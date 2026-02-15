@@ -5,10 +5,33 @@ Cargo.lock.bk
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
 # OS artifacts
 .DS_Store
 Thumbs.db
+Desktop.ini
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Logs and local reports
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+coverage/
+lcov.info
+
+# JS package manager artifacts
+**/node_modules/
+.cache/
 
 # Local overrides
 *.local.toml

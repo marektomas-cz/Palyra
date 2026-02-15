@@ -38,7 +38,7 @@
   - [ ] cryptography/key handling
   - [ ] updater/install/release trust chain
   - [ ] security CI gates or secret scanning
-- [ ] If high-risk is selected, security sign-off (`@palo`) is requested before merge.
+- [ ] If high-risk is selected, security sign-off (`@marektomas-cz`) is requested before merge.
 
 ## Rollout and rollback
 

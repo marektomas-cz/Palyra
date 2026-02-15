@@ -5,5 +5,5 @@ description = "Global allowlist"
 paths = [
   '''^LICENSE$''',
   '''^roadmap/''',
-  '''^openclaw-documentation/'''
+  '''^oc-docs/'''
 ]

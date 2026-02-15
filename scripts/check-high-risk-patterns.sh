@@ -4,7 +4,7 @@ set -euo pipefail
 if command -v rg >/dev/null 2>&1; then
   matches="$(rg --line-number --color never \
     --glob '!target/**' \
-    --glob '!openclaw-documentation/**' \
+    --glob '!oc-docs/**' \
     --glob '!roadmap/**' \
     -e 'BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY' \
     -e 'AKIA[0-9A-Z]{16}' \
@@ -15,7 +15,7 @@ else
   common_args=(
     -R -n -E
     --exclude-dir=target
-    --exclude-dir=openclaw-documentation
+    --exclude-dir=oc-docs
     --exclude-dir=roadmap
   )
   main_matches="$(grep "${common_args[@]}" \

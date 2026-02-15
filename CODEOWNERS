@@ -1,20 +1,20 @@
 # Global default owner for all files.
-* @palo
+* @marektomas-cz
 
 # Security-sensitive areas.
-SECURITY.md @palo
-docs/security/ @palo
-infra/ci/ @palo
-scripts/check-high-risk-patterns.sh @palo
-scripts/generate-attestation-placeholder.sh @palo
-crates/palyra-policy/ @palo
-crates/palyra-plugins/runtime/ @palo
-.github/pull_request_template.md @palo
-.github/workflows/ @palo
-schemas/proto/ @palo
-schemas/json/ @palo
-schemas/generated/ @palo
-docs/protocols/ @palo
-Cargo.toml @palo
-Cargo.lock @palo
-deny.toml @palo
+SECURITY.md @marektomas-cz
+docs/security/ @marektomas-cz
+infra/ci/ @marektomas-cz
+scripts/check-high-risk-patterns.sh @marektomas-cz
+scripts/generate-attestation-placeholder.sh @marektomas-cz
+crates/palyra-policy/ @marektomas-cz
+crates/palyra-plugins/runtime/ @marektomas-cz
+.github/pull_request_template.md @marektomas-cz
+.github/workflows/ @marektomas-cz
+schemas/proto/ @marektomas-cz
+schemas/json/ @marektomas-cz
+schemas/generated/ @marektomas-cz
+docs/protocols/ @marektomas-cz
+Cargo.toml @marektomas-cz
+Cargo.lock @marektomas-cz
+deny.toml @marektomas-cz
