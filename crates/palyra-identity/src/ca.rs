@@ -15,9 +15,17 @@ pub struct IssuedCertificate {
     pub sequence: u64,
     pub subject: String,
     pub certificate_pem: String,
+    #[serde(skip_serializing, skip_deserializing, default)]
     pub private_key_pem: String,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoredCertificateAuthority {
+    pub certificate_pem: String,
+    pub private_key_pem: String,
+    pub sequence: u64,
 }
 
 pub struct CertificateAuthority {
@@ -85,6 +93,32 @@ impl CertificateAuthority {
         distinguished_name.push(DnType::CommonName, common_name);
         params.distinguished_name = distinguished_name;
         self.issue_leaf_certificate(params, validity, format!("server:{common_name}"))
+    }
+
+    pub fn from_stored(state: &StoredCertificateAuthority) -> IdentityResult<Self> {
+        let params = CertificateParams::from_ca_cert_pem(&state.certificate_pem)
+            .map_err(|error| IdentityError::Cryptographic(error.to_string()))?;
+        let key_pair = KeyPair::from_pem(&state.private_key_pem)
+            .map_err(|error| IdentityError::Cryptographic(error.to_string()))?;
+        let certificate = params
+            .self_signed(&key_pair)
+            .map_err(|error| IdentityError::Cryptographic(error.to_string()))?;
+
+        Ok(Self {
+            certificate_pem: state.certificate_pem.clone(),
+            certificate,
+            key_pair,
+            sequence: state.sequence,
+        })
+    }
+
+    #[must_use]
+    pub fn to_stored(&self) -> StoredCertificateAuthority {
+        StoredCertificateAuthority {
+            certificate_pem: self.certificate_pem.clone(),
+            private_key_pem: self.key_pair.serialize_pem(),
+            sequence: self.sequence,
+        }
     }
 
     fn issue_leaf_certificate(

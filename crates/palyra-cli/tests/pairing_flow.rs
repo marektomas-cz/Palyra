@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use anyhow::{Context, Result};
+#[cfg(not(windows))]
 use tempfile::TempDir;
 
 const DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -19,6 +20,7 @@ fn pairing_requires_explicit_approval() -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 #[test]
 fn pairing_pair_outputs_verifiable_identity_and_rotation() -> Result<()> {
     let identity_dir = TempDir::new().context("failed to create temporary identity directory")?;

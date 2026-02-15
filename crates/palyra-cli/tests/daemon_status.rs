@@ -69,7 +69,7 @@ fn wait_for_health(port: u16, daemon: &mut Child) -> Result<()> {
         if let Some(status) = daemon.try_wait().context("failed to check daemon status")? {
             anyhow::bail!("palyrad exited before becoming healthy with status: {status}");
         }
-        if client.get(&url).send().is_ok() {
+        if client.get(&url).send().and_then(|response| response.error_for_status()).is_ok() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));

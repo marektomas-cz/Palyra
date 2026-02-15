@@ -33,10 +33,13 @@ jobs:
 
       - name: Install osv-scanner
         run: |
+          OSV_VERSION="v2.2.2"
+          OSV_SHA256="c799274b682e0437c802d4714a136ad09b39c65547c460049ba5358d28afa576"
           mkdir -p "$HOME/.local/bin"
           curl --proto '=https' --tlsv1.2 --retry 5 --retry-connrefused --location --silent --show-error --fail \
-            https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64" \
             -o "$HOME/.local/bin/osv-scanner"
+          echo "${OSV_SHA256}  $HOME/.local/bin/osv-scanner" | sha256sum --check -
           chmod +x "$HOME/.local/bin/osv-scanner"
           "$HOME/.local/bin/osv-scanner" --version
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

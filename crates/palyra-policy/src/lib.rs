@@ -20,6 +20,10 @@ pub fn evaluate(request: &PolicyRequest) -> PolicyDecision {
         };
     }
 
+    if is_read_only_action(request) {
+        return PolicyDecision::Allow;
+    }
+
     PolicyDecision::DenyByDefault { reason: "deny-by-default baseline policy".to_owned() }
 }
 
@@ -31,6 +35,15 @@ fn is_sensitive_action(request: &PolicyRequest) -> bool {
         || action.contains("payment")
         || resource.contains("secrets")
         || resource.contains("credential")
+}
+
+fn is_read_only_action(request: &PolicyRequest) -> bool {
+    let action = request.action.to_ascii_lowercase();
+    action.contains("read")
+        || action.contains("status")
+        || action.contains("list")
+        || action.contains("health")
+        || action.contains("get")
 }
 
 #[cfg(test)]
@@ -67,5 +80,18 @@ mod tests {
                     .to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn read_only_actions_are_allowed() {
+        let request = PolicyRequest {
+            principal: "user:bootstrap".to_owned(),
+            action: "tool.read.status".to_owned(),
+            resource: "tool:daemon".to_owned(),
+        };
+
+        let decision = evaluate(&request);
+
+        assert_eq!(decision, PolicyDecision::Allow);
     }
 }

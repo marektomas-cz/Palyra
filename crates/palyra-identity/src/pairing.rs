@@ -8,11 +8,13 @@ use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use palyra_common::validate_canonical_id;
 use rand::{rngs::OsRng, RngCore};
+use rustls::pki_types::{pem::PemObject, CertificateDer};
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::{
-    ca::{CertificateAuthority, IssuedCertificate},
+    ca::{CertificateAuthority, IssuedCertificate, StoredCertificateAuthority},
     device::DeviceIdentity,
     error::{IdentityError, IdentityResult},
     store::{InMemorySecretStore, SecretStore},
@@ -99,6 +101,8 @@ pub struct PairedDevice {
     pub signing_public_key_hex: String,
     pub transcript_hash_hex: String,
     pub current_certificate: IssuedCertificate,
+    #[serde(default)]
+    pub certificate_fingerprints: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,12 +111,17 @@ pub struct PairingResult {
     pub gateway_ca_certificate_pem: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RevokedDevice {
     pub device_id: String,
     pub reason: String,
     pub revoked_at_unix_ms: u64,
 }
+
+const GATEWAY_CA_STATE_KEY: &str = "identity/ca/state.json";
+const PAIRED_DEVICES_STATE_KEY: &str = "identity/pairing/paired_devices.json";
+const REVOKED_DEVICES_STATE_KEY: &str = "identity/pairing/revoked_devices.json";
+const REVOKED_CERTIFICATES_STATE_KEY: &str = "identity/pairing/revoked_certificates.json";
 
 pub struct IdentityManager {
     store: Arc<dyn SecretStore>,
@@ -122,20 +131,28 @@ pub struct IdentityManager {
     active_sessions: HashMap<String, ActivePairingSession>,
     paired_devices: HashMap<String, PairedDevice>,
     revoked_devices: HashMap<String, RevokedDevice>,
+    revoked_certificate_fingerprints: HashSet<String>,
     ca: CertificateAuthority,
 }
 
 impl IdentityManager {
     pub fn with_store(store: Arc<dyn SecretStore>) -> IdentityResult<Self> {
+        let ca = load_or_init_gateway_ca(store.as_ref())?;
+        let paired_devices = load_paired_devices(store.as_ref())?;
+        let revoked_devices = load_revoked_devices(store.as_ref())?;
+        let revoked_certificate_fingerprints =
+            load_revoked_certificate_fingerprints(store.as_ref())?;
+
         Ok(Self {
             store,
             pairing_window: DEFAULT_PAIRING_WINDOW,
             certificate_validity: DEFAULT_CERT_VALIDITY,
             rotation_threshold: DEFAULT_ROTATION_THRESHOLD,
             active_sessions: HashMap::new(),
-            paired_devices: HashMap::new(),
-            revoked_devices: HashMap::new(),
-            ca: CertificateAuthority::new("Palyra Gateway CA")?,
+            paired_devices,
+            revoked_devices,
+            revoked_certificate_fingerprints,
+            ca,
         })
     }
 
@@ -164,7 +181,9 @@ impl IdentityManager {
         &mut self,
         common_name: &str,
     ) -> IdentityResult<IssuedCertificate> {
-        self.ca.issue_server_certificate(common_name, self.certificate_validity)
+        let issued = self.ca.issue_server_certificate(common_name, self.certificate_validity)?;
+        self.persist_gateway_ca_state()?;
+        Ok(issued)
     }
 
     pub fn start_pairing(
@@ -279,11 +298,15 @@ impl IdentityManager {
             return Err(IdentityError::PairingClientKindMismatch);
         }
         if hello.proof != active.public.method.proof() {
+            self.active_sessions.remove(&hello.session_id);
             return Err(IdentityError::InvalidPairingProof);
         }
 
-        let verifying_key = VerifyingKey::from_bytes(&hello.device_signing_public)
-            .map_err(|_| IdentityError::SignatureVerificationFailed)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&hello.device_signing_public).map_err(|_| {
+                self.active_sessions.remove(&hello.session_id);
+                IdentityError::SignatureVerificationFailed
+            })?;
         let signature_payload = pairing_signature_payload(
             hello.protocol_version,
             &hello.session_id,
@@ -294,9 +317,10 @@ impl IdentityManager {
             &hello.proof,
         );
         let signature = Signature::from_bytes(&hello.challenge_signature);
-        verifying_key
-            .verify(&signature_payload, &signature)
-            .map_err(|_| IdentityError::SignatureVerificationFailed)?;
+        verifying_key.verify(&signature_payload, &signature).map_err(|_| {
+            self.active_sessions.remove(&hello.session_id);
+            IdentityError::SignatureVerificationFailed
+        })?;
 
         let device_public = X25519PublicKey::from(hello.device_x25519_public);
         let shared_secret = active.gateway_ephemeral_secret.diffie_hellman(&device_public);
@@ -312,6 +336,7 @@ impl IdentityManager {
             &transcript_context,
         )?;
         if expected_mac != hello.transcript_mac {
+            self.active_sessions.remove(&hello.session_id);
             return Err(IdentityError::TranscriptVerificationFailed);
         }
 
@@ -323,6 +348,8 @@ impl IdentityManager {
             identity_fingerprint.as_str(),
             self.certificate_validity,
         )?;
+        self.persist_gateway_ca_state()?;
+        let certificate_fingerprint = certificate_fingerprint_hex(&certificate.certificate_pem)?;
 
         let paired = PairedDevice {
             device_id: hello.device_id.clone(),
@@ -330,10 +357,11 @@ impl IdentityManager {
             identity_fingerprint,
             signing_public_key_hex: hex::encode(hello.device_signing_public),
             transcript_hash_hex,
-            current_certificate: certificate,
+            current_certificate: certificate.clone(),
+            certificate_fingerprints: vec![certificate_fingerprint],
         };
-        self.persist_paired_device(&paired)?;
         self.paired_devices.insert(hello.device_id.clone(), paired.clone());
+        self.persist_paired_devices()?;
 
         Ok(PairingResult {
             device: paired,
@@ -356,10 +384,15 @@ impl IdentityManager {
             paired.identity_fingerprint.as_str(),
             self.certificate_validity,
         )?;
+        self.persist_gateway_ca_state()?;
+        let rotated_fingerprint = certificate_fingerprint_hex(&rotated.certificate_pem)?;
         let mut updated = paired;
         updated.current_certificate = rotated.clone();
-        self.persist_paired_device(&updated)?;
+        if !updated.certificate_fingerprints.contains(&rotated_fingerprint) {
+            updated.certificate_fingerprints.push(rotated_fingerprint);
+        }
         self.paired_devices.insert(device_id.to_owned(), updated);
+        self.persist_paired_devices()?;
         Ok(rotated)
     }
 
@@ -385,15 +418,23 @@ impl IdentityManager {
         reason: &str,
         now: SystemTime,
     ) -> IdentityResult<()> {
+        if let Some(paired) = self.paired_devices.remove(device_id) {
+            for fingerprint in paired.certificate_fingerprints {
+                self.revoked_certificate_fingerprints.insert(fingerprint);
+            }
+            self.revoked_certificate_fingerprints
+                .insert(certificate_fingerprint_hex(&paired.current_certificate.certificate_pem)?);
+        }
         let revoked = RevokedDevice {
             device_id: device_id.to_owned(),
             reason: reason.to_owned(),
             revoked_at_unix_ms: unix_ms(now)?,
         };
         self.revoked_devices.insert(device_id.to_owned(), revoked);
-        self.paired_devices.remove(device_id);
-        let key = format!("paired/{device_id}/record.json");
-        self.store.delete_secret(&key)
+        self.persist_paired_devices()?;
+        self.persist_revoked_devices()?;
+        self.persist_revoked_certificate_fingerprints()?;
+        Ok(())
     }
 
     #[must_use]
@@ -406,12 +447,88 @@ impl IdentityManager {
         self.revoked_devices.keys().cloned().collect()
     }
 
-    fn persist_paired_device(&self, paired: &PairedDevice) -> IdentityResult<()> {
-        let key = format!("paired/{}/record.json", paired.device_id);
-        let encoded = serde_json::to_vec(paired)
-            .map_err(|error| IdentityError::Internal(error.to_string()))?;
-        self.store.write_secret(&key, &encoded)
+    #[must_use]
+    pub fn revoked_certificate_fingerprints(&self) -> HashSet<String> {
+        self.revoked_certificate_fingerprints.clone()
     }
+
+    fn persist_gateway_ca_state(&self) -> IdentityResult<()> {
+        write_json(self.store.as_ref(), GATEWAY_CA_STATE_KEY, &self.ca.to_stored())
+    }
+
+    fn persist_paired_devices(&self) -> IdentityResult<()> {
+        write_json(self.store.as_ref(), PAIRED_DEVICES_STATE_KEY, &self.paired_devices)
+    }
+
+    fn persist_revoked_devices(&self) -> IdentityResult<()> {
+        write_json(self.store.as_ref(), REVOKED_DEVICES_STATE_KEY, &self.revoked_devices)
+    }
+
+    fn persist_revoked_certificate_fingerprints(&self) -> IdentityResult<()> {
+        write_json(
+            self.store.as_ref(),
+            REVOKED_CERTIFICATES_STATE_KEY,
+            &self.revoked_certificate_fingerprints,
+        )
+    }
+}
+
+fn load_or_init_gateway_ca(store: &dyn SecretStore) -> IdentityResult<CertificateAuthority> {
+    match store.read_secret(GATEWAY_CA_STATE_KEY) {
+        Ok(raw) => {
+            let state: StoredCertificateAuthority = serde_json::from_slice(&raw)
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            CertificateAuthority::from_stored(&state)
+        }
+        Err(IdentityError::SecretNotFound) => {
+            let ca = CertificateAuthority::new("Palyra Gateway CA")?;
+            write_json(store, GATEWAY_CA_STATE_KEY, &ca.to_stored())?;
+            Ok(ca)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn load_paired_devices(store: &dyn SecretStore) -> IdentityResult<HashMap<String, PairedDevice>> {
+    read_json_or_default(store, PAIRED_DEVICES_STATE_KEY)
+}
+
+fn load_revoked_devices(store: &dyn SecretStore) -> IdentityResult<HashMap<String, RevokedDevice>> {
+    read_json_or_default(store, REVOKED_DEVICES_STATE_KEY)
+}
+
+fn load_revoked_certificate_fingerprints(
+    store: &dyn SecretStore,
+) -> IdentityResult<HashSet<String>> {
+    read_json_or_default(store, REVOKED_CERTIFICATES_STATE_KEY)
+}
+
+fn read_json_or_default<T>(store: &dyn SecretStore, key: &str) -> IdentityResult<T>
+where
+    T: DeserializeOwned + Default,
+{
+    match store.read_secret(key) {
+        Ok(raw) => {
+            serde_json::from_slice(&raw).map_err(|error| IdentityError::Internal(error.to_string()))
+        }
+        Err(IdentityError::SecretNotFound) => Ok(T::default()),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_json<T>(store: &dyn SecretStore, key: &str, value: &T) -> IdentityResult<()>
+where
+    T: serde::Serialize,
+{
+    let encoded =
+        serde_json::to_vec(value).map_err(|error| IdentityError::Internal(error.to_string()))?;
+    store.write_secret(key, &encoded)
+}
+
+fn certificate_fingerprint_hex(certificate_pem: &str) -> IdentityResult<String> {
+    let der = CertificateDer::from_pem_slice(certificate_pem.as_bytes())
+        .map_err(|_| IdentityError::CertificateParsingFailed)?;
+    Ok(hex::encode(Sha256::digest(der.as_ref())))
 }
 
 pub fn should_rotate_certificate(
@@ -494,12 +611,31 @@ fn derive_transcript_mac(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::device::DeviceIdentity;
     use proptest::prelude::*;
 
     fn sample_device_id() -> &'static str {
         "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    }
+
+    fn start_pin_pairing(
+        manager: &mut IdentityManager,
+        proof: &str,
+    ) -> (DeviceIdentity, PairingSession, DevicePairingHello) {
+        let device = DeviceIdentity::generate(sample_device_id()).expect("device should generate");
+        let session = manager
+            .start_pairing(
+                PairingClientKind::Node,
+                PairingMethod::Pin { code: "123456".to_owned() },
+                SystemTime::now(),
+            )
+            .expect("pairing session should start");
+        let hello =
+            manager.build_device_hello(&session, &device, proof).expect("hello should build");
+        (device, session, hello)
     }
 
     #[test]
@@ -522,6 +658,103 @@ mod tests {
             result,
             Err(IdentityError::PairingVersionMismatch { expected: 1, got: 0 })
         ));
+    }
+
+    #[test]
+    fn failed_proof_invalidates_pairing_session() {
+        let mut manager = IdentityManager::with_memory_store().expect("manager should initialize");
+        let (_, session, wrong_hello) = start_pin_pairing(&mut manager, "000000");
+
+        let first = manager.complete_pairing(wrong_hello, SystemTime::now());
+        assert!(matches!(first, Err(IdentityError::InvalidPairingProof)));
+
+        let device = DeviceIdentity::generate(sample_device_id()).expect("device should generate");
+        let retry = manager
+            .build_device_hello(&session, &device, "123456")
+            .expect("retry hello should build");
+        let second = manager.complete_pairing(retry, SystemTime::now());
+        assert!(matches!(second, Err(IdentityError::PairingSessionNotFound)));
+    }
+
+    #[test]
+    fn failed_signature_invalidates_pairing_session() {
+        let mut manager = IdentityManager::with_memory_store().expect("manager should initialize");
+        let (_, session, mut wrong_hello) = start_pin_pairing(&mut manager, "123456");
+        wrong_hello.challenge_signature[0] ^= 0x01;
+
+        let first = manager.complete_pairing(wrong_hello, SystemTime::now());
+        assert!(matches!(first, Err(IdentityError::SignatureVerificationFailed)));
+
+        let device = DeviceIdentity::generate(sample_device_id()).expect("device should generate");
+        let retry = manager
+            .build_device_hello(&session, &device, "123456")
+            .expect("retry hello should build");
+        let second = manager.complete_pairing(retry, SystemTime::now());
+        assert!(matches!(second, Err(IdentityError::PairingSessionNotFound)));
+    }
+
+    #[test]
+    fn failed_transcript_mac_invalidates_pairing_session() {
+        let mut manager = IdentityManager::with_memory_store().expect("manager should initialize");
+        let (_, session, mut wrong_hello) = start_pin_pairing(&mut manager, "123456");
+        wrong_hello.transcript_mac[0] ^= 0x01;
+
+        let first = manager.complete_pairing(wrong_hello, SystemTime::now());
+        assert!(matches!(first, Err(IdentityError::TranscriptVerificationFailed)));
+
+        let device = DeviceIdentity::generate(sample_device_id()).expect("device should generate");
+        let retry = manager
+            .build_device_hello(&session, &device, "123456")
+            .expect("retry hello should build");
+        let second = manager.complete_pairing(retry, SystemTime::now());
+        assert!(matches!(second, Err(IdentityError::PairingSessionNotFound)));
+    }
+
+    #[test]
+    fn identity_state_is_loaded_from_secret_store() {
+        let store = Arc::new(InMemorySecretStore::new());
+        let mut first =
+            IdentityManager::with_store(store.clone()).expect("manager should initialize");
+        let ca_before = first.gateway_ca_certificate_pem();
+        let (_, _, hello) = start_pin_pairing(&mut first, "123456");
+        let paired =
+            first.complete_pairing(hello, SystemTime::now()).expect("pairing should complete");
+
+        drop(first);
+        let second = IdentityManager::with_store(store).expect("manager should reload from store");
+
+        assert_eq!(second.gateway_ca_certificate_pem(), ca_before);
+        let restored =
+            second.paired_device(sample_device_id()).expect("paired device should be rehydrated");
+        assert_eq!(
+            restored.current_certificate.sequence,
+            paired.device.current_certificate.sequence
+        );
+        assert!(
+            restored.current_certificate.private_key_pem.is_empty(),
+            "private key must not be persisted in paired device records"
+        );
+        assert_eq!(restored.certificate_fingerprints.len(), 1);
+    }
+
+    #[test]
+    fn revocation_state_is_loaded_from_secret_store() {
+        let store = Arc::new(InMemorySecretStore::new());
+        let mut first =
+            IdentityManager::with_store(store.clone()).expect("manager should initialize");
+        let (_, _, hello) = start_pin_pairing(&mut first, "123456");
+        first.complete_pairing(hello, SystemTime::now()).expect("pairing should complete");
+        first
+            .revoke_device(sample_device_id(), "test", SystemTime::now())
+            .expect("revocation should succeed");
+
+        let revoked_fingerprints = first.revoked_certificate_fingerprints();
+        assert!(!revoked_fingerprints.is_empty(), "revoked cert index should contain certificate");
+
+        drop(first);
+        let second = IdentityManager::with_store(store).expect("manager should reload from store");
+        assert!(second.revoked_devices().contains(sample_device_id()));
+        assert_eq!(second.revoked_certificate_fingerprints(), revoked_fingerprints);
     }
 
     proptest! {

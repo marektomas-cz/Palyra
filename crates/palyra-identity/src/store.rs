@@ -60,8 +60,20 @@ pub struct FilesystemSecretStore {
 impl FilesystemSecretStore {
     pub fn new(root: impl Into<PathBuf>) -> IdentityResult<Self> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(|error| IdentityError::Internal(error.to_string()))?;
-        Ok(Self { root })
+        #[cfg(windows)]
+        {
+            let _ = &root;
+            Err(IdentityError::Internal(
+                "FilesystemSecretStore on Windows is disabled until ACL hardening is implemented"
+                    .to_owned(),
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            fs::create_dir_all(&root)
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            Ok(Self { root })
+        }
     }
 
     fn key_path(&self, key: &str) -> IdentityResult<PathBuf> {
@@ -79,16 +91,27 @@ impl FilesystemSecretStore {
 
 impl SecretStore for FilesystemSecretStore {
     fn write_secret(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
+        #[cfg(windows)]
+        {
+            let _ = key;
+            let _ = value;
+            return Err(IdentityError::Internal(
+                "FilesystemSecretStore on Windows is disabled until ACL hardening is implemented"
+                    .to_owned(),
+            ));
+        }
+        #[cfg(not(windows))]
         let path = self.key_path(key)?;
+        #[cfg(not(windows))]
         fs::write(&path, value).map_err(|error| IdentityError::Internal(error.to_string()))?;
-        #[cfg(unix)]
+        #[cfg(not(windows))]
         {
             use std::os::unix::fs::PermissionsExt;
             let permissions = fs::Permissions::from_mode(0o600);
             fs::set_permissions(&path, permissions)
                 .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            Ok(())
         }
-        Ok(())
     }
 
     fn read_secret(&self, key: &str) -> IdentityResult<Vec<u8>> {
@@ -113,4 +136,26 @@ impl SecretStore for FilesystemSecretStore {
 
 pub fn default_identity_storage_path(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join(".palyra").join("identity")
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::{FilesystemSecretStore, SecretStore};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_secret_store_sets_owner_only_permissions() {
+        let temp = tempdir().expect("temp dir should initialize");
+        let store = FilesystemSecretStore::new(temp.path()).expect("store should initialize");
+        store.write_secret("device/test.json", br#"{"ok":true}"#).expect("secret should persist");
+        let path = temp.path().join("device__test.json");
+        let metadata = std::fs::metadata(path).expect("metadata should be readable");
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }

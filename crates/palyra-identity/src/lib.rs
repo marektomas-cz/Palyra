@@ -12,7 +12,7 @@ pub use device::DeviceIdentity;
 pub use error::{IdentityError, IdentityResult};
 pub use mtls::{
     build_node_rpc_server_mtls_config, build_paired_device_client_mtls_config,
-    build_unpaired_client_config,
+    build_unpaired_client_config, MemoryRevocationIndex, RevocationIndex,
 };
 pub use pairing::{
     should_rotate_certificate, DevicePairingHello, IdentityManager, PairedDevice,

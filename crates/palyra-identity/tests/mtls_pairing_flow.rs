@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use palyra_identity::{
     build_node_rpc_server_mtls_config, build_paired_device_client_mtls_config,
     build_unpaired_client_config, DeviceIdentity, IdentityError, IdentityManager,
-    PairingClientKind, PairingMethod,
+    MemoryRevocationIndex, PairingClientKind, PairingMethod,
 };
 use rustls::pki_types::ServerName;
 use tokio::{
@@ -87,9 +87,11 @@ async fn pairing_connect_rotate_flow_requires_valid_client_cert() -> Result<()> 
     let server_certificate = manager
         .issue_gateway_server_certificate("palyrad-node-rpc")
         .context("failed to issue server certificate")?;
+    let revocation_index = Arc::new(MemoryRevocationIndex::default());
     let server_config = build_node_rpc_server_mtls_config(
         &pairing_result.gateway_ca_certificate_pem,
         &server_certificate,
+        revocation_index.clone(),
     )
     .context("failed to build server mTLS config")?;
     let (address, shutdown_tx, server_task) = spawn_mtls_echo_server(server_config).await?;
@@ -121,6 +123,14 @@ async fn pairing_connect_rotate_flow_requires_valid_client_cert() -> Result<()> 
     manager
         .revoke_device(device_id, "lost device", SystemTime::now())
         .context("failed to revoke device")?;
+    revocation_index.replace_all(manager.revoked_certificate_fingerprints());
+    let revoked_client = build_paired_device_client_mtls_config(
+        &pairing_result.gateway_ca_certificate_pem,
+        &rotated_certificate,
+    )
+    .context("failed to build revoked client config")?;
+    let revoked_client_result = send_ping(address, revoked_client).await;
+    assert!(revoked_client_result.is_err(), "revoked device unexpectedly connected");
     let revoked_rotate = manager.force_rotate_device_certificate(device_id);
     assert!(
         matches!(revoked_rotate, Err(IdentityError::DeviceRevoked)),
