@@ -39,11 +39,9 @@ fn is_sensitive_action(request: &PolicyRequest) -> bool {
 
 fn is_read_only_action(request: &PolicyRequest) -> bool {
     let action = request.action.to_ascii_lowercase();
-    action.contains("read")
-        || action.contains("status")
-        || action.contains("list")
-        || action.contains("health")
-        || action.contains("get")
+    action
+        .split('.')
+        .any(|segment| matches!(segment, "read" | "status" | "list" | "health" | "get"))
 }
 
 #[cfg(test)]
@@ -93,5 +91,18 @@ mod tests {
         let decision = evaluate(&request);
 
         assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn substring_collision_does_not_grant_read_only_access() {
+        let request = PolicyRequest {
+            principal: "user:bootstrap".to_owned(),
+            action: "tool.target.reset".to_owned(),
+            resource: "tool:filesystem".to_owned(),
+        };
+
+        let decision = evaluate(&request);
+
+        assert!(matches!(decision, PolicyDecision::DenyByDefault { .. }));
     }
 }

@@ -10,6 +10,8 @@ pub enum IdentityError {
     PairingSessionNotFound,
     #[error("pairing session expired")]
     PairingSessionExpired,
+    #[error("active pairing session capacity exceeded (limit: {limit})")]
+    PairingSessionCapacityExceeded { limit: usize },
     #[error("pairing protocol version mismatch (expected {expected}, got {got})")]
     PairingVersionMismatch { expected: u32, got: u32 },
     #[error("pairing client kind mismatch")]

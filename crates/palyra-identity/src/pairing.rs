@@ -122,6 +122,7 @@ const GATEWAY_CA_STATE_KEY: &str = "identity/ca/state.json";
 const PAIRED_DEVICES_STATE_KEY: &str = "identity/pairing/paired_devices.json";
 const REVOKED_DEVICES_STATE_KEY: &str = "identity/pairing/revoked_devices.json";
 const REVOKED_CERTIFICATES_STATE_KEY: &str = "identity/pairing/revoked_certificates.json";
+const MAX_ACTIVE_PAIRING_SESSIONS: usize = 10_000;
 
 pub struct IdentityManager {
     store: Arc<dyn SecretStore>,
@@ -186,12 +187,32 @@ impl IdentityManager {
         Ok(issued)
     }
 
+    fn prune_expired_sessions(
+        &mut self,
+        now: SystemTime,
+        retain_session_id: Option<&str>,
+    ) -> IdentityResult<()> {
+        let now_ms = unix_ms(now)?;
+        self.active_sessions.retain(|session_id, session| {
+            session.public.expires_at_unix_ms > now_ms
+                || retain_session_id.is_some_and(|retain| retain == session_id)
+        });
+        Ok(())
+    }
+
     pub fn start_pairing(
         &mut self,
         client_kind: PairingClientKind,
         method: PairingMethod,
         now: SystemTime,
     ) -> IdentityResult<PairingSession> {
+        self.prune_expired_sessions(now, None)?;
+        if self.active_sessions.len() >= MAX_ACTIVE_PAIRING_SESSIONS {
+            return Err(IdentityError::PairingSessionCapacityExceeded {
+                limit: MAX_ACTIVE_PAIRING_SESSIONS,
+            });
+        }
+
         validate_pairing_method(&method)?;
 
         let session_id = ulid::Ulid::new().to_string();
@@ -273,6 +294,7 @@ impl IdentityManager {
         hello: DevicePairingHello,
         now: SystemTime,
     ) -> IdentityResult<PairingResult> {
+        self.prune_expired_sessions(now, Some(hello.session_id.as_str()))?;
         validate_canonical_id(&hello.device_id)
             .map_err(|error| IdentityError::InvalidCanonicalDeviceId(error.to_string()))?;
         if self.revoked_devices.contains_key(&hello.device_id) {
@@ -708,6 +730,86 @@ mod tests {
             .expect("retry hello should build");
         let second = manager.complete_pairing(retry, SystemTime::now());
         assert!(matches!(second, Err(IdentityError::PairingSessionNotFound)));
+    }
+
+    #[test]
+    fn start_pairing_prunes_expired_sessions() {
+        let mut manager = IdentityManager::with_memory_store().expect("manager should initialize");
+        manager.set_pairing_window(Duration::from_millis(1));
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+
+        let expired = manager
+            .start_pairing(
+                PairingClientKind::Node,
+                PairingMethod::Pin { code: "123456".to_owned() },
+                now,
+            )
+            .expect("expired candidate should be created");
+
+        let fresh = manager
+            .start_pairing(
+                PairingClientKind::Node,
+                PairingMethod::Pin { code: "123456".to_owned() },
+                now + Duration::from_secs(1),
+            )
+            .expect("fresh session should be created");
+
+        assert!(!manager.active_sessions.contains_key(expired.session_id.as_str()));
+        assert!(manager.active_sessions.contains_key(fresh.session_id.as_str()));
+        assert_eq!(manager.active_sessions.len(), 1);
+    }
+
+    #[test]
+    fn start_pairing_enforces_active_session_capacity() {
+        let mut manager = IdentityManager::with_memory_store().expect("manager should initialize");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+
+        let seed = manager
+            .start_pairing(
+                PairingClientKind::Node,
+                PairingMethod::Pin { code: "123456".to_owned() },
+                now,
+            )
+            .expect("seed session should be created");
+        let seed_active = manager
+            .active_sessions
+            .get(seed.session_id.as_str())
+            .cloned()
+            .expect("seed session should be in active set");
+
+        manager.active_sessions.clear();
+        for index in 0..MAX_ACTIVE_PAIRING_SESSIONS {
+            manager.active_sessions.insert(format!("session-{index}"), seed_active.clone());
+        }
+
+        let result = manager.start_pairing(
+            PairingClientKind::Node,
+            PairingMethod::Pin { code: "123456".to_owned() },
+            now,
+        );
+
+        assert!(matches!(
+            result,
+            Err(IdentityError::PairingSessionCapacityExceeded {
+                limit: MAX_ACTIVE_PAIRING_SESSIONS
+            })
+        ));
+    }
+
+    #[test]
+    fn start_pairing_succeeds_when_under_capacity() {
+        let mut manager = IdentityManager::with_memory_store().expect("manager should initialize");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+
+        for offset in 0..32 {
+            manager
+                .start_pairing(
+                    PairingClientKind::Node,
+                    PairingMethod::Pin { code: "123456".to_owned() },
+                    now + Duration::from_secs(offset),
+                )
+                .expect("session should be created while under cap");
+        }
     }
 
     #[test]

@@ -70,7 +70,11 @@ impl FilesystemSecretStore {
         }
         #[cfg(not(windows))]
         {
+            use std::os::unix::fs::PermissionsExt;
+
             fs::create_dir_all(&root)
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
                 .map_err(|error| IdentityError::Internal(error.to_string()))?;
             Ok(Self { root })
         }
@@ -85,7 +89,7 @@ impl FilesystemSecretStore {
         {
             return Err(IdentityError::InvalidSecretStoreKey);
         }
-        Ok(self.root.join(key.replace('/', "__")))
+        Ok(self.root.join(hex::encode(key.as_bytes())))
     }
 }
 
@@ -101,15 +105,24 @@ impl SecretStore for FilesystemSecretStore {
             ))
         }
         #[cfg(not(windows))]
-        let path = self.key_path(key)?;
-        #[cfg(not(windows))]
-        fs::write(&path, value).map_err(|error| IdentityError::Internal(error.to_string()))?;
-        #[cfg(not(windows))]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&path, permissions)
+            use std::{
+                io::Write,
+                os::unix::fs::{OpenOptionsExt, PermissionsExt},
+            };
+
+            let path = self.key_path(key)?;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
                 .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            file.write_all(value).map_err(|error| IdentityError::Internal(error.to_string()))?;
+            file.sync_all().map_err(|error| IdentityError::Internal(error.to_string()))?;
             Ok(())
         }
     }
@@ -153,9 +166,57 @@ mod tests {
         let temp = tempdir().expect("temp dir should initialize");
         let store = FilesystemSecretStore::new(temp.path()).expect("store should initialize");
         store.write_secret("device/test.json", br#"{"ok":true}"#).expect("secret should persist");
-        let path = temp.path().join("device__test.json");
-        let metadata = std::fs::metadata(path).expect("metadata should be readable");
-        let mode = metadata.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        let file_path =
+            store.key_path("device/test.json").expect("test key should map to a filesystem path");
+        let file_mode = std::fs::metadata(file_path)
+            .expect("file metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        let dir_mode = std::fs::metadata(temp.path())
+            .expect("directory metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_secret_store_prevents_key_path_collisions() {
+        let temp = tempdir().expect("temp dir should initialize");
+        let store = FilesystemSecretStore::new(temp.path()).expect("store should initialize");
+        let first_key = "device/a/b";
+        let second_key = "device__a__b";
+
+        store.write_secret(first_key, b"first").expect("first secret should persist");
+        store.write_secret(second_key, b"second").expect("second secret should persist");
+
+        let first_value = store.read_secret(first_key).expect("first secret should be readable");
+        let second_value = store.read_secret(second_key).expect("second secret should be readable");
+        assert_eq!(first_value, b"first");
+        assert_eq!(second_value, b"second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_secret_store_deletes_only_requested_key() {
+        let temp = tempdir().expect("temp dir should initialize");
+        let store = FilesystemSecretStore::new(temp.path()).expect("store should initialize");
+        let first_key = "device/a/b";
+        let second_key = "device__a__b";
+
+        store.write_secret(first_key, b"first").expect("first secret should persist");
+        store.write_secret(second_key, b"second").expect("second secret should persist");
+        store.delete_secret(first_key).expect("first secret should delete");
+
+        let second_value =
+            store.read_secret(second_key).expect("second secret should remain available");
+        assert_eq!(second_value, b"second");
+        assert!(matches!(
+            store.read_secret(first_key),
+            Err(crate::error::IdentityError::SecretNotFound)
+        ));
     }
 }
