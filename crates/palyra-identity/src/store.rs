@@ -95,10 +95,10 @@ impl SecretStore for FilesystemSecretStore {
         {
             let _ = key;
             let _ = value;
-            return Err(IdentityError::Internal(
+            Err(IdentityError::Internal(
                 "FilesystemSecretStore on Windows is disabled until ACL hardening is implemented"
                     .to_owned(),
-            ));
+            ))
         }
         #[cfg(not(windows))]
         let path = self.key_path(key)?;
