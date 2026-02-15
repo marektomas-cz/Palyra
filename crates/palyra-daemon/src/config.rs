@@ -1,7 +1,9 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use palyra_common::{daemon_config_schema::RootFileConfig, parse_config_path};
+use palyra_common::{
+    daemon_config_schema::RootFileConfig, default_config_search_paths, parse_config_path,
+};
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 7142;
@@ -93,12 +95,7 @@ fn find_config_path() -> Result<Option<PathBuf>> {
         return Ok(Some(path));
     }
 
-    let search_paths = [
-        PathBuf::from("palyra.toml"),
-        PathBuf::from("Palyra.toml"),
-        PathBuf::from("config/palyra.toml"),
-    ];
-    for candidate in search_paths {
+    for candidate in default_config_search_paths() {
         if candidate.exists() {
             return Ok(Some(candidate));
         }

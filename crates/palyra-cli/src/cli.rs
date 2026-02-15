@@ -82,10 +82,17 @@ pub enum PairingCommand {
         client_kind: PairingClientKindArg,
         #[arg(long, value_enum, default_value_t = PairingMethodArg::Pin)]
         method: PairingMethodArg,
-        #[arg(long, conflicts_with = "proof_stdin", required_unless_present = "proof_stdin")]
+        #[arg(
+            long,
+            hide = true,
+            conflicts_with = "proof_stdin",
+            requires = "allow_insecure_proof_arg"
+        )]
         proof: Option<String>,
         #[arg(long, default_value_t = false)]
         proof_stdin: bool,
+        #[arg(long, default_value_t = false)]
+        allow_insecure_proof_arg: bool,
         #[arg(long)]
         store_dir: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -222,6 +229,7 @@ mod tests {
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "--proof",
             "123456",
+            "--allow-insecure-proof-arg",
             "--approve",
         ]);
         assert_eq!(
@@ -233,6 +241,7 @@ mod tests {
                     method: PairingMethodArg::Pin,
                     proof: Some("123456".to_owned()),
                     proof_stdin: false,
+                    allow_insecure_proof_arg: true,
                     store_dir: None,
                     approve: true,
                     simulate_rotation: false,
@@ -255,6 +264,7 @@ mod tests {
             "qr",
             "--proof",
             "0123456789ABCDEF0123456789ABCDEF",
+            "--allow-insecure-proof-arg",
             "--store-dir",
             "tmp-identity",
             "--approve",
@@ -269,6 +279,7 @@ mod tests {
                     method: PairingMethodArg::Qr,
                     proof: Some("0123456789ABCDEF0123456789ABCDEF".to_owned()),
                     proof_stdin: false,
+                    allow_insecure_proof_arg: true,
                     store_dir: Some("tmp-identity".to_owned()),
                     approve: true,
                     simulate_rotation: true,
@@ -297,11 +308,27 @@ mod tests {
                     method: PairingMethodArg::Pin,
                     proof: None,
                     proof_stdin: true,
+                    allow_insecure_proof_arg: false,
                     store_dir: None,
                     approve: true,
                     simulate_rotation: false,
                 }
             }
         );
+    }
+
+    #[test]
+    fn parse_pairing_pair_rejects_proof_without_insecure_ack() {
+        let result = Cli::try_parse_from([
+            "palyra",
+            "pairing",
+            "pair",
+            "--device-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--proof",
+            "123456",
+            "--approve",
+        ]);
+        assert!(result.is_err(), "proof should require explicit insecure acknowledgement flag");
     }
 }

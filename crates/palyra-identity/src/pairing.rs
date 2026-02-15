@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant, SystemTime},
@@ -44,7 +44,7 @@ impl PairingClientKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PairingMethod {
     Pin { code: String },
     Qr { token: String },
@@ -63,6 +63,15 @@ impl PairingMethod {
         match self {
             Self::Pin { code } => format!("pin:{}", "*".repeat(code.len())),
             Self::Qr { token } => format!("qr:{}...", token.chars().take(6).collect::<String>()),
+        }
+    }
+}
+
+impl std::fmt::Debug for PairingMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pin { code } => f.debug_struct("Pin").field("code_len", &code.len()).finish(),
+            Self::Qr { token } => f.debug_struct("Qr").field("token_len", &token.len()).finish(),
         }
     }
 }
@@ -141,7 +150,6 @@ const MAX_ACTIVE_PAIRING_SESSIONS: usize = 10_000;
 const IDENTITY_STATE_LOCK_FILENAME: &str = ".identity-state.lock";
 const IDENTITY_STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 const IDENTITY_STATE_LOCK_RETRY: Duration = Duration::from_millis(20);
-const IDENTITY_STATE_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 
 static IDENTITY_STATE_PROCESS_LOCK: Mutex<()> = Mutex::new(());
 
@@ -257,13 +265,9 @@ impl IdentityManager {
                     return Ok(Some(FilesystemStateLockGuard { path: lock_path }));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if lock_file_is_stale(&lock_path)? {
-                        let _ = fs::remove_file(&lock_path);
-                        continue;
-                    }
                     if start.elapsed() >= IDENTITY_STATE_LOCK_TIMEOUT {
                         return Err(IdentityError::Internal(format!(
-                            "timed out waiting for identity state lock at {}",
+                            "timed out waiting for identity state lock at {} (lock stealing disabled to prevent state corruption; remove stale lock file if no process owns it)",
                             lock_path.display()
                         )));
                     }
@@ -687,21 +691,6 @@ fn load_identity_state_bundle(
     }
 }
 
-fn lock_file_is_stale(path: &Path) -> IdentityResult<bool> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(IdentityError::Internal(error.to_string())),
-    };
-    let modified =
-        metadata.modified().map_err(|error| IdentityError::Internal(error.to_string()))?;
-    let age = match SystemTime::now().duration_since(modified) {
-        Ok(age) => age,
-        Err(_) => Duration::from_secs(0),
-    };
-    Ok(age >= IDENTITY_STATE_LOCK_STALE_AFTER)
-}
-
 fn read_json_or_default<T>(store: &dyn SecretStore, key: &str) -> IdentityResult<T>
 where
     T: DeserializeOwned + Default,
@@ -826,11 +815,16 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
+        time::SystemTime,
     };
+    #[cfg(not(windows))]
+    use std::{fs, time::Instant};
 
     use super::*;
     use crate::{device::DeviceIdentity, store::SecretStore};
     use proptest::prelude::*;
+    #[cfg(not(windows))]
+    use tempfile::TempDir;
 
     struct ToggleFailSecretStore {
         state: Mutex<HashMap<String, Vec<u8>>>,
@@ -920,6 +914,52 @@ mod tests {
         let hello =
             manager.build_device_hello(&session, &device, proof).expect("hello should build");
         (device, session, hello)
+    }
+
+    #[test]
+    fn pairing_method_debug_redacts_pin_secret_material() {
+        let formatted = format!("{:?}", PairingMethod::Pin { code: "123456".to_owned() });
+        assert!(!formatted.contains("123456"), "debug output must not contain raw pin");
+        assert!(formatted.contains("code_len"), "debug output should retain diagnostic shape");
+    }
+
+    #[test]
+    fn pairing_session_debug_redacts_embedded_method_secret_material() {
+        let session = PairingSession {
+            session_id: "session-test".to_owned(),
+            protocol_version: 1,
+            client_kind: PairingClientKind::Desktop,
+            method: PairingMethod::Qr { token: "SECRET_TOKEN_VALUE".to_owned() },
+            gateway_ephemeral_public: [0_u8; 32],
+            challenge: [1_u8; 32],
+            expires_at_unix_ms: 1,
+        };
+        let formatted = format!("{session:?}");
+        assert!(!formatted.contains("SECRET_TOKEN_VALUE"), "debug output must redact raw token");
+        assert!(formatted.contains("token_len"), "debug output should preserve safe diagnostics");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn filesystem_lock_is_not_force_reclaimed_by_age_only_logic() {
+        let root = TempDir::new().expect("temp directory should be created");
+        let store = Arc::new(
+            FilesystemSecretStore::new(root.path())
+                .expect("filesystem secret store should initialize"),
+        );
+        let mut manager = IdentityManager::with_store(store)
+            .expect("manager with filesystem store should initialize");
+        let lock_path = root.path().join(IDENTITY_STATE_LOCK_FILENAME);
+        fs::write(&lock_path, b"pid=99999 ts_ms=0\n").expect("lock marker should be written");
+
+        let started = Instant::now();
+        let result = manager.issue_gateway_server_certificate("localhost");
+        assert!(result.is_err(), "operation should fail when lock cannot be acquired");
+        assert!(lock_path.exists(), "existing lock file must not be force deleted");
+        assert!(
+            started.elapsed() >= IDENTITY_STATE_LOCK_TIMEOUT,
+            "lock acquisition should wait for timeout before failing"
+        );
     }
 
     #[test]

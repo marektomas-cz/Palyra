@@ -77,5 +77,8 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(error = %error, "failed to register Ctrl+C handler");
+        std::future::pending::<()>().await;
+    }
 }

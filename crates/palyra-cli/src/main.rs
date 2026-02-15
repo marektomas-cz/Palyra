@@ -4,7 +4,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{Read, Write},
+    io::{BufRead, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -19,8 +19,9 @@ use cli::{
     PairingMethodArg, PolicyCommand, ProtocolCommand,
 };
 use palyra_common::{
-    build_metadata, daemon_config_schema::RootFileConfig, validate_canonical_id, HealthResponse,
-    CANONICAL_JSON_ENVELOPE_VERSION, CANONICAL_PROTOCOL_MAJOR,
+    build_metadata, daemon_config_schema::RootFileConfig, default_config_search_paths,
+    validate_canonical_id, HealthResponse, CANONICAL_JSON_ENVELOPE_VERSION,
+    CANONICAL_PROTOCOL_MAJOR,
 };
 #[cfg(not(windows))]
 use palyra_identity::FilesystemSecretStore;
@@ -242,9 +243,9 @@ fn validate_daemon_compatible_config(content: &str) -> Result<()> {
 }
 
 fn find_default_config_path() -> Option<String> {
-    for candidate in ["palyra.toml", "Palyra.toml", "config/palyra.toml"] {
-        if Path::new(candidate).exists() {
-            return Some(candidate.to_owned());
+    for candidate in default_config_search_paths() {
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().into_owned());
         }
     }
 
@@ -259,6 +260,7 @@ fn run_pairing(command: PairingCommand) -> Result<()> {
             method,
             proof,
             proof_stdin,
+            allow_insecure_proof_arg,
             store_dir,
             approve,
             simulate_rotation,
@@ -274,7 +276,7 @@ fn run_pairing(command: PairingCommand) -> Result<()> {
             let store = build_identity_store(&store_root)?;
             let mut manager = IdentityManager::with_store(store.clone())
                 .context("failed to initialize identity manager")?;
-            let proof = resolve_pairing_proof(proof, proof_stdin)?;
+            let proof = resolve_pairing_proof(proof, proof_stdin, allow_insecure_proof_arg)?;
             let pairing_method = build_pairing_method(method, &proof);
 
             let session = manager
@@ -390,11 +392,16 @@ fn build_pairing_method(method: PairingMethodArg, proof: &str) -> PairingMethod 
     }
 }
 
-fn resolve_pairing_proof(proof: Option<String>, proof_stdin: bool) -> Result<String> {
+fn resolve_pairing_proof(
+    proof: Option<String>,
+    proof_stdin: bool,
+    allow_insecure_proof_arg: bool,
+) -> Result<String> {
     if proof_stdin {
         let mut input = String::new();
         std::io::stdin()
-            .read_to_string(&mut input)
+            .lock()
+            .read_line(&mut input)
             .context("failed to read pairing proof from stdin")?;
         let proof = input.trim_end_matches(['\r', '\n']);
         if proof.is_empty() {
@@ -403,7 +410,18 @@ fn resolve_pairing_proof(proof: Option<String>, proof_stdin: bool) -> Result<Str
         return Ok(proof.to_owned());
     }
 
-    proof.context("missing pairing proof: use --proof or --proof-stdin")
+    if let Some(proof) = proof {
+        if !allow_insecure_proof_arg {
+            anyhow::bail!(
+                "refusing --proof without --allow-insecure-proof-arg; use --proof-stdin instead"
+            );
+        }
+        return Ok(proof);
+    }
+
+    anyhow::bail!(
+        "missing pairing proof: use --proof-stdin or --proof with --allow-insecure-proof-arg"
+    )
 }
 
 fn to_identity_client_kind(value: PairingClientKindArg) -> PairingClientKind {
@@ -554,14 +572,23 @@ mod tests {
 
     #[test]
     fn resolve_pairing_proof_accepts_explicit_value() {
-        let proof =
-            resolve_pairing_proof(Some("123456".to_owned()), false).expect("proof should resolve");
+        let proof = resolve_pairing_proof(Some("123456".to_owned()), false, true)
+            .expect("proof should resolve");
         assert_eq!(proof, "123456");
     }
 
     #[test]
     fn resolve_pairing_proof_requires_value_or_stdin_flag() {
-        let result = resolve_pairing_proof(None, false);
+        let result = resolve_pairing_proof(None, false, false);
         assert!(result.is_err(), "proof resolution should fail without any proof source");
+    }
+
+    #[test]
+    fn resolve_pairing_proof_rejects_explicit_value_without_insecure_ack() {
+        let result = resolve_pairing_proof(Some("123456".to_owned()), false, false);
+        assert!(
+            result.is_err(),
+            "proof from CLI arg must require explicit insecure acknowledgment"
+        );
     }
 }

@@ -13,7 +13,7 @@ const DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 #[test]
 fn pairing_requires_explicit_approval() -> Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
-        .args(["pairing", "pair", "--device-id", DEVICE_ID, "--proof", "123456"])
+        .args(["pairing", "pair", "--device-id", DEVICE_ID, "--proof-stdin"])
         .output()
         .context("failed to execute palyra pairing pair")?;
 
@@ -41,6 +41,7 @@ fn pairing_pair_outputs_verifiable_identity_and_rotation() -> Result<()> {
             "qr",
             "--proof",
             "0123456789ABCDEF0123456789ABCDEF",
+            "--allow-insecure-proof-arg",
             "--store-dir",
             &store_dir,
             "--approve",
@@ -68,7 +69,16 @@ fn pairing_pair_outputs_verifiable_identity_and_rotation() -> Result<()> {
 #[test]
 fn pairing_pair_refuses_windows_volatile_storage() -> Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
-        .args(["pairing", "pair", "--device-id", DEVICE_ID, "--proof", "123456", "--approve"])
+        .args([
+            "pairing",
+            "pair",
+            "--device-id",
+            DEVICE_ID,
+            "--proof",
+            "123456",
+            "--allow-insecure-proof-arg",
+            "--approve",
+        ])
         .output()
         .context("failed to execute palyra pairing pair on windows")?;
 
@@ -129,6 +139,7 @@ fn failed_pairing_does_not_persist_device_identity_secret() -> Result<()> {
             DEVICE_ID,
             "--proof",
             "00000",
+            "--allow-insecure-proof-arg",
             "--store-dir",
             &store_dir,
             "--approve",
@@ -144,6 +155,32 @@ fn failed_pairing_does_not_persist_device_identity_secret() -> Result<()> {
         !device_identity_file.exists(),
         "device identity secret should not be persisted on failed pairing"
     );
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[test]
+fn pairing_pair_rejects_proof_arg_without_insecure_ack_flag() -> Result<()> {
+    let identity_dir = TempDir::new().context("failed to create temporary identity directory")?;
+    let store_dir = identity_dir.path().to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .args([
+            "pairing",
+            "pair",
+            "--device-id",
+            DEVICE_ID,
+            "--proof",
+            "123456",
+            "--store-dir",
+            &store_dir,
+            "--approve",
+        ])
+        .output()
+        .context("failed to execute palyra pairing pair without insecure ack flag")?;
+
+    assert!(!output.status.success(), "pairing should reject --proof without insecure ack flag");
+    let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;
+    assert!(stderr.contains("--allow-insecure-proof-arg"));
     Ok(())
 }
 

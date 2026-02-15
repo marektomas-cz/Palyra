@@ -1,4 +1,6 @@
 use std::{
+    env,
+    ffi::OsString,
     path::{Component, PathBuf},
     time::Instant,
     time::{SystemTime, UNIX_EPOCH},
@@ -135,6 +137,48 @@ pub fn parse_config_path(raw: &str) -> Result<PathBuf, ConfigPathParseError> {
     }
 
     Ok(path)
+}
+
+#[must_use]
+pub fn default_config_search_paths() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        default_config_search_paths_from_env(env::var_os("APPDATA"), env::var_os("PROGRAMDATA"))
+    }
+    #[cfg(not(windows))]
+    {
+        default_config_search_paths_from_env(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))
+    }
+}
+
+#[cfg(windows)]
+fn default_config_search_paths_from_env(
+    appdata: Option<OsString>,
+    programdata: Option<OsString>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(appdata) = appdata {
+        paths.push(PathBuf::from(appdata).join("Palyra").join("palyra.toml"));
+    }
+    if let Some(programdata) = programdata {
+        paths.push(PathBuf::from(programdata).join("Palyra").join("palyra.toml"));
+    }
+    paths
+}
+
+#[cfg(not(windows))]
+fn default_config_search_paths_from_env(
+    xdg_config_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(xdg_config_home) = xdg_config_home {
+        paths.push(PathBuf::from(xdg_config_home).join("palyra").join("palyra.toml"));
+    } else if let Some(home) = home {
+        paths.push(PathBuf::from(home).join(".config").join("palyra").join("palyra.toml"));
+    }
+    paths.push(PathBuf::from("/etc/palyra/palyra.toml"));
+    paths
 }
 
 pub fn parse_webhook_payload(input: &[u8]) -> Result<WebhookEnvelope, WebhookPayloadError> {
@@ -350,14 +394,16 @@ fn is_valid_crockford_char(ch: char) -> bool {
 mod tests {
     use std::{
         collections::HashSet,
+        ffi::OsString,
+        path::PathBuf,
         sync::Mutex,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        parse_config_path, parse_webhook_payload_with_now, validate_canonical_id,
-        verify_webhook_payload, CanonicalIdError, ConfigPathParseError, ReplayNonceStore,
-        WebhookEnvelope, WebhookPayloadError, WebhookSignatureVerifier,
+        default_config_search_paths_from_env, parse_config_path, parse_webhook_payload_with_now,
+        validate_canonical_id, verify_webhook_payload, CanonicalIdError, ConfigPathParseError,
+        ReplayNonceStore, WebhookEnvelope, WebhookPayloadError, WebhookSignatureVerifier,
     };
 
     const REFERENCE_NOW_UNIX_MS: u64 = 1_730_000_000_000;
@@ -447,6 +493,51 @@ mod tests {
     fn parse_config_path_accepts_relative_safe_path() {
         let path = parse_config_path("config/palyra.toml").expect("path should parse");
         assert_eq!(path.to_string_lossy(), "config/palyra.toml");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn default_config_search_paths_prefers_xdg_and_includes_etc() {
+        let paths = default_config_search_paths_from_env(
+            Some(OsString::from("/tmp/xdg-config")),
+            Some(OsString::from("/tmp/home")),
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/xdg-config").join("palyra").join("palyra.toml"),
+                PathBuf::from("/etc/palyra/palyra.toml"),
+            ]
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn default_config_search_paths_falls_back_to_home_when_xdg_missing() {
+        let paths = default_config_search_paths_from_env(None, Some(OsString::from("/tmp/home")));
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/home").join(".config").join("palyra").join("palyra.toml"),
+                PathBuf::from("/etc/palyra/palyra.toml"),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_config_search_paths_uses_appdata_and_programdata() {
+        let paths = default_config_search_paths_from_env(
+            Some(OsString::from(r"C:\Users\Test\AppData\Roaming")),
+            Some(OsString::from(r"C:\ProgramData")),
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from(r"C:\Users\Test\AppData\Roaming").join("Palyra").join("palyra.toml"),
+                PathBuf::from(r"C:\ProgramData").join("Palyra").join("palyra.toml"),
+            ]
+        );
     }
 
     #[test]
