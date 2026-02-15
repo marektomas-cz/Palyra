@@ -128,7 +128,7 @@ fn failed_pairing_does_not_persist_device_identity_secret() -> Result<()> {
             "--device-id",
             DEVICE_ID,
             "--proof",
-            "000000",
+            "00000",
             "--store-dir",
             &store_dir,
             "--approve",
