@@ -964,6 +964,7 @@ fn validate_db_path(path: &Path) -> Result<(), JournalError> {
 mod tests {
     use std::{
         path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -976,6 +977,8 @@ mod tests {
         OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
         OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
     };
+
+    static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn build_request(event_id: &str, payload_json: &[u8]) -> JournalAppendRequest {
         JournalAppendRequest {
@@ -1008,8 +1011,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after unix epoch")
             .as_nanos();
+        let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir()
-            .join(format!("palyra-journal-test-{nonce}-{}.sqlite3", std::process::id()))
+            .join(format!("palyra-journal-test-{nonce}-{}-{counter}.sqlite3", std::process::id()))
     }
 
     #[test]
