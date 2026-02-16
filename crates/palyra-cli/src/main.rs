@@ -1,30 +1,24 @@
 mod cli;
 
-use std::{
-    env,
-    ffi::OsString,
-    fs,
-    io::{BufRead, Write},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::Arc,
-    thread,
-    time::{Duration, SystemTime},
-};
+use std::{env, fs, io::Write, path::Path, process::Command, thread, time::Duration};
+#[cfg(not(windows))]
+use std::{ffi::OsString, io::BufRead, path::PathBuf, sync::Arc, time::SystemTime};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{
-    Cli, Command as CliCommand, ConfigCommand, DaemonCommand, PairingClientKindArg, PairingCommand,
-    PairingMethodArg, PolicyCommand, ProtocolCommand,
+    Cli, Command as CliCommand, ConfigCommand, DaemonCommand, PolicyCommand, ProtocolCommand,
 };
+#[cfg(not(windows))]
+use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 use palyra_common::{
     build_metadata, daemon_config_schema::RootFileConfig, default_config_search_paths,
-    validate_canonical_id, HealthResponse, CANONICAL_JSON_ENVELOPE_VERSION,
-    CANONICAL_PROTOCOL_MAJOR,
+    parse_daemon_bind_socket, validate_canonical_id, HealthResponse,
+    CANONICAL_JSON_ENVELOPE_VERSION, CANONICAL_PROTOCOL_MAJOR,
 };
 #[cfg(not(windows))]
 use palyra_identity::FilesystemSecretStore;
+#[cfg(not(windows))]
 use palyra_identity::{
     DeviceIdentity, IdentityManager, PairingClientKind, PairingMethod, SecretStore,
     DEFAULT_CERT_VALIDITY,
@@ -44,6 +38,7 @@ fn main() -> Result<()> {
         CliCommand::Policy { command } => run_policy(command),
         CliCommand::Protocol { command } => run_protocol(command),
         CliCommand::Config { command } => run_config(command),
+        #[cfg(not(windows))]
         CliCommand::Pairing { command } => run_pairing(command),
     }
 }
@@ -238,7 +233,15 @@ fn run_config(command: ConfigCommand) -> Result<()> {
 }
 
 fn validate_daemon_compatible_config(content: &str) -> Result<()> {
-    let _: RootFileConfig = toml::from_str(content).context("invalid daemon config schema")?;
+    let parsed: RootFileConfig = toml::from_str(content).context("invalid daemon config schema")?;
+    let bind_addr = parsed
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.bind_addr.as_deref())
+        .unwrap_or("127.0.0.1");
+    let port = parsed.daemon.as_ref().and_then(|daemon| daemon.port).unwrap_or(7142);
+    let _ =
+        parse_daemon_bind_socket(bind_addr, port).context("invalid daemon bind address or port")?;
     Ok(())
 }
 
@@ -252,6 +255,7 @@ fn find_default_config_path() -> Option<String> {
     None
 }
 
+#[cfg(not(windows))]
 fn run_pairing(command: PairingCommand) -> Result<()> {
     match command {
         PairingCommand::Pair {
@@ -271,7 +275,6 @@ fn run_pairing(command: PairingCommand) -> Result<()> {
                 );
             }
 
-            let now = SystemTime::now();
             let store_root = resolve_identity_store_root(store_dir)?;
             let store = build_identity_store(&store_root)?;
             let mut manager = IdentityManager::with_store(store.clone())
@@ -279,8 +282,9 @@ fn run_pairing(command: PairingCommand) -> Result<()> {
             let proof = resolve_pairing_proof(proof, proof_stdin, allow_insecure_proof_arg)?;
             let pairing_method = build_pairing_method(method, &proof);
 
+            let started_at = SystemTime::now();
             let session = manager
-                .start_pairing(to_identity_client_kind(client_kind), pairing_method, now)
+                .start_pairing(to_identity_client_kind(client_kind), pairing_method, started_at)
                 .context("failed to start pairing session")?;
             let device = DeviceIdentity::generate(&device_id)
                 .context("failed to generate device identity")?;
@@ -288,8 +292,9 @@ fn run_pairing(command: PairingCommand) -> Result<()> {
             let hello = manager
                 .build_device_hello(&session, &device, &proof)
                 .context("failed to build device pairing hello")?;
+            let completed_at = SystemTime::now();
             let result = manager
-                .complete_pairing(hello, now)
+                .complete_pairing(hello, completed_at)
                 .context("failed to complete pairing handshake")?;
             if let Err(store_error) = device.store(store.as_ref()) {
                 let rollback = manager.revoke_device(
@@ -322,7 +327,10 @@ fn run_pairing(command: PairingCommand) -> Result<()> {
 
             if simulate_rotation {
                 let rotated = manager
-                    .rotate_device_certificate_if_due(&device_id, now + DEFAULT_CERT_VALIDITY)
+                    .rotate_device_certificate_if_due(
+                        &device_id,
+                        SystemTime::now() + DEFAULT_CERT_VALIDITY,
+                    )
                     .context("failed to rotate certificate in simulation mode")?;
                 println!(
                     "pairing.rotation=simulated rotated=true previous_sequence={} current_sequence={}",
@@ -335,24 +343,12 @@ fn run_pairing(command: PairingCommand) -> Result<()> {
     }
 }
 
+#[cfg(not(windows))]
 fn resolve_identity_store_root(store_dir: Option<String>) -> Result<PathBuf> {
     if let Some(path) = store_dir {
         return Ok(PathBuf::from(path));
     }
-    #[cfg(windows)]
-    {
-        default_identity_store_root_from_env(env::var_os("LOCALAPPDATA"))
-    }
-    #[cfg(not(windows))]
-    {
-        default_identity_store_root_from_env(env::var_os("XDG_STATE_HOME"), env::var_os("HOME"))
-    }
-}
-
-#[cfg(windows)]
-fn default_identity_store_root_from_env(localappdata: Option<OsString>) -> Result<PathBuf> {
-    let base = localappdata.map(PathBuf::from).context("LOCALAPPDATA is not set")?;
-    Ok(base.join("Palyra").join("identity"))
+    default_identity_store_root_from_env(env::var_os("XDG_STATE_HOME"), env::var_os("HOME"))
 }
 
 #[cfg(not(windows))]
@@ -368,23 +364,15 @@ fn default_identity_store_root_from_env(
     Ok(home.join(".local").join("state").join("palyra").join("identity"))
 }
 
+#[cfg(not(windows))]
 fn build_identity_store(store_root: &Path) -> Result<Arc<dyn SecretStore>> {
-    #[cfg(windows)]
-    {
-        anyhow::bail!(
-            "persistent identity storage is not available on Windows yet; refusing volatile pairing state at {}",
-            store_root.display()
-        );
-    }
-    #[cfg(not(windows))]
-    {
-        let store = FilesystemSecretStore::new(store_root).with_context(|| {
-            format!("failed to initialize secret store at {}", store_root.display())
-        })?;
-        Ok(Arc::new(store))
-    }
+    let store = FilesystemSecretStore::new(store_root).with_context(|| {
+        format!("failed to initialize secret store at {}", store_root.display())
+    })?;
+    Ok(Arc::new(store))
 }
 
+#[cfg(not(windows))]
 fn build_pairing_method(method: PairingMethodArg, proof: &str) -> PairingMethod {
     match method {
         PairingMethodArg::Pin => PairingMethod::Pin { code: proof.to_owned() },
@@ -392,6 +380,7 @@ fn build_pairing_method(method: PairingMethodArg, proof: &str) -> PairingMethod 
     }
 }
 
+#[cfg(not(windows))]
 fn resolve_pairing_proof(
     proof: Option<String>,
     proof_stdin: bool,
@@ -424,6 +413,7 @@ fn resolve_pairing_proof(
     )
 }
 
+#[cfg(not(windows))]
 fn to_identity_client_kind(value: PairingClientKindArg) -> PairingClientKind {
     match value {
         PairingClientKindArg::Cli => PairingClientKind::Cli,
@@ -528,14 +518,13 @@ struct DoctorCheck {
     required: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::{default_identity_store_root_from_env, resolve_pairing_proof};
     use anyhow::Result;
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    #[cfg(not(windows))]
     #[test]
     fn identity_store_defaults_to_xdg_state_home_when_available() -> Result<()> {
         let root = default_identity_store_root_from_env(
@@ -546,26 +535,12 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn identity_store_falls_back_to_home_state_directory() -> Result<()> {
         let root = default_identity_store_root_from_env(None, Some(OsString::from("/tmp/home")))?;
         assert_eq!(
             root,
             PathBuf::from("/tmp/home").join(".local").join("state").join("palyra").join("identity")
-        );
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn identity_store_uses_localappdata_on_windows() -> Result<()> {
-        let root = default_identity_store_root_from_env(Some(OsString::from(
-            r"C:\Users\Test\AppData\Local",
-        )))?;
-        assert_eq!(
-            root,
-            PathBuf::from(r"C:\Users\Test\AppData\Local").join("Palyra").join("identity")
         );
         Ok(())
     }

@@ -151,6 +151,13 @@ pub fn default_config_search_paths() -> Vec<PathBuf> {
     }
 }
 
+pub fn parse_daemon_bind_socket(
+    bind_addr: &str,
+    port: u16,
+) -> Result<std::net::SocketAddr, std::net::AddrParseError> {
+    format!("{bind_addr}:{port}").parse()
+}
+
 #[cfg(windows)]
 fn default_config_search_paths_from_env(
     appdata: Option<OsString>,
@@ -395,15 +402,17 @@ mod tests {
     use std::{
         collections::HashSet,
         ffi::OsString,
+        net::SocketAddr,
         path::PathBuf,
         sync::Mutex,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        default_config_search_paths_from_env, parse_config_path, parse_webhook_payload_with_now,
-        validate_canonical_id, verify_webhook_payload, CanonicalIdError, ConfigPathParseError,
-        ReplayNonceStore, WebhookEnvelope, WebhookPayloadError, WebhookSignatureVerifier,
+        default_config_search_paths_from_env, parse_config_path, parse_daemon_bind_socket,
+        parse_webhook_payload_with_now, validate_canonical_id, verify_webhook_payload,
+        CanonicalIdError, ConfigPathParseError, ReplayNonceStore, WebhookEnvelope,
+        WebhookPayloadError, WebhookSignatureVerifier,
     };
 
     const REFERENCE_NOW_UNIX_MS: u64 = 1_730_000_000_000;
@@ -538,6 +547,22 @@ mod tests {
                 PathBuf::from(r"C:\ProgramData").join("Palyra").join("palyra.toml"),
             ]
         );
+    }
+
+    #[test]
+    fn parse_daemon_bind_socket_accepts_valid_loopback_endpoint() {
+        let parsed = parse_daemon_bind_socket("127.0.0.1", 7142)
+            .expect("loopback bind endpoint should parse");
+        assert_eq!(
+            parsed,
+            "127.0.0.1:7142".parse::<SocketAddr>().expect("expected endpoint should parse"),
+        );
+    }
+
+    #[test]
+    fn parse_daemon_bind_socket_rejects_invalid_bind_host() {
+        let result = parse_daemon_bind_socket("bad host value", 7142);
+        assert!(result.is_err(), "invalid bind host should be rejected");
     }
 
     #[test]

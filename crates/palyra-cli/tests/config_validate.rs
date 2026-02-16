@@ -113,6 +113,51 @@ fn config_validate_with_explicit_path_rejects_non_numeric_daemon_port() -> Resul
 }
 
 #[test]
+fn config_validate_with_explicit_path_rejects_invalid_bind_address() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("invalid-bind.toml");
+    fs::write(&config_path, "[daemon]\nbind_addr='bad host value'\nport=7142\n")
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .current_dir(workdir.path())
+        .args(["config", "validate", "--path", "invalid-bind.toml"])
+        .output()
+        .context("failed to execute palyra config validate with invalid bind address")?;
+
+    assert!(!output.status.success(), "config with invalid bind address must fail");
+    let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;
+    assert!(
+        stderr.contains("invalid daemon bind address or port"),
+        "unexpected stderr output: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn config_validate_with_explicit_path_accepts_valid_bind_address_and_port() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("valid-bind.toml");
+    fs::write(&config_path, "[daemon]\nbind_addr='127.0.0.1'\nport=7142\n")
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .current_dir(workdir.path())
+        .args(["config", "validate", "--path", "valid-bind.toml"])
+        .output()
+        .context("failed to execute palyra config validate with valid bind address")?;
+
+    assert!(
+        output.status.success(),
+        "config with valid bind address should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not UTF-8")?;
+    assert!(stdout.contains("config=valid source=valid-bind.toml"));
+    Ok(())
+}
+
+#[test]
 fn config_validate_with_explicit_path_rejects_non_boolean_identity_flag() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("invalid-identity.toml");

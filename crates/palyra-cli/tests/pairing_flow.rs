@@ -11,6 +11,7 @@ use tempfile::TempDir;
 const DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
 #[test]
+#[cfg(not(windows))]
 fn pairing_requires_explicit_approval() -> Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
         .args(["pairing", "pair", "--device-id", DEVICE_ID, "--proof-stdin"])
@@ -67,7 +68,7 @@ fn pairing_pair_outputs_verifiable_identity_and_rotation() -> Result<()> {
 
 #[cfg(windows)]
 #[test]
-fn pairing_pair_refuses_windows_volatile_storage() -> Result<()> {
+fn pairing_command_is_unavailable_on_windows() -> Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
         .args([
             "pairing",
@@ -82,9 +83,9 @@ fn pairing_pair_refuses_windows_volatile_storage() -> Result<()> {
         .output()
         .context("failed to execute palyra pairing pair on windows")?;
 
-    assert!(!output.status.success(), "pairing should fail on windows without durable store");
+    assert!(!output.status.success(), "pairing subcommand should be unavailable on windows");
     let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;
-    assert!(stderr.contains("persistent identity storage is not available on Windows yet"));
+    assert!(stderr.contains("unrecognized subcommand"), "unexpected stderr output: {stderr}");
     Ok(())
 }
 

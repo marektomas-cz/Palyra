@@ -30,6 +30,7 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    #[cfg(not(windows))]
     Pairing {
         #[command(subcommand)]
         command: PairingCommand,
@@ -117,6 +118,7 @@ pub enum PairingMethodArg {
 
 impl PairingMethodArg {
     #[must_use]
+    #[cfg_attr(windows, allow(dead_code))]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pin => "pin",
@@ -129,10 +131,9 @@ impl PairingMethodArg {
 mod tests {
     use clap::Parser;
 
-    use super::{
-        Cli, Command, ConfigCommand, DaemonCommand, PairingClientKindArg, PairingCommand,
-        PairingMethodArg, PolicyCommand, ProtocolCommand,
-    };
+    use super::{Cli, Command, ConfigCommand, DaemonCommand, PolicyCommand, ProtocolCommand};
+    #[cfg(not(windows))]
+    use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 
     #[test]
     fn parse_version_subcommand() {
@@ -220,6 +221,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn parse_pairing_pair_with_defaults() {
         let parsed = Cli::parse_from([
             "palyra",
@@ -251,6 +253,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn parse_pairing_pair_desktop_qr() {
         let parsed = Cli::parse_from([
             "palyra",
@@ -289,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn parse_pairing_pair_with_proof_stdin() {
         let parsed = Cli::parse_from([
             "palyra",
@@ -318,6 +322,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn parse_pairing_pair_rejects_proof_without_insecure_ack() {
         let result = Cli::try_parse_from([
             "palyra",
@@ -330,5 +335,22 @@ mod tests {
             "--approve",
         ]);
         assert!(result.is_err(), "proof should require explicit insecure acknowledgement flag");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn parse_pairing_command_is_unavailable_on_windows() {
+        let result = Cli::try_parse_from([
+            "palyra",
+            "pairing",
+            "pair",
+            "--device-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--proof",
+            "123456",
+            "--allow-insecure-proof-arg",
+            "--approve",
+        ]);
+        assert!(result.is_err(), "pairing command should not be exposed on windows");
     }
 }

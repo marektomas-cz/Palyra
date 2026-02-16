@@ -1515,6 +1515,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hkdf",
+ "libc",
  "palyra-common",
  "proptest",
  "rand 0.8.5",

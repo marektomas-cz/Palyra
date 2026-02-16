@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant, SystemTime},
@@ -150,6 +150,7 @@ const MAX_ACTIVE_PAIRING_SESSIONS: usize = 10_000;
 const IDENTITY_STATE_LOCK_FILENAME: &str = ".identity-state.lock";
 const IDENTITY_STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 const IDENTITY_STATE_LOCK_RETRY: Duration = Duration::from_millis(20);
+const IDENTITY_STATE_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 
 static IDENTITY_STATE_PROCESS_LOCK: Mutex<()> = Mutex::new(());
 
@@ -265,6 +266,13 @@ impl IdentityManager {
                     return Ok(Some(FilesystemStateLockGuard { path: lock_path }));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if try_reclaim_stale_filesystem_lock(
+                        &lock_path,
+                        SystemTime::now(),
+                        IDENTITY_STATE_STALE_LOCK_AGE,
+                    )? {
+                        continue;
+                    }
                     if start.elapsed() >= IDENTITY_STATE_LOCK_TIMEOUT {
                         return Err(IdentityError::Internal(format!(
                             "timed out waiting for identity state lock at {} (lock stealing disabled to prevent state corruption; remove stale lock file if no process owns it)",
@@ -296,7 +304,6 @@ impl IdentityManager {
         self.state_generation = state.generation;
         Ok(())
     }
-
     pub fn issue_gateway_server_certificate(
         &mut self,
         common_name: &str,
@@ -565,16 +572,22 @@ impl IdentityManager {
         device_id: &str,
         now: SystemTime,
     ) -> IdentityResult<IssuedCertificate> {
+        let _guard = self.acquire_state_mutation_guard()?;
+        self.reload_persisted_state()?;
         if self.revoked_devices.contains_key(device_id) {
             return Err(IdentityError::DeviceRevoked);
         }
         let paired =
             self.paired_devices.get(device_id).cloned().ok_or(IdentityError::DeviceNotPaired)?;
         if paired.current_certificate.private_key_pem.is_empty() {
-            return self.force_rotate_device_certificate(device_id);
+            let rotated = self.force_rotate_device_certificate_inner(device_id)?;
+            self.persist_identity_state_bundle()?;
+            return Ok(rotated);
         }
         if should_rotate_certificate(&paired.current_certificate, now, self.rotation_threshold)? {
-            return self.force_rotate_device_certificate(device_id);
+            let rotated = self.force_rotate_device_certificate_inner(device_id)?;
+            self.persist_identity_state_bundle()?;
+            return Ok(rotated);
         }
         Ok(paired.current_certificate)
     }
@@ -636,6 +649,88 @@ impl IdentityManager {
             .insert(certificate_fingerprint_hex(&paired.current_certificate.certificate_pem)?);
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FilesystemLockMarker {
+    pid: u32,
+    ts_ms: u64,
+}
+
+fn try_reclaim_stale_filesystem_lock(
+    lock_path: &Path,
+    now: SystemTime,
+    stale_age: Duration,
+) -> IdentityResult<bool> {
+    let marker_raw = match fs::read_to_string(lock_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(_) => return Ok(false),
+    };
+    let Some(marker) = parse_filesystem_lock_marker(&marker_raw) else {
+        return Ok(false);
+    };
+    if !lock_marker_is_stale(marker, now, stale_age)? {
+        return Ok(false);
+    }
+    if process_is_alive(marker.pid) {
+        return Ok(false);
+    }
+    match fs::remove_file(lock_path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+fn parse_filesystem_lock_marker(raw: &str) -> Option<FilesystemLockMarker> {
+    let mut pid = None;
+    let mut ts_ms = None;
+    for part in raw.split_whitespace() {
+        if let Some(value) = part.strip_prefix("pid=") {
+            pid = value.parse::<u32>().ok();
+            continue;
+        }
+        if let Some(value) = part.strip_prefix("ts_ms=") {
+            ts_ms = value.parse::<u64>().ok();
+        }
+    }
+    Some(FilesystemLockMarker { pid: pid?, ts_ms: ts_ms? })
+}
+
+fn lock_marker_is_stale(
+    marker: FilesystemLockMarker,
+    now: SystemTime,
+    stale_age: Duration,
+) -> IdentityResult<bool> {
+    let now_ms = unix_ms(now)?;
+    let stale_age_ms = u64::try_from(stale_age.as_millis()).map_err(|_| {
+        IdentityError::Internal("identity state stale lock age overflow".to_owned())
+    })?;
+    Ok(now_ms.saturating_sub(marker.ts_ms) >= stale_age_ms)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let Ok(pid_i32) = i32::try_from(pid) else {
+        return true;
+    };
+    // SAFETY: calling `kill(pid, 0)` only probes process existence/permission and does not send
+    // a signal. Inputs are validated above.
+    let result = unsafe { libc::kill(pid_i32, 0) };
+    if result == 0 {
+        return true;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(code) if code == libc::ESRCH => false,
+        Some(code) if code == libc::EPERM => true,
+        _ => true,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
 }
 
 fn load_or_init_gateway_ca(store: &dyn SecretStore) -> IdentityResult<CertificateAuthority> {
@@ -941,7 +1036,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn filesystem_lock_is_not_force_reclaimed_by_age_only_logic() {
+    fn filesystem_lock_is_not_reclaimed_when_owner_pid_is_live() {
         let root = TempDir::new().expect("temp directory should be created");
         let store = Arc::new(
             FilesystemSecretStore::new(root.path())
@@ -950,7 +1045,8 @@ mod tests {
         let mut manager = IdentityManager::with_store(store)
             .expect("manager with filesystem store should initialize");
         let lock_path = root.path().join(IDENTITY_STATE_LOCK_FILENAME);
-        fs::write(&lock_path, b"pid=99999 ts_ms=0\n").expect("lock marker should be written");
+        fs::write(&lock_path, format!("pid={} ts_ms=0\n", std::process::id()))
+            .expect("lock marker should be written");
 
         let started = Instant::now();
         let result = manager.issue_gateway_server_certificate("localhost");
@@ -960,6 +1056,25 @@ mod tests {
             started.elapsed() >= IDENTITY_STATE_LOCK_TIMEOUT,
             "lock acquisition should wait for timeout before failing"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_lock_reclaims_stale_dead_owner_marker() {
+        let root = TempDir::new().expect("temp directory should be created");
+        let store = Arc::new(
+            FilesystemSecretStore::new(root.path())
+                .expect("filesystem secret store should initialize"),
+        );
+        let mut manager = IdentityManager::with_store(store)
+            .expect("manager with filesystem store should initialize");
+        let lock_path = root.path().join(IDENTITY_STATE_LOCK_FILENAME);
+        fs::write(&lock_path, format!("pid={} ts_ms=0\n", i32::MAX))
+            .expect("stale lock marker should be written");
+
+        let issued = manager.issue_gateway_server_certificate("localhost");
+        assert!(issued.is_ok(), "stale dead lock marker should be reclaimed");
+        assert!(!lock_path.exists(), "stale lock file should be removed after successful mutation");
     }
 
     #[test]
@@ -1313,6 +1428,26 @@ mod tests {
         assert!(
             second.revoked_certificate_fingerprints().contains(&before_fingerprint),
             "previous certificate should be revoked after keyless reissue"
+        );
+    }
+
+    #[test]
+    fn rotate_if_due_reloads_revocation_state_before_returning_cached_certificate() {
+        let store = Arc::new(InMemorySecretStore::new());
+        let mut stale =
+            IdentityManager::with_store(store.clone()).expect("manager should initialize");
+        let (_, _, hello) = start_pin_pairing(&mut stale, "123456");
+        stale.complete_pairing(hello, SystemTime::now()).expect("pairing should complete");
+        let mut revoker =
+            IdentityManager::with_store(store.clone()).expect("revoker should initialize");
+        revoker
+            .revoke_device(sample_device_id(), "operator revoked", SystemTime::now())
+            .expect("revocation should succeed");
+
+        let result = stale.rotate_device_certificate_if_due(sample_device_id(), SystemTime::now());
+        assert!(
+            matches!(result, Err(IdentityError::DeviceRevoked)),
+            "rotate_if_due must refresh persisted revocation state before returning a certificate"
         );
     }
 

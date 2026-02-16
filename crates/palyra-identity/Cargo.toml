@@ -30,6 +30,9 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "sync"] }
 x509-parser = "0.16.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.171"
+
 [[bench]]
 name = "pairing_handshake"
 harness = false
