@@ -313,6 +313,7 @@ async fn main() -> Result<()> {
         grpc_address,
         loaded.gateway.allow_insecure_remote,
         loaded.gateway.tls.enabled,
+        !loaded.identity.allow_insecure_node_rpc_without_mtls,
         dangerous_remote_bind_acknowledged()?,
     )?;
 
@@ -685,6 +686,7 @@ fn enforce_remote_bind_guard(
     grpc_address: SocketAddr,
     allow_insecure_remote: bool,
     gateway_tls_enabled: bool,
+    node_rpc_mtls_required: bool,
     dangerous_remote_bind_acknowledged: bool,
 ) -> Result<()> {
     let admin_remote = !admin_address.ip().is_loopback();
@@ -696,13 +698,15 @@ fn enforce_remote_bind_guard(
             grpc_address
         );
     }
-    let requires_danger_ack = admin_remote || (grpc_remote && !gateway_tls_enabled);
+    let requires_danger_ack =
+        admin_remote || (grpc_remote && (!gateway_tls_enabled || !node_rpc_mtls_required));
     if requires_danger_ack && !dangerous_remote_bind_acknowledged {
         anyhow::bail!(
-            "refusing insecure remote bind without explicit danger acknowledgement: admin={} grpc={} gateway_tls_enabled={} (set {}=true to acknowledge risk, or keep admin loopback and enable gateway TLS)",
+            "refusing insecure remote bind without explicit danger acknowledgement: admin={} grpc={} gateway_tls_enabled={} node_rpc_mtls_required={} (set {}=true to acknowledge risk, or keep admin loopback and enable gateway TLS and node RPC mTLS)",
             admin_address,
             grpc_address,
             gateway_tls_enabled,
+            node_rpc_mtls_required,
             DANGEROUS_REMOTE_BIND_ACK_ENV,
         );
     }
@@ -733,6 +737,7 @@ mod tests {
             "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
             false,
             false,
+            true,
             false,
         );
         assert!(result.is_ok(), "loopback bind should not require insecure opt-in");
@@ -745,6 +750,7 @@ mod tests {
             "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
             false,
             false,
+            true,
             false,
         );
         assert!(result.is_err(), "non-loopback bind should require explicit opt-in");
@@ -755,6 +761,7 @@ mod tests {
         let result = enforce_remote_bind_guard(
             "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
             "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
+            true,
             true,
             true,
             false,
@@ -772,6 +779,7 @@ mod tests {
             "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
             true,
             false,
+            true,
             false,
         );
         assert!(
@@ -788,6 +796,7 @@ mod tests {
             true,
             false,
             true,
+            true,
         );
         assert!(result.is_ok(), "danger acknowledgement should allow non-TLS remote gRPC bind");
     }
@@ -799,11 +808,44 @@ mod tests {
             "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
             true,
             true,
+            true,
             false,
         );
         assert!(
             result.is_err(),
             "remote admin bind should require explicit danger acknowledgement"
+        );
+    }
+
+    #[test]
+    fn remote_bind_guard_requires_danger_ack_for_remote_grpc_when_node_rpc_mtls_disabled() {
+        let result = enforce_remote_bind_guard(
+            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
+            "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
+            true,
+            true,
+            false,
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "remote gRPC bind should require danger acknowledgement when node RPC mTLS is disabled"
+        );
+    }
+
+    #[test]
+    fn remote_bind_guard_allows_remote_grpc_with_node_rpc_mtls_disabled_and_danger_ack() {
+        let result = enforce_remote_bind_guard(
+            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
+            "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
+            true,
+            true,
+            false,
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "danger acknowledgement should allow remote gRPC bind when node RPC mTLS is disabled"
         );
     }
 }
