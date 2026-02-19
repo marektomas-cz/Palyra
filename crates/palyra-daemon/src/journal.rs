@@ -32,6 +32,7 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
 const MAX_CRON_JOBS_LIST_LIMIT: usize = 500;
 const MAX_CRON_RUNS_LIST_LIMIT: usize = 500;
 const MAX_APPROVALS_LIST_LIMIT: usize = 500;
+const MAX_APPROVALS_QUERY_LIMIT: usize = MAX_APPROVALS_LIST_LIMIT + 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2265,7 +2266,7 @@ impl JournalStore {
         filter: ApprovalsListFilter<'_>,
     ) -> Result<Vec<ApprovalRecord>, JournalError> {
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
-        let limit = filter.limit.clamp(1, MAX_APPROVALS_LIST_LIMIT);
+        let limit = filter.limit.clamp(1, MAX_APPROVALS_QUERY_LIMIT);
         let mut statement = guard.prepare(
             r#"
                 SELECT
