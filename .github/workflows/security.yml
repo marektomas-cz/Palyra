@@ -35,6 +35,24 @@ jobs:
         if: ${{ hashFiles('apps/web/package-lock.json') != '' }}
         run: npm --prefix apps/web audit --audit-level=high --omit=dev
 
+      - name: Collect npm audit reports (runtime + full)
+        if: ${{ hashFiles('apps/web/package-lock.json') != '' }}
+        run: |
+          mkdir -p security-artifacts
+          npm --prefix apps/web audit --json --omit=dev > security-artifacts/npm-audit-runtime.json || true
+          npm --prefix apps/web audit --json > security-artifacts/npm-audit-full.json || true
+
+      - name: Validate dev-only npm advisories allowlist (non-blocking)
+        if: ${{ hashFiles('apps/web/package-lock.json') != '' }}
+        continue-on-error: true
+        run: |
+          node scripts/validate-npm-audit-dev-allowlist.mjs \
+            --full security-artifacts/npm-audit-full.json \
+            --runtime security-artifacts/npm-audit-runtime.json \
+            --allowlist npm-audit-dev-allowlist.json \
+            --summary security-artifacts/npm-audit-dev-summary.json \
+            --threshold high
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
