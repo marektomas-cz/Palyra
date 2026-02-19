@@ -78,6 +78,18 @@ when {
     context.action == "tool.execute" &&
     context.is_allowlisted_tool
 };
+
+@id("allow_cron_management_actions")
+permit(principal, action, resource)
+when {
+    context.action == "cron.create" ||
+    context.action == "cron.update" ||
+    context.action == "cron.delete" ||
+    context.action == "cron.get" ||
+    context.action == "cron.list" ||
+    context.action == "cron.logs" ||
+    context.action == "cron.run"
+};
 "#;
 
 const POLICY_DENY_REASON: &str = "tool execution denied by default: tool is not allowlisted";
@@ -360,6 +372,21 @@ mod tests {
             principal: "user:bootstrap".to_owned(),
             action: "tool.read.status".to_owned(),
             resource: "tool:daemon".to_owned(),
+        };
+
+        let evaluation =
+            evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
+
+        assert_eq!(evaluation.decision, PolicyDecision::Allow);
+        assert!(!evaluation.explanation.matched_policy_ids.is_empty());
+    }
+
+    #[test]
+    fn cron_actions_are_explicitly_allowed() {
+        let request = PolicyRequest {
+            principal: "user:ops".to_owned(),
+            action: "cron.create".to_owned(),
+            resource: "cron:job".to_owned(),
         };
 
         let evaluation =

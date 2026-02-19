@@ -26,6 +26,7 @@ axum = "0.8.1"
 base64 = "0.22.1"
 clap = { version = "4.5.31", features = ["derive"] }
 clap_complete = "4.5.31"
+chrono = "0.4.40"
 criterion = "0.5.1"
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 futures = "0.3.31"

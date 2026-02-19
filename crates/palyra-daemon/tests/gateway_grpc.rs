@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::Value;
 #[cfg(unix)]
 use std::path::Path;
@@ -47,10 +47,16 @@ pub mod proto {
                 tonic::include_proto!("palyra.gateway.v1");
             }
         }
+
+        pub mod cron {
+            pub mod v1 {
+                tonic::include_proto!("palyra.cron.v1");
+            }
+        }
     }
 }
 
-use proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
+use proto::palyra::{common::v1 as common_v1, cron::v1 as cron_v1, gateway::v1 as gateway_v1};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn grpc_gateway_enforces_auth_and_streams_status() -> Result<()> {
@@ -172,6 +178,263 @@ async fn grpc_resolve_session_and_list_sessions_roundtrip() -> Result<()> {
     assert!(
         listed.sessions.iter().any(|session| session.session_key == "agent:main:main"),
         "listed sessions must include resolved session key"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_cron_create_run_now_and_list_runs_roundtrip() -> Result<()> {
+    let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut cron_client = cron_v1::cron_service_client::CronServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect cron gRPC client")?;
+
+    let mut create_request = tonic::Request::new(cron_v1::CreateJobRequest {
+        v: 1,
+        name: "Health summary".to_owned(),
+        prompt: "Summarize daemon health".to_owned(),
+        owner_principal: "user:ops".to_owned(),
+        channel: "system:cron".to_owned(),
+        session_key: "cron:health-summary".to_owned(),
+        session_label: "Health summary".to_owned(),
+        schedule: Some(cron_v1::Schedule {
+            r#type: cron_v1::ScheduleType::Every as i32,
+            spec: Some(cron_v1::schedule::Spec::Every(cron_v1::EverySchedule {
+                interval_ms: 3_600_000,
+            })),
+        }),
+        enabled: true,
+        concurrency_policy: cron_v1::ConcurrencyPolicy::Forbid as i32,
+        retry_policy: Some(cron_v1::RetryPolicy { max_attempts: 1, backoff_ms: 1 }),
+        misfire_policy: cron_v1::MisfirePolicy::Skip as i32,
+        jitter_ms: 0,
+    });
+    authorize_metadata(create_request.metadata_mut())?;
+    let created = cron_client
+        .create_job(create_request)
+        .await
+        .context("failed to call cron CreateJob")?
+        .into_inner();
+    let job = created.job.context("CreateJob must return job payload")?;
+    let job_id = job
+        .job_id
+        .as_ref()
+        .map(|value| value.ulid.clone())
+        .context("CreateJob must return canonical job id")?;
+
+    let mut run_now_request = tonic::Request::new(cron_v1::RunJobNowRequest {
+        v: 1,
+        job_id: Some(common_v1::CanonicalId { ulid: job_id.clone() }),
+    });
+    authorize_metadata(run_now_request.metadata_mut())?;
+    let run_now = cron_client
+        .run_job_now(run_now_request)
+        .await
+        .context("failed to call cron RunJobNow")?
+        .into_inner();
+    let run_id = run_now
+        .run_id
+        .as_ref()
+        .map(|value| value.ulid.clone())
+        .context("RunJobNow must return canonical run id")?;
+
+    let terminal_statuses = [
+        cron_v1::JobRunStatus::Succeeded as i32,
+        cron_v1::JobRunStatus::Failed as i32,
+        cron_v1::JobRunStatus::Denied as i32,
+        cron_v1::JobRunStatus::Skipped as i32,
+    ];
+    let mut observed_status = None::<i32>;
+    for _ in 0..40 {
+        let mut list_runs_request = tonic::Request::new(cron_v1::ListJobRunsRequest {
+            v: 1,
+            job_id: Some(common_v1::CanonicalId { ulid: job_id.clone() }),
+            after_run_ulid: String::new(),
+            limit: 25,
+        });
+        authorize_metadata(list_runs_request.metadata_mut())?;
+        let listed = cron_client
+            .list_job_runs(list_runs_request)
+            .await
+            .context("failed to call cron ListJobRuns")?
+            .into_inner();
+        if let Some(run) = listed
+            .runs
+            .iter()
+            .find(|run| run.run_id.as_ref().map(|id| id.ulid.as_str()) == Some(run_id.as_str()))
+        {
+            observed_status = Some(run.status);
+            if terminal_statuses.contains(&run.status) {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let status = observed_status.context("cron run should be visible in list_job_runs")?;
+    assert!(
+        terminal_statuses.contains(&status),
+        "cron run should eventually reach a terminal status, observed={status}"
+    );
+
+    let mut get_run_request = tonic::Request::new(cron_v1::GetJobRunRequest {
+        v: 1,
+        run_id: Some(common_v1::CanonicalId { ulid: run_id.clone() }),
+    });
+    authorize_metadata(get_run_request.metadata_mut())?;
+    let get_run = cron_client
+        .get_job_run(get_run_request)
+        .await
+        .context("failed to call cron GetJobRun")?
+        .into_inner();
+    let run = get_run.run.context("GetJobRun must return run payload")?;
+    assert_eq!(
+        run.run_id.as_ref().map(|value| value.ulid.as_str()),
+        Some(run_id.as_str()),
+        "GetJobRun should return the requested run"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_cron_create_rejects_invalid_schedule_expression() -> Result<()> {
+    let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut cron_client = cron_v1::cron_service_client::CronServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect cron gRPC client")?;
+
+    let mut create_request = tonic::Request::new(cron_v1::CreateJobRequest {
+        v: 1,
+        name: "Invalid cron".to_owned(),
+        prompt: "This should fail".to_owned(),
+        owner_principal: "user:ops".to_owned(),
+        channel: "system:cron".to_owned(),
+        session_key: "cron:invalid-expression".to_owned(),
+        session_label: "Invalid cron".to_owned(),
+        schedule: Some(cron_v1::Schedule {
+            r#type: cron_v1::ScheduleType::Cron as i32,
+            spec: Some(cron_v1::schedule::Spec::Cron(cron_v1::CronSchedule {
+                expression: "*/0 * * * *".to_owned(),
+            })),
+        }),
+        enabled: true,
+        concurrency_policy: cron_v1::ConcurrencyPolicy::Forbid as i32,
+        retry_policy: Some(cron_v1::RetryPolicy { max_attempts: 1, backoff_ms: 1 }),
+        misfire_policy: cron_v1::MisfirePolicy::Skip as i32,
+        jitter_ms: 0,
+    });
+    authorize_metadata(create_request.metadata_mut())?;
+
+    let error = cron_client
+        .create_job(create_request)
+        .await
+        .expect_err("CreateJob should reject invalid cron expressions");
+    assert_eq!(error.code(), Code::InvalidArgument);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_cron_run_now_skips_when_forbid_policy_has_active_run() -> Result<()> {
+    let (child, admin_port, grpc_port, journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut cron_client = cron_v1::cron_service_client::CronServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect cron gRPC client")?;
+
+    let mut create_request = tonic::Request::new(cron_v1::CreateJobRequest {
+        v: 1,
+        name: "Concurrency forbid".to_owned(),
+        prompt: "Prevent overlap".to_owned(),
+        owner_principal: "user:ops".to_owned(),
+        channel: "system:cron".to_owned(),
+        session_key: "cron:forbid-concurrency".to_owned(),
+        session_label: "Concurrency forbid".to_owned(),
+        schedule: Some(cron_v1::Schedule {
+            r#type: cron_v1::ScheduleType::Every as i32,
+            spec: Some(cron_v1::schedule::Spec::Every(cron_v1::EverySchedule {
+                interval_ms: 3_600_000,
+            })),
+        }),
+        enabled: true,
+        concurrency_policy: cron_v1::ConcurrencyPolicy::Forbid as i32,
+        retry_policy: Some(cron_v1::RetryPolicy { max_attempts: 1, backoff_ms: 1 }),
+        misfire_policy: cron_v1::MisfirePolicy::Skip as i32,
+        jitter_ms: 0,
+    });
+    authorize_metadata(create_request.metadata_mut())?;
+    let created = cron_client
+        .create_job(create_request)
+        .await
+        .context("failed to create cron job for concurrency test")?
+        .into_inner();
+    let job = created.job.context("CreateJob must return job payload")?;
+    let job_id = job
+        .job_id
+        .as_ref()
+        .map(|value| value.ulid.clone())
+        .context("CreateJob must return canonical job id")?;
+
+    let now_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock should be after unix epoch")?
+        .as_millis() as i64;
+    let connection = Connection::open(journal_db_path)
+        .context("failed to open journal sqlite db for seed run")?;
+    connection
+        .execute(
+            r#"
+                INSERT INTO cron_runs (
+                    run_ulid,
+                    job_ulid,
+                    attempt,
+                    session_ulid,
+                    orchestrator_run_ulid,
+                    started_at_unix_ms,
+                    finished_at_unix_ms,
+                    status,
+                    error_kind,
+                    error_message_redacted,
+                    model_tokens_in,
+                    model_tokens_out,
+                    tool_calls,
+                    tool_denies,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                ) VALUES (?1, ?2, 1, NULL, NULL, ?3, NULL, 'running', NULL, NULL, 0, 0, 0, 0, ?3, ?3)
+            "#,
+            params!["01ARZ3NDEKTSV4RRFFQ69G5FBB", job_id, now_unix_ms],
+        )
+        .context("failed to seed active cron run")?;
+
+    let mut run_now_request = tonic::Request::new(cron_v1::RunJobNowRequest {
+        v: 1,
+        job_id: Some(common_v1::CanonicalId { ulid: job_id }),
+    });
+    authorize_metadata(run_now_request.metadata_mut())?;
+    let run_now = cron_client
+        .run_job_now(run_now_request)
+        .await
+        .context("failed to call cron RunJobNow for concurrency test")?
+        .into_inner();
+    assert_eq!(
+        run_now.status,
+        cron_v1::JobRunStatus::Skipped as i32,
+        "RunJobNow should skip when policy=forbid and an active run exists"
+    );
+    assert!(
+        run_now.message.contains("forbids overlapping runs"),
+        "skip reason should explain forbid overlap policy"
     );
     Ok(())
 }

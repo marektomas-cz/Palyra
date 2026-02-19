@@ -65,6 +65,65 @@ pub mod palyra_common_v1 {
     pub struct ToolResult;
 }
 
+pub mod palyra_cron_v1 {
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct AtSchedule;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct CreateJobRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct CreateJobResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct CronSchedule;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct DeleteJobRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct DeleteJobResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct EverySchedule;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GetJobRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GetJobResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GetJobRunRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GetJobRunResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct Job;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct JobRun;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ListJobRunsRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ListJobRunsResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ListJobsRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ListJobsResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct RetryPolicy;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct RunJobNowRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct RunJobNowResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct Schedule;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct UpdateJobRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct UpdateJobResponse;
+    pub trait CronServiceClient {
+        fn CreateJob(&self);
+        fn DeleteJob(&self);
+        fn GetJob(&self);
+        fn GetJobRun(&self);
+        fn ListJobRuns(&self);
+        fn ListJobs(&self);
+        fn RunJobNow(&self);
+        fn UpdateJob(&self);
+    }
+}
+
 pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct AbortRunRequest;

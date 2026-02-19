@@ -1,0 +1,271 @@
+syntax = "proto3";
+
+package palyra.cron.v1;
+
+import "palyra/v1/common.proto";
+
+service CronService {
+  rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
+  rpc UpdateJob(UpdateJobRequest) returns (UpdateJobResponse);
+  rpc DeleteJob(DeleteJobRequest) returns (DeleteJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  rpc RunJobNow(RunJobNowRequest) returns (RunJobNowResponse);
+  rpc ListJobRuns(ListJobRunsRequest) returns (ListJobRunsResponse);
+  rpc GetJobRun(GetJobRunRequest) returns (GetJobRunResponse);
+}
+
+enum ScheduleType {
+  SCHEDULE_TYPE_UNSPECIFIED = 0;
+  SCHEDULE_TYPE_CRON = 1;
+  SCHEDULE_TYPE_EVERY = 2;
+  SCHEDULE_TYPE_AT = 3;
+}
+
+enum ConcurrencyPolicy {
+  CONCURRENCY_POLICY_UNSPECIFIED = 0;
+  CONCURRENCY_POLICY_FORBID = 1;
+  CONCURRENCY_POLICY_REPLACE = 2;
+  CONCURRENCY_POLICY_QUEUE_ONE = 3;
+}
+
+enum MisfirePolicy {
+  MISFIRE_POLICY_UNSPECIFIED = 0;
+  MISFIRE_POLICY_SKIP = 1;
+  MISFIRE_POLICY_CATCH_UP = 2;
+}
+
+enum JobRunStatus {
+  JOB_RUN_STATUS_UNSPECIFIED = 0;
+  JOB_RUN_STATUS_ACCEPTED = 1;
+  JOB_RUN_STATUS_RUNNING = 2;
+  JOB_RUN_STATUS_SUCCEEDED = 3;
+  JOB_RUN_STATUS_FAILED = 4;
+  JOB_RUN_STATUS_SKIPPED = 5;
+  JOB_RUN_STATUS_DENIED = 6;
+}
+
+message RetryPolicy {
+  uint32 max_attempts = 1;
+  uint64 backoff_ms = 2;
+
+  reserved 3 to 10;
+}
+
+message CronSchedule {
+  string expression = 1;
+
+  reserved 2 to 10;
+}
+
+message EverySchedule {
+  uint64 interval_ms = 1;
+
+  reserved 2 to 10;
+}
+
+message AtSchedule {
+  string timestamp_rfc3339 = 1;
+
+  reserved 2 to 10;
+}
+
+message Schedule {
+  ScheduleType type = 1;
+
+  oneof spec {
+    CronSchedule cron = 2;
+    EverySchedule every = 3;
+    AtSchedule at = 4;
+  }
+
+  reserved 5 to 12;
+}
+
+message Job {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId job_id = 2;
+  string name = 3;
+  string prompt = 4;
+  string owner_principal = 5;
+  string channel = 6;
+  string session_key = 7;
+  string session_label = 8;
+  Schedule schedule = 9;
+  bool enabled = 10;
+  ConcurrencyPolicy concurrency_policy = 11;
+  RetryPolicy retry_policy = 12;
+  MisfirePolicy misfire_policy = 13;
+  uint64 jitter_ms = 14;
+  int64 next_run_at_unix_ms = 15;
+  int64 last_run_at_unix_ms = 16;
+  int64 created_at_unix_ms = 17;
+  int64 updated_at_unix_ms = 18;
+
+  reserved 19 to 30;
+}
+
+message JobRun {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId run_id = 2;
+  palyra.common.v1.CanonicalId job_id = 3;
+  palyra.common.v1.CanonicalId session_id = 4;
+  palyra.common.v1.CanonicalId orchestrator_run_id = 5;
+  uint32 attempt = 6;
+  int64 started_at_unix_ms = 7;
+  int64 finished_at_unix_ms = 8;
+  JobRunStatus status = 9;
+  string error_kind = 10;
+  string error_message_redacted = 11;
+  uint64 model_tokens_in = 12;
+  uint64 model_tokens_out = 13;
+  uint64 tool_calls = 14;
+  uint64 tool_denies = 15;
+
+  reserved 16 to 30;
+}
+
+message CreateJobRequest {
+  uint32 v = 1;
+  string name = 2;
+  string prompt = 3;
+  string owner_principal = 4;
+  string channel = 5;
+  string session_key = 6;
+  string session_label = 7;
+  Schedule schedule = 8;
+  bool enabled = 9;
+  ConcurrencyPolicy concurrency_policy = 10;
+  RetryPolicy retry_policy = 11;
+  MisfirePolicy misfire_policy = 12;
+  uint64 jitter_ms = 13;
+
+  reserved 14 to 20;
+}
+
+message CreateJobResponse {
+  uint32 v = 1;
+  Job job = 2;
+
+  reserved 3 to 10;
+}
+
+message UpdateJobRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId job_id = 2;
+  optional string name = 3;
+  optional string prompt = 4;
+  optional string owner_principal = 5;
+  optional string channel = 6;
+  optional string session_key = 7;
+  optional string session_label = 8;
+  Schedule schedule = 9;
+  optional bool enabled = 10;
+  optional ConcurrencyPolicy concurrency_policy = 11;
+  RetryPolicy retry_policy = 12;
+  optional MisfirePolicy misfire_policy = 13;
+  optional uint64 jitter_ms = 14;
+
+  reserved 15 to 24;
+}
+
+message UpdateJobResponse {
+  uint32 v = 1;
+  Job job = 2;
+
+  reserved 3 to 10;
+}
+
+message DeleteJobRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId job_id = 2;
+
+  reserved 3 to 10;
+}
+
+message DeleteJobResponse {
+  uint32 v = 1;
+  bool deleted = 2;
+
+  reserved 3 to 10;
+}
+
+message GetJobRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId job_id = 2;
+
+  reserved 3 to 10;
+}
+
+message GetJobResponse {
+  uint32 v = 1;
+  Job job = 2;
+
+  reserved 3 to 10;
+}
+
+message ListJobsRequest {
+  uint32 v = 1;
+  string after_job_ulid = 2;
+  uint32 limit = 3;
+  optional bool enabled = 4;
+  optional string owner_principal = 5;
+  optional string channel = 6;
+
+  reserved 7 to 16;
+}
+
+message ListJobsResponse {
+  uint32 v = 1;
+  repeated Job jobs = 2;
+  string next_after_job_ulid = 3;
+
+  reserved 4 to 12;
+}
+
+message RunJobNowRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId job_id = 2;
+
+  reserved 3 to 10;
+}
+
+message RunJobNowResponse {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId run_id = 2;
+  JobRunStatus status = 3;
+  string message = 4;
+
+  reserved 5 to 12;
+}
+
+message ListJobRunsRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId job_id = 2;
+  string after_run_ulid = 3;
+  uint32 limit = 4;
+
+  reserved 5 to 12;
+}
+
+message ListJobRunsResponse {
+  uint32 v = 1;
+  repeated JobRun runs = 2;
+  string next_after_run_ulid = 3;
+
+  reserved 4 to 12;
+}
+
+message GetJobRunRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId run_id = 2;
+
+  reserved 3 to 10;
+}
+
+message GetJobRunResponse {
+  uint32 v = 1;
+  JobRun run = 2;
+
+  reserved 3 to 10;
+}

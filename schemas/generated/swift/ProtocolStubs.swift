@@ -86,6 +86,88 @@ public enum PalyraCommonV1 {
     }
 }
 
+public enum PalyraCronV1 {
+    public struct AtSchedule: Equatable {
+        public init() {}
+    }
+    public struct CreateJobRequest: Equatable {
+        public init() {}
+    }
+    public struct CreateJobResponse: Equatable {
+        public init() {}
+    }
+    public struct CronSchedule: Equatable {
+        public init() {}
+    }
+    public struct DeleteJobRequest: Equatable {
+        public init() {}
+    }
+    public struct DeleteJobResponse: Equatable {
+        public init() {}
+    }
+    public struct EverySchedule: Equatable {
+        public init() {}
+    }
+    public struct GetJobRequest: Equatable {
+        public init() {}
+    }
+    public struct GetJobResponse: Equatable {
+        public init() {}
+    }
+    public struct GetJobRunRequest: Equatable {
+        public init() {}
+    }
+    public struct GetJobRunResponse: Equatable {
+        public init() {}
+    }
+    public struct Job: Equatable {
+        public init() {}
+    }
+    public struct JobRun: Equatable {
+        public init() {}
+    }
+    public struct ListJobRunsRequest: Equatable {
+        public init() {}
+    }
+    public struct ListJobRunsResponse: Equatable {
+        public init() {}
+    }
+    public struct ListJobsRequest: Equatable {
+        public init() {}
+    }
+    public struct ListJobsResponse: Equatable {
+        public init() {}
+    }
+    public struct RetryPolicy: Equatable {
+        public init() {}
+    }
+    public struct RunJobNowRequest: Equatable {
+        public init() {}
+    }
+    public struct RunJobNowResponse: Equatable {
+        public init() {}
+    }
+    public struct Schedule: Equatable {
+        public init() {}
+    }
+    public struct UpdateJobRequest: Equatable {
+        public init() {}
+    }
+    public struct UpdateJobResponse: Equatable {
+        public init() {}
+    }
+    public protocol CronServiceClient {
+        func createJob()
+        func deleteJob()
+        func getJob()
+        func getJobRun()
+        func listJobRuns()
+        func listJobs()
+        func runJobNow()
+        func updateJob()
+    }
+}
+
 public enum PalyraGatewayV1 {
     public struct AbortRunRequest: Equatable {
         public init() {}

@@ -1,4 +1,5 @@
 mod config;
+mod cron;
 mod gateway;
 mod journal;
 mod model_provider;
@@ -8,7 +9,13 @@ mod sandbox_runner;
 mod tool_protocol;
 mod wasm_plugin_runner;
 
-use std::{collections::HashSet, net::SocketAddr, path::PathBuf, time::Instant};
+use std::{
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -20,6 +27,7 @@ use axum::{
 };
 use clap::Parser;
 use config::load_config;
+use cron::spawn_scheduler_loop;
 use gateway::{
     authorize_headers, request_context_from_headers, AuthError, GatewayAuthConfig,
     GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
@@ -37,6 +45,7 @@ use palyra_identity::IdentityManager;
 use palyra_identity::{FilesystemSecretStore, SecretStore};
 use palyra_policy::{evaluate_with_config, PolicyDecision, PolicyEvaluationConfig, PolicyRequest};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::info;
@@ -62,7 +71,7 @@ struct Args {
 #[derive(Clone)]
 struct AppState {
     started_at: Instant,
-    runtime: std::sync::Arc<GatewayRuntimeState>,
+    runtime: Arc<GatewayRuntimeState>,
     auth: GatewayAuthConfig,
 }
 
@@ -353,11 +362,28 @@ async fn main() -> Result<()> {
         );
     }
 
-    let gateway_service = gateway::GatewayServiceImpl::new(runtime, auth);
-    let grpc_server =
+    let scheduler_wake = Arc::new(Notify::new());
+    let grpc_url = loopback_grpc_url(grpc_bound);
+    let _cron_scheduler_task = spawn_scheduler_loop(
+        runtime.clone(),
+        auth.clone(),
+        grpc_url.clone(),
+        Arc::clone(&scheduler_wake),
+    );
+
+    let gateway_service = gateway::GatewayServiceImpl::new(runtime.clone(), auth.clone());
+    let grpc_gateway_server =
         gateway::proto::palyra::gateway::v1::gateway_service_server::GatewayServiceServer::new(
             gateway_service,
         );
+    let cron_service = gateway::CronServiceImpl::new(
+        runtime.clone(),
+        auth.clone(),
+        grpc_url,
+        Arc::clone(&scheduler_wake),
+    );
+    let grpc_cron_server =
+        gateway::proto::palyra::cron::v1::cron_service_server::CronServiceServer::new(cron_service);
     let node_rpc_service = node_rpc::NodeRpcServiceImpl::new(
         identity_runtime.revoked_certificate_fingerprints.clone(),
         !loaded.identity.allow_insecure_node_rpc_without_mtls,
@@ -389,7 +415,8 @@ async fn main() -> Result<()> {
         },
         async move {
             grpc_server_builder
-                .add_service(grpc_server)
+                .add_service(grpc_gateway_server)
+                .add_service(grpc_cron_server)
                 .serve_with_incoming_shutdown(
                     TcpListenerStream::new(grpc_listener),
                     shutdown_signal(),
@@ -415,6 +442,19 @@ async fn main() -> Result<()> {
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().json().with_env_filter(filter).init();
+}
+
+fn loopback_grpc_url(socket: SocketAddr) -> String {
+    let normalized = match socket {
+        SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), v4.port())
+        }
+        SocketAddr::V6(v6) if v6.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), v6.port())
+        }
+        other => other,
+    };
+    format!("http://{normalized}")
 }
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {

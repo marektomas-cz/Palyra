@@ -37,6 +37,42 @@ object PalyraCommonV1 {
     data class ToolResult(val placeholder: Int = 0)
 }
 
+object PalyraCronV1 {
+    data class AtSchedule(val placeholder: Int = 0)
+    data class CreateJobRequest(val placeholder: Int = 0)
+    data class CreateJobResponse(val placeholder: Int = 0)
+    data class CronSchedule(val placeholder: Int = 0)
+    data class DeleteJobRequest(val placeholder: Int = 0)
+    data class DeleteJobResponse(val placeholder: Int = 0)
+    data class EverySchedule(val placeholder: Int = 0)
+    data class GetJobRequest(val placeholder: Int = 0)
+    data class GetJobResponse(val placeholder: Int = 0)
+    data class GetJobRunRequest(val placeholder: Int = 0)
+    data class GetJobRunResponse(val placeholder: Int = 0)
+    data class Job(val placeholder: Int = 0)
+    data class JobRun(val placeholder: Int = 0)
+    data class ListJobRunsRequest(val placeholder: Int = 0)
+    data class ListJobRunsResponse(val placeholder: Int = 0)
+    data class ListJobsRequest(val placeholder: Int = 0)
+    data class ListJobsResponse(val placeholder: Int = 0)
+    data class RetryPolicy(val placeholder: Int = 0)
+    data class RunJobNowRequest(val placeholder: Int = 0)
+    data class RunJobNowResponse(val placeholder: Int = 0)
+    data class Schedule(val placeholder: Int = 0)
+    data class UpdateJobRequest(val placeholder: Int = 0)
+    data class UpdateJobResponse(val placeholder: Int = 0)
+    interface CronServiceClient {
+        fun createJob()
+        fun deleteJob()
+        fun getJob()
+        fun getJobRun()
+        fun listJobRuns()
+        fun listJobs()
+        fun runJobNow()
+        fun updateJob()
+    }
+}
+
 object PalyraGatewayV1 {
     data class AbortRunRequest(val placeholder: Int = 0)
     data class AbortRunResponse(val placeholder: Int = 0)
