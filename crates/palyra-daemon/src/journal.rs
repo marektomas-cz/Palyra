@@ -6,7 +6,7 @@ use std::{
 };
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -29,6 +29,269 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
     "pin",
     "signature",
 ];
+const MAX_CRON_JOBS_LIST_LIMIT: usize = 500;
+const MAX_CRON_RUNS_LIST_LIMIT: usize = 500;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CronScheduleType {
+    Cron,
+    Every,
+    At,
+}
+
+impl CronScheduleType {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cron => "cron",
+            Self::Every => "every",
+            Self::At => "at",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "cron" => Some(Self::Cron),
+            "every" => Some(Self::Every),
+            "at" => Some(Self::At),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CronConcurrencyPolicy {
+    Forbid,
+    Replace,
+    QueueOne,
+}
+
+impl CronConcurrencyPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Forbid => "forbid",
+            Self::Replace => "replace",
+            Self::QueueOne => "queue(1)",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "forbid" => Some(Self::Forbid),
+            "replace" => Some(Self::Replace),
+            "queue(1)" => Some(Self::QueueOne),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CronMisfirePolicy {
+    Skip,
+    CatchUp,
+}
+
+impl CronMisfirePolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::CatchUp => "catch_up",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "skip" => Some(Self::Skip),
+            "catch_up" => Some(Self::CatchUp),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CronRunStatus {
+    Accepted,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Denied,
+}
+
+impl CronRunStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Denied => "denied",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "running" => Some(Self::Running),
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "skipped" => Some(Self::Skipped),
+            "denied" => Some(Self::Denied),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Accepted | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CronRetryPolicy {
+    pub max_attempts: u32,
+    pub backoff_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronJobCreateRequest {
+    pub job_id: String,
+    pub name: String,
+    pub prompt: String,
+    pub owner_principal: String,
+    pub channel: String,
+    pub session_key: Option<String>,
+    pub session_label: Option<String>,
+    pub schedule_type: CronScheduleType,
+    pub schedule_payload_json: String,
+    pub enabled: bool,
+    pub concurrency_policy: CronConcurrencyPolicy,
+    pub retry_policy: CronRetryPolicy,
+    pub misfire_policy: CronMisfirePolicy,
+    pub jitter_ms: u64,
+    pub next_run_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CronJobUpdatePatch {
+    pub name: Option<String>,
+    pub prompt: Option<String>,
+    pub owner_principal: Option<String>,
+    pub channel: Option<String>,
+    pub session_key: Option<Option<String>>,
+    pub session_label: Option<Option<String>>,
+    pub schedule_type: Option<CronScheduleType>,
+    pub schedule_payload_json: Option<String>,
+    pub enabled: Option<bool>,
+    pub concurrency_policy: Option<CronConcurrencyPolicy>,
+    pub retry_policy: Option<CronRetryPolicy>,
+    pub misfire_policy: Option<CronMisfirePolicy>,
+    pub jitter_ms: Option<u64>,
+    pub next_run_at_unix_ms: Option<Option<i64>>,
+    pub queued_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CronJobRecord {
+    pub job_id: String,
+    pub name: String,
+    pub prompt: String,
+    pub owner_principal: String,
+    pub channel: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<String>,
+    pub schedule_type: CronScheduleType,
+    pub schedule_payload_json: String,
+    pub enabled: bool,
+    pub concurrency_policy: CronConcurrencyPolicy,
+    pub retry_policy: CronRetryPolicy,
+    pub misfire_policy: CronMisfirePolicy,
+    pub jitter_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_run_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_at_unix_ms: Option<i64>,
+    pub queued_run: bool,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronRunsListFilter<'a> {
+    pub job_id: Option<&'a str>,
+    pub after_run_id: Option<&'a str>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronJobsListFilter<'a> {
+    pub after_job_id: Option<&'a str>,
+    pub limit: usize,
+    pub enabled: Option<bool>,
+    pub owner_principal: Option<&'a str>,
+    pub channel: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronRunStartRequest {
+    pub run_id: String,
+    pub job_id: String,
+    pub attempt: u32,
+    pub session_id: Option<String>,
+    pub orchestrator_run_id: Option<String>,
+    pub status: CronRunStatus,
+    pub error_kind: Option<String>,
+    pub error_message_redacted: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronRunFinalizeRequest {
+    pub run_id: String,
+    pub status: CronRunStatus,
+    pub error_kind: Option<String>,
+    pub error_message_redacted: Option<String>,
+    pub model_tokens_in: u64,
+    pub model_tokens_out: u64,
+    pub tool_calls: u64,
+    pub tool_denies: u64,
+    pub orchestrator_run_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CronRunRecord {
+    pub run_id: String,
+    pub job_id: String,
+    pub attempt: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orchestrator_run_id: Option<String>,
+    pub started_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at_unix_ms: Option<i64>,
+    pub status: CronRunStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message_redacted: Option<String>,
+    pub model_tokens_in: u64,
+    pub model_tokens_out: u64,
+    pub tool_calls: u64,
+    pub tool_denies: u64,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalConfig {
@@ -209,6 +472,14 @@ pub enum JournalError {
     DuplicateRunId { run_id: String },
     #[error("orchestrator tape sequence already exists for run {run_id} at seq {seq}")]
     DuplicateTapeSequence { run_id: String, seq: i64 },
+    #[error("cron job already exists: {job_id}")]
+    DuplicateCronJobId { job_id: String },
+    #[error("cron run already exists: {run_id}")]
+    DuplicateCronRunId { run_id: String },
+    #[error("cron job not found: {job_id}")]
+    CronJobNotFound { job_id: String },
+    #[error("cron run not found: {run_id}")]
+    CronRunNotFound { run_id: String },
     #[error("orchestrator run not found: {run_id}")]
     RunNotFound { run_id: String },
     #[error("orchestrator session identity mismatch for session: {session_id}")]
@@ -347,6 +618,65 @@ const MIGRATIONS: &[Migration] = &[
                 ON orchestrator_sessions(session_key);
             CREATE INDEX IF NOT EXISTS idx_orchestrator_sessions_session_label
                 ON orchestrator_sessions(session_label);
+        "#,
+    },
+    Migration {
+        version: 4,
+        name: "create_cron_jobs_and_runs",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS cron_jobs (
+                job_ulid TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                owner_principal TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                session_key TEXT,
+                session_label TEXT,
+                schedule_type TEXT NOT NULL,
+                schedule_payload_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                concurrency_policy TEXT NOT NULL,
+                retry_policy_json TEXT NOT NULL,
+                misfire_policy TEXT NOT NULL,
+                jitter_ms INTEGER NOT NULL DEFAULT 0,
+                next_run_at_unix_ms INTEGER,
+                last_run_at_unix_ms INTEGER,
+                queued_run INTEGER NOT NULL DEFAULT 0,
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cron_jobs_enabled_next_run
+                ON cron_jobs(enabled, next_run_at_unix_ms);
+            CREATE INDEX IF NOT EXISTS idx_cron_jobs_owner
+                ON cron_jobs(owner_principal);
+            CREATE INDEX IF NOT EXISTS idx_cron_jobs_channel
+                ON cron_jobs(channel);
+
+            CREATE TABLE IF NOT EXISTS cron_runs (
+                run_ulid TEXT PRIMARY KEY,
+                job_ulid TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                session_ulid TEXT,
+                orchestrator_run_ulid TEXT,
+                started_at_unix_ms INTEGER NOT NULL,
+                finished_at_unix_ms INTEGER,
+                status TEXT NOT NULL,
+                error_kind TEXT,
+                error_message_redacted TEXT,
+                model_tokens_in INTEGER NOT NULL DEFAULT 0,
+                model_tokens_out INTEGER NOT NULL DEFAULT 0,
+                tool_calls INTEGER NOT NULL DEFAULT 0,
+                tool_denies INTEGER NOT NULL DEFAULT 0,
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(job_ulid) REFERENCES cron_jobs(job_ulid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cron_runs_job_started
+                ON cron_runs(job_ulid, started_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_cron_runs_job_status
+                ON cron_runs(job_ulid, status);
+            CREATE INDEX IF NOT EXISTS idx_cron_runs_started
+                ON cron_runs(started_at_unix_ms DESC);
         "#,
     },
 ];
@@ -1058,6 +1388,508 @@ impl JournalStore {
         )? as u64;
         Ok(Some(snapshot))
     }
+
+    pub fn create_cron_job(
+        &self,
+        request: &CronJobCreateRequest,
+    ) -> Result<CronJobRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let retry_policy_json = serde_json::to_string(&request.retry_policy)?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        match guard.execute(
+            r#"
+                INSERT INTO cron_jobs (
+                    job_ulid,
+                    name,
+                    prompt,
+                    owner_principal,
+                    channel,
+                    session_key,
+                    session_label,
+                    schedule_type,
+                    schedule_payload_json,
+                    enabled,
+                    concurrency_policy,
+                    retry_policy_json,
+                    misfire_policy,
+                    jitter_ms,
+                    next_run_at_unix_ms,
+                    last_run_at_unix_ms,
+                    queued_run,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, 0, ?16, ?16
+                )
+            "#,
+            params![
+                request.job_id,
+                request.name,
+                request.prompt,
+                request.owner_principal,
+                request.channel,
+                request.session_key,
+                request.session_label,
+                request.schedule_type.as_str(),
+                request.schedule_payload_json,
+                request.enabled as i64,
+                request.concurrency_policy.as_str(),
+                retry_policy_json,
+                request.misfire_policy.as_str(),
+                request.jitter_ms as i64,
+                request.next_run_at_unix_ms,
+                now,
+            ],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(error, message))
+                if error.code == ErrorCode::ConstraintViolation
+                    && (error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                        || error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                        || message
+                            .as_deref()
+                            .map(|value| value.contains("cron_jobs.job_ulid"))
+                            .unwrap_or(false)) =>
+            {
+                return Err(JournalError::DuplicateCronJobId {
+                    job_id: request.job_id.clone(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
+        load_cron_job_by_id(&guard, request.job_id.as_str())?
+            .ok_or_else(|| JournalError::CronJobNotFound { job_id: request.job_id.clone() })
+    }
+
+    pub fn update_cron_job(
+        &self,
+        job_id: &str,
+        patch: &CronJobUpdatePatch,
+    ) -> Result<CronJobRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let Some(existing) = load_cron_job_by_id(&guard, job_id)? else {
+            return Err(JournalError::CronJobNotFound { job_id: job_id.to_owned() });
+        };
+
+        let name = patch.name.clone().unwrap_or(existing.name);
+        let prompt = patch.prompt.clone().unwrap_or(existing.prompt);
+        let owner_principal = patch.owner_principal.clone().unwrap_or(existing.owner_principal);
+        let channel = patch.channel.clone().unwrap_or(existing.channel);
+        let session_key = patch.session_key.clone().unwrap_or(existing.session_key);
+        let session_label = patch.session_label.clone().unwrap_or(existing.session_label);
+        let schedule_type = patch.schedule_type.unwrap_or(existing.schedule_type);
+        let schedule_payload_json =
+            patch.schedule_payload_json.clone().unwrap_or(existing.schedule_payload_json);
+        let enabled = patch.enabled.unwrap_or(existing.enabled);
+        let concurrency_policy = patch.concurrency_policy.unwrap_or(existing.concurrency_policy);
+        let retry_policy = patch.retry_policy.clone().unwrap_or(existing.retry_policy);
+        let misfire_policy = patch.misfire_policy.unwrap_or(existing.misfire_policy);
+        let jitter_ms = patch.jitter_ms.unwrap_or(existing.jitter_ms);
+        let next_run_at_unix_ms = patch.next_run_at_unix_ms.unwrap_or(existing.next_run_at_unix_ms);
+        let queued_run = patch.queued_run.unwrap_or(existing.queued_run);
+
+        guard.execute(
+            r#"
+                UPDATE cron_jobs
+                SET
+                    name = ?2,
+                    prompt = ?3,
+                    owner_principal = ?4,
+                    channel = ?5,
+                    session_key = ?6,
+                    session_label = ?7,
+                    schedule_type = ?8,
+                    schedule_payload_json = ?9,
+                    enabled = ?10,
+                    concurrency_policy = ?11,
+                    retry_policy_json = ?12,
+                    misfire_policy = ?13,
+                    jitter_ms = ?14,
+                    next_run_at_unix_ms = ?15,
+                    queued_run = ?16,
+                    updated_at_unix_ms = ?17
+                WHERE job_ulid = ?1
+            "#,
+            params![
+                job_id,
+                name,
+                prompt,
+                owner_principal,
+                channel,
+                session_key,
+                session_label,
+                schedule_type.as_str(),
+                schedule_payload_json,
+                enabled as i64,
+                concurrency_policy.as_str(),
+                serde_json::to_string(&retry_policy)?,
+                misfire_policy.as_str(),
+                jitter_ms as i64,
+                next_run_at_unix_ms,
+                queued_run as i64,
+                now,
+            ],
+        )?;
+        load_cron_job_by_id(&guard, job_id)?
+            .ok_or_else(|| JournalError::CronJobNotFound { job_id: job_id.to_owned() })
+    }
+
+    pub fn delete_cron_job(&self, job_id: &str) -> Result<bool, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let deleted =
+            guard.execute("DELETE FROM cron_jobs WHERE job_ulid = ?1", params![job_id])?;
+        Ok(deleted > 0)
+    }
+
+    pub fn cron_job(&self, job_id: &str) -> Result<Option<CronJobRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_cron_job_by_id(&guard, job_id)
+    }
+
+    pub fn list_cron_jobs(
+        &self,
+        filter: CronJobsListFilter<'_>,
+    ) -> Result<Vec<CronJobRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let limit = filter.limit.clamp(1, MAX_CRON_JOBS_LIST_LIMIT);
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    job_ulid,
+                    name,
+                    prompt,
+                    owner_principal,
+                    channel,
+                    session_key,
+                    session_label,
+                    schedule_type,
+                    schedule_payload_json,
+                    enabled,
+                    concurrency_policy,
+                    retry_policy_json,
+                    misfire_policy,
+                    jitter_ms,
+                    next_run_at_unix_ms,
+                    last_run_at_unix_ms,
+                    queued_run,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM cron_jobs
+                WHERE
+                    (?1 IS NULL OR job_ulid > ?1) AND
+                    (?2 IS NULL OR enabled = ?2) AND
+                    (?3 IS NULL OR owner_principal = ?3) AND
+                    (?4 IS NULL OR channel = ?4)
+                ORDER BY job_ulid ASC
+                LIMIT ?5
+            "#,
+        )?;
+        let enabled = filter.enabled.map(|value| if value { 1_i64 } else { 0_i64 });
+        let mut rows = statement.query(params![
+            filter.after_job_id,
+            enabled,
+            filter.owner_principal,
+            filter.channel,
+            limit as i64
+        ])?;
+        let mut jobs = Vec::new();
+        while let Some(row) = rows.next()? {
+            jobs.push(map_cron_job_row(row)?);
+        }
+        Ok(jobs)
+    }
+
+    pub fn list_due_cron_jobs(
+        &self,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<CronJobRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let limit = limit.clamp(1, MAX_CRON_JOBS_LIST_LIMIT);
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    job_ulid,
+                    name,
+                    prompt,
+                    owner_principal,
+                    channel,
+                    session_key,
+                    session_label,
+                    schedule_type,
+                    schedule_payload_json,
+                    enabled,
+                    concurrency_policy,
+                    retry_policy_json,
+                    misfire_policy,
+                    jitter_ms,
+                    next_run_at_unix_ms,
+                    last_run_at_unix_ms,
+                    queued_run,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM cron_jobs
+                WHERE
+                    enabled = 1
+                    AND next_run_at_unix_ms IS NOT NULL
+                    AND next_run_at_unix_ms <= ?1
+                ORDER BY next_run_at_unix_ms ASC, job_ulid ASC
+                LIMIT ?2
+            "#,
+        )?;
+        let mut rows = statement.query(params![now_unix_ms, limit as i64])?;
+        let mut jobs = Vec::new();
+        while let Some(row) = rows.next()? {
+            jobs.push(map_cron_job_row(row)?);
+        }
+        Ok(jobs)
+    }
+
+    pub fn first_due_cron_job_time(&self) -> Result<Option<i64>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let due = guard
+            .query_row(
+                r#"
+                    SELECT next_run_at_unix_ms
+                    FROM cron_jobs
+                    WHERE enabled = 1 AND next_run_at_unix_ms IS NOT NULL
+                    ORDER BY next_run_at_unix_ms ASC
+                    LIMIT 1
+                "#,
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(due)
+    }
+
+    pub fn set_cron_job_next_run(
+        &self,
+        job_id: &str,
+        next_run_at_unix_ms: Option<i64>,
+        last_run_at_unix_ms: Option<i64>,
+    ) -> Result<(), JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let updated = guard.execute(
+            r#"
+                UPDATE cron_jobs
+                SET
+                    next_run_at_unix_ms = ?2,
+                    last_run_at_unix_ms = COALESCE(?3, last_run_at_unix_ms),
+                    updated_at_unix_ms = ?4
+                WHERE job_ulid = ?1
+            "#,
+            params![job_id, next_run_at_unix_ms, last_run_at_unix_ms, now],
+        )?;
+        if updated == 0 {
+            return Err(JournalError::CronJobNotFound { job_id: job_id.to_owned() });
+        }
+        Ok(())
+    }
+
+    pub fn set_cron_job_queue_state(
+        &self,
+        job_id: &str,
+        queued_run: bool,
+    ) -> Result<(), JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let updated = guard.execute(
+            r#"
+                UPDATE cron_jobs
+                SET
+                    queued_run = ?2,
+                    updated_at_unix_ms = ?3
+                WHERE job_ulid = ?1
+            "#,
+            params![job_id, queued_run as i64, now],
+        )?;
+        if updated == 0 {
+            return Err(JournalError::CronJobNotFound { job_id: job_id.to_owned() });
+        }
+        Ok(())
+    }
+
+    pub fn start_cron_run(&self, request: &CronRunStartRequest) -> Result<(), JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        match guard.execute(
+            r#"
+                INSERT INTO cron_runs (
+                    run_ulid,
+                    job_ulid,
+                    attempt,
+                    session_ulid,
+                    orchestrator_run_ulid,
+                    started_at_unix_ms,
+                    finished_at_unix_ms,
+                    status,
+                    error_kind,
+                    error_message_redacted,
+                    model_tokens_in,
+                    model_tokens_out,
+                    tool_calls,
+                    tool_denies,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, 0, 0, 0, 0, ?6, ?6
+                )
+            "#,
+            params![
+                request.run_id,
+                request.job_id,
+                request.attempt as i64,
+                request.session_id,
+                request.orchestrator_run_id,
+                now,
+                request.status.as_str(),
+                request.error_kind,
+                request.error_message_redacted.as_ref().map(|value| redact_error_text(value)),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(error, message))
+                if error.code == ErrorCode::ConstraintViolation
+                    && (error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                        || error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                        || message
+                            .as_deref()
+                            .map(|value| value.contains("cron_runs.run_ulid"))
+                            .unwrap_or(false)) =>
+            {
+                return Err(JournalError::DuplicateCronRunId { run_id: request.run_id.clone() });
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+
+    pub fn finalize_cron_run(&self, request: &CronRunFinalizeRequest) -> Result<(), JournalError> {
+        let now = current_unix_ms()?;
+        let finished_at = if request.status.is_active() { None } else { Some(now) };
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let updated = guard.execute(
+            r#"
+                UPDATE cron_runs
+                SET
+                    status = ?2,
+                    finished_at_unix_ms = COALESCE(?3, finished_at_unix_ms),
+                    error_kind = ?4,
+                    error_message_redacted = ?5,
+                    model_tokens_in = ?6,
+                    model_tokens_out = ?7,
+                    tool_calls = ?8,
+                    tool_denies = ?9,
+                    orchestrator_run_ulid = COALESCE(?10, orchestrator_run_ulid),
+                    session_ulid = COALESCE(?11, session_ulid),
+                    updated_at_unix_ms = ?12
+                WHERE run_ulid = ?1
+            "#,
+            params![
+                request.run_id,
+                request.status.as_str(),
+                finished_at,
+                request.error_kind,
+                request.error_message_redacted.as_ref().map(|value| redact_error_text(value)),
+                request.model_tokens_in as i64,
+                request.model_tokens_out as i64,
+                request.tool_calls as i64,
+                request.tool_denies as i64,
+                request.orchestrator_run_id,
+                request.session_id,
+                now
+            ],
+        )?;
+        if updated == 0 {
+            return Err(JournalError::CronRunNotFound { run_id: request.run_id.clone() });
+        }
+        Ok(())
+    }
+
+    pub fn cron_run(&self, run_id: &str) -> Result<Option<CronRunRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_cron_run_by_id(&guard, run_id)
+    }
+
+    pub fn active_cron_run_for_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<CronRunRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    run_ulid,
+                    job_ulid,
+                    attempt,
+                    session_ulid,
+                    orchestrator_run_ulid,
+                    started_at_unix_ms,
+                    finished_at_unix_ms,
+                    status,
+                    error_kind,
+                    error_message_redacted,
+                    model_tokens_in,
+                    model_tokens_out,
+                    tool_calls,
+                    tool_denies,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM cron_runs
+                WHERE job_ulid = ?1
+                  AND status IN ('accepted', 'running')
+                ORDER BY started_at_unix_ms DESC
+                LIMIT 1
+            "#,
+        )?;
+        statement.query_row(params![job_id], map_cron_run_row).optional().map_err(Into::into)
+    }
+
+    pub fn list_cron_runs(
+        &self,
+        filter: CronRunsListFilter<'_>,
+    ) -> Result<Vec<CronRunRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let limit = filter.limit.clamp(1, MAX_CRON_RUNS_LIST_LIMIT);
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    run_ulid,
+                    job_ulid,
+                    attempt,
+                    session_ulid,
+                    orchestrator_run_ulid,
+                    started_at_unix_ms,
+                    finished_at_unix_ms,
+                    status,
+                    error_kind,
+                    error_message_redacted,
+                    model_tokens_in,
+                    model_tokens_out,
+                    tool_calls,
+                    tool_denies,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                FROM cron_runs
+                WHERE
+                    (?1 IS NULL OR job_ulid = ?1) AND
+                    (?2 IS NULL OR run_ulid > ?2)
+                ORDER BY run_ulid ASC
+                LIMIT ?3
+            "#,
+        )?;
+        let mut rows =
+            statement.query(params![filter.job_id, filter.after_run_id, limit as i64])?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next()? {
+            runs.push(map_cron_run_row(row)?);
+        }
+        Ok(runs)
+    }
 }
 
 #[cfg(test)]
@@ -1242,6 +2074,176 @@ fn load_orchestrator_sessions_page(
     Ok(sessions)
 }
 
+fn map_cron_job_row(row: &rusqlite::Row<'_>) -> Result<CronJobRecord, rusqlite::Error> {
+    let schedule_type_raw: String = row.get(7)?;
+    let schedule_type =
+        CronScheduleType::from_str(schedule_type_raw.as_str()).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid cron schedule_type value: {schedule_type_raw}"),
+                )),
+            )
+        })?;
+    let concurrency_policy_raw: String = row.get(10)?;
+    let concurrency_policy = CronConcurrencyPolicy::from_str(concurrency_policy_raw.as_str())
+        .ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid cron concurrency_policy value: {concurrency_policy_raw}"),
+                )),
+            )
+        })?;
+    let retry_policy_json: String = row.get(11)?;
+    let retry_policy: CronRetryPolicy =
+        serde_json::from_str(retry_policy_json.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                11,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid retry_policy_json: {error}"),
+                )),
+            )
+        })?;
+    let misfire_policy_raw: String = row.get(12)?;
+    let misfire_policy =
+        CronMisfirePolicy::from_str(misfire_policy_raw.as_str()).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                12,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid cron misfire_policy value: {misfire_policy_raw}"),
+                )),
+            )
+        })?;
+
+    Ok(CronJobRecord {
+        job_id: row.get(0)?,
+        name: row.get(1)?,
+        prompt: row.get(2)?,
+        owner_principal: row.get(3)?,
+        channel: row.get(4)?,
+        session_key: row.get(5)?,
+        session_label: row.get(6)?,
+        schedule_type,
+        schedule_payload_json: row.get(8)?,
+        enabled: row.get::<_, i64>(9)? == 1,
+        concurrency_policy,
+        retry_policy,
+        misfire_policy,
+        jitter_ms: row.get::<_, i64>(13)? as u64,
+        next_run_at_unix_ms: row.get(14)?,
+        last_run_at_unix_ms: row.get(15)?,
+        queued_run: row.get::<_, i64>(16)? == 1,
+        created_at_unix_ms: row.get(17)?,
+        updated_at_unix_ms: row.get(18)?,
+    })
+}
+
+fn load_cron_job_by_id(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<CronJobRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                job_ulid,
+                name,
+                prompt,
+                owner_principal,
+                channel,
+                session_key,
+                session_label,
+                schedule_type,
+                schedule_payload_json,
+                enabled,
+                concurrency_policy,
+                retry_policy_json,
+                misfire_policy,
+                jitter_ms,
+                next_run_at_unix_ms,
+                last_run_at_unix_ms,
+                queued_run,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM cron_jobs
+            WHERE job_ulid = ?1
+            LIMIT 1
+        "#,
+    )?;
+    statement.query_row(params![job_id], map_cron_job_row).optional().map_err(Into::into)
+}
+
+fn map_cron_run_row(row: &rusqlite::Row<'_>) -> Result<CronRunRecord, rusqlite::Error> {
+    let status_raw: String = row.get(7)?;
+    let status = CronRunStatus::from_str(status_raw.as_str()).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid cron run status value: {status_raw}"),
+            )),
+        )
+    })?;
+    Ok(CronRunRecord {
+        run_id: row.get(0)?,
+        job_id: row.get(1)?,
+        attempt: row.get::<_, i64>(2)? as u32,
+        session_id: row.get(3)?,
+        orchestrator_run_id: row.get(4)?,
+        started_at_unix_ms: row.get(5)?,
+        finished_at_unix_ms: row.get(6)?,
+        status,
+        error_kind: row.get(8)?,
+        error_message_redacted: row.get(9)?,
+        model_tokens_in: row.get::<_, i64>(10)? as u64,
+        model_tokens_out: row.get::<_, i64>(11)? as u64,
+        tool_calls: row.get::<_, i64>(12)? as u64,
+        tool_denies: row.get::<_, i64>(13)? as u64,
+        created_at_unix_ms: row.get(14)?,
+        updated_at_unix_ms: row.get(15)?,
+    })
+}
+
+fn load_cron_run_by_id(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<CronRunRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                run_ulid,
+                job_ulid,
+                attempt,
+                session_ulid,
+                orchestrator_run_ulid,
+                started_at_unix_ms,
+                finished_at_unix_ms,
+                status,
+                error_kind,
+                error_message_redacted,
+                model_tokens_in,
+                model_tokens_out,
+                tool_calls,
+                tool_denies,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM cron_runs
+            WHERE run_ulid = ?1
+            LIMIT 1
+        "#,
+    )?;
+    statement.query_row(params![run_id], map_cron_run_row).optional().map_err(Into::into)
+}
+
 fn apply_migrations(connection: &mut Connection) -> Result<(), JournalError> {
     connection.execute_batch(
         r#"
@@ -1368,6 +2370,22 @@ fn looks_like_secret(value: &str) -> bool {
         || normalized.contains("token=")
 }
 
+fn redact_error_text(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if looks_like_secret(trimmed) {
+        return REDACTED_MARKER.to_owned();
+    }
+    let bounded = trimmed.chars().take(512).collect::<String>();
+    if bounded.len() == trimmed.len() {
+        bounded
+    } else {
+        format!("{bounded}...")
+    }
+}
+
 fn compute_hash(
     prev_hash: Option<&str>,
     request: &JournalAppendRequest,
@@ -1440,9 +2458,11 @@ mod tests {
     use crate::orchestrator::RunLifecycleState;
 
     use super::{
-        JournalAppendRequest, JournalConfig, JournalError, JournalStore, OrchestratorCancelRequest,
-        OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
-        OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
+        CronConcurrencyPolicy, CronJobCreateRequest, CronJobsListFilter, CronMisfirePolicy,
+        CronRetryPolicy, CronRunFinalizeRequest, CronRunStartRequest, CronRunStatus,
+        CronRunsListFilter, CronScheduleType, JournalAppendRequest, JournalConfig, JournalError,
+        JournalStore, OrchestratorCancelRequest, OrchestratorRunStartRequest,
+        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
     };
 
     static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1473,6 +2493,26 @@ mod tests {
                 channel: Some("cli".to_owned()),
             })
             .expect("orchestrator session should be upserted");
+    }
+
+    fn sample_cron_job_request(job_id: &str) -> CronJobCreateRequest {
+        CronJobCreateRequest {
+            job_id: job_id.to_owned(),
+            name: "Hourly report".to_owned(),
+            prompt: "summarize health status".to_owned(),
+            owner_principal: "user:ops".to_owned(),
+            channel: "system:cron".to_owned(),
+            session_key: Some("cron:hourly-report".to_owned()),
+            session_label: Some("Hourly report".to_owned()),
+            schedule_type: CronScheduleType::Every,
+            schedule_payload_json: r#"{"interval_ms":60000}"#.to_owned(),
+            enabled: true,
+            concurrency_policy: CronConcurrencyPolicy::Forbid,
+            retry_policy: CronRetryPolicy { max_attempts: 3, backoff_ms: 500 },
+            misfire_policy: CronMisfirePolicy::Skip,
+            jitter_ms: 250,
+            next_run_at_unix_ms: Some(1_730_000_060_000),
+        }
     }
 
     fn temp_db_path() -> PathBuf {
@@ -1510,8 +2550,24 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("schema migrations should be queryable");
+        let migration_v3: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                params![3],
+                |row| row.get(0),
+            )
+            .expect("schema migrations should be queryable");
+        let migration_v4: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                params![4],
+                |row| row.get(0),
+            )
+            .expect("schema migrations should be queryable");
         assert_eq!(migration_v1, 1, "migration v1 should be recorded exactly once");
         assert_eq!(migration_v2, 1, "migration v2 should be recorded exactly once");
+        assert_eq!(migration_v3, 1, "migration v3 should be recorded exactly once");
+        assert_eq!(migration_v4, 1, "migration v4 should be recorded exactly once");
     }
 
     #[test]
@@ -1943,6 +2999,158 @@ mod tests {
                 .expect("cancel status should query"),
             "cancel request should persist"
         );
+    }
+
+    #[test]
+    fn cron_job_crud_and_filters_roundtrip() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        let first = store
+            .create_cron_job(&sample_cron_job_request("01ARZ3NDEKTSV4RRFFQ69G5FB0"))
+            .expect("first cron job should be inserted");
+        assert_eq!(first.name, "Hourly report");
+        let mut second_request = sample_cron_job_request("01ARZ3NDEKTSV4RRFFQ69G5FB1");
+        second_request.owner_principal = "user:finance".to_owned();
+        second_request.channel = "slack:ops".to_owned();
+        second_request.enabled = false;
+        second_request.next_run_at_unix_ms = Some(1_730_000_090_000);
+        store.create_cron_job(&second_request).expect("second cron job should be inserted");
+
+        let loaded = store
+            .cron_job("01ARZ3NDEKTSV4RRFFQ69G5FB0")
+            .expect("cron job lookup should succeed")
+            .expect("cron job must exist");
+        assert_eq!(loaded.retry_policy.max_attempts, 3);
+        assert_eq!(loaded.jitter_ms, 250);
+
+        let due =
+            store.list_due_cron_jobs(1_730_000_070_000, 10).expect("due jobs query should succeed");
+        assert_eq!(due.len(), 1, "only enabled due job should be returned");
+        assert_eq!(due[0].job_id, "01ARZ3NDEKTSV4RRFFQ69G5FB0");
+
+        let filtered = store
+            .list_cron_jobs(CronJobsListFilter {
+                after_job_id: None,
+                limit: 10,
+                enabled: Some(false),
+                owner_principal: Some("user:finance"),
+                channel: Some("slack:ops"),
+            })
+            .expect("list cron jobs with filters should succeed");
+        assert_eq!(filtered.len(), 1, "owner/channel/enabled filters should match one job");
+        assert_eq!(filtered[0].job_id, "01ARZ3NDEKTSV4RRFFQ69G5FB1");
+    }
+
+    #[test]
+    fn cron_run_start_finalize_and_active_lookup() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let job = store
+            .create_cron_job(&sample_cron_job_request("01ARZ3NDEKTSV4RRFFQ69G5FBC"))
+            .expect("cron job should be inserted");
+        upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5FAW");
+
+        store
+            .start_cron_run(&CronRunStartRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBD".to_owned(),
+                job_id: job.job_id.clone(),
+                attempt: 1,
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned()),
+                orchestrator_run_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned()),
+                status: CronRunStatus::Running,
+                error_kind: None,
+                error_message_redacted: None,
+            })
+            .expect("cron run start should persist");
+
+        let active = store
+            .active_cron_run_for_job(job.job_id.as_str())
+            .expect("active cron run query should succeed")
+            .expect("active run should exist");
+        assert_eq!(active.status, CronRunStatus::Running);
+
+        store
+            .finalize_cron_run(&CronRunFinalizeRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBD".to_owned(),
+                status: CronRunStatus::Succeeded,
+                error_kind: None,
+                error_message_redacted: None,
+                model_tokens_in: 11,
+                model_tokens_out: 7,
+                tool_calls: 2,
+                tool_denies: 1,
+                orchestrator_run_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned()),
+            })
+            .expect("cron run finalize should persist");
+        store
+            .set_cron_job_next_run(
+                job.job_id.as_str(),
+                Some(1_730_000_120_000),
+                Some(1_730_000_090_000),
+            )
+            .expect("next run metadata should update");
+
+        let finalized = store
+            .cron_run("01ARZ3NDEKTSV4RRFFQ69G5FBD")
+            .expect("cron run lookup should succeed")
+            .expect("cron run should exist");
+        assert_eq!(finalized.status, CronRunStatus::Succeeded);
+        assert_eq!(finalized.model_tokens_in, 11);
+        assert_eq!(finalized.tool_denies, 1);
+
+        let listed = store
+            .list_cron_runs(CronRunsListFilter {
+                job_id: Some(job.job_id.as_str()),
+                after_run_id: None,
+                limit: 5,
+            })
+            .expect("cron runs listing should succeed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].run_id, "01ARZ3NDEKTSV4RRFFQ69G5FBD");
+    }
+
+    #[test]
+    fn cron_run_duplicate_id_returns_deterministic_error() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let job = store
+            .create_cron_job(&sample_cron_job_request("01ARZ3NDEKTSV4RRFFQ69G5FBE"))
+            .expect("cron job should be inserted");
+
+        store
+            .start_cron_run(&CronRunStartRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBF".to_owned(),
+                job_id: job.job_id.clone(),
+                attempt: 1,
+                session_id: None,
+                orchestrator_run_id: None,
+                status: CronRunStatus::Accepted,
+                error_kind: None,
+                error_message_redacted: None,
+            })
+            .expect("initial cron run should persist");
+        let duplicate = store
+            .start_cron_run(&CronRunStartRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBF".to_owned(),
+                job_id: job.job_id.clone(),
+                attempt: 2,
+                session_id: None,
+                orchestrator_run_id: None,
+                status: CronRunStatus::Running,
+                error_kind: None,
+                error_message_redacted: None,
+            })
+            .expect_err("duplicate cron run ids must fail");
+        assert!(matches!(
+            duplicate,
+            JournalError::DuplicateCronRunId { ref run_id }
+                if run_id == "01ARZ3NDEKTSV4RRFFQ69G5FBF"
+        ));
     }
 
     #[test]

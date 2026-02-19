@@ -14,6 +14,12 @@ pub mod proto {
                 tonic::include_proto!("palyra.gateway.v1");
             }
         }
+
+        pub mod cron {
+            pub mod v1 {
+                tonic::include_proto!("palyra.cron.v1");
+            }
+        }
     }
 }
 
@@ -33,7 +39,8 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use cli::{
     AgentCommand, BrowserCommand, ChannelsCommand, Cli, Command as CliCommand, CompletionShell,
-    ConfigCommand, CronCommand, DaemonCommand, OnboardingCommand, PolicyCommand, ProtocolCommand,
+    ConfigCommand, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
+    CronScheduleTypeArg, DaemonCommand, OnboardingCommand, PolicyCommand, ProtocolCommand,
 };
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -68,7 +75,9 @@ use tokio_stream::{iter, StreamExt};
 use tonic::Request;
 use ulid::Ulid;
 
-use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
+use crate::proto::palyra::{
+    common::v1 as common_v1, cron::v1 as cron_v1, gateway::v1 as gateway_v1,
+};
 
 const MAX_HEALTH_ATTEMPTS: usize = 3;
 const BASE_HEALTH_BACKOFF_MS: u64 = 100;
@@ -405,21 +414,436 @@ fn run_agent(command: AgentCommand) -> Result<()> {
 }
 
 fn run_cron(command: CronCommand) -> Result<()> {
+    let connection = AgentConnection {
+        grpc_url: resolve_grpc_url(None)?,
+        token: env::var("PALYRA_ADMIN_TOKEN").ok(),
+        principal: "user:local".to_owned(),
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        channel: DEFAULT_CHANNEL.to_owned(),
+    };
+    let runtime = build_runtime()?;
+    runtime.block_on(run_cron_async(command, connection))
+}
+
+async fn run_cron_async(command: CronCommand, connection: AgentConnection) -> Result<()> {
+    let mut client =
+        cron_v1::cron_service_client::CronServiceClient::connect(connection.grpc_url.clone())
+            .await
+            .with_context(|| {
+                format!("failed to connect gateway gRPC endpoint {}", connection.grpc_url)
+            })?;
+
     match command {
-        CronCommand::List => {
-            println!("cron.list status=stub message=\"scheduler v1 arrives in M16\"");
+        CronCommand::List { after, limit, enabled, owner, channel, json } => {
+            let mut request = Request::new(cron_v1::ListJobsRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                after_job_ulid: after.unwrap_or_default(),
+                limit: limit.unwrap_or(100),
+                enabled,
+                owner_principal: owner,
+                channel,
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .list_jobs(request)
+                .await
+                .context("failed to call cron ListJobs")?
+                .into_inner();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "jobs": response.jobs.iter().map(cron_job_to_json).collect::<Vec<_>>(),
+                        "next_after_job_ulid": response.next_after_job_ulid,
+                    }))
+                    .context("failed to serialize JSON output")?
+                );
+            } else {
+                println!(
+                    "cron.list jobs={} next_after={}",
+                    response.jobs.len(),
+                    if response.next_after_job_ulid.is_empty() {
+                        "none"
+                    } else {
+                        response.next_after_job_ulid.as_str()
+                    }
+                );
+                for job in response.jobs {
+                    let id =
+                        job.job_id.as_ref().map(|value| value.ulid.as_str()).unwrap_or("unknown");
+                    println!(
+                        "cron.job id={} name={} enabled={} owner={} channel={} next_run_at_ms={}",
+                        id,
+                        job.name,
+                        job.enabled,
+                        job.owner_principal,
+                        job.channel,
+                        job.next_run_at_unix_ms
+                    );
+                }
+            }
         }
-        CronCommand::Add { schedule, action } => {
-            println!(
-                "cron.add status=stub schedule=\"{}\" action=\"{}\" message=\"scheduler v1 arrives in M16\"",
-                schedule, action
-            );
+        CronCommand::Show { id, json } => {
+            validate_canonical_id(id.as_str()).context("cron job id must be a canonical ULID")?;
+            let mut request = Request::new(cron_v1::GetJobRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                job_id: Some(common_v1::CanonicalId { ulid: id.clone() }),
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response =
+                client.get_job(request).await.context("failed to call cron GetJob")?.into_inner();
+            let job = response.job.context("cron GetJob returned empty job payload")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&cron_job_to_json(&job))?);
+            } else {
+                println!(
+                    "cron.show id={} name={} enabled={} owner={} channel={} schedule_type={}",
+                    id,
+                    job.name,
+                    job.enabled,
+                    job.owner_principal,
+                    job.channel,
+                    job.schedule.map(|s| s.r#type).unwrap_or_default()
+                );
+            }
         }
-        CronCommand::Remove { id } => {
-            println!("cron.remove status=stub id={} message=\"scheduler v1 arrives in M16\"", id);
+        CronCommand::Add {
+            name,
+            prompt,
+            schedule_type,
+            schedule,
+            enabled,
+            concurrency,
+            retry_max_attempts,
+            retry_backoff_ms,
+            misfire,
+            jitter_ms,
+            owner,
+            channel,
+            session_key,
+            session_label,
+            json,
+        } => {
+            let schedule = build_cron_schedule(schedule_type, schedule)?;
+            let mut request = Request::new(cron_v1::CreateJobRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                name,
+                prompt,
+                owner_principal: owner.unwrap_or_else(|| connection.principal.clone()),
+                channel: channel.unwrap_or_else(|| "system:cron".to_owned()),
+                session_key: session_key.unwrap_or_default(),
+                session_label: session_label.unwrap_or_default(),
+                schedule: Some(schedule),
+                enabled,
+                concurrency_policy: cron_concurrency_to_proto(concurrency),
+                retry_policy: Some(cron_v1::RetryPolicy {
+                    max_attempts: retry_max_attempts.max(1),
+                    backoff_ms: retry_backoff_ms.max(1),
+                }),
+                misfire_policy: cron_misfire_to_proto(misfire),
+                jitter_ms,
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .create_job(request)
+                .await
+                .context("failed to call cron CreateJob")?
+                .into_inner();
+            let job = response.job.context("cron CreateJob returned empty job payload")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&cron_job_to_json(&job))?);
+            } else {
+                let id = job.job_id.as_ref().map(|value| value.ulid.as_str()).unwrap_or("unknown");
+                println!(
+                    "cron.add id={} name={} enabled={} owner={} channel={}",
+                    id, job.name, job.enabled, job.owner_principal, job.channel
+                );
+            }
+        }
+        CronCommand::Enable { id, json } => {
+            let response = update_cron_enabled(&mut client, &connection, id, true).await?;
+            if json {
+                let job = response.job.context("cron UpdateJob returned empty job payload")?;
+                println!("{}", serde_json::to_string_pretty(&cron_job_to_json(&job))?);
+            } else {
+                let job = response.job.context("cron UpdateJob returned empty job payload")?;
+                println!(
+                    "cron.enable id={} enabled={}",
+                    job.job_id.map(|value| value.ulid).unwrap_or_default(),
+                    job.enabled
+                );
+            }
+        }
+        CronCommand::Disable { id, json } => {
+            let response = update_cron_enabled(&mut client, &connection, id, false).await?;
+            if json {
+                let job = response.job.context("cron UpdateJob returned empty job payload")?;
+                println!("{}", serde_json::to_string_pretty(&cron_job_to_json(&job))?);
+            } else {
+                let job = response.job.context("cron UpdateJob returned empty job payload")?;
+                println!(
+                    "cron.disable id={} enabled={}",
+                    job.job_id.map(|value| value.ulid).unwrap_or_default(),
+                    job.enabled
+                );
+            }
+        }
+        CronCommand::RunNow { id, json } => {
+            validate_canonical_id(id.as_str()).context("cron job id must be a canonical ULID")?;
+            let mut request = Request::new(cron_v1::RunJobNowRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                job_id: Some(common_v1::CanonicalId { ulid: id.clone() }),
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .run_job_now(request)
+                .await
+                .context("failed to call cron RunJobNow")?
+                .into_inner();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "run_id": response.run_id.map(|value| value.ulid),
+                        "status": response.status,
+                        "message": response.message,
+                    }))?
+                );
+            } else {
+                println!(
+                    "cron.run_now id={} run_id={} status={} message={}",
+                    id,
+                    response.run_id.map(|value| value.ulid).unwrap_or_default(),
+                    response.status,
+                    response.message
+                );
+            }
+        }
+        CronCommand::Logs { id, after, limit, json } => {
+            validate_canonical_id(id.as_str()).context("cron job id must be a canonical ULID")?;
+            let mut request = Request::new(cron_v1::ListJobRunsRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                job_id: Some(common_v1::CanonicalId { ulid: id.clone() }),
+                after_run_ulid: after.unwrap_or_default(),
+                limit: limit.unwrap_or(100),
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .list_job_runs(request)
+                .await
+                .context("failed to call cron ListJobRuns")?
+                .into_inner();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "runs": response.runs.iter().map(cron_run_to_json).collect::<Vec<_>>(),
+                        "next_after_run_ulid": response.next_after_run_ulid,
+                    }))?
+                );
+            } else {
+                println!(
+                    "cron.logs id={} runs={} next_after={}",
+                    id,
+                    response.runs.len(),
+                    if response.next_after_run_ulid.is_empty() {
+                        "none"
+                    } else {
+                        response.next_after_run_ulid.as_str()
+                    }
+                );
+                for run in response.runs {
+                    println!(
+                        "cron.run run_id={} status={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
+                        run.run_id.map(|value| value.ulid).unwrap_or_default(),
+                        run.status,
+                        run.started_at_unix_ms,
+                        run.finished_at_unix_ms,
+                        run.tool_calls,
+                        run.tool_denies
+                    );
+                }
+            }
         }
     }
+
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+async fn update_cron_enabled(
+    client: &mut cron_v1::cron_service_client::CronServiceClient<tonic::transport::Channel>,
+    connection: &AgentConnection,
+    id: String,
+    enabled: bool,
+) -> Result<cron_v1::UpdateJobResponse> {
+    validate_canonical_id(id.as_str()).context("cron job id must be a canonical ULID")?;
+    let mut request = Request::new(cron_v1::UpdateJobRequest {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        job_id: Some(common_v1::CanonicalId { ulid: id }),
+        name: None,
+        prompt: None,
+        owner_principal: None,
+        channel: None,
+        session_key: None,
+        session_label: None,
+        schedule: None,
+        enabled: Some(enabled),
+        concurrency_policy: None,
+        retry_policy: None,
+        misfire_policy: None,
+        jitter_ms: None,
+    });
+    inject_run_stream_metadata(request.metadata_mut(), connection)?;
+    let response =
+        client.update_job(request).await.context("failed to call cron UpdateJob")?.into_inner();
+    Ok(response)
+}
+
+fn build_cron_schedule(
+    schedule_type: CronScheduleTypeArg,
+    schedule: String,
+) -> Result<cron_v1::Schedule> {
+    match schedule_type {
+        CronScheduleTypeArg::Cron => Ok(cron_v1::Schedule {
+            r#type: cron_v1::ScheduleType::Cron as i32,
+            spec: Some(cron_v1::schedule::Spec::Cron(cron_v1::CronSchedule {
+                expression: schedule,
+            })),
+        }),
+        CronScheduleTypeArg::Every => Ok(cron_v1::Schedule {
+            r#type: cron_v1::ScheduleType::Every as i32,
+            spec: Some(cron_v1::schedule::Spec::Every(cron_v1::EverySchedule {
+                interval_ms: parse_interval_ms(schedule.as_str())?,
+            })),
+        }),
+        CronScheduleTypeArg::At => Ok(cron_v1::Schedule {
+            r#type: cron_v1::ScheduleType::At as i32,
+            spec: Some(cron_v1::schedule::Spec::At(cron_v1::AtSchedule {
+                timestamp_rfc3339: schedule,
+            })),
+        }),
+    }
+}
+
+fn parse_interval_ms(raw: &str) -> Result<u64> {
+    let value = raw.trim();
+    if value.is_empty() {
+        anyhow::bail!("every schedule value cannot be empty");
+    }
+    if let Some(stripped) = value.strip_suffix("ms") {
+        let parsed = stripped
+            .trim()
+            .parse::<u64>()
+            .context("every schedule milliseconds must be a positive integer")?;
+        if parsed == 0 {
+            anyhow::bail!("every schedule interval must be greater than zero");
+        }
+        return Ok(parsed);
+    }
+    if let Some(stripped) = value.strip_suffix('s') {
+        let parsed = stripped
+            .trim()
+            .parse::<u64>()
+            .context("every schedule seconds must be a positive integer")?;
+        if parsed == 0 {
+            anyhow::bail!("every schedule interval must be greater than zero");
+        }
+        return Ok(parsed.saturating_mul(1_000));
+    }
+    if let Some(stripped) = value.strip_suffix('m') {
+        let parsed = stripped
+            .trim()
+            .parse::<u64>()
+            .context("every schedule minutes must be a positive integer")?;
+        if parsed == 0 {
+            anyhow::bail!("every schedule interval must be greater than zero");
+        }
+        return Ok(parsed.saturating_mul(60_000));
+    }
+    if let Some(stripped) = value.strip_suffix('h') {
+        let parsed = stripped
+            .trim()
+            .parse::<u64>()
+            .context("every schedule hours must be a positive integer")?;
+        if parsed == 0 {
+            anyhow::bail!("every schedule interval must be greater than zero");
+        }
+        return Ok(parsed.saturating_mul(3_600_000));
+    }
+    let parsed = value.parse::<u64>().context(
+        "every schedule value must be integer milliseconds or include one of suffixes: ms,s,m,h",
+    )?;
+    if parsed == 0 {
+        anyhow::bail!("every schedule interval must be greater than zero");
+    }
+    Ok(parsed)
+}
+
+fn cron_concurrency_to_proto(value: CronConcurrencyPolicyArg) -> i32 {
+    match value {
+        CronConcurrencyPolicyArg::Forbid => cron_v1::ConcurrencyPolicy::Forbid as i32,
+        CronConcurrencyPolicyArg::Replace => cron_v1::ConcurrencyPolicy::Replace as i32,
+        CronConcurrencyPolicyArg::QueueOne => cron_v1::ConcurrencyPolicy::QueueOne as i32,
+    }
+}
+
+fn cron_misfire_to_proto(value: CronMisfirePolicyArg) -> i32 {
+    match value {
+        CronMisfirePolicyArg::Skip => cron_v1::MisfirePolicy::Skip as i32,
+        CronMisfirePolicyArg::CatchUp => cron_v1::MisfirePolicy::CatchUp as i32,
+    }
+}
+
+fn cron_job_to_json(job: &cron_v1::Job) -> serde_json::Value {
+    json!({
+        "job_id": job.job_id.as_ref().map(|value| value.ulid.clone()),
+        "name": job.name,
+        "prompt": job.prompt,
+        "owner_principal": job.owner_principal,
+        "channel": job.channel,
+        "session_key": job.session_key,
+        "session_label": job.session_label,
+        "schedule": job.schedule.as_ref().map(|schedule| json!({
+            "type": schedule.r#type,
+            "spec": match schedule.spec.as_ref() {
+                Some(cron_v1::schedule::Spec::Cron(value)) => json!({ "cron": { "expression": value.expression } }),
+                Some(cron_v1::schedule::Spec::Every(value)) => json!({ "every": { "interval_ms": value.interval_ms } }),
+                Some(cron_v1::schedule::Spec::At(value)) => json!({ "at": { "timestamp_rfc3339": value.timestamp_rfc3339 } }),
+                None => json!(null),
+            },
+        })),
+        "enabled": job.enabled,
+        "concurrency_policy": job.concurrency_policy,
+        "retry_policy": job.retry_policy.as_ref().map(|value| json!({
+            "max_attempts": value.max_attempts,
+            "backoff_ms": value.backoff_ms,
+        })),
+        "misfire_policy": job.misfire_policy,
+        "jitter_ms": job.jitter_ms,
+        "next_run_at_unix_ms": job.next_run_at_unix_ms,
+        "last_run_at_unix_ms": job.last_run_at_unix_ms,
+        "created_at_unix_ms": job.created_at_unix_ms,
+        "updated_at_unix_ms": job.updated_at_unix_ms,
+    })
+}
+
+fn cron_run_to_json(run: &cron_v1::JobRun) -> serde_json::Value {
+    json!({
+        "run_id": run.run_id.as_ref().map(|value| value.ulid.clone()),
+        "job_id": run.job_id.as_ref().map(|value| value.ulid.clone()),
+        "session_id": run.session_id.as_ref().map(|value| value.ulid.clone()),
+        "orchestrator_run_id": run.orchestrator_run_id.as_ref().map(|value| value.ulid.clone()),
+        "attempt": run.attempt,
+        "started_at_unix_ms": run.started_at_unix_ms,
+        "finished_at_unix_ms": run.finished_at_unix_ms,
+        "status": run.status,
+        "error_kind": run.error_kind,
+        "error_message_redacted": run.error_message_redacted,
+        "model_tokens_in": run.model_tokens_in,
+        "model_tokens_out": run.model_tokens_out,
+        "tool_calls": run.tool_calls,
+        "tool_denies": run.tool_denies,
+    })
 }
 
 fn run_channels(command: ChannelsCommand) -> Result<()> {

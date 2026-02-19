@@ -167,17 +167,106 @@ pub enum AgentCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CronCommand {
-    List,
-    Add {
+    List {
         #[arg(long)]
-        schedule: String,
+        after: Option<String>,
         #[arg(long)]
-        action: String,
+        limit: Option<u32>,
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
-    Remove {
+    Show {
         #[arg(long)]
         id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long, value_enum)]
+        schedule_type: CronScheduleTypeArg,
+        #[arg(long)]
+        schedule: String,
+        #[arg(long, default_value_t = true)]
+        enabled: bool,
+        #[arg(long, value_enum, default_value_t = CronConcurrencyPolicyArg::Forbid)]
+        concurrency: CronConcurrencyPolicyArg,
+        #[arg(long, default_value_t = 1)]
+        retry_max_attempts: u32,
+        #[arg(long, default_value_t = 1000)]
+        retry_backoff_ms: u64,
+        #[arg(long, value_enum, default_value_t = CronMisfirePolicyArg::Skip)]
+        misfire: CronMisfirePolicyArg,
+        #[arg(long, default_value_t = 0)]
+        jitter_ms: u64,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        session_key: Option<String>,
+        #[arg(long)]
+        session_label: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Enable {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Disable {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    RunNow {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Logs {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CronScheduleTypeArg {
+    Cron,
+    Every,
+    At,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CronConcurrencyPolicyArg {
+    Forbid,
+    Replace,
+    QueueOne,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CronMisfirePolicyArg {
+    Skip,
+    CatchUp,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -446,8 +535,8 @@ mod tests {
 
     use super::{
         AgentCommand, BrowserCommand, ChannelsCommand, Cli, Command, CompletionShell,
-        ConfigCommand, CronCommand, DaemonCommand, OnboardingCommand, PolicyCommand,
-        ProtocolCommand,
+        ConfigCommand, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
+        CronScheduleTypeArg, DaemonCommand, OnboardingCommand, PolicyCommand, ProtocolCommand,
     };
     #[cfg(not(windows))]
     use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -658,17 +747,53 @@ mod tests {
             "palyra",
             "cron",
             "add",
+            "--name",
+            "Health summary",
+            "--prompt",
+            "Summarize status",
+            "--schedule-type",
+            "cron",
             "--schedule",
             "*/5 * * * *",
-            "--action",
-            "agent.run",
+            "--enabled",
+            "--concurrency",
+            "forbid",
+            "--retry-max-attempts",
+            "3",
+            "--retry-backoff-ms",
+            "2000",
+            "--misfire",
+            "skip",
+            "--jitter-ms",
+            "150",
+            "--owner",
+            "user:ops",
+            "--channel",
+            "system:cron",
+            "--session-key",
+            "cron:health",
+            "--session-label",
+            "Health",
         ]);
         assert_eq!(
             parsed.command,
             Command::Cron {
                 command: CronCommand::Add {
+                    name: "Health summary".to_owned(),
+                    prompt: "Summarize status".to_owned(),
+                    schedule_type: CronScheduleTypeArg::Cron,
                     schedule: "*/5 * * * *".to_owned(),
-                    action: "agent.run".to_owned(),
+                    enabled: true,
+                    concurrency: CronConcurrencyPolicyArg::Forbid,
+                    retry_max_attempts: 3,
+                    retry_backoff_ms: 2000,
+                    misfire: CronMisfirePolicyArg::Skip,
+                    jitter_ms: 150,
+                    owner: Some("user:ops".to_owned()),
+                    channel: Some("system:cron".to_owned()),
+                    session_key: Some("cron:health".to_owned()),
+                    session_label: Some("Health".to_owned()),
+                    json: false,
                 }
             }
         );

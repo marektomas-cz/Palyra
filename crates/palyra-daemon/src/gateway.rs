@@ -9,9 +9,10 @@ use std::{
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use palyra_common::{build_metadata, validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
+use palyra_policy::{evaluate_with_config, PolicyDecision, PolicyEvaluationConfig, PolicyRequest};
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{metadata::MetadataMap, Request, Response, Status, Streaming};
@@ -19,12 +20,15 @@ use tracing::{info, warn};
 use ulid::Ulid;
 
 use crate::{
+    cron::{normalize_schedule, schedule_to_proto, trigger_job_now},
     journal::{
-        JournalAppendRequest, JournalError, JournalEventRecord, JournalStore,
-        OrchestratorCancelRequest, OrchestratorRunStartRequest, OrchestratorRunStatusSnapshot,
-        OrchestratorSessionRecord, OrchestratorSessionResolveOutcome,
-        OrchestratorSessionResolveRequest, OrchestratorTapeAppendRequest, OrchestratorTapeRecord,
-        OrchestratorUsageDelta,
+        CronConcurrencyPolicy, CronJobCreateRequest, CronJobRecord, CronJobUpdatePatch,
+        CronJobsListFilter, CronRunFinalizeRequest, CronRunRecord, CronRunStartRequest,
+        CronRunStatus, CronRunsListFilter, JournalAppendRequest, JournalError, JournalEventRecord,
+        JournalStore, OrchestratorCancelRequest, OrchestratorRunStartRequest,
+        OrchestratorRunStatusSnapshot, OrchestratorSessionRecord,
+        OrchestratorSessionResolveOutcome, OrchestratorSessionResolveRequest,
+        OrchestratorTapeAppendRequest, OrchestratorTapeRecord, OrchestratorUsageDelta,
     },
     model_provider::{
         ModelProvider, ProviderError, ProviderEvent, ProviderRequest, ProviderStatusSnapshot,
@@ -50,6 +54,12 @@ pub mod proto {
             }
         }
 
+        pub mod cron {
+            pub mod v1 {
+                tonic::include_proto!("palyra.cron.v1");
+            }
+        }
+
         pub mod node {
             pub mod v1 {
                 tonic::include_proto!("palyra.node.v1");
@@ -58,7 +68,7 @@ pub mod proto {
     }
 }
 
-use proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
+use proto::palyra::{common::v1 as common_v1, cron::v1 as cron_v1, gateway::v1 as gateway_v1};
 
 pub const HEADER_PRINCIPAL: &str = "x-palyra-principal";
 pub const HEADER_DEVICE_ID: &str = "x-palyra-device-id";
@@ -75,6 +85,10 @@ const APPROVAL_CHANNEL_UNAVAILABLE_REASON: &str =
     "approval required but no interactive approval channel is available for this run";
 const APPROVAL_DENIED_REASON: &str = "tool execution denied by explicit client approval response";
 const MAX_MODEL_TOKEN_TAPE_EVENTS_PER_RUN: usize = 1_024;
+const MAX_CRON_JOB_NAME_BYTES: usize = 128;
+const MAX_CRON_PROMPT_BYTES: usize = 16 * 1024;
+const MAX_CRON_SCHEDULE_BYTES: usize = 4 * 1024;
+const MAX_CRON_PAGE_LIMIT: usize = 500;
 
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeConfigSnapshot {
@@ -153,6 +167,14 @@ struct RuntimeCounters {
     tool_execution_failures: AtomicU64,
     tool_execution_timeouts: AtomicU64,
     tool_attestations_emitted: AtomicU64,
+    cron_jobs_created: AtomicU64,
+    cron_jobs_updated: AtomicU64,
+    cron_jobs_deleted: AtomicU64,
+    cron_triggers_fired: AtomicU64,
+    cron_runs_started: AtomicU64,
+    cron_runs_completed: AtomicU64,
+    cron_runs_failed: AtomicU64,
+    cron_runs_skipped: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,6 +253,14 @@ pub struct CountersSnapshot {
     pub tool_execution_failures: u64,
     pub tool_execution_timeouts: u64,
     pub tool_attestations_emitted: u64,
+    pub cron_jobs_created: u64,
+    pub cron_jobs_updated: u64,
+    pub cron_jobs_deleted: u64,
+    pub cron_triggers_fired: u64,
+    pub cron_runs_started: u64,
+    pub cron_runs_completed: u64,
+    pub cron_runs_failed: u64,
+    pub cron_runs_skipped: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -306,6 +336,14 @@ impl RuntimeCounters {
             tool_execution_failures: self.tool_execution_failures.load(Ordering::Relaxed),
             tool_execution_timeouts: self.tool_execution_timeouts.load(Ordering::Relaxed),
             tool_attestations_emitted: self.tool_attestations_emitted.load(Ordering::Relaxed),
+            cron_jobs_created: self.cron_jobs_created.load(Ordering::Relaxed),
+            cron_jobs_updated: self.cron_jobs_updated.load(Ordering::Relaxed),
+            cron_jobs_deleted: self.cron_jobs_deleted.load(Ordering::Relaxed),
+            cron_triggers_fired: self.cron_triggers_fired.load(Ordering::Relaxed),
+            cron_runs_started: self.cron_runs_started.load(Ordering::Relaxed),
+            cron_runs_completed: self.cron_runs_completed.load(Ordering::Relaxed),
+            cron_runs_failed: self.cron_runs_failed.load(Ordering::Relaxed),
+            cron_runs_skipped: self.cron_runs_skipped.load(Ordering::Relaxed),
         }
     }
 }
@@ -373,6 +411,14 @@ impl GatewayRuntimeState {
                 tool_execution_failures: AtomicU64::new(0),
                 tool_execution_timeouts: AtomicU64::new(0),
                 tool_attestations_emitted: AtomicU64::new(0),
+                cron_jobs_created: AtomicU64::new(0),
+                cron_jobs_updated: AtomicU64::new(0),
+                cron_jobs_deleted: AtomicU64::new(0),
+                cron_triggers_fired: AtomicU64::new(0),
+                cron_runs_started: AtomicU64::new(0),
+                cron_runs_completed: AtomicU64::new(0),
+                cron_runs_failed: AtomicU64::new(0),
+                cron_runs_skipped: AtomicU64::new(0),
             },
             journal_store,
             revoked_certificate_count,
@@ -869,6 +915,313 @@ impl GatewayRuntimeState {
         .await
         .map_err(|_| Status::internal("orchestrator tape snapshot worker panicked"))?
     }
+
+    #[allow(clippy::result_large_err)]
+    fn create_cron_job_blocking(
+        &self,
+        request: &CronJobCreateRequest,
+    ) -> Result<CronJobRecord, Status> {
+        self.journal_store
+            .create_cron_job(request)
+            .map_err(|error| map_cron_store_error("create cron job", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn create_cron_job(
+        self: &Arc<Self>,
+        request: CronJobCreateRequest,
+    ) -> Result<CronJobRecord, Status> {
+        let state = Arc::clone(self);
+        let result = tokio::task::spawn_blocking(move || state.create_cron_job_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("cron create worker panicked"))??;
+        self.counters.cron_jobs_created.fetch_add(1, Ordering::Relaxed);
+        Ok(result)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn update_cron_job_blocking(
+        &self,
+        job_id: &str,
+        patch: &CronJobUpdatePatch,
+    ) -> Result<CronJobRecord, Status> {
+        self.journal_store
+            .update_cron_job(job_id, patch)
+            .map_err(|error| map_cron_store_error("update cron job", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn update_cron_job(
+        self: &Arc<Self>,
+        job_id: String,
+        patch: CronJobUpdatePatch,
+    ) -> Result<CronJobRecord, Status> {
+        let state = Arc::clone(self);
+        let result = tokio::task::spawn_blocking(move || {
+            state.update_cron_job_blocking(job_id.as_str(), &patch)
+        })
+        .await
+        .map_err(|_| Status::internal("cron update worker panicked"))??;
+        self.counters.cron_jobs_updated.fetch_add(1, Ordering::Relaxed);
+        Ok(result)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn delete_cron_job_blocking(&self, job_id: &str) -> Result<bool, Status> {
+        self.journal_store
+            .delete_cron_job(job_id)
+            .map_err(|error| map_cron_store_error("delete cron job", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn delete_cron_job(self: &Arc<Self>, job_id: String) -> Result<bool, Status> {
+        let state = Arc::clone(self);
+        let deleted =
+            tokio::task::spawn_blocking(move || state.delete_cron_job_blocking(job_id.as_str()))
+                .await
+                .map_err(|_| Status::internal("cron delete worker panicked"))??;
+        if deleted {
+            self.counters.cron_jobs_deleted.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(deleted)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn cron_job_blocking(&self, job_id: &str) -> Result<Option<CronJobRecord>, Status> {
+        self.journal_store
+            .cron_job(job_id)
+            .map_err(|error| map_cron_store_error("load cron job", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn cron_job(
+        self: &Arc<Self>,
+        job_id: String,
+    ) -> Result<Option<CronJobRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.cron_job_blocking(job_id.as_str()))
+            .await
+            .map_err(|_| Status::internal("cron read worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_cron_jobs(
+        self: &Arc<Self>,
+        after_job_id: Option<String>,
+        requested_limit: Option<usize>,
+        enabled: Option<bool>,
+        owner_principal: Option<String>,
+        channel: Option<String>,
+    ) -> Result<(Vec<CronJobRecord>, Option<String>), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let limit = requested_limit.unwrap_or(100).clamp(1, MAX_CRON_PAGE_LIMIT);
+            state
+                .journal_store
+                .list_cron_jobs(CronJobsListFilter {
+                    after_job_id: after_job_id.as_deref(),
+                    limit: limit.saturating_add(1),
+                    enabled,
+                    owner_principal: owner_principal.as_deref(),
+                    channel: channel.as_deref(),
+                })
+                .map_err(|error| map_cron_store_error("list cron jobs", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron list worker panicked"))?
+        .map(|mut jobs| {
+            let limit = requested_limit.unwrap_or(100).clamp(1, MAX_CRON_PAGE_LIMIT);
+            let has_more = jobs.len() > limit;
+            if has_more {
+                jobs.truncate(limit);
+            }
+            let next_after =
+                if has_more { jobs.last().map(|job| job.job_id.clone()) } else { None };
+            (jobs, next_after)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_due_cron_jobs(
+        self: &Arc<Self>,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<CronJobRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .list_due_cron_jobs(now_unix_ms, limit)
+                .map_err(|error| map_cron_store_error("list due cron jobs", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron due-list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn first_due_cron_job_time(self: &Arc<Self>) -> Result<Option<i64>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .first_due_cron_job_time()
+                .map_err(|error| map_cron_store_error("load first due cron job time", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron next due worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn set_cron_job_next_run(
+        self: &Arc<Self>,
+        job_id: String,
+        next_run_at_unix_ms: Option<i64>,
+        last_run_at_unix_ms: Option<i64>,
+    ) -> Result<(), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .set_cron_job_next_run(job_id.as_str(), next_run_at_unix_ms, last_run_at_unix_ms)
+                .map_err(|error| map_cron_store_error("update cron job next run", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron next-run worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn set_cron_job_queue_state(
+        self: &Arc<Self>,
+        job_id: String,
+        queued_run: bool,
+    ) -> Result<(), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .set_cron_job_queue_state(job_id.as_str(), queued_run)
+                .map_err(|error| map_cron_store_error("update cron job queue state", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron queue worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn start_cron_run(
+        self: &Arc<Self>,
+        request: CronRunStartRequest,
+    ) -> Result<(), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .start_cron_run(&request)
+                .map_err(|error| map_cron_store_error("start cron run", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron run start worker panicked"))??;
+        self.counters.cron_runs_started.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn finalize_cron_run(
+        self: &Arc<Self>,
+        request: CronRunFinalizeRequest,
+    ) -> Result<(), Status> {
+        let terminal_status = request.status;
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .finalize_cron_run(&request)
+                .map_err(|error| map_cron_store_error("finalize cron run", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron run finalize worker panicked"))??;
+        match terminal_status {
+            CronRunStatus::Succeeded => {
+                self.counters.cron_runs_completed.fetch_add(1, Ordering::Relaxed);
+            }
+            CronRunStatus::Failed | CronRunStatus::Denied => {
+                self.counters.cron_runs_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            CronRunStatus::Skipped => {
+                self.counters.cron_runs_skipped.fetch_add(1, Ordering::Relaxed);
+            }
+            CronRunStatus::Accepted | CronRunStatus::Running => {}
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn cron_run(
+        self: &Arc<Self>,
+        run_id: String,
+    ) -> Result<Option<CronRunRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .cron_run(run_id.as_str())
+                .map_err(|error| map_cron_store_error("load cron run", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron run read worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn active_cron_run_for_job(
+        self: &Arc<Self>,
+        job_id: String,
+    ) -> Result<Option<CronRunRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .active_cron_run_for_job(job_id.as_str())
+                .map_err(|error| map_cron_store_error("load active cron run", error))
+        })
+        .await
+        .map_err(|_| Status::internal("active cron run worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_cron_runs(
+        self: &Arc<Self>,
+        job_id: Option<String>,
+        after_run_id: Option<String>,
+        requested_limit: Option<usize>,
+    ) -> Result<(Vec<CronRunRecord>, Option<String>), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let limit = requested_limit.unwrap_or(100).clamp(1, MAX_CRON_PAGE_LIMIT);
+            state
+                .journal_store
+                .list_cron_runs(CronRunsListFilter {
+                    job_id: job_id.as_deref(),
+                    after_run_id: after_run_id.as_deref(),
+                    limit: limit.saturating_add(1),
+                })
+                .map_err(|error| map_cron_store_error("list cron runs", error))
+        })
+        .await
+        .map_err(|_| Status::internal("cron runs list worker panicked"))?
+        .map(|mut runs| {
+            let limit = requested_limit.unwrap_or(100).clamp(1, MAX_CRON_PAGE_LIMIT);
+            let has_more = runs.len() > limit;
+            if has_more {
+                runs.truncate(limit);
+            }
+            let next_after =
+                if has_more { runs.last().map(|run| run.run_id.clone()) } else { None };
+            (runs, next_after)
+        })
+    }
+
+    pub fn record_cron_trigger_fired(&self) {
+        self.counters.cron_triggers_fired.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn map_orchestrator_store_error(operation: &str, error: JournalError) -> Status {
@@ -897,6 +1250,209 @@ fn map_orchestrator_store_error(operation: &str, error: JournalError) -> Status 
             Status::invalid_argument(format!("invalid orchestrator session selector: {reason}"))
         }
         other => Status::internal(format!("{operation} failed: {other}")),
+    }
+}
+
+fn map_cron_store_error(operation: &str, error: JournalError) -> Status {
+    match error {
+        JournalError::CronJobNotFound { job_id } => {
+            Status::not_found(format!("cron job not found: {job_id}"))
+        }
+        JournalError::CronRunNotFound { run_id } => {
+            Status::not_found(format!("cron run not found: {run_id}"))
+        }
+        JournalError::DuplicateCronJobId { job_id } => {
+            Status::already_exists(format!("cron job already exists: {job_id}"))
+        }
+        JournalError::DuplicateCronRunId { run_id } => {
+            Status::already_exists(format!("cron run already exists: {run_id}"))
+        }
+        JournalError::PayloadTooLarge { payload_kind, actual_bytes, max_bytes } => {
+            Status::invalid_argument(format!(
+                "{payload_kind} payload exceeds maximum size ({actual_bytes} > {max_bytes})"
+            ))
+        }
+        other => Status::internal(format!("{operation} failed: {other}")),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn require_supported_version(v: u32) -> Result<(), Status> {
+    if v != CANONICAL_PROTOCOL_MAJOR {
+        return Err(Status::failed_precondition("unsupported protocol major version"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn authorize_cron_action(principal: &str, action: &str, resource: &str) -> Result<(), Status> {
+    let evaluation = evaluate_with_config(
+        &PolicyRequest {
+            principal: principal.to_owned(),
+            action: action.to_owned(),
+            resource: resource.to_owned(),
+        },
+        &PolicyEvaluationConfig::default(),
+    )
+    .map_err(|error| Status::internal(format!("failed to evaluate cron policy: {error}")))?;
+    match evaluation.decision {
+        PolicyDecision::Allow => Ok(()),
+        PolicyDecision::DenyByDefault { reason } => Err(Status::permission_denied(format!(
+            "policy denied action '{action}' on '{resource}': {reason}"
+        ))),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn current_unix_ms_status() -> Result<i64, Status> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| Status::internal(format!("system time before unix epoch: {error}")))?;
+    Ok(elapsed.as_millis() as i64)
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_cron_job_name(name: String) -> Result<String, Status> {
+    let value = name.trim();
+    if value.is_empty() {
+        return Err(Status::invalid_argument("cron job name cannot be empty"));
+    }
+    if value.len() > MAX_CRON_JOB_NAME_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "cron job name exceeds maximum bytes ({} > {MAX_CRON_JOB_NAME_BYTES})",
+            value.len()
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_cron_job_prompt(prompt: String) -> Result<String, Status> {
+    let value = prompt.trim();
+    if value.is_empty() {
+        return Err(Status::invalid_argument("cron job prompt cannot be empty"));
+    }
+    if value.len() > MAX_CRON_PROMPT_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "cron job prompt exceeds maximum bytes ({} > {MAX_CRON_PROMPT_BYTES})",
+            value.len()
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+#[allow(clippy::result_large_err)]
+fn cron_concurrency_from_proto(raw: i32) -> Result<CronConcurrencyPolicy, Status> {
+    match cron_v1::ConcurrencyPolicy::try_from(raw)
+        .unwrap_or(cron_v1::ConcurrencyPolicy::Unspecified)
+    {
+        cron_v1::ConcurrencyPolicy::Forbid => Ok(CronConcurrencyPolicy::Forbid),
+        cron_v1::ConcurrencyPolicy::Replace => Ok(CronConcurrencyPolicy::Replace),
+        cron_v1::ConcurrencyPolicy::QueueOne => Ok(CronConcurrencyPolicy::QueueOne),
+        cron_v1::ConcurrencyPolicy::Unspecified => {
+            Err(Status::invalid_argument("concurrency_policy must be specified"))
+        }
+    }
+}
+
+fn cron_concurrency_to_proto(policy: CronConcurrencyPolicy) -> i32 {
+    match policy {
+        CronConcurrencyPolicy::Forbid => cron_v1::ConcurrencyPolicy::Forbid as i32,
+        CronConcurrencyPolicy::Replace => cron_v1::ConcurrencyPolicy::Replace as i32,
+        CronConcurrencyPolicy::QueueOne => cron_v1::ConcurrencyPolicy::QueueOne as i32,
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn cron_misfire_from_proto(raw: i32) -> Result<crate::journal::CronMisfirePolicy, Status> {
+    match cron_v1::MisfirePolicy::try_from(raw).unwrap_or(cron_v1::MisfirePolicy::Unspecified) {
+        cron_v1::MisfirePolicy::Skip => Ok(crate::journal::CronMisfirePolicy::Skip),
+        cron_v1::MisfirePolicy::CatchUp => Ok(crate::journal::CronMisfirePolicy::CatchUp),
+        cron_v1::MisfirePolicy::Unspecified => {
+            Err(Status::invalid_argument("misfire_policy must be specified"))
+        }
+    }
+}
+
+fn cron_misfire_to_proto(policy: crate::journal::CronMisfirePolicy) -> i32 {
+    match policy {
+        crate::journal::CronMisfirePolicy::Skip => cron_v1::MisfirePolicy::Skip as i32,
+        crate::journal::CronMisfirePolicy::CatchUp => cron_v1::MisfirePolicy::CatchUp as i32,
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn cron_retry_from_proto(
+    value: Option<cron_v1::RetryPolicy>,
+) -> Result<crate::journal::CronRetryPolicy, Status> {
+    let value = value.ok_or_else(|| Status::invalid_argument("retry_policy is required"))?;
+    let max_attempts = value.max_attempts.clamp(1, 16);
+    let backoff_ms = value.backoff_ms.clamp(1, 60_000);
+    Ok(crate::journal::CronRetryPolicy { max_attempts, backoff_ms })
+}
+
+#[allow(clippy::result_large_err)]
+fn cron_job_message(job: &CronJobRecord) -> Result<cron_v1::Job, Status> {
+    let schedule = schedule_to_proto(job.schedule_type, job.schedule_payload_json.as_str())?;
+    Ok(cron_v1::Job {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        job_id: Some(common_v1::CanonicalId { ulid: job.job_id.clone() }),
+        name: job.name.clone(),
+        prompt: job.prompt.clone(),
+        owner_principal: job.owner_principal.clone(),
+        channel: job.channel.clone(),
+        session_key: job.session_key.clone().unwrap_or_default(),
+        session_label: job.session_label.clone().unwrap_or_default(),
+        schedule: Some(schedule),
+        enabled: job.enabled,
+        concurrency_policy: cron_concurrency_to_proto(job.concurrency_policy),
+        retry_policy: Some(cron_v1::RetryPolicy {
+            max_attempts: job.retry_policy.max_attempts,
+            backoff_ms: job.retry_policy.backoff_ms,
+        }),
+        misfire_policy: cron_misfire_to_proto(job.misfire_policy),
+        jitter_ms: job.jitter_ms,
+        next_run_at_unix_ms: job.next_run_at_unix_ms.unwrap_or_default(),
+        last_run_at_unix_ms: job.last_run_at_unix_ms.unwrap_or_default(),
+        created_at_unix_ms: job.created_at_unix_ms,
+        updated_at_unix_ms: job.updated_at_unix_ms,
+    })
+}
+
+fn cron_run_message(run: &CronRunRecord) -> cron_v1::JobRun {
+    cron_v1::JobRun {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        run_id: Some(common_v1::CanonicalId { ulid: run.run_id.clone() }),
+        job_id: Some(common_v1::CanonicalId { ulid: run.job_id.clone() }),
+        session_id: run
+            .session_id
+            .as_ref()
+            .map(|value| common_v1::CanonicalId { ulid: value.clone() }),
+        orchestrator_run_id: run
+            .orchestrator_run_id
+            .as_ref()
+            .map(|value| common_v1::CanonicalId { ulid: value.clone() }),
+        attempt: run.attempt,
+        started_at_unix_ms: run.started_at_unix_ms,
+        finished_at_unix_ms: run.finished_at_unix_ms.unwrap_or_default(),
+        status: cron_run_status_to_proto(run.status),
+        error_kind: run.error_kind.clone().unwrap_or_default(),
+        error_message_redacted: run.error_message_redacted.clone().unwrap_or_default(),
+        model_tokens_in: run.model_tokens_in,
+        model_tokens_out: run.model_tokens_out,
+        tool_calls: run.tool_calls,
+        tool_denies: run.tool_denies,
+    }
+}
+
+fn cron_run_status_to_proto(status: CronRunStatus) -> i32 {
+    match status {
+        CronRunStatus::Accepted => cron_v1::JobRunStatus::Accepted as i32,
+        CronRunStatus::Running => cron_v1::JobRunStatus::Running as i32,
+        CronRunStatus::Succeeded => cron_v1::JobRunStatus::Succeeded as i32,
+        CronRunStatus::Failed => cron_v1::JobRunStatus::Failed as i32,
+        CronRunStatus::Skipped => cron_v1::JobRunStatus::Skipped as i32,
+        CronRunStatus::Denied => cron_v1::JobRunStatus::Denied as i32,
     }
 }
 
@@ -1057,6 +1613,39 @@ impl GatewayServiceImpl {
         authorize_metadata(metadata, &self.auth).map_err(|error| {
             self.state.record_denied();
             warn!(method, error = %error, "gateway rpc authorization denied");
+            Status::permission_denied(error.to_string())
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct CronServiceImpl {
+    state: Arc<GatewayRuntimeState>,
+    auth: GatewayAuthConfig,
+    grpc_url: String,
+    scheduler_wake: Arc<Notify>,
+}
+
+impl CronServiceImpl {
+    #[must_use]
+    pub fn new(
+        state: Arc<GatewayRuntimeState>,
+        auth: GatewayAuthConfig,
+        grpc_url: String,
+        scheduler_wake: Arc<Notify>,
+    ) -> Self {
+        Self { state, auth, grpc_url, scheduler_wake }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn authorize_rpc(
+        &self,
+        metadata: &MetadataMap,
+        method: &'static str,
+    ) -> Result<RequestContext, Status> {
+        authorize_metadata(metadata, &self.auth).map_err(|error| {
+            self.state.record_denied();
+            warn!(method, error = %error, "cron rpc authorization denied");
             Status::permission_denied(error.to_string())
         })
     }
@@ -2343,6 +2932,277 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
         );
 
         Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+}
+
+#[tonic::async_trait]
+impl cron_v1::cron_service_server::CronService for CronServiceImpl {
+    async fn create_job(
+        &self,
+        request: Request<cron_v1::CreateJobRequest>,
+    ) -> Result<Response<cron_v1::CreateJobResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "CreateJob")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_cron_action(context.principal.as_str(), "cron.create", "cron:job")?;
+
+        let now_unix_ms = current_unix_ms_status()?;
+        let schedule = normalize_schedule(payload.schedule, now_unix_ms)?;
+        let name = validate_cron_job_name(payload.name)?;
+        let prompt = validate_cron_job_prompt(payload.prompt)?;
+        let owner_principal = non_empty(payload.owner_principal).unwrap_or(context.principal);
+        let channel = non_empty(payload.channel)
+            .unwrap_or_else(|| context.channel.unwrap_or_else(|| "system:cron".to_owned()));
+        let session_key = non_empty(payload.session_key);
+        let session_label = non_empty(payload.session_label);
+        let concurrency_policy = cron_concurrency_from_proto(payload.concurrency_policy)?;
+        let retry_policy = cron_retry_from_proto(payload.retry_policy)?;
+        let misfire_policy = cron_misfire_from_proto(payload.misfire_policy)?;
+        let jitter_ms = payload.jitter_ms.min(MAX_CRON_SCHEDULE_BYTES as u64);
+
+        let job = self
+            .state
+            .create_cron_job(CronJobCreateRequest {
+                job_id: Ulid::new().to_string(),
+                name,
+                prompt,
+                owner_principal,
+                channel,
+                session_key,
+                session_label,
+                schedule_type: schedule.schedule_type,
+                schedule_payload_json: schedule.schedule_payload_json,
+                enabled: payload.enabled,
+                concurrency_policy,
+                retry_policy,
+                misfire_policy,
+                jitter_ms,
+                next_run_at_unix_ms: schedule.next_run_at_unix_ms,
+            })
+            .await?;
+        self.scheduler_wake.notify_one();
+        Ok(Response::new(cron_v1::CreateJobResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            job: Some(cron_job_message(&job)?),
+        }))
+    }
+
+    async fn update_job(
+        &self,
+        request: Request<cron_v1::UpdateJobRequest>,
+    ) -> Result<Response<cron_v1::UpdateJobResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "UpdateJob")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        let job_id = canonical_id(payload.job_id, "job_id")?;
+        authorize_cron_action(
+            context.principal.as_str(),
+            "cron.update",
+            format!("cron:{job_id}").as_str(),
+        )?;
+
+        let mut patch = CronJobUpdatePatch::default();
+        if let Some(name) = payload.name {
+            patch.name = Some(validate_cron_job_name(name)?);
+        }
+        if let Some(prompt) = payload.prompt {
+            patch.prompt = Some(validate_cron_job_prompt(prompt)?);
+        }
+        if let Some(owner_principal) = payload.owner_principal {
+            patch.owner_principal = non_empty(owner_principal);
+        }
+        if let Some(channel) = payload.channel {
+            patch.channel = non_empty(channel);
+        }
+        if let Some(session_key) = payload.session_key {
+            patch.session_key = Some(non_empty(session_key));
+        }
+        if let Some(session_label) = payload.session_label {
+            patch.session_label = Some(non_empty(session_label));
+        }
+        if payload.schedule.is_some() {
+            let schedule = normalize_schedule(payload.schedule, current_unix_ms_status()?)?;
+            patch.schedule_type = Some(schedule.schedule_type);
+            patch.schedule_payload_json = Some(schedule.schedule_payload_json);
+            patch.next_run_at_unix_ms = Some(schedule.next_run_at_unix_ms);
+        }
+        if let Some(enabled) = payload.enabled {
+            patch.enabled = Some(enabled);
+        }
+        if let Some(concurrency_policy) = payload.concurrency_policy {
+            patch.concurrency_policy = Some(cron_concurrency_from_proto(concurrency_policy)?);
+        }
+        if let Some(retry_policy) = payload.retry_policy {
+            patch.retry_policy = Some(cron_retry_from_proto(Some(retry_policy))?);
+        }
+        if let Some(misfire_policy) = payload.misfire_policy {
+            patch.misfire_policy = Some(cron_misfire_from_proto(misfire_policy)?);
+        }
+        if let Some(jitter_ms) = payload.jitter_ms {
+            patch.jitter_ms = Some(jitter_ms.min(MAX_CRON_SCHEDULE_BYTES as u64));
+        }
+
+        let updated = self.state.update_cron_job(job_id, patch).await?;
+        self.scheduler_wake.notify_one();
+        Ok(Response::new(cron_v1::UpdateJobResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            job: Some(cron_job_message(&updated)?),
+        }))
+    }
+
+    async fn delete_job(
+        &self,
+        request: Request<cron_v1::DeleteJobRequest>,
+    ) -> Result<Response<cron_v1::DeleteJobResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "DeleteJob")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        let job_id = canonical_id(payload.job_id, "job_id")?;
+        authorize_cron_action(
+            context.principal.as_str(),
+            "cron.delete",
+            format!("cron:{job_id}").as_str(),
+        )?;
+        let deleted = self.state.delete_cron_job(job_id).await?;
+        self.scheduler_wake.notify_one();
+        Ok(Response::new(cron_v1::DeleteJobResponse { v: CANONICAL_PROTOCOL_MAJOR, deleted }))
+    }
+
+    async fn get_job(
+        &self,
+        request: Request<cron_v1::GetJobRequest>,
+    ) -> Result<Response<cron_v1::GetJobResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "GetJob")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        let job_id = canonical_id(payload.job_id, "job_id")?;
+        authorize_cron_action(
+            context.principal.as_str(),
+            "cron.get",
+            format!("cron:{job_id}").as_str(),
+        )?;
+        let job = self
+            .state
+            .cron_job(job_id.clone())
+            .await?
+            .ok_or_else(|| Status::not_found(format!("cron job not found: {job_id}")))?;
+        Ok(Response::new(cron_v1::GetJobResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            job: Some(cron_job_message(&job)?),
+        }))
+    }
+
+    async fn list_jobs(
+        &self,
+        request: Request<cron_v1::ListJobsRequest>,
+    ) -> Result<Response<cron_v1::ListJobsResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "ListJobs")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_cron_action(context.principal.as_str(), "cron.list", "cron:jobs")?;
+
+        let (jobs, next_after_job_ulid) = self
+            .state
+            .list_cron_jobs(
+                non_empty(payload.after_job_ulid),
+                Some(payload.limit as usize),
+                payload.enabled,
+                payload.owner_principal,
+                payload.channel,
+            )
+            .await?;
+        let jobs = jobs.iter().map(cron_job_message).collect::<Result<Vec<_>, _>>()?;
+        Ok(Response::new(cron_v1::ListJobsResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            jobs,
+            next_after_job_ulid: next_after_job_ulid.unwrap_or_default(),
+        }))
+    }
+
+    async fn run_job_now(
+        &self,
+        request: Request<cron_v1::RunJobNowRequest>,
+    ) -> Result<Response<cron_v1::RunJobNowResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "RunJobNow")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        let job_id = canonical_id(payload.job_id, "job_id")?;
+        authorize_cron_action(
+            context.principal.as_str(),
+            "cron.run",
+            format!("cron:{job_id}").as_str(),
+        )?;
+        let job = self
+            .state
+            .cron_job(job_id.clone())
+            .await?
+            .ok_or_else(|| Status::not_found(format!("cron job not found: {job_id}")))?;
+        let outcome = trigger_job_now(
+            Arc::clone(&self.state),
+            self.auth.clone(),
+            self.grpc_url.clone(),
+            job,
+            Arc::clone(&self.scheduler_wake),
+        )
+        .await?;
+        Ok(Response::new(cron_v1::RunJobNowResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: Some(common_v1::CanonicalId { ulid: outcome.run_id }),
+            status: cron_run_status_to_proto(outcome.status),
+            message: outcome.message,
+        }))
+    }
+
+    async fn list_job_runs(
+        &self,
+        request: Request<cron_v1::ListJobRunsRequest>,
+    ) -> Result<Response<cron_v1::ListJobRunsResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "ListJobRuns")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        let job_id = canonical_id(payload.job_id, "job_id")?;
+        authorize_cron_action(
+            context.principal.as_str(),
+            "cron.logs",
+            format!("cron:{job_id}").as_str(),
+        )?;
+        let (runs, next_after_run_ulid) = self
+            .state
+            .list_cron_runs(
+                Some(job_id),
+                non_empty(payload.after_run_ulid),
+                Some(payload.limit as usize),
+            )
+            .await?;
+        Ok(Response::new(cron_v1::ListJobRunsResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            runs: runs.iter().map(cron_run_message).collect(),
+            next_after_run_ulid: next_after_run_ulid.unwrap_or_default(),
+        }))
+    }
+
+    async fn get_job_run(
+        &self,
+        request: Request<cron_v1::GetJobRunRequest>,
+    ) -> Result<Response<cron_v1::GetJobRunResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "GetJobRun")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        let run_id = canonical_id(payload.run_id, "run_id")?;
+        authorize_cron_action(
+            context.principal.as_str(),
+            "cron.logs",
+            format!("cron:run:{run_id}").as_str(),
+        )?;
+        let run = self
+            .state
+            .cron_run(run_id.clone())
+            .await?
+            .ok_or_else(|| Status::not_found(format!("cron run not found: {run_id}")))?;
+        Ok(Response::new(cron_v1::GetJobRunResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run: Some(cron_run_message(&run)),
+        }))
     }
 }
 
