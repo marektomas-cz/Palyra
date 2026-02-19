@@ -1352,14 +1352,17 @@ impl GatewayRuntimeState {
         decision: Option<ApprovalDecision>,
         subject_type: Option<ApprovalSubjectType>,
     ) -> Result<(Vec<ApprovalRecord>, Option<String>), Status> {
+        let effective_limit = requested_limit
+            .filter(|value| *value > 0)
+            .unwrap_or(100)
+            .clamp(1, MAX_APPROVAL_PAGE_LIMIT);
         let state = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
-            let limit = requested_limit.unwrap_or(100).clamp(1, MAX_APPROVAL_PAGE_LIMIT);
             state
                 .journal_store
                 .list_approvals(ApprovalsListFilter {
                     after_approval_id: after_approval_id.as_deref(),
-                    limit: limit.saturating_add(1),
+                    limit: effective_limit.saturating_add(1),
                     since_unix_ms,
                     until_unix_ms,
                     subject_id: subject_id.as_deref(),
@@ -1372,10 +1375,9 @@ impl GatewayRuntimeState {
         .await
         .map_err(|_| Status::internal("approvals list worker panicked"))?
         .map(|mut approvals| {
-            let limit = requested_limit.unwrap_or(100).clamp(1, MAX_APPROVAL_PAGE_LIMIT);
-            let has_more = approvals.len() > limit;
+            let has_more = approvals.len() > effective_limit;
             if has_more {
-                approvals.truncate(limit);
+                approvals.truncate(effective_limit);
             }
             let next_after = if has_more {
                 approvals.last().map(|approval| approval.approval_id.clone())
@@ -2985,6 +2987,15 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 )
                                 .await
                                 {
+                                    best_effort_mark_approval_error(
+                                        &state_for_stream,
+                                        pending_approval.approval_id.as_str(),
+                                        format!(
+                                            "approval_request_dispatch_error: {}",
+                                            error.message()
+                                        ),
+                                    )
+                                    .await;
                                     finalize_run_failure(
                                         &sender,
                                         &state_for_stream,
@@ -3012,6 +3023,15 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 )
                                 .await
                                 {
+                                    best_effort_mark_approval_error(
+                                        &state_for_stream,
+                                        pending_approval.approval_id.as_str(),
+                                        format!(
+                                            "approval_request_journal_error: {}",
+                                            error.message()
+                                        ),
+                                    )
+                                    .await;
                                     finalize_run_failure(
                                         &sender,
                                         &state_for_stream,
@@ -4048,6 +4068,26 @@ impl gateway_v1::approvals_service_server::ApprovalsService for ApprovalsService
         });
 
         Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn best_effort_mark_approval_error(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    approval_id: &str,
+    reason: String,
+) {
+    if let Err(error) = runtime_state
+        .resolve_approval_record(ApprovalResolveRequest {
+            approval_id: approval_id.to_owned(),
+            decision: ApprovalDecision::Error,
+            decision_scope: ApprovalDecisionScope::Once,
+            decision_reason: reason,
+            decision_scope_ttl_ms: None,
+        })
+        .await
+    {
+        warn!(approval_id, error = %error, "failed to mark approval record as error");
     }
 }
 
@@ -5215,15 +5255,18 @@ mod tests {
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
 
     use crate::journal::{
+        ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
+        ApprovalPromptOption, ApprovalPromptRecord, ApprovalRiskLevel, ApprovalSubjectType,
         JournalAppendRequest, JournalConfig, JournalStore, OrchestratorRunStartRequest,
         OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest,
     };
+    use ulid::Ulid;
 
     use super::{
-        apply_tool_approval_outcome, authorize_headers, request_context_from_headers, AuthError,
-        GatewayAuthConfig, GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot,
-        GatewayRuntimeState, RequestContext, ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID,
-        HEADER_PRINCIPAL,
+        apply_tool_approval_outcome, authorize_headers, best_effort_mark_approval_error,
+        request_context_from_headers, AuthError, GatewayAuthConfig, GatewayJournalConfigSnapshot,
+        GatewayRuntimeConfigSnapshot, GatewayRuntimeState, RequestContext, ToolApprovalOutcome,
+        HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT,
     };
 
     fn unique_temp_journal_path() -> PathBuf {
@@ -5288,6 +5331,52 @@ mod tests {
             0,
         )
         .expect("runtime state should initialize")
+    }
+
+    fn build_test_approval_request(subject_suffix: usize) -> ApprovalCreateRequest {
+        ApprovalCreateRequest {
+            approval_id: Ulid::new().to_string(),
+            session_id: Ulid::new().to_string(),
+            run_id: Ulid::new().to_string(),
+            principal: "user:ops".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: Some("cli".to_owned()),
+            subject_type: ApprovalSubjectType::Tool,
+            subject_id: format!("tool:test-{subject_suffix}"),
+            request_summary: format!("test summary {subject_suffix}"),
+            policy_snapshot: ApprovalPolicySnapshot {
+                policy_id: "tool_call_policy.v1".to_owned(),
+                policy_hash: "sha256:test".to_owned(),
+                evaluation_summary: "approval_required=true".to_owned(),
+            },
+            prompt: ApprovalPromptRecord {
+                title: "Approve tool execution".to_owned(),
+                risk_level: ApprovalRiskLevel::High,
+                subject_id: format!("tool:test-{subject_suffix}"),
+                summary: "Tool requires approval".to_owned(),
+                options: vec![
+                    ApprovalPromptOption {
+                        option_id: "allow_once".to_owned(),
+                        label: "Allow once".to_owned(),
+                        description: "Approve once".to_owned(),
+                        default_selected: true,
+                        decision_scope: ApprovalDecisionScope::Once,
+                        timebox_ttl_ms: None,
+                    },
+                    ApprovalPromptOption {
+                        option_id: "deny_once".to_owned(),
+                        label: "Deny".to_owned(),
+                        description: "Reject".to_owned(),
+                        default_selected: false,
+                        decision_scope: ApprovalDecisionScope::Once,
+                        timebox_ttl_ms: None,
+                    },
+                ],
+                timeout_seconds: 60,
+                details_json: r#"{"tool_name":"test"}"#.to_owned(),
+                policy_explanation: "Policy requires explicit approval".to_owned(),
+            },
+        }
     }
 
     #[test]
@@ -5445,6 +5534,122 @@ mod tests {
         assert!(
             enforced.reason.contains("explicit approval granted"),
             "allow reason should preserve approval context"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approval_list_pagination_keeps_next_cursor_at_page_limit() {
+        let state = build_test_runtime_state(false);
+        for index in 0..=MAX_APPROVAL_PAGE_LIMIT {
+            state
+                .create_approval_record(build_test_approval_request(index))
+                .await
+                .expect("approval create should succeed");
+        }
+
+        let (first_page, next_after) = state
+            .list_approval_records(
+                None,
+                Some(MAX_APPROVAL_PAGE_LIMIT),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("first approvals page should succeed");
+        assert_eq!(
+            first_page.len(),
+            MAX_APPROVAL_PAGE_LIMIT,
+            "first page should respect requested page size"
+        );
+        let next_after =
+            next_after.expect("pagination should expose next cursor when more records exist");
+
+        let (second_page, second_next_after) = state
+            .list_approval_records(
+                Some(next_after),
+                Some(MAX_APPROVAL_PAGE_LIMIT),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("second approvals page should succeed");
+        assert_eq!(second_page.len(), 1, "sentinel pagination should return remaining records");
+        assert!(
+            second_next_after.is_none(),
+            "second page should not expose a cursor after returning the final record"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approval_list_zero_limit_uses_default_page_size() {
+        let state = build_test_runtime_state(false);
+        for index in 0..3 {
+            state
+                .create_approval_record(build_test_approval_request(index))
+                .await
+                .expect("approval create should succeed");
+        }
+
+        let (records, next_after) = state
+            .list_approval_records(None, Some(0), None, None, None, None, None, None)
+            .await
+            .expect("list approvals with zero limit should succeed");
+        assert_eq!(
+            records.len(),
+            3,
+            "zero limit should use the default page size instead of returning a single record"
+        );
+        assert!(
+            next_after.is_none(),
+            "default page should not expose pagination cursor when all records are returned"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn best_effort_mark_approval_error_resolves_pending_record() {
+        let state = build_test_runtime_state(false);
+        let created = state
+            .create_approval_record(build_test_approval_request(0))
+            .await
+            .expect("approval create should succeed");
+        assert!(created.decision.is_none(), "freshly created approval should start unresolved");
+
+        best_effort_mark_approval_error(
+            &state,
+            created.approval_id.as_str(),
+            "approval_request_dispatch_error: response channel closed".to_owned(),
+        )
+        .await;
+
+        let resolved = state
+            .approval_record(created.approval_id.clone())
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should exist");
+        assert_eq!(
+            resolved.decision,
+            Some(ApprovalDecision::Error),
+            "best-effort error marking should close the approval lifecycle"
+        );
+        assert!(
+            resolved.resolved_at_unix_ms.is_some(),
+            "resolved approval should include resolved timestamp"
+        );
+        assert!(
+            resolved
+                .decision_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("approval_request_dispatch_error"),
+            "resolved approval should retain reason context"
         );
     }
 
