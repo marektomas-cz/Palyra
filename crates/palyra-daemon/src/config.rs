@@ -1025,8 +1025,12 @@ fn parse_openai_base_url(raw: &str) -> Result<String> {
     let normalized = raw.trim();
     let parsed =
         reqwest::Url::parse(normalized).context("openai base URL must be a valid absolute URL")?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        anyhow::bail!("openai base URL must use http or https");
+    let host =
+        parsed.host_str().ok_or_else(|| anyhow::anyhow!("openai base URL must include a host"))?;
+    let loopback_http_allowed = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback_http_allowed) {
+        anyhow::bail!("openai base URL must use https (http is only allowed for loopback hosts)");
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         anyhow::bail!("openai base URL must not embed credentials");
@@ -1444,9 +1448,22 @@ mod tests {
     }
 
     #[test]
-    fn openai_base_url_requires_http_scheme() {
+    fn openai_base_url_requires_https_scheme() {
         let result = parse_openai_base_url("file:///tmp/openai");
-        assert!(result.is_err(), "openai base URL without http/https scheme must fail");
+        assert!(result.is_err(), "openai base URL without https scheme must fail");
+    }
+
+    #[test]
+    fn openai_base_url_rejects_non_loopback_http_url() {
+        let result = parse_openai_base_url("http://example.com/v1");
+        assert!(result.is_err(), "openai base URL over non-loopback HTTP must be rejected");
+    }
+
+    #[test]
+    fn openai_base_url_accepts_loopback_http_url() {
+        let parsed = parse_openai_base_url("http://127.0.0.1:8080/v1")
+            .expect("loopback HTTP should be allowed for local testing");
+        assert_eq!(parsed, "http://127.0.0.1:8080/v1");
     }
 
     #[test]

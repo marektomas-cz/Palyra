@@ -433,7 +433,7 @@ async fn main() -> Result<()> {
     }
 
     let scheduler_wake = Arc::new(Notify::new());
-    let grpc_url = loopback_grpc_url(grpc_bound);
+    let grpc_url = loopback_grpc_url(grpc_bound, loaded.gateway.tls.enabled);
     let _cron_scheduler_task = spawn_scheduler_loop(
         runtime.clone(),
         auth.clone(),
@@ -532,7 +532,7 @@ fn init_tracing() {
     tracing_subscriber::fmt().json().with_env_filter(filter).init();
 }
 
-fn loopback_grpc_url(socket: SocketAddr) -> String {
+fn loopback_grpc_url(socket: SocketAddr, tls_enabled: bool) -> String {
     let normalized = match socket {
         SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), v4.port())
@@ -542,7 +542,8 @@ fn loopback_grpc_url(socket: SocketAddr) -> String {
         }
         other => other,
     };
-    format!("http://{normalized}")
+    let scheme = if tls_enabled { "https" } else { "http" };
+    format!("{scheme}://{normalized}")
 }
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -1068,7 +1069,10 @@ fn dangerous_remote_bind_acknowledged() -> Result<bool> {
 mod tests {
     use axum::http::StatusCode;
 
-    use super::{enforce_remote_bind_guard, runtime_status_response, validate_admin_auth_config};
+    use super::{
+        enforce_remote_bind_guard, loopback_grpc_url, runtime_status_response,
+        validate_admin_auth_config,
+    };
     use crate::gateway::GatewayAuthConfig;
 
     #[test]
@@ -1156,6 +1160,16 @@ mod tests {
             result.is_err(),
             "remote admin bind should require explicit danger acknowledgement"
         );
+    }
+
+    #[test]
+    fn loopback_grpc_url_matches_gateway_tls_mode() {
+        let plain_url =
+            loopback_grpc_url("0.0.0.0:7443".parse().expect("socket address should parse"), false);
+        let tls_url =
+            loopback_grpc_url("0.0.0.0:7443".parse().expect("socket address should parse"), true);
+        assert_eq!(plain_url, "http://127.0.0.1:7443");
+        assert_eq!(tls_url, "https://127.0.0.1:7443");
     }
 
     #[test]

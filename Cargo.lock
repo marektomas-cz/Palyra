@@ -2484,6 +2484,7 @@ dependencies = [
  "base64",
  "hex",
  "hkdf",
+ "libc",
  "palyra-common",
  "palyra-identity",
  "rand 0.8.5",

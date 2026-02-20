@@ -64,6 +64,8 @@ struct CronMatcher {
     day_of_month: Vec<bool>,
     months: Vec<bool>,
     weekdays: Vec<bool>,
+    day_of_month_wildcard: bool,
+    weekdays_wildcard: bool,
 }
 
 impl CronMatcher {
@@ -80,6 +82,8 @@ impl CronMatcher {
             day_of_month: parse_cron_field(parts[2], 1, 31, false)?,
             months: parse_cron_field(parts[3], 1, 12, false)?,
             weekdays: parse_cron_field(parts[4], 0, 6, true)?,
+            day_of_month_wildcard: parts[2].trim() == "*",
+            weekdays_wildcard: parts[4].trim() == "*",
         })
     }
 
@@ -103,11 +107,15 @@ impl CronMatcher {
         let day = value.day() as usize;
         let month = value.month() as usize;
         let weekday = value.weekday().num_days_from_sunday() as usize;
-        self.minutes[minute]
-            && self.hours[hour]
-            && self.day_of_month[day - 1]
-            && self.months[month - 1]
-            && self.weekdays[weekday]
+        let day_of_month_match = self.day_of_month[day - 1];
+        let weekday_match = self.weekdays[weekday];
+        let day_selector_match = match (self.day_of_month_wildcard, self.weekdays_wildcard) {
+            (true, true) => true,
+            (true, false) => weekday_match,
+            (false, true) => day_of_month_match,
+            (false, false) => day_of_month_match || weekday_match,
+        };
+        self.minutes[minute] && self.hours[hour] && day_selector_match && self.months[month - 1]
     }
 }
 
@@ -1051,6 +1059,7 @@ mod tests {
     use crate::journal::{
         CronConcurrencyPolicy, CronJobRecord, CronMisfirePolicy, CronRetryPolicy, CronScheduleType,
     };
+    use chrono::TimeZone;
     use serde_json::json;
 
     #[test]
@@ -1059,6 +1068,58 @@ mod tests {
         let now = 1_730_000_000_000_i64;
         let next = matcher.next_after(now).expect("next fire should exist");
         assert!(next > now, "next fire should be in the future");
+    }
+
+    #[test]
+    fn cron_matcher_uses_standard_dom_dow_or_semantics() {
+        let matcher = CronMatcher::parse("0 9 1 * 1").expect("cron should parse");
+        let monday_not_first = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 8, 9, 0, 0)
+            .single()
+            .expect("date should be valid");
+        let first_not_monday = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 1, 9, 0, 0)
+            .single()
+            .expect("date should be valid");
+        let neither = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 6, 9, 0, 0)
+            .single()
+            .expect("date should be valid");
+        assert!(matcher.matches(monday_not_first), "weekday match should satisfy schedule");
+        assert!(matcher.matches(first_not_monday), "day-of-month match should satisfy schedule");
+        assert!(!matcher.matches(neither), "non-matching day selectors should not run");
+    }
+
+    #[test]
+    fn cron_matcher_uses_non_wildcard_day_field_when_other_is_wildcard() {
+        let dow_only = CronMatcher::parse("0 9 * * 1").expect("cron should parse");
+        let dom_only = CronMatcher::parse("0 9 1 * *").expect("cron should parse");
+        let monday = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 8, 9, 0, 0)
+            .single()
+            .expect("date should be valid");
+        let tuesday = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 9, 9, 0, 0)
+            .single()
+            .expect("date should be valid");
+        let first_day = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 1, 9, 0, 0)
+            .single()
+            .expect("date should be valid");
+        let second_day = chrono::Utc
+            .with_ymd_and_hms(2024, 2, 2, 9, 0, 0)
+            .single()
+            .expect("date should be valid");
+        assert!(
+            dow_only.matches(monday),
+            "weekday selector should drive schedule when dom is wildcard"
+        );
+        assert!(!dow_only.matches(tuesday), "non-matching weekday should be rejected");
+        assert!(
+            dom_only.matches(first_day),
+            "day-of-month selector should drive schedule when dow is wildcard"
+        );
+        assert!(!dom_only.matches(second_day), "non-matching day-of-month should be rejected");
     }
 
     #[test]
