@@ -185,7 +185,7 @@ impl Vault {
             let created = MetadataEntry {
                 scope: scope.clone(),
                 key: key.to_owned(),
-                object_id,
+                object_id: object_id.clone(),
                 created_at_unix_ms: now,
                 updated_at_unix_ms: now,
                 value_bytes: value.len(),
@@ -193,7 +193,16 @@ impl Vault {
             index.entries.push(created.clone());
             created
         };
-        self.write_metadata(&index)?;
+        if let Err(write_error) = self.write_metadata(&index) {
+            if let Err(rollback_error) = self.backend.delete_blob(object_id.as_str()) {
+                return Err(VaultError::Io(format!(
+                    "failed to persist metadata after blob write and failed to rollback blob: write_error={write_error}; rollback_error={rollback_error}"
+                )));
+            }
+            return Err(VaultError::Io(format!(
+                "failed to persist metadata after blob write: {write_error}"
+            )));
+        }
         Ok(entry.into())
     }
 
@@ -615,7 +624,11 @@ mod tests {
         BackendPreference, Vault, VaultConfig, VaultError, VaultRef, VaultScope,
     };
     use anyhow::Result;
-    use std::{collections::HashMap, sync::Mutex};
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
     use tempfile::tempdir;
 
     #[derive(Default)]
@@ -647,6 +660,68 @@ mod tests {
 
         fn delete_blob(&self, _object_id: &str) -> Result<(), VaultError> {
             Err(VaultError::Io("injected backend delete failure".to_owned()))
+        }
+    }
+
+    struct MetadataWriteFailureBackend {
+        root: PathBuf,
+        objects: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    }
+
+    impl BlobBackend for MetadataWriteFailureBackend {
+        fn kind(&self) -> BackendKind {
+            BackendKind::EncryptedFile
+        }
+
+        fn put_blob(&self, object_id: &str, payload: &[u8]) -> Result<(), VaultError> {
+            let mut objects = self.objects.lock().map_err(|_| {
+                VaultError::Io("metadata-failure backend mutex poisoned".to_owned())
+            })?;
+            objects.insert(object_id.to_owned(), payload.to_vec());
+            drop(objects);
+
+            // Force metadata persistence failure after blob write by replacing metadata file path
+            // with a directory before `write_metadata` attempts its atomic rename.
+            let metadata_path = self.root.join(super::METADATA_FILE);
+            if metadata_path.exists() {
+                if metadata_path.is_dir() {
+                    std::fs::remove_dir_all(&metadata_path).map_err(|error| {
+                        VaultError::Io(format!(
+                            "failed to reset metadata sabotage directory {}: {error}",
+                            metadata_path.display()
+                        ))
+                    })?;
+                } else {
+                    std::fs::remove_file(&metadata_path).map_err(|error| {
+                        VaultError::Io(format!(
+                            "failed to reset metadata sabotage file {}: {error}",
+                            metadata_path.display()
+                        ))
+                    })?;
+                }
+            }
+            std::fs::create_dir(&metadata_path).map_err(|error| {
+                VaultError::Io(format!(
+                    "failed to create metadata sabotage directory {}: {error}",
+                    metadata_path.display()
+                ))
+            })?;
+            Ok(())
+        }
+
+        fn get_blob(&self, object_id: &str) -> Result<Vec<u8>, VaultError> {
+            let objects = self.objects.lock().map_err(|_| {
+                VaultError::Io("metadata-failure backend mutex poisoned".to_owned())
+            })?;
+            objects.get(object_id).cloned().ok_or(VaultError::NotFound)
+        }
+
+        fn delete_blob(&self, object_id: &str) -> Result<(), VaultError> {
+            let mut objects = self.objects.lock().map_err(|_| {
+                VaultError::Io("metadata-failure backend mutex poisoned".to_owned())
+            })?;
+            objects.remove(object_id);
+            Ok(())
         }
     }
 
@@ -731,6 +806,38 @@ mod tests {
         );
         let loaded = vault.get_secret(&scope, "api_key")?;
         assert_eq!(loaded, b"secret-value");
+        Ok(())
+    }
+
+    #[test]
+    fn vault_put_secret_rolls_back_blob_when_metadata_write_fails() -> Result<()> {
+        let temp = tempdir()?;
+        let vault_root = temp.path().join("vault");
+        ensure_owner_only_dir(&vault_root)?;
+        let objects = Arc::new(Mutex::new(HashMap::new()));
+        let vault = Vault {
+            root: vault_root.clone(),
+            backend: Box::new(MetadataWriteFailureBackend {
+                root: vault_root,
+                objects: Arc::clone(&objects),
+            }),
+            max_secret_bytes: 1024,
+            kek: derive_kek_from_seed_material(b"palyra.vault.tests.put_rollback")?,
+        };
+        let scope =
+            VaultScope::Channel { channel_name: "cli".to_owned(), account_id: "acct-1".to_owned() };
+        let error = vault
+            .put_secret(&scope, "api_key", b"secret-value")
+            .expect_err("put should fail when metadata persistence is sabotaged");
+        assert!(
+            matches!(error, VaultError::Io(message) if message.contains("failed to persist metadata after blob write")),
+            "put error should preserve metadata failure context"
+        );
+        let object_count = objects
+            .lock()
+            .map_err(|_| VaultError::Io("metadata-failure backend mutex poisoned".to_owned()))?
+            .len();
+        assert_eq!(object_count, 0, "blob rollback should remove orphaned payload");
         Ok(())
     }
 

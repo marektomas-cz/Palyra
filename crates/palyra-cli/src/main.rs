@@ -5303,9 +5303,12 @@ fn prompt_yes_no(prompt: &str) -> Result<bool> {
 fn prompt_secret_value(prompt: &str) -> Result<String> {
     eprint!("{prompt}");
     std::io::stderr().flush().context("stderr flush failed")?;
-    let mut value = String::new();
-    std::io::stdin().read_line(&mut value).context("failed to read secret value")?;
-    Ok(value.trim_end_matches(['\r', '\n']).to_owned())
+    let value = rpassword::read_password().context("failed to read secret value")?;
+    Ok(normalize_prompt_secret_value(&value))
+}
+
+fn normalize_prompt_secret_value(raw: &str) -> String {
+    raw.trim_end_matches(['\r', '\n']).to_owned()
 }
 
 fn update_skill_current_pointer(skill_root: &Path, version: &str) -> Result<()> {
@@ -5931,7 +5934,7 @@ mod cli_v1_tests {
     use super::{
         compare_semver_versions, ensure_remote_registry_same_origin, fetch_limited_bytes,
         is_retryable_grpc_error, normalize_client_socket, normalize_installed_skills_index,
-        normalize_relative_registry_path, parse_acp_shim_input_line,
+        normalize_prompt_secret_value, normalize_relative_registry_path, parse_acp_shim_input_line,
         parse_and_verify_signed_remote_registry_index, registry_key_id_for, sha256_hex,
         validate_registry_index, write_file_atomically, InstalledSkillRecord, InstalledSkillSource,
         InstalledSkillsIndex, RegistrySignature, SignedSkillRegistryIndex, SkillRegistryEntry,
@@ -6118,6 +6121,13 @@ mod cli_v1_tests {
             fetch_limited_bytes(&client, url.as_str(), expected.len()).expect("fetch should pass");
         assert_eq!(payload, expected);
         server.join().expect("server thread should exit");
+    }
+
+    #[test]
+    fn normalize_prompt_secret_value_trims_only_trailing_line_endings() {
+        assert_eq!(normalize_prompt_secret_value("secret\r\n"), "secret");
+        assert_eq!(normalize_prompt_secret_value("secret\n"), "secret");
+        assert_eq!(normalize_prompt_secret_value("sec ret"), "sec ret");
     }
 
     #[cfg(not(windows))]

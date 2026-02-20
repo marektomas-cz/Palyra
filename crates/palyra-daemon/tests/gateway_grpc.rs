@@ -2476,6 +2476,92 @@ async fn grpc_approvals_service_persists_and_exports_denied_tool_approval() -> R
         "export output must keep redacted cookie values"
     );
 
+    let mut export_json_request = tonic::Request::new(gateway_v1::ExportApprovalsRequest {
+        v: 1,
+        format: gateway_v1::ApprovalExportFormat::Json as i32,
+        limit: 50,
+        since_unix_ms: 0,
+        until_unix_ms: 0,
+        subject_id: "tool:custom.noop".to_owned(),
+        principal: "user:ops".to_owned(),
+        decision: gateway_v1::ApprovalDecision::Deny as i32,
+        subject_type: gateway_v1::ApprovalSubjectType::Tool as i32,
+    });
+    authorize_metadata(export_json_request.metadata_mut())?;
+    let mut export_json_stream = approvals_client
+        .export_approvals(export_json_request)
+        .await
+        .context("failed to call ExportApprovals JSON")?
+        .into_inner();
+    let mut exported_json = Vec::new();
+    while let Some(chunk) = export_json_stream.next().await {
+        let chunk = chunk.context("failed to read ExportApprovals JSON chunk")?;
+        if !chunk.chunk.is_empty() {
+            exported_json.extend_from_slice(chunk.chunk.as_slice());
+        }
+        if chunk.done {
+            break;
+        }
+    }
+    let exported_json_text = String::from_utf8(exported_json.clone())
+        .context("exported approvals JSON must be UTF-8")?;
+    let exported_json_records = serde_json::from_slice::<Vec<Value>>(exported_json.as_slice())
+        .context("exported approvals JSON should parse as an array")?;
+    assert!(
+        !exported_json_records.is_empty(),
+        "JSON export should contain at least one approval record"
+    );
+    assert!(
+        exported_json_records.iter().any(|record| {
+            record
+                .get("approval_id")
+                .and_then(Value::as_str)
+                .map(|value| value == approval_id.as_str())
+                .unwrap_or(false)
+        }),
+        "JSON export should include persisted approval_id"
+    );
+    assert!(
+        !exported_json_text.contains("token=abc"),
+        "JSON export output must keep redacted token values"
+    );
+    assert!(
+        !exported_json_text.contains("sessionid=abc123"),
+        "JSON export output must keep redacted cookie values"
+    );
+
+    let mut export_json_empty_request = tonic::Request::new(gateway_v1::ExportApprovalsRequest {
+        v: 1,
+        format: gateway_v1::ApprovalExportFormat::Json as i32,
+        limit: 50,
+        since_unix_ms: 0,
+        until_unix_ms: 0,
+        subject_id: "tool:custom.none".to_owned(),
+        principal: "user:ops".to_owned(),
+        decision: gateway_v1::ApprovalDecision::Deny as i32,
+        subject_type: gateway_v1::ApprovalSubjectType::Tool as i32,
+    });
+    authorize_metadata(export_json_empty_request.metadata_mut())?;
+    let mut export_json_empty_stream = approvals_client
+        .export_approvals(export_json_empty_request)
+        .await
+        .context("failed to call ExportApprovals empty JSON")?
+        .into_inner();
+    let mut exported_empty_json = Vec::new();
+    while let Some(chunk) = export_json_empty_stream.next().await {
+        let chunk = chunk.context("failed to read ExportApprovals empty JSON chunk")?;
+        if !chunk.chunk.is_empty() {
+            exported_empty_json.extend_from_slice(chunk.chunk.as_slice());
+        }
+        if chunk.done {
+            break;
+        }
+    }
+    let exported_empty_records =
+        serde_json::from_slice::<Vec<Value>>(exported_empty_json.as_slice())
+            .context("empty JSON export should still parse as an array")?;
+    assert!(exported_empty_records.is_empty(), "empty JSON export should be represented as []");
+
     server_handle.join().expect("scripted openai server thread should exit");
     Ok(())
 }

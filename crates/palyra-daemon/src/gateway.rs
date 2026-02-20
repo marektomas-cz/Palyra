@@ -672,7 +672,19 @@ impl GatewayRuntimeState {
                     <= VAULT_RATE_LIMIT_WINDOW_MS
             });
             if buckets.len() >= VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS {
-                return false;
+                let evicted = buckets
+                    .iter()
+                    .min_by(|(left_principal, left_entry), (right_principal, right_entry)| {
+                        left_entry
+                            .window_started_at
+                            .cmp(&right_entry.window_started_at)
+                            .then_with(|| left_principal.cmp(right_principal))
+                    })
+                    .map(|(oldest_principal, _)| oldest_principal.clone());
+                let Some(oldest_principal) = evicted else {
+                    return false;
+                };
+                buckets.remove(oldest_principal.as_str());
             }
         }
         let entry = buckets
@@ -1689,23 +1701,40 @@ impl GatewayRuntimeState {
     }
 
     pub fn configure_memory(&self, config: MemoryRuntimeConfig) {
-        if let Ok(mut guard) = self.memory_config.write() {
-            *guard = config;
+        match self.memory_config.write() {
+            Ok(mut guard) => {
+                *guard = config;
+            }
+            Err(poisoned) => {
+                warn!("memory config lock poisoned while applying runtime config");
+                let mut guard = poisoned.into_inner();
+                *guard = config;
+            }
         }
         self.clear_memory_search_cache();
     }
 
     #[must_use]
     pub fn memory_config_snapshot(&self) -> MemoryRuntimeConfig {
-        self.memory_config
-            .read()
-            .map(|config| config.clone())
-            .unwrap_or_else(|_| MemoryRuntimeConfig::default())
+        match self.memory_config.read() {
+            Ok(config) => config.clone(),
+            Err(poisoned) => {
+                warn!("memory config lock poisoned while reading runtime config");
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     pub fn clear_memory_search_cache(&self) {
-        if let Ok(mut cache) = self.memory_search_cache.lock() {
-            cache.clear();
+        match self.memory_search_cache.lock() {
+            Ok(mut cache) => {
+                cache.clear();
+            }
+            Err(poisoned) => {
+                warn!("memory search cache lock poisoned while clearing cache");
+                let mut cache = poisoned.into_inner();
+                cache.clear();
+            }
         }
     }
 
@@ -1857,11 +1886,17 @@ impl GatewayRuntimeState {
     ) -> Result<Vec<MemorySearchHit>, Status> {
         self.counters.memory_search_requests.fetch_add(1, Ordering::Relaxed);
         let cache_key = memory_search_cache_key(&request);
-        if let Ok(cache) = self.memory_search_cache.lock() {
-            if let Some(cached) = cache.get(cache_key.as_str()) {
-                self.counters.memory_search_cache_hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(cached.clone());
+        let cached_hits = match self.memory_search_cache.lock() {
+            Ok(cache) => cache.get(cache_key.as_str()).cloned(),
+            Err(poisoned) => {
+                warn!("memory search cache lock poisoned while reading cache");
+                let cache = poisoned.into_inner();
+                cache.get(cache_key.as_str()).cloned()
             }
+        };
+        if let Some(cached) = cached_hits {
+            self.counters.memory_search_cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached);
         }
 
         let started_at = Instant::now();
@@ -1882,13 +1917,25 @@ impl GatewayRuntimeState {
             );
         }
 
-        if let Ok(mut cache) = self.memory_search_cache.lock() {
-            if cache.len() >= MEMORY_SEARCH_CACHE_CAPACITY {
-                if let Some(first_key) = cache.keys().next().cloned() {
-                    cache.remove(first_key.as_str());
+        match self.memory_search_cache.lock() {
+            Ok(mut cache) => {
+                if cache.len() >= MEMORY_SEARCH_CACHE_CAPACITY {
+                    if let Some(first_key) = cache.keys().next().cloned() {
+                        cache.remove(first_key.as_str());
+                    }
                 }
+                cache.insert(cache_key, results.clone());
             }
-            cache.insert(cache_key, results.clone());
+            Err(poisoned) => {
+                warn!("memory search cache lock poisoned while writing cache");
+                let mut cache = poisoned.into_inner();
+                if cache.len() >= MEMORY_SEARCH_CACHE_CAPACITY {
+                    if let Some(first_key) = cache.keys().next().cloned() {
+                        cache.remove(first_key.as_str());
+                    }
+                }
+                cache.insert(cache_key, results.clone());
+            }
         }
         Ok(results)
     }
@@ -4998,7 +5045,8 @@ impl gateway_v1::approvals_service_server::ApprovalsService for ApprovalsService
             let mut after_approval_id: Option<String> = None;
             let mut exported = 0_usize;
             let mut chunk_seq = 0_u32;
-            let mut json_records = Vec::new();
+            let mut json_array_started = false;
+            let mut json_first_item = true;
 
             loop {
                 if exported >= export_limit {
@@ -5064,7 +5112,64 @@ impl gateway_v1::approvals_service_server::ApprovalsService for ApprovalsService
                             }
                         }
                         gateway_v1::ApprovalExportFormat::Json => {
-                            json_records.push(record);
+                            if !json_array_started {
+                                json_array_started = true;
+                                chunk_seq = chunk_seq.saturating_add(1);
+                                if sender
+                                    .send(Ok(gateway_v1::ExportApprovalsResponse {
+                                        v: CANONICAL_PROTOCOL_MAJOR,
+                                        chunk: b"[".to_vec(),
+                                        chunk_seq,
+                                        done: false,
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            if !json_first_item {
+                                chunk_seq = chunk_seq.saturating_add(1);
+                                if sender
+                                    .send(Ok(gateway_v1::ExportApprovalsResponse {
+                                        v: CANONICAL_PROTOCOL_MAJOR,
+                                        chunk: b",".to_vec(),
+                                        chunk_seq,
+                                        done: false,
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            json_first_item = false;
+                            let payload = match serde_json::to_vec(&record) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    let _ = sender
+                                        .send(Err(Status::internal(format!(
+                                            "failed to serialize approvals JSON export record: {error}"
+                                        ))))
+                                        .await;
+                                    return;
+                                }
+                            };
+                            for chunk in payload.chunks(MAX_APPROVAL_EXPORT_CHUNK_BYTES) {
+                                chunk_seq = chunk_seq.saturating_add(1);
+                                if sender
+                                    .send(Ok(gateway_v1::ExportApprovalsResponse {
+                                        v: CANONICAL_PROTOCOL_MAJOR,
+                                        chunk: chunk.to_vec(),
+                                        chunk_seq,
+                                        done: false,
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
                         }
                         gateway_v1::ApprovalExportFormat::Unspecified => {}
                     }
@@ -5078,18 +5183,8 @@ impl gateway_v1::approvals_service_server::ApprovalsService for ApprovalsService
             }
 
             if export_format == gateway_v1::ApprovalExportFormat::Json {
-                let payload = match serde_json::to_vec(&json_records) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        let _ = sender
-                            .send(Err(Status::internal(format!(
-                                "failed to serialize approvals JSON export: {error}"
-                            ))))
-                            .await;
-                        return;
-                    }
-                };
-                for chunk in payload.chunks(MAX_APPROVAL_EXPORT_CHUNK_BYTES) {
+                let suffix: &[u8] = if json_array_started { b"]" } else { b"[]" };
+                for chunk in suffix.chunks(MAX_APPROVAL_EXPORT_CHUNK_BYTES) {
                     chunk_seq = chunk_seq.saturating_add(1);
                     if sender
                         .send(Ok(gateway_v1::ExportApprovalsResponse {
@@ -7395,8 +7490,9 @@ mod tests {
         constant_time_eq, enforce_vault_scope_access, execute_memory_search_tool,
         request_context_from_headers, resolve_cron_job_channel_for_create, AuthError,
         GatewayAuthConfig, GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot,
-        GatewayRuntimeState, RequestContext, ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID,
-        HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
+        GatewayRuntimeState, MemoryRuntimeConfig, RequestContext, ToolApprovalOutcome,
+        HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT,
+        VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS, VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
     };
 
     static TEMP_JOURNAL_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -7707,13 +7803,91 @@ mod tests {
             assert!(allowed, "initial request for unique principal should be allowed");
         }
         assert!(
-            !state.consume_vault_rate_limit("user:overflow"),
-            "new principal should be denied when rate-limit bucket map reaches configured cap"
+            state.consume_vault_rate_limit("user:overflow"),
+            "new principal should remain admissible via oldest-bucket eviction at cap"
         );
+        let bucket_count = match state.vault_rate_limit.lock() {
+            Ok(cache) => cache.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        };
+        assert_eq!(
+            bucket_count, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
+            "eviction should keep bucket map bounded to configured cap"
+        );
+    }
+
+    #[test]
+    fn vault_rate_limit_still_throttles_hot_principal_within_window() {
+        let state = build_test_runtime_state(false);
+        for attempt in 0..VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+            assert!(
+                state.consume_vault_rate_limit("user:hot"),
+                "request {attempt} within per-window limit should be allowed"
+            );
+        }
         assert!(
-            state.consume_vault_rate_limit("user:0"),
-            "existing principal bucket should remain usable when cap is reached"
+            !state.consume_vault_rate_limit("user:hot"),
+            "request above per-window limit should be throttled"
         );
+    }
+
+    #[test]
+    fn memory_config_snapshot_recovers_from_poisoned_lock_without_default_fallback() {
+        let state = build_test_runtime_state(false);
+        let poisoned_state = std::sync::Arc::clone(&state);
+        let panic_result = std::thread::spawn(move || {
+            let _guard = poisoned_state
+                .memory_config
+                .write()
+                .expect("memory config lock should be available before poisoning");
+            panic!("intentional memory config lock poison");
+        })
+        .join();
+        assert!(panic_result.is_err(), "poisoning helper thread should panic");
+
+        let expected = MemoryRuntimeConfig {
+            max_item_bytes: 4_096,
+            max_item_tokens: 128,
+            auto_inject_enabled: true,
+            auto_inject_max_items: 2,
+            default_ttl_ms: Some(60_000),
+        };
+        state.configure_memory(expected.clone());
+        assert_eq!(
+            state.memory_config_snapshot(),
+            expected,
+            "poisoned lock recovery should preserve configured runtime memory limits"
+        );
+    }
+
+    #[test]
+    fn clear_memory_search_cache_recovers_from_poisoned_lock() {
+        let state = build_test_runtime_state(false);
+        {
+            let mut cache = state
+                .memory_search_cache
+                .lock()
+                .expect("cache lock should be available before poisoning");
+            cache.insert("seed".to_owned(), Vec::new());
+        }
+
+        let poisoned_state = std::sync::Arc::clone(&state);
+        let panic_result = std::thread::spawn(move || {
+            let _guard = poisoned_state
+                .memory_search_cache
+                .lock()
+                .expect("cache lock should be available before poisoning");
+            panic!("intentional memory cache lock poison");
+        })
+        .join();
+        assert!(panic_result.is_err(), "poisoning helper thread should panic");
+
+        state.clear_memory_search_cache();
+        let cache_is_empty = match state.memory_search_cache.lock() {
+            Ok(cache) => cache.is_empty(),
+            Err(poisoned) => poisoned.into_inner().is_empty(),
+        };
+        assert!(cache_is_empty, "cache clear should succeed even when lock is poisoned");
     }
 
     #[test]
