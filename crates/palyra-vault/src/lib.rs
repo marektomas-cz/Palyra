@@ -2,6 +2,8 @@ mod backend;
 mod envelope;
 mod scope;
 
+#[cfg(windows)]
+use std::process::Command;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -38,6 +40,8 @@ const LEGACY_CA_STATE_KEY: &str = "identity/ca/state.json";
 const MAX_SECRET_KEY_BYTES: usize = 128;
 pub const MAX_SCOPE_SEGMENT_BYTES: usize = 256;
 const DEFAULT_MAX_SECRET_BYTES: usize = 64 * 1024;
+#[cfg(windows)]
+const WINDOWS_SYSTEM_SID: &str = "S-1-5-18";
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
@@ -426,7 +430,20 @@ impl Drop for MetadataLockGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetadataLockMarker {
+    pid: u32,
+}
+
 fn maybe_reclaim_stale_lock(lock_path: &Path) -> Result<bool, VaultError> {
+    maybe_reclaim_stale_lock_with_policy(lock_path, SystemTime::now(), METADATA_LOCK_STALE_AGE)
+}
+
+fn maybe_reclaim_stale_lock_with_policy(
+    lock_path: &Path,
+    now: SystemTime,
+    stale_age: Duration,
+) -> Result<bool, VaultError> {
     let metadata = fs::metadata(lock_path).map_err(|error| {
         VaultError::Io(format!("failed to inspect metadata lock {}: {error}", lock_path.display()))
     })?;
@@ -436,10 +453,15 @@ fn maybe_reclaim_stale_lock(lock_path: &Path) -> Result<bool, VaultError> {
             lock_path.display()
         ))
     })?;
-    if SystemTime::now().duration_since(modified).unwrap_or(Duration::ZERO)
-        < METADATA_LOCK_STALE_AGE
-    {
+    if now.duration_since(modified).unwrap_or(Duration::ZERO) < stale_age {
         return Ok(false);
+    }
+    if let Ok(raw_marker) = fs::read_to_string(lock_path) {
+        if let Some(marker) = parse_metadata_lock_marker(raw_marker.as_str()) {
+            if metadata_lock_owner_is_alive(marker.pid) {
+                return Ok(false);
+            }
+        }
     }
     fs::remove_file(lock_path).map_err(|error| {
         VaultError::Io(format!(
@@ -448,6 +470,63 @@ fn maybe_reclaim_stale_lock(lock_path: &Path) -> Result<bool, VaultError> {
         ))
     })?;
     Ok(true)
+}
+
+fn parse_metadata_lock_marker(raw: &str) -> Option<MetadataLockMarker> {
+    let mut pid = None;
+    let mut ts_ms_seen = false;
+    for part in raw.split_whitespace() {
+        if let Some(value) = part.strip_prefix("pid=") {
+            pid = value.parse::<u32>().ok();
+            continue;
+        }
+        if let Some(value) = part.strip_prefix("ts_ms=") {
+            ts_ms_seen = value.parse::<u64>().is_ok();
+        }
+    }
+    if !ts_ms_seen {
+        return None;
+    }
+    Some(MetadataLockMarker { pid: pid? })
+}
+
+#[cfg(unix)]
+fn metadata_lock_owner_is_alive(pid: u32) -> bool {
+    let Ok(pid_i32) = i32::try_from(pid) else {
+        return true;
+    };
+    // SAFETY: `kill(pid, 0)` only probes process existence/permission.
+    let result = unsafe { libc::kill(pid_i32, 0) };
+    if result == 0 {
+        return true;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(code) if code == libc::ESRCH => false,
+        Some(code) if code == libc::EPERM => true,
+        _ => true,
+    }
+}
+
+#[cfg(windows)]
+fn metadata_lock_owner_is_alive(pid: u32) -> bool {
+    let output = Command::new("tasklist")
+        .arg("/FI")
+        .arg(format!("PID eq {pid}"))
+        .args(["/FO", "CSV", "/NH"])
+        .output();
+    let Ok(output) = output else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let pid_marker = format!(",\"{pid}\"");
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| line.contains(&pid_marker))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn metadata_lock_owner_is_alive(_pid: u32) -> bool {
+    true
 }
 
 fn derive_device_kek(identity_store_root: &Path) -> Result<[u8; 32], VaultError> {
@@ -587,6 +666,11 @@ pub fn ensure_owner_only_dir(path: &Path) -> Result<(), VaultError> {
     fs::create_dir_all(path).map_err(|error| {
         VaultError::Io(format!("failed to create directory {}: {error}", path.display()))
     })?;
+    #[cfg(windows)]
+    {
+        let owner_sid = current_user_sid()?;
+        harden_windows_path_permissions(path, owner_sid.as_str(), true)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -601,8 +685,11 @@ pub fn ensure_owner_only_dir(path: &Path) -> Result<(), VaultError> {
 }
 
 pub fn ensure_owner_only_file(path: &Path) -> Result<(), VaultError> {
-    #[cfg(not(unix))]
-    let _ = path;
+    #[cfg(windows)]
+    {
+        let owner_sid = current_user_sid()?;
+        harden_windows_path_permissions(path, owner_sid.as_str(), false)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -616,18 +703,97 @@ pub fn ensure_owner_only_file(path: &Path) -> Result<(), VaultError> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn current_user_sid() -> Result<String, VaultError> {
+    let output =
+        Command::new("whoami").args(["/user", "/fo", "csv", "/nh"]).output().map_err(|error| {
+            VaultError::Io(format!("failed to execute whoami for vault ACL: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(VaultError::Io(format!(
+            "whoami returned non-success status {} while resolving vault ACL user SID: stdout={} stderr={}",
+            output.status.code().map_or_else(|| "unknown".to_owned(), |code| code.to_string()),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+    parse_whoami_sid_csv(String::from_utf8_lossy(&output.stdout).trim()).ok_or_else(|| {
+        VaultError::Io("failed to parse current user SID from whoami output".to_owned())
+    })
+}
+
+#[cfg(windows)]
+fn parse_whoami_sid_csv(raw: &str) -> Option<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in raw.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                fields.push(current.trim().to_owned());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    fields.push(current.trim().to_owned());
+    if fields.len() < 2 {
+        return None;
+    }
+    let sid = fields[1].trim().trim_matches('"').to_owned();
+    if sid.starts_with("S-1-") {
+        Some(sid)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn harden_windows_path_permissions(
+    path: &Path,
+    owner_sid: &str,
+    is_directory: bool,
+) -> Result<(), VaultError> {
+    let grant_mask = if is_directory { "(OI)(CI)F" } else { "F" };
+    let owner_grant = format!("*{owner_sid}:{grant_mask}");
+    let system_grant = format!("*{WINDOWS_SYSTEM_SID}:{grant_mask}");
+    let output = Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(owner_grant)
+        .args(["/grant:r"])
+        .arg(system_grant)
+        .output()
+        .map_err(|error| {
+            VaultError::Io(format!("failed to execute icacls for {}: {error}", path.display()))
+        })?;
+    if !output.status.success() {
+        return Err(VaultError::Io(format!(
+            "icacls returned non-success status {} for {}: stdout={} stderr={}",
+            output.status.code().map_or_else(|| "unknown".to_owned(), |code| code.to_string()),
+            path.display(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         backend::{BackendKind, BlobBackend},
         derive_kek_from_seed_material, ensure_owner_only_dir, extract_kek_seed_material,
-        BackendPreference, Vault, VaultConfig, VaultError, VaultRef, VaultScope,
+        maybe_reclaim_stale_lock_with_policy, BackendPreference, Vault, VaultConfig, VaultError,
+        VaultRef, VaultScope,
     };
     use anyhow::Result;
     use std::{
         collections::HashMap,
         path::PathBuf,
         sync::{Arc, Mutex},
+        time::Duration,
     };
     use tempfile::tempdir;
 
@@ -838,6 +1004,63 @@ mod tests {
             .map_err(|_| VaultError::Io("metadata-failure backend mutex poisoned".to_owned()))?
             .len();
         assert_eq!(object_count, 0, "blob rollback should remove orphaned payload");
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_lock_reclaim_keeps_live_owner_when_stale_age_elapsed() -> Result<()> {
+        let temp = tempdir()?;
+        let lock_path = temp.path().join(super::METADATA_LOCK_FILE);
+        std::fs::write(&lock_path, format!("pid={} ts_ms=0\n", std::process::id()))?;
+
+        let reclaimed = maybe_reclaim_stale_lock_with_policy(
+            &lock_path,
+            std::time::SystemTime::now(),
+            Duration::ZERO,
+        )?;
+        assert!(!reclaimed, "live owner lock must not be reclaimed");
+        assert!(lock_path.exists(), "live owner lock file should remain");
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_lock_reclaim_removes_dead_owner_when_stale_age_elapsed() -> Result<()> {
+        let temp = tempdir()?;
+        let lock_path = temp.path().join(super::METADATA_LOCK_FILE);
+        std::fs::write(&lock_path, format!("pid={} ts_ms=0\n", i32::MAX))?;
+
+        let reclaimed = maybe_reclaim_stale_lock_with_policy(
+            &lock_path,
+            std::time::SystemTime::now(),
+            Duration::ZERO,
+        )?;
+        assert!(reclaimed, "dead owner lock should be reclaimed");
+        assert!(!lock_path.exists(), "reclaimed lock file should be removed");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_whoami_sid_csv_extracts_sid_field() {
+        let parsed = super::parse_whoami_sid_csv(
+            r#""desktop\operator","S-1-5-21-123456789-111111111-222222222-1001""#,
+        );
+        assert_eq!(
+            parsed.as_deref(),
+            Some("S-1-5-21-123456789-111111111-222222222-1001"),
+            "whoami CSV parser should extract SID from second column"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_owner_only_helpers_apply_acl_to_dir_and_file() -> Result<()> {
+        let temp = tempdir()?;
+        let dir = temp.path().join("vault-acl");
+        ensure_owner_only_dir(&dir)?;
+        let file = dir.join("metadata.lock");
+        std::fs::write(&file, b"marker")?;
+        super::ensure_owner_only_file(&file)?;
         Ok(())
     }
 

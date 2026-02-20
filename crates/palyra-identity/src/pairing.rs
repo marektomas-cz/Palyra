@@ -768,7 +768,24 @@ fn process_is_alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    let output = std::process::Command::new("tasklist")
+        .arg("/FI")
+        .arg(format!("PID eq {pid}"))
+        .args(["/FO", "CSV", "/NH"])
+        .output();
+    let Ok(output) = output else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let pid_marker = format!(",\"{pid}\"");
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| line.contains(&pid_marker))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn process_is_alive(_pid: u32) -> bool {
     true
 }
@@ -947,18 +964,18 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
+    use std::time::Instant;
     use std::{
         collections::HashMap,
+        fs,
         sync::{Arc, Mutex},
         time::SystemTime,
     };
-    #[cfg(not(windows))]
-    use std::{fs, time::Instant};
 
     use super::*;
     use crate::{device::DeviceIdentity, store::SecretStore};
     use proptest::prelude::*;
-    #[cfg(not(windows))]
     use tempfile::TempDir;
 
     struct ToggleFailSecretStore {
@@ -1126,6 +1143,36 @@ mod tests {
         let issued = manager.issue_gateway_server_certificate("localhost");
         assert!(issued.is_ok(), "stale dead lock marker should be reclaimed");
         assert!(!lock_path.exists(), "stale lock file should be removed after successful mutation");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn filesystem_lock_reclaims_stale_dead_owner_marker_windows() {
+        let root = TempDir::new().expect("temp directory should be created");
+        let lock_path = root.path().join(IDENTITY_STATE_LOCK_FILENAME);
+        fs::write(&lock_path, format!("pid={} ts_ms=0\n", i32::MAX))
+            .expect("stale lock marker should be written");
+
+        let reclaimed =
+            try_reclaim_stale_filesystem_lock(&lock_path, SystemTime::now(), Duration::ZERO)
+                .expect("reclaim evaluation should succeed");
+        assert!(reclaimed, "stale dead lock marker should be reclaimed on windows");
+        assert!(!lock_path.exists(), "stale lock file should be removed after reclaim");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn filesystem_lock_keeps_stale_live_owner_marker_windows() {
+        let root = TempDir::new().expect("temp directory should be created");
+        let lock_path = root.path().join(IDENTITY_STATE_LOCK_FILENAME);
+        fs::write(&lock_path, format!("pid={} ts_ms=0\n", std::process::id()))
+            .expect("live lock marker should be written");
+
+        let reclaimed =
+            try_reclaim_stale_filesystem_lock(&lock_path, SystemTime::now(), Duration::ZERO)
+                .expect("reclaim evaluation should succeed");
+        assert!(!reclaimed, "live owner lock marker must not be reclaimed");
+        assert!(lock_path.exists(), "live owner lock file must remain in place");
     }
 
     #[cfg(not(windows))]

@@ -26,9 +26,9 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
     "credential",
     "private_key",
     "proof",
-    "pin",
     "signature",
 ];
+const SENSITIVE_KEY_TOKENS: &[&str] = &["pin"];
 const MAX_CRON_JOBS_LIST_LIMIT: usize = 500;
 const MAX_CRON_RUNS_LIST_LIMIT: usize = 500;
 const MAX_APPROVALS_LIST_LIMIT: usize = 500;
@@ -3931,7 +3931,12 @@ fn redact_value(value: &mut Value, key_context: Option<&str>) -> bool {
 
 fn is_sensitive_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase();
-    SENSITIVE_KEY_FRAGMENTS.iter().any(|fragment| normalized.contains(fragment))
+    if SENSITIVE_KEY_FRAGMENTS.iter().any(|fragment| normalized.contains(fragment)) {
+        return true;
+    }
+    normalized
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| SENSITIVE_KEY_TOKENS.iter().any(|fragment| token == *fragment))
 }
 
 fn looks_like_secret(value: &str) -> bool {
@@ -4263,6 +4268,30 @@ mod tests {
         assert!(!records[0].payload_json.contains("123456"), "password must be redacted");
         assert!(records[0].payload_json.contains("<redacted>"), "payload should contain marker");
         assert!(records[0].redacted, "record should flag that redaction occurred");
+    }
+
+    #[test]
+    fn append_redacts_pin_token_without_overmatching_pin_substrings() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        store
+            .append(&build_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FB9",
+                br#"{"pin":"1234","pinpoint_id":"region-1"}"#,
+            ))
+            .expect("append should succeed");
+        let records = store.recent(1).expect("recent journal query should succeed");
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0].payload_json.contains("\"pin\":\"<redacted>\""),
+            "explicit pin keys should remain redacted"
+        );
+        assert!(
+            records[0].payload_json.contains("\"pinpoint_id\":\"region-1\""),
+            "pin substring in benign key names must not trigger over-redaction"
+        );
     }
 
     #[test]
