@@ -129,6 +129,7 @@ pub struct FileMemoryAutoInjectConfig {
 pub struct FileModelProviderConfig {
     pub kind: Option<String>,
     pub openai_base_url: Option<String>,
+    pub allow_private_base_url: Option<bool>,
     pub openai_model: Option<String>,
     pub openai_api_key: Option<String>,
     pub openai_api_key_vault_ref: Option<String>,

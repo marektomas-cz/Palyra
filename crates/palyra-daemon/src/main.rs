@@ -350,6 +350,7 @@ async fn main() -> Result<()> {
         memory_auto_inject_max_items = loaded.memory.auto_inject.max_items,
         model_provider_kind = loaded.model_provider.kind.as_str(),
         model_provider_openai_base_url = %loaded.model_provider.openai_base_url,
+        model_provider_allow_private_base_url = loaded.model_provider.allow_private_base_url,
         model_provider_openai_model = %loaded.model_provider.openai_model,
         model_provider_api_key_configured = loaded.model_provider.openai_api_key.is_some(),
         model_provider_openai_api_key_vault_ref_configured =
