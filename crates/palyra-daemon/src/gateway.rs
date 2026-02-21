@@ -7914,9 +7914,10 @@ mod tests {
         constant_time_eq, enforce_vault_scope_access, execute_memory_search_tool,
         request_context_from_headers, resolve_cron_job_channel_for_create, AuthError,
         GatewayAuthConfig, GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot,
-        GatewayRuntimeState, MemoryRuntimeConfig, RequestContext, ToolApprovalOutcome,
-        HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT,
-        VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS, VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest, RequestContext,
+        ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
+        MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
+        VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
     };
 
     static TEMP_JOURNAL_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -8390,6 +8391,63 @@ mod tests {
         assert!(
             status.storage.latest_event_hash.is_some(),
             "latest hash should be available when hash-chain is enabled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_snapshot_surfaces_model_provider_runtime_aggregates() {
+        let state = build_test_runtime_state(false);
+
+        state
+            .execute_model_provider(ProviderRequest {
+                input_text: "status snapshot provider metrics".to_owned(),
+                json_mode: false,
+                vision_requested: false,
+            })
+            .await
+            .expect("deterministic provider request should succeed");
+        let failed = state
+            .execute_model_provider(ProviderRequest {
+                input_text: "vision unsupported path".to_owned(),
+                json_mode: false,
+                vision_requested: true,
+            })
+            .await;
+        assert!(
+            failed.is_err(),
+            "vision request should fail and contribute to provider error aggregates"
+        );
+
+        let status = state.status_snapshot(
+            RequestContext {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+            },
+            &GatewayAuthConfig {
+                require_auth: true,
+                admin_token: Some("token".to_owned()),
+                bound_principal: Some("user:ops".to_owned()),
+            },
+        );
+        assert_eq!(status.model_provider.runtime_metrics.request_count, 2);
+        assert_eq!(status.model_provider.runtime_metrics.error_count, 1);
+        assert_eq!(status.model_provider.runtime_metrics.error_rate_bps, 5_000);
+        assert!(
+            status.model_provider.runtime_metrics.total_prompt_tokens > 0,
+            "status snapshot should expose accumulated prompt token usage"
+        );
+        assert!(
+            status.model_provider.runtime_metrics.total_completion_tokens > 0,
+            "status snapshot should expose accumulated completion token usage"
+        );
+        assert_eq!(
+            status.counters.model_provider_requests, 2,
+            "gateway counters should keep tracking provider request totals"
+        );
+        assert_eq!(
+            status.counters.model_provider_failures, 1,
+            "gateway counters should keep tracking provider failures"
         );
     }
 

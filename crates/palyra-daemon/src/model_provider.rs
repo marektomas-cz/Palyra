@@ -156,6 +156,21 @@ pub struct ProviderCircuitBreakerSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderRuntimeMetricsSnapshot {
+    pub request_count: u64,
+    pub error_count: u64,
+    pub error_rate_bps: u32,
+    pub total_retry_attempts: u64,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
+    pub avg_prompt_tokens_per_run: u64,
+    pub avg_completion_tokens_per_run: u64,
+    pub last_latency_ms: u64,
+    pub avg_latency_ms: u64,
+    pub max_latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProviderStatusSnapshot {
     pub kind: String,
     pub capabilities: ProviderCapabilitiesSnapshot,
@@ -166,6 +181,7 @@ pub struct ProviderStatusSnapshot {
     pub api_key_configured: bool,
     pub retry_policy: ProviderRetryPolicySnapshot,
     pub circuit_breaker: ProviderCircuitBreakerSnapshot,
+    pub runtime_metrics: ProviderRuntimeMetricsSnapshot,
 }
 
 pub trait ModelProvider: Send + Sync {
@@ -267,11 +283,28 @@ fn is_private_or_local_ipv6(address: Ipv6Addr) -> bool {
 #[derive(Debug)]
 struct DeterministicProvider {
     config: ModelProviderConfig,
+    runtime_metrics: Mutex<ProviderRuntimeMetrics>,
 }
 
 impl DeterministicProvider {
     fn new(config: ModelProviderConfig) -> Self {
-        Self { config }
+        Self { config, runtime_metrics: Mutex::new(ProviderRuntimeMetrics::default()) }
+    }
+
+    fn record_runtime_metrics(
+        &self,
+        error: bool,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        retry_count: u32,
+        latency_ms: u64,
+    ) {
+        let mut metrics = lock_runtime_metrics(&self.runtime_metrics);
+        metrics.record(error, prompt_tokens, completion_tokens, retry_count, latency_ms);
+    }
+
+    fn runtime_metrics_snapshot(&self) -> ProviderRuntimeMetricsSnapshot {
+        lock_runtime_metrics(&self.runtime_metrics).snapshot()
     }
 }
 
@@ -281,7 +314,9 @@ impl ModelProvider for DeterministicProvider {
         request: ProviderRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
+            let started_at = Instant::now();
             if request.vision_requested {
+                self.record_runtime_metrics(true, 0, 0, 0, elapsed_millis_since(started_at));
                 return Err(ProviderError::VisionUnsupported {
                     provider: "deterministic".to_owned(),
                 });
@@ -307,12 +342,16 @@ impl ModelProvider for DeterministicProvider {
                     is_final: index + 1 == token_count,
                 })
                 .collect::<Vec<_>>();
-            Ok(ProviderResponse {
-                events,
-                prompt_tokens: estimate_token_count(request.input_text.as_str()),
-                completion_tokens: token_count as u64,
-                retry_count: 0,
-            })
+            let prompt_tokens = estimate_token_count(request.input_text.as_str());
+            let completion_tokens = token_count as u64;
+            self.record_runtime_metrics(
+                false,
+                prompt_tokens,
+                completion_tokens,
+                0,
+                elapsed_millis_since(started_at),
+            );
+            Ok(ProviderResponse { events, prompt_tokens, completion_tokens, retry_count: 0 })
         })
     }
 
@@ -338,6 +377,7 @@ impl ModelProvider for DeterministicProvider {
                 consecutive_failures: 0,
                 open: false,
             },
+            runtime_metrics: self.runtime_metrics_snapshot(),
         }
     }
 }
@@ -347,6 +387,7 @@ struct OpenAiCompatibleProvider {
     config: ModelProviderConfig,
     client: Client,
     circuit_state: Mutex<CircuitBreakerState>,
+    runtime_metrics: Mutex<ProviderRuntimeMetrics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,7 +457,24 @@ impl OpenAiCompatibleProvider {
                 consecutive_failures: 0,
                 open_until: None,
             }),
+            runtime_metrics: Mutex::new(ProviderRuntimeMetrics::default()),
         })
+    }
+
+    fn record_runtime_metrics(
+        &self,
+        error: bool,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        retry_count: u32,
+        latency_ms: u64,
+    ) {
+        let mut metrics = lock_runtime_metrics(&self.runtime_metrics);
+        metrics.record(error, prompt_tokens, completion_tokens, retry_count, latency_ms);
+    }
+
+    fn runtime_metrics_snapshot(&self) -> ProviderRuntimeMetricsSnapshot {
+        lock_runtime_metrics(&self.runtime_metrics).snapshot()
     }
 
     fn ensure_circuit_closed(&self) -> Result<(), ProviderError> {
@@ -569,14 +627,27 @@ impl ModelProvider for OpenAiCompatibleProvider {
         request: ProviderRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
+            let started_at = Instant::now();
             if request.vision_requested {
+                self.record_runtime_metrics(true, 0, 0, 0, elapsed_millis_since(started_at));
                 return Err(ProviderError::VisionUnsupported {
                     provider: ModelProviderKind::OpenAiCompatible.as_str().to_owned(),
                 });
             }
-            let api_key =
-                self.config.openai_api_key.as_ref().ok_or(ProviderError::MissingApiKey)?;
-            self.ensure_circuit_closed()?;
+            let Some(api_key) = self.config.openai_api_key.as_ref() else {
+                self.record_runtime_metrics(true, 0, 0, 0, elapsed_millis_since(started_at));
+                return Err(ProviderError::MissingApiKey);
+            };
+            if let Err(error) = self.ensure_circuit_closed() {
+                self.record_runtime_metrics(
+                    true,
+                    0,
+                    0,
+                    error.retry_count(),
+                    elapsed_millis_since(started_at),
+                );
+                return Err(error);
+            }
 
             let mut retry_count = 0_u32;
             for attempt in 0..=self.config.max_retries {
@@ -584,6 +655,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     Ok(mut response) => {
                         self.record_success()?;
                         response.retry_count = retry_count;
+                        self.record_runtime_metrics(
+                            false,
+                            response.prompt_tokens,
+                            response.completion_tokens,
+                            response.retry_count,
+                            elapsed_millis_since(started_at),
+                        );
                         return Ok(response);
                     }
                     Err(error) => {
@@ -595,26 +673,40 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         }
 
                         self.record_failure()?;
-                        if error.invalid_response {
-                            return Err(ProviderError::InvalidResponse {
+                        let provider_error = if error.invalid_response {
+                            ProviderError::InvalidResponse { message: error.message, retry_count }
+                        } else {
+                            ProviderError::RequestFailed {
                                 message: error.message,
+                                retryable: error.retryable,
                                 retry_count,
-                            });
-                        }
-                        return Err(ProviderError::RequestFailed {
-                            message: error.message,
-                            retryable: error.retryable,
-                            retry_count,
-                        });
+                            }
+                        };
+                        self.record_runtime_metrics(
+                            true,
+                            0,
+                            0,
+                            provider_error.retry_count(),
+                            elapsed_millis_since(started_at),
+                        );
+                        return Err(provider_error);
                     }
                 }
             }
 
-            Err(ProviderError::RequestFailed {
+            let exhausted_error = ProviderError::RequestFailed {
                 message: "openai-compatible execution exhausted retries".to_owned(),
                 retryable: true,
                 retry_count,
-            })
+            };
+            self.record_runtime_metrics(
+                true,
+                0,
+                0,
+                exhausted_error.retry_count(),
+                elapsed_millis_since(started_at),
+            );
+            Err(exhausted_error)
         })
     }
 
@@ -649,8 +741,88 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 consecutive_failures,
                 open,
             },
+            runtime_metrics: self.runtime_metrics_snapshot(),
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ProviderRuntimeMetrics {
+    request_count: u64,
+    error_count: u64,
+    total_retry_attempts: u64,
+    total_prompt_tokens: u64,
+    total_completion_tokens: u64,
+    total_latency_ms: u64,
+    last_latency_ms: u64,
+    max_latency_ms: u64,
+}
+
+impl ProviderRuntimeMetrics {
+    fn record(
+        &mut self,
+        error: bool,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        retry_count: u32,
+        latency_ms: u64,
+    ) {
+        self.request_count = self.request_count.saturating_add(1);
+        if error {
+            self.error_count = self.error_count.saturating_add(1);
+        }
+        self.total_retry_attempts =
+            self.total_retry_attempts.saturating_add(u64::from(retry_count));
+        self.total_prompt_tokens = self.total_prompt_tokens.saturating_add(prompt_tokens);
+        self.total_completion_tokens =
+            self.total_completion_tokens.saturating_add(completion_tokens);
+        self.total_latency_ms = self.total_latency_ms.saturating_add(latency_ms);
+        self.last_latency_ms = latency_ms;
+        self.max_latency_ms = self.max_latency_ms.max(latency_ms);
+    }
+
+    fn snapshot(&self) -> ProviderRuntimeMetricsSnapshot {
+        let error_rate_bps = if self.request_count == 0 {
+            0
+        } else {
+            ((u128::from(self.error_count) * 10_000_u128) / u128::from(self.request_count)) as u32
+        };
+        let avg_prompt_tokens_per_run =
+            if self.request_count == 0 { 0 } else { self.total_prompt_tokens / self.request_count };
+        let avg_completion_tokens_per_run = if self.request_count == 0 {
+            0
+        } else {
+            self.total_completion_tokens / self.request_count
+        };
+        let avg_latency_ms =
+            if self.request_count == 0 { 0 } else { self.total_latency_ms / self.request_count };
+        ProviderRuntimeMetricsSnapshot {
+            request_count: self.request_count,
+            error_count: self.error_count,
+            error_rate_bps,
+            total_retry_attempts: self.total_retry_attempts,
+            total_prompt_tokens: self.total_prompt_tokens,
+            total_completion_tokens: self.total_completion_tokens,
+            avg_prompt_tokens_per_run,
+            avg_completion_tokens_per_run,
+            last_latency_ms: self.last_latency_ms,
+            avg_latency_ms,
+            max_latency_ms: self.max_latency_ms,
+        }
+    }
+}
+
+fn lock_runtime_metrics(
+    metrics: &Mutex<ProviderRuntimeMetrics>,
+) -> std::sync::MutexGuard<'_, ProviderRuntimeMetrics> {
+    match metrics.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn elapsed_millis_since(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 pub(crate) fn sanitize_remote_error(body: &str) -> String {
@@ -851,6 +1023,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn deterministic_provider_status_snapshot_reports_runtime_metrics() {
+        let provider = build_model_provider(&ModelProviderConfig::default())
+            .expect("provider should build from defaults");
+        provider
+            .complete(ProviderRequest {
+                input_text: "measure deterministic metrics".to_owned(),
+                json_mode: false,
+                vision_requested: false,
+            })
+            .await
+            .expect("deterministic provider should succeed");
+        let failed = provider
+            .complete(ProviderRequest {
+                input_text: "vision request".to_owned(),
+                json_mode: false,
+                vision_requested: true,
+            })
+            .await;
+        assert!(matches!(failed, Err(ProviderError::VisionUnsupported { .. })));
+
+        let snapshot = provider.status_snapshot();
+        assert_eq!(snapshot.runtime_metrics.request_count, 2);
+        assert_eq!(snapshot.runtime_metrics.error_count, 1);
+        assert_eq!(snapshot.runtime_metrics.error_rate_bps, 5_000);
+        assert_eq!(snapshot.runtime_metrics.total_retry_attempts, 0);
+        assert!(
+            snapshot.runtime_metrics.total_prompt_tokens > 0,
+            "successful deterministic calls should report prompt token usage"
+        );
+        assert!(
+            snapshot.runtime_metrics.total_completion_tokens > 0,
+            "successful deterministic calls should report completion token usage"
+        );
+        assert!(
+            snapshot.runtime_metrics.max_latency_ms >= snapshot.runtime_metrics.last_latency_ms,
+            "max latency should be at least as large as the latest observation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn openai_provider_retries_on_retryable_error_then_succeeds() {
         let scripted = vec![
             (503_u16, r#"{"error":{"message":"temporary upstream error"}}"#.to_owned()),
@@ -880,6 +1092,19 @@ mod tests {
             .filter(|event| matches!(event, ProviderEvent::ModelToken { .. }))
             .count();
         assert_eq!(model_tokens, 3, "response should map completion text into model tokens");
+        let snapshot = provider.status_snapshot();
+        assert_eq!(snapshot.runtime_metrics.request_count, 1);
+        assert_eq!(snapshot.runtime_metrics.error_count, 0);
+        assert_eq!(snapshot.runtime_metrics.error_rate_bps, 0);
+        assert_eq!(snapshot.runtime_metrics.total_retry_attempts, 1);
+        assert_eq!(
+            snapshot.runtime_metrics.total_prompt_tokens, response.prompt_tokens,
+            "status snapshot should accumulate prompt token usage per provider request"
+        );
+        assert_eq!(
+            snapshot.runtime_metrics.total_completion_tokens, response.completion_tokens,
+            "status snapshot should accumulate completion token usage per provider request"
+        );
         handle.join().expect("scripted server thread should exit");
     }
 
@@ -917,6 +1142,10 @@ mod tests {
             1,
             "circuit-open call must not hit upstream provider"
         );
+        let snapshot = provider.status_snapshot();
+        assert_eq!(snapshot.runtime_metrics.request_count, 2);
+        assert_eq!(snapshot.runtime_metrics.error_count, 2);
+        assert_eq!(snapshot.runtime_metrics.error_rate_bps, 10_000);
         handle.join().expect("scripted server thread should exit");
     }
 
