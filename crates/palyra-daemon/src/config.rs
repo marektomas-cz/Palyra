@@ -12,7 +12,9 @@ use palyra_common::{
     default_config_search_paths, default_identity_store_root, parse_config_path,
 };
 
-use crate::model_provider::{ModelProviderConfig, ModelProviderKind};
+use crate::model_provider::{
+    validate_openai_base_url_network_policy, ModelProviderConfig, ModelProviderKind,
+};
 use crate::sandbox_runner::EgressEnforcementMode;
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1";
@@ -424,6 +426,9 @@ pub fn load_config() -> Result<LoadedConfig> {
             if let Some(openai_base_url) = file_model_provider.openai_base_url {
                 model_provider.openai_base_url = parse_openai_base_url(openai_base_url.as_str())?;
             }
+            if let Some(allow_private_base_url) = file_model_provider.allow_private_base_url {
+                model_provider.allow_private_base_url = allow_private_base_url;
+            }
             if let Some(openai_model) = file_model_provider.openai_model {
                 model_provider.openai_model = parse_openai_model(openai_model.as_str())?;
             }
@@ -798,6 +803,13 @@ pub fn load_config() -> Result<LoadedConfig> {
         source.push_str(" +env(PALYRA_MODEL_PROVIDER_OPENAI_BASE_URL)");
     }
 
+    if let Ok(allow_private_base_url) = env::var("PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL") {
+        model_provider.allow_private_base_url = allow_private_base_url
+            .parse::<bool>()
+            .context("PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL must be true or false")?;
+        source.push_str(" +env(PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL)");
+    }
+
     if let Ok(openai_model) = env::var("PALYRA_MODEL_PROVIDER_OPENAI_MODEL") {
         model_provider.openai_model = parse_openai_model(openai_model.as_str())?;
         source.push_str(" +env(PALYRA_MODEL_PROVIDER_OPENAI_MODEL)");
@@ -953,6 +965,12 @@ pub fn load_config() -> Result<LoadedConfig> {
         anyhow::bail!(
             "gateway.tls.enabled=true requires both gateway.tls.cert_path and gateway.tls.key_path"
         );
+    }
+    if model_provider.kind == ModelProviderKind::OpenAiCompatible {
+        validate_openai_base_url_network_policy(
+            model_provider.openai_base_url.as_str(),
+            model_provider.allow_private_base_url,
+        )?;
     }
 
     Ok(LoadedConfig {
@@ -1373,6 +1391,10 @@ mod tests {
         let config = ModelProviderConfig::default();
         assert_eq!(config.kind, ModelProviderKind::Deterministic);
         assert_eq!(config.openai_base_url, "https://api.openai.com/v1");
+        assert!(
+            !config.allow_private_base_url,
+            "model provider private-network base URLs must require explicit opt-in"
+        );
         assert_eq!(config.openai_model, "gpt-4o-mini");
         assert!(config.openai_api_key.is_none(), "openai API key should default to unset");
         assert!(
@@ -1563,6 +1585,19 @@ mod tests {
         let parsed =
             parse_openai_base_url("https://api.openai.com/v1").expect("base URL should parse");
         assert_eq!(parsed, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn model_provider_config_parses_private_base_url_opt_in_flag() {
+        let (parsed, _) = parse_root_file_config(
+            r#"
+            [model_provider]
+            allow_private_base_url = true
+            "#,
+        )
+        .expect("model provider private-base-url opt-in should parse");
+        let model_provider = parsed.model_provider.expect("model_provider section should exist");
+        assert_eq!(model_provider.allow_private_base_url, Some(true));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -46,6 +47,7 @@ impl ModelProviderKind {
 pub struct ModelProviderConfig {
     pub kind: ModelProviderKind,
     pub openai_base_url: String,
+    pub allow_private_base_url: bool,
     pub openai_model: String,
     pub openai_api_key: Option<String>,
     pub openai_api_key_vault_ref: Option<String>,
@@ -61,6 +63,7 @@ impl Default for ModelProviderConfig {
         Self {
             kind: ModelProviderKind::Deterministic,
             openai_base_url: "https://api.openai.com/v1".to_owned(),
+            allow_private_base_url: false,
             openai_model: "gpt-4o-mini".to_owned(),
             openai_api_key: None,
             openai_api_key_vault_ref: None,
@@ -186,6 +189,12 @@ pub fn build_model_provider(config: &ModelProviderConfig) -> Result<Arc<dyn Mode
     if config.circuit_breaker_cooldown_ms == 0 {
         anyhow::bail!("model provider circuit breaker cooldown must be greater than 0ms");
     }
+    if config.kind == ModelProviderKind::OpenAiCompatible {
+        validate_openai_base_url_network_policy(
+            config.openai_base_url.as_str(),
+            config.allow_private_base_url,
+        )?;
+    }
 
     match config.kind {
         ModelProviderKind::Deterministic => {
@@ -193,6 +202,66 @@ pub fn build_model_provider(config: &ModelProviderConfig) -> Result<Arc<dyn Mode
         }
         ModelProviderKind::OpenAiCompatible => Ok(Arc::new(OpenAiCompatibleProvider::new(config)?)),
     }
+}
+
+pub fn validate_openai_base_url_network_policy(
+    base_url: &str,
+    allow_private_base_url: bool,
+) -> Result<()> {
+    let parsed = reqwest::Url::parse(base_url)
+        .context("model_provider.openai_base_url must be a valid absolute URL")?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("model_provider.openai_base_url must include a host"))?;
+
+    if allow_private_base_url {
+        return Ok(());
+    }
+
+    if is_localhost_hostname(host) {
+        anyhow::bail!(
+            "model_provider.openai_base_url host '{}' targets localhost/private network; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+            host
+        );
+    }
+    if let Ok(address) = host.parse::<IpAddr>() {
+        if is_private_or_local_ip(address) {
+            anyhow::bail!(
+                "model_provider.openai_base_url host '{}' targets localhost/private network; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+                host
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_localhost_hostname(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    normalized == "localhost" || normalized.ends_with(".localhost")
+}
+
+fn is_private_or_local_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ipv4) => is_private_or_local_ipv4(ipv4),
+        IpAddr::V6(ipv6) => is_private_or_local_ipv6(ipv6),
+    }
+}
+
+fn is_private_or_local_ipv4(address: Ipv4Addr) -> bool {
+    address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_unspecified()
+}
+
+fn is_private_or_local_ipv6(address: Ipv6Addr) -> bool {
+    if let Some(mapped_ipv4) = address.to_ipv4_mapped() {
+        return is_private_or_local_ipv4(mapped_ipv4);
+    }
+    address.is_loopback()
+        || address.is_unicast_link_local()
+        || address.is_unique_local()
+        || address.is_unspecified()
 }
 
 #[derive(Debug)]
@@ -747,6 +816,7 @@ mod tests {
         ModelProviderConfig {
             kind: ModelProviderKind::OpenAiCompatible,
             openai_base_url: base_url,
+            allow_private_base_url: true,
             openai_model: "gpt-4o-mini".to_owned(),
             openai_api_key: Some("sk-test-secret".to_owned()),
             openai_api_key_vault_ref: None,
@@ -848,6 +918,29 @@ mod tests {
             "circuit-open call must not hit upstream provider"
         );
         handle.join().expect("scripted server thread should exit");
+    }
+
+    #[test]
+    fn openai_provider_rejects_private_base_url_without_explicit_opt_in() {
+        let mut config = openai_test_config("https://10.10.10.10/v1".to_owned());
+        config.allow_private_base_url = false;
+        let error = match build_model_provider(&config) {
+            Ok(_) => panic!("private-network base URL must be rejected"),
+            Err(error) => error,
+        };
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("allow_private_base_url"),
+            "error should explain explicit opt-in path for local/private testing: {rendered}"
+        );
+    }
+
+    #[test]
+    fn openai_provider_accepts_private_base_url_with_explicit_opt_in() {
+        let mut config = openai_test_config("https://10.10.10.10/v1".to_owned());
+        config.allow_private_base_url = true;
+        build_model_provider(&config)
+            .expect("private-network base URL should build with explicit opt-in");
     }
 
     #[tokio::test(flavor = "multi_thread")]
