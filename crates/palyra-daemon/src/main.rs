@@ -234,6 +234,10 @@ async fn main() -> Result<()> {
             orchestrator_runloop_v1_enabled: loaded.orchestrator.runloop_v1_enabled,
             node_rpc_mtls_required: !loaded.identity.allow_insecure_node_rpc_without_mtls,
             admin_auth_required: loaded.admin.require_auth,
+            vault_get_approval_required_refs: loaded
+                .gateway
+                .vault_get_approval_required_refs
+                .clone(),
             max_tape_entries_per_response: loaded.gateway.max_tape_entries_per_response,
             max_tape_bytes_per_response: loaded.gateway.max_tape_bytes_per_response,
             tool_call: tool_protocol::ToolCallConfig {
@@ -336,6 +340,7 @@ async fn main() -> Result<()> {
         quic_enabled = loaded.gateway.quic_enabled,
         allow_insecure_remote = loaded.gateway.allow_insecure_remote,
         gateway_identity_store_dir = ?loaded.gateway.identity_store_dir.as_ref().map(|path| path.display().to_string()),
+        gateway_vault_get_approval_required_refs = ?loaded.gateway.vault_get_approval_required_refs,
         gateway_max_tape_entries_per_response = loaded.gateway.max_tape_entries_per_response,
         gateway_max_tape_bytes_per_response = loaded.gateway.max_tape_bytes_per_response,
         gateway_tls_enabled = loaded.gateway.tls.enabled,

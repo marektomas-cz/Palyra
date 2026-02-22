@@ -11,6 +11,7 @@ use palyra_common::{
     daemon_config_schema::RootFileConfig,
     default_config_search_paths, default_identity_store_root, parse_config_path,
 };
+use palyra_vault::VaultRef;
 
 use crate::cron::CronTimezoneMode;
 use crate::model_provider::{
@@ -29,6 +30,7 @@ const DEFAULT_GATEWAY_ALLOW_INSECURE_REMOTE: bool = false;
 const DEFAULT_GATEWAY_MAX_TAPE_ENTRIES_PER_RESPONSE: usize = 1_000;
 const DEFAULT_GATEWAY_MAX_TAPE_BYTES_PER_RESPONSE: usize = 2 * 1024 * 1024;
 const DEFAULT_GATEWAY_TLS_ENABLED: bool = false;
+const DEFAULT_GATEWAY_VAULT_GET_APPROVAL_REQUIRED_REFS: &[&str] = &["global/openai_api_key"];
 const DEFAULT_CRON_TIMEZONE_MODE: CronTimezoneMode = CronTimezoneMode::Utc;
 const DEFAULT_ORCHESTRATOR_RUNLOOP_V1_ENABLED: bool = false;
 const DEFAULT_MEMORY_MAX_ITEM_BYTES: usize = 16 * 1024;
@@ -90,6 +92,7 @@ pub struct GatewayConfig {
     pub quic_enabled: bool,
     pub allow_insecure_remote: bool,
     pub identity_store_dir: Option<PathBuf>,
+    pub vault_get_approval_required_refs: Vec<String>,
     pub max_tape_entries_per_response: usize,
     pub max_tape_bytes_per_response: usize,
     pub tls: GatewayTlsConfig,
@@ -218,6 +221,10 @@ impl Default for GatewayConfig {
             quic_enabled: DEFAULT_QUIC_ENABLED,
             allow_insecure_remote: DEFAULT_GATEWAY_ALLOW_INSECURE_REMOTE,
             identity_store_dir: None,
+            vault_get_approval_required_refs: DEFAULT_GATEWAY_VAULT_GET_APPROVAL_REQUIRED_REFS
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
             max_tape_entries_per_response: DEFAULT_GATEWAY_MAX_TAPE_ENTRIES_PER_RESPONSE,
             max_tape_bytes_per_response: DEFAULT_GATEWAY_MAX_TAPE_BYTES_PER_RESPONSE,
             tls: GatewayTlsConfig::default(),
@@ -375,6 +382,14 @@ pub fn load_config() -> Result<LoadedConfig> {
             if let Some(identity_store_dir) = file_gateway.identity_store_dir {
                 gateway.identity_store_dir =
                     Some(parse_identity_store_dir(identity_store_dir.as_str())?);
+            }
+            if let Some(vault_get_approval_required_refs) =
+                file_gateway.vault_get_approval_required_refs
+            {
+                gateway.vault_get_approval_required_refs = parse_vault_ref_allowlist(
+                    vault_get_approval_required_refs.join(",").as_str(),
+                    "gateway.vault_get_approval_required_refs",
+                )?;
             }
             if let Some(max_tape_entries_per_response) = file_gateway.max_tape_entries_per_response
             {
@@ -711,6 +726,16 @@ pub fn load_config() -> Result<LoadedConfig> {
     if let Ok(identity_store_dir) = env::var("PALYRA_GATEWAY_IDENTITY_STORE_DIR") {
         gateway.identity_store_dir = Some(parse_identity_store_dir(identity_store_dir.as_str())?);
         source.push_str(" +env(PALYRA_GATEWAY_IDENTITY_STORE_DIR)");
+    }
+
+    if let Ok(vault_get_approval_required_refs) =
+        env::var("PALYRA_VAULT_GET_APPROVAL_REQUIRED_REFS")
+    {
+        gateway.vault_get_approval_required_refs = parse_vault_ref_allowlist(
+            vault_get_approval_required_refs.as_str(),
+            "PALYRA_VAULT_GET_APPROVAL_REQUIRED_REFS",
+        )?;
+        source.push_str(" +env(PALYRA_VAULT_GET_APPROVAL_REQUIRED_REFS)");
     }
 
     if let Ok(max_tape_entries_per_response) =
@@ -1128,6 +1153,23 @@ fn parse_openai_model(raw: &str) -> Result<String> {
     Ok(raw.trim().to_owned())
 }
 
+fn parse_vault_ref_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
+    let mut refs = Vec::new();
+    for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        let parsed = VaultRef::parse(candidate).map_err(|error| {
+            anyhow::anyhow!("{source_name} contains invalid vault ref '{candidate}': {error}")
+        })?;
+        let normalized = format!("{}/{}", parsed.scope, parsed.key).to_ascii_lowercase();
+        if !refs.iter().any(|existing| existing == &normalized) {
+            refs.push(normalized);
+        }
+    }
+    if refs.is_empty() {
+        anyhow::bail!("{source_name} must include at least one <scope>/<key> entry");
+    }
+    Ok(refs)
+}
+
 fn parse_tool_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
     parse_identifier_allowlist(raw, source_name, "tool name")
 }
@@ -1306,8 +1348,9 @@ mod tests {
         parse_host_allowlist, parse_journal_db_path, parse_openai_base_url, parse_positive_usize,
         parse_process_executable_allowlist, parse_process_runner_egress_enforcement_mode,
         parse_root_file_config, parse_storage_prefix_allowlist, parse_tool_allowlist,
-        parse_vault_dir, AdminConfig, CronConfig, GatewayConfig, GatewayTlsConfig, IdentityConfig,
-        MemoryConfig, ModelProviderConfig, OrchestratorConfig, StorageConfig, ToolCallConfig,
+        parse_vault_dir, parse_vault_ref_allowlist, AdminConfig, CronConfig, GatewayConfig,
+        GatewayTlsConfig, IdentityConfig, MemoryConfig, ModelProviderConfig, OrchestratorConfig,
+        StorageConfig, ToolCallConfig,
     };
     use crate::model_provider::ModelProviderKind;
     use crate::sandbox_runner::EgressEnforcementMode;
@@ -1344,9 +1387,36 @@ mod tests {
             !config.allow_insecure_remote,
             "remote exposure must require explicit insecure opt-in"
         );
+        assert_eq!(
+            config.vault_get_approval_required_refs,
+            vec!["global/openai_api_key".to_owned()],
+            "sensitive vault reads should require explicit approval by default"
+        );
         assert_eq!(config.max_tape_entries_per_response, 1_000);
         assert_eq!(config.max_tape_bytes_per_response, 2 * 1024 * 1024);
         assert_eq!(config.tls, GatewayTlsConfig::default());
+    }
+
+    #[test]
+    fn gateway_config_parses_vault_get_approval_required_refs() {
+        let (parsed, _) = parse_root_file_config(
+            r#"
+            [gateway]
+            vault_get_approval_required_refs = [
+                "global/openai_api_key",
+                "principal:user/openai_api_key",
+            ]
+            "#,
+        )
+        .expect("gateway vault approval refs should parse");
+        let gateway = parsed.gateway.expect("gateway section should exist");
+        assert_eq!(
+            gateway.vault_get_approval_required_refs,
+            Some(vec![
+                "global/openai_api_key".to_owned(),
+                "principal:user/openai_api_key".to_owned(),
+            ])
+        );
     }
 
     #[test]
@@ -1675,6 +1745,28 @@ mod tests {
     fn parse_tool_allowlist_rejects_invalid_characters() {
         let result = parse_tool_allowlist("palyra.echo,../shell", "tool_call.allowed_tools");
         assert!(result.is_err(), "allowlist parser must reject invalid tool names");
+    }
+
+    #[test]
+    fn parse_vault_ref_allowlist_normalizes_and_deduplicates_values() {
+        let parsed = parse_vault_ref_allowlist(
+            "GLOBAL/openai_api_key,global/openai_api_key,principal:user/openai_api_key",
+            "gateway.vault_get_approval_required_refs",
+        )
+        .expect("vault ref allowlist should parse");
+        assert_eq!(
+            parsed,
+            vec!["global/openai_api_key".to_owned(), "principal:user/openai_api_key".to_owned(),]
+        );
+    }
+
+    #[test]
+    fn parse_vault_ref_allowlist_rejects_invalid_entries() {
+        let result = parse_vault_ref_allowlist(
+            "global/not valid",
+            "gateway.vault_get_approval_required_refs",
+        );
+        assert!(result.is_err(), "vault ref allowlist must reject invalid entries");
     }
 
     #[test]

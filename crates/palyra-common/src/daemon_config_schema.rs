@@ -89,6 +89,7 @@ pub struct FileGatewayConfig {
     pub quic_enabled: Option<bool>,
     pub allow_insecure_remote: Option<bool>,
     pub identity_store_dir: Option<String>,
+    pub vault_get_approval_required_refs: Option<Vec<String>>,
     pub max_tape_entries_per_response: Option<u64>,
     pub max_tape_bytes_per_response: Option<u64>,
     pub tls: Option<FileGatewayTlsConfig>,
