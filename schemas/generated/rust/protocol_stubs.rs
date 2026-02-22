@@ -134,6 +134,8 @@ pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct AbortRunResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct Agent;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct AppendEventRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct AppendEventResponse;
@@ -142,6 +144,10 @@ pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ApprovalRecord;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct CreateAgentRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct CreateAgentResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct DeleteSecretRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct DeleteSecretResponse;
@@ -149,6 +155,10 @@ pub mod palyra_gateway_v1 {
     pub struct ExportApprovalsRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ExportApprovalsResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GetAgentRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GetAgentResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct GetApprovalRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -161,6 +171,10 @@ pub mod palyra_gateway_v1 {
     pub struct HealthRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct HealthResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ListAgentsRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ListAgentsResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ListApprovalsRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -178,11 +192,19 @@ pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct PutSecretResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ResolveAgentForContextRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ResolveAgentForContextResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ResolveSessionRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ResolveSessionResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SessionSummary;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct SetDefaultAgentRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct SetDefaultAgentResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct VaultSecretMetadata;
     pub trait ApprovalsServiceClient {
@@ -193,10 +215,15 @@ pub mod palyra_gateway_v1 {
     pub trait GatewayServiceClient {
         fn AbortRun(&self);
         fn AppendEvent(&self);
+        fn CreateAgent(&self);
+        fn GetAgent(&self);
         fn GetHealth(&self);
+        fn ListAgents(&self);
         fn ListSessions(&self);
+        fn ResolveAgentForContext(&self);
         fn ResolveSession(&self);
         fn RunStream(&self);
+        fn SetDefaultAgent(&self);
     }
     pub trait VaultServiceClient {
         fn DeleteSecret(&self);

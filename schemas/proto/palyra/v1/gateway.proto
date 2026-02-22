@@ -12,6 +12,12 @@ service GatewayService {
   rpc AbortRun(AbortRunRequest) returns (AbortRunResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc ResolveSession(ResolveSessionRequest) returns (ResolveSessionResponse);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc GetAgent(GetAgentRequest) returns (GetAgentResponse);
+  rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse);
+  rpc SetDefaultAgent(SetDefaultAgentRequest) returns (SetDefaultAgentResponse);
+  rpc ResolveAgentForContext(ResolveAgentForContextRequest)
+      returns (ResolveAgentForContextResponse);
 }
 
 service ApprovalsService {
@@ -305,4 +311,117 @@ message ResolveSessionResponse {
   bool reset_applied = 4;
 
   reserved 5 to 12;
+}
+
+message Agent {
+  string agent_id = 1;
+  string display_name = 2;
+  string agent_dir = 3;
+  repeated string workspace_roots = 4;
+  string default_model_profile = 5;
+  repeated string default_tool_allowlist = 6;
+  repeated string default_skill_allowlist = 7;
+  int64 created_at_unix_ms = 8;
+  int64 updated_at_unix_ms = 9;
+
+  reserved 10 to 16;
+}
+
+message ListAgentsRequest {
+  uint32 v = 1;
+  uint32 limit = 2;
+  string after_agent_id = 3;
+
+  reserved 4 to 10;
+}
+
+message ListAgentsResponse {
+  uint32 v = 1;
+  repeated Agent agents = 2;
+  string default_agent_id = 3;
+  string next_after_agent_id = 4;
+
+  reserved 5 to 12;
+}
+
+message GetAgentRequest {
+  uint32 v = 1;
+  string agent_id = 2;
+
+  reserved 3 to 10;
+}
+
+message GetAgentResponse {
+  uint32 v = 1;
+  Agent agent = 2;
+  bool is_default = 3;
+
+  reserved 4 to 10;
+}
+
+message CreateAgentRequest {
+  uint32 v = 1;
+  string agent_id = 2;
+  string display_name = 3;
+  string agent_dir = 4;
+  repeated string workspace_roots = 5;
+  string default_model_profile = 6;
+  repeated string default_tool_allowlist = 7;
+  repeated string default_skill_allowlist = 8;
+  bool set_default = 9;
+  bool allow_absolute_paths = 10;
+
+  reserved 11 to 20;
+}
+
+message CreateAgentResponse {
+  uint32 v = 1;
+  Agent agent = 2;
+  bool default_changed = 3;
+  string default_agent_id = 4;
+
+  reserved 5 to 10;
+}
+
+message SetDefaultAgentRequest {
+  uint32 v = 1;
+  string agent_id = 2;
+
+  reserved 3 to 10;
+}
+
+message SetDefaultAgentResponse {
+  uint32 v = 1;
+  string previous_agent_id = 2;
+  string default_agent_id = 3;
+
+  reserved 4 to 10;
+}
+
+enum AgentResolutionSource {
+  AGENT_RESOLUTION_SOURCE_UNSPECIFIED = 0;
+  AGENT_RESOLUTION_SOURCE_SESSION_BINDING = 1;
+  AGENT_RESOLUTION_SOURCE_DEFAULT = 2;
+  AGENT_RESOLUTION_SOURCE_FALLBACK = 3;
+}
+
+message ResolveAgentForContextRequest {
+  uint32 v = 1;
+  string principal = 2;
+  string channel = 3;
+  palyra.common.v1.CanonicalId session_id = 4;
+  string preferred_agent_id = 5;
+  bool persist_session_binding = 6;
+
+  reserved 7 to 14;
+}
+
+message ResolveAgentForContextResponse {
+  uint32 v = 1;
+  Agent agent = 2;
+  AgentResolutionSource source = 3;
+  bool binding_created = 4;
+  bool is_default = 5;
+
+  reserved 6 to 12;
 }

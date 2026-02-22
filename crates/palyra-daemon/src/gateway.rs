@@ -30,6 +30,11 @@ use tracing::{info, warn};
 use ulid::Ulid;
 
 use crate::{
+    agents::{
+        AgentCreateOutcome, AgentCreateRequest, AgentListPage, AgentRecord, AgentRegistry,
+        AgentRegistryError, AgentResolutionSource, AgentResolveOutcome, AgentResolveRequest,
+        AgentSetDefaultOutcome,
+    },
     cron::{normalize_schedule, schedule_to_proto, trigger_job_now, CronTimezoneMode},
     journal::{
         ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
@@ -101,6 +106,7 @@ pub const HEADER_CHANNEL: &str = "x-palyra-channel";
 pub const HEADER_VAULT_READ_APPROVAL: &str = "x-palyra-vault-read-approval";
 const MAX_JOURNAL_RECENT_EVENTS: usize = 100;
 const MAX_SESSIONS_PAGE_LIMIT: usize = 500;
+const MAX_AGENTS_PAGE_LIMIT: usize = 500;
 const JOURNAL_WRITE_LATENCY_BUDGET_MS: u128 = 25;
 const TOOL_EXECUTION_LATENCY_BUDGET_MS: u128 = 200;
 const MIN_TAPE_PAGE_LIMIT: usize = 1;
@@ -130,6 +136,7 @@ const MAX_MEMORY_ITEM_BYTES: usize = 16 * 1024;
 const MAX_MEMORY_ITEM_TOKENS: usize = 2_048;
 const MAX_MEMORY_TOOL_QUERY_BYTES: usize = 4 * 1024;
 const MAX_MEMORY_TOOL_TAGS: usize = 32;
+const MAX_AGENT_STATUS_BINDINGS: usize = 128;
 const MAX_VAULT_SECRET_BYTES: usize = 64 * 1024;
 const MAX_VAULT_LIST_RESULTS: usize = 1_000;
 const VAULT_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
@@ -257,6 +264,7 @@ pub struct GatewayRuntimeState {
     memory_search_cache: Mutex<HashMap<String, Vec<MemorySearchHit>>>,
     tool_approval_cache: Mutex<HashMap<String, CachedToolApprovalDecision>>,
     vault_rate_limit: Mutex<HashMap<String, VaultRateLimitEntry>>,
+    agent_registry: AgentRegistry,
 }
 
 #[derive(Debug)]
@@ -310,6 +318,10 @@ struct RuntimeCounters {
     approvals_tool_resolved_deny: AtomicU64,
     approvals_tool_resolved_timeout: AtomicU64,
     approvals_tool_resolved_error: AtomicU64,
+    agent_mutations: AtomicU64,
+    agent_resolution_hits: AtomicU64,
+    agent_resolution_misses: AtomicU64,
+    agent_validation_failures: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -333,6 +345,7 @@ pub struct GatewayStatusSnapshot {
     pub model_provider: ProviderStatusSnapshot,
     pub tool_call_policy: ToolCallPolicySnapshot,
     pub counters: CountersSnapshot,
+    pub agents: AgentRuntimeSnapshot,
     pub request_context: RequestContext,
 }
 
@@ -414,6 +427,24 @@ pub struct CountersSnapshot {
     pub approvals_tool_resolved_deny: u64,
     pub approvals_tool_resolved_timeout: u64,
     pub approvals_tool_resolved_error: u64,
+    pub agent_mutations: u64,
+    pub agent_resolution_hits: u64,
+    pub agent_resolution_misses: u64,
+    pub agent_validation_failures: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentRuntimeSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_agent_id: Option<String>,
+    pub agent_count: usize,
+    pub active_session_bindings: Vec<AgentSessionBindingSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSessionBindingSnapshot {
+    pub session_id_redacted: String,
+    pub agent_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -521,6 +552,10 @@ impl RuntimeCounters {
             approvals_tool_resolved_error: self
                 .approvals_tool_resolved_error
                 .load(Ordering::Relaxed),
+            agent_mutations: self.agent_mutations.load(Ordering::Relaxed),
+            agent_resolution_hits: self.agent_resolution_hits.load(Ordering::Relaxed),
+            agent_resolution_misses: self.agent_resolution_misses.load(Ordering::Relaxed),
+            agent_validation_failures: self.agent_validation_failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -532,6 +567,7 @@ impl GatewayRuntimeState {
         journal_config: GatewayJournalConfigSnapshot,
         journal_store: JournalStore,
         revoked_certificate_count: usize,
+        agent_registry: AgentRegistry,
     ) -> Result<Arc<Self>, JournalError> {
         let default_provider = crate::model_provider::build_model_provider(
             &crate::model_provider::ModelProviderConfig::default(),
@@ -545,6 +581,7 @@ impl GatewayRuntimeState {
             revoked_certificate_count,
             default_provider,
             default_vault,
+            agent_registry,
         )
     }
 
@@ -555,6 +592,7 @@ impl GatewayRuntimeState {
         revoked_certificate_count: usize,
         model_provider: Arc<dyn ModelProvider>,
         vault: Arc<Vault>,
+        agent_registry: AgentRegistry,
     ) -> Result<Arc<Self>, JournalError> {
         let build = build_metadata();
         let existing_events = journal_store.total_events()? as u64;
@@ -617,6 +655,10 @@ impl GatewayRuntimeState {
                 approvals_tool_resolved_deny: AtomicU64::new(0),
                 approvals_tool_resolved_timeout: AtomicU64::new(0),
                 approvals_tool_resolved_error: AtomicU64::new(0),
+                agent_mutations: AtomicU64::new(0),
+                agent_resolution_hits: AtomicU64::new(0),
+                agent_resolution_misses: AtomicU64::new(0),
+                agent_validation_failures: AtomicU64::new(0),
             },
             journal_store,
             revoked_certificate_count,
@@ -626,6 +668,7 @@ impl GatewayRuntimeState {
             memory_search_cache: Mutex::new(HashMap::new()),
             tool_approval_cache: Mutex::new(HashMap::new()),
             vault_rate_limit: Mutex::new(HashMap::new()),
+            agent_registry,
         }))
     }
 
@@ -788,6 +831,27 @@ impl GatewayRuntimeState {
         auth_config: &GatewayAuthConfig,
     ) -> GatewayStatusSnapshot {
         let latest_event_hash = self.journal_store.latest_hash().ok().flatten();
+        let agents_runtime = self
+            .agent_registry
+            .status_snapshot()
+            .map(|snapshot| AgentRuntimeSnapshot {
+                default_agent_id: snapshot.default_agent_id,
+                agent_count: snapshot.agent_count,
+                active_session_bindings: snapshot
+                    .session_bindings
+                    .into_iter()
+                    .take(MAX_AGENT_STATUS_BINDINGS)
+                    .map(|binding| AgentSessionBindingSnapshot {
+                        session_id_redacted: redact_session_id(binding.session_id.as_str()),
+                        agent_id: binding.agent_id,
+                    })
+                    .collect(),
+            })
+            .unwrap_or_else(|_| AgentRuntimeSnapshot {
+                default_agent_id: None,
+                agent_count: 0,
+                active_session_bindings: Vec::new(),
+            });
         GatewayStatusSnapshot {
             service: "palyrad",
             status: "ok",
@@ -818,6 +882,7 @@ impl GatewayRuntimeState {
             model_provider: self.model_provider.status_snapshot(),
             tool_call_policy: tool_policy_snapshot(&self.config.tool_call),
             counters: self.counters.snapshot(),
+            agents: agents_runtime,
             request_context: context,
         }
     }
@@ -958,6 +1023,146 @@ impl GatewayRuntimeState {
         })
         .await
         .map_err(|_| Status::internal("orchestrator session list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_agents_blocking(
+        &self,
+        after_agent_id: Option<String>,
+        requested_limit: Option<usize>,
+    ) -> Result<AgentListPage, Status> {
+        self.agent_registry
+            .list_agents(after_agent_id.as_deref(), requested_limit.or(Some(MAX_AGENTS_PAGE_LIMIT)))
+            .map_err(|error| map_agent_registry_error("list agents", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_agents(
+        self: &Arc<Self>,
+        after_agent_id: Option<String>,
+        requested_limit: Option<usize>,
+    ) -> Result<AgentListPage, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.list_agents_blocking(after_agent_id, requested_limit)
+        })
+        .await
+        .map_err(|_| Status::internal("agent list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn get_agent_blocking(&self, agent_id: &str) -> Result<(AgentRecord, bool), Status> {
+        self.agent_registry
+            .get_agent(agent_id)
+            .map_err(|error| map_agent_registry_error("get agent", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn get_agent(
+        self: &Arc<Self>,
+        agent_id: String,
+    ) -> Result<(AgentRecord, bool), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.get_agent_blocking(agent_id.as_str()))
+            .await
+            .map_err(|_| Status::internal("agent get worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn create_agent_blocking(
+        &self,
+        request: &AgentCreateRequest,
+    ) -> Result<AgentCreateOutcome, Status> {
+        self.agent_registry
+            .create_agent(request.clone())
+            .map_err(|error| map_agent_registry_error("create agent", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn create_agent(
+        self: &Arc<Self>,
+        request: AgentCreateRequest,
+    ) -> Result<AgentCreateOutcome, Status> {
+        let state = Arc::clone(self);
+        let result = tokio::task::spawn_blocking(move || state.create_agent_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("agent create worker panicked"))?;
+        if let Err(status) = &result {
+            if status.code() == tonic::Code::InvalidArgument {
+                self.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            self.counters.agent_mutations.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn set_default_agent_blocking(&self, agent_id: &str) -> Result<AgentSetDefaultOutcome, Status> {
+        self.agent_registry
+            .set_default_agent(agent_id)
+            .map_err(|error| map_agent_registry_error("set default agent", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn set_default_agent(
+        self: &Arc<Self>,
+        agent_id: String,
+    ) -> Result<AgentSetDefaultOutcome, Status> {
+        let state = Arc::clone(self);
+        let result = tokio::task::spawn_blocking(move || {
+            state.set_default_agent_blocking(agent_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("agent default worker panicked"))?;
+        if let Err(status) = &result {
+            if status.code() == tonic::Code::InvalidArgument {
+                self.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            self.counters.agent_mutations.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn resolve_agent_for_context_blocking(
+        &self,
+        request: &AgentResolveRequest,
+    ) -> Result<AgentResolveOutcome, Status> {
+        self.agent_registry
+            .resolve_agent_for_context(request.clone())
+            .map_err(|error| map_agent_registry_error("resolve agent for context", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn resolve_agent_for_context(
+        self: &Arc<Self>,
+        request: AgentResolveRequest,
+    ) -> Result<AgentResolveOutcome, Status> {
+        let state = Arc::clone(self);
+        let result =
+            tokio::task::spawn_blocking(move || state.resolve_agent_for_context_blocking(&request))
+                .await
+                .map_err(|_| Status::internal("agent resolve worker panicked"))?;
+        match &result {
+            Ok(outcome) => {
+                if matches!(outcome.source, AgentResolutionSource::SessionBinding) {
+                    self.counters.agent_resolution_hits.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.counters.agent_resolution_misses.fetch_add(1, Ordering::Relaxed);
+                }
+                if outcome.binding_created {
+                    self.counters.agent_mutations.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(status) => {
+                if status.code() == tonic::Code::InvalidArgument {
+                    self.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        result
     }
 
     #[allow(clippy::result_large_err)]
@@ -2115,6 +2320,33 @@ fn map_orchestrator_store_error(operation: &str, error: JournalError) -> Status 
     }
 }
 
+fn map_agent_registry_error(operation: &str, error: AgentRegistryError) -> Status {
+    match error {
+        AgentRegistryError::AgentNotFound(agent_id) => {
+            Status::not_found(format!("agent not found: {agent_id}"))
+        }
+        AgentRegistryError::DuplicateAgentId(agent_id) => {
+            Status::already_exists(format!("agent already exists: {agent_id}"))
+        }
+        AgentRegistryError::AgentDirCollision(agent_id) => Status::already_exists(format!(
+            "agent directory overlaps with existing agent {agent_id}"
+        )),
+        AgentRegistryError::WorkspaceRootEscape(path)
+        | AgentRegistryError::DuplicateWorkspaceRoot(path)
+        | AgentRegistryError::InvalidSessionId(path) => Status::invalid_argument(path),
+        AgentRegistryError::DefaultAgentNotConfigured => {
+            Status::failed_precondition("default agent is not configured")
+        }
+        AgentRegistryError::InvalidPath { field, message } => {
+            Status::invalid_argument(format!("{field}: {message}"))
+        }
+        AgentRegistryError::RegistryLimitExceeded => {
+            Status::resource_exhausted("agent registry limits exceeded")
+        }
+        other => Status::internal(format!("{operation} failed: {other}")),
+    }
+}
+
 fn map_cron_store_error(operation: &str, error: JournalError) -> Status {
     match error {
         JournalError::CronJobNotFound { job_id } => {
@@ -2352,6 +2584,35 @@ fn authorize_vault_action(principal: &str, action: &str, resource: &str) -> Resu
             "policy denied action '{action}' on '{resource}': {reason}"
         ))),
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn authorize_agent_management_action(
+    principal: &str,
+    action: &str,
+    resource: &str,
+) -> Result<(), Status> {
+    let evaluation = evaluate_with_config(
+        &PolicyRequest {
+            principal: principal.to_owned(),
+            action: action.to_owned(),
+            resource: resource.to_owned(),
+        },
+        &PolicyEvaluationConfig::default(),
+    )
+    .map_err(|error| Status::internal(format!("failed to evaluate agent policy: {error}")))?;
+    if principal.to_ascii_lowercase().starts_with("admin:") {
+        return Ok(());
+    }
+    let reason = match evaluation.decision {
+        PolicyDecision::Allow => {
+            "agent management requires admin principal prefix 'admin:'".to_owned()
+        }
+        PolicyDecision::DenyByDefault { reason } => reason,
+    };
+    Err(Status::permission_denied(format!(
+        "policy denied action '{action}' on '{resource}': {reason}"
+    )))
 }
 
 fn normalize_vault_ref_literal(scope: &VaultScope, key: &str) -> String {
@@ -2934,6 +3195,30 @@ fn session_summary_message(session: &OrchestratorSessionRecord) -> gateway_v1::S
     }
 }
 
+fn agent_message(agent: &AgentRecord) -> gateway_v1::Agent {
+    gateway_v1::Agent {
+        agent_id: agent.agent_id.clone(),
+        display_name: agent.display_name.clone(),
+        agent_dir: agent.agent_dir.clone(),
+        workspace_roots: agent.workspace_roots.clone(),
+        default_model_profile: agent.default_model_profile.clone(),
+        default_tool_allowlist: agent.default_tool_allowlist.clone(),
+        default_skill_allowlist: agent.default_skill_allowlist.clone(),
+        created_at_unix_ms: agent.created_at_unix_ms,
+        updated_at_unix_ms: agent.updated_at_unix_ms,
+    }
+}
+
+fn agent_resolution_source_to_proto(source: AgentResolutionSource) -> i32 {
+    match source {
+        AgentResolutionSource::SessionBinding => {
+            gateway_v1::AgentResolutionSource::SessionBinding as i32
+        }
+        AgentResolutionSource::Default => gateway_v1::AgentResolutionSource::Default as i32,
+        AgentResolutionSource::Fallback => gateway_v1::AgentResolutionSource::Fallback as i32,
+    }
+}
+
 fn approval_option_messages(options: &[ApprovalPromptOption]) -> Vec<common_v1::ApprovalOption> {
     options
         .iter()
@@ -3458,6 +3743,218 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             session: Some(session_summary_message(&outcome.session)),
             created: outcome.created,
             reset_applied: outcome.reset_applied,
+        }))
+    }
+
+    async fn list_agents(
+        &self,
+        request: Request<gateway_v1::ListAgentsRequest>,
+    ) -> Result<Response<gateway_v1::ListAgentsResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "ListAgents")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.list",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let page = self
+            .state
+            .list_agents(non_empty(payload.after_agent_id), Some(payload.limit as usize))
+            .await?;
+        Ok(Response::new(gateway_v1::ListAgentsResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            agents: page.agents.iter().map(agent_message).collect(),
+            default_agent_id: page.default_agent_id.unwrap_or_default(),
+            next_after_agent_id: page.next_after_agent_id.unwrap_or_default(),
+        }))
+    }
+
+    async fn get_agent(
+        &self,
+        request: Request<gateway_v1::GetAgentRequest>,
+    ) -> Result<Response<gateway_v1::GetAgentResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "GetAgent")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.get",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let agent_id = normalize_agent_identifier(payload.agent_id.as_str(), "agent_id")
+            .inspect_err(|_error| {
+                self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            })?;
+        let (agent, is_default) = self.state.get_agent(agent_id).await?;
+        Ok(Response::new(gateway_v1::GetAgentResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            agent: Some(agent_message(&agent)),
+            is_default,
+        }))
+    }
+
+    async fn create_agent(
+        &self,
+        request: Request<gateway_v1::CreateAgentRequest>,
+    ) -> Result<Response<gateway_v1::CreateAgentResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "CreateAgent")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.create",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let outcome = self
+            .state
+            .create_agent(AgentCreateRequest {
+                agent_id: payload.agent_id,
+                display_name: payload.display_name,
+                agent_dir: non_empty(payload.agent_dir),
+                workspace_roots: payload.workspace_roots,
+                default_model_profile: non_empty(payload.default_model_profile),
+                default_tool_allowlist: payload.default_tool_allowlist,
+                default_skill_allowlist: payload.default_skill_allowlist,
+                set_default: payload.set_default,
+                allow_absolute_paths: payload.allow_absolute_paths,
+            })
+            .await?;
+        let journal_payload = json!({
+            "event": "agent.created",
+            "agent_id": outcome.agent.agent_id,
+            "display_name": outcome.agent.display_name,
+            "agent_dir": outcome.agent.agent_dir,
+            "workspace_roots": outcome.agent.workspace_roots,
+            "default_model_profile": outcome.agent.default_model_profile,
+            "default_changed": outcome.default_changed,
+            "default_agent_id": outcome.default_agent_id,
+        });
+        let _ = record_agent_journal_event(&self.state, &context, journal_payload).await;
+        if outcome.default_changed {
+            let _ = record_agent_journal_event(
+                &self.state,
+                &context,
+                json!({
+                    "event": "agent.default_changed",
+                    "previous_default_agent_id": outcome.previous_default_agent_id,
+                    "default_agent_id": outcome.default_agent_id,
+                }),
+            )
+            .await;
+        }
+        Ok(Response::new(gateway_v1::CreateAgentResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            agent: Some(agent_message(&outcome.agent)),
+            default_changed: outcome.default_changed,
+            default_agent_id: outcome.default_agent_id.unwrap_or_default(),
+        }))
+    }
+
+    async fn set_default_agent(
+        &self,
+        request: Request<gateway_v1::SetDefaultAgentRequest>,
+    ) -> Result<Response<gateway_v1::SetDefaultAgentResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "SetDefaultAgent")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.set_default",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let agent_id = normalize_agent_identifier(payload.agent_id.as_str(), "agent_id")
+            .inspect_err(|_error| {
+                self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            })?;
+        let outcome = self.state.set_default_agent(agent_id).await?;
+        let _ = record_agent_journal_event(
+            &self.state,
+            &context,
+            json!({
+                "event": "agent.default_changed",
+                "previous_default_agent_id": outcome.previous_default_agent_id,
+                "default_agent_id": outcome.default_agent_id,
+            }),
+        )
+        .await;
+        Ok(Response::new(gateway_v1::SetDefaultAgentResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            previous_agent_id: outcome.previous_default_agent_id.unwrap_or_default(),
+            default_agent_id: outcome.default_agent_id,
+        }))
+    }
+
+    async fn resolve_agent_for_context(
+        &self,
+        request: Request<gateway_v1::ResolveAgentForContextRequest>,
+    ) -> Result<Response<gateway_v1::ResolveAgentForContextResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "ResolveAgentForContext")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.resolve",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let principal = if let Some(value) = non_empty(payload.principal) {
+            if value != context.principal {
+                self.state.record_denied();
+                return Err(Status::permission_denied(
+                    "resolve agent principal must match authenticated principal",
+                ));
+            }
+            value
+        } else {
+            context.principal.clone()
+        };
+        let session_id =
+            optional_canonical_id(payload.session_id, "session_id").inspect_err(|_error| {
+                self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            })?;
+        let outcome = self
+            .state
+            .resolve_agent_for_context(AgentResolveRequest {
+                principal,
+                channel: non_empty(payload.channel),
+                session_id,
+                preferred_agent_id: non_empty(payload.preferred_agent_id),
+                persist_session_binding: payload.persist_session_binding,
+            })
+            .await?;
+        if outcome.binding_created {
+            let _ = record_agent_journal_event(
+                &self.state,
+                &context,
+                json!({
+                    "event": "agent.updated",
+                    "agent_id": outcome.agent.agent_id,
+                    "binding_created": true,
+                }),
+            )
+            .await;
+        }
+        Ok(Response::new(gateway_v1::ResolveAgentForContextResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            agent: Some(agent_message(&outcome.agent)),
+            source: agent_resolution_source_to_proto(outcome.source),
+            binding_created: outcome.binding_created,
+            is_default: outcome.is_default,
         }))
     }
 
@@ -7761,6 +8258,29 @@ async fn record_vault_journal_event(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
+async fn record_agent_journal_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: &RequestContext,
+    payload: Value,
+) -> Result<(), Status> {
+    runtime_state
+        .record_journal_event(JournalAppendRequest {
+            event_id: Ulid::new().to_string(),
+            session_id: Ulid::new().to_string(),
+            run_id: Ulid::new().to_string(),
+            kind: common_v1::journal_event::EventKind::ToolExecuted as i32,
+            actor: common_v1::journal_event::EventActor::System as i32,
+            timestamp_unix_ms: current_unix_ms(),
+            payload_json: payload.to_string().into_bytes(),
+            principal: context.principal.clone(),
+            device_id: context.device_id.clone(),
+            channel: context.channel.clone(),
+        })
+        .await
+        .map(|_| ())
+}
+
 fn tool_result_tape_payload(
     proposal_id: &str,
     success: bool,
@@ -7803,6 +8323,15 @@ fn current_unix_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
 }
 
+fn redact_session_id(session_id: &str) -> String {
+    if session_id.len() <= 8 {
+        return "***".to_owned();
+    }
+    let prefix = &session_id[..4];
+    let suffix = &session_id[session_id.len().saturating_sub(4)..];
+    format!("{prefix}***{suffix}")
+}
+
 const fn status_kind_name(kind: common_v1::stream_status::StatusKind) -> &'static str {
     match kind {
         common_v1::stream_status::StatusKind::Unspecified => "unspecified",
@@ -7839,6 +8368,25 @@ fn optional_canonical_id(
     validate_canonical_id(id.as_str())
         .map_err(|_| Status::invalid_argument(format!("{field_name} must be a canonical ULID")))?;
     Ok(Some(id))
+}
+
+#[allow(clippy::result_large_err)]
+fn normalize_agent_identifier(raw: &str, field_name: &'static str) -> Result<String, Status> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(Status::invalid_argument(format!("{field_name} cannot be empty")));
+    }
+    if value.len() > 64 {
+        return Err(Status::invalid_argument(format!("{field_name} cannot exceed 64 bytes")));
+    }
+    for character in value.chars() {
+        if !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')) {
+            return Err(Status::invalid_argument(format!(
+                "{field_name} contains unsupported character '{character}'"
+            )));
+        }
+    }
+    Ok(value.to_ascii_lowercase())
 }
 
 pub fn authorize_headers(headers: &HeaderMap, auth: &GatewayAuthConfig) -> Result<(), AuthError> {
@@ -8037,6 +8585,14 @@ mod tests {
 
     fn build_test_runtime_state(hash_chain_enabled: bool) -> std::sync::Arc<GatewayRuntimeState> {
         let db_path = unique_temp_journal_path();
+        let state_root = std::env::temp_dir().join(format!(
+            "palyra-gateway-unit-state-{}-{}",
+            std::process::id(),
+            TEMP_JOURNAL_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let identity_root = state_root.join("identity");
+        let agent_registry = crate::agents::AgentRegistry::open(identity_root.as_path())
+            .expect("agent registry should initialize");
         let journal_store = JournalStore::open(JournalConfig {
             db_path: db_path.clone(),
             hash_chain_enabled,
@@ -8091,6 +8647,7 @@ mod tests {
             GatewayJournalConfigSnapshot { db_path, hash_chain_enabled },
             journal_store,
             0,
+            agent_registry,
         )
         .expect("runtime state should initialize")
     }

@@ -183,6 +183,17 @@ pub fn default_identity_store_root() -> Result<PathBuf, IdentityStorePathError> 
     }
 }
 
+pub fn default_state_root() -> Result<PathBuf, IdentityStorePathError> {
+    #[cfg(windows)]
+    {
+        default_state_root_from_env(env::var_os("LOCALAPPDATA"), env::var_os("APPDATA"))
+    }
+    #[cfg(not(windows))]
+    {
+        default_state_root_from_env(env::var_os("XDG_STATE_HOME"), env::var_os("HOME"))
+    }
+}
+
 #[cfg(windows)]
 pub fn default_identity_store_root_from_env(
     local_appdata: Option<OsString>,
@@ -197,6 +208,15 @@ pub fn default_identity_store_root_from_env(
     Err(IdentityStorePathError::AppDataNotSet)
 }
 
+#[cfg(windows)]
+pub fn default_state_root_from_env(
+    local_appdata: Option<OsString>,
+    appdata: Option<OsString>,
+) -> Result<PathBuf, IdentityStorePathError> {
+    let identity_root = default_identity_store_root_from_env(local_appdata, appdata)?;
+    Ok(identity_root.parent().map(PathBuf::from).unwrap_or(identity_root))
+}
+
 #[cfg(not(windows))]
 pub fn default_identity_store_root_from_env(
     xdg_state_home: Option<OsString>,
@@ -207,6 +227,15 @@ pub fn default_identity_store_root_from_env(
     }
     let home = home.map(PathBuf::from).ok_or(IdentityStorePathError::HomeNotSet)?;
     Ok(home.join(".local").join("state").join("palyra").join("identity"))
+}
+
+#[cfg(not(windows))]
+pub fn default_state_root_from_env(
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, IdentityStorePathError> {
+    let identity_root = default_identity_store_root_from_env(xdg_state_home, home)?;
+    Ok(identity_root.parent().map(PathBuf::from).unwrap_or(identity_root))
 }
 
 #[cfg(windows)]
@@ -461,10 +490,10 @@ mod tests {
 
     use super::{
         default_config_search_paths_from_env, default_identity_store_root_from_env,
-        parse_config_path, parse_daemon_bind_socket, parse_webhook_payload_with_now,
-        validate_canonical_id, verify_webhook_payload, CanonicalIdError, ConfigPathParseError,
-        IdentityStorePathError, ReplayNonceStore, WebhookEnvelope, WebhookPayloadError,
-        WebhookSignatureVerifier,
+        default_state_root_from_env, parse_config_path, parse_daemon_bind_socket,
+        parse_webhook_payload_with_now, validate_canonical_id, verify_webhook_payload,
+        CanonicalIdError, ConfigPathParseError, IdentityStorePathError, ReplayNonceStore,
+        WebhookEnvelope, WebhookPayloadError, WebhookSignatureVerifier,
     };
 
     const REFERENCE_NOW_UNIX_MS: u64 = 1_730_000_000_000;
@@ -613,6 +642,17 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
+    fn default_state_root_uses_identity_parent_directory() {
+        let path = default_state_root_from_env(
+            Some(OsString::from("/tmp/xdg-state")),
+            Some(OsString::from("/tmp/home")),
+        )
+        .expect("state root should resolve");
+        assert_eq!(path, PathBuf::from("/tmp/xdg-state").join("palyra"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
     fn default_identity_store_root_requires_home_when_xdg_is_missing() {
         assert_eq!(
             default_identity_store_root_from_env(None, None),
@@ -648,6 +688,17 @@ mod tests {
             path,
             PathBuf::from(r"C:\Users\Test\AppData\Local").join("Palyra").join("identity")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_state_root_uses_identity_parent_directory() {
+        let path = default_state_root_from_env(
+            Some(OsString::from(r"C:\Users\Test\AppData\Local")),
+            Some(OsString::from(r"C:\Users\Test\AppData\Roaming")),
+        )
+        .expect("state root should resolve");
+        assert_eq!(path, PathBuf::from(r"C:\Users\Test\AppData\Local").join("Palyra"));
     }
 
     #[cfg(windows)]
