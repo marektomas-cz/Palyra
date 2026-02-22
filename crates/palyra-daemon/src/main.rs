@@ -1,3 +1,4 @@
+mod agents;
 mod config;
 mod cron;
 mod gateway;
@@ -224,6 +225,8 @@ async fn main() -> Result<()> {
     }
     let model_provider = build_model_provider(&loaded.model_provider)
         .context("failed to initialize model provider runtime")?;
+    let agent_registry = agents::AgentRegistry::open(identity_runtime.store_root.as_path())
+        .context("failed to initialize agent registry state")?;
     let runtime = GatewayRuntimeState::new_with_provider(
         GatewayRuntimeConfigSnapshot {
             grpc_bind_addr: loaded.gateway.grpc_bind_addr.clone(),
@@ -298,6 +301,7 @@ async fn main() -> Result<()> {
         identity_runtime.revoked_certificate_count,
         model_provider,
         Arc::clone(&vault),
+        agent_registry,
     )
     .context("failed to initialize gateway runtime state")?;
     runtime.configure_memory(MemoryRuntimeConfig {

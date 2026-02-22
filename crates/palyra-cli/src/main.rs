@@ -46,11 +46,12 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{CommandFactory, Parser};
 use cli::{
-    AgentCommand, ApprovalDecisionArg, ApprovalExportFormatArg, ApprovalsCommand, BrowserCommand,
-    ChannelsCommand, Cli, Command as CliCommand, CompletionShell, ConfigCommand, CronCommand,
-    CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
-    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, OnboardingCommand,
-    PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand, SkillsPackageCommand,
+    AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg, ApprovalsCommand,
+    BrowserCommand, ChannelsCommand, Cli, Command as CliCommand, CompletionShell, ConfigCommand,
+    CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg,
+    DaemonCommand, JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg,
+    OnboardingCommand, PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand,
+    SkillsPackageCommand,
 };
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -142,6 +143,7 @@ fn main() -> Result<()> {
             run_status(url, grpc_url, admin, token, principal, device_id, channel)
         }
         CliCommand::Agent { command } => run_agent(command),
+        CliCommand::Agents { command } => run_agents(command),
         CliCommand::Cron { command } => run_cron(command),
         CliCommand::Memory { command } => run_memory(command),
         CliCommand::Approvals { command } => run_approvals(command),
@@ -454,6 +456,202 @@ fn run_agent(command: AgentCommand) -> Result<()> {
             acp_bridge::run_agent_acp_bridge(connection, allow_sensitive_tools)
         }
     }
+}
+
+fn run_agents(command: AgentsCommand) -> Result<()> {
+    let connection = AgentConnection {
+        grpc_url: resolve_grpc_url(None)?,
+        token: env::var("PALYRA_ADMIN_TOKEN").ok(),
+        principal: "admin:local".to_owned(),
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        channel: DEFAULT_CHANNEL.to_owned(),
+    };
+    let runtime = build_runtime()?;
+    runtime.block_on(run_agents_async(command, connection))
+}
+
+async fn run_agents_async(command: AgentsCommand, connection: AgentConnection) -> Result<()> {
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(
+        connection.grpc_url.clone(),
+    )
+    .await
+    .with_context(|| format!("failed to connect gateway gRPC endpoint {}", connection.grpc_url))?;
+
+    match command {
+        AgentsCommand::List { after, limit, json, ndjson } => {
+            let mut request = Request::new(gateway_v1::ListAgentsRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                limit: limit.unwrap_or(100),
+                after_agent_id: after.unwrap_or_default(),
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .list_agents(request)
+                .await
+                .context("failed to call ListAgents")?
+                .into_inner();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "agents": response.agents.iter().map(agent_to_json).collect::<Vec<_>>(),
+                        "default_agent_id": empty_to_none(response.default_agent_id),
+                        "next_after_agent_id": empty_to_none(response.next_after_agent_id),
+                    }))?
+                );
+            } else if ndjson {
+                for agent in &response.agents {
+                    let line = json!({
+                        "type": "agent",
+                        "agent": agent_to_json(agent),
+                        "is_default": response.default_agent_id == agent.agent_id,
+                    });
+                    println!("{}", serde_json::to_string(&line)?);
+                }
+            } else {
+                println!(
+                    "agents.list count={} default={} next_after={}",
+                    response.agents.len(),
+                    if response.default_agent_id.is_empty() {
+                        "none"
+                    } else {
+                        response.default_agent_id.as_str()
+                    },
+                    if response.next_after_agent_id.is_empty() {
+                        "none"
+                    } else {
+                        response.next_after_agent_id.as_str()
+                    }
+                );
+                for agent in &response.agents {
+                    println!(
+                        "agent id={} name={} dir={} workspaces={} model_profile={}",
+                        agent.agent_id,
+                        agent.display_name,
+                        agent.agent_dir,
+                        agent.workspace_roots.len(),
+                        agent.default_model_profile
+                    );
+                }
+            }
+        }
+        AgentsCommand::Show { agent_id, json } => {
+            let mut request = Request::new(gateway_v1::GetAgentRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                agent_id: normalize_agent_id_cli(agent_id.as_str())?,
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response =
+                client.get_agent(request).await.context("failed to call GetAgent")?.into_inner();
+            let agent = response.agent.context("GetAgent returned empty agent payload")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "agent": agent_to_json(&agent),
+                        "is_default": response.is_default,
+                    }))?
+                );
+            } else {
+                println!(
+                    "agents.show id={} name={} dir={} default={} model_profile={}",
+                    agent.agent_id,
+                    agent.display_name,
+                    agent.agent_dir,
+                    response.is_default,
+                    agent.default_model_profile
+                );
+            }
+        }
+        AgentsCommand::SetDefault { agent_id, json } => {
+            let mut request = Request::new(gateway_v1::SetDefaultAgentRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                agent_id: normalize_agent_id_cli(agent_id.as_str())?,
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .set_default_agent(request)
+                .await
+                .context("failed to call SetDefaultAgent")?
+                .into_inner();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "previous_agent_id": empty_to_none(response.previous_agent_id),
+                        "default_agent_id": response.default_agent_id,
+                    }))?
+                );
+            } else {
+                println!(
+                    "agents.set_default previous={} default={}",
+                    if response.previous_agent_id.is_empty() {
+                        "none"
+                    } else {
+                        response.previous_agent_id.as_str()
+                    },
+                    response.default_agent_id
+                );
+            }
+        }
+        AgentsCommand::Create {
+            agent_id,
+            display_name,
+            agent_dir,
+            workspace_root,
+            model_profile,
+            tool_allow,
+            skill_allow,
+            set_default,
+            allow_absolute_paths,
+            json,
+        } => {
+            let mut request = Request::new(gateway_v1::CreateAgentRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                agent_id: normalize_agent_id_cli(agent_id.as_str())?,
+                display_name,
+                agent_dir: agent_dir.unwrap_or_default(),
+                workspace_roots: workspace_root,
+                default_model_profile: model_profile.unwrap_or_default(),
+                default_tool_allowlist: tool_allow,
+                default_skill_allowlist: skill_allow,
+                set_default,
+                allow_absolute_paths,
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .create_agent(request)
+                .await
+                .context("failed to call CreateAgent")?
+                .into_inner();
+            let agent = response.agent.context("CreateAgent returned empty agent payload")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "agent": agent_to_json(&agent),
+                        "default_changed": response.default_changed,
+                        "default_agent_id": empty_to_none(response.default_agent_id),
+                    }))?
+                );
+            } else {
+                println!(
+                    "agents.create id={} name={} default_changed={} default={} dir={}",
+                    agent.agent_id,
+                    agent.display_name,
+                    response.default_changed,
+                    if response.default_agent_id.is_empty() {
+                        "none"
+                    } else {
+                        response.default_agent_id.as_str()
+                    },
+                    agent.agent_dir
+                );
+            }
+        }
+    }
+
+    std::io::stdout().flush().context("stdout flush failed")
 }
 
 fn run_cron(command: CronCommand) -> Result<()> {
@@ -1568,6 +1766,44 @@ fn approval_export_format_to_proto(value: ApprovalExportFormatArg) -> i32 {
         ApprovalExportFormatArg::Ndjson => gateway_v1::ApprovalExportFormat::Ndjson as i32,
         ApprovalExportFormatArg::Json => gateway_v1::ApprovalExportFormat::Json as i32,
     }
+}
+
+fn normalize_agent_id_cli(raw: &str) -> Result<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        anyhow::bail!("agent id cannot be empty");
+    }
+    if value.len() > 64 {
+        anyhow::bail!("agent id cannot exceed 64 bytes");
+    }
+    for character in value.chars() {
+        if !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')) {
+            anyhow::bail!("agent id contains unsupported character '{character}'");
+        }
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn empty_to_none(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+fn agent_to_json(agent: &gateway_v1::Agent) -> serde_json::Value {
+    json!({
+        "agent_id": agent.agent_id,
+        "display_name": agent.display_name,
+        "agent_dir": agent.agent_dir,
+        "workspace_roots": agent.workspace_roots,
+        "default_model_profile": agent.default_model_profile,
+        "default_tool_allowlist": agent.default_tool_allowlist,
+        "default_skill_allowlist": agent.default_skill_allowlist,
+        "created_at_unix_ms": agent.created_at_unix_ms,
+        "updated_at_unix_ms": agent.updated_at_unix_ms,
+    })
 }
 
 fn run_channels(command: ChannelsCommand) -> Result<()> {

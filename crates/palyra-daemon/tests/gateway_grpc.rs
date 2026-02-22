@@ -200,6 +200,179 @@ async fn grpc_resolve_session_and_list_sessions_roundtrip() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_agents_create_set_default_and_resolve_roundtrip() -> Result<()> {
+    let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let mut create_main = tonic::Request::new(gateway_v1::CreateAgentRequest {
+        v: 1,
+        agent_id: "main".to_owned(),
+        display_name: "Main".to_owned(),
+        agent_dir: String::new(),
+        workspace_roots: vec!["workspace".to_owned()],
+        default_model_profile: "gpt-4o-mini".to_owned(),
+        default_tool_allowlist: vec!["palyra.echo".to_owned()],
+        default_skill_allowlist: vec!["acme.echo".to_owned()],
+        set_default: true,
+        allow_absolute_paths: false,
+    });
+    authorize_metadata_with_principal(create_main.metadata_mut(), "admin:ops")?;
+    let created_main = client
+        .create_agent(create_main)
+        .await
+        .context("failed to call CreateAgent for main")?
+        .into_inner();
+    assert!(created_main.default_changed, "first create should set default");
+
+    let mut create_review = tonic::Request::new(gateway_v1::CreateAgentRequest {
+        v: 1,
+        agent_id: "review".to_owned(),
+        display_name: "Reviewer".to_owned(),
+        agent_dir: String::new(),
+        workspace_roots: vec!["workspace".to_owned()],
+        default_model_profile: "gpt-4o-mini".to_owned(),
+        default_tool_allowlist: vec!["palyra.echo".to_owned()],
+        default_skill_allowlist: vec!["acme.review".to_owned()],
+        set_default: false,
+        allow_absolute_paths: false,
+    });
+    authorize_metadata_with_principal(create_review.metadata_mut(), "admin:ops")?;
+    client.create_agent(create_review).await.context("failed to call CreateAgent for review")?;
+
+    let mut set_default = tonic::Request::new(gateway_v1::SetDefaultAgentRequest {
+        v: 1,
+        agent_id: "review".to_owned(),
+    });
+    authorize_metadata_with_principal(set_default.metadata_mut(), "admin:ops")?;
+    let changed = client
+        .set_default_agent(set_default)
+        .await
+        .context("failed to call SetDefaultAgent")?
+        .into_inner();
+    assert_eq!(changed.default_agent_id, "review");
+
+    let mut list_request = tonic::Request::new(gateway_v1::ListAgentsRequest {
+        v: 1,
+        limit: 10,
+        after_agent_id: String::new(),
+    });
+    authorize_metadata_with_principal(list_request.metadata_mut(), "admin:ops")?;
+    let listed =
+        client.list_agents(list_request).await.context("failed to call ListAgents")?.into_inner();
+    assert_eq!(listed.default_agent_id, "review");
+    assert!(
+        listed.agents.iter().any(|agent| agent.agent_id == "main")
+            && listed.agents.iter().any(|agent| agent.agent_id == "review"),
+        "list should include both created agents"
+    );
+
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned();
+    let mut resolve_first = tonic::Request::new(gateway_v1::ResolveAgentForContextRequest {
+        v: 1,
+        principal: "admin:ops".to_owned(),
+        channel: "cli".to_owned(),
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        preferred_agent_id: String::new(),
+        persist_session_binding: true,
+    });
+    authorize_metadata_with_principal(resolve_first.metadata_mut(), "admin:ops")?;
+    let resolved_first = client
+        .resolve_agent_for_context(resolve_first)
+        .await
+        .context("failed to call ResolveAgentForContext")?
+        .into_inner();
+    assert_eq!(
+        resolved_first.source,
+        gateway_v1::AgentResolutionSource::Default as i32,
+        "first resolve should use default agent"
+    );
+    assert!(resolved_first.binding_created, "first resolve should persist session binding");
+    assert_eq!(resolved_first.agent.as_ref().map(|agent| agent.agent_id.as_str()), Some("review"));
+
+    let mut resolve_second = tonic::Request::new(gateway_v1::ResolveAgentForContextRequest {
+        v: 1,
+        principal: "admin:ops".to_owned(),
+        channel: "cli".to_owned(),
+        session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+        preferred_agent_id: String::new(),
+        persist_session_binding: true,
+    });
+    authorize_metadata_with_principal(resolve_second.metadata_mut(), "admin:ops")?;
+    let resolved_second = client
+        .resolve_agent_for_context(resolve_second)
+        .await
+        .context("failed to call ResolveAgentForContext second time")?
+        .into_inner();
+    assert_eq!(
+        resolved_second.source,
+        gateway_v1::AgentResolutionSource::SessionBinding as i32,
+        "second resolve should reuse persisted session binding"
+    );
+    assert!(
+        !resolved_second.binding_created,
+        "second resolve should not mutate binding when already present"
+    );
+
+    let status_snapshot = admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;
+    assert_eq!(
+        status_snapshot
+            .get("agents")
+            .and_then(|value| value.get("default_agent_id"))
+            .and_then(Value::as_str),
+        Some("review"),
+        "admin status should expose default agent id"
+    );
+    assert_eq!(
+        status_snapshot
+            .get("agents")
+            .and_then(|value| value.get("agent_count"))
+            .and_then(Value::as_u64),
+        Some(2),
+        "admin status should expose agent count"
+    );
+    assert!(
+        status_snapshot
+            .get("agents")
+            .and_then(|value| value.get("active_session_bindings"))
+            .and_then(Value::as_array)
+            .is_some_and(|bindings| !bindings.is_empty()),
+        "admin status should expose redacted session->agent bindings"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_agents_management_denies_non_admin_principal() -> Result<()> {
+    let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let mut request = tonic::Request::new(gateway_v1::ListAgentsRequest {
+        v: 1,
+        limit: 10,
+        after_agent_id: String::new(),
+    });
+    authorize_metadata_with_principal(request.metadata_mut(), "user:ops")?;
+    let denied = client
+        .list_agents(request)
+        .await
+        .expect_err("non-admin principal should be denied for agent management");
+    assert_eq!(denied.code(), Code::PermissionDenied);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_cron_create_run_now_and_list_runs_roundtrip() -> Result<()> {
     let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);
@@ -5256,7 +5429,8 @@ fn unique_temp_identity_store_dir() -> PathBuf {
         .as_nanos();
     let counter = TEMP_IDENTITY_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
-        .join(format!("palyra-gateway-identity-{nonce}-{}-{counter}", std::process::id()))
+        .join(format!("palyra-gateway-state-{nonce}-{}-{counter}", std::process::id()))
+        .join("identity")
 }
 
 fn unique_temp_vault_dir() -> PathBuf {

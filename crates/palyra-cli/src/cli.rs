@@ -34,6 +34,10 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommand,
+    },
     Cron {
         #[command(subcommand)]
         command: CronCommand,
@@ -485,6 +489,51 @@ pub enum CompletionShell {
     Fish,
     Powershell,
     Elvish,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum AgentsCommand {
+    List {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, default_value_t = false, conflicts_with = "ndjson")]
+        json: bool,
+        #[arg(long, default_value_t = false, conflicts_with = "json")]
+        ndjson: bool,
+    },
+    Show {
+        agent_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    SetDefault {
+        agent_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Create {
+        agent_id: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        agent_dir: Option<String>,
+        #[arg(long = "workspace-root")]
+        workspace_root: Vec<String>,
+        #[arg(long = "model-profile")]
+        model_profile: Option<String>,
+        #[arg(long = "tool-allow")]
+        tool_allow: Vec<String>,
+        #[arg(long = "skill-allow")]
+        skill_allow: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        set_default: bool,
+        #[arg(long, default_value_t = false)]
+        allow_absolute_paths: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -942,12 +991,12 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        AgentCommand, ApprovalDecisionArg, ApprovalExportFormatArg, ApprovalsCommand,
-        BrowserCommand, ChannelsCommand, Cli, Command, CompletionShell, ConfigCommand, CronCommand,
-        CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
-        JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg,
-        OnboardingCommand, PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand,
-        SkillsPackageCommand,
+        AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg,
+        ApprovalsCommand, BrowserCommand, ChannelsCommand, Cli, Command, CompletionShell,
+        ConfigCommand, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
+        CronScheduleTypeArg, DaemonCommand, JournalCheckpointModeArg, MemoryCommand,
+        MemoryScopeArg, MemorySourceArg, OnboardingCommand, PolicyCommand, ProtocolCommand,
+        SecretsCommand, SkillsCommand, SkillsPackageCommand,
     };
     #[cfg(not(windows))]
     use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -1150,6 +1199,72 @@ mod tests {
             "01ARZ3NDEKTSV4RRFFQ69G5FAX",
         ]);
         assert!(with_run.is_err(), "--ndjson-stdin must conflict with --run-id");
+    }
+
+    #[test]
+    fn parse_agents_list_json() {
+        let parsed = Cli::parse_from([
+            "palyra", "agents", "list", "--after", "main", "--limit", "25", "--json",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Agents {
+                command: AgentsCommand::List {
+                    after: Some("main".to_owned()),
+                    limit: Some(25),
+                    json: true,
+                    ndjson: false,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_agents_create_with_workspace_roots() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "agents",
+            "create",
+            "reviewer",
+            "--display-name",
+            "Code Reviewer",
+            "--workspace-root",
+            "workspace",
+            "--workspace-root",
+            "scratch",
+            "--model-profile",
+            "gpt-4o-mini",
+            "--tool-allow",
+            "palyra.echo",
+            "--skill-allow",
+            "acme.review",
+            "--set-default",
+            "--allow-absolute-paths",
+            "--json",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Agents {
+                command: AgentsCommand::Create {
+                    agent_id: "reviewer".to_owned(),
+                    display_name: "Code Reviewer".to_owned(),
+                    agent_dir: None,
+                    workspace_root: vec!["workspace".to_owned(), "scratch".to_owned()],
+                    model_profile: Some("gpt-4o-mini".to_owned()),
+                    tool_allow: vec!["palyra.echo".to_owned()],
+                    skill_allow: vec!["acme.review".to_owned()],
+                    set_default: true,
+                    allow_absolute_paths: true,
+                    json: true,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_agents_list_ndjson_conflicts_with_json() {
+        let result = Cli::try_parse_from(["palyra", "agents", "list", "--json", "--ndjson"]);
+        assert!(result.is_err(), "--json and --ndjson must be mutually exclusive for agents list");
     }
 
     #[test]

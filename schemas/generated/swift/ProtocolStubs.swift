@@ -181,6 +181,9 @@ public enum PalyraGatewayV1 {
     public struct AbortRunResponse: Equatable {
         public init() {}
     }
+    public struct Agent: Equatable {
+        public init() {}
+    }
     public struct AppendEventRequest: Equatable {
         public init() {}
     }
@@ -193,6 +196,12 @@ public enum PalyraGatewayV1 {
     public struct ApprovalRecord: Equatable {
         public init() {}
     }
+    public struct CreateAgentRequest: Equatable {
+        public init() {}
+    }
+    public struct CreateAgentResponse: Equatable {
+        public init() {}
+    }
     public struct DeleteSecretRequest: Equatable {
         public init() {}
     }
@@ -203,6 +212,12 @@ public enum PalyraGatewayV1 {
         public init() {}
     }
     public struct ExportApprovalsResponse: Equatable {
+        public init() {}
+    }
+    public struct GetAgentRequest: Equatable {
+        public init() {}
+    }
+    public struct GetAgentResponse: Equatable {
         public init() {}
     }
     public struct GetApprovalRequest: Equatable {
@@ -221,6 +236,12 @@ public enum PalyraGatewayV1 {
         public init() {}
     }
     public struct HealthResponse: Equatable {
+        public init() {}
+    }
+    public struct ListAgentsRequest: Equatable {
+        public init() {}
+    }
+    public struct ListAgentsResponse: Equatable {
         public init() {}
     }
     public struct ListApprovalsRequest: Equatable {
@@ -247,6 +268,12 @@ public enum PalyraGatewayV1 {
     public struct PutSecretResponse: Equatable {
         public init() {}
     }
+    public struct ResolveAgentForContextRequest: Equatable {
+        public init() {}
+    }
+    public struct ResolveAgentForContextResponse: Equatable {
+        public init() {}
+    }
     public struct ResolveSessionRequest: Equatable {
         public init() {}
     }
@@ -254,6 +281,12 @@ public enum PalyraGatewayV1 {
         public init() {}
     }
     public struct SessionSummary: Equatable {
+        public init() {}
+    }
+    public struct SetDefaultAgentRequest: Equatable {
+        public init() {}
+    }
+    public struct SetDefaultAgentResponse: Equatable {
         public init() {}
     }
     public struct VaultSecretMetadata: Equatable {
@@ -267,10 +300,15 @@ public enum PalyraGatewayV1 {
     public protocol GatewayServiceClient {
         func abortRun()
         func appendEvent()
+        func createAgent()
+        func getAgent()
         func getHealth()
+        func listAgents()
         func listSessions()
+        func resolveAgentForContext()
         func resolveSession()
         func runStream()
+        func setDefaultAgent()
     }
     public protocol VaultServiceClient {
         func deleteSecret()
