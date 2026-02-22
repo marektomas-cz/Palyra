@@ -1,4 +1,5 @@
 mod agents;
+mod channel_router;
 mod config;
 mod cron;
 mod gateway;
@@ -253,6 +254,7 @@ async fn main() -> Result<()> {
                 .clone(),
             max_tape_entries_per_response: loaded.gateway.max_tape_entries_per_response,
             max_tape_bytes_per_response: loaded.gateway.max_tape_bytes_per_response,
+            channel_router: loaded.channel_router.clone(),
             tool_call: tool_protocol::ToolCallConfig {
                 allowed_tools: loaded.tool_call.allowed_tools.clone(),
                 max_calls_per_run: loaded.tool_call.max_calls_per_run,
@@ -402,6 +404,27 @@ async fn main() -> Result<()> {
         tool_call_wasm_runtime_allowed_secrets = ?loaded.tool_call.wasm_runtime.allowed_secrets,
         tool_call_wasm_runtime_allowed_storage_prefixes = ?loaded.tool_call.wasm_runtime.allowed_storage_prefixes,
         tool_call_wasm_runtime_allowed_channels = ?loaded.tool_call.wasm_runtime.allowed_channels,
+        channel_router_enabled = loaded.channel_router.enabled,
+        channel_router_max_message_bytes = loaded.channel_router.max_message_bytes,
+        channel_router_max_retry_queue_depth_per_channel =
+            loaded.channel_router.max_retry_queue_depth_per_channel,
+        channel_router_max_retry_attempts = loaded.channel_router.max_retry_attempts,
+        channel_router_retry_backoff_ms = loaded.channel_router.retry_backoff_ms,
+        channel_router_default_channel_enabled = loaded.channel_router.default_channel_enabled,
+        channel_router_default_allow_direct_messages =
+            loaded.channel_router.default_allow_direct_messages,
+        channel_router_default_isolate_session_by_sender =
+            loaded.channel_router.default_isolate_session_by_sender,
+        channel_router_default_broadcast_strategy =
+            loaded.channel_router.default_broadcast_strategy.as_str(),
+        channel_router_default_concurrency_limit =
+            loaded.channel_router.default_concurrency_limit,
+        channel_router_channels = ?loaded
+            .channel_router
+            .channels
+            .iter()
+            .map(|rule| rule.channel.clone())
+            .collect::<Vec<_>>(),
         admin_auth_required = loaded.admin.require_auth,
         admin_token_configured = loaded.admin.auth_token.is_some(),
         admin_rate_limit_window_ms = ADMIN_RATE_LIMIT_WINDOW_MS,

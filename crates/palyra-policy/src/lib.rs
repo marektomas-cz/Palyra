@@ -144,6 +144,14 @@ when {
     context.action == "vault.delete" ||
     context.action == "vault.list"
 };
+
+@id("allow_message_router_actions")
+permit(principal, action, resource)
+when {
+    context.action == "message.reply" ||
+    context.action == "message.broadcast" ||
+    context.action == "channel.send"
+};
 "#;
 
 const POLICY_DENY_REASON: &str = "tool execution denied by default: tool is not allowlisted";
@@ -402,6 +410,9 @@ fn decision_reason(
         }
         if normalized_action.starts_with("vault.") {
             return "vault action allowed by Cedar policy".to_owned();
+        }
+        if normalized_action.starts_with("message.") || normalized_action == "channel.send" {
+            return "message router action allowed by Cedar policy".to_owned();
         }
         return "read-only action allowed by Cedar baseline policy".to_owned();
     }
@@ -811,6 +822,38 @@ mod tests {
             evaluation.explanation.reason.contains("vault action allowed"),
             "vault allow reason should reflect dedicated vault policy"
         );
+    }
+
+    #[test]
+    fn message_router_actions_are_explicitly_allowed() {
+        let request = PolicyRequest {
+            principal: "user:ops".to_owned(),
+            action: "message.reply".to_owned(),
+            resource: "channel:slack".to_owned(),
+        };
+
+        let evaluation =
+            evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
+
+        assert_eq!(evaluation.decision, PolicyDecision::Allow);
+        assert!(
+            evaluation.explanation.reason.contains("message router action allowed"),
+            "message action allow reason should reflect dedicated message policy"
+        );
+    }
+
+    #[test]
+    fn channel_send_action_is_explicitly_allowed() {
+        let request = PolicyRequest {
+            principal: "user:ops".to_owned(),
+            action: "channel.send".to_owned(),
+            resource: "channel:slack".to_owned(),
+        };
+
+        let evaluation =
+            evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
+
+        assert_eq!(evaluation.decision, PolicyDecision::Allow);
     }
 
     #[test]

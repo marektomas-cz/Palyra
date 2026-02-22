@@ -12,6 +12,7 @@ service GatewayService {
   rpc AbortRun(AbortRunRequest) returns (AbortRunResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc ResolveSession(ResolveSessionRequest) returns (ResolveSessionResponse);
+  rpc RouteMessage(RouteMessageRequest) returns (RouteMessageResponse);
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
   rpc GetAgent(GetAgentRequest) returns (GetAgentResponse);
   rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse);
@@ -311,6 +312,46 @@ message ResolveSessionResponse {
   bool reset_applied = 4;
 
   reserved 5 to 12;
+}
+
+message OutboundMessage {
+  string text = 1;
+  repeated palyra.common.v1.MessageAttachment attachments = 2;
+  string thread_id = 3;
+  string in_reply_to_message_id = 4;
+  bool broadcast = 5;
+  string auto_ack_text = 6;
+  string auto_reaction = 7;
+
+  reserved 8 to 16;
+}
+
+message RouteMessageRequest {
+  uint32 v = 1;
+  palyra.common.v1.MessageEnvelope envelope = 2;
+  bool is_direct_message = 3;
+  bool request_broadcast = 4;
+  string adapter_message_id = 5;
+  string adapter_thread_id = 6;
+  uint32 retry_attempt = 7;
+  string session_label = 8;
+
+  reserved 9 to 16;
+}
+
+message RouteMessageResponse {
+  uint32 v = 1;
+  bool accepted = 2;
+  bool queued_for_retry = 3;
+  string decision_reason = 4;
+  palyra.common.v1.CanonicalId session_id = 5;
+  palyra.common.v1.CanonicalId run_id = 6;
+  repeated OutboundMessage outputs = 7;
+  string route_key = 8;
+  uint32 retry_attempt = 9;
+  uint32 queue_depth = 10;
+
+  reserved 11 to 20;
 }
 
 message Agent {

@@ -242,6 +242,8 @@ pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ListSessionsResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct OutboundMessage;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct PutSecretRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct PutSecretResponse;
@@ -253,6 +255,10 @@ pub mod palyra_gateway_v1 {
     pub struct ResolveSessionRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ResolveSessionResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct RouteMessageRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct RouteMessageResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SessionSummary;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -276,6 +282,7 @@ pub mod palyra_gateway_v1 {
         fn ListSessions(&self);
         fn ResolveAgentForContext(&self);
         fn ResolveSession(&self);
+        fn RouteMessage(&self);
         fn RunStream(&self);
         fn SetDefaultAgent(&self);
     }
