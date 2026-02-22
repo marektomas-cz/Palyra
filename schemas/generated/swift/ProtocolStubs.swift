@@ -338,6 +338,9 @@ public enum PalyraGatewayV1 {
     public struct ListSessionsResponse: Equatable {
         public init() {}
     }
+    public struct OutboundMessage: Equatable {
+        public init() {}
+    }
     public struct PutSecretRequest: Equatable {
         public init() {}
     }
@@ -354,6 +357,12 @@ public enum PalyraGatewayV1 {
         public init() {}
     }
     public struct ResolveSessionResponse: Equatable {
+        public init() {}
+    }
+    public struct RouteMessageRequest: Equatable {
+        public init() {}
+    }
+    public struct RouteMessageResponse: Equatable {
         public init() {}
     }
     public struct SessionSummary: Equatable {
@@ -383,6 +392,7 @@ public enum PalyraGatewayV1 {
         func listSessions()
         func resolveAgentForContext()
         func resolveSession()
+        func routeMessage()
         func runStream()
         func setDefaultAgent()
     }

@@ -13,6 +13,7 @@ use palyra_common::{
 };
 use palyra_vault::VaultRef;
 
+use crate::channel_router::{BroadcastStrategy, ChannelRouterConfig, ChannelRoutingRule};
 use crate::cron::CronTimezoneMode;
 use crate::model_provider::{
     validate_openai_base_url_network_policy, ModelProviderConfig, ModelProviderKind,
@@ -72,6 +73,7 @@ pub struct LoadedConfig {
     pub memory: MemoryConfig,
     pub model_provider: ModelProviderConfig,
     pub tool_call: ToolCallConfig,
+    pub channel_router: ChannelRouterConfig,
     pub admin: AdminConfig,
     pub identity: IdentityConfig,
     pub storage: StorageConfig,
@@ -336,6 +338,7 @@ pub fn load_config() -> Result<LoadedConfig> {
     let mut memory = MemoryConfig::default();
     let mut model_provider = ModelProviderConfig::default();
     let mut tool_call = ToolCallConfig::default();
+    let mut channel_router = ChannelRouterConfig::default();
     let mut admin = AdminConfig::default();
     let mut identity = IdentityConfig::default();
     let mut storage = StorageConfig::default();
@@ -632,6 +635,78 @@ pub fn load_config() -> Result<LoadedConfig> {
                         "tool_call.wasm_runtime.allowed_channels",
                         "channel handle",
                     )?;
+                }
+            }
+        }
+        if let Some(file_channel_router) = parsed.channel_router {
+            if let Some(enabled) = file_channel_router.enabled {
+                channel_router.enabled = enabled;
+            }
+            if let Some(max_message_bytes) = file_channel_router.max_message_bytes {
+                channel_router.max_message_bytes =
+                    parse_positive_usize(max_message_bytes, "channel_router.max_message_bytes")?;
+            }
+            if let Some(max_retry_queue_depth_per_channel) =
+                file_channel_router.max_retry_queue_depth_per_channel
+            {
+                channel_router.max_retry_queue_depth_per_channel = parse_positive_usize(
+                    max_retry_queue_depth_per_channel,
+                    "channel_router.max_retry_queue_depth_per_channel",
+                )?;
+            }
+            if let Some(max_retry_attempts) = file_channel_router.max_retry_attempts {
+                channel_router.max_retry_attempts =
+                    parse_positive_u32(max_retry_attempts, "channel_router.max_retry_attempts")?;
+            }
+            if let Some(retry_backoff_ms) = file_channel_router.retry_backoff_ms {
+                channel_router.retry_backoff_ms =
+                    parse_positive_u64(retry_backoff_ms, "channel_router.retry_backoff_ms")?;
+            }
+            if let Some(default_response_prefix) = file_channel_router.default_response_prefix {
+                channel_router.default_response_prefix = parse_optional_text_field(
+                    default_response_prefix,
+                    "channel_router.default_response_prefix",
+                    256,
+                )?;
+            }
+            if let Some(file_routing) = file_channel_router.routing {
+                if let Some(default_channel_enabled) = file_routing.default_channel_enabled {
+                    channel_router.default_channel_enabled = default_channel_enabled;
+                }
+                if let Some(default_allow_direct_messages) =
+                    file_routing.default_allow_direct_messages
+                {
+                    channel_router.default_allow_direct_messages = default_allow_direct_messages;
+                }
+                if let Some(default_isolate_session_by_sender) =
+                    file_routing.default_isolate_session_by_sender
+                {
+                    channel_router.default_isolate_session_by_sender =
+                        default_isolate_session_by_sender;
+                }
+                if let Some(default_broadcast_strategy) = file_routing.default_broadcast_strategy {
+                    channel_router.default_broadcast_strategy = parse_broadcast_strategy(
+                        default_broadcast_strategy.as_str(),
+                        "channel_router.routing.default_broadcast_strategy",
+                    )?;
+                }
+                if let Some(default_concurrency_limit) = file_routing.default_concurrency_limit {
+                    channel_router.default_concurrency_limit = parse_positive_usize(
+                        default_concurrency_limit,
+                        "channel_router.routing.default_concurrency_limit",
+                    )?;
+                }
+                if let Some(channels) = file_routing.channels {
+                    let mut parsed_channels = Vec::with_capacity(channels.len());
+                    for (index, channel) in channels.into_iter().enumerate() {
+                        let source_name = format!("channel_router.routing.channels[{index}]");
+                        parsed_channels.push(parse_channel_routing_rule(
+                            channel,
+                            source_name.as_str(),
+                            &channel_router,
+                        )?);
+                    }
+                    channel_router.channels = parsed_channels;
                 }
             }
         }
@@ -959,6 +1034,55 @@ pub fn load_config() -> Result<LoadedConfig> {
         source.push_str(" +env(PALYRA_TOOL_CALL_TIMEOUT_MS)");
     }
 
+    if let Ok(channel_router_enabled) = env::var("PALYRA_CHANNEL_ROUTER_ENABLED") {
+        channel_router.enabled = channel_router_enabled
+            .parse::<bool>()
+            .context("PALYRA_CHANNEL_ROUTER_ENABLED must be true or false")?;
+        source.push_str(" +env(PALYRA_CHANNEL_ROUTER_ENABLED)");
+    }
+
+    if let Ok(max_message_bytes) = env::var("PALYRA_CHANNEL_ROUTER_MAX_MESSAGE_BYTES") {
+        channel_router.max_message_bytes = parse_positive_usize(
+            max_message_bytes
+                .parse::<u64>()
+                .context("PALYRA_CHANNEL_ROUTER_MAX_MESSAGE_BYTES must be a valid u64")?,
+            "PALYRA_CHANNEL_ROUTER_MAX_MESSAGE_BYTES",
+        )?;
+        source.push_str(" +env(PALYRA_CHANNEL_ROUTER_MAX_MESSAGE_BYTES)");
+    }
+
+    if let Ok(max_retry_queue_depth_per_channel) =
+        env::var("PALYRA_CHANNEL_ROUTER_MAX_RETRY_QUEUE_DEPTH_PER_CHANNEL")
+    {
+        channel_router.max_retry_queue_depth_per_channel = parse_positive_usize(
+            max_retry_queue_depth_per_channel.parse::<u64>().context(
+                "PALYRA_CHANNEL_ROUTER_MAX_RETRY_QUEUE_DEPTH_PER_CHANNEL must be a valid u64",
+            )?,
+            "PALYRA_CHANNEL_ROUTER_MAX_RETRY_QUEUE_DEPTH_PER_CHANNEL",
+        )?;
+        source.push_str(" +env(PALYRA_CHANNEL_ROUTER_MAX_RETRY_QUEUE_DEPTH_PER_CHANNEL)");
+    }
+
+    if let Ok(max_retry_attempts) = env::var("PALYRA_CHANNEL_ROUTER_MAX_RETRY_ATTEMPTS") {
+        channel_router.max_retry_attempts = parse_positive_u32(
+            max_retry_attempts
+                .parse::<u32>()
+                .context("PALYRA_CHANNEL_ROUTER_MAX_RETRY_ATTEMPTS must be a valid u32")?,
+            "PALYRA_CHANNEL_ROUTER_MAX_RETRY_ATTEMPTS",
+        )?;
+        source.push_str(" +env(PALYRA_CHANNEL_ROUTER_MAX_RETRY_ATTEMPTS)");
+    }
+
+    if let Ok(retry_backoff_ms) = env::var("PALYRA_CHANNEL_ROUTER_RETRY_BACKOFF_MS") {
+        channel_router.retry_backoff_ms = parse_positive_u64(
+            retry_backoff_ms
+                .parse::<u64>()
+                .context("PALYRA_CHANNEL_ROUTER_RETRY_BACKOFF_MS must be a valid u64")?,
+            "PALYRA_CHANNEL_ROUTER_RETRY_BACKOFF_MS",
+        )?;
+        source.push_str(" +env(PALYRA_CHANNEL_ROUTER_RETRY_BACKOFF_MS)");
+    }
+
     if let Ok(require_auth) = env::var("PALYRA_ADMIN_REQUIRE_AUTH") {
         admin.require_auth = require_auth
             .parse::<bool>()
@@ -1034,6 +1158,7 @@ pub fn load_config() -> Result<LoadedConfig> {
         memory,
         model_provider,
         tool_call,
+        channel_router,
         admin,
         identity,
         storage,
@@ -1266,6 +1391,153 @@ fn parse_storage_prefix_allowlist(raw: &str, source_name: &str) -> Result<Vec<St
     Ok(allowlist)
 }
 
+fn parse_broadcast_strategy(raw: &str, source_name: &str) -> Result<BroadcastStrategy> {
+    BroadcastStrategy::parse(raw)
+        .ok_or_else(|| anyhow::anyhow!("{source_name} must be one of: deny, mention_only, allow"))
+}
+
+fn parse_optional_text_field(
+    raw: String,
+    source_name: &str,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > max_bytes {
+        anyhow::bail!("{source_name} exceeds maximum bytes ({} > {max_bytes})", trimmed.len());
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+fn parse_channel_identifier(raw: &str, source_name: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{source_name} cannot be empty");
+    }
+    if !trimmed.chars().all(|ch| {
+        ch.is_ascii_lowercase()
+            || ch.is_ascii_uppercase()
+            || ch.is_ascii_digit()
+            || matches!(ch, '.' | '_' | '-' | ':')
+    }) {
+        anyhow::bail!("{source_name} contains invalid channel identifier '{trimmed}'");
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn parse_sender_identifier_list(raw: &[String], source_name: &str) -> Result<Vec<String>> {
+    let mut values = Vec::new();
+    for candidate in raw.iter().map(String::as_str).map(str::trim).filter(|value| !value.is_empty())
+    {
+        if !candidate.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '@' | ':' | '/' | '#')
+        }) {
+            anyhow::bail!("{source_name} contains invalid sender identifier '{candidate}'");
+        }
+        let normalized = candidate.to_ascii_lowercase();
+        if !values.iter().any(|existing| existing == &normalized) {
+            values.push(normalized);
+        }
+    }
+    Ok(values)
+}
+
+fn parse_mention_patterns(raw: &[String], source_name: &str) -> Result<Vec<String>> {
+    if raw.len() > 64 {
+        anyhow::bail!("{source_name} exceeds maximum entries ({} > 64)", raw.len());
+    }
+    let mut patterns = Vec::new();
+    for candidate in raw.iter().map(String::as_str) {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("{source_name} cannot contain empty mention patterns");
+        }
+        if trimmed.len() > 128 {
+            anyhow::bail!(
+                "{source_name} contains oversized mention pattern ({} > 128)",
+                trimmed.len()
+            );
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        if !patterns.iter().any(|existing| existing == &normalized) {
+            patterns.push(normalized);
+        }
+    }
+    Ok(patterns)
+}
+
+fn parse_channel_routing_rule(
+    raw: palyra_common::daemon_config_schema::FileChannelRoutingRule,
+    source_name: &str,
+    defaults: &ChannelRouterConfig,
+) -> Result<ChannelRoutingRule> {
+    let channel = parse_channel_identifier(
+        raw.channel.unwrap_or_default().as_str(),
+        format!("{source_name}.channel").as_str(),
+    )?;
+    let mention_patterns = parse_mention_patterns(
+        raw.mention_patterns.unwrap_or_default().as_slice(),
+        format!("{source_name}.mention_patterns").as_str(),
+    )?;
+    let allow_from = parse_sender_identifier_list(
+        raw.allow_from.unwrap_or_default().as_slice(),
+        format!("{source_name}.allow_from").as_str(),
+    )?;
+    let deny_from = parse_sender_identifier_list(
+        raw.deny_from.unwrap_or_default().as_slice(),
+        format!("{source_name}.deny_from").as_str(),
+    )?;
+    let response_prefix = parse_optional_text_field(
+        raw.response_prefix.unwrap_or_default(),
+        format!("{source_name}.response_prefix").as_str(),
+        256,
+    )?;
+    let auto_ack_text = parse_optional_text_field(
+        raw.auto_ack_text.unwrap_or_default(),
+        format!("{source_name}.auto_ack_text").as_str(),
+        256,
+    )?;
+    let auto_reaction = parse_optional_text_field(
+        raw.auto_reaction.unwrap_or_default(),
+        format!("{source_name}.auto_reaction").as_str(),
+        64,
+    )?;
+    let broadcast_strategy = if let Some(value) = raw.broadcast_strategy {
+        parse_broadcast_strategy(
+            value.as_str(),
+            format!("{source_name}.broadcast_strategy").as_str(),
+        )?
+    } else {
+        defaults.default_broadcast_strategy
+    };
+    let concurrency_limit = if let Some(value) = raw.concurrency_limit {
+        Some(parse_positive_usize(value, format!("{source_name}.concurrency_limit").as_str())?)
+    } else {
+        Some(defaults.default_concurrency_limit)
+    };
+
+    Ok(ChannelRoutingRule {
+        channel,
+        enabled: raw.enabled.unwrap_or(defaults.default_channel_enabled),
+        mention_patterns,
+        allow_from,
+        deny_from,
+        allow_direct_messages: raw
+            .allow_direct_messages
+            .unwrap_or(defaults.default_allow_direct_messages),
+        isolate_session_by_sender: raw
+            .isolate_session_by_sender
+            .unwrap_or(defaults.default_isolate_session_by_sender),
+        response_prefix,
+        auto_ack_text,
+        auto_reaction,
+        broadcast_strategy,
+        concurrency_limit,
+    })
+}
+
 fn normalize_host_candidate(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('.').to_ascii_lowercase();
     if trimmed.is_empty() {
@@ -1344,14 +1616,16 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        parse_cron_timezone_mode, parse_default_memory_ttl_ms, parse_dns_suffix_allowlist,
-        parse_host_allowlist, parse_journal_db_path, parse_openai_base_url, parse_positive_usize,
-        parse_process_executable_allowlist, parse_process_runner_egress_enforcement_mode,
-        parse_root_file_config, parse_storage_prefix_allowlist, parse_tool_allowlist,
-        parse_vault_dir, parse_vault_ref_allowlist, AdminConfig, CronConfig, GatewayConfig,
+        parse_broadcast_strategy, parse_cron_timezone_mode, parse_default_memory_ttl_ms,
+        parse_dns_suffix_allowlist, parse_host_allowlist, parse_journal_db_path,
+        parse_openai_base_url, parse_positive_usize, parse_process_executable_allowlist,
+        parse_process_runner_egress_enforcement_mode, parse_root_file_config,
+        parse_storage_prefix_allowlist, parse_tool_allowlist, parse_vault_dir,
+        parse_vault_ref_allowlist, AdminConfig, ChannelRouterConfig, CronConfig, GatewayConfig,
         GatewayTlsConfig, IdentityConfig, MemoryConfig, ModelProviderConfig, OrchestratorConfig,
         StorageConfig, ToolCallConfig,
     };
+    use crate::channel_router::BroadcastStrategy;
     use crate::model_provider::ModelProviderKind;
     use crate::sandbox_runner::EgressEnforcementMode;
     use palyra_common::daemon_config_schema::RootFileConfig;
@@ -1459,6 +1733,84 @@ mod tests {
         assert_eq!(config.default_ttl_ms, Some(30 * 24 * 60 * 60 * 1_000));
         assert!(!config.auto_inject.enabled, "memory auto-inject must default to disabled");
         assert_eq!(config.auto_inject.max_items, 3);
+    }
+
+    #[test]
+    fn channel_router_defaults_to_disabled_deny_by_default() {
+        let config = ChannelRouterConfig::default();
+        assert!(!config.enabled, "channel router must require explicit opt-in");
+        assert_eq!(config.max_message_bytes, 32 * 1024);
+        assert_eq!(config.max_retry_queue_depth_per_channel, 64);
+        assert_eq!(config.max_retry_attempts, 3);
+        assert_eq!(config.retry_backoff_ms, 250);
+        assert!(
+            !config.default_channel_enabled,
+            "per-channel routing should default disabled until explicitly configured"
+        );
+        assert_eq!(config.default_broadcast_strategy, BroadcastStrategy::Deny);
+        assert_eq!(config.default_concurrency_limit, 2);
+    }
+
+    #[test]
+    fn channel_router_config_parses_routing_rules() {
+        let (parsed, _) = parse_root_file_config(
+            r#"
+            [channel_router]
+            enabled = true
+            max_message_bytes = 2048
+            max_retry_queue_depth_per_channel = 8
+            max_retry_attempts = 2
+            retry_backoff_ms = 150
+            default_response_prefix = "Palyra: "
+
+            [channel_router.routing]
+            default_channel_enabled = false
+            default_allow_direct_messages = false
+            default_isolate_session_by_sender = true
+            default_broadcast_strategy = "mention_only"
+            default_concurrency_limit = 3
+            channels = [
+                { channel = "slack", enabled = true, mention_patterns = ["@palyra"], allow_from = ["U123"], allow_direct_messages = true, broadcast_strategy = "allow", concurrency_limit = 1 }
+            ]
+            "#,
+        )
+        .expect("channel router config should parse");
+        let channel_router = parsed.channel_router.expect("channel_router section should exist");
+        assert_eq!(channel_router.enabled, Some(true));
+        assert_eq!(channel_router.max_message_bytes, Some(2048));
+        let routing = channel_router.routing.expect("routing section should exist");
+        assert_eq!(routing.default_concurrency_limit, Some(3));
+        let channels = routing.channels.expect("channels list should exist");
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].channel.as_deref(), Some("slack"));
+        assert_eq!(channels[0].broadcast_strategy.as_deref(), Some("allow"));
+    }
+
+    #[test]
+    fn parse_broadcast_strategy_accepts_and_rejects_expected_values() {
+        assert_eq!(
+            parse_broadcast_strategy("deny", "channel_router.routing.default_broadcast_strategy")
+                .expect("deny should parse"),
+            BroadcastStrategy::Deny
+        );
+        assert_eq!(
+            parse_broadcast_strategy(
+                "mention_only",
+                "channel_router.routing.default_broadcast_strategy",
+            )
+            .expect("mention_only should parse"),
+            BroadcastStrategy::MentionOnly
+        );
+        assert_eq!(
+            parse_broadcast_strategy("allow", "channel_router.routing.default_broadcast_strategy")
+                .expect("allow should parse"),
+            BroadcastStrategy::Allow
+        );
+        assert!(
+            parse_broadcast_strategy("always", "channel_router.routing.default_broadcast_strategy")
+                .is_err(),
+            "unsupported broadcast strategy should be rejected"
+        );
     }
 
     #[test]
@@ -1666,6 +2018,32 @@ mod tests {
         let result: Result<RootFileConfig, _> =
             toml::from_str("[tool_call.wasm_runtime]\nenabled=true\nunexpected=true\n");
         assert!(result.is_err(), "unknown wasm runtime keys must be rejected");
+    }
+
+    #[test]
+    fn config_rejects_unknown_channel_router_key() {
+        let result: Result<RootFileConfig, _> =
+            toml::from_str("[channel_router]\nenabled=true\nunexpected=true\n");
+        assert!(result.is_err(), "unknown channel_router keys must be rejected");
+    }
+
+    #[test]
+    fn config_rejects_unknown_channel_router_routing_key() {
+        let result: Result<RootFileConfig, _> = toml::from_str(
+            "[channel_router.routing]\ndefault_channel_enabled=true\nunexpected=true\n",
+        );
+        assert!(result.is_err(), "unknown channel_router.routing keys must be rejected");
+    }
+
+    #[test]
+    fn config_rejects_unknown_channel_router_channel_rule_key() {
+        let result: Result<RootFileConfig, _> = toml::from_str(
+            "[channel_router.routing]\nchannels = [{ channel = 'slack', enabled = true, unexpected = true }]\n",
+        );
+        assert!(
+            result.is_err(),
+            "unknown channel_router.routing.channels[*] keys must be rejected"
+        );
     }
 
     #[test]

@@ -67,6 +67,7 @@ pub struct RootFileConfig {
     pub memory: Option<FileMemoryConfig>,
     pub model_provider: Option<FileModelProviderConfig>,
     pub tool_call: Option<FileToolCallConfig>,
+    pub channel_router: Option<FileChannelRouterConfig>,
     pub admin: Option<FileAdminConfig>,
     pub identity: Option<FileIdentityConfig>,
     pub storage: Option<FileStorageConfig>,
@@ -156,6 +157,46 @@ pub struct FileToolCallConfig {
     pub execution_timeout_ms: Option<u64>,
     pub process_runner: Option<FileProcessRunnerConfig>,
     pub wasm_runtime: Option<FileWasmRuntimeConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileChannelRouterConfig {
+    pub enabled: Option<bool>,
+    pub max_message_bytes: Option<u64>,
+    pub max_retry_queue_depth_per_channel: Option<u64>,
+    pub max_retry_attempts: Option<u32>,
+    pub retry_backoff_ms: Option<u64>,
+    pub default_response_prefix: Option<String>,
+    pub routing: Option<FileChannelRoutingConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileChannelRoutingConfig {
+    pub default_channel_enabled: Option<bool>,
+    pub default_allow_direct_messages: Option<bool>,
+    pub default_isolate_session_by_sender: Option<bool>,
+    pub default_broadcast_strategy: Option<String>,
+    pub default_concurrency_limit: Option<u64>,
+    pub channels: Option<Vec<FileChannelRoutingRule>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileChannelRoutingRule {
+    pub channel: Option<String>,
+    pub enabled: Option<bool>,
+    pub mention_patterns: Option<Vec<String>>,
+    pub allow_from: Option<Vec<String>>,
+    pub deny_from: Option<Vec<String>>,
+    pub allow_direct_messages: Option<bool>,
+    pub isolate_session_by_sender: Option<bool>,
+    pub response_prefix: Option<String>,
+    pub auto_ack_text: Option<String>,
+    pub auto_reaction: Option<String>,
+    pub broadcast_strategy: Option<String>,
+    pub concurrency_limit: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
