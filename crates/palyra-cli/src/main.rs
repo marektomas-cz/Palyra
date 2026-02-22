@@ -50,7 +50,7 @@ use cli::{
     BrowserCommand, ChannelsCommand, Cli, Command as CliCommand, CompletionShell, ConfigCommand,
     CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg,
     DaemonCommand, JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg,
-    OnboardingCommand, PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand,
+    OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand,
     SkillsPackageCommand,
 };
 #[cfg(not(windows))]
@@ -66,8 +66,12 @@ use palyra_common::{
     },
     daemon_config_schema::{is_secret_config_path, redact_secret_config_values, RootFileConfig},
     default_config_search_paths, parse_config_path, parse_daemon_bind_socket,
-    validate_canonical_id, HealthResponse, CANONICAL_JSON_ENVELOPE_VERSION,
-    CANONICAL_PROTOCOL_MAJOR,
+    validate_canonical_id,
+    workspace_patch::{
+        apply_workspace_patch, compute_patch_sha256, redact_patch_preview, WorkspacePatchLimits,
+        WorkspacePatchRedactionPolicy, WorkspacePatchRequest,
+    },
+    HealthResponse, CANONICAL_JSON_ENVELOPE_VERSION, CANONICAL_PROTOCOL_MAJOR,
 };
 #[cfg(not(windows))]
 use palyra_identity::FilesystemSecretStore;
@@ -155,6 +159,7 @@ fn main() -> Result<()> {
         CliCommand::Policy { command } => run_policy(command),
         CliCommand::Protocol { command } => run_protocol(command),
         CliCommand::Config { command } => run_config(command),
+        CliCommand::Patch { command } => run_patch(command),
         CliCommand::Skills { command } => run_skills(command),
         CliCommand::Secrets { command } => run_secrets(command),
         #[cfg(not(windows))]
@@ -3173,6 +3178,82 @@ fn run_config(command: ConfigCommand) -> Result<()> {
                 backups
             );
             std::io::stdout().flush().context("stdout flush failed")
+        }
+    }
+}
+
+fn run_patch(command: PatchCommand) -> Result<()> {
+    match command {
+        PatchCommand::Apply { stdin, dry_run, json } => {
+            if !stdin {
+                anyhow::bail!("patch apply requires --stdin");
+            }
+            let mut patch = String::new();
+            std::io::stdin()
+                .read_to_string(&mut patch)
+                .context("failed to read patch from stdin")?;
+            if patch.trim().is_empty() {
+                anyhow::bail!("patch from stdin is empty");
+            }
+
+            let workspace_root = std::env::current_dir()
+                .context("failed to resolve current working directory as workspace root")?;
+            let limits = WorkspacePatchLimits::default();
+            let redaction_policy = WorkspacePatchRedactionPolicy::default();
+            let request = WorkspacePatchRequest {
+                patch: patch.clone(),
+                dry_run,
+                redaction_policy: redaction_policy.clone(),
+            };
+
+            match apply_workspace_patch(&[workspace_root], &request, &limits) {
+                Ok(outcome) => {
+                    if json {
+                        let rendered = serde_json::to_string_pretty(&outcome)
+                            .context("failed to serialize patch apply output")?;
+                        println!("{rendered}");
+                    } else {
+                        println!(
+                            "patch.apply success=true dry_run={} files_touched={} patch_sha256={}",
+                            outcome.dry_run,
+                            outcome.files_touched.len(),
+                            outcome.patch_sha256
+                        );
+                    }
+                    std::io::stdout().flush().context("stdout flush failed")
+                }
+                Err(error) => {
+                    let parse_error = error
+                        .parse_location()
+                        .map(|(line, column)| json!({ "line": line, "column": column }));
+                    let payload = json!({
+                        "patch_sha256": compute_patch_sha256(patch.as_str()),
+                        "dry_run": dry_run,
+                        "rollback_performed": error.rollback_performed(),
+                        "redacted_preview": redact_patch_preview(
+                            patch.as_str(),
+                            &redaction_policy,
+                            limits.max_preview_bytes,
+                        ),
+                        "parse_error": parse_error,
+                        "error": error.to_string(),
+                    });
+                    if json {
+                        let rendered = serde_json::to_string_pretty(&payload)
+                            .context("failed to serialize patch apply failure output")?;
+                        println!("{rendered}");
+                    } else {
+                        println!(
+                            "patch.apply success=false dry_run={} rollback_performed={} error={}",
+                            dry_run,
+                            error.rollback_performed(),
+                            error
+                        );
+                    }
+                    std::io::stdout().flush().context("stdout flush failed")?;
+                    anyhow::bail!("patch apply failed: {error}");
+                }
+            }
         }
     }
 }

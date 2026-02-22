@@ -82,6 +82,10 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    Patch {
+        #[command(subcommand)]
+        command: PatchCommand,
+    },
     #[command(visible_alias = "skill")]
     Skills {
         #[command(subcommand)]
@@ -726,6 +730,18 @@ pub enum ConfigCommand {
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum PatchCommand {
+    Apply {
+        #[arg(long, default_value_t = false)]
+        stdin: bool,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum SecretsCommand {
     Set {
         scope: String,
@@ -995,8 +1011,8 @@ mod tests {
         ApprovalsCommand, BrowserCommand, ChannelsCommand, Cli, Command, CompletionShell,
         ConfigCommand, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
         CronScheduleTypeArg, DaemonCommand, JournalCheckpointModeArg, MemoryCommand,
-        MemoryScopeArg, MemorySourceArg, OnboardingCommand, PolicyCommand, ProtocolCommand,
-        SecretsCommand, SkillsCommand, SkillsPackageCommand,
+        MemoryScopeArg, MemorySourceArg, OnboardingCommand, PatchCommand, PolicyCommand,
+        ProtocolCommand, SecretsCommand, SkillsCommand, SkillsPackageCommand,
     };
     #[cfg(not(windows))]
     use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -1903,6 +1919,18 @@ mod tests {
                 command: ProtocolCommand::ValidateId {
                     id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()
                 }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_patch_apply_from_stdin() {
+        let parsed =
+            Cli::parse_from(["palyra", "patch", "apply", "--stdin", "--dry-run", "--json"]);
+        assert_eq!(
+            parsed.command,
+            Command::Patch {
+                command: PatchCommand::Apply { stdin: true, dry_run: true, json: true }
             }
         );
     }

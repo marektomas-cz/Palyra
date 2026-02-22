@@ -131,6 +131,7 @@ const UNSUPPORTED_TOOL_DENY_REASON: &str =
 const TOOL_MAX_SLEEP_MS: u64 = 5_000;
 const EMPTY_TOOL_CAPABILITIES: &[ToolCapability] = &[];
 const PROCESS_RUNNER_CAPABILITIES: &[ToolCapability] = &[ToolCapability::ProcessExec];
+const WORKSPACE_PATCH_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemWrite];
 const WASM_PLUGIN_CAPABILITIES: &[ToolCapability] =
     &[ToolCapability::Network, ToolCapability::SecretsRead, ToolCapability::FilesystemWrite];
 const TOOL_INPUT_TOO_LARGE_ERROR_CODE: &str = "quota/tool_input_too_large";
@@ -138,6 +139,7 @@ const MAX_ECHO_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_SLEEP_TOOL_INPUT_BYTES: usize = 8 * 1024;
 const MAX_MEMORY_SEARCH_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES: usize = 128 * 1024;
+const MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES: usize = 256 * 1024;
 const MAX_WASM_PLUGIN_TOOL_INPUT_BYTES: usize = 448 * 1024;
 const SENSITIVE_CAPABILITY_POLICY_NAMES: &[&str] =
     &["process_exec", "network", "secrets_read", "filesystem_write"];
@@ -281,6 +283,10 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         }
         "palyra.process.run" => Some(ToolMetadata {
             capabilities: PROCESS_RUNNER_CAPABILITIES,
+            default_sensitive: true,
+        }),
+        "palyra.fs.apply_patch" => Some(ToolMetadata {
+            capabilities: WORKSPACE_PATCH_CAPABILITIES,
             default_sensitive: true,
         }),
         "palyra.plugin.run" => {
@@ -483,6 +489,14 @@ async fn run_allowlisted_tool(
             },
         },
         "palyra.process.run" => execute_process_runner_tool(config, input_json).await,
+        "palyra.fs.apply_patch" => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: "palyra.fs.apply_patch requires gateway workspace context".to_owned(),
+            timed_out: false,
+            executor: "workspace_patch".to_owned(),
+            sandbox_enforcement: "workspace_roots".to_owned(),
+        },
         "palyra.plugin.run" => execute_wasm_plugin_tool(config, input_json).await,
         _ => ToolExecutionRawResult {
             success: false,
@@ -502,6 +516,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.sleep"
             | "palyra.memory.search"
             | "palyra.process.run"
+            | "palyra.fs.apply_patch"
             | "palyra.plugin.run"
     )
 }
@@ -509,6 +524,8 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
 fn tool_executor_name(tool_name: &str) -> &'static str {
     if tool_name == "palyra.process.run" {
         "sandbox_tier_b"
+    } else if tool_name == "palyra.fs.apply_patch" {
+        "workspace_patch"
     } else if tool_name == "palyra.memory.search" {
         "gateway_runtime"
     } else if tool_name == "palyra.plugin.run" {
@@ -524,6 +541,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.sleep" => MAX_SLEEP_TOOL_INPUT_BYTES,
         "palyra.memory.search" => MAX_MEMORY_SEARCH_TOOL_INPUT_BYTES,
         "palyra.process.run" => MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES,
+        "palyra.fs.apply_patch" => MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES,
         "palyra.plugin.run" => MAX_WASM_PLUGIN_TOOL_INPUT_BYTES,
         _ => MAX_MEMORY_SEARCH_TOOL_INPUT_BYTES,
     }
@@ -532,6 +550,8 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
 fn sandbox_enforcement_for_tool(config: &ToolCallConfig, tool_name: &str) -> String {
     if tool_name == "palyra.process.run" {
         config.process_runner.egress_enforcement_mode.as_str().to_owned()
+    } else if tool_name == "palyra.fs.apply_patch" {
+        "workspace_roots".to_owned()
     } else {
         "none".to_owned()
     }
@@ -930,11 +950,57 @@ mod tests {
     }
 
     #[test]
+    fn decide_tool_call_workspace_patch_requires_explicit_approval() {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.fs.apply_patch".to_owned()],
+            max_calls_per_run: 2,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let mut budget = config.max_calls_per_run;
+        let request_context = tool_request_context("user:ops");
+
+        let decision = decide_tool_call(
+            &config,
+            &mut budget,
+            &request_context,
+            "palyra.fs.apply_patch",
+            false,
+        );
+
+        assert!(!decision.allowed, "patch tool should be denied without explicit approval");
+        assert!(decision.approval_required, "patch tool should require explicit approval");
+        assert_eq!(budget, 2, "denied decision must not consume budget");
+    }
+
+    #[test]
+    fn decide_tool_call_workspace_patch_allows_with_explicit_approval() {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.fs.apply_patch".to_owned()],
+            max_calls_per_run: 2,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let mut budget = config.max_calls_per_run;
+        let request_context = tool_request_context("user:ops");
+
+        let decision =
+            decide_tool_call(&config, &mut budget, &request_context, "palyra.fs.apply_patch", true);
+
+        assert!(decision.allowed, "patch tool should be allowed with explicit approval");
+        assert!(decision.approval_required, "sensitive tool metadata should remain visible");
+        assert_eq!(budget, 1, "allowed decision should consume budget");
+    }
+
+    #[test]
     fn tool_requires_approval_flags_sensitive_capabilities() {
         assert!(!tool_requires_approval("palyra.echo"));
         assert!(!tool_requires_approval("palyra.sleep"));
         assert!(!tool_requires_approval("palyra.memory.search"));
         assert!(tool_requires_approval("palyra.process.run"));
+        assert!(tool_requires_approval("palyra.fs.apply_patch"));
         assert!(tool_requires_approval("palyra.plugin.run"));
         assert!(
             tool_requires_approval("custom.unknown"),

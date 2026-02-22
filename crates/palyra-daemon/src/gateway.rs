@@ -9,7 +9,14 @@ use std::{
 };
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
-use palyra_common::{build_metadata, validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
+use palyra_common::{
+    build_metadata, validate_canonical_id,
+    workspace_patch::{
+        apply_workspace_patch, compute_patch_sha256, redact_patch_preview, WorkspacePatchLimits,
+        WorkspacePatchRedactionPolicy, WorkspacePatchRequest,
+    },
+    CANONICAL_PROTOCOL_MAJOR,
+};
 use palyra_policy::{
     evaluate_with_config, evaluate_with_context, PolicyDecision, PolicyEvaluationConfig,
     PolicyRequest, PolicyRequestContext,
@@ -136,6 +143,11 @@ const MAX_MEMORY_ITEM_BYTES: usize = 16 * 1024;
 const MAX_MEMORY_ITEM_TOKENS: usize = 2_048;
 const MAX_MEMORY_TOOL_QUERY_BYTES: usize = 4 * 1024;
 const MAX_MEMORY_TOOL_TAGS: usize = 32;
+const MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES: usize = 256 * 1024;
+const MAX_PATCH_TOOL_REDACTION_PATTERNS: usize = 64;
+const MAX_PATCH_TOOL_SECRET_FILE_MARKERS: usize = 64;
+const MAX_PATCH_TOOL_PATTERN_BYTES: usize = 256;
+const MAX_PATCH_TOOL_MARKER_BYTES: usize = 256;
 const MAX_AGENT_STATUS_BINDINGS: usize = 128;
 const MAX_VAULT_SECRET_BYTES: usize = 64 * 1024;
 const MAX_VAULT_LIST_RESULTS: usize = 1_000;
@@ -151,6 +163,7 @@ const APPROVAL_PROMPT_TIMEOUT_SECONDS: u32 = 60;
 const APPROVAL_REQUEST_SUMMARY_MAX_BYTES: usize = 1024;
 const TOOL_APPROVAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const SKILL_EXECUTION_DENY_REASON_PREFIX: &str = "skill execution blocked by security gate";
+const WORKSPACE_PATCH_TOOL_NAME: &str = "palyra.fs.apply_patch";
 
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeConfigSnapshot {
@@ -292,6 +305,10 @@ struct RuntimeCounters {
     tool_execution_failures: AtomicU64,
     tool_execution_timeouts: AtomicU64,
     tool_attestations_emitted: AtomicU64,
+    patches_applied: AtomicU64,
+    patches_rejected: AtomicU64,
+    patch_files_touched: AtomicU64,
+    patch_rollbacks: AtomicU64,
     cron_jobs_created: AtomicU64,
     cron_jobs_updated: AtomicU64,
     cron_jobs_deleted: AtomicU64,
@@ -401,6 +418,10 @@ pub struct CountersSnapshot {
     pub tool_execution_failures: u64,
     pub tool_execution_timeouts: u64,
     pub tool_attestations_emitted: u64,
+    pub patches_applied: u64,
+    pub patches_rejected: u64,
+    pub patch_files_touched: u64,
+    pub patch_rollbacks: u64,
     pub cron_jobs_created: u64,
     pub cron_jobs_updated: u64,
     pub cron_jobs_deleted: u64,
@@ -520,6 +541,10 @@ impl RuntimeCounters {
             tool_execution_failures: self.tool_execution_failures.load(Ordering::Relaxed),
             tool_execution_timeouts: self.tool_execution_timeouts.load(Ordering::Relaxed),
             tool_attestations_emitted: self.tool_attestations_emitted.load(Ordering::Relaxed),
+            patches_applied: self.patches_applied.load(Ordering::Relaxed),
+            patches_rejected: self.patches_rejected.load(Ordering::Relaxed),
+            patch_files_touched: self.patch_files_touched.load(Ordering::Relaxed),
+            patch_rollbacks: self.patch_rollbacks.load(Ordering::Relaxed),
             cron_jobs_created: self.cron_jobs_created.load(Ordering::Relaxed),
             cron_jobs_updated: self.cron_jobs_updated.load(Ordering::Relaxed),
             cron_jobs_deleted: self.cron_jobs_deleted.load(Ordering::Relaxed),
@@ -629,6 +654,10 @@ impl GatewayRuntimeState {
                 tool_execution_failures: AtomicU64::new(0),
                 tool_execution_timeouts: AtomicU64::new(0),
                 tool_attestations_emitted: AtomicU64::new(0),
+                patches_applied: AtomicU64::new(0),
+                patches_rejected: AtomicU64::new(0),
+                patch_files_touched: AtomicU64::new(0),
+                patch_rollbacks: AtomicU64::new(0),
                 cron_jobs_created: AtomicU64::new(0),
                 cron_jobs_updated: AtomicU64::new(0),
                 cron_jobs_deleted: AtomicU64::new(0),
@@ -5214,6 +5243,16 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                             input_json.as_slice(),
                                         )
                                         .await
+                                    } else if tool_name == WORKSPACE_PATCH_TOOL_NAME {
+                                        execute_workspace_patch_tool(
+                                            &state_for_stream,
+                                            context_for_stream.principal.as_str(),
+                                            context_for_stream.channel.as_deref(),
+                                            session_id,
+                                            proposal_id.as_str(),
+                                            input_json.as_slice(),
+                                        )
+                                        .await
                                     } else {
                                         execute_tool_call(
                                             &state_for_stream.config.tool_call,
@@ -5331,6 +5370,37 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                     decision.reason.as_str(),
                                 )
                             };
+
+                            if tool_name == WORKSPACE_PATCH_TOOL_NAME {
+                                if execution_outcome.success {
+                                    state_for_stream
+                                        .counters
+                                        .patches_applied
+                                        .fetch_add(1, Ordering::Relaxed);
+                                } else {
+                                    state_for_stream
+                                        .counters
+                                        .patches_rejected
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+
+                                let (files_touched, rollback_performed) =
+                                    workspace_patch_metrics_from_output(
+                                        execution_outcome.output_json.as_slice(),
+                                    );
+                                if files_touched > 0 {
+                                    state_for_stream
+                                        .counters
+                                        .patch_files_touched
+                                        .fetch_add(files_touched as u64, Ordering::Relaxed);
+                                }
+                                if rollback_performed {
+                                    state_for_stream
+                                        .counters
+                                        .patch_rollbacks
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
 
                             if let Err(error) = send_tool_result_with_tape(
                                 &sender,
@@ -7023,6 +7093,282 @@ async fn execute_memory_search_tool(
     }
 }
 
+async fn execute_workspace_patch_tool(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    principal: &str,
+    channel: Option<&str>,
+    session_id: &str,
+    proposal_id: &str,
+    input_json: &[u8],
+) -> ToolExecutionOutcome {
+    if input_json.len() > MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES {
+        return workspace_patch_tool_execution_outcome(
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!(
+                "palyra.fs.apply_patch input exceeds {MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES} bytes"
+            ),
+        );
+    }
+
+    let parsed = match serde_json::from_slice::<Value>(input_json) {
+        Ok(Value::Object(map)) => map,
+        Ok(_) => {
+            return workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                "palyra.fs.apply_patch requires JSON object input".to_owned(),
+            );
+        }
+        Err(error) => {
+            return workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.fs.apply_patch invalid JSON input: {error}"),
+            );
+        }
+    };
+
+    let patch = match parsed.get("patch").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => value.to_owned(),
+        _ => {
+            return workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                "palyra.fs.apply_patch requires non-empty string field 'patch'".to_owned(),
+            );
+        }
+    };
+
+    let dry_run = match parsed.get("dry_run") {
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                "palyra.fs.apply_patch dry_run must be a boolean".to_owned(),
+            );
+        }
+        None => false,
+    };
+
+    let mut redaction_policy = WorkspacePatchRedactionPolicy::default();
+    match parse_patch_string_array_field(
+        &parsed,
+        "redaction_patterns",
+        MAX_PATCH_TOOL_REDACTION_PATTERNS,
+        MAX_PATCH_TOOL_PATTERN_BYTES,
+    ) {
+        Ok(Some(patterns)) => {
+            redaction_policy.redaction_patterns = patterns;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            return workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                message,
+            );
+        }
+    }
+    match parse_patch_string_array_field(
+        &parsed,
+        "secret_file_markers",
+        MAX_PATCH_TOOL_SECRET_FILE_MARKERS,
+        MAX_PATCH_TOOL_MARKER_BYTES,
+    ) {
+        Ok(Some(markers)) => {
+            redaction_policy.secret_file_markers = markers;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            return workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                message,
+            );
+        }
+    }
+
+    let agent_outcome = match runtime_state
+        .resolve_agent_for_context(AgentResolveRequest {
+            principal: principal.to_owned(),
+            channel: channel.map(str::to_owned),
+            session_id: Some(session_id.to_owned()),
+            preferred_agent_id: None,
+            persist_session_binding: false,
+        })
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!(
+                    "palyra.fs.apply_patch failed to resolve agent workspace: {}",
+                    error.message()
+                ),
+            );
+        }
+    };
+    let workspace_roots =
+        agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let limits = WorkspacePatchLimits::default();
+    let request = WorkspacePatchRequest {
+        patch: patch.clone(),
+        dry_run,
+        redaction_policy: redaction_policy.clone(),
+    };
+
+    match apply_workspace_patch(workspace_roots.as_slice(), &request, &limits) {
+        Ok(outcome) => match serde_json::to_vec(&outcome) {
+            Ok(output_json) => workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                true,
+                output_json,
+                String::new(),
+            ),
+            Err(error) => workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.fs.apply_patch failed to serialize output: {error}"),
+            ),
+        },
+        Err(error) => {
+            if let Some((line, column)) = error.parse_location() {
+                warn!(
+                    proposal_id = %proposal_id,
+                    line,
+                    column,
+                    error = %error,
+                    "workspace patch parse failed"
+                );
+            } else {
+                warn!(
+                    proposal_id = %proposal_id,
+                    error = %error,
+                    "workspace patch execution failed"
+                );
+            }
+            let failure_payload = json!({
+                "patch_sha256": compute_patch_sha256(patch.as_str()),
+                "dry_run": dry_run,
+                "files_touched": [],
+                "rollback_performed": error.rollback_performed(),
+                "redacted_preview": redact_patch_preview(
+                    patch.as_str(),
+                    &redaction_policy,
+                    limits.max_preview_bytes
+                ),
+                "parse_error": error
+                    .parse_location()
+                    .map(|(line, column)| json!({ "line": line, "column": column })),
+                "error": error.to_string(),
+            });
+            let output_json =
+                serde_json::to_vec(&failure_payload).unwrap_or_else(|_| b"{}".to_vec());
+            workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                output_json,
+                format!("palyra.fs.apply_patch failed: {error}"),
+            )
+        }
+    }
+}
+
+fn parse_patch_string_array_field(
+    payload: &serde_json::Map<String, Value>,
+    field_name: &str,
+    max_items: usize,
+    max_item_bytes: usize,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = payload.get(field_name) else {
+        return Ok(None);
+    };
+    let Value::Array(values) = value else {
+        return Err(format!("palyra.fs.apply_patch {field_name} must be an array of strings"));
+    };
+    if values.len() > max_items {
+        return Err(format!("palyra.fs.apply_patch {field_name} exceeds limit ({max_items})"));
+    }
+    let mut parsed = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(raw) = value.as_str() else {
+            return Err(format!("palyra.fs.apply_patch {field_name} must be an array of strings"));
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.len() > max_item_bytes {
+            return Err(format!(
+                "palyra.fs.apply_patch {field_name} entries must be <= {max_item_bytes} bytes"
+            ));
+        }
+        parsed.push(trimmed.to_owned());
+    }
+    Ok(Some(parsed))
+}
+
+fn workspace_patch_tool_execution_outcome(
+    proposal_id: &str,
+    input_json: &[u8],
+    success: bool,
+    output_json: Vec<u8>,
+    error: String,
+) -> ToolExecutionOutcome {
+    let executed_at_unix_ms = current_unix_ms();
+    let mut hasher = Sha256::new();
+    hasher.update(b"palyra.fs.apply_patch.attestation.v1");
+    hasher.update((proposal_id.len() as u64).to_be_bytes());
+    hasher.update(proposal_id.as_bytes());
+    hasher.update((input_json.len() as u64).to_be_bytes());
+    hasher.update(input_json);
+    hasher.update([u8::from(success)]);
+    hasher.update((output_json.len() as u64).to_be_bytes());
+    hasher.update(output_json.as_slice());
+    hasher.update((error.len() as u64).to_be_bytes());
+    hasher.update(error.as_bytes());
+    hasher.update(executed_at_unix_ms.to_be_bytes());
+    let execution_sha256 = format!("{:x}", hasher.finalize());
+
+    ToolExecutionOutcome {
+        success,
+        output_json,
+        error,
+        attestation: ToolAttestation {
+            attestation_id: Ulid::new().to_string(),
+            execution_sha256,
+            executed_at_unix_ms,
+            timed_out: false,
+            executor: "workspace_patch".to_owned(),
+            sandbox_enforcement: "workspace_roots".to_owned(),
+        },
+    }
+}
+
 fn parse_memory_source_literal(raw: &str) -> Option<MemorySource> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "tape:user_message" | "tape_user_message" | "user_message" => {
@@ -8281,6 +8627,18 @@ async fn record_agent_journal_event(
         .map(|_| ())
 }
 
+fn workspace_patch_metrics_from_output(output_json: &[u8]) -> (usize, bool) {
+    let parsed = serde_json::from_slice::<Value>(output_json).ok();
+    let Some(Value::Object(payload)) = parsed else {
+        return (0, false);
+    };
+    let files_touched =
+        payload.get("files_touched").and_then(Value::as_array).map_or(0, std::vec::Vec::len);
+    let rollback_performed =
+        payload.get("rollback_performed").and_then(Value::as_bool).unwrap_or(false);
+    (files_touched, rollback_performed)
+}
+
 fn tool_result_tape_payload(
     proposal_id: &str,
     success: bool,
@@ -8544,13 +8902,16 @@ fn non_empty(input: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
+    use serde_json::{json, Value};
 
+    use crate::agents::AgentCreateRequest;
     use crate::journal::{
         ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
         ApprovalPromptOption, ApprovalPromptRecord, ApprovalRiskLevel, ApprovalSubjectType,
@@ -8562,8 +8923,9 @@ mod tests {
     use super::{
         apply_tool_approval_outcome, authorize_headers, best_effort_mark_approval_error,
         constant_time_eq, enforce_vault_get_approval_policy, enforce_vault_scope_access,
-        execute_memory_search_tool, request_context_from_headers,
-        resolve_cron_job_channel_for_create, vault_get_requires_approval, AuthError,
+        execute_memory_search_tool, execute_workspace_patch_tool, parse_patch_string_array_field,
+        request_context_from_headers, resolve_cron_job_channel_for_create,
+        vault_get_requires_approval, workspace_patch_metrics_from_output, AuthError,
         GatewayAuthConfig, GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot,
         GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest, RequestContext,
         ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
@@ -9546,6 +9908,168 @@ mod tests {
         assert!(
             tape[0].payload_json.contains("token_cap_reached"),
             "marker payload should describe compaction trigger"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_patch_tool_applies_patch_and_emits_attested_hashes() {
+        let state = build_test_runtime_state(false);
+        let created = state
+            .create_agent(AgentCreateRequest {
+                agent_id: "patcher".to_owned(),
+                display_name: "Patcher".to_owned(),
+                agent_dir: None,
+                workspace_roots: Vec::new(),
+                default_model_profile: None,
+                default_tool_allowlist: Vec::new(),
+                default_skill_allowlist: Vec::new(),
+                set_default: true,
+                allow_absolute_paths: false,
+            })
+            .await
+            .expect("agent should be created");
+        let workspace = PathBuf::from(&created.agent.workspace_roots[0]);
+        fs::write(workspace.join("notes.txt"), "alpha\nbeta\n")
+            .expect("seed file should be written");
+
+        let patch = "*** Begin Patch\n*** Update File: notes.txt\n@@\n-beta\n+beta-updated\n*** Add File: new.txt\n+hello\n*** End Patch\n";
+        let input_json =
+            serde_json::to_vec(&json!({ "patch": patch })).expect("patch input should serialize");
+        let outcome = execute_workspace_patch_tool(
+            &state,
+            "user:ops",
+            Some("cli"),
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+            input_json.as_slice(),
+        )
+        .await;
+        assert!(outcome.success, "patch tool should apply valid patch");
+
+        let payload: Value =
+            serde_json::from_slice(&outcome.output_json).expect("output should parse as JSON");
+        let files = payload
+            .get("files_touched")
+            .and_then(Value::as_array)
+            .expect("files_touched must be present");
+        assert_eq!(files.len(), 2, "update + add should emit two file attestations");
+
+        let notes = files
+            .iter()
+            .find(|entry| entry.get("path").and_then(Value::as_str) == Some("notes.txt"))
+            .expect("notes.txt attestation should be present");
+        let before_notes_hash = super::sha256_hex(b"alpha\nbeta\n");
+        let after_notes_hash = super::sha256_hex(
+            fs::read(workspace.join("notes.txt"))
+                .expect("updated notes file should exist")
+                .as_slice(),
+        );
+        assert_eq!(
+            notes.get("before_sha256").and_then(Value::as_str),
+            Some(before_notes_hash.as_str()),
+            "before hash should match original file bytes"
+        );
+        assert_eq!(
+            notes.get("after_sha256").and_then(Value::as_str),
+            Some(after_notes_hash.as_str()),
+            "after hash should match updated file bytes"
+        );
+
+        let created_file = files
+            .iter()
+            .find(|entry| entry.get("path").and_then(Value::as_str) == Some("new.txt"))
+            .expect("new.txt attestation should be present");
+        let created_file_hash = super::sha256_hex(
+            fs::read(workspace.join("new.txt")).expect("new file should exist").as_slice(),
+        );
+        assert_eq!(
+            created_file.get("before_sha256").and_then(Value::as_str),
+            None,
+            "new file attestation must not include before hash"
+        );
+        assert_eq!(
+            created_file.get("after_sha256").and_then(Value::as_str),
+            Some(created_file_hash.as_str()),
+            "after hash should match newly created file"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_patch_tool_rejects_oversized_input_payload() {
+        let state = build_test_runtime_state(false);
+        let oversized = vec![b'a'; super::MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES + 1];
+        let outcome = execute_workspace_patch_tool(
+            &state,
+            "user:ops",
+            Some("cli"),
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "01ARZ3NDEKTSV4RRFFQ69G5FB2",
+            oversized.as_slice(),
+        )
+        .await;
+        assert!(!outcome.success, "oversized payload must be rejected");
+        assert!(
+            outcome.error.contains("input exceeds"),
+            "error should describe payload size limit enforcement"
+        );
+    }
+
+    #[test]
+    fn parse_patch_string_array_field_validates_shape_limits_and_sizes() {
+        let payload = json!({
+            "redaction_patterns": ["token", "  ", "password"],
+            "secret_file_markers": "invalid"
+        });
+        let object = payload.as_object().expect("payload should be object");
+
+        let parsed = parse_patch_string_array_field(object, "redaction_patterns", 4, 16)
+            .expect("string array should parse")
+            .expect("field should be present");
+        assert_eq!(
+            parsed,
+            vec!["token".to_owned(), "password".to_owned()],
+            "blank entries should be ignored"
+        );
+
+        let type_error = parse_patch_string_array_field(object, "secret_file_markers", 4, 16)
+            .expect_err("non-array field must be rejected");
+        assert!(
+            type_error.contains("must be an array of strings"),
+            "error should explain expected array type"
+        );
+
+        let too_many = json!({ "redaction_patterns": ["a", "b", "c"] });
+        let too_many_err = parse_patch_string_array_field(
+            too_many.as_object().expect("payload should be object"),
+            "redaction_patterns",
+            2,
+            16,
+        )
+        .expect_err("item count above limit must fail");
+        assert!(too_many_err.contains("exceeds limit"));
+
+        let too_large = json!({ "redaction_patterns": ["123456"] });
+        let too_large_err = parse_patch_string_array_field(
+            too_large.as_object().expect("payload should be object"),
+            "redaction_patterns",
+            4,
+            4,
+        )
+        .expect_err("oversized entry must fail");
+        assert!(too_large_err.contains("must be <="));
+    }
+
+    #[test]
+    fn workspace_patch_metrics_from_output_extracts_files_and_rollback() {
+        let output = json!({
+            "files_touched": [{"path": "a.txt"}, {"path": "b.txt"}],
+            "rollback_performed": true
+        });
+        let serialized = serde_json::to_vec(&output).expect("metrics payload should serialize");
+        assert_eq!(workspace_patch_metrics_from_output(&serialized), (2, true));
+        assert_eq!(
+            workspace_patch_metrics_from_output(b"{\"files_touched\":\"invalid\"}"),
+            (0, false)
         );
     }
 }
