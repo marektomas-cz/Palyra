@@ -26,7 +26,7 @@ anyhow = "1.0.96"
 async-trait = "0.1.89"
 axum = "0.8.1"
 base64 = "0.22.1"
-clap = { version = "4.5.31", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 clap_complete = "4.5.31"
 chrono = "0.4.40"
 criterion = "0.5.1"
