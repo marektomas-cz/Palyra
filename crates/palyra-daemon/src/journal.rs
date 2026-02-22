@@ -1,7 +1,7 @@
 use std::{
     fmt, fs,
     path::{Component, Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -37,6 +37,37 @@ const MAX_MEMORY_ITEMS_LIST_LIMIT: usize = 500;
 const MAX_MEMORY_SEARCH_CANDIDATES: usize = 256;
 const DEFAULT_MEMORY_VECTOR_DIMS: usize = 64;
 const DEFAULT_MEMORY_EMBEDDING_MODEL: &str = "hash-embedding-v1";
+
+pub trait MemoryEmbeddingProvider: Send + Sync {
+    fn model_name(&self) -> &'static str;
+    fn dimensions(&self) -> usize;
+    fn embed_text(&self, text: &str) -> Vec<f32>;
+}
+
+#[derive(Debug, Clone)]
+pub struct HashMemoryEmbeddingProvider {
+    dimensions: usize,
+}
+
+impl Default for HashMemoryEmbeddingProvider {
+    fn default() -> Self {
+        Self { dimensions: DEFAULT_MEMORY_VECTOR_DIMS }
+    }
+}
+
+impl MemoryEmbeddingProvider for HashMemoryEmbeddingProvider {
+    fn model_name(&self) -> &'static str {
+        DEFAULT_MEMORY_EMBEDDING_MODEL
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    fn embed_text(&self, text: &str) -> Vec<f32> {
+        hash_embed_text(text, self.dimensions)
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -880,6 +911,8 @@ pub enum JournalError {
     PayloadTooLarge { payload_kind: &'static str, actual_bytes: usize, max_bytes: usize },
     #[error("journal max payload bytes must be greater than 0")]
     InvalidPayloadLimit,
+    #[error("memory embedding vector dimensions must be greater than 0")]
+    InvalidMemoryVectorDimensions,
     #[error("journal sqlite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("failed to serialize journal payload: {0}")]
@@ -1181,6 +1214,7 @@ const MIGRATIONS: &[Migration] = &[
 pub struct JournalStore {
     config: JournalConfig,
     connection: Mutex<Connection>,
+    memory_embedding_provider: Arc<dyn MemoryEmbeddingProvider>,
 }
 
 impl fmt::Debug for JournalStore {
@@ -1196,8 +1230,21 @@ impl fmt::Debug for JournalStore {
 
 impl JournalStore {
     pub fn open(config: JournalConfig) -> Result<Self, JournalError> {
+        Self::open_with_memory_embedding_provider(
+            config,
+            Arc::new(HashMemoryEmbeddingProvider::default()),
+        )
+    }
+
+    pub fn open_with_memory_embedding_provider(
+        config: JournalConfig,
+        memory_embedding_provider: Arc<dyn MemoryEmbeddingProvider>,
+    ) -> Result<Self, JournalError> {
         if config.max_payload_bytes == 0 {
             return Err(JournalError::InvalidPayloadLimit);
+        }
+        if memory_embedding_provider.dimensions() == 0 {
+            return Err(JournalError::InvalidMemoryVectorDimensions);
         }
         validate_db_path(&config.db_path)?;
         if let Some(parent) = config.db_path.parent() {
@@ -1219,7 +1266,7 @@ impl JournalStore {
         )?;
 
         apply_migrations(&mut connection)?;
-        Ok(Self { config, connection: Mutex::new(connection) })
+        Ok(Self { config, connection: Mutex::new(connection), memory_embedding_provider })
     }
 
     pub fn append(
@@ -2631,12 +2678,16 @@ impl JournalStore {
         request: &MemoryItemCreateRequest,
     ) -> Result<MemoryItemRecord, JournalError> {
         let now = current_unix_ms()?;
+        let embedding_dims = self.memory_embedding_provider.dimensions();
         let normalized_content = normalize_memory_text(request.content_text.as_str());
         let content_text = sanitize_object_text_field("content_text", normalized_content.as_str())?;
         let tags = normalize_memory_tags(request.tags.as_slice());
         let tags_json = serde_json::to_string(&tags)?;
         let content_hash = sha256_hex(content_text.as_bytes());
-        let vector = embed_text(content_text.as_str(), DEFAULT_MEMORY_VECTOR_DIMS);
+        let vector = normalize_embedding_dimensions(
+            self.memory_embedding_provider.embed_text(content_text.as_str()),
+            embedding_dims,
+        );
         let vector_blob = encode_vector_blob(vector.as_slice());
 
         let mut guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
@@ -2701,8 +2752,8 @@ impl JournalStore {
             "#,
             params![
                 request.memory_id.as_str(),
-                DEFAULT_MEMORY_EMBEDDING_MODEL,
-                DEFAULT_MEMORY_VECTOR_DIMS as i64,
+                self.memory_embedding_provider.model_name(),
+                embedding_dims as i64,
                 vector_blob,
                 now,
             ],
@@ -2854,6 +2905,7 @@ impl JournalStore {
         request: &MemorySearchRequest,
     ) -> Result<Vec<MemorySearchHit>, JournalError> {
         let query_text = normalize_memory_text(request.query.as_str());
+        let embedding_dims = self.memory_embedding_provider.dimensions();
         let requested_tags = normalize_memory_tags(request.tags.as_slice());
         if query_text.is_empty() {
             return Ok(Vec::new());
@@ -2866,7 +2918,10 @@ impl JournalStore {
             return Ok(Vec::new());
         }
 
-        let query_vector = embed_text(query_text.as_str(), DEFAULT_MEMORY_VECTOR_DIMS);
+        let query_vector = normalize_embedding_dimensions(
+            self.memory_embedding_provider.embed_text(query_text.as_str()),
+            embedding_dims,
+        );
         self.purge_expired_memory_items(now)?;
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         let mut statement = guard.prepare(
@@ -2923,7 +2978,7 @@ impl JournalStore {
             let lexical_rank: f64 = row.get(12)?;
             let lexical_raw = (-lexical_rank).max(0.0);
             let dims = row.get::<_, Option<i64>>(13)?.unwrap_or_default() as usize;
-            let vector_raw = if dims == DEFAULT_MEMORY_VECTOR_DIMS {
+            let vector_raw = if dims == embedding_dims {
                 let vector_blob: Option<Vec<u8>> = row.get(14)?;
                 vector_blob
                     .as_ref()
@@ -3728,7 +3783,7 @@ fn sha256_hex(payload: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn embed_text(text: &str, dims: usize) -> Vec<f32> {
+fn hash_embed_text(text: &str, dims: usize) -> Vec<f32> {
     let mut vector = vec![0_f32; dims];
     if dims == 0 {
         return vector;
@@ -3743,6 +3798,19 @@ fn embed_text(text: &str, dims: usize) -> Vec<f32> {
         let sign = if digest[1] % 2 == 0 { 1.0_f32 } else { -1.0_f32 };
         let magnitude = 1.0 + (f32::from(digest[2]) / 255.0);
         vector[index] += sign * magnitude;
+    }
+    normalize_vector(vector.as_mut_slice());
+    vector
+}
+
+fn normalize_embedding_dimensions(mut vector: Vec<f32>, expected_dims: usize) -> Vec<f32> {
+    if expected_dims == 0 {
+        return Vec::new();
+    }
+    if vector.len() < expected_dims {
+        vector.resize(expected_dims, 0.0);
+    } else if vector.len() > expected_dims {
+        vector.truncate(expected_dims);
     }
     normalize_vector(vector.as_mut_slice());
     vector
@@ -4024,6 +4092,7 @@ mod tests {
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
+        sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -4039,13 +4108,35 @@ mod tests {
         CronJobCreateRequest, CronJobsListFilter, CronMisfirePolicy, CronRetryPolicy,
         CronRunFinalizeRequest, CronRunStartRequest, CronRunStatus, CronRunsListFilter,
         CronScheduleType, JournalAppendRequest, JournalConfig, JournalError, JournalStore,
-        MemoryItemCreateRequest, MemoryItemsListFilter, MemoryPurgeRequest, MemorySearchRequest,
-        MemorySource, OrchestratorCancelRequest, OrchestratorRunStartRequest,
-        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
-        SkillExecutionStatus, SkillStatusUpsertRequest,
+        MemoryEmbeddingProvider, MemoryItemCreateRequest, MemoryItemsListFilter,
+        MemoryPurgeRequest, MemorySearchRequest, MemorySource, OrchestratorCancelRequest,
+        OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
+        OrchestratorTapeAppendRequest, OrchestratorUsageDelta, SkillExecutionStatus,
+        SkillStatusUpsertRequest,
     };
 
     static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Debug)]
+    struct FixedMemoryEmbeddingProvider {
+        model_name: &'static str,
+        dimensions: usize,
+        vector: Vec<f32>,
+    }
+
+    impl MemoryEmbeddingProvider for FixedMemoryEmbeddingProvider {
+        fn model_name(&self) -> &'static str {
+            self.model_name
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn embed_text(&self, _text: &str) -> Vec<f32> {
+            self.vector.clone()
+        }
+    }
 
     fn build_request(event_id: &str, payload_json: &[u8]) -> JournalAppendRequest {
         JournalAppendRequest {
@@ -5100,6 +5191,46 @@ mod tests {
             hits.iter().any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FC1"),
             "search should return the matching memory item"
         );
+    }
+
+    #[test]
+    fn memory_store_supports_custom_embedding_provider_plug() {
+        let db_path = temp_db_path();
+        let provider = Arc::new(FixedMemoryEmbeddingProvider {
+            model_name: "test-embedding-v1",
+            dimensions: 4,
+            vector: vec![0.25, 0.5, 0.75, 1.0],
+        });
+        let store = JournalStore::open_with_memory_embedding_provider(
+            test_journal_config(db_path, false),
+            provider,
+        )
+        .expect("journal store should open with custom embedding provider");
+
+        let memory_id = "01ARZ3NDEKTSV4RRFFQ69G5FC0";
+        store
+            .create_memory_item(&sample_memory_request(
+                memory_id,
+                "user:ops",
+                Some("cli"),
+                Some("01ARZ3NDEKTSV4RRFFQ69G5FAT"),
+                MemorySource::Manual,
+                "custom embedding provider roundtrip",
+            ))
+            .expect("memory item should be created");
+
+        let guard = store.connection.lock().expect("connection lock should not be poisoned");
+        let (model_name, dims): (String, i64) = guard
+            .query_row(
+                "SELECT embedding_model, dims FROM memory_vectors WHERE memory_ulid = ?1",
+                params![memory_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("memory vector metadata should be persisted");
+        drop(guard);
+
+        assert_eq!(model_name, "test-embedding-v1");
+        assert_eq!(dims, 4);
     }
 
     #[test]

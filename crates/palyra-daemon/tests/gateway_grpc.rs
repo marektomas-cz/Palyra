@@ -32,6 +32,8 @@ const RUN_ID_ALT: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAZ";
 const RUN_ID_THIRD: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
 const ENVELOPE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAY";
 const OPENAI_API_KEY: &str = "sk-openai-integration-test";
+const VAULT_READ_APPROVAL_HEADER: &str = "x-palyra-vault-read-approval";
+const VAULT_READ_APPROVAL_ALLOW_VALUE: &str = "allow";
 const MAX_TEST_CRON_JITTER_MS: u64 = 60_000;
 const GRPC_OVERSIZED_PAYLOAD_BYTES: usize = (4 * 1024 * 1024) + 8 * 1024;
 const TRANSPORT_LIMIT_TEST_JOURNAL_MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -1483,6 +1485,72 @@ async fn grpc_memory_get_hides_ttl_expired_item() -> Result<()> {
         .await
         .expect_err("expired memory item should not be visible through get path");
     assert_eq!(error.code(), Code::NotFound);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_vault_get_requires_explicit_approval_for_selected_sensitive_ref() -> Result<()> {
+    let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut vault_client = gateway_v1::vault_service_client::VaultServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect vault gRPC client")?;
+
+    let secret_key = "openai_api_key";
+    let secret_value = b"sk-sensitive-vault-value";
+    let mut put_request = tonic::Request::new(gateway_v1::PutSecretRequest {
+        v: 1,
+        scope: "global".to_owned(),
+        key: secret_key.to_owned(),
+        value: secret_value.to_vec(),
+    });
+    authorize_metadata(put_request.metadata_mut())?;
+    let put_response = vault_client
+        .put_secret(put_request)
+        .await
+        .context("failed to put sensitive global vault secret")?
+        .into_inner();
+    let stored_secret = put_response.secret.context("PutSecret should return secret metadata")?;
+    assert_eq!(stored_secret.scope, "global");
+    assert_eq!(stored_secret.key, secret_key);
+
+    let mut denied_get_request = tonic::Request::new(gateway_v1::GetSecretRequest {
+        v: 1,
+        scope: "global".to_owned(),
+        key: secret_key.to_owned(),
+    });
+    authorize_metadata(denied_get_request.metadata_mut())?;
+    let denied_error = vault_client
+        .get_secret(denied_get_request)
+        .await
+        .expect_err("selected sensitive vault ref must require explicit approval header");
+    assert_eq!(denied_error.code(), Code::PermissionDenied);
+    assert!(
+        denied_error.message().contains("requires explicit approval"),
+        "permission denied should explain explicit approval requirement"
+    );
+
+    let mut approved_get_request = tonic::Request::new(gateway_v1::GetSecretRequest {
+        v: 1,
+        scope: "global".to_owned(),
+        key: secret_key.to_owned(),
+    });
+    authorize_metadata(approved_get_request.metadata_mut())?;
+    approved_get_request
+        .metadata_mut()
+        .insert(VAULT_READ_APPROVAL_HEADER, VAULT_READ_APPROVAL_ALLOW_VALUE.parse()?);
+    let approved_response = vault_client
+        .get_secret(approved_get_request)
+        .await
+        .context("approved sensitive vault read should succeed")?
+        .into_inner();
+    assert_eq!(
+        approved_response.value, secret_value,
+        "approved vault read should return stored secret bytes"
+    );
     Ok(())
 }
 

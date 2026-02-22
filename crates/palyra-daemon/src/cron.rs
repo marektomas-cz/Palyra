@@ -2,16 +2,21 @@
 
 use std::{
     collections::hash_map::DefaultHasher,
+    fs,
     hash::{Hash, Hasher},
+    path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
+use palyra_common::default_identity_store_root;
 use palyra_policy::{
     evaluate_with_context, PolicyDecision, PolicyEvaluationConfig, PolicyRequest,
     PolicyRequestContext,
 };
+use palyra_skills::{audit_skill_artifact_security, SkillSecurityAuditPolicy, SkillTrustStore};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tokio_stream::StreamExt;
@@ -22,12 +27,13 @@ use ulid::Ulid;
 use crate::{
     gateway::{
         proto::palyra::{common::v1 as common_v1, cron::v1 as cron_v1, gateway::v1 as gateway_v1},
-        GatewayAuthConfig, GatewayRuntimeState, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
+        GatewayAuthConfig, GatewayRuntimeState, RequestContext, HEADER_CHANNEL, HEADER_DEVICE_ID,
+        HEADER_PRINCIPAL,
     },
     journal::{
         CronConcurrencyPolicy, CronJobRecord, CronMisfirePolicy, CronRunFinalizeRequest,
         CronRunStartRequest, CronRunStatus, CronScheduleType, OrchestratorCancelRequest,
-        OrchestratorRunStatusSnapshot,
+        OrchestratorRunStatusSnapshot, SkillExecutionStatus, SkillStatusUpsertRequest,
     },
 };
 
@@ -38,6 +44,13 @@ const DEFAULT_CRON_CHANNEL: &str = "system:cron";
 const MAX_CRON_LOOKAHEAD_MINUTES: i64 = 60 * 24 * 370;
 const MAX_RETRY_ATTEMPTS: u32 = 16;
 const MAX_RETRY_BACKOFF_MS: u64 = 60_000;
+const SKILLS_LAYOUT_VERSION: u32 = 1;
+const SKILLS_INDEX_FILE_NAME: &str = "installed-index.json";
+const SKILLS_ARTIFACT_FILE_NAME: &str = "artifact.palyra-skill";
+const SKILLS_TRUST_STORE_PATH_ENV: &str = "PALYRA_SKILLS_TRUST_STORE";
+const SKILL_REAUDIT_INTERVAL_ENV: &str = "PALYRA_SKILL_REAUDIT_INTERVAL_MS";
+const DEFAULT_SKILL_REAUDIT_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const SYSTEM_DAEMON_PRINCIPAL: &str = "system:daemon";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CronTimezoneMode {
@@ -81,6 +94,28 @@ pub struct DispatchOutcome {
     pub run_id: Option<String>,
     pub status: CronRunStatus,
     pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct PeriodicSkillReauditConfig {
+    interval: Duration,
+    skills_root: PathBuf,
+    trust_store_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct InstalledSkillsIndex {
+    schema_version: u32,
+    #[serde(default)]
+    entries: Vec<InstalledSkillRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct InstalledSkillRecord {
+    skill_id: String,
+    version: String,
+    #[serde(default)]
+    current: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,6 +486,228 @@ fn deterministic_jitter_ms(job_id: &str, seed: i64, max_jitter_ms: u64) -> u64 {
     hasher.finish() % (max_jitter_ms.saturating_add(1))
 }
 
+#[allow(clippy::result_large_err)]
+fn parse_skill_reaudit_interval(raw: Option<&str>) -> Result<Option<Duration>, Status> {
+    let Some(raw) = raw else {
+        return Ok(Some(DEFAULT_SKILL_REAUDIT_INTERVAL));
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{SKILL_REAUDIT_INTERVAL_ENV} cannot be empty when set"
+        )));
+    }
+    let interval_ms = trimmed.parse::<u64>().map_err(|_| {
+        Status::invalid_argument(format!(
+            "{SKILL_REAUDIT_INTERVAL_ENV} must be a valid non-negative u64 milliseconds value"
+        ))
+    })?;
+    if interval_ms == 0 {
+        return Ok(None);
+    }
+    Ok(Some(Duration::from_millis(interval_ms)))
+}
+
+#[allow(clippy::result_large_err)]
+fn default_skills_root() -> Result<PathBuf, Status> {
+    let identity_root = default_identity_store_root().map_err(|error| {
+        Status::internal(format!("failed to resolve default identity store root: {error}"))
+    })?;
+    let state_root =
+        identity_root.parent().map(Path::to_path_buf).unwrap_or_else(|| identity_root.clone());
+    Ok(state_root.join("skills"))
+}
+
+fn resolve_skills_trust_store_path(skills_root: &Path) -> Result<PathBuf, Status> {
+    match std::env::var(SKILLS_TRUST_STORE_PATH_ENV) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(Status::invalid_argument(format!(
+                    "{SKILLS_TRUST_STORE_PATH_ENV} cannot be empty when set"
+                )));
+            }
+            Ok(PathBuf::from(trimmed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(skills_root.join("trust-store.json")),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Status::invalid_argument(format!(
+            "{SKILLS_TRUST_STORE_PATH_ENV} must contain valid UTF-8"
+        ))),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn resolve_periodic_skill_reaudit_config() -> Result<Option<PeriodicSkillReauditConfig>, Status> {
+    let interval_raw = match std::env::var(SKILL_REAUDIT_INTERVAL_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(Status::invalid_argument(format!(
+                "{SKILL_REAUDIT_INTERVAL_ENV} must contain valid UTF-8"
+            )));
+        }
+    };
+    let interval = parse_skill_reaudit_interval(interval_raw.as_deref())?;
+    let Some(interval) = interval else {
+        return Ok(None);
+    };
+    let skills_root = default_skills_root()?;
+    let trust_store_path = resolve_skills_trust_store_path(skills_root.as_path())?;
+    Ok(Some(PeriodicSkillReauditConfig { interval, skills_root, trust_store_path }))
+}
+
+fn periodic_reaudit_targets(index: &InstalledSkillsIndex) -> Vec<(String, String)> {
+    let mut selected = index
+        .entries
+        .iter()
+        .filter(|entry| entry.current)
+        .map(|entry| (entry.skill_id.clone(), entry.version.clone()))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        selected = index
+            .entries
+            .iter()
+            .map(|entry| (entry.skill_id.clone(), entry.version.clone()))
+            .collect::<Vec<_>>();
+    }
+    selected.sort();
+    selected.dedup();
+    selected
+}
+
+#[allow(clippy::result_large_err)]
+async fn quarantine_skill_after_periodic_reaudit(
+    state: Arc<GatewayRuntimeState>,
+    skill_id: &str,
+    version: &str,
+    reason: String,
+) -> Result<(), Status> {
+    let existing = state.skill_status(skill_id.to_owned(), version.to_owned()).await?;
+    if existing.is_some_and(|record| matches!(record.status, SkillExecutionStatus::Quarantined)) {
+        return Ok(());
+    }
+
+    let detected_at_ms = now_unix_ms()?;
+    let record = state
+        .upsert_skill_status(SkillStatusUpsertRequest {
+            skill_id: skill_id.to_owned(),
+            version: version.to_owned(),
+            status: SkillExecutionStatus::Quarantined,
+            reason: Some(reason),
+            detected_at_ms,
+            operator_principal: SYSTEM_DAEMON_PRINCIPAL.to_owned(),
+        })
+        .await?;
+    let context = RequestContext {
+        principal: SYSTEM_DAEMON_PRINCIPAL.to_owned(),
+        device_id: SCHEDULER_DEVICE_ID.to_owned(),
+        channel: Some(DEFAULT_CRON_CHANNEL.to_owned()),
+    };
+    state.record_skill_status_event(&context, "skill.quarantined", &record).await
+}
+
+#[allow(clippy::result_large_err)]
+async fn run_periodic_skill_reaudit(
+    state: Arc<GatewayRuntimeState>,
+    config: &PeriodicSkillReauditConfig,
+) -> Result<(), Status> {
+    let index_path = config.skills_root.join(SKILLS_INDEX_FILE_NAME);
+    if !index_path.exists() {
+        return Ok(());
+    }
+    let payload = fs::read(index_path.as_path()).map_err(|error| {
+        Status::internal(format!(
+            "failed to read installed skills index {}: {error}",
+            index_path.display()
+        ))
+    })?;
+    let index: InstalledSkillsIndex =
+        serde_json::from_slice(payload.as_slice()).map_err(|error| {
+            Status::internal(format!(
+                "failed to parse installed skills index {}: {error}",
+                index_path.display()
+            ))
+        })?;
+    if index.schema_version != SKILLS_LAYOUT_VERSION {
+        return Err(Status::failed_precondition(format!(
+            "unsupported installed skills index schema version {} (expected {})",
+            index.schema_version, SKILLS_LAYOUT_VERSION
+        )));
+    }
+
+    let targets = periodic_reaudit_targets(&index);
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let mut trust_store =
+        SkillTrustStore::load(config.trust_store_path.as_path()).map_err(|error| {
+            Status::internal(format!(
+                "failed to load skills trust store {}: {error}",
+                config.trust_store_path.display()
+            ))
+        })?;
+    for (skill_id, version) in targets {
+        let artifact_path = config
+            .skills_root
+            .join(skill_id.as_str())
+            .join(version.as_str())
+            .join(SKILLS_ARTIFACT_FILE_NAME);
+        let artifact_bytes = match fs::read(artifact_path.as_path()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                quarantine_skill_after_periodic_reaudit(
+                    Arc::clone(&state),
+                    skill_id.as_str(),
+                    version.as_str(),
+                    format!("periodic_reaudit_missing_artifact: {}", error),
+                )
+                .await?;
+                continue;
+            }
+        };
+        let audit_report = match audit_skill_artifact_security(
+            artifact_bytes.as_slice(),
+            &mut trust_store,
+            false,
+            &SkillSecurityAuditPolicy::default(),
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                quarantine_skill_after_periodic_reaudit(
+                    Arc::clone(&state),
+                    skill_id.as_str(),
+                    version.as_str(),
+                    format!("periodic_reaudit_failed: {error}"),
+                )
+                .await?;
+                continue;
+            }
+        };
+        if audit_report.should_quarantine {
+            let reason = if audit_report.quarantine_reasons.is_empty() {
+                "periodic_reaudit_failed".to_owned()
+            } else {
+                format!("periodic_reaudit_failed: {}", audit_report.quarantine_reasons.join(" | "))
+            };
+            quarantine_skill_after_periodic_reaudit(
+                Arc::clone(&state),
+                skill_id.as_str(),
+                version.as_str(),
+                reason,
+            )
+            .await?;
+        }
+    }
+    trust_store.save(config.trust_store_path.as_path()).map_err(|error| {
+        Status::internal(format!(
+            "failed to persist skills trust store {}: {error}",
+            config.trust_store_path.display()
+        ))
+    })?;
+    Ok(())
+}
+
 pub fn spawn_scheduler_loop(
     state: Arc<GatewayRuntimeState>,
     auth: GatewayAuthConfig,
@@ -458,6 +715,14 @@ pub fn spawn_scheduler_loop(
     wake_signal: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let periodic_skill_reaudit = match resolve_periodic_skill_reaudit_config() {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(error = %error, "skill periodic re-audit config is invalid; disabling task");
+                None
+            }
+        };
+        let mut next_skill_reaudit_at = Instant::now();
         loop {
             if let Err(error) = process_due_jobs(
                 Arc::clone(&state),
@@ -479,6 +744,16 @@ pub fn spawn_scheduler_loop(
             .await
             {
                 warn!(error = %error, "cron scheduler failed to process queued jobs");
+            }
+
+            if let Some(config) = periodic_skill_reaudit.as_ref() {
+                if Instant::now() >= next_skill_reaudit_at {
+                    if let Err(error) = run_periodic_skill_reaudit(Arc::clone(&state), config).await
+                    {
+                        warn!(error = %error, "periodic skill re-audit failed");
+                    }
+                    next_skill_reaudit_at = Instant::now() + config.interval;
+                }
             }
 
             let sleep_duration = match state.first_due_cron_job_time().await {
@@ -1159,8 +1434,9 @@ fn now_unix_ms() -> Result<i64, Status> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_next_run_after, decide_concurrency_policy, normalize_schedule, ConcurrencyDecision,
-        CronMatcher, CronTimezoneMode,
+        compute_next_run_after, decide_concurrency_policy, normalize_schedule,
+        parse_skill_reaudit_interval, periodic_reaudit_targets, ConcurrencyDecision, CronMatcher,
+        CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex,
     };
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
     use crate::journal::{
@@ -1437,6 +1713,48 @@ mod tests {
             next,
             Some(60_000),
             "catch-up policy should replay the oldest missed slot first"
+        );
+    }
+
+    #[test]
+    fn periodic_reaudit_targets_prefer_current_versions() {
+        let index = InstalledSkillsIndex {
+            schema_version: 1,
+            entries: vec![
+                InstalledSkillRecord {
+                    skill_id: "acme.echo_http".to_owned(),
+                    version: "1.0.0".to_owned(),
+                    current: false,
+                },
+                InstalledSkillRecord {
+                    skill_id: "acme.echo_http".to_owned(),
+                    version: "1.1.0".to_owned(),
+                    current: true,
+                },
+                InstalledSkillRecord {
+                    skill_id: "acme.triage".to_owned(),
+                    version: "2.0.0".to_owned(),
+                    current: true,
+                },
+            ],
+        };
+        let targets = periodic_reaudit_targets(&index);
+        assert_eq!(
+            targets,
+            vec![
+                ("acme.echo_http".to_owned(), "1.1.0".to_owned()),
+                ("acme.triage".to_owned(), "2.0.0".to_owned()),
+            ],
+            "periodic re-audit should target current versions first"
+        );
+    }
+
+    #[test]
+    fn parse_skill_reaudit_interval_zero_disables_periodic_job() {
+        let parsed = parse_skill_reaudit_interval(Some("0")).expect("zero interval should parse");
+        assert!(
+            parsed.is_none(),
+            "zero interval should explicitly disable periodic skill re-audit"
         );
     }
 

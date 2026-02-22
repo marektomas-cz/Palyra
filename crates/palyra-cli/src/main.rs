@@ -130,6 +130,8 @@ const MAX_REGISTRY_INDEX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REGISTRY_ENTRIES: usize = 10_000;
 const MAX_REGISTRY_PAGES: usize = 20;
 const REGISTRY_SIGNATURE_ALGORITHM: &str = "ed25519-sha256";
+const TRUST_STORE_INTEGRITY_VAULT_SCOPE: VaultScope = VaultScope::Global;
+const TRUST_STORE_INTEGRITY_VAULT_KEY_PREFIX: &str = "skills.trust_store.integrity.";
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -3055,7 +3057,7 @@ fn run_skills(command: SkillsCommand) -> Result<()> {
                 })?;
                 let trust_store_path = resolve_skills_trust_store_path(trust_store.as_deref())
                     .with_context(|| "failed to resolve skills trust store path".to_owned())?;
-                let mut store = SkillTrustStore::load(trust_store_path.as_path())?;
+                let mut store = load_trust_store_with_integrity(trust_store_path.as_path())?;
                 for trusted in trusted_publishers {
                     let (publisher, key) = parse_trusted_publisher_arg(trusted.as_str())?;
                     store.add_trusted_key(publisher, key)?;
@@ -3063,7 +3065,7 @@ fn run_skills(command: SkillsCommand) -> Result<()> {
                 let report =
                     verify_skill_artifact(artifact_bytes.as_slice(), &mut store, allow_tofu)
                         .context("failed to verify skill artifact")?;
-                store.save(trust_store_path.as_path())?;
+                save_trust_store_with_integrity(trust_store_path.as_path(), &store)?;
 
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3318,6 +3320,91 @@ fn resolve_skills_trust_store_path(raw: Option<&str>) -> Result<PathBuf> {
     }
 }
 
+fn load_trust_store_with_integrity(path: &Path) -> Result<SkillTrustStore> {
+    let store = SkillTrustStore::load(path)?;
+    verify_or_initialize_trust_store_integrity(path)?;
+    Ok(store)
+}
+
+fn save_trust_store_with_integrity(path: &Path, store: &SkillTrustStore) -> Result<()> {
+    store.save(path)?;
+    update_trust_store_integrity_digest(path)
+}
+
+fn verify_or_initialize_trust_store_integrity(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let payload =
+        fs::read(path).with_context(|| format!("failed to read trust store {}", path.display()))?;
+    let observed_digest = sha256_hex(payload.as_slice());
+    let key = trust_store_integrity_vault_key(path);
+    let vault = open_cli_vault().context("failed to open vault for trust-store integrity check")?;
+    match vault.get_secret(&TRUST_STORE_INTEGRITY_VAULT_SCOPE, key.as_str()) {
+        Ok(expected_bytes) => {
+            let expected_digest = String::from_utf8(expected_bytes).with_context(|| {
+                format!("trust-store integrity record for {} is not valid UTF-8", path.display())
+            })?;
+            if expected_digest.trim() != observed_digest {
+                anyhow::bail!(
+                    "trust-store integrity mismatch detected for {} (expected digest {}, observed {})",
+                    path.display(),
+                    expected_digest.trim(),
+                    observed_digest
+                );
+            }
+        }
+        Err(VaultError::NotFound) => {
+            vault
+                .put_secret(
+                    &TRUST_STORE_INTEGRITY_VAULT_SCOPE,
+                    key.as_str(),
+                    observed_digest.as_bytes(),
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to initialize trust-store integrity record in vault for {}",
+                        path.display()
+                    )
+                })?;
+        }
+        Err(error) => {
+            return Err(anyhow::Error::from(error)).with_context(|| {
+                format!(
+                    "failed to load trust-store integrity record from vault for {}",
+                    path.display()
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
+fn update_trust_store_integrity_digest(path: &Path) -> Result<()> {
+    let payload =
+        fs::read(path).with_context(|| format!("failed to read trust store {}", path.display()))?;
+    let digest = sha256_hex(payload.as_slice());
+    let key = trust_store_integrity_vault_key(path);
+    let vault =
+        open_cli_vault().context("failed to open vault for trust-store integrity update")?;
+    vault
+        .put_secret(&TRUST_STORE_INTEGRITY_VAULT_SCOPE, key.as_str(), digest.as_bytes())
+        .with_context(|| {
+            format!(
+                "failed to persist trust-store integrity record in vault for {}",
+                path.display()
+            )
+        })?;
+    Ok(())
+}
+
+fn trust_store_integrity_vault_key(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let normalized = canonical.to_string_lossy().to_ascii_lowercase();
+    let path_digest = sha256_hex(normalized.as_bytes());
+    format!("{}{}", TRUST_STORE_INTEGRITY_VAULT_KEY_PREFIX, &path_digest[..32])
+}
+
 fn skill_entry_path_from_cli(raw: &str) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -3570,7 +3657,7 @@ fn run_skills_install(command: SkillsInstallCommand) -> Result<()> {
     })?;
 
     let trust_store_path = resolve_skills_trust_store_path(command.trust_store.as_deref())?;
-    let mut trust_store = SkillTrustStore::load(trust_store_path.as_path())?;
+    let mut trust_store = load_trust_store_with_integrity(trust_store_path.as_path())?;
     let trusted_publishers = command.trusted_publishers.clone();
     for trusted in &trusted_publishers {
         let (publisher, key) = parse_trusted_publisher_arg(trusted.as_str())?;
@@ -3618,7 +3705,7 @@ fn run_skills_install(command: SkillsInstallCommand) -> Result<()> {
         &SkillSecurityAuditPolicy::default(),
     )
     .context("failed to evaluate skill security audit policy during install")?;
-    trust_store.save(trust_store_path.as_path())?;
+    save_trust_store_with_integrity(trust_store_path.as_path(), &trust_store)?;
     append_skills_audit_event(
         skills_root.as_path(),
         "skill.audit",
@@ -3747,7 +3834,7 @@ fn run_skills_update(command: SkillsUpdateCommand) -> Result<()> {
         .map(|entry| entry.version.clone());
 
     let trust_store_path = resolve_skills_trust_store_path(command.trust_store.as_deref())?;
-    let mut trust_store = SkillTrustStore::load(trust_store_path.as_path())?;
+    let mut trust_store = load_trust_store_with_integrity(trust_store_path.as_path())?;
     let trusted_publishers = command.trusted_publishers.clone();
     for trusted in &trusted_publishers {
         let (publisher, key) = parse_trusted_publisher_arg(trusted.as_str())?;
@@ -3763,7 +3850,7 @@ fn run_skills_update(command: SkillsUpdateCommand) -> Result<()> {
         command.allow_untrusted,
     )?;
     if current_version.as_deref() == Some(resolved.entry.version.as_str()) {
-        trust_store.save(trust_store_path.as_path())?;
+        save_trust_store_with_integrity(trust_store_path.as_path(), &trust_store)?;
         if command.json {
             println!(
                 "{}",
@@ -3787,7 +3874,7 @@ fn run_skills_update(command: SkillsUpdateCommand) -> Result<()> {
         return std::io::stdout().flush().context("stdout flush failed");
     }
 
-    trust_store.save(trust_store_path.as_path())?;
+    save_trust_store_with_integrity(trust_store_path.as_path(), &trust_store)?;
 
     let install_command = SkillsInstallCommand {
         artifact: None,
@@ -3963,14 +4050,14 @@ fn run_skills_verify(
     })?;
 
     let trust_store_path = resolve_skills_trust_store_path(trust_store.as_deref())?;
-    let mut store = SkillTrustStore::load(trust_store_path.as_path())?;
+    let mut store = load_trust_store_with_integrity(trust_store_path.as_path())?;
     for trusted in trusted_publishers {
         let (publisher, key) = parse_trusted_publisher_arg(trusted.as_str())?;
         store.add_trusted_key(publisher, key)?;
     }
     let report = verify_skill_artifact(artifact_bytes.as_slice(), &mut store, allow_untrusted)
         .context("failed to verify installed skill artifact")?;
-    store.save(trust_store_path.as_path())?;
+    save_trust_store_with_integrity(trust_store_path.as_path(), &store)?;
 
     index.entries[record_index].trust_decision =
         trust_decision_label(report.trust_decision).to_owned();
@@ -4017,7 +4104,7 @@ struct SkillAuditTarget {
 
 fn run_skills_audit(command: SkillsAuditCommand) -> Result<()> {
     let trust_store_path = resolve_skills_trust_store_path(command.trust_store.as_deref())?;
-    let mut store = SkillTrustStore::load(trust_store_path.as_path())?;
+    let mut store = load_trust_store_with_integrity(trust_store_path.as_path())?;
     for trusted in &command.trusted_publishers {
         let (publisher, key) = parse_trusted_publisher_arg(trusted.as_str())?;
         store.add_trusted_key(publisher, key)?;
@@ -4092,7 +4179,7 @@ fn run_skills_audit(command: SkillsAuditCommand) -> Result<()> {
         })?;
         reports.push((target.clone(), report));
     }
-    store.save(trust_store_path.as_path())?;
+    save_trust_store_with_integrity(trust_store_path.as_path(), &store)?;
 
     if let Some(skills_root) = managed_skills_root.as_deref() {
         for (target, report) in &reports {
@@ -6075,19 +6162,22 @@ mod cli_v1_tests {
         normalize_client_socket, normalize_installed_skills_index, normalize_prompt_secret_value,
         normalize_relative_registry_path, parse_acp_shim_input_line,
         parse_and_verify_signed_remote_registry_index, registry_key_id_for, sha256_hex,
-        validate_registry_index, write_file_atomically, InstalledSkillRecord, InstalledSkillSource,
-        InstalledSkillsIndex, RegistrySignature, SignedSkillRegistryIndex, SkillRegistryEntry,
-        SkillRegistryIndex, REGISTRY_INDEX_SCHEMA_VERSION, REGISTRY_SIGNATURE_ALGORITHM,
-        REGISTRY_SIGNED_INDEX_SCHEMA_VERSION,
+        trust_store_integrity_vault_key, validate_registry_index,
+        verify_or_initialize_trust_store_integrity, write_file_atomically, InstalledSkillRecord,
+        InstalledSkillSource, InstalledSkillsIndex, RegistrySignature, SignedSkillRegistryIndex,
+        SkillRegistryEntry, SkillRegistryIndex, REGISTRY_INDEX_SCHEMA_VERSION,
+        REGISTRY_SIGNATURE_ALGORITHM, REGISTRY_SIGNED_INDEX_SCHEMA_VERSION,
     };
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use palyra_skills::SkillTrustStore;
     use reqwest::Url;
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
 
@@ -6167,6 +6257,43 @@ mod cli_v1_tests {
         }
     }
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: tests serialize env updates via env_lock().
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                // SAFETY: tests serialize env updates via env_lock().
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
+            } else {
+                // SAFETY: tests serialize env updates via env_lock().
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
     #[test]
     fn ndjson_stdin_uses_top_level_allow_sensitive_tools_default() {
         let request = parse_acp_shim_input_line(
@@ -6213,6 +6340,67 @@ mod cli_v1_tests {
     fn semver_comparison_uses_numeric_ordering() {
         assert_eq!(compare_semver_versions("1.10.0", "1.2.99"), std::cmp::Ordering::Greater);
         assert_eq!(compare_semver_versions("1.2.0", "1.2.0"), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn trust_store_integrity_vault_key_is_stable_for_same_path() {
+        let path = Path::new("/tmp/palyra/skills/trust-store.json");
+        let first = trust_store_integrity_vault_key(path);
+        let second = trust_store_integrity_vault_key(path);
+        assert_eq!(first, second, "vault integrity key should be stable");
+        assert!(
+            first.starts_with("skills.trust_store.integrity."),
+            "vault integrity key should use expected namespace prefix"
+        );
+    }
+
+    #[test]
+    fn trust_store_integrity_check_detects_tampered_file_contents() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let skills_root = tempdir.path().join("skills");
+        std::fs::create_dir_all(skills_root.as_path()).expect("skills root should be created");
+        let trust_store_path = skills_root.join("trust-store.json");
+        let mut store = SkillTrustStore::default();
+        store
+            .add_trusted_key(
+                "acme",
+                "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+            )
+            .expect("trusted key should be accepted");
+        store.save(trust_store_path.as_path()).expect("trust-store fixture should be written");
+
+        let vault_root = tempdir.path().join("vault");
+        let state_root = tempdir.path().join("state");
+        let _vault_dir =
+            ScopedEnvVar::set("PALYRA_VAULT_DIR", vault_root.to_string_lossy().as_ref());
+        let _vault_backend = ScopedEnvVar::set("PALYRA_VAULT_BACKEND", "encrypted_file");
+        #[cfg(not(windows))]
+        let _state_root =
+            ScopedEnvVar::set("XDG_STATE_HOME", state_root.to_string_lossy().as_ref());
+        #[cfg(not(windows))]
+        let _home = ScopedEnvVar::set("HOME", state_root.to_string_lossy().as_ref());
+        #[cfg(windows)]
+        let _local_app_data =
+            ScopedEnvVar::set("LOCALAPPDATA", state_root.to_string_lossy().as_ref());
+        #[cfg(windows)]
+        let _app_data = ScopedEnvVar::set("APPDATA", state_root.to_string_lossy().as_ref());
+
+        verify_or_initialize_trust_store_integrity(trust_store_path.as_path())
+            .expect("initial trust-store digest should be persisted");
+
+        std::fs::write(
+            trust_store_path.as_path(),
+            br#"{"schema_version":1,"trusted_publishers":{},"tofu_publishers":{}}"#,
+        )
+        .expect("tampered trust-store fixture should be written");
+
+        let error = verify_or_initialize_trust_store_integrity(trust_store_path.as_path())
+            .expect_err("tampered trust-store should fail integrity verification");
+        assert!(
+            error.to_string().contains("integrity mismatch"),
+            "error should mention trust-store integrity mismatch: {error}"
+        );
     }
 
     #[test]

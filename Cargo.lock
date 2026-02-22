@@ -2386,6 +2386,7 @@ dependencies = [
  "palyra-plugins-runtime",
  "palyra-plugins-sdk",
  "palyra-policy",
+ "palyra-skills",
  "palyra-vault",
  "prost",
  "protoc-bin-vendored",
