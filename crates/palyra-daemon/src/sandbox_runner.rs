@@ -814,7 +814,7 @@ fn validate_runtime_egress_enforcement(
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::EgressDenied,
             message: format!(
-                "sandbox denied: tier-c backend '{}' cannot enforce host-level egress allowlists",
+                "sandbox denied: tier-c strict mode is offline-only; backend '{}' cannot enforce host-level egress allowlists. Clear allowlists or route network through dedicated browser/http tools",
                 current_backend_kind().as_str()
             ),
         });
@@ -1684,8 +1684,9 @@ mod tests {
             .expect_err("tier-c strict mode must fail closed for unsupported host allowlists");
         assert_eq!(error.kind, SandboxProcessRunErrorKind::EgressDenied);
         assert!(
-            error.message.contains("cannot enforce host-level egress allowlists"),
-            "tier-c strict denial should explain unsupported host-level enforcement"
+            error.message.contains("offline-only")
+                && error.message.contains("cannot enforce host-level egress allowlists"),
+            "tier-c strict denial should explain offline-only host-level enforcement limits"
         );
     }
 
