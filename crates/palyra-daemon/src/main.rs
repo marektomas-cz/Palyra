@@ -200,6 +200,9 @@ async fn main() -> Result<()> {
     validate_process_runner_backend_policy(
         loaded.tool_call.process_runner.enabled,
         loaded.tool_call.process_runner.tier,
+        loaded.tool_call.process_runner.egress_enforcement_mode,
+        !loaded.tool_call.process_runner.allowed_egress_hosts.is_empty()
+            || !loaded.tool_call.process_runner.allowed_dns_suffixes.is_empty(),
     )?;
 
     let identity_runtime = load_identity_runtime(loaded.gateway.identity_store_dir.clone())
@@ -1069,10 +1072,20 @@ fn validate_admin_auth_config(auth: &GatewayAuthConfig) -> Result<()> {
 fn validate_process_runner_backend_policy(
     enabled: bool,
     tier: sandbox_runner::SandboxProcessRunnerTier,
+    egress_enforcement_mode: sandbox_runner::EgressEnforcementMode,
+    has_host_allowlists: bool,
 ) -> Result<()> {
     if enabled && matches!(tier, sandbox_runner::SandboxProcessRunnerTier::C) && cfg!(windows) {
         anyhow::bail!(
             "tool_call.process_runner.tier='c' is unsupported on windows until Tier-C backend isolation is OS-enforced"
+        );
+    }
+    if enabled
+        && matches!(egress_enforcement_mode, sandbox_runner::EgressEnforcementMode::Strict)
+        && has_host_allowlists
+    {
+        anyhow::bail!(
+            "tool_call.process_runner.egress_enforcement_mode='strict' does not support host allowlists; clear allowlists or switch to preflight mode with dedicated network tools"
         );
     }
     Ok(())
@@ -1277,7 +1290,7 @@ mod tests {
         ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
     };
     use crate::gateway::GatewayAuthConfig;
-    use crate::sandbox_runner::SandboxProcessRunnerTier;
+    use crate::sandbox_runner::{EgressEnforcementMode, SandboxProcessRunnerTier};
 
     #[test]
     fn remote_bind_guard_allows_loopback_without_opt_in() {
@@ -1496,17 +1509,25 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn process_runner_backend_policy_allows_tier_c_on_supported_platforms() {
-        let result = validate_process_runner_backend_policy(true, SandboxProcessRunnerTier::C);
+        let result = validate_process_runner_backend_policy(
+            true,
+            SandboxProcessRunnerTier::C,
+            EgressEnforcementMode::Strict,
+            false,
+        );
         assert!(result.is_ok(), "tier-c should remain configurable on non-windows platforms");
     }
 
     #[test]
     #[cfg(windows)]
     fn process_runner_backend_policy_rejects_tier_c_on_windows() {
-        let error = validate_process_runner_backend_policy(true, SandboxProcessRunnerTier::C)
-            .expect_err(
-                "tier-c must fail closed on windows until backend isolation is implemented",
-            );
+        let error = validate_process_runner_backend_policy(
+            true,
+            SandboxProcessRunnerTier::C,
+            EgressEnforcementMode::Strict,
+            false,
+        )
+        .expect_err("tier-c must fail closed on windows until backend isolation is implemented");
         assert!(
             error.to_string().contains("unsupported on windows"),
             "error should explain unsupported tier-c backend policy"
@@ -1515,8 +1536,30 @@ mod tests {
 
     #[test]
     fn process_runner_backend_policy_allows_tier_b() {
-        let result = validate_process_runner_backend_policy(true, SandboxProcessRunnerTier::B);
+        let result = validate_process_runner_backend_policy(
+            true,
+            SandboxProcessRunnerTier::B,
+            EgressEnforcementMode::Strict,
+            false,
+        );
         assert!(result.is_ok(), "tier-b should remain allowed");
+    }
+
+    #[test]
+    fn process_runner_backend_policy_rejects_strict_mode_host_allowlists() {
+        let error = validate_process_runner_backend_policy(
+            true,
+            SandboxProcessRunnerTier::B,
+            EgressEnforcementMode::Strict,
+            true,
+        )
+        .expect_err("strict mode host allowlists should fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("egress_enforcement_mode='strict' does not support host allowlists"),
+            "error should explain strict-mode host allowlist policy restrictions"
+        );
     }
 }
 
