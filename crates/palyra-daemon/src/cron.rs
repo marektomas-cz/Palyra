@@ -758,7 +758,11 @@ pub fn spawn_scheduler_loop(
 
             let sleep_duration = match state.first_due_cron_job_time().await {
                 Ok(Some(next_due_ms)) => {
-                    let now = now_unix_ms().unwrap_or(next_due_ms);
+                    let now = now_unix_ms_or_fallback(
+                        now_unix_ms(),
+                        next_due_ms,
+                        "cron scheduler failed to read system time; using next due timestamp fallback",
+                    );
                     if next_due_ms <= now {
                         Duration::from_millis(10)
                     } else {
@@ -1363,7 +1367,11 @@ fn fallback_usage_snapshot(
     session_id: &str,
     job: &CronJobRecord,
 ) -> OrchestratorRunStatusSnapshot {
-    let now = now_unix_ms().unwrap_or_default();
+    let now = now_unix_ms_or_fallback(
+        now_unix_ms(),
+        0,
+        "cron fallback usage snapshot could not read system time; using zero timestamp fallback",
+    );
     OrchestratorRunStatusSnapshot {
         run_id: run_id.to_owned(),
         session_id: session_id.to_owned(),
@@ -1431,12 +1439,27 @@ fn now_unix_ms() -> Result<i64, Status> {
     Ok(elapsed.as_millis() as i64)
 }
 
+fn now_unix_ms_or_fallback(
+    now_result: Result<i64, Status>,
+    fallback: i64,
+    context: &'static str,
+) -> i64 {
+    match now_result {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(error = %error, fallback_unix_ms = fallback, "{context}");
+            fallback
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         compute_next_run_after, decide_concurrency_policy, normalize_schedule,
-        parse_skill_reaudit_interval, periodic_reaudit_targets, ConcurrencyDecision, CronMatcher,
-        CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex,
+        now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
+        ConcurrencyDecision, CronMatcher, CronTimezoneMode, InstalledSkillRecord,
+        InstalledSkillsIndex,
     };
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
     use crate::journal::{
@@ -1756,6 +1779,22 @@ mod tests {
             parsed.is_none(),
             "zero interval should explicitly disable periodic skill re-audit"
         );
+    }
+
+    #[test]
+    fn now_unix_ms_or_fallback_returns_value_when_time_read_succeeds() {
+        let resolved = now_unix_ms_or_fallback(Ok(123_i64), 456_i64, "unused test context");
+        assert_eq!(resolved, 123_i64, "successful reads should not use fallback");
+    }
+
+    #[test]
+    fn now_unix_ms_or_fallback_returns_fallback_when_time_read_fails() {
+        let resolved = now_unix_ms_or_fallback(
+            Err(tonic::Status::internal("clock unavailable")),
+            456_i64,
+            "test fallback context",
+        );
+        assert_eq!(resolved, 456_i64, "failed reads should return configured fallback value");
     }
 
     #[test]

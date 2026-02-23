@@ -1,6 +1,6 @@
 use std::{
     future::Future,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
     pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -224,6 +224,21 @@ pub fn validate_openai_base_url_network_policy(
     base_url: &str,
     allow_private_base_url: bool,
 ) -> Result<()> {
+    validate_openai_base_url_network_policy_with_resolver(
+        base_url,
+        allow_private_base_url,
+        resolve_hostname_ip_addrs,
+    )
+}
+
+fn validate_openai_base_url_network_policy_with_resolver<F>(
+    base_url: &str,
+    allow_private_base_url: bool,
+    resolver: F,
+) -> Result<()>
+where
+    F: Fn(&str, u16) -> std::io::Result<Vec<IpAddr>>,
+{
     let parsed = reqwest::Url::parse(base_url)
         .context("model_provider.openai_base_url must be a valid absolute URL")?;
     let host = parsed
@@ -247,8 +262,43 @@ pub fn validate_openai_base_url_network_policy(
                 host
             );
         }
+        return Ok(());
+    }
+
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        anyhow::anyhow!(
+            "model_provider.openai_base_url must include an explicit port for unknown URL schemes"
+        )
+    })?;
+    let resolved_addresses = resolver(host, port).map_err(|error| {
+        anyhow::anyhow!(
+            "model_provider.openai_base_url host '{}' could not be resolved to enforce private-network guard: {}; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+            host,
+            error
+        )
+    })?;
+    if resolved_addresses.is_empty() {
+        anyhow::bail!(
+            "model_provider.openai_base_url host '{}' resolved with no addresses; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+            host
+        );
+    }
+    if let Some(address) =
+        resolved_addresses.into_iter().find(|address| is_private_or_local_ip(*address))
+    {
+        anyhow::bail!(
+            "model_provider.openai_base_url host '{}' resolves to private/local address '{}'; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+            host,
+            address
+        );
     }
     Ok(())
+}
+
+fn resolve_hostname_ip_addrs(host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
+    (host, port)
+        .to_socket_addrs()
+        .map(|socket_addrs| socket_addrs.map(|socket_addr| socket_addr.ip()).collect())
 }
 
 fn is_localhost_hostname(host: &str) -> bool {
@@ -969,7 +1019,7 @@ fn normalize_tool_arguments(raw: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use std::{
         io::{BufRead, BufReader, Read, Write},
-        net::{TcpListener, TcpStream},
+        net::{IpAddr, Ipv4Addr, TcpListener, TcpStream},
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -980,8 +1030,8 @@ mod tests {
 
     use super::{
         build_model_provider, extract_completion_text, normalize_tool_arguments,
-        sanitize_remote_error, ModelProviderConfig, ModelProviderKind, ProviderError,
-        ProviderEvent, ProviderRequest,
+        sanitize_remote_error, validate_openai_base_url_network_policy_with_resolver,
+        ModelProviderConfig, ModelProviderKind, ProviderError, ProviderEvent, ProviderRequest,
     };
 
     fn openai_test_config(base_url: String) -> ModelProviderConfig {
@@ -1161,6 +1211,50 @@ mod tests {
         assert!(
             rendered.contains("allow_private_base_url"),
             "error should explain explicit opt-in path for local/private testing: {rendered}"
+        );
+    }
+
+    #[test]
+    fn openai_provider_rejects_hostname_resolving_to_private_ip_without_opt_in() {
+        let error = validate_openai_base_url_network_policy_with_resolver(
+            "https://api.example.invalid/v1",
+            false,
+            |_host, _port| Ok(vec![IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10))]),
+        )
+        .expect_err("hostname resolving to private IP must be rejected");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("resolves to private/local address"),
+            "error should describe resolved private-address guard failure: {rendered}"
+        );
+        assert!(
+            rendered.contains("allow_private_base_url"),
+            "error should explain explicit opt-in path for trusted environments: {rendered}"
+        );
+    }
+
+    #[test]
+    fn openai_provider_accepts_hostname_resolving_to_public_ip_without_opt_in() {
+        validate_openai_base_url_network_policy_with_resolver(
+            "https://api.example.invalid/v1",
+            false,
+            |_host, _port| Ok(vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))]),
+        )
+        .expect("hostname resolving to public IP should pass private-network guard");
+    }
+
+    #[test]
+    fn openai_provider_rejects_unresolvable_hostname_without_opt_in() {
+        let error = validate_openai_base_url_network_policy_with_resolver(
+            "https://api.example.invalid/v1",
+            false,
+            |_host, _port| Err(std::io::Error::other("dns resolution failed")),
+        )
+        .expect_err("unresolvable hostname should fail closed without explicit opt-in");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("could not be resolved to enforce private-network guard"),
+            "error should explain fail-closed resolution guard: {rendered}"
         );
     }
 
