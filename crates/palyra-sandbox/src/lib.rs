@@ -92,6 +92,8 @@ pub trait TierCBackend {
 
 #[cfg(target_os = "linux")]
 mod platform {
+    use std::path::{Component, Path, PathBuf};
+
     use super::{
         ensure_binary_available, TierCBackend, TierCBackendCapabilities, TierCBackendError,
         TierCBackendKind, TierCCommandPlan, TierCCommandRequest, TierCPolicy,
@@ -133,13 +135,28 @@ mod platform {
                 "/proc".to_owned(),
                 "--dev".to_owned(),
                 "/dev".to_owned(),
-                "--ro-bind".to_owned(),
-                "/".to_owned(),
-                "/".to_owned(),
                 "--tmpfs".to_owned(),
                 "/tmp".to_owned(),
                 "--tmpfs".to_owned(),
                 "/var/tmp".to_owned(),
+                "--dir".to_owned(),
+                "/etc".to_owned(),
+            ];
+            for runtime_dir in ["/usr", "/bin", "/sbin", "/lib", "/lib64"] {
+                append_ro_bind_if_exists(&mut args, runtime_dir, runtime_dir);
+            }
+            for runtime_file in [
+                "/etc/hosts",
+                "/etc/resolv.conf",
+                "/etc/nsswitch.conf",
+                "/etc/passwd",
+                "/etc/group",
+                "/etc/ld.so.cache",
+            ] {
+                append_ro_bind_if_exists(&mut args, runtime_file, runtime_file);
+            }
+            append_workspace_path_scaffold(&mut args, policy.workspace_root.as_path());
+            args.extend([
                 "--bind".to_owned(),
                 workspace.clone(),
                 workspace,
@@ -155,7 +172,7 @@ mod platform {
                 "--setenv".to_owned(),
                 "LC_ALL".to_owned(),
                 "C".to_owned(),
-            ];
+            ]);
             if policy.enforce_network_isolation {
                 args.push("--unshare-net".to_owned());
             }
@@ -163,6 +180,27 @@ mod platform {
             args.push(request.command.clone());
             args.extend(request.args.iter().cloned());
             Ok(TierCCommandPlan { backend: self.kind(), program: "bwrap".to_owned(), args })
+        }
+    }
+
+    fn append_ro_bind_if_exists(args: &mut Vec<String>, source: &str, destination: &str) {
+        if !Path::new(source).exists() {
+            return;
+        }
+        args.extend(["--ro-bind".to_owned(), source.to_owned(), destination.to_owned()]);
+    }
+
+    fn append_workspace_path_scaffold(args: &mut Vec<String>, workspace_root: &Path) {
+        let mut current = PathBuf::from("/");
+        for component in workspace_root.components() {
+            if matches!(component, Component::RootDir) {
+                continue;
+            }
+            current.push(component.as_os_str());
+            if current == workspace_root {
+                break;
+            }
+            args.extend(["--dir".to_owned(), current.to_string_lossy().to_string()]);
         }
     }
 }
@@ -221,7 +259,16 @@ mod platform {
 (import "system.sb")
 (allow process-fork)
 (allow process-exec)
-(allow file-read*)
+(allow file-read*
+    (subpath "{workspace}")
+    (subpath "/bin")
+    (subpath "/sbin")
+    (subpath "/usr")
+    (subpath "/System")
+    (subpath "/Library")
+    (subpath "/private/var/db/dyld")
+    (subpath "/tmp")
+    (subpath "/private/tmp"))
 (allow file-write*
     (subpath "{workspace}")
     (subpath "/tmp")
@@ -255,24 +302,12 @@ mod platform {
 
         fn build_command_plan(
             &self,
-            policy: &TierCPolicy,
-            request: &TierCCommandRequest,
+            _policy: &TierCPolicy,
+            _request: &TierCCommandRequest,
         ) -> Result<TierCCommandPlan, TierCBackendError> {
-            if policy.enforce_network_isolation {
-                return Err(TierCBackendError::NetworkIsolationUnsupported {
-                    backend: self.kind().as_str(),
-                });
-            }
-            if !policy.allowed_egress_hosts.is_empty() || !policy.allowed_dns_suffixes.is_empty() {
-                return Err(TierCBackendError::HostAllowlistUnsupported {
-                    backend: self.kind().as_str(),
-                });
-            }
-
-            Ok(TierCCommandPlan {
-                backend: self.kind(),
-                program: request.command.clone(),
-                args: request.args.clone(),
+            Err(TierCBackendError::BackendUnavailable {
+                backend: self.kind().as_str(),
+                reason: "tier-c backend is disabled on windows until filesystem and token isolation are OS-enforced".to_owned(),
             })
         }
     }
@@ -386,8 +421,15 @@ mod tests {
         if matches!(kind, TierCBackendKind::LinuxBubblewrap | TierCBackendKind::MacosSandboxExec) {
             assert!(capabilities.runtime_network_isolation);
         }
-        if matches!(kind, TierCBackendKind::Unsupported) {
-            assert!(!capabilities.runtime_network_isolation);
+        if matches!(kind, TierCBackendKind::WindowsJobObject | TierCBackendKind::Unsupported) {
+            assert!(
+                !capabilities.runtime_network_isolation,
+                "unsupported tier-c backends must report missing runtime network isolation"
+            );
+            assert!(
+                !capabilities.host_allowlists,
+                "unsupported tier-c backends must report missing runtime host allowlist support"
+            );
         }
     }
 
@@ -402,6 +444,13 @@ mod tests {
             assert_eq!(plan.program, "bwrap");
             assert!(plan.args.iter().any(|arg| arg == "--unshare-net"));
             assert!(plan.args.iter().any(|arg| arg == "uname"));
+            assert!(
+                !plan
+                    .args
+                    .windows(3)
+                    .any(|window| window[0] == "--ro-bind" && window[1] == "/" && window[2] == "/"),
+                "linux tier-c command plan must not expose host root with '--ro-bind / /'"
+            );
         }
     }
 
@@ -429,32 +478,32 @@ mod tests {
         if let Ok(plan) = result {
             assert_eq!(plan.backend, TierCBackendKind::MacosSandboxExec);
             assert_eq!(plan.program, "sandbox-exec");
-            assert!(plan.args.iter().any(|arg| arg.contains("(deny network*)")));
+            let profile = plan
+                .args
+                .iter()
+                .find(|argument| argument.contains("(version 1)"))
+                .expect("sandbox-exec profile argument should be present");
+            assert!(profile.contains("(deny network*)"));
+            assert!(
+                !profile.contains("(allow file-read*)"),
+                "macOS tier-c profile must not grant global read permissions"
+            );
+            assert!(
+                profile.contains("(subpath \"/usr\")"),
+                "macOS tier-c profile should allow minimal runtime reads from /usr"
+            );
         }
     }
 
     #[cfg(windows)]
     #[test]
-    fn windows_backend_fails_closed_for_runtime_network_isolation() {
+    fn windows_backend_is_explicitly_unavailable() {
         let policy = sample_policy();
         let request =
             TierCCommandRequest { command: "where".to_owned(), args: vec!["cmd".to_owned()] };
         let error = build_tier_c_command_plan(&policy, &request).expect_err(
-            "windows backend must fail closed when runtime network isolation is required",
+            "windows tier-c backend should fail closed until OS-enforced sandboxing is implemented",
         );
-        assert!(matches!(error, TierCBackendError::NetworkIsolationUnsupported { .. }));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_backend_allows_plan_without_network_isolation() {
-        let mut policy = sample_policy();
-        policy.enforce_network_isolation = false;
-        let request =
-            TierCCommandRequest { command: "where".to_owned(), args: vec!["cmd".to_owned()] };
-        let plan = build_tier_c_command_plan(&policy, &request)
-            .expect("windows backend should support direct process execution in tier-c mode");
-        assert_eq!(plan.backend, TierCBackendKind::WindowsJobObject);
-        assert_eq!(plan.program, "where");
+        assert!(matches!(error, TierCBackendError::BackendUnavailable { .. }));
     }
 }
