@@ -2829,8 +2829,8 @@ fn authorize_message_action(
     action: &str,
     resource: &str,
     channel: Option<&str>,
-    session_id: Option<&str>,
-    run_id: Option<&str>,
+    _session_id: Option<&str>,
+    _run_id: Option<&str>,
 ) -> Result<(), Status> {
     let evaluation = evaluate_with_context(
         &PolicyRequest {
@@ -2839,9 +2839,9 @@ fn authorize_message_action(
             resource: resource.to_owned(),
         },
         &PolicyRequestContext {
+            // Message-routing policy currently gates by principal/channel semantics only.
+            // Keep session/run correlation identifiers out of policy error surfaces.
             channel: channel.map(str::to_owned),
-            session_id: session_id.map(str::to_owned),
-            run_id: run_id.map(str::to_owned),
             ..PolicyRequestContext::default()
         },
         &PolicyEvaluationConfig::default(),
