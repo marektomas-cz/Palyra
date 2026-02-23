@@ -197,6 +197,10 @@ async fn main() -> Result<()> {
         loaded.gateway.grpc_port = grpc_port;
         loaded.source.push_str(" +cli(--grpc-port)");
     }
+    validate_process_runner_backend_policy(
+        loaded.tool_call.process_runner.enabled,
+        loaded.tool_call.process_runner.tier,
+    )?;
 
     let identity_runtime = load_identity_runtime(loaded.gateway.identity_store_dir.clone())
         .context("failed to initialize gateway identity runtime")?;
@@ -1062,6 +1066,18 @@ fn validate_admin_auth_config(auth: &GatewayAuthConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_process_runner_backend_policy(
+    enabled: bool,
+    tier: sandbox_runner::SandboxProcessRunnerTier,
+) -> Result<()> {
+    if enabled && matches!(tier, sandbox_runner::SandboxProcessRunnerTier::C) && cfg!(windows) {
+        anyhow::bail!(
+            "tool_call.process_runner.tier='c' is unsupported on windows until Tier-C backend isolation is OS-enforced"
+        );
+    }
+    Ok(())
+}
+
 fn resolve_model_provider_secret_from_vault(
     loaded: &mut config::LoadedConfig,
     vault: &Vault,
@@ -1256,10 +1272,12 @@ mod tests {
 
     use super::{
         consume_admin_rate_limit_with_now, enforce_remote_bind_guard, loopback_grpc_url,
-        runtime_status_response, validate_admin_auth_config, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
+        runtime_status_response, validate_admin_auth_config,
+        validate_process_runner_backend_policy, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
         ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
     };
     use crate::gateway::GatewayAuthConfig;
+    use crate::sandbox_runner::SandboxProcessRunnerTier;
 
     #[test]
     fn remote_bind_guard_allows_loopback_without_opt_in() {
@@ -1473,6 +1491,32 @@ mod tests {
             bucket_count, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
             "bucket count must remain bounded to avoid unbounded memory growth"
         );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn process_runner_backend_policy_allows_tier_c_on_supported_platforms() {
+        let result = validate_process_runner_backend_policy(true, SandboxProcessRunnerTier::C);
+        assert!(result.is_ok(), "tier-c should remain configurable on non-windows platforms");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn process_runner_backend_policy_rejects_tier_c_on_windows() {
+        let error = validate_process_runner_backend_policy(true, SandboxProcessRunnerTier::C)
+            .expect_err(
+                "tier-c must fail closed on windows until backend isolation is implemented",
+            );
+        assert!(
+            error.to_string().contains("unsupported on windows"),
+            "error should explain unsupported tier-c backend policy"
+        );
+    }
+
+    #[test]
+    fn process_runner_backend_policy_allows_tier_b() {
+        let result = validate_process_runner_backend_policy(true, SandboxProcessRunnerTier::B);
+        assert!(result.is_ok(), "tier-b should remain allowed");
     }
 }
 

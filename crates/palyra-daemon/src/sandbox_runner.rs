@@ -1704,4 +1704,21 @@ mod tests {
             "denial should explain tier-c runtime network enforcement requirement"
         );
     }
+
+    #[test]
+    #[cfg(windows)]
+    fn tier_c_preflight_mode_fails_closed_when_backend_is_unavailable() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let mut policy = sandbox_policy(workspace);
+        policy.tier = SandboxProcessRunnerTier::C;
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
+        let input = br#"{"command":"uname","args":[]}"#;
+        let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect_err("tier-c preflight mode must fail closed when backend is unavailable");
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::SpawnFailed);
+        assert!(
+            error.message.contains("is unavailable"),
+            "denial should explain that the tier-c backend is unavailable"
+        );
+    }
 }
