@@ -205,6 +205,8 @@ const BROWSER_SCROLL_TOOL_NAME: &str = "palyra.browser.scroll";
 const BROWSER_WAIT_FOR_TOOL_NAME: &str = "palyra.browser.wait_for";
 const BROWSER_TITLE_TOOL_NAME: &str = "palyra.browser.title";
 const BROWSER_SCREENSHOT_TOOL_NAME: &str = "palyra.browser.screenshot";
+const BROWSER_OBSERVE_TOOL_NAME: &str = "palyra.browser.observe";
+const BROWSER_NETWORK_LOG_TOOL_NAME: &str = "palyra.browser.network_log";
 
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeConfigSnapshot {
@@ -9397,6 +9399,22 @@ async fn execute_browser_tool(
                         .get("max_action_log_entries")
                         .and_then(Value::as_u64)
                         .unwrap_or(0),
+                    max_observe_snapshot_bytes: value
+                        .get("max_observe_snapshot_bytes")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    max_visible_text_bytes: value
+                        .get("max_visible_text_bytes")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    max_network_log_entries: value
+                        .get("max_network_log_entries")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    max_network_log_bytes: value
+                        .get("max_network_log_bytes")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
                 }
             });
             let mut request = Request::new(browser_v1::CreateSessionRequest {
@@ -9454,6 +9472,10 @@ async fn execute_browser_tool(
                             "max_actions_per_window": value.max_actions_per_window,
                             "action_rate_window_ms": value.action_rate_window_ms,
                             "max_action_log_entries": value.max_action_log_entries,
+                            "max_observe_snapshot_bytes": value.max_observe_snapshot_bytes,
+                            "max_visible_text_bytes": value.max_visible_text_bytes,
+                            "max_network_log_entries": value.max_network_log_entries,
+                            "max_network_log_bytes": value.max_network_log_bytes,
                         })),
                         "downloads_enabled": response.downloads_enabled,
                         "action_allowed_domains": response.action_allowed_domains,
@@ -10040,6 +10062,153 @@ async fn execute_browser_tool(
                 ),
             }
         }
+        BROWSER_OBSERVE_TOOL_NAME => {
+            let session_id = match parse_browser_tool_session_id(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let mut request = Request::new(browser_v1::ObserveRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                include_dom_snapshot: payload
+                    .get("include_dom_snapshot")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                include_accessibility_tree: payload
+                    .get("include_accessibility_tree")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                include_visible_text: payload
+                    .get("include_visible_text")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                max_dom_snapshot_bytes: payload
+                    .get("max_dom_snapshot_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                max_accessibility_tree_bytes: payload
+                    .get("max_accessibility_tree_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                max_visible_text_bytes: payload
+                    .get("max_visible_text_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            match client.observe(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let output = json!({
+                        "success": response.success,
+                        "dom_snapshot": response.dom_snapshot,
+                        "accessibility_tree": response.accessibility_tree,
+                        "visible_text": response.visible_text,
+                        "dom_truncated": response.dom_truncated,
+                        "accessibility_tree_truncated": response.accessibility_tree_truncated,
+                        "visible_text_truncated": response.visible_text_truncated,
+                        "page_url": response.page_url,
+                        "error": response.error,
+                    });
+                    (
+                        response.success,
+                        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                        if response.success { String::new() } else { response.error },
+                    )
+                }
+                Err(error) => (
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.browser.observe failed: {}", sanitize_status_message(&error)),
+                ),
+            }
+        }
+        BROWSER_NETWORK_LOG_TOOL_NAME => {
+            let session_id = match parse_browser_tool_session_id(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let mut request = Request::new(browser_v1::NetworkLogRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                limit: payload.get("limit").and_then(Value::as_u64).unwrap_or(0) as u32,
+                include_headers: payload
+                    .get("include_headers")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                max_payload_bytes: payload
+                    .get("max_payload_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            match client.network_log(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let output = json!({
+                        "success": response.success,
+                        "entries": response
+                            .entries
+                            .into_iter()
+                            .map(browser_network_log_entry_to_json)
+                            .collect::<Vec<_>>(),
+                        "truncated": response.truncated,
+                        "error": response.error,
+                    });
+                    (
+                        response.success,
+                        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                        if response.success { String::new() } else { response.error },
+                    )
+                }
+                Err(error) => (
+                    false,
+                    b"{}".to_vec(),
+                    format!(
+                        "palyra.browser.network_log failed: {}",
+                        sanitize_status_message(&error)
+                    ),
+                ),
+            }
+        }
         _ => (false, b"{}".to_vec(), "palyra.browser.* unsupported tool name".to_owned()),
     };
 
@@ -10107,6 +10276,27 @@ fn browser_action_log_to_json(entry: browser_v1::BrowserActionLogEntry) -> Value
         "completed_at_unix_ms": entry.completed_at_unix_ms,
         "attempts": entry.attempts,
         "page_url": entry.page_url,
+    })
+}
+
+fn browser_network_log_entry_to_json(entry: browser_v1::NetworkLogEntry) -> Value {
+    let mut headers = entry
+        .headers
+        .into_iter()
+        .map(|header| json!({ "name": header.name, "value": header.value }))
+        .collect::<Vec<_>>();
+    headers.sort_by(|left, right| {
+        let left_name = left.get("name").and_then(Value::as_str).unwrap_or_default();
+        let right_name = right.get("name").and_then(Value::as_str).unwrap_or_default();
+        left_name.cmp(right_name)
+    });
+    json!({
+        "request_url": entry.request_url,
+        "status_code": entry.status_code,
+        "timing_bucket": entry.timing_bucket,
+        "latency_ms": entry.latency_ms,
+        "captured_at_unix_ms": entry.captured_at_unix_ms,
+        "headers": headers,
     })
 }
 

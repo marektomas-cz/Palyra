@@ -324,6 +324,12 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.browser.screenshot" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
+        "palyra.browser.observe" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
+        "palyra.browser.network_log" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
         "palyra.plugin.run" => {
             Some(ToolMetadata { capabilities: WASM_PLUGIN_CAPABILITIES, default_sensitive: true })
         }
@@ -556,7 +562,9 @@ async fn run_allowlisted_tool(
         | "palyra.browser.scroll"
         | "palyra.browser.wait_for"
         | "palyra.browser.title"
-        | "palyra.browser.screenshot" => ToolExecutionRawResult {
+        | "palyra.browser.screenshot"
+        | "palyra.browser.observe"
+        | "palyra.browser.network_log" => ToolExecutionRawResult {
             success: false,
             output_json: b"{}".to_vec(),
             error: "palyra.browser.* requires gateway browser broker runtime context".to_owned(),
@@ -594,6 +602,8 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.browser.wait_for"
             | "palyra.browser.title"
             | "palyra.browser.screenshot"
+            | "palyra.browser.observe"
+            | "palyra.browser.network_log"
             | "palyra.plugin.run"
     )
 }
@@ -632,7 +642,9 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         | "palyra.browser.scroll"
         | "palyra.browser.wait_for"
         | "palyra.browser.title"
-        | "palyra.browser.screenshot" => MAX_BROWSER_TOOL_INPUT_BYTES,
+        | "palyra.browser.screenshot"
+        | "palyra.browser.observe"
+        | "palyra.browser.network_log" => MAX_BROWSER_TOOL_INPUT_BYTES,
         "palyra.plugin.run" => MAX_WASM_PLUGIN_TOOL_INPUT_BYTES,
         _ => MAX_MEMORY_SEARCH_TOOL_INPUT_BYTES,
     }
@@ -1109,6 +1121,8 @@ mod tests {
         assert!(tool_requires_approval("palyra.browser.wait_for"));
         assert!(tool_requires_approval("palyra.browser.title"));
         assert!(tool_requires_approval("palyra.browser.screenshot"));
+        assert!(tool_requires_approval("palyra.browser.observe"));
+        assert!(tool_requires_approval("palyra.browser.network_log"));
         assert!(tool_requires_approval("palyra.plugin.run"));
         assert!(
             tool_requires_approval("custom.unknown"),

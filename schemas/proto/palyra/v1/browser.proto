@@ -15,6 +15,8 @@ service BrowserService {
   rpc WaitFor(WaitForRequest) returns (WaitForResponse);
   rpc GetTitle(GetTitleRequest) returns (GetTitleResponse);
   rpc Screenshot(ScreenshotRequest) returns (ScreenshotResponse);
+  rpc Observe(ObserveRequest) returns (ObserveResponse);
+  rpc NetworkLog(NetworkLogRequest) returns (NetworkLogResponse);
 }
 
 message BrowserHealthRequest {
@@ -41,6 +43,10 @@ message SessionBudget {
   uint64 max_actions_per_window = 8;
   uint64 action_rate_window_ms = 9;
   uint64 max_action_log_entries = 10;
+  uint64 max_observe_snapshot_bytes = 13;
+  uint64 max_visible_text_bytes = 14;
+  uint64 max_network_log_entries = 15;
+  uint64 max_network_log_bytes = 16;
 
   reserved 11 to 12;
 }
@@ -254,6 +260,74 @@ message ScreenshotResponse {
   bool success = 2;
   bytes image_bytes = 3;
   string mime_type = 4;
+  string error = 5;
+
+  reserved 6 to 12;
+}
+
+message ObserveRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  bool include_dom_snapshot = 3;
+  bool include_accessibility_tree = 4;
+  bool include_visible_text = 5;
+  uint64 max_dom_snapshot_bytes = 6;
+  uint64 max_accessibility_tree_bytes = 7;
+  uint64 max_visible_text_bytes = 8;
+
+  reserved 9 to 14;
+}
+
+message ObserveResponse {
+  uint32 v = 1;
+  bool success = 2;
+  string dom_snapshot = 3;
+  string accessibility_tree = 4;
+  string visible_text = 5;
+  bool dom_truncated = 6;
+  bool accessibility_tree_truncated = 7;
+  bool visible_text_truncated = 8;
+  string page_url = 9;
+  string error = 10;
+
+  reserved 11 to 16;
+}
+
+message NetworkLogRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  uint32 limit = 3;
+  bool include_headers = 4;
+  uint64 max_payload_bytes = 5;
+
+  reserved 6 to 12;
+}
+
+message NetworkLogHeader {
+  uint32 v = 1;
+  string name = 2;
+  string value = 3;
+
+  reserved 4 to 8;
+}
+
+message NetworkLogEntry {
+  uint32 v = 1;
+  string request_url = 2;
+  uint32 status_code = 3;
+  string timing_bucket = 4;
+  uint64 latency_ms = 5;
+  uint64 captured_at_unix_ms = 6;
+  repeated NetworkLogHeader headers = 7;
+
+  reserved 8 to 12;
+}
+
+message NetworkLogResponse {
+  uint32 v = 1;
+  bool success = 2;
+  repeated NetworkLogEntry entries = 3;
+  bool truncated = 4;
   string error = 5;
 
   reserved 6 to 12;

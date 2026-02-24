@@ -53,6 +53,13 @@ const DEFAULT_MAX_ACTIONS_PER_SESSION: u64 = 256;
 const DEFAULT_MAX_ACTIONS_PER_WINDOW: u64 = 20;
 const DEFAULT_ACTION_RATE_WINDOW_MS: u64 = 1_000;
 const DEFAULT_MAX_ACTION_LOG_ENTRIES: usize = 256;
+const DEFAULT_MAX_OBSERVE_SNAPSHOT_BYTES: u64 = 64 * 1024;
+const DEFAULT_MAX_VISIBLE_TEXT_BYTES: u64 = 16 * 1024;
+const DEFAULT_MAX_NETWORK_LOG_ENTRIES: usize = 256;
+const DEFAULT_MAX_NETWORK_LOG_BYTES: u64 = 64 * 1024;
+const MAX_NETWORK_LOG_HEADER_COUNT: usize = 24;
+const MAX_NETWORK_LOG_HEADER_VALUE_BYTES: usize = 256;
+const MAX_NETWORK_LOG_URL_BYTES: usize = 2 * 1024;
 const DEFAULT_ACTION_RETRY_INTERVAL_MS: u64 = 100;
 const CLEANUP_INTERVAL_MS: u64 = 15_000;
 const AUTHORIZATION_HEADER: &str = "authorization";
@@ -104,6 +111,10 @@ struct SessionBudget {
     max_actions_per_window: u64,
     action_rate_window_ms: u64,
     max_action_log_entries: usize,
+    max_observe_snapshot_bytes: u64,
+    max_visible_text_bytes: u64,
+    max_network_log_entries: usize,
+    max_network_log_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +135,7 @@ struct BrowserSessionRecord {
     action_count: u64,
     action_window: VecDeque<Instant>,
     action_log: VecDeque<BrowserActionLogEntryInternal>,
+    network_log: VecDeque<NetworkLogEntryInternal>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +150,22 @@ struct BrowserActionLogEntryInternal {
     completed_at_unix_ms: u64,
     attempts: u32,
     page_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct NetworkLogHeaderInternal {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Clone)]
+struct NetworkLogEntryInternal {
+    request_url: String,
+    status_code: u16,
+    timing_bucket: String,
+    latency_ms: u64,
+    captured_at_unix_ms: u64,
+    headers: Vec<NetworkLogHeaderInternal>,
 }
 
 #[derive(Debug)]
@@ -182,6 +210,10 @@ impl BrowserRuntimeState {
                 max_actions_per_window: DEFAULT_MAX_ACTIONS_PER_WINDOW,
                 action_rate_window_ms: DEFAULT_ACTION_RATE_WINDOW_MS,
                 max_action_log_entries: DEFAULT_MAX_ACTION_LOG_ENTRIES,
+                max_observe_snapshot_bytes: DEFAULT_MAX_OBSERVE_SNAPSHOT_BYTES,
+                max_visible_text_bytes: DEFAULT_MAX_VISIBLE_TEXT_BYTES,
+                max_network_log_entries: DEFAULT_MAX_NETWORK_LOG_ENTRIES,
+                max_network_log_bytes: DEFAULT_MAX_NETWORK_LOG_BYTES,
             },
             max_sessions: args.max_sessions,
             sessions: Mutex::new(HashMap::new()),
@@ -312,6 +344,31 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 .and_then(|value| usize::try_from(value).ok())
                 .filter(|value| *value > 0)
                 .unwrap_or(self.runtime.default_budget.max_action_log_entries),
+            max_observe_snapshot_bytes: payload
+                .budget
+                .as_ref()
+                .map(|value| value.max_observe_snapshot_bytes)
+                .filter(|value| *value > 0)
+                .unwrap_or(self.runtime.default_budget.max_observe_snapshot_bytes),
+            max_visible_text_bytes: payload
+                .budget
+                .as_ref()
+                .map(|value| value.max_visible_text_bytes)
+                .filter(|value| *value > 0)
+                .unwrap_or(self.runtime.default_budget.max_visible_text_bytes),
+            max_network_log_entries: payload
+                .budget
+                .as_ref()
+                .map(|value| value.max_network_log_entries)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(self.runtime.default_budget.max_network_log_entries),
+            max_network_log_bytes: payload
+                .budget
+                .as_ref()
+                .map(|value| value.max_network_log_bytes)
+                .filter(|value| *value > 0)
+                .unwrap_or(self.runtime.default_budget.max_network_log_bytes),
             max_title_bytes: self.runtime.default_budget.max_title_bytes,
         };
         let action_allowed_domains =
@@ -335,6 +392,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 action_count: 0,
                 action_window: VecDeque::new(),
                 action_log: VecDeque::new(),
+                network_log: VecDeque::new(),
             },
         );
 
@@ -353,6 +411,10 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 max_actions_per_window: budget.max_actions_per_window,
                 action_rate_window_ms: budget.action_rate_window_ms,
                 max_action_log_entries: budget.max_action_log_entries as u64,
+                max_observe_snapshot_bytes: budget.max_observe_snapshot_bytes,
+                max_visible_text_bytes: budget.max_visible_text_bytes,
+                max_network_log_entries: budget.max_network_log_entries as u64,
+                max_network_log_bytes: budget.max_network_log_bytes,
             }),
             downloads_enabled: payload.allow_downloads,
             action_allowed_domains,
@@ -414,6 +476,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             max_response_bytes,
         )
         .await;
+        let network_log_entries = outcome.network_log.clone();
 
         let mut sessions = self.runtime.sessions.lock().await;
         if let Some(session) = sessions.get_mut(session_id.as_str()) {
@@ -425,6 +488,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 session.scroll_y = 0;
                 session.typed_inputs.clear();
             }
+            append_network_log_entries(session, network_log_entries.as_slice());
             session.last_active = Instant::now();
         }
 
@@ -930,6 +994,157 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             error: String::new(),
         }))
     }
+
+    async fn observe(
+        &self,
+        request: Request<browser_v1::ObserveRequest>,
+    ) -> Result<Response<browser_v1::ObserveResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        let include_dom_snapshot = if payload.include_dom_snapshot
+            || payload.include_accessibility_tree
+            || payload.include_visible_text
+        {
+            payload.include_dom_snapshot
+        } else {
+            true
+        };
+        let include_accessibility_tree = if payload.include_dom_snapshot
+            || payload.include_accessibility_tree
+            || payload.include_visible_text
+        {
+            payload.include_accessibility_tree
+        } else {
+            true
+        };
+        let include_visible_text = payload.include_visible_text;
+
+        let mut sessions = self.runtime.sessions.lock().await;
+        let Some(session) = sessions.get_mut(session_id.as_str()) else {
+            return Ok(Response::new(browser_v1::ObserveResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: false,
+                dom_snapshot: String::new(),
+                accessibility_tree: String::new(),
+                visible_text: String::new(),
+                dom_truncated: false,
+                accessibility_tree_truncated: false,
+                visible_text_truncated: false,
+                page_url: String::new(),
+                error: "session_not_found".to_owned(),
+            }));
+        };
+        session.last_active = Instant::now();
+        if session.last_page_body.trim().is_empty() {
+            return Ok(Response::new(browser_v1::ObserveResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: false,
+                dom_snapshot: String::new(),
+                accessibility_tree: String::new(),
+                visible_text: String::new(),
+                dom_truncated: false,
+                accessibility_tree_truncated: false,
+                visible_text_truncated: false,
+                page_url: String::new(),
+                error: "navigate must succeed before observe".to_owned(),
+            }));
+        }
+
+        let max_dom_snapshot_bytes =
+            payload.max_dom_snapshot_bytes.max(1).min(session.budget.max_observe_snapshot_bytes)
+                as usize;
+        let max_accessibility_tree_bytes = payload
+            .max_accessibility_tree_bytes
+            .max(1)
+            .min(session.budget.max_observe_snapshot_bytes)
+            as usize;
+        let max_visible_text_bytes =
+            payload.max_visible_text_bytes.max(1).min(session.budget.max_visible_text_bytes)
+                as usize;
+
+        let (dom_snapshot, dom_truncated) = if include_dom_snapshot {
+            build_dom_snapshot(session.last_page_body.as_str(), max_dom_snapshot_bytes)
+        } else {
+            (String::new(), false)
+        };
+        let (accessibility_tree, accessibility_tree_truncated) = if include_accessibility_tree {
+            build_accessibility_tree_snapshot(
+                session.last_page_body.as_str(),
+                max_accessibility_tree_bytes,
+            )
+        } else {
+            (String::new(), false)
+        };
+        let (visible_text, visible_text_truncated) = if include_visible_text {
+            build_visible_text_snapshot(session.last_page_body.as_str(), max_visible_text_bytes)
+        } else {
+            (String::new(), false)
+        };
+
+        Ok(Response::new(browser_v1::ObserveResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success: true,
+            dom_snapshot,
+            accessibility_tree,
+            visible_text,
+            dom_truncated,
+            accessibility_tree_truncated,
+            visible_text_truncated,
+            page_url: normalize_url_with_redaction(session.last_url.as_deref().unwrap_or_default()),
+            error: String::new(),
+        }))
+    }
+
+    async fn network_log(
+        &self,
+        request: Request<browser_v1::NetworkLogRequest>,
+    ) -> Result<Response<browser_v1::NetworkLogResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        let mut sessions = self.runtime.sessions.lock().await;
+        let Some(session) = sessions.get_mut(session_id.as_str()) else {
+            return Ok(Response::new(browser_v1::NetworkLogResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: false,
+                entries: Vec::new(),
+                truncated: false,
+                error: "session_not_found".to_owned(),
+            }));
+        };
+        session.last_active = Instant::now();
+        let limit = if payload.limit == 0 {
+            session.budget.max_network_log_entries
+        } else {
+            usize::try_from(payload.limit).unwrap_or(usize::MAX)
+        }
+        .min(session.budget.max_network_log_entries)
+        .max(1);
+        let max_payload_bytes =
+            payload.max_payload_bytes.max(1).min(session.budget.max_network_log_bytes) as usize;
+
+        let start = session.network_log.len().saturating_sub(limit);
+        let mut truncated = start > 0;
+        let mut entries = session
+            .network_log
+            .iter()
+            .skip(start)
+            .cloned()
+            .map(|entry| network_log_entry_to_proto(entry, payload.include_headers))
+            .collect::<Vec<_>>();
+        truncated = truncate_network_log_payload(&mut entries, max_payload_bytes) || truncated;
+
+        Ok(Response::new(browser_v1::NetworkLogResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success: true,
+            entries,
+            truncated,
+            error: String::new(),
+        }))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -942,6 +1157,7 @@ struct NavigateOutcome {
     body_bytes: u64,
     latency_ms: u64,
     error: String,
+    network_log: Vec<NetworkLogEntryInternal>,
 }
 
 #[tokio::main]
@@ -1045,6 +1261,7 @@ async fn navigate_with_guards(
     max_response_bytes: u64,
 ) -> NavigateOutcome {
     let started_at = Instant::now();
+    let mut network_log = Vec::new();
     let mut current_url = match Url::parse(raw_url) {
         Ok(value) => value,
         Err(error) => {
@@ -1057,6 +1274,7 @@ async fn navigate_with_guards(
                 body_bytes: 0,
                 latency_ms: started_at.elapsed().as_millis() as u64,
                 error: format!("invalid URL: {error}"),
+                network_log,
             }
         }
     };
@@ -1076,6 +1294,7 @@ async fn navigate_with_guards(
                 body_bytes: 0,
                 latency_ms: started_at.elapsed().as_millis() as u64,
                 error: format!("failed to build HTTP client: {error}"),
+                network_log,
             }
         }
     };
@@ -1093,9 +1312,11 @@ async fn navigate_with_guards(
                 body_bytes: 0,
                 latency_ms: started_at.elapsed().as_millis() as u64,
                 error,
+                network_log,
             };
         }
 
+        let request_started = Instant::now();
         let response = match client.get(current_url.clone()).send().await {
             Ok(value) => value,
             Err(error) => {
@@ -1108,9 +1329,19 @@ async fn navigate_with_guards(
                     body_bytes: 0,
                     latency_ms: started_at.elapsed().as_millis() as u64,
                     error: format!("request failed: {error}"),
+                    network_log,
                 }
             }
         };
+        let request_latency_ms = request_started.elapsed().as_millis() as u64;
+        network_log.push(NetworkLogEntryInternal {
+            request_url: normalize_url_with_redaction(current_url.as_str()),
+            status_code: response.status().as_u16(),
+            timing_bucket: timing_bucket_for_latency(request_latency_ms).to_owned(),
+            latency_ms: request_latency_ms,
+            captured_at_unix_ms: current_unix_ms(),
+            headers: sanitize_network_headers(response.headers()),
+        });
 
         if response.status().is_redirection() {
             if !allow_redirects {
@@ -1123,6 +1354,7 @@ async fn navigate_with_guards(
                     body_bytes: 0,
                     latency_ms: started_at.elapsed().as_millis() as u64,
                     error: "redirect response blocked by policy".to_owned(),
+                    network_log,
                 };
             }
             if redirects >= redirect_limit {
@@ -1135,6 +1367,7 @@ async fn navigate_with_guards(
                     body_bytes: 0,
                     latency_ms: started_at.elapsed().as_millis() as u64,
                     error: format!("redirect limit exceeded ({redirect_limit})"),
+                    network_log,
                 };
             }
             let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
@@ -1147,6 +1380,7 @@ async fn navigate_with_guards(
                     body_bytes: 0,
                     latency_ms: started_at.elapsed().as_millis() as u64,
                     error: "redirect missing Location header".to_owned(),
+                    network_log,
                 };
             };
             let Ok(location_str) = location.to_str() else {
@@ -1159,6 +1393,7 @@ async fn navigate_with_guards(
                     body_bytes: 0,
                     latency_ms: started_at.elapsed().as_millis() as u64,
                     error: "redirect location header contains invalid UTF-8".to_owned(),
+                    network_log,
                 };
             };
             current_url = match current_url.join(location_str) {
@@ -1173,6 +1408,7 @@ async fn navigate_with_guards(
                         body_bytes: 0,
                         latency_ms: started_at.elapsed().as_millis() as u64,
                         error: format!("invalid redirect target: {error}"),
+                        network_log,
                     }
                 }
             };
@@ -1193,6 +1429,7 @@ async fn navigate_with_guards(
                     body_bytes: 0,
                     latency_ms: started_at.elapsed().as_millis() as u64,
                     error: format!("failed to read response body: {error}"),
+                    network_log,
                 }
             }
         };
@@ -1210,6 +1447,7 @@ async fn navigate_with_guards(
                     "response exceeds max_response_bytes ({} > {max_response_bytes})",
                     body.len()
                 ),
+                network_log,
             };
         }
 
@@ -1228,6 +1466,7 @@ async fn navigate_with_guards(
             } else {
                 String::new()
             },
+            network_log,
         };
     }
 }
@@ -1287,6 +1526,535 @@ fn extract_html_title(body: &str) -> Option<&str> {
     let start = lower.find("<title>")?;
     let end = lower[start + 7..].find("</title>")?;
     Some(body[start + 7..start + 7 + end].trim())
+}
+
+fn truncate_utf8_bytes_with_flag(raw: &str, max_bytes: usize) -> (String, bool) {
+    let truncated = truncate_utf8_bytes(raw, max_bytes);
+    let was_truncated = truncated.len() < raw.len();
+    (truncated, was_truncated)
+}
+
+fn append_network_log_entries(
+    session: &mut BrowserSessionRecord,
+    entries: &[NetworkLogEntryInternal],
+) {
+    for entry in entries {
+        session.network_log.push_back(entry.clone());
+    }
+    while session.network_log.len() > session.budget.max_network_log_entries {
+        session.network_log.pop_front();
+    }
+    while session.network_log.iter().map(estimate_network_log_entry_internal_bytes).sum::<usize>()
+        > session.budget.max_network_log_bytes as usize
+    {
+        if session.network_log.pop_front().is_none() {
+            break;
+        }
+    }
+}
+
+fn estimate_network_log_entry_internal_bytes(entry: &NetworkLogEntryInternal) -> usize {
+    let headers_bytes = entry
+        .headers
+        .iter()
+        .map(|header| header.name.len() + header.value.len() + 8)
+        .sum::<usize>();
+    entry.request_url.len() + entry.timing_bucket.len() + headers_bytes + 64
+}
+
+fn network_log_entry_to_proto(
+    entry: NetworkLogEntryInternal,
+    include_headers: bool,
+) -> browser_v1::NetworkLogEntry {
+    let headers = if include_headers {
+        entry
+            .headers
+            .into_iter()
+            .map(|header| browser_v1::NetworkLogHeader {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                name: header.name,
+                value: header.value,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    browser_v1::NetworkLogEntry {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        request_url: entry.request_url,
+        status_code: u32::from(entry.status_code),
+        timing_bucket: entry.timing_bucket,
+        latency_ms: entry.latency_ms,
+        captured_at_unix_ms: entry.captured_at_unix_ms,
+        headers,
+    }
+}
+
+fn estimate_network_log_payload_bytes(entries: &[browser_v1::NetworkLogEntry]) -> usize {
+    entries.iter().map(estimate_network_log_proto_entry_bytes).sum::<usize>() + 2
+}
+
+fn estimate_network_log_proto_entry_bytes(entry: &browser_v1::NetworkLogEntry) -> usize {
+    let headers = entry.headers.iter().map(estimate_network_log_proto_header_bytes).sum::<usize>();
+    entry.request_url.len() + entry.timing_bucket.len() + headers + 64
+}
+
+fn estimate_network_log_proto_header_bytes(header: &browser_v1::NetworkLogHeader) -> usize {
+    header.name.len() + header.value.len() + 8
+}
+
+fn truncate_network_log_payload(
+    entries: &mut Vec<browser_v1::NetworkLogEntry>,
+    max_payload_bytes: usize,
+) -> bool {
+    let mut truncated = false;
+    while !entries.is_empty()
+        && estimate_network_log_payload_bytes(entries.as_slice()) > max_payload_bytes
+    {
+        entries.remove(0);
+        truncated = true;
+    }
+    truncated
+}
+
+fn timing_bucket_for_latency(latency_ms: u64) -> &'static str {
+    if latency_ms <= 100 {
+        "lt_100ms"
+    } else if latency_ms <= 500 {
+        "100_500ms"
+    } else if latency_ms <= 2_000 {
+        "500ms_2s"
+    } else {
+        "gt_2s"
+    }
+}
+
+fn sanitize_network_headers(headers: &reqwest::header::HeaderMap) -> Vec<NetworkLogHeaderInternal> {
+    let mut output = headers
+        .iter()
+        .take(MAX_NETWORK_LOG_HEADER_COUNT)
+        .map(|(name, value)| {
+            let header_name = name.as_str().to_ascii_lowercase();
+            let raw_value = value.to_str().unwrap_or("<non_utf8>");
+            let sanitized = sanitize_single_network_header(header_name.as_str(), raw_value);
+            NetworkLogHeaderInternal { name: header_name, value: sanitized }
+        })
+        .collect::<Vec<_>>();
+    output.sort_by(|left, right| left.name.cmp(&right.name));
+    output
+}
+
+fn sanitize_single_network_header(name: &str, raw_value: &str) -> String {
+    if name.eq_ignore_ascii_case("location")
+        || raw_value.starts_with("http://")
+        || raw_value.starts_with("https://")
+    {
+        return normalize_url_with_redaction(raw_value);
+    }
+    if is_sensitive_header_name(name) || contains_sensitive_material(raw_value) {
+        return "<redacted>".to_owned();
+    }
+    truncate_utf8_bytes(raw_value, MAX_NETWORK_LOG_HEADER_VALUE_BYTES)
+}
+
+fn is_sensitive_header_name(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-api-key"
+            | "x-auth-token"
+            | "x-csrf-token"
+    ) || name.contains("token")
+        || name.contains("secret")
+        || name.contains("password")
+}
+
+fn contains_sensitive_material(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    [
+        "bearer ",
+        "token=",
+        "access_token=",
+        "id_token=",
+        "refresh_token=",
+        "session=",
+        "password=",
+        "passwd=",
+        "secret=",
+        "api_key=",
+        "apikey=",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn normalize_url_with_redaction(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(parsed) = Url::parse(trimmed) {
+        let Some(host) = parsed.host_str() else {
+            return truncate_utf8_bytes(
+                redact_query_from_raw(trimmed).as_str(),
+                MAX_NETWORK_LOG_URL_BYTES,
+            );
+        };
+        let mut output = format!("{}://{host}", parsed.scheme());
+        if let Some(port) = parsed.port() {
+            if !is_default_port(parsed.scheme(), port) {
+                output.push(':');
+                output.push_str(port.to_string().as_str());
+            }
+        }
+        if parsed.path().is_empty() {
+            output.push('/');
+        } else {
+            output.push_str(parsed.path());
+        }
+        if let Some(query) = parsed.query() {
+            let redacted = redact_query_pairs(query);
+            if !redacted.is_empty() {
+                output.push('?');
+                output.push_str(redacted.as_str());
+            }
+        }
+        return truncate_utf8_bytes(output.as_str(), MAX_NETWORK_LOG_URL_BYTES);
+    }
+    truncate_utf8_bytes(redact_query_from_raw(trimmed).as_str(), MAX_NETWORK_LOG_URL_BYTES)
+}
+
+fn redact_query_from_raw(raw: &str) -> String {
+    let without_fragment = raw.split('#').next().unwrap_or_default();
+    let Some((base, query)) = without_fragment.split_once('?') else {
+        return without_fragment.to_owned();
+    };
+    let redacted = redact_query_pairs(query);
+    if redacted.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base}?{redacted}")
+    }
+}
+
+fn redact_query_pairs(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|pair| !pair.trim().is_empty())
+        .map(|pair| {
+            let (raw_key, raw_value_opt) = pair
+                .split_once('=')
+                .map(|(key, value)| (key.trim(), Some(value)))
+                .unwrap_or_else(|| (pair.trim(), None));
+            if raw_key.is_empty() {
+                return String::new();
+            }
+            let value = raw_value_opt.unwrap_or_default();
+            let sanitized = if is_sensitive_query_key(raw_key) || contains_sensitive_material(value)
+            {
+                "<redacted>".to_owned()
+            } else {
+                truncate_utf8_bytes(value, 128)
+            };
+            if raw_value_opt.is_some() {
+                format!("{raw_key}={sanitized}")
+            } else {
+                raw_key.to_owned()
+            }
+        })
+        .filter(|pair| !pair.is_empty())
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn is_sensitive_query_key(raw_key: &str) -> bool {
+    let key = raw_key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "token"
+            | "access_token"
+            | "id_token"
+            | "refresh_token"
+            | "auth"
+            | "authorization"
+            | "api_key"
+            | "apikey"
+            | "password"
+            | "passwd"
+            | "secret"
+            | "signature"
+            | "sig"
+            | "session"
+            | "session_id"
+            | "jwt"
+    ) || key.contains("token")
+        || key.contains("secret")
+        || key.contains("password")
+}
+
+fn is_default_port(scheme: &str, port: u16) -> bool {
+    matches!((scheme, port), ("http", 80) | ("https", 443))
+}
+
+fn build_dom_snapshot(page_body: &str, max_bytes: usize) -> (String, bool) {
+    let lines = collect_opening_tags(page_body)
+        .iter()
+        .enumerate()
+        .map(|(index, tag)| build_dom_line(index + 1, tag.as_str()))
+        .collect::<Vec<_>>();
+    let content = lines.join("\n");
+    truncate_utf8_bytes_with_flag(content.as_str(), max_bytes)
+}
+
+fn build_dom_line(index: usize, tag: &str) -> String {
+    let tag_lower = tag.to_ascii_lowercase();
+    let name = html_tag_name(tag_lower.as_str()).unwrap_or("unknown");
+    let mut attributes = Vec::new();
+    for attr_name in [
+        "id",
+        "class",
+        "name",
+        "role",
+        "aria-label",
+        "type",
+        "href",
+        "src",
+        "action",
+        "title",
+        "alt",
+        "placeholder",
+    ] {
+        let Some(value) = extract_attr_value(tag_lower.as_str(), attr_name) else {
+            continue;
+        };
+        let sanitized = sanitize_snapshot_attribute(attr_name, value.as_str());
+        if sanitized.is_empty() {
+            continue;
+        }
+        attributes.push(format!("{attr_name}=\"{sanitized}\""));
+    }
+    if attributes.is_empty() {
+        format!("{index:04} <{name}>")
+    } else {
+        format!("{index:04} <{name} {}>", attributes.join(" "))
+    }
+}
+
+fn sanitize_snapshot_attribute(attr_name: &str, raw_value: &str) -> String {
+    if raw_value.trim().is_empty() {
+        return String::new();
+    }
+    let lower = attr_name.to_ascii_lowercase();
+    if matches!(lower.as_str(), "value" | "password" | "token") {
+        return "<redacted>".to_owned();
+    }
+    if lower == "href" || lower == "src" || lower == "action" {
+        return normalize_url_with_redaction(raw_value);
+    }
+    if contains_sensitive_material(raw_value) {
+        return "<redacted>".to_owned();
+    }
+    truncate_utf8_bytes(raw_value, 128)
+}
+
+fn build_accessibility_tree_snapshot(page_body: &str, max_bytes: usize) -> (String, bool) {
+    let mut lines = Vec::new();
+    for (index, tag) in collect_opening_tags(page_body).iter().enumerate() {
+        if let Some(line) = build_accessibility_line(index + 1, tag.as_str()) {
+            lines.push(line);
+        }
+    }
+    let content = lines.join("\n");
+    truncate_utf8_bytes_with_flag(content.as_str(), max_bytes)
+}
+
+fn build_accessibility_line(index: usize, tag: &str) -> Option<String> {
+    let tag_lower = tag.to_ascii_lowercase();
+    let role = accessibility_role_for_tag(tag_lower.as_str())?;
+    let tag_name = html_tag_name(tag_lower.as_str()).unwrap_or("unknown");
+    let name = accessibility_name_for_tag(tag_lower.as_str());
+    let selector = accessibility_selector_for_tag(tag_lower.as_str());
+    Some(format!("{index:04} role={role}; name={name}; tag={tag_name}; selector={selector}"))
+}
+
+fn accessibility_role_for_tag(tag_lower: &str) -> Option<String> {
+    if let Some(explicit_role) = extract_attr_value(tag_lower, "role")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(truncate_utf8_bytes(explicit_role.as_str(), 64));
+    }
+    let tag_name = html_tag_name(tag_lower)?;
+    let inferred = match tag_name {
+        "a" => "link",
+        "button" => "button",
+        "textarea" => "textbox",
+        "select" => "combobox",
+        "img" => "img",
+        "form" => "form",
+        "nav" => "navigation",
+        "main" => "main",
+        "header" => "banner",
+        "footer" => "contentinfo",
+        "ul" | "ol" => "list",
+        "li" => "listitem",
+        "table" => "table",
+        "tr" => "row",
+        "td" => "cell",
+        "th" => "columnheader",
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "heading",
+        "input" => match extract_attr_value(tag_lower, "type")
+            .unwrap_or_else(|| "text".to_owned())
+            .as_str()
+        {
+            "checkbox" => "checkbox",
+            "radio" => "radio",
+            "submit" | "button" | "reset" => "button",
+            "search" | "email" | "url" | "tel" | "text" | "password" => "textbox",
+            _ => "input",
+        },
+        _ => return None,
+    };
+    Some(inferred.to_owned())
+}
+
+fn accessibility_name_for_tag(tag_lower: &str) -> String {
+    for attr_name in ["aria-label", "title", "alt", "placeholder", "name", "id"] {
+        if let Some(value) = extract_attr_value(tag_lower, attr_name)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            if contains_sensitive_material(value.as_str()) {
+                return "<redacted>".to_owned();
+            }
+            return truncate_utf8_bytes(value.as_str(), 128);
+        }
+    }
+    if let Some(href) = extract_attr_value(tag_lower, "href")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return normalize_url_with_redaction(href.as_str());
+    }
+    "-".to_owned()
+}
+
+fn accessibility_selector_for_tag(tag_lower: &str) -> String {
+    if let Some(id) = extract_attr_value(tag_lower, "id")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return format!("#{}", truncate_utf8_bytes(id.as_str(), 96));
+    }
+    if let Some(name) = extract_attr_value(tag_lower, "name")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return format!("[name={}]", truncate_utf8_bytes(name.as_str(), 96));
+    }
+    if let Some(class) = extract_attr_value(tag_lower, "class")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        let first_class = class.split_ascii_whitespace().next().unwrap_or_default();
+        if !first_class.is_empty() {
+            return format!(".{}", truncate_utf8_bytes(first_class, 96));
+        }
+    }
+    "-".to_owned()
+}
+
+fn build_visible_text_snapshot(page_body: &str, max_bytes: usize) -> (String, bool) {
+    let without_scripts = strip_tag_block_case_insensitive(page_body, "script");
+    let without_styles = strip_tag_block_case_insensitive(without_scripts.as_str(), "style");
+    let without_comments = strip_html_comments(without_styles.as_str());
+    let mut visible = String::new();
+    let mut inside_tag = false;
+    for character in without_comments.chars() {
+        if character == '<' {
+            inside_tag = true;
+            visible.push(' ');
+            continue;
+        }
+        if character == '>' {
+            inside_tag = false;
+            visible.push(' ');
+            continue;
+        }
+        if !inside_tag {
+            visible.push(character);
+        }
+    }
+    let collapsed = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_utf8_bytes_with_flag(collapsed.as_str(), max_bytes)
+}
+
+fn strip_tag_block_case_insensitive(input: &str, tag_name: &str) -> String {
+    let mut output = String::new();
+    let lower = input.to_ascii_lowercase();
+    let open_pattern = format!("<{tag_name}");
+    let close_pattern = format!("</{tag_name}>");
+    let mut cursor = 0usize;
+    while let Some(rel_open) = lower[cursor..].find(open_pattern.as_str()) {
+        let open = cursor + rel_open;
+        output.push_str(&input[cursor..open]);
+        let Some(rel_close) = lower[open..].find(close_pattern.as_str()) else {
+            cursor = input.len();
+            break;
+        };
+        let close_start = open + rel_close;
+        cursor = close_start + close_pattern.len();
+    }
+    if cursor < input.len() {
+        output.push_str(&input[cursor..]);
+    }
+    output
+}
+
+fn strip_html_comments(input: &str) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while let Some(rel_start) = input[cursor..].find("<!--") {
+        let start = cursor + rel_start;
+        output.push_str(&input[cursor..start]);
+        let Some(rel_end) = input[start + 4..].find("-->") else {
+            cursor = input.len();
+            break;
+        };
+        cursor = start + 4 + rel_end + 3;
+    }
+    if cursor < input.len() {
+        output.push_str(&input[cursor..]);
+    }
+    output
+}
+
+fn collect_opening_tags(html: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel_start) = html[cursor..].find('<') {
+        let start = cursor + rel_start;
+        let Some(rel_end) = html[start..].find('>') else {
+            break;
+        };
+        let end = start + rel_end;
+        let tag = &html[start..=end];
+        if tag.starts_with("</") || tag.starts_with("<!") || tag.starts_with("<?") {
+            cursor = end.saturating_add(1);
+            continue;
+        }
+        let tag_lower = tag.to_ascii_lowercase();
+        if matches!(html_tag_name(tag_lower.as_str()), Some("script" | "style")) {
+            cursor = end.saturating_add(1);
+            continue;
+        }
+        tags.push(tag.to_owned());
+        cursor = end.saturating_add(1);
+    }
+    tags
 }
 
 fn truncate_utf8_bytes(raw: &str, max_bytes: usize) -> String {
@@ -1921,6 +2689,10 @@ mod tests {
                     max_actions_per_window: 0,
                     action_rate_window_ms: 0,
                     max_action_log_entries: 0,
+                    max_observe_snapshot_bytes: 0,
+                    max_visible_text_bytes: 0,
+                    max_network_log_entries: 0,
+                    max_network_log_bytes: 0,
                 }),
                 allow_private_targets: true,
                 allow_downloads: false,
@@ -2061,6 +2833,339 @@ mod tests {
         handle.join().expect("test server thread should exit");
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_service_observe_returns_stable_sanitized_snapshot() {
+        let (url, handle) = spawn_static_http_server(
+            200,
+            "<html><head><title>Observe Fixture</title></head><body><main><h1>Portal</h1><form id=\"login\" action=\"/submit?token=secret&safe=ok\"><input id=\"email\" name=\"email\" type=\"email\" /><button id=\"send\" aria-label=\"Send\">Send</button></form><a id=\"docs\" href=\"https://example.com/docs?access_token=secret&lang=en\">Docs</a><script>window.token='abc'</script></main></body></html>",
+        );
+        let runtime = std::sync::Arc::new(
+            BrowserRuntimeState::new(&Args {
+                bind: "127.0.0.1".to_owned(),
+                port: 7143,
+                grpc_bind: "127.0.0.1".to_owned(),
+                grpc_port: 7543,
+                auth_token: None,
+                session_idle_ttl_ms: 60_000,
+                max_sessions: 16,
+                max_navigation_timeout_ms: 10_000,
+                max_session_lifetime_ms: 60_000,
+                max_screenshot_bytes: 128 * 1024,
+                max_response_bytes: 128 * 1024,
+                max_title_bytes: 4 * 1024,
+            })
+            .expect("runtime should initialize"),
+        );
+        let service = BrowserServiceImpl { runtime };
+        let created = service
+            .create_session(Request::new(browser_v1::CreateSessionRequest {
+                v: 1,
+                principal: "user:ops".to_owned(),
+                idle_ttl_ms: 10_000,
+                budget: None,
+                allow_private_targets: true,
+                allow_downloads: false,
+                action_allowed_domains: Vec::new(),
+            }))
+            .await
+            .expect("create_session should succeed")
+            .into_inner();
+        let session_id = created
+            .session_id
+            .as_ref()
+            .map(|value| value.ulid.clone())
+            .expect("session id should be present");
+        let navigate = service
+            .navigate(Request::new(browser_v1::NavigateRequest {
+                v: 1,
+                session_id: Some(proto::palyra::common::v1::CanonicalId {
+                    ulid: session_id.clone(),
+                }),
+                url: format!("{url}?access_token=topsecret&lang=en"),
+                timeout_ms: 2_000,
+                allow_redirects: true,
+                max_redirects: 3,
+                allow_private_targets: true,
+            }))
+            .await
+            .expect("navigate should succeed")
+            .into_inner();
+        assert!(navigate.success, "navigation should succeed");
+
+        let observed = service
+            .observe(Request::new(browser_v1::ObserveRequest {
+                v: 1,
+                session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+                include_dom_snapshot: true,
+                include_accessibility_tree: true,
+                include_visible_text: true,
+                max_dom_snapshot_bytes: 8 * 1024,
+                max_accessibility_tree_bytes: 8 * 1024,
+                max_visible_text_bytes: 2 * 1024,
+            }))
+            .await
+            .expect("observe should execute")
+            .into_inner();
+        assert!(observed.success, "observe should succeed");
+        assert!(
+            observed.dom_snapshot.contains("<form"),
+            "dom snapshot should include structural elements"
+        );
+        assert!(
+            observed.dom_snapshot.contains("token=<redacted>")
+                || observed.dom_snapshot.contains("access_token=<redacted>"),
+            "dom snapshot should redact sensitive URL query params: {}",
+            observed.dom_snapshot
+        );
+        assert!(
+            !observed.dom_snapshot.contains("topsecret"),
+            "sensitive query values must be redacted from dom snapshot: {}",
+            observed.dom_snapshot
+        );
+        assert!(
+            observed.accessibility_tree.contains("role=button"),
+            "accessibility tree should include semantic roles: {}",
+            observed.accessibility_tree
+        );
+        assert!(
+            observed.visible_text.contains("Portal"),
+            "visible text extraction should include visible text content"
+        );
+        assert!(
+            observed.page_url.contains("access_token=<redacted>"),
+            "observed page URL should be redacted: {}",
+            observed.page_url
+        );
+
+        handle.join().expect("test server thread should exit");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_service_observe_truncates_deterministically_when_oversized() {
+        let large_body = format!(
+            "<html><body><main>{}</main></body></html>",
+            (0..80)
+                .map(|index| format!("<section id=\"section-{index}\"><button id=\"btn-{index}\">Run {index}</button></section>"))
+                .collect::<String>()
+        );
+        let (url, handle) = spawn_static_http_server(200, large_body.as_str());
+        let runtime = std::sync::Arc::new(
+            BrowserRuntimeState::new(&Args {
+                bind: "127.0.0.1".to_owned(),
+                port: 7143,
+                grpc_bind: "127.0.0.1".to_owned(),
+                grpc_port: 7543,
+                auth_token: None,
+                session_idle_ttl_ms: 60_000,
+                max_sessions: 16,
+                max_navigation_timeout_ms: 10_000,
+                max_session_lifetime_ms: 60_000,
+                max_screenshot_bytes: 128 * 1024,
+                max_response_bytes: 256 * 1024,
+                max_title_bytes: 4 * 1024,
+            })
+            .expect("runtime should initialize"),
+        );
+        let service = BrowserServiceImpl { runtime };
+        let created = service
+            .create_session(Request::new(browser_v1::CreateSessionRequest {
+                v: 1,
+                principal: "user:ops".to_owned(),
+                idle_ttl_ms: 10_000,
+                budget: None,
+                allow_private_targets: true,
+                allow_downloads: false,
+                action_allowed_domains: Vec::new(),
+            }))
+            .await
+            .expect("create_session should succeed")
+            .into_inner();
+        let session_id = created
+            .session_id
+            .as_ref()
+            .map(|value| value.ulid.clone())
+            .expect("session id should be present");
+        let navigate = service
+            .navigate(Request::new(browser_v1::NavigateRequest {
+                v: 1,
+                session_id: Some(proto::palyra::common::v1::CanonicalId {
+                    ulid: session_id.clone(),
+                }),
+                url,
+                timeout_ms: 2_000,
+                allow_redirects: true,
+                max_redirects: 3,
+                allow_private_targets: true,
+            }))
+            .await
+            .expect("navigate should succeed")
+            .into_inner();
+        assert!(navigate.success, "navigation should succeed");
+
+        let request = browser_v1::ObserveRequest {
+            v: 1,
+            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+            include_dom_snapshot: true,
+            include_accessibility_tree: true,
+            include_visible_text: true,
+            max_dom_snapshot_bytes: 64,
+            max_accessibility_tree_bytes: 64,
+            max_visible_text_bytes: 48,
+        };
+        let first = service
+            .observe(Request::new(request.clone()))
+            .await
+            .expect("first observe should execute")
+            .into_inner();
+        let second = service
+            .observe(Request::new(request))
+            .await
+            .expect("second observe should execute")
+            .into_inner();
+        assert!(
+            first.dom_truncated
+                && first.accessibility_tree_truncated
+                && first.visible_text_truncated,
+            "all observe channels should report truncation for oversized snapshots"
+        );
+        assert_eq!(first.dom_snapshot, second.dom_snapshot, "dom truncation must be deterministic");
+        assert_eq!(
+            first.accessibility_tree, second.accessibility_tree,
+            "a11y truncation must be deterministic"
+        );
+        assert_eq!(
+            first.visible_text, second.visible_text,
+            "visible text truncation must be deterministic"
+        );
+
+        handle.join().expect("test server thread should exit");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_service_network_log_redacts_sensitive_values() {
+        let (url, handle) = spawn_static_http_server_with_headers(
+            200,
+            "<html><body>network log fixture</body></html>",
+            &[
+                ("Set-Cookie", "session=abc123; HttpOnly"),
+                ("X-Api-Key", "secret-key"),
+                ("Location", "https://example.com/redirect?token=secret&safe=1"),
+            ],
+        );
+        let runtime = std::sync::Arc::new(
+            BrowserRuntimeState::new(&Args {
+                bind: "127.0.0.1".to_owned(),
+                port: 7143,
+                grpc_bind: "127.0.0.1".to_owned(),
+                grpc_port: 7543,
+                auth_token: None,
+                session_idle_ttl_ms: 60_000,
+                max_sessions: 16,
+                max_navigation_timeout_ms: 10_000,
+                max_session_lifetime_ms: 60_000,
+                max_screenshot_bytes: 128 * 1024,
+                max_response_bytes: 128 * 1024,
+                max_title_bytes: 4 * 1024,
+            })
+            .expect("runtime should initialize"),
+        );
+        let service = BrowserServiceImpl { runtime };
+        let created = service
+            .create_session(Request::new(browser_v1::CreateSessionRequest {
+                v: 1,
+                principal: "user:ops".to_owned(),
+                idle_ttl_ms: 10_000,
+                budget: None,
+                allow_private_targets: true,
+                allow_downloads: false,
+                action_allowed_domains: Vec::new(),
+            }))
+            .await
+            .expect("create_session should succeed")
+            .into_inner();
+        let session_id = created
+            .session_id
+            .as_ref()
+            .map(|value| value.ulid.clone())
+            .expect("session id should be present");
+        let navigate = service
+            .navigate(Request::new(browser_v1::NavigateRequest {
+                v: 1,
+                session_id: Some(proto::palyra::common::v1::CanonicalId {
+                    ulid: session_id.clone(),
+                }),
+                url: format!("{url}?access_token=supersecret&safe=1"),
+                timeout_ms: 2_000,
+                allow_redirects: true,
+                max_redirects: 3,
+                allow_private_targets: true,
+            }))
+            .await
+            .expect("navigate should succeed")
+            .into_inner();
+        assert!(navigate.success, "navigation should succeed");
+
+        let without_headers = service
+            .network_log(Request::new(browser_v1::NetworkLogRequest {
+                v: 1,
+                session_id: Some(proto::palyra::common::v1::CanonicalId {
+                    ulid: session_id.clone(),
+                }),
+                limit: 10,
+                include_headers: false,
+                max_payload_bytes: 8 * 1024,
+            }))
+            .await
+            .expect("network_log without headers should execute")
+            .into_inner();
+        assert!(without_headers.success, "network log call should succeed");
+        assert!(!without_headers.entries.is_empty(), "network log should contain entries");
+        assert!(
+            without_headers.entries.iter().all(|entry| entry.headers.is_empty()),
+            "headers must be excluded unless explicitly requested"
+        );
+
+        let with_headers = service
+            .network_log(Request::new(browser_v1::NetworkLogRequest {
+                v: 1,
+                session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+                limit: 10,
+                include_headers: true,
+                max_payload_bytes: 8 * 1024,
+            }))
+            .await
+            .expect("network_log with headers should execute")
+            .into_inner();
+        assert!(with_headers.success, "network log call should succeed");
+        let entry =
+            with_headers.entries.last().expect("network log should include at least one entry");
+        assert!(
+            entry.request_url.contains("access_token=<redacted>"),
+            "network log URLs should redact sensitive query values: {}",
+            entry.request_url
+        );
+        assert!(
+            !entry.request_url.contains("supersecret"),
+            "network log must not leak original sensitive URL values: {}",
+            entry.request_url
+        );
+        assert!(
+            entry
+                .headers
+                .iter()
+                .any(|header| { header.name == "set-cookie" && header.value == "<redacted>" }),
+            "set-cookie header should be redacted"
+        );
+        assert!(
+            entry.headers.iter().any(|header| {
+                header.name == "location" && header.value.contains("token=<redacted>")
+            }),
+            "location header URLs should be normalized and redacted"
+        );
+
+        handle.join().expect("test server thread should exit");
+    }
+
     fn spawn_static_http_server(status_code: u16, body: &str) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let address = listener.local_addr().expect("listener local address should resolve");
@@ -2072,6 +3177,36 @@ mod tests {
                 "HTTP/1.1 {status_code} OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
+            stream.write_all(response.as_bytes()).expect("server should write response");
+            stream.flush().expect("server should flush response");
+        });
+        (format!("http://{address}/"), handle)
+    }
+
+    fn spawn_static_http_server_with_headers(
+        status_code: u16,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener local address should resolve");
+        let body = body.to_owned();
+        let headers = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect::<Vec<_>>();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("listener should accept request");
+            read_http_request(&mut stream);
+            let mut response = format!(
+                "HTTP/1.1 {status_code} OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n",
+                body.len()
+            );
+            for (name, value) in headers {
+                response.push_str(format!("{name}: {value}\r\n").as_str());
+            }
+            response.push_str("Connection: close\r\n\r\n");
+            response.push_str(body.as_str());
             stream.write_all(response.as_bytes()).expect("server should write response");
             stream.flush().expect("server should flush response");
         });

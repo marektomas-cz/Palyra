@@ -86,6 +86,18 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct NavigateResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct NetworkLogEntry;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct NetworkLogHeader;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct NetworkLogRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct NetworkLogResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ObserveRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ObserveResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ScreenshotRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ScreenshotResponse;
@@ -110,6 +122,8 @@ pub mod palyra_browser_v1 {
         fn GetTitle(&self);
         fn Health(&self);
         fn Navigate(&self);
+        fn NetworkLog(&self);
+        fn Observe(&self);
         fn Screenshot(&self);
         fn Scroll(&self);
         fn Type(&self);
