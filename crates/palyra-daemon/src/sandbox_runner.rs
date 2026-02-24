@@ -13,11 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use palyra_common::process_runner_input::{
+    parse_process_runner_tool_input, ProcessRunnerToolInput,
+};
 use palyra_sandbox::{
     build_tier_c_command_plan, current_backend_capabilities, current_backend_executor,
     current_backend_kind, TierCBackendError, TierCCommandRequest, TierCPolicy,
 };
-use serde::Deserialize;
 use serde_json::json;
 
 const MAX_COMMAND_LENGTH: usize = 256;
@@ -123,19 +125,7 @@ pub fn process_runner_executor_name(policy: &SandboxProcessRunnerPolicy) -> Stri
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProcessRunnerInput {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    requested_egress_hosts: Vec<String>,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-}
+type ProcessRunnerInput = ProcessRunnerToolInput;
 
 #[derive(Debug)]
 struct ProcessExecutionCapture {
@@ -188,8 +178,15 @@ pub fn run_constrained_process(
         input.command.as_str(),
         input.args.as_slice(),
     )?;
+    let requested_hosts = if matches!(policy.egress_enforcement_mode, EgressEnforcementMode::None) {
+        Vec::new()
+    } else {
+        collect_requested_egress_hosts(&input)?
+    };
+    if matches!(policy.egress_enforcement_mode, EgressEnforcementMode::Strict) {
+        validate_tier_c_strict_offline_egress_requests(policy, requested_hosts.as_slice())?;
+    }
     if !matches!(policy.egress_enforcement_mode, EgressEnforcementMode::None) {
-        let requested_hosts = collect_requested_egress_hosts(&input)?;
         validate_egress_hosts(policy, requested_hosts.as_slice())?;
     }
     if matches!(policy.egress_enforcement_mode, EgressEnforcementMode::Strict) {
@@ -278,11 +275,9 @@ pub fn run_constrained_process(
 fn parse_process_runner_input(
     input_json: &[u8],
 ) -> Result<ProcessRunnerInput, SandboxProcessRunError> {
-    serde_json::from_slice::<ProcessRunnerInput>(input_json).map_err(|error| {
-        SandboxProcessRunError {
-            kind: SandboxProcessRunErrorKind::InvalidInput,
-            message: format!("palyra.process.run input must be valid JSON object: {error}"),
-        }
+    parse_process_runner_tool_input(input_json).map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::InvalidInput,
+        message: format!("palyra.process.run input must be valid JSON object: {error}"),
     })
 }
 
@@ -783,6 +778,28 @@ fn validate_egress_hosts(
         });
     }
     Ok(())
+}
+
+fn validate_tier_c_strict_offline_egress_requests(
+    policy: &SandboxProcessRunnerPolicy,
+    requested_hosts: &[String],
+) -> Result<(), SandboxProcessRunError> {
+    if !matches!(policy.tier, SandboxProcessRunnerTier::C) || requested_hosts.is_empty() {
+        return Ok(());
+    }
+
+    let sample_hosts = requested_hosts.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let overflow_suffix = if requested_hosts.len() > 3 {
+        format!(" (+{} more)", requested_hosts.len() - 3)
+    } else {
+        String::new()
+    };
+    Err(SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::EgressDenied,
+        message: format!(
+            "sandbox denied: tier-c strict mode is offline-only; requested outbound host(s) [{sample_hosts}]{overflow_suffix} are blocked. Route network access through dedicated browser/http tools"
+        ),
+    })
 }
 
 fn validate_runtime_egress_enforcement(
@@ -1606,6 +1623,21 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn run_constrained_process_rejects_args_over_count_limit_deterministically() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let policy = sandbox_policy(workspace);
+        let args = vec!["a"; 129];
+        let input = serde_json::to_vec(&serde_json::json!({ "command": "uname", "args": args }))
+            .expect("input JSON should serialize");
+        let error =
+            run_constrained_process(&policy, input.as_slice(), Duration::from_millis(1_000))
+                .expect_err("argv count over limit must be denied deterministically");
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::InvalidInput);
+        assert!(error.message.contains("supports at most"));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn run_constrained_process_fails_closed_without_runtime_egress_enforcement() {
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
         let mut policy = sandbox_policy(workspace);
@@ -1618,6 +1650,37 @@ mod tests {
             error.message.contains("runtime egress enforcement is unavailable"),
             "error should explain fail-closed runtime egress requirement"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tier_c_strict_mode_rejects_requested_egress_hosts_as_offline_only() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let mut policy = sandbox_policy(workspace);
+        policy.tier = SandboxProcessRunnerTier::C;
+        policy.allowed_egress_hosts = vec!["allowed.example".to_owned()];
+        let input = br#"{"command":"uname","args":["https://allowed.example/path"]}"#;
+        let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect_err("tier-c strict mode must reject outbound requests as offline-only");
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::EgressDenied);
+        assert!(
+            error.message.contains("offline-only") && error.message.contains("browser/http tools"),
+            "strict tier-c denial should explain offline-only posture and dedicated network tools"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tier_c_strict_mode_rejects_requested_egress_hosts_field_as_offline_only() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let mut policy = sandbox_policy(workspace);
+        policy.tier = SandboxProcessRunnerTier::C;
+        let input =
+            br#"{"command":"uname","args":[],"requested_egress_hosts":["api.example.com"]}"#;
+        let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect_err("tier-c strict mode must reject requested_egress_hosts in offline mode");
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::EgressDenied);
+        assert!(error.message.contains("offline-only"));
     }
 
     #[test]

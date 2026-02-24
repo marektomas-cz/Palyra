@@ -208,6 +208,16 @@ fn run_doctor(strict: bool) -> Result<()> {
             required: false,
         },
         DoctorCheck {
+            key: "process_runner_tier_c_strict_offline_only",
+            ok: process_runner_tier_c_strict_offline_config_ok(),
+            required: false,
+        },
+        DoctorCheck {
+            key: "process_runner_tier_c_windows_backend_supported",
+            ok: process_runner_tier_c_windows_backend_config_ok(),
+            required: cfg!(windows),
+        },
+        DoctorCheck {
             key: "gitleaks_installed",
             ok: command_available("gitleaks", &["--version"]),
             required: false,
@@ -6802,21 +6812,9 @@ fn process_runner_tier_b_allowlist_config_ok() -> bool {
 }
 
 fn process_runner_tier_b_allowlist_config_ok_impl() -> Result<bool> {
-    let Some(config_path) = doctor_config_path() else {
+    let Some(parsed) = read_doctor_root_file_config()? else {
         return Ok(true);
     };
-    if !config_path.exists() {
-        return Ok(true);
-    }
-
-    let content = fs::read_to_string(config_path.as_path())
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let (document, _) = parse_document_with_migration(content.as_str())
-        .context("failed to migrate doctor config document")?;
-    let migrated =
-        toml::to_string(&document).context("failed to serialize doctor config document")?;
-    let parsed: RootFileConfig =
-        toml::from_str(migrated.as_str()).context("invalid doctor daemon config schema")?;
     Ok(process_runner_tier_b_allowlist_preflight_only(&parsed))
 }
 
@@ -6832,6 +6830,25 @@ fn doctor_config_path() -> Option<PathBuf> {
         Err(env::VarError::NotPresent) => find_default_config_path().map(PathBuf::from),
         Err(env::VarError::NotUnicode(_)) => None,
     }
+}
+
+fn read_doctor_root_file_config() -> Result<Option<RootFileConfig>> {
+    let Some(config_path) = doctor_config_path() else {
+        return Ok(None);
+    };
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(config_path.as_path())
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let (document, _) = parse_document_with_migration(content.as_str())
+        .context("failed to migrate doctor config document")?;
+    let migrated =
+        toml::to_string(&document).context("failed to serialize doctor config document")?;
+    let parsed: RootFileConfig =
+        toml::from_str(migrated.as_str()).context("invalid doctor daemon config schema")?;
+    Ok(Some(parsed))
 }
 
 fn process_runner_tier_b_allowlist_preflight_only(parsed: &RootFileConfig) -> bool {
@@ -6855,6 +6872,73 @@ fn process_runner_tier_b_allowlist_preflight_only(parsed: &RootFileConfig) -> bo
             .map(|suffixes| !suffixes.is_empty())
             .unwrap_or(false);
     !has_host_allowlists
+}
+
+fn process_runner_tier_c_strict_offline_config_ok() -> bool {
+    process_runner_tier_c_strict_offline_config_ok_impl().unwrap_or(true)
+}
+
+fn process_runner_tier_c_strict_offline_config_ok_impl() -> Result<bool> {
+    let Some(parsed) = read_doctor_root_file_config()? else {
+        return Ok(true);
+    };
+    Ok(process_runner_tier_c_strict_offline_allowlists_empty(&parsed))
+}
+
+fn process_runner_tier_c_strict_offline_allowlists_empty(parsed: &RootFileConfig) -> bool {
+    let Some(process_runner) =
+        parsed.tool_call.as_ref().and_then(|tool_call| tool_call.process_runner.as_ref())
+    else {
+        return true;
+    };
+    let tier = process_runner.tier.as_deref().unwrap_or("b").trim().to_ascii_lowercase();
+    if tier != "c" && tier != "tier_c" {
+        return true;
+    }
+    let mode = process_runner
+        .egress_enforcement_mode
+        .as_deref()
+        .unwrap_or("strict")
+        .trim()
+        .to_ascii_lowercase();
+    if mode != "strict" {
+        return true;
+    }
+    let has_host_allowlists = process_runner
+        .allowed_egress_hosts
+        .as_ref()
+        .map(|hosts| !hosts.is_empty())
+        .unwrap_or(false)
+        || process_runner
+            .allowed_dns_suffixes
+            .as_ref()
+            .map(|suffixes| !suffixes.is_empty())
+            .unwrap_or(false);
+    !has_host_allowlists
+}
+
+fn process_runner_tier_c_windows_backend_config_ok() -> bool {
+    process_runner_tier_c_windows_backend_config_ok_impl().unwrap_or(true)
+}
+
+fn process_runner_tier_c_windows_backend_config_ok_impl() -> Result<bool> {
+    let Some(parsed) = read_doctor_root_file_config()? else {
+        return Ok(true);
+    };
+    Ok(process_runner_tier_c_windows_backend_supported(&parsed))
+}
+
+fn process_runner_tier_c_windows_backend_supported(parsed: &RootFileConfig) -> bool {
+    if !cfg!(windows) {
+        return true;
+    }
+    let Some(process_runner) =
+        parsed.tool_call.as_ref().and_then(|tool_call| tool_call.process_runner.as_ref())
+    else {
+        return true;
+    };
+    let tier = process_runner.tier.as_deref().unwrap_or("b").trim().to_ascii_lowercase();
+    tier != "c" && tier != "tier_c"
 }
 
 fn command_available(command: &str, args: &[&str]) -> bool {
@@ -7007,7 +7091,9 @@ mod cli_v1_tests {
         normalize_client_socket, normalize_installed_skills_index, normalize_prompt_secret_value,
         normalize_relative_registry_path, parse_acp_shim_input_line,
         parse_and_verify_signed_remote_registry_index,
-        process_runner_tier_b_allowlist_preflight_only, registry_key_id_for, sha256_hex,
+        process_runner_tier_b_allowlist_preflight_only,
+        process_runner_tier_c_strict_offline_allowlists_empty,
+        process_runner_tier_c_windows_backend_supported, registry_key_id_for, sha256_hex,
         trust_store_integrity_vault_key, validate_registry_index,
         verify_or_initialize_trust_store_integrity, write_file_atomically, InstalledSkillRecord,
         InstalledSkillSource, InstalledSkillsIndex, RegistrySignature, RootFileConfig,
@@ -7548,6 +7634,57 @@ allowed_egress_hosts = ["api.example.com"]
         assert!(
             process_runner_tier_b_allowlist_preflight_only(&parsed),
             "tier-c policy should not trigger tier-b preflight-only warning"
+        );
+    }
+
+    #[test]
+    fn process_runner_tier_c_strict_allowlists_report_offline_only_warning() {
+        let parsed: RootFileConfig = toml::from_str(
+            r#"
+[tool_call.process_runner]
+tier = "c"
+egress_enforcement_mode = "strict"
+allowed_egress_hosts = ["api.example.com"]
+"#,
+        )
+        .expect("fixture config should parse");
+        assert!(
+            !process_runner_tier_c_strict_offline_allowlists_empty(&parsed),
+            "tier-c strict mode with host allowlists should be flagged as offline-only mismatch"
+        );
+    }
+
+    #[test]
+    fn process_runner_tier_c_preflight_allowlists_pass_offline_only_check() {
+        let parsed: RootFileConfig = toml::from_str(
+            r#"
+[tool_call.process_runner]
+tier = "c"
+egress_enforcement_mode = "preflight"
+allowed_egress_hosts = ["api.example.com"]
+"#,
+        )
+        .expect("fixture config should parse");
+        assert!(
+            process_runner_tier_c_strict_offline_allowlists_empty(&parsed),
+            "tier-c preflight mode should not trigger strict offline-only warning"
+        );
+    }
+
+    #[test]
+    fn process_runner_tier_c_windows_backend_check_tracks_platform_support() {
+        let parsed: RootFileConfig = toml::from_str(
+            r#"
+[tool_call.process_runner]
+tier = "c"
+"#,
+        )
+        .expect("fixture config should parse");
+        let expected = !cfg!(windows);
+        assert_eq!(
+            process_runner_tier_c_windows_backend_supported(&parsed),
+            expected,
+            "windows backend doctor check should fail only on windows tier-c configs"
         );
     }
 

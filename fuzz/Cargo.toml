@@ -33,4 +33,18 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "workspace_patch_parser"
+path = "fuzz_targets/workspace_patch_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "process_runner_input_parser"
+path = "fuzz_targets/process_runner_input_parser.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
