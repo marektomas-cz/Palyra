@@ -1263,6 +1263,50 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn execute_tool_call_denies_secret_exfiltration_path_and_emits_attestation() {
+        if std::process::Command::new("cat").output().is_err() {
+            return;
+        }
+
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.process.run".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 2_000,
+            process_runner: SandboxProcessRunnerPolicy {
+                enabled: true,
+                tier: SandboxProcessRunnerTier::B,
+                workspace_root: std::env::current_dir().expect("current_dir should resolve"),
+                allowed_executables: vec!["cat".to_owned()],
+                allow_interpreters: false,
+                egress_enforcement_mode: EgressEnforcementMode::Strict,
+                allowed_egress_hosts: Vec::new(),
+                allowed_dns_suffixes: Vec::new(),
+                cpu_time_limit_ms: 2_000,
+                memory_limit_bytes: 128 * 1024 * 1024,
+                max_output_bytes: 64 * 1024,
+            },
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+
+        let outcome = execute_tool_call(
+            &config,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+            "palyra.process.run",
+            br#"{"command":"cat","args":["/etc/shadow"]}"#,
+        )
+        .await;
+
+        assert!(!outcome.success, "secret path exfil attempt must be denied");
+        assert_eq!(outcome.attestation.executor, "sandbox_tier_b");
+        assert_eq!(outcome.attestation.sandbox_enforcement, "strict");
+        assert!(
+            outcome.error.contains("escapes workspace scope"),
+            "secret-path denial should explain workspace scope boundary"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn execute_tool_call_runs_sandbox_wasm_plugin() {
         let config = ToolCallConfig {
             allowed_tools: vec!["palyra.plugin.run".to_owned()],
