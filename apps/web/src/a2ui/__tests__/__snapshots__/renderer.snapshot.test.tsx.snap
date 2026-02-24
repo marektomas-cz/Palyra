@@ -10,7 +10,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
     class="a2ui-component"
     data-component-id="status-line"
     data-component-type="text"
-    style="animation-delay: 0ms;"
   >
     <p
       class="a2ui-text a2ui-text-success"
@@ -22,7 +21,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
     class="a2ui-component"
     data-component-id="summary"
     data-component-type="markdown"
-    style="animation-delay: 32ms;"
   >
     <div
       class="a2ui-markdown"
@@ -50,7 +48,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
     class="a2ui-component"
     data-component-id="tasks"
     data-component-type="list"
-    style="animation-delay: 64ms;"
   >
     <ul
       class="a2ui-list"
@@ -73,7 +70,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
     class="a2ui-component"
     data-component-id="metrics"
     data-component-type="table"
-    style="animation-delay: 96ms;"
   >
     <div
       class="a2ui-table-wrap"
@@ -116,7 +112,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
     class="a2ui-component"
     data-component-id="operator-form"
     data-component-type="form"
-    style="animation-delay: 128ms;"
   >
     <form
       class="a2ui-form"
@@ -196,7 +191,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
     class="a2ui-component"
     data-component-id="latency-chart"
     data-component-type="chart"
-    style="animation-delay: 160ms;"
   >
     <figure
       class="a2ui-chart"
@@ -218,12 +212,33 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
             P50
           </span>
           <span
+            aria-hidden="true"
             class="a2ui-chart-track"
           >
-            <span
-              class="a2ui-chart-bar"
-              style="width: 39.130434782608695%;"
-            />
+            <svg
+              class="a2ui-chart-track-svg"
+              preserveAspectRatio="none"
+              viewBox="0 0 100 10"
+            >
+              <rect
+                class="a2ui-chart-track-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="100"
+                x="0"
+                y="0"
+              />
+              <rect
+                class="a2ui-chart-bar-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="39.130434782608695"
+                x="0"
+                y="0"
+              />
+            </svg>
           </span>
           <span
             class="a2ui-chart-value"
@@ -240,12 +255,33 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
             P95
           </span>
           <span
+            aria-hidden="true"
             class="a2ui-chart-track"
           >
-            <span
-              class="a2ui-chart-bar"
-              style="width: 60.86956521739131%;"
-            />
+            <svg
+              class="a2ui-chart-track-svg"
+              preserveAspectRatio="none"
+              viewBox="0 0 100 10"
+            >
+              <rect
+                class="a2ui-chart-track-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="100"
+                x="0"
+                y="0"
+              />
+              <rect
+                class="a2ui-chart-bar-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="60.86956521739131"
+                x="0"
+                y="0"
+              />
+            </svg>
           </span>
           <span
             class="a2ui-chart-value"
@@ -262,12 +298,33 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup after pat
             P99
           </span>
           <span
+            aria-hidden="true"
             class="a2ui-chart-track"
           >
-            <span
-              class="a2ui-chart-bar"
-              style="width: 100%;"
-            />
+            <svg
+              class="a2ui-chart-track-svg"
+              preserveAspectRatio="none"
+              viewBox="0 0 100 10"
+            >
+              <rect
+                class="a2ui-chart-track-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="100"
+                x="0"
+                y="0"
+              />
+              <rect
+                class="a2ui-chart-bar-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="100"
+                x="0"
+                y="0"
+              />
+            </svg>
           </span>
           <span
             class="a2ui-chart-value"
@@ -291,7 +348,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
     class="a2ui-component"
     data-component-id="status-line"
     data-component-type="text"
-    style="animation-delay: 0ms;"
   >
     <p
       class="a2ui-text a2ui-text-success"
@@ -303,7 +359,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
     class="a2ui-component"
     data-component-id="summary"
     data-component-type="markdown"
-    style="animation-delay: 32ms;"
   >
     <div
       class="a2ui-markdown"
@@ -331,7 +386,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
     class="a2ui-component"
     data-component-id="tasks"
     data-component-type="list"
-    style="animation-delay: 64ms;"
   >
     <ul
       class="a2ui-list"
@@ -351,7 +405,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
     class="a2ui-component"
     data-component-id="metrics"
     data-component-type="table"
-    style="animation-delay: 96ms;"
   >
     <div
       class="a2ui-table-wrap"
@@ -394,7 +447,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
     class="a2ui-component"
     data-component-id="operator-form"
     data-component-type="form"
-    style="animation-delay: 128ms;"
   >
     <form
       class="a2ui-form"
@@ -475,7 +527,6 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
     class="a2ui-component"
     data-component-id="latency-chart"
     data-component-type="chart"
-    style="animation-delay: 160ms;"
   >
     <figure
       class="a2ui-chart"
@@ -497,12 +548,33 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
             P50
           </span>
           <span
+            aria-hidden="true"
             class="a2ui-chart-track"
           >
-            <span
-              class="a2ui-chart-bar"
-              style="width: 39.130434782608695%;"
-            />
+            <svg
+              class="a2ui-chart-track-svg"
+              preserveAspectRatio="none"
+              viewBox="0 0 100 10"
+            >
+              <rect
+                class="a2ui-chart-track-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="100"
+                x="0"
+                y="0"
+              />
+              <rect
+                class="a2ui-chart-bar-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="39.130434782608695"
+                x="0"
+                y="0"
+              />
+            </svg>
           </span>
           <span
             class="a2ui-chart-value"
@@ -519,12 +591,33 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
             P95
           </span>
           <span
+            aria-hidden="true"
             class="a2ui-chart-track"
           >
-            <span
-              class="a2ui-chart-bar"
-              style="width: 69.56521739130434%;"
-            />
+            <svg
+              class="a2ui-chart-track-svg"
+              preserveAspectRatio="none"
+              viewBox="0 0 100 10"
+            >
+              <rect
+                class="a2ui-chart-track-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="100"
+                x="0"
+                y="0"
+              />
+              <rect
+                class="a2ui-chart-bar-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="69.56521739130434"
+                x="0"
+                y="0"
+              />
+            </svg>
           </span>
           <span
             class="a2ui-chart-value"
@@ -541,12 +634,33 @@ exports[`A2uiRenderer snapshot coverage > renders deterministic markup for basel
             P99
           </span>
           <span
+            aria-hidden="true"
             class="a2ui-chart-track"
           >
-            <span
-              class="a2ui-chart-bar"
-              style="width: 100%;"
-            />
+            <svg
+              class="a2ui-chart-track-svg"
+              preserveAspectRatio="none"
+              viewBox="0 0 100 10"
+            >
+              <rect
+                class="a2ui-chart-track-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="100"
+                x="0"
+                y="0"
+              />
+              <rect
+                class="a2ui-chart-bar-rect"
+                height="10"
+                rx="5"
+                ry="5"
+                width="100"
+                x="0"
+                y="0"
+              />
+            </svg>
           </span>
           <span
             class="a2ui-chart-value"
