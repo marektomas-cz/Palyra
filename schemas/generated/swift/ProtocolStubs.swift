@@ -116,6 +116,24 @@ public enum PalyraBrowserV1 {
     public struct NavigateResponse: Equatable {
         public init() {}
     }
+    public struct NetworkLogEntry: Equatable {
+        public init() {}
+    }
+    public struct NetworkLogHeader: Equatable {
+        public init() {}
+    }
+    public struct NetworkLogRequest: Equatable {
+        public init() {}
+    }
+    public struct NetworkLogResponse: Equatable {
+        public init() {}
+    }
+    public struct ObserveRequest: Equatable {
+        public init() {}
+    }
+    public struct ObserveResponse: Equatable {
+        public init() {}
+    }
     public struct ScreenshotRequest: Equatable {
         public init() {}
     }
@@ -150,6 +168,8 @@ public enum PalyraBrowserV1 {
         func getTitle()
         func health()
         func navigate()
+        func networkLog()
+        func observe()
         func screenshot()
         func scroll()
         func type()
