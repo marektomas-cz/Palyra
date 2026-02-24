@@ -162,6 +162,15 @@ jobs:
       - name: Lint web app
         run: npm --prefix apps/web run lint
 
+      - name: Typecheck web app
+        run: npm --prefix apps/web run typecheck
+
+      - name: Test web app
+        run: npm --prefix apps/web run test:run
+
+      - name: Build web app
+        run: npm --prefix apps/web run build
+
   security:
     name: Security checks
     uses: ./.github/workflows/security.yml

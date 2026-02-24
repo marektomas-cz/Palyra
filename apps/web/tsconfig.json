@@ -4,15 +4,27 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
+    "jsx": "react-jsx",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": [
+      "vite/client",
+      "vitest/globals"
+    ]
   },
   "include": [
-    "**/*.ts",
-    "**/*.tsx"
+    "src",
+    "vite.config.ts",
+    "vitest.setup.ts"
   ],
   "exclude": [
     "dist",
-    "node_modules"
+    "node_modules",
+    "coverage"
   ]
 }

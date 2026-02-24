@@ -1,0 +1,362 @@
+:root {
+  --bg-top: #f8fbff;
+  --bg-bottom: #eef4ea;
+  --surface: #ffffffd9;
+  --surface-strong: #ffffff;
+  --border: #0e5d5a26;
+  --text: #0d2a29;
+  --text-muted: #506865;
+  --accent: #007f76;
+  --accent-strong: #005f59;
+  --accent-soft: #def5f2;
+  --critical: #a73321;
+  --success: #206547;
+  --shadow: 0 20px 48px #09343014;
+  --radius-lg: 1.1rem;
+  --radius-md: 0.75rem;
+  --radius-sm: 0.5rem;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    "IBM Plex Sans",
+    "Segoe UI",
+    "Helvetica Neue",
+    sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 8% 10%, #ffdd9c66 0%, transparent 38%),
+    radial-gradient(circle at 85% 7%, #9ae7de80 0%, transparent 42%),
+    linear-gradient(160deg, var(--bg-top), var(--bg-bottom));
+}
+
+.console-shell {
+  max-width: 1050px;
+  margin: 0 auto;
+  padding: 1.5rem clamp(1rem, 2vw, 2rem) 2rem;
+}
+
+.console-shell__header {
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  animation: fade-up 380ms ease-out both;
+}
+
+.console-shell__eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.console-shell__header h1 {
+  margin: 0.35rem 0 0.45rem;
+  line-height: 1.05;
+  font-size: clamp(1.5rem, 2.5vw, 2.2rem);
+}
+
+.console-shell__subtitle {
+  margin: 0;
+  color: var(--text-muted);
+  max-width: 50ch;
+}
+
+.console-shell__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #f7fffe;
+  padding: 0.6rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px #005f5933;
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+button.button--ghost {
+  background: transparent;
+  color: var(--accent-strong);
+  border: 1px solid #00635d40;
+}
+
+.console-shell__status {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 0.85rem 1rem;
+}
+
+.console-shell__status p {
+  margin: 0;
+}
+
+.console-shell__main {
+  margin-top: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: clamp(0.9rem, 2.2vw, 1.4rem);
+}
+
+.console-shell__footer {
+  margin-top: 1rem;
+  color: var(--text-muted);
+  font-size: 0.93rem;
+}
+
+.a2ui-renderer {
+  display: grid;
+  gap: 0.95rem;
+}
+
+.a2ui-component {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.95rem;
+  background: var(--surface-strong);
+  animation: fade-up 280ms ease-out both;
+}
+
+.a2ui-component-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.a2ui-text {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.a2ui-text-muted {
+  color: var(--text-muted);
+}
+
+.a2ui-text-critical {
+  color: var(--critical);
+}
+
+.a2ui-text-success {
+  color: var(--success);
+}
+
+.a2ui-markdown {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.a2ui-markdown-heading {
+  margin: 0;
+  line-height: 1.2;
+}
+
+.a2ui-markdown-paragraph,
+.a2ui-markdown-empty {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.a2ui-markdown-list {
+  margin: 0;
+  padding-inline-start: 1.2rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.a2ui-markdown-code {
+  font-family:
+    "JetBrains Mono",
+    "Cascadia Code",
+    monospace;
+  background: #edf7f6;
+  border-radius: 0.35rem;
+  padding: 0.12rem 0.35rem;
+}
+
+.a2ui-list {
+  margin: 0;
+  padding-inline-start: 1.2rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.a2ui-table-wrap {
+  overflow-x: auto;
+}
+
+.a2ui-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 320px;
+}
+
+.a2ui-table th,
+.a2ui-table td {
+  border-bottom: 1px solid #dde8e6;
+  text-align: left;
+  padding: 0.5rem 0.45rem;
+}
+
+.a2ui-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.a2ui-form {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.a2ui-form-header h3 {
+  margin: 0;
+}
+
+.a2ui-form-fields {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.a2ui-form-field {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+}
+
+.a2ui-form-field small {
+  color: var(--text-muted);
+}
+
+.a2ui-form-field input,
+.a2ui-form-field select {
+  font: inherit;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #b9d0cc;
+  border-radius: var(--radius-sm);
+  background: #fcfffe;
+}
+
+.a2ui-form-field-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.a2ui-form-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.a2ui-chart {
+  margin: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.a2ui-chart figcaption {
+  font-weight: 600;
+}
+
+.a2ui-chart-bars {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.a2ui-chart-row {
+  display: grid;
+  grid-template-columns: minmax(86px, 1fr) minmax(130px, 5fr) minmax(34px, auto);
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.a2ui-chart-label,
+.a2ui-chart-value {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.a2ui-chart-track {
+  width: 100%;
+  border-radius: 999px;
+  background: #d7ece9;
+  min-height: 0.62rem;
+  overflow: hidden;
+}
+
+.a2ui-chart-bar {
+  display: block;
+  min-height: 0.62rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #00a092, #0f6fdf);
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 760px) {
+  .console-shell__header {
+    flex-direction: column;
+  }
+
+  .console-shell__actions {
+    width: 100%;
+  }
+
+  .console-shell__actions button {
+    flex: 1 1 auto;
+  }
+
+  .a2ui-chart-row {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
+}
