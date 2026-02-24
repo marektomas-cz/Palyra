@@ -160,6 +160,34 @@ button.button--ghost {
   animation: fade-up 280ms ease-out both;
 }
 
+.a2ui-component:nth-child(2) {
+  animation-delay: 32ms;
+}
+
+.a2ui-component:nth-child(3) {
+  animation-delay: 64ms;
+}
+
+.a2ui-component:nth-child(4) {
+  animation-delay: 96ms;
+}
+
+.a2ui-component:nth-child(5) {
+  animation-delay: 128ms;
+}
+
+.a2ui-component:nth-child(6) {
+  animation-delay: 160ms;
+}
+
+.a2ui-component:nth-child(7) {
+  animation-delay: 192ms;
+}
+
+.a2ui-component:nth-child(8) {
+  animation-delay: 224ms;
+}
+
 .a2ui-component-empty {
   color: var(--text-muted);
   font-style: italic;
@@ -318,17 +346,21 @@ button.button--ghost {
 
 .a2ui-chart-track {
   width: 100%;
-  border-radius: 999px;
-  background: #d7ece9;
   min-height: 0.62rem;
-  overflow: hidden;
 }
 
-.a2ui-chart-bar {
+.a2ui-chart-track-svg {
   display: block;
-  min-height: 0.62rem;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #00a092, #0f6fdf);
+  width: 100%;
+  height: 0.7rem;
+}
+
+.a2ui-chart-track-rect {
+  fill: #d7ece9;
+}
+
+.a2ui-chart-bar-rect {
+  fill: #08998e;
 }
 
 @keyframes fade-up {

@@ -19,13 +19,12 @@ interface A2uiRendererProps {
 export function A2uiRenderer({ document, onFormSubmit }: A2uiRendererProps) {
   return (
     <section className="a2ui-renderer" data-surface={document.surface} aria-label={document.surface}>
-      {document.components.map((component, index) => (
+      {document.components.map((component) => (
         <article
           key={component.id}
           className="a2ui-component"
           data-component-id={component.id}
           data-component-type={component.type}
-          style={{ animationDelay: `${index * 32}ms` }}
         >
           <ComponentBody component={component} onFormSubmit={onFormSubmit} />
         </article>
@@ -267,12 +266,23 @@ function A2uiBarChart({ component }: A2uiBarChartProps) {
       <figcaption>{component.props.title}</figcaption>
       <div className="a2ui-chart-bars" role="img" aria-label={component.props.title}>
         {component.props.series.map((entry) => {
-          const width = `${Math.min(100, (entry.value / maxValue) * 100)}%`;
+          const widthPercent = Math.min(100, (entry.value / maxValue) * 100);
           return (
             <div key={`${component.id}-${entry.label}`} className="a2ui-chart-row">
               <span className="a2ui-chart-label">{entry.label}</span>
-              <span className="a2ui-chart-track">
-                <span className="a2ui-chart-bar" style={{ width }} />
+              <span className="a2ui-chart-track" aria-hidden="true">
+                <svg className="a2ui-chart-track-svg" viewBox="0 0 100 10" preserveAspectRatio="none">
+                  <rect className="a2ui-chart-track-rect" x="0" y="0" width="100" height="10" rx="5" ry="5" />
+                  <rect
+                    className="a2ui-chart-bar-rect"
+                    x="0"
+                    y="0"
+                    width={widthPercent}
+                    height="10"
+                    rx="5"
+                    ry="5"
+                  />
+                </svg>
               </span>
               <span className="a2ui-chart-value">{entry.value}</span>
             </div>
