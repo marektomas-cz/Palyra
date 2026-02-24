@@ -9438,8 +9438,10 @@ async fn execute_browser_tool(
             match client.create_session(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
+                    let session_id =
+                        if let Some(value) = response.session_id { Some(value.ulid) } else { None };
                     let output = json!({
-                        "session_id": response.session_id.map(|value| value.ulid),
+                        "session_id": session_id,
                         "created_at_unix_ms": response.created_at_unix_ms,
                         "effective_budget": response.effective_budget.map(|value| json!({
                             "max_navigation_timeout_ms": value.max_navigation_timeout_ms,

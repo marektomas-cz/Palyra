@@ -364,10 +364,8 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::CloseSessionRequest>,
     ) -> Result<Response<browser_v1::CloseSessionResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
-        let session_id = parse_session_id(
-            request.into_inner().session_id.as_ref().map(|value| value.ulid.as_str()),
-        )
-        .map_err(Status::invalid_argument)?;
+        let session_id = parse_session_id_from_proto(request.into_inner().session_id)
+            .map_err(Status::invalid_argument)?;
         let removed = self.runtime.sessions.lock().await.remove(session_id.as_str());
         Ok(Response::new(browser_v1::CloseSessionResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
@@ -385,10 +383,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::NavigateRequest>,
     ) -> Result<Response<browser_v1::NavigateResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
-        let payload = request.into_inner();
-        let session_id =
-            parse_session_id(payload.session_id.as_ref().map(|value| value.ulid.as_str()))
-                .map_err(Status::invalid_argument)?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
         let url = payload.url.trim().to_owned();
         if url.is_empty() {
             return Err(Status::invalid_argument("navigate requires non-empty url"));
@@ -451,10 +448,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::ClickRequest>,
     ) -> Result<Response<browser_v1::ClickResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
-        let payload = request.into_inner();
-        let session_id =
-            parse_session_id(payload.session_id.as_ref().map(|value| value.ulid.as_str()))
-                .map_err(Status::invalid_argument)?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
         let selector = payload.selector.trim();
         if selector.is_empty() {
             return Err(Status::invalid_argument("click requires non-empty selector"));
@@ -549,10 +545,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::TypeRequest>,
     ) -> Result<Response<browser_v1::TypeResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
-        let payload = request.into_inner();
-        let session_id =
-            parse_session_id(payload.session_id.as_ref().map(|value| value.ulid.as_str()))
-                .map_err(Status::invalid_argument)?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
         let selector = payload.selector.trim();
         if selector.is_empty() {
             return Err(Status::invalid_argument("type requires non-empty selector"));
@@ -689,10 +684,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::ScrollRequest>,
     ) -> Result<Response<browser_v1::ScrollResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
-        let payload = request.into_inner();
-        let session_id =
-            parse_session_id(payload.session_id.as_ref().map(|value| value.ulid.as_str()))
-                .map_err(Status::invalid_argument)?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
 
         let _context = match consume_action_budget_and_snapshot(
             self.runtime.as_ref(),
@@ -763,10 +757,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::WaitForRequest>,
     ) -> Result<Response<browser_v1::WaitForResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
-        let payload = request.into_inner();
-        let session_id =
-            parse_session_id(payload.session_id.as_ref().map(|value| value.ulid.as_str()))
-                .map_err(Status::invalid_argument)?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
         let selector = payload.selector.trim().to_owned();
         let text = payload.text;
         if selector.is_empty() && text.trim().is_empty() {
@@ -869,10 +862,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::GetTitleRequest>,
     ) -> Result<Response<browser_v1::GetTitleResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
-        let payload = request.into_inner();
-        let session_id =
-            parse_session_id(payload.session_id.as_ref().map(|value| value.ulid.as_str()))
-                .map_err(Status::invalid_argument)?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
         let max_title_bytes = usize::try_from(payload.max_title_bytes)
             .ok()
             .filter(|value| *value > 0)
@@ -900,10 +892,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::ScreenshotRequest>,
     ) -> Result<Response<browser_v1::ScreenshotResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
-        let payload = request.into_inner();
-        let session_id =
-            parse_session_id(payload.session_id.as_ref().map(|value| value.ulid.as_str()))
-                .map_err(Status::invalid_argument)?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
         if !payload.format.trim().is_empty() && !payload.format.trim().eq_ignore_ascii_case("png") {
             return Err(Status::invalid_argument("screenshot format must be empty or 'png'"));
         }
@@ -1316,6 +1307,15 @@ fn parse_session_id(raw: Option<&str>) -> Result<String, String> {
     }
     validate_canonical_id(value).map_err(|error| format!("invalid session_id: {error}"))?;
     Ok(value.to_owned())
+}
+
+fn parse_session_id_from_proto(
+    raw: Option<proto::palyra::common::v1::CanonicalId>,
+) -> Result<String, String> {
+    match raw {
+        Some(value) => parse_session_id(Some(value.ulid.as_str())),
+        None => parse_session_id(None),
+    }
 }
 
 fn current_unix_ms() -> u64 {

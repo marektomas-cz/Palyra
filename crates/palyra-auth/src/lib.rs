@@ -1738,7 +1738,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Barrier, Mutex,
+        Arc, Barrier, Condvar, Mutex,
     };
     use std::thread;
     use std::time::Duration;
@@ -1762,6 +1762,7 @@ mod tests {
     struct RacingRefreshAdapter {
         barrier: Arc<Barrier>,
         call_count: Arc<AtomicUsize>,
+        success_persisted: Arc<(Mutex<bool>, Condvar)>,
     }
 
     impl OAuthRefreshAdapter for RacingRefreshAdapter {
@@ -1778,7 +1779,16 @@ mod tests {
                     expires_in_seconds: Some(60),
                 });
             }
-            thread::sleep(Duration::from_millis(750));
+            let (lock, signal) = &*self.success_persisted;
+            let guard = lock.lock().expect("test mutex should be available");
+            let wait_result = signal
+                .wait_timeout_while(guard, Duration::from_secs(5), |persisted| !*persisted)
+                .expect("test condvar should be available");
+            if !*wait_result.0 {
+                return Err(OAuthRefreshError::Transport(
+                    "timed out waiting for successful refresh to persist".to_owned(),
+                ));
+            }
             Err(OAuthRefreshError::Transport("simulated transport fault".to_owned()))
         }
     }
@@ -2156,28 +2166,49 @@ mod tests {
         let adapter = Arc::new(RacingRefreshAdapter {
             barrier: Arc::new(Barrier::new(2)),
             call_count: Arc::new(AtomicUsize::new(0)),
+            success_persisted: Arc::new((Mutex::new(false), Condvar::new())),
         });
+        let success_persisted_left = Arc::clone(&adapter.success_persisted);
         let registry_left = Arc::clone(&registry);
         let vault_left = Arc::clone(&vault);
         let adapter_left = Arc::clone(&adapter);
         let worker_left = thread::spawn(move || {
-            registry_left.refresh_oauth_profile_with_clock(
+            let outcome = registry_left.refresh_oauth_profile_with_clock(
                 "openai-default",
                 vault_left.as_ref(),
                 adapter_left.as_ref(),
                 now,
-            )
+            );
+            if let Ok(value) = outcome.as_ref() {
+                if value.kind == OAuthRefreshOutcomeKind::Succeeded {
+                    let (lock, signal) = &*success_persisted_left;
+                    let mut persisted = lock.lock().expect("test mutex should be available");
+                    *persisted = true;
+                    signal.notify_all();
+                }
+            }
+            outcome
         });
+        let success_persisted_right = Arc::clone(&adapter.success_persisted);
         let registry_right = Arc::clone(&registry);
         let vault_right = Arc::clone(&vault);
         let adapter_right = Arc::clone(&adapter);
         let worker_right = thread::spawn(move || {
-            registry_right.refresh_oauth_profile_with_clock(
+            let outcome = registry_right.refresh_oauth_profile_with_clock(
                 "openai-default",
                 vault_right.as_ref(),
                 adapter_right.as_ref(),
                 now,
-            )
+            );
+            if let Ok(value) = outcome.as_ref() {
+                if value.kind == OAuthRefreshOutcomeKind::Succeeded {
+                    let (lock, signal) = &*success_persisted_right;
+                    let mut persisted = lock.lock().expect("test mutex should be available");
+                    *persisted = true;
+                    signal.notify_all();
+                }
+            }
+            outcome
         });
 
         let left_outcome = worker_left
