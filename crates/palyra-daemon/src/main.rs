@@ -840,6 +840,7 @@ async fn main() -> Result<()> {
         .route("/admin/v1/skills/{skill_id}/quarantine", post(admin_skill_quarantine_handler))
         .route("/admin/v1/skills/{skill_id}/enable", post(admin_skill_enable_handler))
         .layer(DefaultBodyLimit::max(HTTP_MAX_REQUEST_BODY_BYTES))
+        .route_layer(middleware::from_fn(admin_console_security_headers_middleware))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_rate_limit_middleware));
     let console_routes = Router::new()
         .route("/console/v1/auth/login", post(console_login_handler))
@@ -866,6 +867,7 @@ async fn main() -> Result<()> {
         .route("/console/v1/skills/{skill_id}/enable", post(console_skill_enable_handler))
         .route("/console/v1/audit/events", get(console_audit_events_handler))
         .layer(DefaultBodyLimit::max(HTTP_MAX_REQUEST_BODY_BYTES))
+        .route_layer(middleware::from_fn(admin_console_security_headers_middleware))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_rate_limit_middleware));
     let app = Router::new()
         .route("/healthz", get(health_handler))
@@ -1145,6 +1147,22 @@ fn apply_canvas_security_headers(headers: &mut HeaderMap, csp: &str) -> Result<(
         HeaderValue::from_static("nosniff"),
     );
     Ok(())
+}
+
+async fn admin_console_security_headers_middleware(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(HeaderName::from_static("x-frame-options"), HeaderValue::from_static("DENY"));
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 fn consume_admin_rate_limit(state: &AppState, remote_addr: SocketAddr) -> bool {
