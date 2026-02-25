@@ -1980,20 +1980,8 @@ async fn console_cron_create_handler(
         .map(ToOwned::to_owned)
         .or_else(|| session.context.channel.clone())
         .unwrap_or_default();
-    let session_key = payload
-        .session_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_default();
-    let session_label = payload
-        .session_label
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_default();
+    let session_key = payload.session_key.clone().and_then(trim_to_option).unwrap_or_default();
+    let session_label = payload.session_label.clone().and_then(trim_to_option).unwrap_or_default();
     let schedule = build_console_schedule(payload.schedule_type.as_str(), &payload)?;
     let mut request = TonicRequest::new(cron_v1::CreateJobRequest {
         v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
@@ -2237,12 +2225,7 @@ async fn console_memory_search_handler(
             "min_score must be in range 0.0..=1.0",
         )));
     }
-    let session_scope = query
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let session_scope = query.session_id.clone().and_then(trim_to_option);
     if let Some(session_scope) = session_scope.as_deref() {
         validate_canonical_id(session_scope).map_err(|_| {
             runtime_status_response(tonic::Status::invalid_argument(
@@ -2275,12 +2258,7 @@ async fn console_memory_purge_handler(
     Json(payload): Json<ConsoleMemoryPurgeRequest>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    let session_scope = payload
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let session_scope = payload.session_id.clone().and_then(trim_to_option);
     if let Some(session_scope) = session_scope.as_deref() {
         validate_canonical_id(session_scope).map_err(|_| {
             runtime_status_response(tonic::Status::invalid_argument(
