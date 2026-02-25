@@ -13877,6 +13877,7 @@ async fn record_auth_refresh_journal_event(
     }
     let event_name =
         if outcome.kind.success() { "auth.token.refreshed" } else { "auth.refresh.failed" };
+    let redacted_reason = crate::model_provider::sanitize_remote_error(outcome.reason.as_str());
     runtime_state
         .record_journal_event(JournalAppendRequest {
             event_id: Ulid::new().to_string(),
@@ -13889,7 +13890,7 @@ async fn record_auth_refresh_journal_event(
                 "event": event_name,
                 "profile_id": outcome.profile_id,
                 "provider": outcome.provider,
-                "reason": outcome.reason,
+                "reason": redacted_reason,
                 "next_allowed_refresh_unix_ms": outcome.next_allowed_refresh_unix_ms,
                 "expires_at_unix_ms": outcome.expires_at_unix_ms,
             })
@@ -14629,13 +14630,13 @@ mod tests {
         enforce_vault_get_approval_policy, enforce_vault_scope_access, execute_http_fetch_tool,
         execute_memory_search_tool, execute_workspace_patch_tool, extend_patch_string_defaults,
         parse_patch_string_array_field, principal_has_sensitive_service_role,
-        request_context_from_headers, resolve_cron_job_channel_for_create,
-        validate_resolved_fetch_addresses, vault_get_requires_approval,
-        workspace_patch_metrics_from_output, AuthError, GatewayAuthConfig,
-        GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
-        MemoryRuntimeConfig, ProviderRequest, RequestContext, SensitiveServiceRole,
-        ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
-        MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
+        record_auth_refresh_journal_event, request_context_from_headers,
+        resolve_cron_job_channel_for_create, validate_resolved_fetch_addresses,
+        vault_get_requires_approval, workspace_patch_metrics_from_output, AuthError,
+        GatewayAuthConfig, GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot,
+        GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest, RequestContext,
+        SensitiveServiceRole, ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID,
+        HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
         VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
     };
 
@@ -15610,6 +15611,52 @@ mod tests {
         assert!(
             snapshot.events[0].event_id.ends_with('2'),
             "recent events should be returned in descending order"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auth_refresh_journal_event_redacts_reason_text() {
+        let state = build_test_runtime_state(false);
+        let context = RequestContext {
+            principal: "admin:ops".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: Some("cli".to_owned()),
+        };
+        let outcome = palyra_auth::OAuthRefreshOutcome {
+            profile_id: "openai-default".to_owned(),
+            provider: "openai".to_owned(),
+            kind: palyra_auth::OAuthRefreshOutcomeKind::Failed,
+            reason: "Bearer topsecret123 sk-test-secret-token token=qwe".to_owned(),
+            next_allowed_refresh_unix_ms: Some(1_730_000_000_000),
+            expires_at_unix_ms: None,
+        };
+
+        record_auth_refresh_journal_event(&state, &context, &outcome)
+            .await
+            .expect("auth refresh journal event should persist");
+
+        let snapshot = state
+            .recent_journal_snapshot_blocking(100)
+            .expect("recent journal snapshot should be returned");
+        let payload = snapshot
+            .events
+            .iter()
+            .find_map(|event| {
+                let parsed = serde_json::from_str::<Value>(event.payload_json.as_str()).ok()?;
+                if parsed.get("event").and_then(Value::as_str) == Some("auth.refresh.failed") {
+                    Some(parsed)
+                } else {
+                    None
+                }
+            })
+            .expect("auth refresh event should be present in recent journal snapshot");
+        let reason = payload.get("reason").and_then(Value::as_str).unwrap_or_default();
+        assert!(reason.contains("<redacted>"), "auth refresh reason should be redacted");
+        assert!(
+            !reason.contains("topsecret123")
+                && !reason.contains("sk-test-secret-token")
+                && !reason.contains("token=qwe"),
+            "auth refresh journal reason must not leak raw secret values"
         );
     }
 
