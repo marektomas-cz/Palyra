@@ -90,6 +90,9 @@ const GRPC_MAX_ENCODING_MESSAGE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 const ADMIN_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
 const ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 30;
 const ADMIN_RATE_LIMIT_MAX_IP_BUCKETS: usize = 4_096;
+const CANVAS_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
+const CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 90;
+const CANVAS_RATE_LIMIT_MAX_IP_BUCKETS: usize = 4_096;
 const HTTP_MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const CONSOLE_SESSION_COOKIE_NAME: &str = "palyra_console_session";
 const CONSOLE_CSRF_HEADER_NAME: &str = "x-palyra-csrf-token";
@@ -121,6 +124,7 @@ struct AppState {
     auth_runtime: Arc<gateway::AuthRuntimeState>,
     auth: GatewayAuthConfig,
     admin_rate_limit: Arc<Mutex<HashMap<IpAddr, AdminRateLimitEntry>>>,
+    canvas_rate_limit: Arc<Mutex<HashMap<IpAddr, CanvasRateLimitEntry>>>,
     cron_timezone_mode: cron::CronTimezoneMode,
     grpc_url: String,
     scheduler_wake: Arc<Notify>,
@@ -129,6 +133,12 @@ struct AppState {
 
 #[derive(Debug, Clone, Copy)]
 struct AdminRateLimitEntry {
+    window_started_at: Instant,
+    requests_in_window: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CanvasRateLimitEntry {
     window_started_at: Instant,
     requests_in_window: u32,
 }
@@ -745,6 +755,8 @@ async fn main() -> Result<()> {
         admin_token_configured = loaded.admin.auth_token.is_some(),
         admin_rate_limit_window_ms = ADMIN_RATE_LIMIT_WINDOW_MS,
         admin_rate_limit_max_requests_per_window = ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        canvas_rate_limit_window_ms = CANVAS_RATE_LIMIT_WINDOW_MS,
+        canvas_rate_limit_max_requests_per_window = CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
         grpc_max_decoding_message_size_bytes = GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES,
         grpc_max_encoding_message_size_bytes = GRPC_MAX_ENCODING_MESSAGE_SIZE_BYTES,
         node_rpc_mtls_required,
@@ -825,6 +837,7 @@ async fn main() -> Result<()> {
         auth_runtime: Arc::clone(&auth_runtime),
         auth: auth.clone(),
         admin_rate_limit: Arc::new(Mutex::new(HashMap::new())),
+        canvas_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         cron_timezone_mode: loaded.cron.timezone,
         grpc_url: grpc_url.clone(),
         scheduler_wake: Arc::clone(&scheduler_wake),
@@ -875,6 +888,7 @@ async fn main() -> Result<()> {
         .route("/canvas/v1/runtime.css", get(canvas_runtime_css_handler))
         .route("/canvas/v1/bundle/{canvas_id}/{*asset_path}", get(canvas_bundle_asset_handler))
         .route("/canvas/v1/state/{canvas_id}", get(canvas_state_handler))
+        .route_layer(middleware::from_fn_with_state(state.clone(), canvas_rate_limit_middleware))
         .route_layer(middleware::from_fn(canvas_security_headers_middleware));
     let app = Router::new()
         .route("/healthz", get(health_handler))
@@ -1234,6 +1248,64 @@ async fn admin_rate_limit_middleware(
         state.runtime.record_denied();
         return runtime_status_response(tonic::Status::resource_exhausted(format!(
             "admin API rate limit exceeded for {}",
+            remote_addr.ip()
+        )));
+    }
+    next.run(request).await
+}
+
+fn consume_canvas_rate_limit(state: &AppState, remote_addr: SocketAddr) -> bool {
+    consume_canvas_rate_limit_with_now(&state.canvas_rate_limit, remote_addr.ip(), Instant::now())
+}
+
+fn consume_canvas_rate_limit_with_now(
+    buckets: &Mutex<HashMap<IpAddr, CanvasRateLimitEntry>>,
+    remote_ip: IpAddr,
+    now: Instant,
+) -> bool {
+    let mut buckets = match buckets.lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    if !buckets.contains_key(&remote_ip) && buckets.len() >= CANVAS_RATE_LIMIT_MAX_IP_BUCKETS {
+        buckets.retain(|_, entry| {
+            now.duration_since(entry.window_started_at).as_millis() as u64
+                <= CANVAS_RATE_LIMIT_WINDOW_MS
+        });
+        if buckets.len() >= CANVAS_RATE_LIMIT_MAX_IP_BUCKETS {
+            let evicted_ip =
+                buckets.iter().min_by_key(|(_, entry)| entry.window_started_at).map(|(ip, _)| *ip);
+            let Some(evicted_ip) = evicted_ip else {
+                return false;
+            };
+            buckets.remove(&evicted_ip);
+        }
+    }
+    let entry = buckets
+        .entry(remote_ip)
+        .or_insert(CanvasRateLimitEntry { window_started_at: now, requests_in_window: 0 });
+    if now.duration_since(entry.window_started_at).as_millis() as u64 > CANVAS_RATE_LIMIT_WINDOW_MS
+    {
+        entry.window_started_at = now;
+        entry.requests_in_window = 0;
+    }
+    if entry.requests_in_window >= CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+        return false;
+    }
+    entry.requests_in_window = entry.requests_in_window.saturating_add(1);
+    true
+}
+
+async fn canvas_rate_limit_middleware(
+    State(state): State<AppState>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !consume_canvas_rate_limit(&state, remote_addr) {
+        state.runtime.record_denied();
+        return runtime_status_response(tonic::Status::resource_exhausted(format!(
+            "canvas API rate limit exceeded for {}",
             remote_addr.ip()
         )));
     }
@@ -3179,10 +3251,11 @@ mod tests {
     use axum::http::StatusCode;
 
     use super::{
-        consume_admin_rate_limit_with_now, enforce_remote_bind_guard, loopback_grpc_url,
-        runtime_status_response, validate_admin_auth_config,
-        validate_process_runner_backend_policy, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
-        ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        consume_admin_rate_limit_with_now, consume_canvas_rate_limit_with_now,
+        enforce_remote_bind_guard, loopback_grpc_url, runtime_status_response,
+        validate_admin_auth_config, validate_process_runner_backend_policy,
+        ADMIN_RATE_LIMIT_MAX_IP_BUCKETS, ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
     };
     use crate::gateway::GatewayAuthConfig;
     use crate::sandbox_runner::{EgressEnforcementMode, SandboxProcessRunnerTier};
@@ -3436,6 +3509,61 @@ mod tests {
         let bucket_count = buckets.lock().expect("bucket mutex should be available").len();
         assert_eq!(
             bucket_count, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
+            "bucket count must remain bounded to avoid unbounded memory growth"
+        );
+    }
+
+    #[test]
+    fn canvas_rate_limit_rejects_after_window_budget_is_exhausted() {
+        let buckets = Mutex::new(HashMap::new());
+        let ip = IpAddr::from_str("127.0.0.1").expect("IP literal should parse");
+        let now = Instant::now();
+        for attempt in 0..CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+            let allowed = consume_canvas_rate_limit_with_now(&buckets, ip, now);
+            assert!(allowed, "attempt {attempt} should remain within the request budget");
+        }
+        assert!(
+            !consume_canvas_rate_limit_with_now(&buckets, ip, now),
+            "request after budget exhaustion should be rejected"
+        );
+    }
+
+    #[test]
+    fn canvas_rate_limit_resets_budget_after_window_elapses() {
+        let buckets = Mutex::new(HashMap::new());
+        let ip = IpAddr::from_str("127.0.0.1").expect("IP literal should parse");
+        let now = Instant::now();
+        for _ in 0..CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+            let _ = consume_canvas_rate_limit_with_now(&buckets, ip, now);
+        }
+        assert!(
+            !consume_canvas_rate_limit_with_now(&buckets, ip, now),
+            "budget should be exhausted within the same window"
+        );
+        let advanced = now + Duration::from_millis(1_200);
+        assert!(
+            consume_canvas_rate_limit_with_now(&buckets, ip, advanced),
+            "request should be allowed after the fixed window expires"
+        );
+    }
+
+    #[test]
+    fn canvas_rate_limit_bucket_count_is_bounded() {
+        let buckets = Mutex::new(HashMap::new());
+        let now = Instant::now();
+        for offset in 0..CANVAS_RATE_LIMIT_MAX_IP_BUCKETS {
+            let ip = IpAddr::from([100, 64, (offset / 256) as u8, (offset % 256) as u8]);
+            let allowed = consume_canvas_rate_limit_with_now(&buckets, ip, now);
+            assert!(allowed, "filling bucket {offset} should succeed");
+        }
+        let overflow_ip = IpAddr::from([100, 127, 0, 1]);
+        assert!(
+            consume_canvas_rate_limit_with_now(&buckets, overflow_ip, now),
+            "overflow principal should still be accepted after oldest-bucket eviction"
+        );
+        let bucket_count = buckets.lock().expect("bucket mutex should be available").len();
+        assert_eq!(
+            bucket_count, CANVAS_RATE_LIMIT_MAX_IP_BUCKETS,
             "bucket count must remain bounded to avoid unbounded memory growth"
         );
     }
