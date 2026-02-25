@@ -10506,6 +10506,8 @@ fn is_private_or_local_ipv4(address: Ipv4Addr) -> bool {
         || address.is_loopback()
         || address.is_link_local()
         || address.is_unspecified()
+        || address.is_multicast()
+        || is_special_ipv4_ssrf_range(address)
 }
 
 fn is_private_or_local_ipv6(address: Ipv6Addr) -> bool {
@@ -10516,6 +10518,35 @@ fn is_private_or_local_ipv6(address: Ipv6Addr) -> bool {
         || address.is_unicast_link_local()
         || address.is_unique_local()
         || address.is_unspecified()
+        || address.is_multicast()
+        || is_documentation_ipv6(address)
+        || is_site_local_ipv6(address)
+}
+
+fn is_special_ipv4_ssrf_range(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    let first = octets[0];
+    let second = octets[1];
+    let third = octets[2];
+
+    first == 0
+        || (first == 100 && (64..=127).contains(&second))
+        || (first == 192 && second == 0 && third == 0)
+        || (first == 192 && second == 0 && third == 2)
+        || (first == 198 && second == 18)
+        || (first == 198 && second == 19)
+        || (first == 198 && second == 51 && third == 100)
+        || (first == 203 && second == 0 && third == 113)
+        || first >= 240
+}
+
+fn is_documentation_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    segments[0] == 0x2001 && segments[1] == 0x0db8
+}
+
+fn is_site_local_ipv6(address: Ipv6Addr) -> bool {
+    (address.segments()[0] & 0xffc0) == 0xfec0
 }
 
 fn redacted_http_headers(headers: &[(String, String)]) -> Vec<serde_json::Value> {
@@ -14571,7 +14602,7 @@ mod tests {
     use std::{
         fs,
         io::{Read, Write},
-        net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream},
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         thread,
@@ -14645,6 +14676,24 @@ mod tests {
             }
         });
         (format!("http://{address}/loop"), handle)
+    }
+
+    fn spawn_redirect_http_server(location: &str) -> (String, thread::JoinHandle<()>) {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("redirect test listener should bind");
+        let address = listener.local_addr().expect("redirect test listener address should resolve");
+        let redirect_location = location.to_owned();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) =
+                listener.accept().expect("redirect test listener should accept request");
+            read_http_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {redirect_location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).expect("redirect test response should write");
+            stream.flush().expect("redirect test response should flush");
+        });
+        (format!("http://{address}/redirect"), handle)
     }
 
     fn spawn_static_http_server(body: &str) -> (String, thread::JoinHandle<()>) {
@@ -14859,6 +14908,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn http_fetch_rejects_url_credentials() {
+        let state = build_test_runtime_state(false);
+        let input = serde_json::to_vec(&json!({
+            "url": "https://user:secret@example.test/private"
+        }))
+        .expect("input should serialize");
+        let outcome =
+            execute_http_fetch_tool(&state, "proposal-http-fetch-credentials", input.as_slice())
+                .await;
+        assert!(!outcome.success, "URL credentials must be denied");
+        assert!(
+            outcome.error.contains("URL credentials are not allowed"),
+            "error should explain credential rejection: {}",
+            outcome.error
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn http_fetch_rejects_redirect_hop_with_url_credentials() {
+        let state = build_test_runtime_state(false);
+        let (url, handle) = spawn_redirect_http_server("http://user:secret@example.test/next");
+        let input = serde_json::to_vec(&json!({
+            "url": url,
+            "allow_private_targets": true,
+            "allow_redirects": true
+        }))
+        .expect("input should serialize");
+        let outcome = execute_http_fetch_tool(
+            &state,
+            "proposal-http-fetch-redirect-credentials",
+            input.as_slice(),
+        )
+        .await;
+        assert!(!outcome.success, "redirect hop URLs with credentials must be denied");
+        assert!(
+            outcome.error.contains("URL credentials are not allowed"),
+            "error should explain credential rejection on redirect hops: {}",
+            outcome.error
+        );
+        handle.join().expect("redirect test server should complete after one request");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn http_fetch_detects_redirect_loop_limit() {
         let state = build_test_runtime_state(false);
         let (url, handle) = spawn_redirect_loop_http_server(3);
@@ -14917,6 +15009,45 @@ mod tests {
             allowed.is_ok(),
             "explicit private-target override should permit mixed DNS answers"
         );
+    }
+
+    #[test]
+    fn validate_resolved_fetch_addresses_blocks_ssrf_sensitive_ipv4_ranges() {
+        let blocked = [
+            Ipv4Addr::new(100, 64, 0, 1),
+            Ipv4Addr::new(169, 254, 169, 254),
+            Ipv4Addr::new(198, 18, 0, 1),
+            Ipv4Addr::new(192, 0, 2, 42),
+            Ipv4Addr::new(198, 51, 100, 42),
+            Ipv4Addr::new(203, 0, 113, 42),
+            Ipv4Addr::new(240, 1, 2, 3),
+        ];
+        for ip in blocked {
+            let result =
+                validate_resolved_fetch_addresses(&[SocketAddr::new(IpAddr::V4(ip), 443)], false);
+            assert!(
+                result.is_err(),
+                "address {ip} must be treated as non-public and denied by default"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_resolved_fetch_addresses_blocks_ssrf_sensitive_ipv6_ranges() {
+        let blocked = [
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1),
+            Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 1),
+            Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1),
+        ];
+        for ip in blocked {
+            let result =
+                validate_resolved_fetch_addresses(&[SocketAddr::new(IpAddr::V6(ip), 443)], false);
+            assert!(
+                result.is_err(),
+                "address {ip} must be treated as non-public and denied by default"
+            );
+        }
     }
 
     #[test]

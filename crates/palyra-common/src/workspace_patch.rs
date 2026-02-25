@@ -685,6 +685,12 @@ fn parse_relative_patch_path(raw: &str) -> Result<PathBuf, WorkspacePatchError> 
     if trimmed.contains('\0') {
         return Err(WorkspacePatchError::InvalidPatchPath { path: raw.to_owned() });
     }
+    if trimmed.contains('\\') {
+        return Err(WorkspacePatchError::InvalidPatchPath { path: raw.to_owned() });
+    }
+    if trimmed.starts_with("\\\\") || looks_like_windows_drive_path(trimmed) {
+        return Err(WorkspacePatchError::InvalidPatchPath { path: raw.to_owned() });
+    }
 
     let parsed = PathBuf::from(trimmed);
     if parsed.is_absolute() {
@@ -701,6 +707,11 @@ fn parse_relative_patch_path(raw: &str) -> Result<PathBuf, WorkspacePatchError> 
     }
 
     Ok(parsed)
+}
+
+fn looks_like_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn normalize_relative_path_display(path: &Path) -> String {
@@ -1494,5 +1505,60 @@ mod tests {
             apply_workspace_patch(&[workspace], &default_request(patch, false), &default_limits())
                 .expect_err("absolute path must be denied");
         assert!(matches!(error, WorkspacePatchError::InvalidPatchPath { .. }));
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_windows_drive_prefix_path() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        let patch = "*** Begin Patch\n*** Add File: C:/Windows/system32/drivers/etc/hosts\n+bad\n*** End Patch\n";
+        let error =
+            apply_workspace_patch(&[workspace], &default_request(patch, false), &default_limits())
+                .expect_err("windows drive prefix path must be denied");
+        assert!(matches!(error, WorkspacePatchError::InvalidPatchPath { .. }));
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_backslash_paths_for_cross_platform_determinism() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        let patch = "*** Begin Patch\n*** Add File: src\\nested\\file.txt\n+bad\n*** End Patch\n";
+        let error =
+            apply_workspace_patch(&[workspace], &default_request(patch, false), &default_limits())
+                .expect_err("backslash-separated path must be denied");
+        assert!(matches!(error, WorkspacePatchError::InvalidPatchPath { .. }));
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_payloads_that_exceed_max_patch_bytes() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: large.txt\n+{}\n*** End Patch\n",
+            "A".repeat(256)
+        );
+        let mut limits = default_limits();
+        limits.max_patch_bytes = 64;
+
+        let error =
+            apply_workspace_patch(&[workspace], &default_request(patch.as_str(), false), &limits)
+                .expect_err("oversized patch payload must be denied");
+
+        assert!(
+            matches!(
+                error,
+                WorkspacePatchError::PatchTooLarge {
+                    limit: 64,
+                    actual
+                } if actual > 64
+            ),
+            "error should report deterministic payload-too-large details: {error}"
+        );
     }
 }
