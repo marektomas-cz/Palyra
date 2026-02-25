@@ -9645,7 +9645,7 @@ async fn build_memory_augmented_prompt(
 }
 
 fn memory_auto_inject_tape_payload(query: &str, hits: &[MemorySearchHit]) -> String {
-    json!({
+    let payload = json!({
         "query": truncate_with_ellipsis(query.to_owned(), 512),
         "injected_count": hits.len(),
         "hits": hits.iter().map(|hit| {
@@ -9658,7 +9658,8 @@ fn memory_auto_inject_tape_payload(query: &str, hits: &[MemorySearchHit]) -> Str
             })
         }).collect::<Vec<_>>(),
     })
-    .to_string()
+    .to_string();
+    crate::journal::redact_payload_json(payload.as_bytes()).unwrap_or(payload)
 }
 
 fn build_tool_result_memory_text(
@@ -14617,9 +14618,9 @@ mod tests {
     use crate::journal::{
         ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
         ApprovalPromptOption, ApprovalPromptRecord, ApprovalRiskLevel, ApprovalSubjectType,
-        JournalAppendRequest, JournalConfig, JournalStore, MemoryItemRecord, MemorySource,
-        OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
-        OrchestratorTapeAppendRequest,
+        JournalAppendRequest, JournalConfig, JournalStore, MemoryItemRecord, MemoryScoreBreakdown,
+        MemorySearchHit, MemorySource, OrchestratorRunStartRequest,
+        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest,
     };
     use tonic::Code;
     use ulid::Ulid;
@@ -15139,6 +15140,35 @@ mod tests {
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
         }
+    }
+
+    #[test]
+    fn memory_auto_inject_tape_payload_redacts_secret_like_values() {
+        let hit = MemorySearchHit {
+            item: test_memory_item(None),
+            snippet: "token=abc123 should never leak".to_owned(),
+            score: 0.87,
+            breakdown: MemoryScoreBreakdown {
+                lexical_score: 0.5,
+                vector_score: 0.2,
+                recency_score: 0.17,
+                final_score: 0.87,
+            },
+        };
+        let payload = super::memory_auto_inject_tape_payload(
+            "Bearer topsecret123 access_token=supersecret",
+            &[hit],
+        );
+        assert!(
+            payload.contains("<redacted>"),
+            "memory auto-inject tape payload should include redaction marker"
+        );
+        assert!(
+            !payload.contains("topsecret123")
+                && !payload.contains("access_token=supersecret")
+                && !payload.contains("token=abc123"),
+            "secret-like values must be redacted before tape persistence: {payload}"
+        );
     }
 
     #[test]
