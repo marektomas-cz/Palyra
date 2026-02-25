@@ -46,7 +46,7 @@ fn admin_status_requires_token_and_context() -> Result<()> {
         .context("failed to call admin status with invalid context")?;
     assert_eq!(invalid_context.status().as_u16(), 400, "invalid context must be rejected");
 
-    let success = client
+    let success_response = client
         .get(&url)
         .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
         .header("x-palyra-principal", "user:ops")
@@ -55,9 +55,9 @@ fn admin_status_requires_token_and_context() -> Result<()> {
         .send()
         .context("failed to call admin status with valid context")?
         .error_for_status()
-        .context("admin status with valid context returned non-success status")?
-        .text()
-        .context("failed to read admin status response body")?;
+        .context("admin status with valid context returned non-success status")?;
+    assert_admin_console_security_headers(success_response.headers())?;
+    let success = success_response.text().context("failed to read admin status response body")?;
 
     assert!(success.contains("\"status\":\"ok\""), "expected admin status to be healthy");
     assert!(success.contains("\"admin_auth_required\":true"));
@@ -359,9 +359,10 @@ fn console_session_and_csrf_guards_are_enforced() -> Result<()> {
         .send()
         .context("failed to call console session endpoint")?
         .error_for_status()
-        .context("console session endpoint returned non-success status")?
-        .text()
-        .context("failed to read console session response body")?;
+        .context("console session endpoint returned non-success status")?;
+    assert_admin_console_security_headers(session_response.headers())?;
+    let session_response =
+        session_response.text().context("failed to read console session response body")?;
     assert!(
         session_response.contains(CONSOLE_ADMIN_PRINCIPAL),
         "session payload should include authenticated principal"
@@ -716,6 +717,39 @@ fn login_console_session(
         .ok_or_else(|| anyhow::anyhow!("console login response missing csrf_token"))?
         .to_owned();
     Ok((cookie, csrf_token))
+}
+
+fn assert_admin_console_security_headers(headers: &reqwest::header::HeaderMap) -> Result<()> {
+    assert_eq!(
+        header_value(headers, "cache-control")?,
+        "no-store",
+        "admin/console responses must disable cache persistence"
+    );
+    assert_eq!(
+        header_value(headers, "x-content-type-options")?,
+        "nosniff",
+        "admin/console responses must set X-Content-Type-Options=nosniff"
+    );
+    assert_eq!(
+        header_value(headers, "x-frame-options")?,
+        "DENY",
+        "admin/console responses must deny framing"
+    );
+    assert_eq!(
+        header_value(headers, "referrer-policy")?,
+        "no-referrer",
+        "admin/console responses must not leak referrer values"
+    );
+    Ok(())
+}
+
+fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Result<String> {
+    headers
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("missing expected response header {name}"))?
+        .to_str()
+        .with_context(|| format!("header {name} contains invalid UTF-8")) // security headers must be simple ASCII directives
+        .map(ToOwned::to_owned)
 }
 
 fn spawn_palyrad_with_dynamic_ports_once() -> Result<(Child, u16)> {
