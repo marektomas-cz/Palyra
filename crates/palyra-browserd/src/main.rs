@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2025,6 +2025,12 @@ async fn main() -> Result<()> {
     let runtime = Arc::new(BrowserRuntimeState::new(&args)?);
     spawn_cleanup_loop(Arc::clone(&runtime));
 
+    let admin_address =
+        parse_daemon_bind_socket(&args.bind, args.port).context("invalid bind address or port")?;
+    let grpc_address = parse_daemon_bind_socket(&args.grpc_bind, args.grpc_port)
+        .context("invalid gRPC bind address or port")?;
+    enforce_non_loopback_bind_auth(admin_address, grpc_address, runtime.auth_token.is_some())?;
+
     let build = build_metadata();
     info!(
         service = "palyra-browserd",
@@ -2044,10 +2050,6 @@ async fn main() -> Result<()> {
         .route("/healthz", get(health_handler))
         .with_state(AppState { runtime: Arc::clone(&runtime) });
 
-    let admin_address =
-        parse_daemon_bind_socket(&args.bind, args.port).context("invalid bind address or port")?;
-    let grpc_address = parse_daemon_bind_socket(&args.grpc_bind, args.grpc_port)
-        .context("invalid gRPC bind address or port")?;
     let admin_listener = tokio::net::TcpListener::bind(admin_address)
         .await
         .context("failed to bind browserd health listener")?;
@@ -2074,6 +2076,26 @@ async fn main() -> Result<()> {
     let (http_result, grpc_result) = tokio::join!(http_server, grpc_server);
     http_result.context("browserd health server failed")?;
     grpc_result.context("browserd gRPC server failed")?;
+    Ok(())
+}
+
+fn enforce_non_loopback_bind_auth(
+    admin_address: SocketAddr,
+    grpc_address: SocketAddr,
+    auth_enabled: bool,
+) -> Result<()> {
+    if auth_enabled {
+        return Ok(());
+    }
+
+    let admin_non_loopback = !admin_address.ip().is_loopback();
+    let grpc_non_loopback = !grpc_address.ip().is_loopback();
+    if admin_non_loopback || grpc_non_loopback {
+        anyhow::bail!(
+            "browser service auth token is required for non-loopback bindings (admin: {admin_address}, grpc: {grpc_address}); set --auth-token or PALYRA_BROWSERD_AUTH_TOKEN"
+        );
+    }
+
     Ok(())
 }
 
@@ -3657,8 +3679,8 @@ fn is_download_like_tag(tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_v1, navigate_with_guards, Args, BrowserRuntimeState, BrowserServiceImpl,
-        ONE_BY_ONE_PNG,
+        browser_v1, enforce_non_loopback_bind_auth, navigate_with_guards, parse_daemon_bind_socket,
+        Args, BrowserRuntimeState, BrowserServiceImpl, DEFAULT_GRPC_PORT, ONE_BY_ONE_PNG,
     };
     use crate::proto;
     use crate::proto::palyra::browser::v1::browser_service_server::BrowserService;
@@ -3706,6 +3728,38 @@ mod tests {
             "error should explain private target block: {}",
             outcome.error
         );
+    }
+
+    #[test]
+    fn non_loopback_bind_requires_auth_token() {
+        let admin = parse_daemon_bind_socket("0.0.0.0", 7143).expect("admin address should parse");
+        let grpc = parse_daemon_bind_socket("127.0.0.1", DEFAULT_GRPC_PORT)
+            .expect("grpc address should parse");
+        let error = enforce_non_loopback_bind_auth(admin, grpc, false)
+            .expect_err("non-loopback bind without auth token must fail closed");
+        assert!(
+            error.to_string().contains("auth token is required"),
+            "error should explain startup auth requirement: {error}"
+        );
+    }
+
+    #[test]
+    fn loopback_binds_allow_missing_auth_token() {
+        let admin =
+            parse_daemon_bind_socket("127.0.0.1", 7143).expect("admin address should parse");
+        let grpc =
+            parse_daemon_bind_socket("::1", DEFAULT_GRPC_PORT).expect("grpc address should parse");
+        enforce_non_loopback_bind_auth(admin, grpc, false)
+            .expect("loopback-only binds may run without auth token");
+    }
+
+    #[test]
+    fn non_loopback_bind_allows_when_auth_is_enabled() {
+        let admin = parse_daemon_bind_socket("0.0.0.0", 7143).expect("admin address should parse");
+        let grpc = parse_daemon_bind_socket("0.0.0.0", DEFAULT_GRPC_PORT)
+            .expect("grpc address should parse");
+        enforce_non_loopback_bind_auth(admin, grpc, true)
+            .expect("configured auth token should allow non-loopback bind");
     }
 
     #[tokio::test(flavor = "multi_thread")]
