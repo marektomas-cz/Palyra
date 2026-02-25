@@ -2338,6 +2338,48 @@ mod tests {
     }
 
     #[test]
+    fn health_report_serialization_does_not_include_secret_values() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let identity_root = tempdir.path().join("identity");
+        let vault_root = tempdir.path().join("vault");
+        let now = 1_730_000_000_000_i64;
+
+        let registry =
+            AuthProfileRegistry::open(identity_root.as_path()).expect("registry should initialize");
+        let vault = open_test_vault(vault_root.as_path(), identity_root.as_path());
+        let access_secret = "access-super-secret-token";
+        let refresh_secret = "refresh-super-secret-token";
+        let client_secret = "client-super-secret";
+        persist_secret_utf8(&vault, "global/auth_openai_access", access_secret)
+            .expect("access secret should persist");
+        persist_secret_utf8(&vault, "global/auth_openai_refresh", refresh_secret)
+            .expect("refresh secret should persist");
+        persist_secret_utf8(&vault, "global/auth_openai_client_secret", client_secret)
+            .expect("client secret should persist");
+
+        registry
+            .set_profile(sample_oauth_profile_request(
+                "https://example.test/token".to_owned(),
+                Some(now.saturating_add(60_000)),
+                OAuthRefreshState::default(),
+            ))
+            .expect("profile should persist");
+
+        let report = registry
+            .health_report_with_clock(&vault, None, now, 15 * 60 * 1_000)
+            .expect("health report should compute");
+        let serialized =
+            serde_json::to_string(&report).expect("health report should serialize as JSON");
+
+        assert!(
+            !serialized.contains(access_secret)
+                && !serialized.contains(refresh_secret)
+                && !serialized.contains(client_secret),
+            "health report payload must not expose secret values loaded from vault refs"
+        );
+    }
+
+    #[test]
     fn invalid_profile_id_is_rejected() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let identity_root = tempdir.path().join("identity");
