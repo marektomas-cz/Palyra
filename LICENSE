@@ -1,21 +1,131 @@
-MIT License
+Palyra Community Source License (PCSL) v1.0
+===========================================
+
+SPDX-License-Identifier: LicenseRef-Palyra-Community-Source-1.0
 
 Copyright (c) 2026 marektomas-cz
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+NOTICE
+------
+This is a source-available license. It is NOT an OSI-approved “Open Source” license.
+It is intended to allow free use, modification, and free redistribution (including for
+internal commercial use), while prohibiting (a) selling the software itself and (b) offering
+the software as a paid hosted/managed service.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Definitions
+--------------
+1.1 “Licensor” means the copyright holder(s) offering the Software under this License.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+1.2 “Software” means the source code, binaries (if any), build scripts, configuration, and
+documentation made available in this repository, including any portion of it.
+
+1.3 “You” (or “Your”) means the individual or legal entity exercising permissions granted
+by this License.
+
+1.4 “Distribute” means to provide, publish, share, transmit, or otherwise make available
+a copy of the Software or a Derivative Work to any third party by any means, including by
+download, source control hosting, package registries, container registries, app stores, or
+physical media.
+
+1.5 “Derivative Work” means any work based on the Software for which Your modifications
+(as a whole) would be considered an original work of authorship under applicable copyright law.
+For clarity: modifications, forks, patches, refactors, ports, and additions that incorporate
+any portion of the Software are Derivative Works.
+
+1.6 “Fee” means any monetary or non-monetary consideration (including subscription payments,
+license fees, access fees, usage fees, seat fees, revenue share, or any other thing of value)
+that a recipient must provide as a condition to (a) obtain a copy of the Software/Derivative Work,
+or (b) access or use the Software’s functionality.
+
+1.7 “Hosted Service” means providing third parties access (directly or indirectly) to any
+substantial set of the features or functionality of the Software or a Derivative Work over a network,
+including SaaS, PaaS, hosted, managed service, or “X-as-a-service” offerings, regardless of whether
+access is provided via a web UI, API, CLI gateway, embedded console, or similar interface.
+
+1.8 “Customer Environment” means infrastructure and accounts that are owned or controlled by the
+customer receiving Professional Services, where the customer has administrative control and can run
+the Software independently.
+
+1.9 “Professional Services” means human-delivered services such as consulting, installation,
+configuration, integration, customization, training, security review, operations support, and
+troubleshooting performed for a specific customer.
+
+2. License Grant
+----------------
+Subject to the terms and conditions of this License, the Licensor grants You a non-exclusive,
+worldwide, royalty-free license to:
+
+(a) use and run the Software for any purpose, including internal commercial purposes;
+
+(b) copy and modify the Software to create Derivative Works;
+
+(c) Distribute the Software and Derivative Works, provided that such Distribution complies with
+Sections 3 and 4 below.
+
+3. Conditions
+-------------
+3.1 License & Copyright Notice.
+You must include this License text and all copyright notices of the Licensor in all copies of the
+Software and Derivative Works that You Distribute.
+
+3.2 Same License for Redistribution.
+Any Distribution of the Software or Derivative Works must be under this License. You may not
+Distribute the Software or Derivative Works under different terms, and You may not impose additional
+restrictions on recipients regarding the Software or Derivative Works.
+
+3.3 Mark Your Changes.
+If You Distribute a Derivative Work, You must include prominent notices stating that You have
+modified the Software.
+
+4. Restrictions (What You May NOT Do)
+-------------------------------------
+4.1 No Paid Distribution (No Paywall / No Selling the Software).
+You may not Distribute the Software or any Derivative Work for a Fee.
+This includes, without limitation, selling licenses, selling copies, charging for downloads,
+or placing the Software or Derivative Works behind a paywall or subscription that is required to
+obtain a copy.
+
+4.2 No Paid Hosted / Managed Service.
+You may not offer or provide the Software or any Derivative Work as part of a Hosted Service for a Fee.
+
+5. Explicit Permission: Paid Implementation / Consulting
+--------------------------------------------------------
+Notwithstanding Sections 4.1 and 4.2, You MAY charge for Professional Services related to the Software,
+provided that ALL of the following are true:
+
+(a) any copy of the Software or Derivative Works You provide to the customer is provided at no charge
+under this License;
+
+(b) the customer is not charged a license fee, subscription fee, access fee, or usage fee for the
+Software itself;
+
+(c) the Software is deployed and operated in the Customer Environment (i.e., the customer controls
+the environment and can run the Software without You).
+
+For clarity: charging for “setup”, “migration”, “integration”, “training”, “support”, or similar
+Professional Services is allowed if the Software itself remains free of charge and is not provided
+as a paid Hosted Service.
+
+6. Trademarks
+-------------
+This License does not grant any rights in the Licensor’s trademarks, service marks, or logos.
+
+7. Termination
+--------------
+If You violate any term of this License, Your rights under this License terminate automatically.
+If the Licensor notifies You of the violation and You cure it within 30 days of receiving notice,
+Your rights will be reinstated retroactively. Repeated violations after reinstatement may result in
+permanent termination.
+
+8. Disclaimer of Warranty
+-------------------------
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+9. Contact for Commercial Exception
+-----------------------------------
+If You want to sell the Software, place it behind a paywall, or offer it as a hosted/managed service,
+you must obtain a separate commercial license from the Licensor.
