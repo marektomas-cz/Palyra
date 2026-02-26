@@ -19,7 +19,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license-file = "LICENSE"
 version = "0.1.0"
 rust-version = "1.90"
 
