@@ -221,6 +221,8 @@ pub struct BrowserServiceConfig {
     pub enabled: bool,
     pub endpoint: String,
     pub auth_token: Option<String>,
+    pub state_dir: Option<PathBuf>,
+    pub state_key_vault_ref: Option<String>,
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub max_screenshot_bytes: u64,
@@ -425,6 +427,8 @@ impl Default for BrowserServiceConfig {
             enabled: DEFAULT_BROWSER_SERVICE_ENABLED,
             endpoint: DEFAULT_BROWSER_SERVICE_ENDPOINT.to_owned(),
             auth_token: None,
+            state_dir: None,
+            state_key_vault_ref: None,
             connect_timeout_ms: DEFAULT_BROWSER_SERVICE_CONNECT_TIMEOUT_MS,
             request_timeout_ms: DEFAULT_BROWSER_SERVICE_REQUEST_TIMEOUT_MS,
             max_screenshot_bytes: DEFAULT_BROWSER_SERVICE_MAX_SCREENSHOT_BYTES,
@@ -834,6 +838,18 @@ pub fn load_config() -> Result<LoadedConfig> {
                     let trimmed = auth_token.trim();
                     tool_call.browser_service.auth_token =
                         if trimmed.is_empty() { None } else { Some(trimmed.to_owned()) };
+                }
+                if let Some(state_dir) = file_browser_service.state_dir {
+                    tool_call.browser_service.state_dir = parse_optional_browser_state_dir(
+                        state_dir.as_str(),
+                        "tool_call.browser_service.state_dir",
+                    )?;
+                }
+                if let Some(state_key_vault_ref) = file_browser_service.state_key_vault_ref {
+                    tool_call.browser_service.state_key_vault_ref = parse_optional_vault_ref_field(
+                        state_key_vault_ref.as_str(),
+                        "tool_call.browser_service.state_key_vault_ref",
+                    )?;
                 }
                 if let Some(connect_timeout_ms) = file_browser_service.connect_timeout_ms {
                     tool_call.browser_service.connect_timeout_ms = parse_positive_u64(
@@ -1394,6 +1410,22 @@ pub fn load_config() -> Result<LoadedConfig> {
             if trimmed.is_empty() { None } else { Some(trimmed.to_owned()) };
         source.push_str(" +env(PALYRA_BROWSER_SERVICE_AUTH_TOKEN)");
     }
+    if let Ok(browserd_state_dir) = env::var("PALYRA_BROWSERD_STATE_DIR") {
+        tool_call.browser_service.state_dir = parse_optional_browser_state_dir(
+            browserd_state_dir.as_str(),
+            "PALYRA_BROWSERD_STATE_DIR",
+        )?;
+        source.push_str(" +env(PALYRA_BROWSERD_STATE_DIR)");
+    }
+    if let Ok(browserd_state_key_vault_ref) =
+        env::var("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY_VAULT_REF")
+    {
+        tool_call.browser_service.state_key_vault_ref = parse_optional_vault_ref_field(
+            browserd_state_key_vault_ref.as_str(),
+            "PALYRA_BROWSERD_STATE_ENCRYPTION_KEY_VAULT_REF",
+        )?;
+        source.push_str(" +env(PALYRA_BROWSERD_STATE_ENCRYPTION_KEY_VAULT_REF)");
+    }
     if let Ok(connect_timeout_ms) = env::var("PALYRA_BROWSER_SERVICE_CONNECT_TIMEOUT_MS") {
         tool_call.browser_service.connect_timeout_ms = parse_positive_u64(
             connect_timeout_ms
@@ -1679,6 +1711,29 @@ fn parse_vault_dir(raw: &str) -> Result<PathBuf> {
         anyhow::bail!("vault directory cannot contain embedded NUL byte");
     }
     Ok(PathBuf::from(raw))
+}
+
+fn parse_optional_browser_state_dir(raw: &str, source_name: &str) -> Result<Option<PathBuf>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.contains('\0') {
+        anyhow::bail!("{source_name} cannot contain embedded NUL byte");
+    }
+    Ok(Some(PathBuf::from(trimmed)))
+}
+
+fn parse_optional_vault_ref_field(raw: &str, source_name: &str) -> Result<Option<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let refs = parse_vault_ref_allowlist(trimmed, source_name)?;
+    if refs.len() != 1 {
+        anyhow::bail!("{source_name} must contain exactly one <scope>/<key> entry");
+    }
+    Ok(refs.into_iter().next())
 }
 
 fn parse_identity_store_dir(raw: &str) -> Result<PathBuf> {
@@ -2191,13 +2246,13 @@ mod tests {
         parse_canvas_host_public_base_url, parse_content_type_allowlist, parse_cron_timezone_mode,
         parse_default_memory_ttl_ms, parse_dns_suffix_allowlist, parse_host_allowlist,
         parse_http_header_allowlist, parse_journal_db_path, parse_openai_base_url,
-        parse_positive_usize, parse_process_executable_allowlist,
-        parse_process_runner_egress_enforcement_mode, parse_process_runner_tier,
-        parse_root_file_config, parse_storage_prefix_allowlist, parse_tool_allowlist,
-        parse_vault_dir, parse_vault_ref_allowlist, AdminConfig, BrowserServiceConfig,
-        CanvasHostConfig, ChannelRouterConfig, CronConfig, GatewayConfig, GatewayTlsConfig,
-        HttpFetchConfig, IdentityConfig, MemoryConfig, ModelProviderConfig, OrchestratorConfig,
-        StorageConfig, ToolCallConfig,
+        parse_optional_browser_state_dir, parse_optional_vault_ref_field, parse_positive_usize,
+        parse_process_executable_allowlist, parse_process_runner_egress_enforcement_mode,
+        parse_process_runner_tier, parse_root_file_config, parse_storage_prefix_allowlist,
+        parse_tool_allowlist, parse_vault_dir, parse_vault_ref_allowlist, AdminConfig,
+        BrowserServiceConfig, CanvasHostConfig, ChannelRouterConfig, CronConfig, GatewayConfig,
+        GatewayTlsConfig, HttpFetchConfig, IdentityConfig, MemoryConfig, ModelProviderConfig,
+        OrchestratorConfig, StorageConfig, ToolCallConfig,
     };
     use crate::channel_router::BroadcastStrategy;
     use crate::model_provider::ModelProviderKind;
@@ -2462,6 +2517,14 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.endpoint, "http://127.0.0.1:7543");
         assert!(config.auth_token.is_none());
+        assert!(
+            config.state_dir.is_none(),
+            "browser service state_dir should default to unset unless explicitly configured"
+        );
+        assert!(
+            config.state_key_vault_ref.is_none(),
+            "browser service state key vault ref should default to unset unless explicitly configured"
+        );
         assert_eq!(config.connect_timeout_ms, 1_500);
         assert_eq!(config.request_timeout_ms, 15_000);
         assert_eq!(config.max_screenshot_bytes, 256 * 1024);
@@ -2551,6 +2614,8 @@ mod tests {
             [tool_call.browser_service]
             enabled = true
             endpoint = "http://127.0.0.1:7543"
+            state_dir = "data/browserd-state"
+            state_key_vault_ref = "global/browserd_state_key"
             connect_timeout_ms = 2000
             request_timeout_ms = 18000
             max_screenshot_bytes = 131072
@@ -2570,6 +2635,11 @@ mod tests {
             tool_call.browser_service.expect("browser_service section should be present");
         assert_eq!(browser_service.enabled, Some(true));
         assert_eq!(browser_service.endpoint, Some("http://127.0.0.1:7543".to_owned()));
+        assert_eq!(browser_service.state_dir, Some("data/browserd-state".to_owned()));
+        assert_eq!(
+            browser_service.state_key_vault_ref,
+            Some("global/browserd_state_key".to_owned())
+        );
         assert_eq!(browser_service.connect_timeout_ms, Some(2_000));
         assert_eq!(browser_service.request_timeout_ms, Some(18_000));
         assert_eq!(browser_service.max_screenshot_bytes, Some(131_072));
@@ -2881,6 +2951,45 @@ mod tests {
             "gateway.vault_get_approval_required_refs",
         );
         assert!(result.is_err(), "vault ref allowlist must reject invalid entries");
+    }
+
+    #[test]
+    fn parse_optional_vault_ref_field_requires_single_entry_when_set() {
+        let parsed = parse_optional_vault_ref_field(
+            "GLOBAL/browserd_state_key",
+            "tool_call.browser_service.state_key_vault_ref",
+        )
+        .expect("single optional vault ref should parse");
+        assert_eq!(parsed, Some("global/browserd_state_key".to_owned()));
+
+        let empty =
+            parse_optional_vault_ref_field("   ", "tool_call.browser_service.state_key_vault_ref")
+                .expect("empty optional vault ref should clear value");
+        assert!(empty.is_none());
+
+        let multiple = parse_optional_vault_ref_field(
+            "global/key_a,global/key_b",
+            "tool_call.browser_service.state_key_vault_ref",
+        );
+        assert!(multiple.is_err(), "multiple refs must be rejected for single-value field");
+    }
+
+    #[test]
+    fn parse_optional_browser_state_dir_accepts_empty_and_rejects_nul() {
+        let parsed = parse_optional_browser_state_dir(
+            "data/browserd-state",
+            "tool_call.browser_service.state_dir",
+        )
+        .expect("browser state dir should parse");
+        assert_eq!(parsed, Some(PathBuf::from("data/browserd-state")));
+
+        let empty = parse_optional_browser_state_dir("   ", "tool_call.browser_service.state_dir")
+            .expect("empty browser state dir should clear value");
+        assert!(empty.is_none());
+
+        let invalid =
+            parse_optional_browser_state_dir("state\0dir", "tool_call.browser_service.state_dir");
+        assert!(invalid.is_err(), "embedded NUL must be rejected");
     }
 
     #[test]

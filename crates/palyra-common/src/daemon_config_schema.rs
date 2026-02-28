@@ -9,6 +9,7 @@ pub const SECRET_CONFIG_PATHS: &[&str] = &[
     "model_provider.openai_api_key_vault_ref",
     "gateway.admin_token",
     "tool_call.browser_service.auth_token",
+    "tool_call.browser_service.state_key_vault_ref",
 ];
 
 #[must_use]
@@ -185,6 +186,8 @@ pub struct FileBrowserServiceConfig {
     pub enabled: Option<bool>,
     pub endpoint: Option<String>,
     pub auth_token: Option<String>,
+    pub state_dir: Option<String>,
+    pub state_key_vault_ref: Option<String>,
     pub connect_timeout_ms: Option<u64>,
     pub request_timeout_ms: Option<u64>,
     pub max_screenshot_bytes: Option<u64>,
@@ -309,6 +312,7 @@ mod tests {
         assert!(is_secret_config_path("model_provider.openai_api_key_vault_ref"));
         assert!(is_secret_config_path("gateway.admin_token"));
         assert!(is_secret_config_path("tool_call.browser_service.auth_token"));
+        assert!(is_secret_config_path("tool_call.browser_service.state_key_vault_ref"));
         assert!(is_secret_config_path(" admin.auth_token "));
         assert!(!is_secret_config_path("daemon.port"));
     }
@@ -327,6 +331,7 @@ mod tests {
             admin_token = "legacy-token"
             [tool_call.browser_service]
             auth_token = "browserd-token"
+            state_key_vault_ref = "global/browserd_state_key"
             "#,
         )
         .expect("config document should parse");
@@ -366,6 +371,14 @@ mod tests {
                 .get("tool_call")
                 .and_then(|tool_call| tool_call.get("browser_service"))
                 .and_then(|browser_service| browser_service.get("auth_token"))
+                .and_then(toml::Value::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            document
+                .get("tool_call")
+                .and_then(|tool_call| tool_call.get("browser_service"))
+                .and_then(|browser_service| browser_service.get("state_key_vault_ref"))
                 .and_then(toml::Value::as_str),
             Some("<redacted>")
         );
