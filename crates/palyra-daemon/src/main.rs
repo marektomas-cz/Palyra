@@ -885,6 +885,10 @@ async fn main() -> Result<()> {
         tool_call_browser_service_endpoint = %loaded.tool_call.browser_service.endpoint,
         tool_call_browser_service_auth_token_configured =
             loaded.tool_call.browser_service.auth_token.is_some(),
+        tool_call_browser_service_state_dir =
+            ?loaded.tool_call.browser_service.state_dir.as_ref().map(|p| p.display().to_string()),
+        tool_call_browser_service_state_key_vault_ref_configured =
+            loaded.tool_call.browser_service.state_key_vault_ref.is_some(),
         tool_call_browser_service_connect_timeout_ms =
             loaded.tool_call.browser_service.connect_timeout_ms,
         tool_call_browser_service_request_timeout_ms =
