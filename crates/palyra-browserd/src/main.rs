@@ -98,12 +98,13 @@ const COOKIE_HEADER: &str = "cookie";
 const SET_COOKIE_HEADER: &str = "set-cookie";
 const PROFILE_REGISTRY_FILE_NAME: &str = "profiles.enc";
 const PROFILE_REGISTRY_SCHEMA_VERSION: u32 = 1;
-const PROFILE_RECORD_SCHEMA_VERSION: u32 = 1;
+const PROFILE_RECORD_SCHEMA_VERSION: u32 = 2;
 const MAX_PROFILE_NAME_BYTES: usize = 96;
 const MAX_PROFILE_THEME_BYTES: usize = 24;
 const MAX_PROFILES_PER_PRINCIPAL: usize = 16;
 const MAX_PROFILE_REGISTRY_BYTES: usize = 512 * 1024;
-const PROFILE_RECORD_HASH_NAMESPACE: &[u8] = b"palyra.browser.profile.record.v1";
+const PROFILE_RECORD_HASH_NAMESPACE: &[u8] = b"palyra.browser.profile.record.v2";
+const PROFILE_RECORD_HASH_NAMESPACE_LEGACY: &[u8] = b"palyra.browser.profile.record.v1";
 const DOWNLOAD_MAX_TOTAL_BYTES_PER_SESSION: u64 = 32 * 1024 * 1024;
 const DOWNLOAD_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_DOWNLOAD_ARTIFACTS_PER_SESSION: usize = 128;
@@ -344,6 +345,8 @@ struct BrowserProfileRecord {
     persistence_enabled: bool,
     private_profile: bool,
     state_schema_version: u32,
+    #[serde(default)]
+    state_revision: u64,
     state_hash_sha256: Option<String>,
     record_hash_sha256: String,
 }
@@ -587,6 +590,22 @@ impl DownloadSandboxSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSessionSnapshot {
+    v: u32,
+    principal: String,
+    channel: Option<String>,
+    tabs: Vec<BrowserTabRecord>,
+    tab_order: Vec<String>,
+    active_tab_id: String,
+    permissions: SessionPermissionsInternal,
+    cookie_jar: HashMap<String, HashMap<String, String>>,
+    storage_entries: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    state_revision: u64,
+    saved_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PersistedSessionSnapshotLegacyForHash {
     v: u32,
     principal: String,
     channel: Option<String>,
@@ -915,6 +934,15 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             },
         });
         if let Some(snapshot) = restored_snapshot {
+            if let Some(profile_record) = profile.as_ref() {
+                validate_restored_snapshot_against_profile(&snapshot, profile_record).map_err(
+                    |error| {
+                        Status::failed_precondition(format!(
+                            "persisted state integrity validation failed: {error}"
+                        ))
+                    },
+                )?;
+            }
             if snapshot.principal != principal {
                 return Err(Status::permission_denied(
                     "persisted state principal does not match session principal",
@@ -1130,6 +1158,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             persistence_enabled: payload.persistence_enabled && !payload.private_profile,
             private_profile: payload.private_profile,
             state_schema_version: PROFILE_RECORD_SCHEMA_VERSION,
+            state_revision: 0,
             state_hash_sha256: None,
             record_hash_sha256: String::new(),
         };
@@ -5513,10 +5542,15 @@ fn normalize_profile_registry(registry: &mut BrowserProfileRegistryDocument) {
             continue;
         }
         if !profile_record_hash_matches(&profile) {
-            continue;
+            if profile_record_legacy_hash_matches(&profile) {
+                refresh_profile_record_hash(&mut profile);
+            } else {
+                continue;
+            }
         }
-        if profile.state_schema_version == 0 {
+        if profile.state_schema_version < PROFILE_RECORD_SCHEMA_VERSION {
             profile.state_schema_version = PROFILE_RECORD_SCHEMA_VERSION;
+            refresh_profile_record_hash(&mut profile);
         }
         deduped.insert(profile.profile_id.clone(), profile);
     }
@@ -5584,8 +5618,20 @@ fn is_active_profile(registry: &BrowserProfileRegistryDocument, profile_id: &str
 }
 
 fn profile_record_hash(record: &BrowserProfileRecord) -> String {
+    profile_record_hash_with_namespace(record, PROFILE_RECORD_HASH_NAMESPACE, true)
+}
+
+fn profile_record_legacy_hash(record: &BrowserProfileRecord) -> String {
+    profile_record_hash_with_namespace(record, PROFILE_RECORD_HASH_NAMESPACE_LEGACY, false)
+}
+
+fn profile_record_hash_with_namespace(
+    record: &BrowserProfileRecord,
+    namespace: &[u8],
+    include_revision: bool,
+) -> String {
     let mut context = DigestContext::new(&SHA256);
-    context.update(PROFILE_RECORD_HASH_NAMESPACE);
+    context.update(namespace);
     context.update(record.profile_id.as_bytes());
     context.update(record.principal.as_bytes());
     context.update(record.name.as_bytes());
@@ -5596,6 +5642,9 @@ fn profile_record_hash(record: &BrowserProfileRecord) -> String {
     context.update(if record.persistence_enabled { b"1" } else { b"0" });
     context.update(if record.private_profile { b"1" } else { b"0" });
     context.update(record.state_schema_version.to_string().as_bytes());
+    if include_revision {
+        context.update(record.state_revision.to_string().as_bytes());
+    }
     context.update(record.state_hash_sha256.clone().unwrap_or_default().as_bytes());
     encode_hex(context.finish().as_ref())
 }
@@ -5606,6 +5655,10 @@ fn refresh_profile_record_hash(record: &mut BrowserProfileRecord) {
 
 fn profile_record_hash_matches(record: &BrowserProfileRecord) -> bool {
     record.record_hash_sha256 == profile_record_hash(record)
+}
+
+fn profile_record_legacy_hash_matches(record: &BrowserProfileRecord) -> bool {
+    record.record_hash_sha256 == profile_record_legacy_hash(record)
 }
 
 fn normalize_profile_principal(raw: &str) -> Result<String, String> {
@@ -5761,6 +5814,7 @@ fn update_profile_state_metadata(
     store: &PersistedStateStore,
     profile_id: &str,
     state_schema_version: u32,
+    state_revision: u64,
     state_hash_sha256: &str,
 ) -> Result<()> {
     let mut registry = store.load_profile_registry()?;
@@ -5768,6 +5822,7 @@ fn update_profile_state_metadata(
         registry.profiles.iter_mut().find(|profile| profile.profile_id == profile_id)
     {
         profile.state_schema_version = state_schema_version;
+        profile.state_revision = state_revision;
         profile.state_hash_sha256 = Some(state_hash_sha256.to_owned());
         profile.updated_at_unix_ms = current_unix_ms();
         refresh_profile_record_hash(profile);
@@ -5775,6 +5830,73 @@ fn update_profile_state_metadata(
         store.save_profile_registry(&registry)?;
     }
     Ok(())
+}
+
+fn next_profile_state_revision(
+    store: &PersistedStateStore,
+    profile_id: Option<&str>,
+) -> Result<u64> {
+    let Some(profile_id) = profile_id else {
+        return Ok(0);
+    };
+    let registry = store.load_profile_registry()?;
+    let current = registry
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == profile_id)
+        .map_or(0, |p| p.state_revision);
+    Ok(current.saturating_add(1).max(1))
+}
+
+fn persisted_snapshot_hash(snapshot: &PersistedSessionSnapshot) -> Result<String> {
+    let bytes = serde_json::to_vec(snapshot)
+        .context("failed to serialize persisted browser state snapshot hash payload")?;
+    Ok(sha256_hex(bytes.as_slice()))
+}
+
+fn persisted_snapshot_legacy_hash(snapshot: &PersistedSessionSnapshot) -> Result<String> {
+    let legacy = PersistedSessionSnapshotLegacyForHash {
+        v: snapshot.v,
+        principal: snapshot.principal.clone(),
+        channel: snapshot.channel.clone(),
+        tabs: snapshot.tabs.clone(),
+        tab_order: snapshot.tab_order.clone(),
+        active_tab_id: snapshot.active_tab_id.clone(),
+        permissions: snapshot.permissions.clone(),
+        cookie_jar: snapshot.cookie_jar.clone(),
+        storage_entries: snapshot.storage_entries.clone(),
+        saved_at_unix_ms: snapshot.saved_at_unix_ms,
+    };
+    let bytes = serde_json::to_vec(&legacy)
+        .context("failed to serialize legacy persisted browser state snapshot hash payload")?;
+    Ok(sha256_hex(bytes.as_slice()))
+}
+
+fn validate_restored_snapshot_against_profile(
+    snapshot: &PersistedSessionSnapshot,
+    profile: &BrowserProfileRecord,
+) -> Result<()> {
+    if snapshot.state_revision < profile.state_revision {
+        anyhow::bail!(
+            "snapshot revision {} is older than profile revision {}",
+            snapshot.state_revision,
+            profile.state_revision
+        );
+    }
+    let Some(expected_hash) = profile.state_hash_sha256.as_deref() else {
+        return Ok(());
+    };
+    let current_hash = persisted_snapshot_hash(snapshot)?;
+    if current_hash == expected_hash {
+        return Ok(());
+    }
+    if snapshot.state_revision == 0 {
+        let legacy_hash = persisted_snapshot_legacy_hash(snapshot)?;
+        if legacy_hash == expected_hash {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("snapshot hash mismatch for profile '{}'", profile.profile_id);
 }
 
 fn permission_setting_to_proto(value: PermissionSettingInternal) -> i32 {
@@ -5812,6 +5934,7 @@ fn persist_session_snapshot(
             tabs.push(tab.clone());
         }
     }
+    let state_revision = next_profile_state_revision(store, session.profile_id.as_deref())?;
     let snapshot = PersistedSessionSnapshot {
         v: CANONICAL_PROTOCOL_MAJOR,
         principal: session.principal.clone(),
@@ -5822,19 +5945,17 @@ fn persist_session_snapshot(
         permissions: session.permissions.clone(),
         cookie_jar: session.cookie_jar.clone(),
         storage_entries: session.storage_entries.clone(),
+        state_revision,
         saved_at_unix_ms: current_unix_ms(),
     };
-    let snapshot_hash = sha256_hex(
-        serde_json::to_vec(&snapshot)
-            .context("failed to serialize browser state snapshot for profile hash")?
-            .as_slice(),
-    );
+    let snapshot_hash = persisted_snapshot_hash(&snapshot)?;
     store.save_snapshot(persistence_id.as_str(), session.profile_id.as_deref(), &snapshot)?;
     if let Some(profile_id) = session.profile_id.as_ref() {
         if let Err(error) = update_profile_state_metadata(
             store,
             profile_id.as_str(),
             PROFILE_RECORD_SCHEMA_VERSION,
+            state_revision,
             snapshot_hash.as_str(),
         ) {
             warn!(
@@ -6535,13 +6656,18 @@ async fn fetch_download_artifact(
 mod tests {
     use super::{
         browser_v1, default_browserd_state_dir_from_env, enforce_non_loopback_bind_auth,
-        navigate_with_guards, parse_daemon_bind_socket, validate_target_url_blocking, Args,
-        BrowserEngineMode, BrowserRuntimeState, BrowserServiceImpl, PersistedStateStore,
-        CHROMIUM_PATH_ENV, DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS, DEFAULT_GRPC_PORT,
-        MAX_RELAY_PAYLOAD_BYTES, ONE_BY_ONE_PNG, STATE_KEY_LEN,
+        navigate_with_guards, parse_daemon_bind_socket, persisted_snapshot_hash,
+        persisted_snapshot_legacy_hash, update_profile_state_metadata,
+        validate_restored_snapshot_against_profile, validate_target_url_blocking, Args,
+        BrowserEngineMode, BrowserProfileRecord, BrowserRuntimeState, BrowserServiceImpl,
+        BrowserTabRecord, PersistedSessionSnapshot, PersistedStateStore,
+        SessionPermissionsInternal, CANONICAL_PROTOCOL_MAJOR, CHROMIUM_PATH_ENV,
+        DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS, DEFAULT_GRPC_PORT, MAX_RELAY_PAYLOAD_BYTES,
+        ONE_BY_ONE_PNG, PROFILE_RECORD_SCHEMA_VERSION, STATE_KEY_LEN,
     };
     use crate::proto;
     use crate::proto::palyra::browser::v1::browser_service_server::BrowserService;
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -8229,6 +8355,173 @@ mod tests {
         assert_eq!(title.title, "Persisted Profile");
 
         handle.join().expect("test server thread should exit");
+    }
+
+    #[test]
+    fn validate_restored_snapshot_against_profile_accepts_legacy_hash_for_revision_zero() {
+        let snapshot = PersistedSessionSnapshot {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            principal: "user:ops".to_owned(),
+            channel: None,
+            tabs: vec![BrowserTabRecord::new(ulid::Ulid::new().to_string())],
+            tab_order: Vec::new(),
+            active_tab_id: String::new(),
+            permissions: SessionPermissionsInternal::default(),
+            cookie_jar: HashMap::new(),
+            storage_entries: HashMap::new(),
+            state_revision: 0,
+            saved_at_unix_ms: 1_737_000_000_000,
+        };
+        let legacy_hash = persisted_snapshot_legacy_hash(&snapshot)
+            .expect("legacy hash generation should succeed");
+        let profile = BrowserProfileRecord {
+            profile_id: ulid::Ulid::new().to_string(),
+            principal: "user:ops".to_owned(),
+            name: "Ops".to_owned(),
+            theme_color: None,
+            created_at_unix_ms: 1_737_000_000_000,
+            updated_at_unix_ms: 1_737_000_000_000,
+            last_used_unix_ms: 1_737_000_000_000,
+            persistence_enabled: true,
+            private_profile: false,
+            state_schema_version: PROFILE_RECORD_SCHEMA_VERSION,
+            state_revision: 0,
+            state_hash_sha256: Some(legacy_hash),
+            record_hash_sha256: String::new(),
+        };
+        validate_restored_snapshot_against_profile(&snapshot, &profile)
+            .expect("legacy hash path should stay backward compatible");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_service_profile_restore_rejects_snapshot_revision_rollback() {
+        let state_dir = tempfile::tempdir().expect("state temp dir should be available");
+        let mut runtime_state = BrowserRuntimeState::new(&Args {
+            bind: "127.0.0.1".to_owned(),
+            port: 7143,
+            grpc_bind: "127.0.0.1".to_owned(),
+            grpc_port: 7543,
+            auth_token: None,
+            session_idle_ttl_ms: 60_000,
+            max_sessions: 16,
+            max_navigation_timeout_ms: 10_000,
+            max_session_lifetime_ms: 60_000,
+            max_screenshot_bytes: 128 * 1024,
+            max_response_bytes: 128 * 1024,
+            max_title_bytes: 4 * 1024,
+            engine_mode: BrowserEngineMode::Simulated,
+            chromium_path: None,
+            chromium_startup_timeout_ms: DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
+        })
+        .expect("runtime should initialize");
+        runtime_state.state_store = Some(
+            PersistedStateStore::new(state_dir.path().join("state"), [9_u8; STATE_KEY_LEN])
+                .expect("state store should initialize"),
+        );
+        let runtime = std::sync::Arc::new(runtime_state);
+        let service = BrowserServiceImpl { runtime: runtime.clone() };
+
+        let profile = service
+            .create_profile(Request::new(browser_v1::CreateProfileRequest {
+                v: 1,
+                principal: "user:ops".to_owned(),
+                name: "Ops".to_owned(),
+                theme_color: "#1f2937".to_owned(),
+                persistence_enabled: true,
+                private_profile: false,
+            }))
+            .await
+            .expect("create_profile should succeed")
+            .into_inner()
+            .profile
+            .expect("profile should be present");
+        let profile_id = profile.profile_id.expect("profile id should be present").ulid;
+
+        let session = service
+            .create_session(Request::new(browser_v1::CreateSessionRequest {
+                v: 1,
+                principal: "user:ops".to_owned(),
+                idle_ttl_ms: 10_000,
+                budget: None,
+                allow_private_targets: true,
+                allow_downloads: false,
+                action_allowed_domains: Vec::new(),
+                persistence_enabled: false,
+                persistence_id: String::new(),
+                profile_id: Some(proto::palyra::common::v1::CanonicalId {
+                    ulid: profile_id.clone(),
+                }),
+                private_profile: false,
+                channel: String::new(),
+            }))
+            .await
+            .expect("create_session should succeed")
+            .into_inner();
+        let session_id = session.session_id.expect("session id should be present").ulid;
+
+        service
+            .close_session(Request::new(browser_v1::CloseSessionRequest {
+                v: 1,
+                session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+            }))
+            .await
+            .expect("close_session should execute");
+
+        let store = runtime
+            .state_store
+            .as_ref()
+            .expect("state store should remain configured for rollback test");
+        let snapshot = store
+            .load_snapshot(profile_id.as_str(), Some(profile_id.as_str()))
+            .expect("snapshot load should succeed")
+            .expect("snapshot should be present after persisted profile session");
+        assert!(
+            snapshot.state_revision >= 1,
+            "snapshot revision should advance after first persist"
+        );
+        let expected_hash =
+            persisted_snapshot_hash(&snapshot).expect("snapshot hash should compute");
+        let mut rollback_snapshot = snapshot.clone();
+        rollback_snapshot.state_revision = snapshot.state_revision.saturating_sub(1);
+        store
+            .save_snapshot(profile_id.as_str(), Some(profile_id.as_str()), &rollback_snapshot)
+            .expect("rollback snapshot write should succeed");
+        update_profile_state_metadata(
+            store,
+            profile_id.as_str(),
+            PROFILE_RECORD_SCHEMA_VERSION,
+            snapshot.state_revision,
+            expected_hash.as_str(),
+        )
+        .expect("profile metadata update should succeed");
+
+        let rollback_attempt = service
+            .create_session(Request::new(browser_v1::CreateSessionRequest {
+                v: 1,
+                principal: "user:ops".to_owned(),
+                idle_ttl_ms: 10_000,
+                budget: None,
+                allow_private_targets: true,
+                allow_downloads: false,
+                action_allowed_domains: Vec::new(),
+                persistence_enabled: false,
+                persistence_id: String::new(),
+                profile_id: Some(proto::palyra::common::v1::CanonicalId { ulid: profile_id }),
+                private_profile: false,
+                channel: String::new(),
+            }))
+            .await
+            .expect_err("rollbacked snapshot should be rejected");
+        assert_eq!(
+            rollback_attempt.code(),
+            tonic::Code::FailedPrecondition,
+            "rollback guard should fail with failed_precondition"
+        );
+        assert!(
+            rollback_attempt.message().contains("snapshot revision"),
+            "error should explain revision rollback guard: {}",
+            rollback_attempt.message()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
