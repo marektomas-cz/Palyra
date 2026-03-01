@@ -39,6 +39,7 @@ const MAX_MEMORY_SEARCH_CANDIDATES: usize = 256;
 const MAX_CANVAS_PATCHES_QUERY_LIMIT: usize = 1_000;
 const DEFAULT_MEMORY_VECTOR_DIMS: usize = 64;
 const DEFAULT_MEMORY_EMBEDDING_MODEL: &str = "hash-embedding-v1";
+const CURRENT_MEMORY_EMBEDDING_VERSION: i64 = 1;
 const MEMORY_RETENTION_DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 const MEMORY_MAINTENANCE_STATE_SINGLETON_KEY: i64 = 1;
 
@@ -1455,6 +1456,32 @@ const MIGRATIONS: &[Migration] = &[
             );
             INSERT OR IGNORE INTO memory_maintenance_state(singleton_key)
             VALUES (1);
+        "#,
+    },
+    Migration {
+        version: 10,
+        name: "memory_vectors_add_provenance_columns",
+        sql: r#"
+            ALTER TABLE memory_vectors ADD COLUMN embedding_model_id TEXT;
+            ALTER TABLE memory_vectors ADD COLUMN embedding_dims INTEGER;
+            ALTER TABLE memory_vectors ADD COLUMN embedding_version INTEGER;
+            ALTER TABLE memory_vectors ADD COLUMN embedding_vector BLOB;
+            ALTER TABLE memory_vectors ADD COLUMN embedded_at_unix_ms INTEGER;
+            UPDATE memory_vectors
+            SET
+                embedding_model_id = COALESCE(embedding_model_id, embedding_model),
+                embedding_dims = COALESCE(embedding_dims, dims),
+                embedding_version = COALESCE(embedding_version, 1),
+                embedding_vector = COALESCE(embedding_vector, vector_blob),
+                embedded_at_unix_ms = COALESCE(embedded_at_unix_ms, created_at_unix_ms)
+            WHERE
+                embedding_model_id IS NULL OR
+                embedding_dims IS NULL OR
+                embedding_version IS NULL OR
+                embedding_vector IS NULL OR
+                embedded_at_unix_ms IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_memory_vectors_model_version
+                ON memory_vectors(embedding_model_id, embedding_version);
         "#,
     },
 ];
@@ -3340,13 +3367,23 @@ impl JournalStore {
                     embedding_model,
                     dims,
                     vector_blob,
-                    created_at_unix_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5)
+                    created_at_unix_ms,
+                    embedding_model_id,
+                    embedding_dims,
+                    embedding_version,
+                    embedding_vector,
+                    embedded_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
             params![
                 request.memory_id.as_str(),
                 self.memory_embedding_provider.model_name(),
                 embedding_dims as i64,
+                vector_blob.clone(),
+                now,
+                self.memory_embedding_provider.model_name(),
+                embedding_dims as i64,
+                CURRENT_MEMORY_EMBEDDING_VERSION,
                 vector_blob,
                 now,
             ],
@@ -3602,7 +3639,9 @@ impl JournalStore {
         request: &MemorySearchRequest,
     ) -> Result<Vec<MemorySearchHit>, JournalError> {
         let query_text = normalize_memory_text(request.query.as_str());
+        let embedding_model_id = self.memory_embedding_provider.model_name().to_owned();
         let embedding_dims = self.memory_embedding_provider.dimensions();
+        let embedding_version = CURRENT_MEMORY_EMBEDDING_VERSION;
         let requested_tags = normalize_memory_tags(request.tags.as_slice());
         if query_text.is_empty() {
             return Ok(Vec::new());
@@ -3637,8 +3676,10 @@ impl JournalStore {
                     memory.created_at_unix_ms,
                     memory.updated_at_unix_ms,
                     bm25(memory_items_fts) AS lexical_rank,
-                    vectors.dims,
-                    vectors.vector_blob
+                    COALESCE(vectors.embedding_model_id, vectors.embedding_model),
+                    COALESCE(vectors.embedding_dims, vectors.dims),
+                    COALESCE(vectors.embedding_version, ?7),
+                    COALESCE(vectors.embedding_vector, vectors.vector_blob)
                 FROM memory_items_fts
                 INNER JOIN memory_items AS memory
                     ON memory.memory_ulid = memory_items_fts.memory_ulid
@@ -3661,6 +3702,7 @@ impl JournalStore {
             request.session_id.as_deref(),
             now,
             candidate_limit as i64,
+            embedding_version,
         ])?;
 
         let mut candidates = Vec::new();
@@ -3674,9 +3716,14 @@ impl JournalStore {
             }
             let lexical_rank: f64 = row.get(12)?;
             let lexical_raw = (-lexical_rank).max(0.0);
-            let dims = row.get::<_, Option<i64>>(13)?.unwrap_or_default() as usize;
-            let vector_raw = if dims == embedding_dims {
-                let vector_blob: Option<Vec<u8>> = row.get(14)?;
+            let model_id = row.get::<_, Option<String>>(13)?.unwrap_or_default();
+            let dims = row.get::<_, Option<i64>>(14)?.unwrap_or_default() as usize;
+            let version = row.get::<_, Option<i64>>(15)?.unwrap_or(embedding_version);
+            let vector_raw = if model_id == embedding_model_id
+                && dims == embedding_dims
+                && version == embedding_version
+            {
+                let vector_blob: Option<Vec<u8>> = row.get(16)?;
                 vector_blob
                     .as_ref()
                     .map(|blob| decode_vector_blob(blob.as_slice(), dims))
@@ -4486,7 +4533,7 @@ fn query_memory_usage_snapshot(
                         COALESCE(length(memory.content_text), 0) +
                         COALESCE(length(memory.content_hash), 0) +
                         COALESCE(length(memory.tags_json), 0) +
-                        COALESCE(length(vectors.vector_blob), 0)
+                        COALESCE(length(vectors.embedding_vector), length(vectors.vector_blob), 0)
                     ),
                     0
                 )
@@ -4651,7 +4698,7 @@ fn evict_oldest_memory_items_by_byte_cap(
                     COALESCE(length(memory.content_text), 0) +
                     COALESCE(length(memory.content_hash), 0) +
                     COALESCE(length(memory.tags_json), 0) +
-                    COALESCE(length(vectors.vector_blob), 0)
+                    COALESCE(length(vectors.embedding_vector), length(vectors.vector_blob), 0)
                 ) AS approx_bytes
             FROM memory_items AS memory
             LEFT JOIN memory_vectors AS vectors
@@ -5119,18 +5166,19 @@ mod tests {
     use crate::orchestrator::RunLifecycleState;
 
     use super::{
-        build_fts_query, current_unix_ms, ApprovalCreateRequest, ApprovalDecision,
-        ApprovalDecisionScope, ApprovalPolicySnapshot, ApprovalPromptOption, ApprovalPromptRecord,
-        ApprovalResolveRequest, ApprovalRiskLevel, ApprovalSubjectType, ApprovalsListFilter,
-        CanvasStateTransitionRequest, CronConcurrencyPolicy, CronJobCreateRequest,
-        CronJobsListFilter, CronMisfirePolicy, CronRetryPolicy, CronRunFinalizeRequest,
-        CronRunStartRequest, CronRunStatus, CronRunsListFilter, CronScheduleType,
-        JournalAppendRequest, JournalConfig, JournalError, JournalStore, MemoryEmbeddingProvider,
-        MemoryItemCreateRequest, MemoryItemsListFilter, MemoryMaintenanceRequest,
-        MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest, MemorySource,
-        OrchestratorCancelRequest, OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
-        OrchestratorTapeAppendRequest, OrchestratorUsageDelta, SkillExecutionStatus,
-        SkillStatusUpsertRequest, MEMORY_RETENTION_DAY_MS,
+        build_fts_query, current_unix_ms, encode_vector_blob, sha256_hex, ApprovalCreateRequest,
+        ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot, ApprovalPromptOption,
+        ApprovalPromptRecord, ApprovalResolveRequest, ApprovalRiskLevel, ApprovalSubjectType,
+        ApprovalsListFilter, CanvasStateTransitionRequest, CronConcurrencyPolicy,
+        CronJobCreateRequest, CronJobsListFilter, CronMisfirePolicy, CronRetryPolicy,
+        CronRunFinalizeRequest, CronRunStartRequest, CronRunStatus, CronRunsListFilter,
+        CronScheduleType, JournalAppendRequest, JournalConfig, JournalError, JournalStore,
+        MemoryEmbeddingProvider, MemoryItemCreateRequest, MemoryItemsListFilter,
+        MemoryMaintenanceRequest, MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest,
+        MemorySource, OrchestratorCancelRequest, OrchestratorRunStartRequest,
+        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
+        SkillExecutionStatus, SkillStatusUpsertRequest, CURRENT_MEMORY_EMBEDDING_VERSION,
+        MEMORY_RETENTION_DAY_MS, MIGRATIONS,
     };
 
     static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -5383,6 +5431,20 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("schema migrations should be queryable");
+        let migration_v9: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                params![9],
+                |row| row.get(0),
+            )
+            .expect("schema migrations should be queryable");
+        let migration_v10: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                params![10],
+                |row| row.get(0),
+            )
+            .expect("schema migrations should be queryable");
         assert_eq!(migration_v1, 1, "migration v1 should be recorded exactly once");
         assert_eq!(migration_v2, 1, "migration v2 should be recorded exactly once");
         assert_eq!(migration_v3, 1, "migration v3 should be recorded exactly once");
@@ -5391,6 +5453,8 @@ mod tests {
         assert_eq!(migration_v6, 1, "migration v6 should be recorded exactly once");
         assert_eq!(migration_v7, 1, "migration v7 should be recorded exactly once");
         assert_eq!(migration_v8, 1, "migration v8 should be recorded exactly once");
+        assert_eq!(migration_v9, 1, "migration v9 should be recorded exactly once");
+        assert_eq!(migration_v10, 1, "migration v10 should be recorded exactly once");
     }
 
     #[test]
@@ -6395,17 +6459,161 @@ mod tests {
             .expect("memory item should be created");
 
         let guard = store.connection.lock().expect("connection lock should not be poisoned");
-        let (model_name, dims): (String, i64) = guard
+        let (model_name, dims, model_id, provenance_dims, version, vector_len, embedded_at): (
+            String,
+            i64,
+            String,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = guard
             .query_row(
-                "SELECT embedding_model, dims FROM memory_vectors WHERE memory_ulid = ?1",
+                r#"
+                    SELECT
+                        embedding_model,
+                        dims,
+                        embedding_model_id,
+                        embedding_dims,
+                        embedding_version,
+                        length(embedding_vector),
+                        embedded_at_unix_ms
+                    FROM memory_vectors
+                    WHERE memory_ulid = ?1
+                "#,
                 params![memory_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
             )
             .expect("memory vector metadata should be persisted");
         drop(guard);
 
         assert_eq!(model_name, "test-embedding-v1");
         assert_eq!(dims, 4);
+        assert_eq!(model_id, "test-embedding-v1");
+        assert_eq!(provenance_dims, 4);
+        assert_eq!(version, CURRENT_MEMORY_EMBEDDING_VERSION);
+        assert!(vector_len > 0, "provenance vector blob should be stored");
+        assert!(embedded_at > 0, "embedded timestamp should be persisted");
+    }
+
+    #[test]
+    fn memory_vectors_provenance_migration_backfills_legacy_rows_without_data_loss() {
+        let db_path = temp_db_path();
+        let mut connection = Connection::open(&db_path).expect("legacy journal db should open");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = NORMAL;
+                 CREATE TABLE IF NOT EXISTS schema_migrations (
+                     version INTEGER PRIMARY KEY,
+                     name TEXT NOT NULL,
+                     applied_at_unix_ms INTEGER NOT NULL
+                 );",
+            )
+            .expect("legacy migration table should be created");
+        let transaction =
+            connection.transaction().expect("legacy migration transaction should open");
+        for migration in MIGRATIONS.iter().filter(|migration| migration.version <= 9) {
+            transaction.execute_batch(migration.sql).expect("legacy migrations should apply");
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at_unix_ms) VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, 0_i64],
+                )
+                .expect("legacy migration entry should be inserted");
+        }
+        let memory_id = "01ARZ3NDEKTSV4RRFFQ69G5FD0";
+        let content_text = "legacy memory vector row";
+        let tags_json = r#"["legacy"]"#;
+        let created_at = 1_730_001_000_000_i64;
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO memory_items (
+                        memory_ulid,
+                        principal,
+                        channel,
+                        session_ulid,
+                        source,
+                        content_text,
+                        content_hash,
+                        tags_json,
+                        confidence,
+                        ttl_unix_ms,
+                        created_at_unix_ms,
+                        updated_at_unix_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10)
+                "#,
+                params![
+                    memory_id,
+                    "user:ops",
+                    "cli",
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAT",
+                    "manual",
+                    content_text,
+                    sha256_hex(content_text.as_bytes()),
+                    tags_json,
+                    0.8_f64,
+                    created_at,
+                ],
+            )
+            .expect("legacy memory item should insert");
+        let legacy_blob = encode_vector_blob(&[0.1_f32, 0.2_f32, 0.3_f32, 0.4_f32]);
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO memory_vectors (
+                        memory_ulid,
+                        embedding_model,
+                        dims,
+                        vector_blob,
+                        created_at_unix_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![memory_id, "legacy-model-v1", 4_i64, legacy_blob, created_at],
+            )
+            .expect("legacy memory vector should insert");
+        transaction.commit().expect("legacy fixture transaction should commit");
+        drop(connection);
+
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should apply provenance migration");
+        let guard = store.connection.lock().expect("connection lock should not be poisoned");
+        let (model_id, dims, version, vector_len, embedded_at): (String, i64, i64, i64, i64) =
+            guard
+                .query_row(
+                    r#"
+                    SELECT
+                        embedding_model_id,
+                        embedding_dims,
+                        embedding_version,
+                        length(embedding_vector),
+                        embedded_at_unix_ms
+                    FROM memory_vectors
+                    WHERE memory_ulid = ?1
+                "#,
+                    params![memory_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .expect("provenance columns should be backfilled for legacy rows");
+        drop(guard);
+
+        assert_eq!(model_id, "legacy-model-v1");
+        assert_eq!(dims, 4);
+        assert_eq!(version, CURRENT_MEMORY_EMBEDDING_VERSION);
+        assert!(vector_len > 0, "migrated vector payload should be preserved");
+        assert_eq!(embedded_at, created_at);
     }
 
     #[test]
