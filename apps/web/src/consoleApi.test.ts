@@ -96,6 +96,15 @@ describe("ConsoleApiClient", () => {
           readiness: "ready",
           liveness: "stopped"
         }
+      }),
+      jsonResponse({
+        connector_id: "discord:default",
+        bot: {
+          id: "123",
+          username: "bot"
+        },
+        warnings: [],
+        policy_warnings: []
       })
     ];
     const fetcher: typeof fetch = (input, init) => {
@@ -116,6 +125,9 @@ describe("ConsoleApiClient", () => {
     });
     await client.listChannels();
     await client.setChannelEnabled("echo:default", false);
+    await client.probeDiscordOnboarding({
+      token: "bot-token"
+    });
 
     expect(requestUrl(calls[1]?.input)).toBe("/console/v1/channels");
     const listHeaders = new Headers(calls[1]?.init?.headers);
@@ -125,6 +137,11 @@ describe("ConsoleApiClient", () => {
     const toggleHeaders = new Headers(calls[2]?.init?.headers);
     expect(toggleHeaders.get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(calls[2]?.init?.method).toBe("POST");
+
+    expect(requestUrl(calls[3]?.input)).toBe("/console/v1/channels/discord/onboarding/probe");
+    const probeHeaders = new Headers(calls[3]?.init?.headers);
+    expect(probeHeaders.get("x-palyra-csrf-token")).toBe("csrf-1");
+    expect(calls[3]?.init?.method).toBe("POST");
   });
 
   it("propagates structured backend errors", async () => {

@@ -423,6 +423,56 @@ export class ConsoleApiClient {
     );
   }
 
+  async probeDiscordOnboarding(
+    payload: {
+      account_id?: string;
+      token: string;
+      mode?: "local" | "remote_vps";
+      inbound_scope?: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
+      allow_from?: string[];
+      deny_from?: string[];
+      require_mention?: boolean;
+      mention_patterns?: string[];
+      concurrency_limit?: number;
+      broadcast_strategy?: "deny" | "mention_only" | "allow";
+      confirm_open_guild_channels?: boolean;
+    }
+  ): Promise<{ [key: string]: JsonValue }> {
+    return this.request(
+      "/console/v1/channels/discord/onboarding/probe",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      { csrf: true }
+    );
+  }
+
+  async applyDiscordOnboarding(
+    payload: {
+      account_id?: string;
+      token: string;
+      mode?: "local" | "remote_vps";
+      inbound_scope?: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
+      allow_from?: string[];
+      deny_from?: string[];
+      require_mention?: boolean;
+      mention_patterns?: string[];
+      concurrency_limit?: number;
+      broadcast_strategy?: "deny" | "mention_only" | "allow";
+      confirm_open_guild_channels?: boolean;
+    }
+  ): Promise<{ [key: string]: JsonValue }> {
+    return this.request(
+      "/console/v1/channels/discord/onboarding/apply",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      { csrf: true }
+    );
+  }
+
   async searchMemory(params?: URLSearchParams): Promise<{ hits: JsonValue[] }> {
     return this.request(buildPathWithQuery("/console/v1/memory/search", params));
   }

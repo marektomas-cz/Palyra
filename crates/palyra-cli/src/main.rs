@@ -3082,6 +3082,139 @@ fn agent_to_json(agent: &gateway_v1::Agent) -> serde_json::Value {
 fn run_channels(command: ChannelsCommand) -> Result<()> {
     match command {
         ChannelsCommand::Discord { command } => match command {
+            ChannelsDiscordCommand::Setup {
+                account_id,
+                url,
+                token,
+                principal,
+                device_id,
+                channel,
+                json,
+            } => {
+                if !std::io::stdin().is_terminal()
+                    || !std::io::stderr().is_terminal()
+                    || !std::io::stdout().is_terminal()
+                {
+                    anyhow::bail!(
+                        "discord setup requires an interactive terminal (stdin/stdout/stderr TTY)"
+                    );
+                }
+                let base_url = resolve_channels_base_url(url);
+                let admin_token = resolve_channels_token(token);
+                let setup_mode = prompt_discord_setup_mode()?;
+                let setup_token = prompt_secret_value(
+                    "Discord bot token (input hidden, paste and press Enter): ",
+                )?;
+                if setup_token.trim().is_empty() {
+                    anyhow::bail!("discord setup requires a non-empty bot token");
+                }
+
+                let connector_id = discord_connector_id(account_id.as_str())?;
+                let client = build_channels_client()?;
+                let probe_endpoint = format!(
+                    "{}/admin/v1/channels/discord/onboarding/probe",
+                    base_url.trim_end_matches('/'),
+                );
+                let probe_payload = json!({
+                    "account_id": account_id,
+                    "token": setup_token,
+                    "mode": setup_mode,
+                });
+                let probe_response = send_channels_request(
+                    client.post(probe_endpoint).json(&probe_payload),
+                    admin_token.clone(),
+                    principal.clone(),
+                    device_id.clone(),
+                    channel.clone(),
+                    "failed to call discord onboarding probe endpoint",
+                )?;
+                let bot_id = read_json_string(&probe_response, &["bot", "id"]).unwrap_or("unknown");
+                let bot_username =
+                    read_json_string(&probe_response, &["bot", "username"]).unwrap_or("unknown");
+                eprintln!(
+                    "discord setup preflight: token valid for bot {} ({})",
+                    bot_username, bot_id
+                );
+                emit_discord_onboarding_warnings(&probe_response);
+
+                let inbound_scope = prompt_discord_setup_scope()?;
+                let allow_from = prompt_discord_sender_filters(
+                    "Allow-from sender IDs (comma separated, optional): ",
+                )?;
+                let deny_from = prompt_discord_sender_filters(
+                    "Deny-from sender IDs (comma separated, optional): ",
+                )?;
+                let require_mention_default = inbound_scope != "open_guild_channels";
+                let require_mention = prompt_yes_no_default(
+                    format!(
+                        "Require mention in guild channels? [{}]: ",
+                        if require_mention_default { "Y/n" } else { "y/N" }
+                    )
+                    .as_str(),
+                    require_mention_default,
+                )?;
+                let broadcast_strategy = prompt_discord_broadcast_strategy()?;
+                let concurrency_limit = prompt_discord_concurrency_limit()?;
+                let confirm_open = if inbound_scope == "open_guild_channels" {
+                    prompt_yes_no("Open guild channels are high-risk. Confirm open scope? [y/N]: ")?
+                } else {
+                    false
+                };
+
+                let apply_endpoint = format!(
+                    "{}/admin/v1/channels/discord/onboarding/apply",
+                    base_url.trim_end_matches('/'),
+                );
+                let apply_payload = json!({
+                    "account_id": account_id,
+                    "token": setup_token,
+                    "mode": setup_mode,
+                    "inbound_scope": inbound_scope,
+                    "allow_from": allow_from,
+                    "deny_from": deny_from,
+                    "require_mention": require_mention,
+                    "concurrency_limit": concurrency_limit,
+                    "broadcast_strategy": broadcast_strategy,
+                    "confirm_open_guild_channels": confirm_open,
+                });
+                let response = send_channels_request(
+                    client.post(apply_endpoint).json(&apply_payload),
+                    admin_token,
+                    principal,
+                    device_id,
+                    channel,
+                    "failed to call discord onboarding apply endpoint",
+                )?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&response)
+                            .context("failed to encode discord onboarding apply payload as JSON")?
+                    );
+                } else {
+                    let token_vault_ref =
+                        read_json_string(&response, &["applied", "token_vault_ref"])
+                            .unwrap_or("unknown");
+                    let config_path = read_json_string(&response, &["applied", "config_path"])
+                        .unwrap_or("unknown");
+                    let restart_required = response
+                        .get("applied")
+                        .and_then(Value::as_object)
+                        .and_then(|applied| applied.get("restart_required_for_routing_rules"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    println!(
+                        "channels.discord.setup connector_id={} bot_id={} bot_username={} token_vault_ref={} config_path={} restart_required_for_routing_rules={}",
+                        connector_id,
+                        bot_id,
+                        bot_username,
+                        token_vault_ref,
+                        config_path,
+                        restart_required
+                    );
+                    emit_discord_onboarding_warnings(&response);
+                }
+            }
             ChannelsDiscordCommand::Status {
                 account_id,
                 url,
@@ -3110,7 +3243,7 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                 )?;
                 emit_channels_status(response, json)?;
             }
-            ChannelsDiscordCommand::TestSend {
+            ChannelsDiscordCommand::Verify {
                 account_id,
                 to,
                 text,
@@ -3125,7 +3258,7 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                 json,
             } => {
                 if !confirm {
-                    anyhow::bail!("discord test-send requires explicit confirmation (--confirm)");
+                    anyhow::bail!("discord verify requires explicit confirmation (--confirm)");
                 }
                 let connector_id = discord_connector_id(account_id.as_str())?;
                 let base_url = resolve_channels_base_url(url);
@@ -3178,7 +3311,7 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                         .and_then(Value::as_u64)
                         .unwrap_or(0);
                     println!(
-                        "channels.discord.test_send connector_id={} delivered={} retried={} dead_lettered={}",
+                        "channels.discord.verify connector_id={} delivered={} retried={} dead_lettered={}",
                         connector_id, delivered, retried, dead_lettered
                     );
                 }
@@ -7705,6 +7838,125 @@ fn resolve_and_prompt_missing_skill_secrets(
         }
     }
     Ok(missing)
+}
+
+fn prompt_discord_setup_mode() -> Result<String> {
+    if prompt_yes_no("Deployment mode remote/VPS? [y/N]: ")? {
+        Ok("remote_vps".to_owned())
+    } else {
+        Ok("local".to_owned())
+    }
+}
+
+fn prompt_discord_setup_scope() -> Result<String> {
+    eprint!(
+        "Inbound scope: [1] DM only, [2] Allowlisted guild senders (recommended), [3] Open guild channels: "
+    );
+    std::io::stderr().flush().context("stderr flush failed")?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("failed to read discord inbound scope selection")?;
+    let normalized = answer.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "1" | "dm" | "dm_only" | "dm-only" => Ok("dm_only".to_owned()),
+        "2" | "allowlisted" | "allowlisted_guild_channels" | "allowlisted-guild-channels" => {
+            Ok("allowlisted_guild_channels".to_owned())
+        }
+        "3" | "open" | "open_guild_channels" | "open-guild-channels" => {
+            Ok("open_guild_channels".to_owned())
+        }
+        _ => anyhow::bail!("unsupported inbound scope selection: {}", answer.trim()),
+    }
+}
+
+fn prompt_discord_sender_filters(prompt: &str) -> Result<Vec<String>> {
+    eprint!("{prompt}");
+    std::io::stderr().flush().context("stderr flush failed")?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).context("failed to read sender filter input")?;
+    let mut values = Vec::new();
+    for candidate in line.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        if !candidate.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '@' | ':' | '/' | '#')
+        }) {
+            anyhow::bail!("sender filter contains unsupported value '{}'", candidate);
+        }
+        let normalized = candidate.to_ascii_lowercase();
+        if !values.iter().any(|existing| existing == &normalized) {
+            values.push(normalized);
+        }
+    }
+    Ok(values)
+}
+
+fn prompt_discord_broadcast_strategy() -> Result<String> {
+    eprint!("Broadcast strategy [deny|mention_only|allow] (default deny): ");
+    std::io::stderr().flush().context("stderr flush failed")?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).context("failed to read broadcast strategy")?;
+    let normalized = answer.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "deny" => Ok("deny".to_owned()),
+        "mention_only" | "mention-only" => Ok("mention_only".to_owned()),
+        "allow" => Ok("allow".to_owned()),
+        _ => anyhow::bail!("unsupported broadcast strategy: {}", answer.trim()),
+    }
+}
+
+fn prompt_discord_concurrency_limit() -> Result<u64> {
+    eprint!("Concurrency limit per channel (1-32, default 2): ");
+    std::io::stderr().flush().context("stderr flush failed")?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).context("failed to read concurrency limit")?;
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        return Ok(2);
+    }
+    let parsed = trimmed
+        .parse::<u64>()
+        .with_context(|| format!("invalid concurrency limit '{}'", trimmed))?;
+    if !(1..=32).contains(&parsed) {
+        anyhow::bail!("concurrency limit must be within 1..=32");
+    }
+    Ok(parsed)
+}
+
+fn prompt_yes_no_default(prompt: &str, default: bool) -> Result<bool> {
+    eprint!("{prompt}");
+    std::io::stderr().flush().context("stderr flush failed")?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).context("failed to read interactive answer")?;
+    let normalized = answer.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(default);
+    }
+    Ok(matches!(normalized.as_str(), "y" | "yes"))
+}
+
+fn read_json_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut cursor = value;
+    for key in path {
+        cursor = cursor.get(*key)?;
+    }
+    cursor.as_str()
+}
+
+fn emit_discord_onboarding_warnings(payload: &Value) {
+    let preflight = payload.get("preflight").unwrap_or(payload);
+    let warnings = preflight.get("warnings").and_then(Value::as_array).cloned().unwrap_or_default();
+    for warning in warnings {
+        if let Some(text) = warning.as_str() {
+            eprintln!("warning: {text}");
+        }
+    }
+    let policy_warnings =
+        preflight.get("policy_warnings").and_then(Value::as_array).cloned().unwrap_or_default();
+    for warning in policy_warnings {
+        if let Some(text) = warning.as_str() {
+            eprintln!("policy-warning: {text}");
+        }
+    }
 }
 
 fn prompt_yes_no(prompt: &str) -> Result<bool> {

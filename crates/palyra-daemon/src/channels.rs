@@ -106,6 +106,27 @@ impl ChannelPlatform {
         self.supervisor.status(connector_id).map_err(ChannelPlatformError::from)
     }
 
+    pub fn ensure_discord_connector(
+        &self,
+        account_id: &str,
+    ) -> Result<ConnectorStatusSnapshot, ChannelPlatformError> {
+        let normalized_account_id = normalize_discord_account_id(account_id)?;
+        let connector_id = discord_connector_id(normalized_account_id.as_str());
+        if let Ok(status) = self.supervisor.status(connector_id.as_str()) {
+            if status.kind != ConnectorKind::Discord {
+                return Err(ChannelPlatformError::InvalidInput(format!(
+                    "connector '{}' is not a Discord connector (kind={})",
+                    connector_id,
+                    status.kind.as_str()
+                )));
+            }
+            return Ok(status);
+        }
+        let spec = discord_connector_spec(normalized_account_id.as_str(), false);
+        self.supervisor.register_connector(&spec)?;
+        self.supervisor.status(spec.connector_id.as_str()).map_err(ChannelPlatformError::from)
+    }
+
     pub fn runtime_snapshot(
         &self,
         connector_id: &str,
@@ -307,15 +328,7 @@ fn default_connector_specs() -> Vec<ConnectorInstanceSpec> {
             egress_allowlist: Vec::new(),
             enabled: true,
         },
-        ConnectorInstanceSpec {
-            connector_id: "discord:default".to_owned(),
-            kind: ConnectorKind::Discord,
-            principal: "channel:discord:default".to_owned(),
-            auth_profile_ref: Some("discord.default".to_owned()),
-            token_vault_ref: Some("global/discord_bot_token".to_owned()),
-            egress_allowlist: vec!["discord.com".to_owned(), "*.discord.com".to_owned()],
-            enabled: false,
-        },
+        discord_connector_spec("default", false),
         ConnectorInstanceSpec {
             connector_id: "slack:default".to_owned(),
             kind: ConnectorKind::Slack,
@@ -335,6 +348,54 @@ fn default_connector_specs() -> Vec<ConnectorInstanceSpec> {
             enabled: false,
         },
     ]
+}
+
+#[must_use]
+pub fn discord_connector_id(account_id: &str) -> String {
+    format!("discord:{}", account_id.trim().to_ascii_lowercase())
+}
+
+#[must_use]
+pub fn discord_principal(account_id: &str) -> String {
+    format!("channel:{}", discord_connector_id(account_id))
+}
+
+#[must_use]
+pub fn discord_token_vault_ref(account_id: &str) -> String {
+    let normalized = account_id.trim().to_ascii_lowercase();
+    if normalized == "default" {
+        return "global/discord_bot_token".to_owned();
+    }
+    format!("global/discord_bot_token.{normalized}")
+}
+
+#[allow(clippy::result_large_err)]
+pub fn normalize_discord_account_id(raw: &str) -> Result<String, ChannelPlatformError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ChannelPlatformError::InvalidInput(
+            "discord account_id cannot be empty".to_owned(),
+        ));
+    }
+    if !trimmed.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
+        return Err(ChannelPlatformError::InvalidInput(
+            "discord account_id contains unsupported characters".to_owned(),
+        ));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn discord_connector_spec(account_id: &str, enabled: bool) -> ConnectorInstanceSpec {
+    let normalized = account_id.trim().to_ascii_lowercase();
+    ConnectorInstanceSpec {
+        connector_id: discord_connector_id(normalized.as_str()),
+        kind: ConnectorKind::Discord,
+        principal: discord_principal(normalized.as_str()),
+        auth_profile_ref: Some(format!("discord.{normalized}")),
+        token_vault_ref: Some(discord_token_vault_ref(normalized.as_str())),
+        egress_allowlist: vec!["discord.com".to_owned(), "*.discord.com".to_owned()],
+        enabled,
+    }
 }
 
 struct GrpcChannelRouter {
@@ -487,4 +548,54 @@ fn unix_ms_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().try_into().unwrap_or(i64::MAX))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        discord_connector_id, discord_token_vault_ref, normalize_discord_account_id,
+        normalize_discord_target, ChannelPlatformError,
+    };
+
+    #[test]
+    fn discord_account_id_normalization_enforces_supported_charset() {
+        let normalized =
+            normalize_discord_account_id(" Ops.Team_1 ").expect("account id should normalize");
+        assert_eq!(normalized, "ops.team_1");
+        let invalid = normalize_discord_account_id("bad/account")
+            .expect_err("unsupported account_id characters should be rejected");
+        assert!(
+            matches!(invalid, ChannelPlatformError::InvalidInput(_)),
+            "invalid account id should return an InvalidInput error"
+        );
+    }
+
+    #[test]
+    fn discord_connector_and_vault_ref_helpers_match_default_conventions() {
+        assert_eq!(discord_connector_id("default"), "discord:default");
+        assert_eq!(discord_token_vault_ref("default"), "global/discord_bot_token");
+        assert_eq!(
+            discord_token_vault_ref("ops"),
+            "global/discord_bot_token.ops",
+            "non-default account should use scoped vault key suffix"
+        );
+    }
+
+    #[test]
+    fn normalize_discord_target_rejects_empty_and_unsupported_values() {
+        let normalized = normalize_discord_target(" channel:123456 ")
+            .expect("channel prefix should normalize to a target id");
+        assert_eq!(normalized, "123456");
+        let empty = normalize_discord_target("  ").expect_err("empty target should be rejected");
+        assert!(
+            matches!(empty, ChannelPlatformError::InvalidInput(_)),
+            "empty target should return InvalidInput"
+        );
+        let unsupported = normalize_discord_target("channel:12 34")
+            .expect_err("targets with spaces should be rejected");
+        assert!(
+            matches!(unsupported, ChannelPlatformError::InvalidInput(_)),
+            "unsupported target should return InvalidInput"
+        );
+    }
 }

@@ -217,6 +217,98 @@ describe("M35 web console app", () => {
     expect(requestBody(request?.body)).toContain("\"enabled\":false");
   });
 
+  it("runs discord onboarding preflight from channels wizard with CSRF-protected request", async () => {
+    const fetchMock = createQueuedFetch([
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        channel: "web",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 300
+      }),
+      jsonResponse({ approvals: [] }),
+      jsonResponse({
+        connectors: [
+          {
+            connector_id: "discord:default",
+            kind: "discord",
+            enabled: false,
+            readiness: "missing_credential",
+            liveness: "stopped",
+            queue_depth: { pending_outbox: 0, dead_letters: 0 }
+          }
+        ]
+      }),
+      jsonResponse({
+        connector: {
+          connector_id: "discord:default",
+          kind: "discord",
+          enabled: false,
+          readiness: "missing_credential",
+          liveness: "stopped",
+          queue_depth: { pending_outbox: 0, dead_letters: 0 }
+        }
+      }),
+      jsonResponse({ events: [], dead_letters: [] }),
+      jsonResponse({
+        connector_id: "discord:default",
+        account_id: "default",
+        mode: "local",
+        inbound_scope: "dm_only",
+        bot: { id: "123", username: "palyra-bot" },
+        warnings: [],
+        policy_warnings: [],
+        routing_preview: { connector_id: "discord:default" },
+        invite_url_template: "https://discord.com/oauth2/authorize?client_id=123&scope=bot&permissions=205824"
+      }),
+      jsonResponse({
+        connectors: [
+          {
+            connector_id: "discord:default",
+            kind: "discord",
+            enabled: false,
+            readiness: "missing_credential",
+            liveness: "stopped",
+            queue_depth: { pending_outbox: 0, dead_letters: 0 }
+          }
+        ]
+      }),
+      jsonResponse({
+        connector: {
+          connector_id: "discord:default",
+          kind: "discord",
+          enabled: false,
+          readiness: "missing_credential",
+          liveness: "stopped",
+          queue_depth: { pending_outbox: 0, dead_letters: 0 }
+        }
+      }),
+      jsonResponse({ events: [], dead_letters: [] })
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Channels" }));
+    expect(await screen.findByRole("heading", { name: "Discord Onboarding Wizard (M45)" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("2) Discord bot token"), {
+      target: { value: "test-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run preflight" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Discord preflight OK for palyra-bot (123).")).toBeInTheDocument();
+    });
+
+    expect(requestUrl(fetchMock.mock.calls[5][0])).toBe("/console/v1/channels/discord/onboarding/probe");
+    const request = fetchMock.mock.calls[5][1];
+    const headers = new Headers(request?.headers);
+    expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
+    expect(request?.method).toBe("POST");
+    expect(requestBody(request?.body)).toContain("\"token\":\"test-token\"");
+  });
+
   it("issues browser relay token from browser section with CSRF protection", async () => {
     const fetchMock = createQueuedFetch([
       jsonResponse({

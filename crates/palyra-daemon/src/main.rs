@@ -20,7 +20,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -65,19 +65,28 @@ use palyra_auth::{
 };
 use palyra_common::default_identity_store_root;
 use palyra_common::{
-    build_metadata, health_response, parse_daemon_bind_socket,
+    build_metadata,
+    config_system::{
+        parse_document_with_migration, set_value_at_path, write_document_with_backups,
+    },
+    daemon_config_schema::RootFileConfig,
+    default_config_search_paths, health_response, parse_config_path, parse_daemon_bind_socket,
     redaction::{is_sensitive_key as redaction_key_is_sensitive, redact_auth_error, redact_url},
     validate_canonical_id, HealthResponse,
 };
 use palyra_identity::IdentityManager;
 use palyra_identity::{FilesystemSecretStore, SecretStore};
-use palyra_policy::{evaluate_with_config, PolicyDecision, PolicyEvaluationConfig, PolicyRequest};
+use palyra_policy::{
+    evaluate_with_config, evaluate_with_context, PolicyDecision, PolicyEvaluationConfig,
+    PolicyRequest, PolicyRequestContext,
+};
 use palyra_skills::{
     audit_skill_artifact_security, inspect_skill_artifact, verify_skill_artifact,
     SkillSecurityAuditPolicy, SkillTrustStore,
 };
 use palyra_transport_quic::QuicTransportLimits;
 use palyra_vault::{Vault, VaultConfig as VaultConfigOptions, VaultRef};
+use reqwest::{Client as ReqwestClient, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -115,6 +124,16 @@ const CANVAS_RATE_LIMIT_MAX_IP_BUCKETS: usize = 4_096;
 const CANVAS_HTTP_MAX_TOKEN_BYTES: usize = 8 * 1024;
 const CANVAS_HTTP_MAX_CANVAS_ID_BYTES: usize = 64;
 const HTTP_MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+const DISCORD_ONBOARDING_HTTP_TIMEOUT_MS: u64 = 5_000;
+const DISCORD_ONBOARDING_CONFIG_BACKUPS: usize = 2;
+const DISCORD_APP_FLAG_GATEWAY_PRESENCE: u64 = 1 << 12;
+const DISCORD_APP_FLAG_GATEWAY_PRESENCE_LIMITED: u64 = 1 << 13;
+const DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS: u64 = 1 << 14;
+const DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS_LIMITED: u64 = 1 << 15;
+const DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT: u64 = 1 << 18;
+const DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT_LIMITED: u64 = 1 << 19;
+const DISCORD_MIN_INVITE_PERMISSIONS: u64 = (1 << 10) | (1 << 11) | (1 << 17) | (1 << 18);
 const CONSOLE_SESSION_COOKIE_NAME: &str = "palyra_console_session";
 const CONSOLE_CSRF_HEADER_NAME: &str = "x-palyra-csrf-token";
 const CONSOLE_SESSION_TTL_SECONDS: u64 = 30 * 60;
@@ -149,6 +168,8 @@ struct AppState {
     started_at: Instant,
     runtime: Arc<GatewayRuntimeState>,
     channels: Arc<channels::ChannelPlatform>,
+    vault: Arc<Vault>,
+    tool_allowed_tools: Vec<String>,
     browser_service_config: gateway::BrowserServiceRuntimeConfig,
     auth_runtime: Arc<gateway::AuthRuntimeState>,
     auth: GatewayAuthConfig,
@@ -374,6 +395,148 @@ struct ChannelTestSendRequest {
     auto_reaction: Option<String>,
     #[serde(default)]
     thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordOnboardingRequest {
+    #[serde(default)]
+    account_id: Option<String>,
+    token: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    inbound_scope: Option<String>,
+    #[serde(default)]
+    allow_from: Option<Vec<String>>,
+    #[serde(default)]
+    deny_from: Option<Vec<String>>,
+    #[serde(default)]
+    require_mention: Option<bool>,
+    #[serde(default)]
+    mention_patterns: Option<Vec<String>>,
+    #[serde(default)]
+    concurrency_limit: Option<u64>,
+    #[serde(default)]
+    broadcast_strategy: Option<String>,
+    #[serde(default)]
+    confirm_open_guild_channels: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiscordOnboardingMode {
+    Local,
+    RemoteVps,
+}
+
+impl DiscordOnboardingMode {
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        let normalized = raw?.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "local" => Some(Self::Local),
+            "remote_vps" | "remote-vps" | "remote" | "vps" => Some(Self::RemoteVps),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiscordOnboardingScope {
+    DmOnly,
+    AllowlistedGuildChannels,
+    OpenGuildChannels,
+}
+
+impl DiscordOnboardingScope {
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        let normalized = raw?.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "dm_only" | "dm-only" | "dm" => Some(Self::DmOnly),
+            "allowlisted_guild_channels" | "allowlisted-guild-channels" | "allowlisted" => {
+                Some(Self::AllowlistedGuildChannels)
+            }
+            "open_guild_channels" | "open-guild-channels" | "open" => Some(Self::OpenGuildChannels),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiscordPrivilegedIntentStatus {
+    Enabled,
+    Limited,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiscordPrivilegedIntentsSummary {
+    message_content: DiscordPrivilegedIntentStatus,
+    guild_members: DiscordPrivilegedIntentStatus,
+    presence: DiscordPrivilegedIntentStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiscordApplicationSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flags: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intents: Option<DiscordPrivilegedIntentsSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiscordBotIdentitySummary {
+    id: String,
+    username: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiscordRoutingPreview {
+    connector_id: String,
+    mode: DiscordOnboardingMode,
+    inbound_scope: DiscordOnboardingScope,
+    require_mention: bool,
+    mention_patterns: Vec<String>,
+    allow_from: Vec<String>,
+    deny_from: Vec<String>,
+    allow_direct_messages: bool,
+    broadcast_strategy: String,
+    concurrency_limit: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiscordOnboardingPreflightResponse {
+    connector_id: String,
+    account_id: String,
+    mode: DiscordOnboardingMode,
+    inbound_scope: DiscordOnboardingScope,
+    bot: DiscordBotIdentitySummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    application: Option<DiscordApplicationSummary>,
+    invite_url_template: String,
+    required_permissions: Vec<String>,
+    routing_preview: DiscordRoutingPreview,
+    warnings: Vec<String>,
+    policy_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DiscordOnboardingPlan {
+    connector_id: String,
+    account_id: String,
+    mode: DiscordOnboardingMode,
+    inbound_scope: DiscordOnboardingScope,
+    require_mention: bool,
+    mention_patterns: Vec<String>,
+    allow_from: Vec<String>,
+    deny_from: Vec<String>,
+    allow_direct_messages: bool,
+    broadcast_strategy: channel_router::BroadcastStrategy,
+    concurrency_limit: u64,
+    confirm_open_guild_channels: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1213,6 +1376,8 @@ async fn main() -> Result<()> {
         started_at,
         runtime: runtime.clone(),
         channels: Arc::clone(&channels),
+        vault: Arc::clone(&vault),
+        tool_allowed_tools: loaded.tool_call.allowed_tools.clone(),
         browser_service_config: gateway::BrowserServiceRuntimeConfig {
             enabled: loaded.tool_call.browser_service.enabled,
             endpoint: loaded.tool_call.browser_service.endpoint.clone(),
@@ -1250,6 +1415,14 @@ async fn main() -> Result<()> {
         .route("/admin/v1/channels/{connector_id}/logs", get(admin_channel_logs_handler))
         .route("/admin/v1/channels/{connector_id}/test", post(admin_channel_test_handler))
         .route("/admin/v1/channels/{connector_id}/test-send", post(admin_channel_test_send_handler))
+        .route(
+            "/admin/v1/channels/discord/onboarding/probe",
+            post(admin_discord_onboarding_probe_handler),
+        )
+        .route(
+            "/admin/v1/channels/discord/onboarding/apply",
+            post(admin_discord_onboarding_apply_handler),
+        )
         .route("/admin/v1/skills/{skill_id}/quarantine", post(admin_skill_quarantine_handler))
         .route("/admin/v1/skills/{skill_id}/enable", post(admin_skill_enable_handler))
         .layer(DefaultBodyLimit::max(HTTP_MAX_REQUEST_BODY_BYTES))
@@ -1301,6 +1474,14 @@ async fn main() -> Result<()> {
         .route(
             "/console/v1/channels/{connector_id}/test-send",
             post(console_channel_test_send_handler),
+        )
+        .route(
+            "/console/v1/channels/discord/onboarding/probe",
+            post(console_discord_onboarding_probe_handler),
+        )
+        .route(
+            "/console/v1/channels/discord/onboarding/apply",
+            post(console_discord_onboarding_apply_handler),
         )
         .route("/console/v1/skills", get(console_skills_list_handler))
         .route("/console/v1/skills/install", post(console_skills_install_handler))
@@ -2180,6 +2361,42 @@ async fn admin_channel_test_send_handler(
         "status": status,
         "runtime": runtime,
     })))
+}
+
+async fn admin_discord_onboarding_probe_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<DiscordOnboardingRequest>,
+) -> Result<Json<DiscordOnboardingPreflightResponse>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let response = build_discord_onboarding_preflight(&state, payload).await?;
+    Ok(Json(response))
+}
+
+async fn admin_discord_onboarding_apply_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<DiscordOnboardingRequest>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let response = apply_discord_onboarding(&state, payload).await?;
+    Ok(Json(response))
 }
 
 async fn admin_skill_quarantine_handler(
@@ -4324,6 +4541,738 @@ async fn console_channel_test_send_handler(
     })))
 }
 
+async fn console_discord_onboarding_probe_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<DiscordOnboardingRequest>,
+) -> Result<Json<DiscordOnboardingPreflightResponse>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let response = build_discord_onboarding_preflight(&state, payload).await?;
+    Ok(Json(response))
+}
+
+async fn console_discord_onboarding_apply_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<DiscordOnboardingRequest>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let response = apply_discord_onboarding(&state, payload).await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Clone)]
+struct DiscordOnboardingEvaluation {
+    token: String,
+    plan: DiscordOnboardingPlan,
+    preflight: DiscordOnboardingPreflightResponse,
+}
+
+async fn build_discord_onboarding_preflight(
+    state: &AppState,
+    payload: DiscordOnboardingRequest,
+) -> Result<DiscordOnboardingPreflightResponse, Response> {
+    let evaluation = evaluate_discord_onboarding_request(state, &payload, false).await?;
+    Ok(evaluation.preflight)
+}
+
+async fn apply_discord_onboarding(
+    state: &AppState,
+    payload: DiscordOnboardingRequest,
+) -> Result<Value, Response> {
+    let evaluation = evaluate_discord_onboarding_request(state, &payload, true).await?;
+    state
+        .channels
+        .ensure_discord_connector(evaluation.plan.account_id.as_str())
+        .map_err(channel_platform_error_response)?;
+
+    let token_vault_ref = channels::discord_token_vault_ref(evaluation.plan.account_id.as_str());
+    let parsed_ref = VaultRef::parse(token_vault_ref.as_str()).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to parse discord token vault ref: {error}"
+        )))
+    })?;
+    state
+        .vault
+        .put_secret(&parsed_ref.scope, parsed_ref.key.as_str(), evaluation.token.as_bytes())
+        .map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to store discord token in vault: {error}"
+            )))
+        })?;
+
+    let (config_path, config_created) = persist_discord_onboarding_config(&evaluation.plan)?;
+    let status = state
+        .channels
+        .set_enabled(evaluation.plan.connector_id.as_str(), true)
+        .map_err(channel_platform_error_response)?;
+    let runtime = state
+        .channels
+        .runtime_snapshot(evaluation.plan.connector_id.as_str())
+        .map_err(channel_platform_error_response)?;
+
+    Ok(json!({
+        "preflight": evaluation.preflight,
+        "applied": {
+            "token_vault_ref": token_vault_ref,
+            "connector_id": evaluation.plan.connector_id,
+            "config_path": config_path.display().to_string(),
+            "config_created": config_created,
+            "config_backups": DISCORD_ONBOARDING_CONFIG_BACKUPS,
+            "connector_enabled": true,
+            "restart_required_for_routing_rules": true,
+        },
+        "status": status,
+        "runtime": runtime,
+    }))
+}
+
+async fn evaluate_discord_onboarding_request(
+    state: &AppState,
+    payload: &DiscordOnboardingRequest,
+    require_open_scope_confirmation: bool,
+) -> Result<DiscordOnboardingEvaluation, Response> {
+    let token = normalize_discord_token(payload.token.as_str()).ok_or_else(|| {
+        runtime_status_response(tonic::Status::invalid_argument("discord token cannot be empty"))
+    })?;
+    let mut plan = build_discord_onboarding_plan(payload)?;
+    if require_open_scope_confirmation
+        && matches!(plan.inbound_scope, DiscordOnboardingScope::OpenGuildChannels)
+        && !plan.confirm_open_guild_channels
+    {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "open guild channels require explicit confirm_open_guild_channels=true",
+        )));
+    }
+
+    let (bot, application) = probe_discord_bot_identity(token.as_str()).await?;
+    plan = finalize_discord_onboarding_plan(plan, bot.id.as_str());
+    let warnings = build_discord_onboarding_warnings(
+        &plan,
+        application.as_ref(),
+        require_open_scope_confirmation,
+    );
+    let policy_warnings = evaluate_discord_policy_warnings(state, &plan);
+    let invite_client_id = application
+        .as_ref()
+        .and_then(|summary| summary.id.clone())
+        .unwrap_or_else(|| bot.id.clone());
+    let invite_url_template = format!(
+        "https://discord.com/oauth2/authorize?client_id={invite_client_id}&scope=bot&permissions={DISCORD_MIN_INVITE_PERMISSIONS}"
+    );
+    let preflight = DiscordOnboardingPreflightResponse {
+        connector_id: plan.connector_id.clone(),
+        account_id: plan.account_id.clone(),
+        mode: plan.mode,
+        inbound_scope: plan.inbound_scope,
+        bot,
+        application,
+        invite_url_template,
+        required_permissions: vec![
+            "View Channels".to_owned(),
+            "Send Messages".to_owned(),
+            "Read Message History".to_owned(),
+            "Embed Links".to_owned(),
+            "Attach Files".to_owned(),
+        ],
+        routing_preview: build_discord_routing_preview(&plan),
+        warnings,
+        policy_warnings,
+    };
+    Ok(DiscordOnboardingEvaluation { token, plan, preflight })
+}
+
+#[allow(clippy::result_large_err)]
+fn build_discord_onboarding_plan(
+    payload: &DiscordOnboardingRequest,
+) -> Result<DiscordOnboardingPlan, Response> {
+    let account_id =
+        channels::normalize_discord_account_id(payload.account_id.as_deref().unwrap_or("default"))
+            .map_err(channel_platform_error_response)?;
+    let mode = DiscordOnboardingMode::parse(payload.mode.as_deref())
+        .unwrap_or(DiscordOnboardingMode::Local);
+    if payload.mode.is_some() && DiscordOnboardingMode::parse(payload.mode.as_deref()).is_none() {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "mode must be one of: local, remote_vps",
+        )));
+    }
+    let inbound_scope = DiscordOnboardingScope::parse(payload.inbound_scope.as_deref())
+        .unwrap_or(DiscordOnboardingScope::DmOnly);
+    if payload.inbound_scope.is_some()
+        && DiscordOnboardingScope::parse(payload.inbound_scope.as_deref()).is_none()
+    {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "inbound_scope must be one of: dm_only, allowlisted_guild_channels, open_guild_channels",
+        )));
+    }
+    let require_mention = payload
+        .require_mention
+        .unwrap_or(!matches!(inbound_scope, DiscordOnboardingScope::OpenGuildChannels));
+    let mention_patterns = normalize_discord_mention_patterns(payload.mention_patterns.as_deref())?;
+    let allow_from = normalize_discord_sender_filters(payload.allow_from.as_deref(), "allow_from")?;
+    let deny_from = normalize_discord_sender_filters(payload.deny_from.as_deref(), "deny_from")?;
+    let broadcast_strategy = if let Some(value) = payload.broadcast_strategy.as_deref() {
+        channel_router::BroadcastStrategy::parse(value).ok_or_else(|| {
+            runtime_status_response(tonic::Status::invalid_argument(
+                "broadcast_strategy must be one of: deny, mention_only, allow",
+            ))
+        })?
+    } else {
+        channel_router::BroadcastStrategy::Deny
+    };
+    let concurrency_limit = payload.concurrency_limit.unwrap_or(2).clamp(1, 32);
+    Ok(DiscordOnboardingPlan {
+        connector_id: channels::discord_connector_id(account_id.as_str()),
+        account_id,
+        mode,
+        inbound_scope,
+        require_mention,
+        mention_patterns,
+        allow_from,
+        deny_from,
+        allow_direct_messages: true,
+        broadcast_strategy,
+        concurrency_limit,
+        confirm_open_guild_channels: payload.confirm_open_guild_channels.unwrap_or(false),
+    })
+}
+
+fn finalize_discord_onboarding_plan(
+    mut plan: DiscordOnboardingPlan,
+    bot_id: &str,
+) -> DiscordOnboardingPlan {
+    if plan.require_mention && plan.mention_patterns.is_empty() {
+        plan.mention_patterns = default_discord_mention_patterns(bot_id);
+    }
+    plan
+}
+
+fn build_discord_routing_preview(plan: &DiscordOnboardingPlan) -> DiscordRoutingPreview {
+    DiscordRoutingPreview {
+        connector_id: plan.connector_id.clone(),
+        mode: plan.mode,
+        inbound_scope: plan.inbound_scope,
+        require_mention: plan.require_mention,
+        mention_patterns: plan.mention_patterns.clone(),
+        allow_from: plan.allow_from.clone(),
+        deny_from: plan.deny_from.clone(),
+        allow_direct_messages: plan.allow_direct_messages,
+        broadcast_strategy: plan.broadcast_strategy.as_str().to_owned(),
+        concurrency_limit: plan.concurrency_limit,
+    }
+}
+
+fn build_discord_onboarding_warnings(
+    plan: &DiscordOnboardingPlan,
+    application: Option<&DiscordApplicationSummary>,
+    require_open_scope_confirmation: bool,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    match plan.inbound_scope {
+        DiscordOnboardingScope::DmOnly => warnings.push(
+            "DM-only onboarding keeps guild replies mention-gated; strict DM-only channel filtering arrives in M46."
+                .to_owned(),
+        ),
+        DiscordOnboardingScope::AllowlistedGuildChannels => {
+            if plan.allow_from.is_empty() {
+                warnings.push(
+                    "Allowlisted guild scope is selected but allow_from is empty. Add sender allowlist entries now or refine strict channel allowlists in M46."
+                        .to_owned(),
+                );
+            } else {
+                warnings.push(
+                    "Allowlisted guild scope currently uses sender and mention gates; strict per-channel allowlists are finalized in M46."
+                        .to_owned(),
+                );
+            }
+        }
+        DiscordOnboardingScope::OpenGuildChannels => {
+            warnings.push(
+                "Open guild channels can trigger unsolicited responses. Keep this mode temporary and move to scoped allowlists in M46."
+                    .to_owned(),
+            );
+            if !require_open_scope_confirmation && !plan.confirm_open_guild_channels {
+                warnings.push(
+                    "Open guild channels will require explicit confirmation on apply."
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if matches!(plan.broadcast_strategy, channel_router::BroadcastStrategy::Allow) {
+        warnings.push(
+            "Broadcast strategy is set to allow. This enables broad outbound fan-out; keep deny unless explicitly required."
+                .to_owned(),
+        );
+    }
+    if let Some(intents) = application.and_then(|summary| summary.intents.as_ref()) {
+        if !matches!(intents.message_content, DiscordPrivilegedIntentStatus::Enabled) {
+            warnings.push(
+                "Discord Message Content intent is not fully enabled. Inbound command quality may be degraded."
+                    .to_owned(),
+            );
+        }
+        if !matches!(intents.guild_members, DiscordPrivilegedIntentStatus::Enabled) {
+            warnings.push(
+                "Guild Members intent is not fully enabled. Mention and membership resolution may be limited."
+                    .to_owned(),
+            );
+        }
+    } else {
+        warnings.push(
+            "Unable to read Discord application flags; intents checks are best-effort and were not confirmed."
+                .to_owned(),
+        );
+    }
+    warnings
+}
+
+fn evaluate_discord_policy_warnings(state: &AppState, plan: &DiscordOnboardingPlan) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let principal = channels::discord_principal(plan.account_id.as_str());
+    let resource = format!("channel:{}", plan.connector_id);
+    for action in ["message.reply", "channel.send", "message.broadcast"] {
+        match evaluate_with_config(
+            &PolicyRequest {
+                principal: principal.clone(),
+                action: action.to_owned(),
+                resource: resource.clone(),
+            },
+            &PolicyEvaluationConfig::default(),
+        ) {
+            Ok(outcome) => {
+                if let PolicyDecision::DenyByDefault { reason } = outcome.decision {
+                    warnings.push(format!(
+                        "Policy warning: action '{action}' for '{}' is denied by default ({reason}).",
+                        plan.connector_id
+                    ));
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "Policy warning: failed to evaluate '{action}' for '{}': {}",
+                plan.connector_id, error
+            )),
+        }
+    }
+
+    let tool_policy = PolicyEvaluationConfig {
+        allowlisted_tools: state.tool_allowed_tools.clone(),
+        allow_sensitive_tools: false,
+        sensitive_tool_names: state.tool_allowed_tools.clone(),
+        sensitive_capability_names: vec![
+            "process_exec".to_owned(),
+            "network".to_owned(),
+            "secrets_read".to_owned(),
+            "filesystem_write".to_owned(),
+        ],
+        ..PolicyEvaluationConfig::default()
+    };
+    match evaluate_with_context(
+        &PolicyRequest {
+            principal: principal.clone(),
+            action: "tool.execute".to_owned(),
+            resource: "tool:palyra.process.run".to_owned(),
+        },
+        &PolicyRequestContext {
+            channel: Some(plan.connector_id.clone()),
+            tool_name: Some("palyra.process.run".to_owned()),
+            capabilities: vec!["process_exec".to_owned()],
+            ..PolicyRequestContext::default()
+        },
+        &tool_policy,
+    ) {
+        Ok(outcome) => {
+            if let PolicyDecision::DenyByDefault { reason } = outcome.decision {
+                warnings.push(format!(
+                    "Policy warning: tool execution for '{}' is currently denied ({reason}).",
+                    plan.connector_id
+                ));
+            }
+        }
+        Err(error) => warnings.push(format!(
+            "Policy warning: failed to evaluate tool execution policy for '{}': {}",
+            plan.connector_id, error
+        )),
+    }
+    warnings
+}
+
+async fn probe_discord_bot_identity(
+    token: &str,
+) -> Result<(DiscordBotIdentitySummary, Option<DiscordApplicationSummary>), Response> {
+    let client = ReqwestClient::builder()
+        .timeout(Duration::from_millis(DISCORD_ONBOARDING_HTTP_TIMEOUT_MS))
+        .build()
+        .map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to initialize discord preflight HTTP client: {error}"
+            )))
+        })?;
+    let me_url = build_discord_api_url("/users/@me")?;
+    let me_response = client
+        .get(me_url)
+        .header("Authorization", format!("Bot {token}"))
+        .header("User-Agent", "palyra-discord-onboarding/1.0")
+        .send()
+        .await
+        .map_err(|error| {
+            runtime_status_response(tonic::Status::unavailable(format!(
+                "failed to reach discord identity endpoint: {error}"
+            )))
+        })?;
+    let me_status = me_response.status();
+    let me_body = me_response.text().await.unwrap_or_default();
+    if me_status.as_u16() == 401 || me_status.as_u16() == 403 {
+        let summary = parse_discord_error_summary(me_body.as_str())
+            .unwrap_or_else(|| "unauthorized".to_owned());
+        return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+            "discord token validation failed (status={}): {}",
+            me_status.as_u16(),
+            summary
+        ))));
+    }
+    if !me_status.is_success() {
+        let summary = parse_discord_error_summary(me_body.as_str())
+            .unwrap_or_else(|| "unexpected response".to_owned());
+        return Err(runtime_status_response(tonic::Status::unavailable(format!(
+            "discord identity lookup failed (status={}): {}",
+            me_status.as_u16(),
+            summary
+        ))));
+    }
+    let me_json = serde_json::from_str::<Value>(me_body.as_str()).map_err(|error| {
+        runtime_status_response(tonic::Status::unavailable(format!(
+            "discord identity endpoint returned invalid JSON: {error}"
+        )))
+    })?;
+    let bot_id = me_json
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::unavailable(
+                "discord identity response is missing bot id",
+            ))
+        })?
+        .to_owned();
+    let bot_username = me_json
+        .get("username")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("discord-bot")
+        .to_owned();
+    let bot = DiscordBotIdentitySummary { id: bot_id, username: bot_username };
+    let application = fetch_discord_application_summary(&client, token).await;
+    Ok((bot, application))
+}
+
+async fn fetch_discord_application_summary(
+    client: &ReqwestClient,
+    token: &str,
+) -> Option<DiscordApplicationSummary> {
+    let url = build_discord_api_url("/oauth2/applications/@me").ok()?;
+    let response = client
+        .get(url)
+        .header("Authorization", format!("Bot {token}"))
+        .header("User-Agent", "palyra-discord-onboarding/1.0")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = response.text().await.ok()?;
+    let payload = serde_json::from_str::<Value>(body.as_str()).ok()?;
+    let id = payload.get("id").and_then(Value::as_str).map(str::to_owned);
+    let flags = payload.get("flags").and_then(Value::as_u64);
+    let intents = flags.map(resolve_discord_intents_from_flags);
+    Some(DiscordApplicationSummary { id, flags, intents })
+}
+
+fn resolve_discord_intents_from_flags(flags: u64) -> DiscordPrivilegedIntentsSummary {
+    let resolve = |enabled_bit: u64, limited_bit: u64| {
+        if (flags & enabled_bit) != 0 {
+            DiscordPrivilegedIntentStatus::Enabled
+        } else if (flags & limited_bit) != 0 {
+            DiscordPrivilegedIntentStatus::Limited
+        } else {
+            DiscordPrivilegedIntentStatus::Disabled
+        }
+    };
+    DiscordPrivilegedIntentsSummary {
+        presence: resolve(
+            DISCORD_APP_FLAG_GATEWAY_PRESENCE,
+            DISCORD_APP_FLAG_GATEWAY_PRESENCE_LIMITED,
+        ),
+        guild_members: resolve(
+            DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS,
+            DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS_LIMITED,
+        ),
+        message_content: resolve(
+            DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT,
+            DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT_LIMITED,
+        ),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn build_discord_api_url(path: &str) -> Result<Url, Response> {
+    Url::parse(format!("{DISCORD_API_BASE}{path}").as_str()).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to construct discord API URL: {error}"
+        )))
+    })
+}
+
+fn parse_discord_error_summary(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(message) = parsed.get("message").and_then(Value::as_str) {
+            let sanitized = sanitize_http_error_message(message);
+            let sanitized = sanitized.trim();
+            if !sanitized.is_empty() {
+                return Some(sanitized.to_owned());
+            }
+        }
+    }
+    let sanitized = sanitize_http_error_message(trimmed);
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized.chars().take(200).collect())
+    }
+}
+
+fn normalize_discord_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed
+        .strip_prefix("Bot ")
+        .or_else(|| trimmed.strip_prefix("bot "))
+        .unwrap_or(trimmed)
+        .trim();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_owned())
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn normalize_discord_sender_filters(
+    raw: Option<&[String]>,
+    field_name: &'static str,
+) -> Result<Vec<String>, Response> {
+    let mut values = Vec::new();
+    for candidate in raw.unwrap_or_default().iter().map(String::as_str).map(str::trim) {
+        if candidate.is_empty() {
+            continue;
+        }
+        if !candidate.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '@' | ':' | '/' | '#')
+        }) {
+            return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+                "{field_name} contains invalid sender identifier '{candidate}'"
+            ))));
+        }
+        let normalized = candidate.to_ascii_lowercase();
+        if !values.iter().any(|existing| existing == &normalized) {
+            values.push(normalized);
+        }
+    }
+    Ok(values)
+}
+
+#[allow(clippy::result_large_err)]
+fn normalize_discord_mention_patterns(raw: Option<&[String]>) -> Result<Vec<String>, Response> {
+    let mut patterns = Vec::new();
+    for candidate in raw.unwrap_or_default().iter().map(String::as_str) {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.len() > 128 {
+            return Err(runtime_status_response(tonic::Status::invalid_argument(
+                "mention_patterns entries must be at most 128 bytes",
+            )));
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        if !patterns.iter().any(|existing| existing == &normalized) {
+            patterns.push(normalized);
+        }
+    }
+    Ok(patterns)
+}
+
+fn default_discord_mention_patterns(bot_id: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for value in [format!("<@{bot_id}>"), format!("<@!{bot_id}>"), "@palyra".to_owned()] {
+        let normalized = value.trim().to_ascii_lowercase();
+        if !normalized.is_empty() && !patterns.iter().any(|existing| existing == &normalized) {
+            patterns.push(normalized);
+        }
+    }
+    patterns
+}
+
+#[allow(clippy::result_large_err)]
+fn persist_discord_onboarding_config(
+    plan: &DiscordOnboardingPlan,
+) -> Result<(PathBuf, bool), Response> {
+    let config_path = resolve_discord_onboarding_config_path()?;
+    let config_exists = config_path.exists();
+    let content = if config_exists {
+        fs::read_to_string(config_path.as_path()).map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to read config for discord onboarding update: {error}"
+            )))
+        })?
+    } else {
+        String::new()
+    };
+    let (mut document, _) = parse_document_with_migration(content.as_str()).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to parse config document for discord onboarding update: {error}"
+        )))
+    })?;
+    let mut merged_rules = document
+        .get("channel_router")
+        .and_then(|value| value.get("routing"))
+        .and_then(|value| value.get("channels"))
+        .and_then(toml::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|rule| {
+            rule.get("channel")
+                .and_then(toml::Value::as_str)
+                .is_none_or(|channel| !channel.eq_ignore_ascii_case(plan.connector_id.as_str()))
+        })
+        .collect::<Vec<_>>();
+    merged_rules.push(build_discord_onboarding_rule(plan));
+
+    set_value_at_path(&mut document, "channel_router.enabled", toml::Value::Boolean(true))
+        .map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to set channel_router.enabled during onboarding update: {error}"
+            )))
+        })?;
+    set_value_at_path(
+        &mut document,
+        "channel_router.routing.channels",
+        toml::Value::Array(merged_rules),
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to set channel_router routing rules during onboarding update: {error}"
+        )))
+    })?;
+    validate_discord_onboarding_document(&document)?;
+
+    if let Some(parent) = config_path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to create config directory during onboarding update: {error}"
+            )))
+        })?;
+    }
+    write_document_with_backups(
+        config_path.as_path(),
+        &document,
+        DISCORD_ONBOARDING_CONFIG_BACKUPS,
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to persist config during discord onboarding update: {error}"
+        )))
+    })?;
+    Ok((config_path, !config_exists))
+}
+
+fn build_discord_onboarding_rule(plan: &DiscordOnboardingPlan) -> toml::Value {
+    let mut map = toml::map::Map::new();
+    map.insert("channel".to_owned(), toml::Value::String(plan.connector_id.clone()));
+    map.insert("enabled".to_owned(), toml::Value::Boolean(true));
+    map.insert(
+        "mention_patterns".to_owned(),
+        toml::Value::Array(
+            plan.mention_patterns.iter().map(|value| toml::Value::String(value.clone())).collect(),
+        ),
+    );
+    map.insert(
+        "allow_from".to_owned(),
+        toml::Value::Array(
+            plan.allow_from.iter().map(|value| toml::Value::String(value.clone())).collect(),
+        ),
+    );
+    map.insert(
+        "deny_from".to_owned(),
+        toml::Value::Array(
+            plan.deny_from.iter().map(|value| toml::Value::String(value.clone())).collect(),
+        ),
+    );
+    map.insert(
+        "allow_direct_messages".to_owned(),
+        toml::Value::Boolean(plan.allow_direct_messages),
+    );
+    map.insert(
+        "broadcast_strategy".to_owned(),
+        toml::Value::String(plan.broadcast_strategy.as_str().to_owned()),
+    );
+    map.insert(
+        "concurrency_limit".to_owned(),
+        toml::Value::Integer(i64::try_from(plan.concurrency_limit).unwrap_or(i64::MAX)),
+    );
+    toml::Value::Table(map)
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_discord_onboarding_document(document: &toml::Value) -> Result<(), Response> {
+    let serialized = toml::to_string(document).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to serialize onboarding config document: {error}"
+        )))
+    })?;
+    let _: RootFileConfig = toml::from_str(serialized.as_str()).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "onboarding config update produced invalid daemon schema: {error}"
+        )))
+    })?;
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn resolve_discord_onboarding_config_path() -> Result<PathBuf, Response> {
+    if let Ok(path_raw) = std::env::var("PALYRA_CONFIG") {
+        let parsed = parse_config_path(path_raw.as_str()).map_err(|error| {
+            runtime_status_response(tonic::Status::invalid_argument(format!(
+                "PALYRA_CONFIG contains an invalid config path: {error}"
+            )))
+        })?;
+        return Ok(parsed);
+    }
+    let candidates = default_config_search_paths();
+    if candidates.is_empty() {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "no default config path is available on this platform; set PALYRA_CONFIG first",
+        )));
+    }
+    for candidate in candidates.iter() {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+    Ok(candidates[0].clone())
+}
+
 fn parse_csv_values(raw: Option<&str>) -> Vec<String> {
     raw.map(|value| {
         value
@@ -6063,20 +7012,23 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        build_memory_embedding_provider, clamp_console_relay_token_ttl_ms,
-        connector_db_path_from_journal_path, constant_time_eq_bytes,
-        consume_admin_rate_limit_with_now, consume_canvas_rate_limit_with_now,
-        enforce_remote_bind_guard, find_hashed_secret_map_key, loopback_grpc_url,
-        mint_console_relay_token, mint_console_secret_token, parse_offline_env_flag,
-        prune_console_relay_tokens, redact_console_diagnostics_value,
+        build_discord_onboarding_plan, build_memory_embedding_provider,
+        clamp_console_relay_token_ttl_ms, connector_db_path_from_journal_path,
+        constant_time_eq_bytes, consume_admin_rate_limit_with_now,
+        consume_canvas_rate_limit_with_now, enforce_remote_bind_guard, find_hashed_secret_map_key,
+        loopback_grpc_url, mint_console_relay_token, mint_console_secret_token,
+        normalize_discord_token, parse_offline_env_flag, prune_console_relay_tokens,
+        redact_console_diagnostics_value, resolve_discord_intents_from_flags,
         resolve_model_provider_secret, runtime_status_response, sanitize_http_error_message,
         sha256_hex, validate_admin_auth_config, validate_canvas_http_canvas_id,
         validate_canvas_http_token_query, validate_process_runner_backend_policy,
-        ConsoleRelayToken, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
+        ConsoleRelayToken, DiscordOnboardingRequest, DiscordOnboardingScope,
+        DiscordPrivilegedIntentStatus, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
         ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CANVAS_HTTP_MAX_TOKEN_BYTES,
         CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
         CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS, CONSOLE_RELAY_TOKEN_MAX_TTL_MS,
-        CONSOLE_RELAY_TOKEN_MIN_TTL_MS,
+        CONSOLE_RELAY_TOKEN_MIN_TTL_MS, DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS,
+        DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT, DISCORD_APP_FLAG_GATEWAY_PRESENCE,
     };
     use crate::gateway::GatewayAuthConfig;
     use crate::model_provider::{
@@ -6107,6 +7059,66 @@ mod tests {
             kind: ModelProviderKind::OpenAiCompatible,
             ..ModelProviderConfig::default()
         }
+    }
+
+    #[test]
+    fn normalize_discord_token_strips_optional_bot_prefix() {
+        assert_eq!(
+            normalize_discord_token(" Bot abc.def "),
+            Some("abc.def".to_owned()),
+            "Bot prefix should be stripped"
+        );
+        assert_eq!(
+            normalize_discord_token("token-only"),
+            Some("token-only".to_owned()),
+            "plain token should remain unchanged"
+        );
+        assert_eq!(normalize_discord_token("   "), None, "blank token should be rejected");
+    }
+
+    #[test]
+    fn discord_intent_flags_map_to_enabled_statuses() {
+        let flags = DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT
+            | DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS
+            | DISCORD_APP_FLAG_GATEWAY_PRESENCE;
+        let intents = resolve_discord_intents_from_flags(flags);
+        assert!(
+            matches!(intents.message_content, DiscordPrivilegedIntentStatus::Enabled),
+            "message content flag should map to enabled"
+        );
+        assert!(
+            matches!(intents.guild_members, DiscordPrivilegedIntentStatus::Enabled),
+            "guild members flag should map to enabled"
+        );
+        assert!(
+            matches!(intents.presence, DiscordPrivilegedIntentStatus::Enabled),
+            "presence flag should map to enabled"
+        );
+    }
+
+    #[test]
+    fn discord_onboarding_plan_defaults_to_dm_only_safe_baseline() {
+        let payload = DiscordOnboardingRequest {
+            account_id: None,
+            token: "token".to_owned(),
+            mode: None,
+            inbound_scope: None,
+            allow_from: None,
+            deny_from: None,
+            require_mention: None,
+            mention_patterns: None,
+            concurrency_limit: None,
+            broadcast_strategy: None,
+            confirm_open_guild_channels: None,
+        };
+        let plan = build_discord_onboarding_plan(&payload)
+            .expect("default onboarding payload should parse");
+        assert!(
+            matches!(plan.inbound_scope, DiscordOnboardingScope::DmOnly),
+            "M45 onboarding should default to DM-only scope"
+        );
+        assert!(plan.require_mention, "safe baseline should require mention by default");
+        assert_eq!(plan.connector_id, "discord:default");
     }
 
     #[test]

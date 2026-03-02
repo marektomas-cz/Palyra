@@ -117,6 +117,24 @@ export function App() {
   const [channelsDiscordAutoReaction, setChannelsDiscordAutoReaction] = useState("");
   const [channelsDiscordThreadId, setChannelsDiscordThreadId] = useState("");
   const [channelsDiscordConfirm, setChannelsDiscordConfirm] = useState(false);
+  const [discordWizardBusy, setDiscordWizardBusy] = useState(false);
+  const [discordWizardAccountId, setDiscordWizardAccountId] = useState("default");
+  const [discordWizardMode, setDiscordWizardMode] = useState<"local" | "remote_vps">("local");
+  const [discordWizardToken, setDiscordWizardToken] = useState("");
+  const [discordWizardScope, setDiscordWizardScope] = useState<
+    "dm_only" | "allowlisted_guild_channels" | "open_guild_channels"
+  >("dm_only");
+  const [discordWizardAllowFrom, setDiscordWizardAllowFrom] = useState("");
+  const [discordWizardDenyFrom, setDiscordWizardDenyFrom] = useState("");
+  const [discordWizardRequireMention, setDiscordWizardRequireMention] = useState(true);
+  const [discordWizardBroadcast, setDiscordWizardBroadcast] = useState<"deny" | "mention_only" | "allow">("deny");
+  const [discordWizardConcurrency, setDiscordWizardConcurrency] = useState("2");
+  const [discordWizardConfirmOpen, setDiscordWizardConfirmOpen] = useState(false);
+  const [discordWizardPreflight, setDiscordWizardPreflight] = useState<JsonObject | null>(null);
+  const [discordWizardApply, setDiscordWizardApply] = useState<JsonObject | null>(null);
+  const [discordWizardVerifyTarget, setDiscordWizardVerifyTarget] = useState("channel:");
+  const [discordWizardVerifyText, setDiscordWizardVerifyText] = useState("palyra discord test message");
+  const [discordWizardVerifyConfirm, setDiscordWizardVerifyConfirm] = useState(false);
 
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [memoryQuery, setMemoryQuery] = useState("");
@@ -576,6 +594,174 @@ export function App() {
       setError(toErrorMessage(failure));
     } finally {
       setChannelsBusy(false);
+    }
+  }
+
+  function discordWizardConnectorId(): string | null {
+    const normalized = discordWizardAccountId.trim().toLowerCase();
+    if (normalized.length === 0) {
+      return "discord:default";
+    }
+    if (!/^[a-z0-9._-]+$/.test(normalized)) {
+      return null;
+    }
+    return `discord:${normalized}`;
+  }
+
+  function parseDiscordWizardSenderList(raw: string): string[] {
+    const entries: string[] = [];
+    for (const candidate of raw.split(",")) {
+      const normalized = candidate.trim().toLowerCase();
+      if (normalized.length === 0) {
+        continue;
+      }
+      if (!entries.includes(normalized)) {
+        entries.push(normalized);
+      }
+    }
+    return entries;
+  }
+
+  function parsedDiscordWizardConcurrency(): number {
+    const parsed = parseInteger(discordWizardConcurrency);
+    if (parsed === null || parsed <= 0) {
+      return 2;
+    }
+    return Math.min(Math.max(parsed, 1), 32);
+  }
+
+  function buildDiscordWizardPayload(): {
+    account_id?: string;
+    token: string;
+    mode: "local" | "remote_vps";
+    inbound_scope: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
+    allow_from: string[];
+    deny_from: string[];
+    require_mention: boolean;
+    concurrency_limit: number;
+    broadcast_strategy: "deny" | "mention_only" | "allow";
+    confirm_open_guild_channels: boolean;
+  } {
+    const normalized = discordWizardAccountId.trim().toLowerCase();
+    return {
+      account_id: normalized.length > 0 ? normalized : undefined,
+      token: discordWizardToken.trim(),
+      mode: discordWizardMode,
+      inbound_scope: discordWizardScope,
+      allow_from: parseDiscordWizardSenderList(discordWizardAllowFrom),
+      deny_from: parseDiscordWizardSenderList(discordWizardDenyFrom),
+      require_mention: discordWizardRequireMention,
+      concurrency_limit: parsedDiscordWizardConcurrency(),
+      broadcast_strategy: discordWizardBroadcast,
+      confirm_open_guild_channels: discordWizardConfirmOpen
+    };
+  }
+
+  async function runDiscordOnboardingProbe(): Promise<void> {
+    if (discordWizardToken.trim().length === 0) {
+      setError("Discord onboarding token cannot be empty.");
+      return;
+    }
+    const connectorId = discordWizardConnectorId();
+    if (connectorId === null) {
+      setError("Discord account ID contains unsupported characters.");
+      return;
+    }
+    setDiscordWizardBusy(true);
+    setError(null);
+    try {
+      const response = await api.probeDiscordOnboarding(buildDiscordWizardPayload());
+      setDiscordWizardPreflight(isJsonObject(response) ? response : null);
+      const botId = isJsonObject(response.bot) ? readString(response.bot, "id") : null;
+      const botUsername = isJsonObject(response.bot) ? readString(response.bot, "username") : null;
+      setNotice(
+        botId !== null && botUsername !== null
+          ? `Discord preflight OK for ${botUsername} (${botId}).`
+          : "Discord preflight completed."
+      );
+      await refreshChannels(connectorId);
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setDiscordWizardBusy(false);
+    }
+  }
+
+  async function applyDiscordOnboarding(): Promise<void> {
+    if (discordWizardToken.trim().length === 0) {
+      setError("Discord onboarding token cannot be empty.");
+      return;
+    }
+    const connectorId = discordWizardConnectorId();
+    if (connectorId === null) {
+      setError("Discord account ID contains unsupported characters.");
+      return;
+    }
+    if (discordWizardScope === "open_guild_channels" && !discordWizardConfirmOpen) {
+      setError("Open guild channels require explicit confirmation.");
+      return;
+    }
+
+    setDiscordWizardBusy(true);
+    setError(null);
+    try {
+      const response = await api.applyDiscordOnboarding(buildDiscordWizardPayload());
+      setDiscordWizardApply(isJsonObject(response) ? response : null);
+      const preflight = isJsonObject(response.preflight) ? response.preflight : null;
+      const bot = preflight !== null && isJsonObject(preflight.bot) ? preflight.bot : null;
+      const botId = bot !== null ? readString(bot, "id") : null;
+      const botUsername = bot !== null ? readString(bot, "username") : null;
+      setNotice(
+        botId !== null && botUsername !== null
+          ? `Discord onboarding applied for ${botUsername} (${botId}).`
+          : "Discord onboarding applied."
+      );
+      setDiscordWizardToken("");
+      await refreshChannels(connectorId);
+      await loadChannel(connectorId);
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setDiscordWizardBusy(false);
+    }
+  }
+
+  async function verifyDiscordOnboardingTarget(): Promise<void> {
+    const connectorId = discordWizardConnectorId();
+    if (connectorId === null) {
+      setError("Discord account ID contains unsupported characters.");
+      return;
+    }
+    if (discordWizardVerifyTarget.trim().length === 0) {
+      setError("Verification target cannot be empty.");
+      return;
+    }
+    if (!discordWizardVerifyConfirm) {
+      setError("Verification send requires explicit confirmation.");
+      return;
+    }
+    setDiscordWizardBusy(true);
+    setError(null);
+    try {
+      const response = await api.sendChannelDiscordTestSend(connectorId, {
+        target: discordWizardVerifyTarget.trim(),
+        text: emptyToUndefined(discordWizardVerifyText),
+        confirm: true
+      });
+      const dispatch = isJsonObject(response.dispatch) ? response.dispatch : null;
+      const delivered = dispatch !== null ? readString(dispatch, "delivered") : null;
+      setNotice(
+        delivered !== null
+          ? `Discord verification dispatched (delivered=${delivered}).`
+          : "Discord verification dispatched."
+      );
+      setDiscordWizardVerifyConfirm(false);
+      await refreshChannels(connectorId);
+      await refreshChannelLogs(connectorId);
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setDiscordWizardBusy(false);
     }
   }
 
@@ -1308,6 +1494,192 @@ export function App() {
               {channelsBusy ? "Refreshing..." : "Refresh"}
             </button>
           </header>
+
+          <section className="console-subpanel">
+            <h3>Discord Onboarding Wizard (M45)</h3>
+            <div className="console-grid-3">
+              <label>
+                1) Mode
+                <select
+                  value={discordWizardMode}
+                  onChange={(event) =>
+                    setDiscordWizardMode(event.target.value === "remote_vps" ? "remote_vps" : "local")
+                  }
+                >
+                  <option value="local">Local install</option>
+                  <option value="remote_vps">Remote/VPS install</option>
+                </select>
+              </label>
+              <label>
+                Account ID
+                <input
+                  value={discordWizardAccountId}
+                  onChange={(event) => setDiscordWizardAccountId(event.target.value)}
+                  placeholder="default"
+                />
+              </label>
+              <label>
+                2) Discord bot token
+                <input
+                  type="password"
+                  value={discordWizardToken}
+                  onChange={(event) => setDiscordWizardToken(event.target.value)}
+                  placeholder="Paste token (never persisted in config)"
+                />
+              </label>
+            </div>
+            <div className="console-inline-actions">
+              <button
+                type="button"
+                onClick={() => void runDiscordOnboardingProbe()}
+                disabled={discordWizardBusy}
+              >
+                {discordWizardBusy ? "Running..." : "Run preflight"}
+              </button>
+            </div>
+
+            <div className="console-grid-3">
+              <label>
+                4) Inbound scope
+                <select
+                  value={discordWizardScope}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    if (
+                      next === "dm_only" ||
+                      next === "allowlisted_guild_channels" ||
+                      next === "open_guild_channels"
+                    ) {
+                      setDiscordWizardScope(next);
+                    }
+                  }}
+                >
+                  <option value="dm_only">DM only (safe default)</option>
+                  <option value="allowlisted_guild_channels">Allowlisted guild senders (recommended)</option>
+                  <option value="open_guild_channels">Open guild channels (not recommended)</option>
+                </select>
+              </label>
+              <label>
+                5) Broadcast strategy
+                <select
+                  value={discordWizardBroadcast}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    if (next === "deny" || next === "mention_only" || next === "allow") {
+                      setDiscordWizardBroadcast(next);
+                    }
+                  }}
+                >
+                  <option value="deny">deny</option>
+                  <option value="mention_only">mention_only</option>
+                  <option value="allow">allow</option>
+                </select>
+              </label>
+              <label>
+                Concurrency limit
+                <input
+                  value={discordWizardConcurrency}
+                  onChange={(event) => setDiscordWizardConcurrency(event.target.value)}
+                />
+              </label>
+            </div>
+
+            <div className="console-grid-2">
+              <label>
+                Allow-from sender IDs (comma separated)
+                <input
+                  value={discordWizardAllowFrom}
+                  onChange={(event) => setDiscordWizardAllowFrom(event.target.value)}
+                  placeholder="user:123,user:456"
+                />
+              </label>
+              <label>
+                Deny-from sender IDs (comma separated)
+                <input
+                  value={discordWizardDenyFrom}
+                  onChange={(event) => setDiscordWizardDenyFrom(event.target.value)}
+                  placeholder="bot:spammy"
+                />
+              </label>
+            </div>
+
+            <div className="console-grid-3">
+              <label className="console-checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={discordWizardRequireMention}
+                  onChange={(event) => setDiscordWizardRequireMention(event.target.checked)}
+                />
+                Require mention in guild channels
+              </label>
+              <label className="console-checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={discordWizardConfirmOpen}
+                  onChange={(event) => setDiscordWizardConfirmOpen(event.target.checked)}
+                />
+                Confirm open guild scope
+              </label>
+              <div className="console-inline-actions">
+                <button
+                  type="button"
+                  onClick={() => void applyDiscordOnboarding()}
+                  disabled={discordWizardBusy}
+                >
+                  {discordWizardBusy ? "Applying..." : "Apply onboarding"}
+                </button>
+              </div>
+            </div>
+
+            <div className="console-grid-3">
+              <label>
+                6) Verification target
+                <input
+                  value={discordWizardVerifyTarget}
+                  onChange={(event) => setDiscordWizardVerifyTarget(event.target.value)}
+                  placeholder="channel:1234567890"
+                />
+              </label>
+              <label>
+                Verification text
+                <input
+                  value={discordWizardVerifyText}
+                  onChange={(event) => setDiscordWizardVerifyText(event.target.value)}
+                />
+              </label>
+              <label className="console-checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={discordWizardVerifyConfirm}
+                  onChange={(event) => setDiscordWizardVerifyConfirm(event.target.checked)}
+                />
+                Confirm verification send
+              </label>
+            </div>
+            <div className="console-inline-actions">
+              <button
+                type="button"
+                onClick={() => void verifyDiscordOnboardingTarget()}
+                disabled={discordWizardBusy}
+              >
+                {discordWizardBusy ? "Sending..." : "Run verification"}
+              </button>
+            </div>
+
+            {discordWizardPreflight !== null && (
+              <section className="console-subpanel">
+                <h4>Preflight snapshot</h4>
+                <pre>{toPrettyJson(discordWizardPreflight, revealSensitiveValues)}</pre>
+              </section>
+            )}
+            {discordWizardApply !== null && (
+              <section className="console-subpanel">
+                <h4>Apply snapshot</h4>
+                <pre>{toPrettyJson(discordWizardApply, revealSensitiveValues)}</pre>
+              </section>
+            )}
+          </section>
+
           <div className="console-table-wrap">
             <table className="console-table">
               <thead>

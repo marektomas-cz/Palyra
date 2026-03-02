@@ -574,6 +574,22 @@ pub enum AuthCredentialArg {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ChannelsDiscordCommand {
+    Setup {
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Status {
         #[arg(long, default_value = "default")]
         account_id: String,
@@ -590,7 +606,8 @@ pub enum ChannelsDiscordCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    TestSend {
+    #[command(visible_alias = "test-send")]
+    Verify {
         #[arg(long, default_value = "default")]
         account_id: String,
         #[arg(long)]
@@ -2081,6 +2098,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_channels_discord_setup() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "channels",
+            "discord",
+            "setup",
+            "--account-id",
+            "ops",
+            "--url",
+            "http://127.0.0.1:7142",
+            "--token",
+            "admin-token",
+            "--principal",
+            "admin:ops",
+            "--device-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--channel",
+            "cli",
+            "--json",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Channels {
+                command: ChannelsCommand::Discord {
+                    command: ChannelsDiscordCommand::Setup {
+                        account_id: "ops".to_owned(),
+                        url: Some("http://127.0.0.1:7142".to_owned()),
+                        token: Some("admin-token".to_owned()),
+                        principal: "admin:ops".to_owned(),
+                        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                        channel: Some("cli".to_owned()),
+                        json: true,
+                    },
+                }
+            }
+        );
+    }
+
+    #[test]
     fn parse_channels_discord_status() {
         let parsed = Cli::parse_from([
             "palyra",
@@ -2120,7 +2176,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_channels_discord_test_send() {
+    fn parse_channels_discord_verify_via_test_send_alias() {
         let parsed = Cli::parse_from([
             "palyra",
             "channels",
@@ -2146,7 +2202,7 @@ mod tests {
             parsed.command,
             Command::Channels {
                 command: ChannelsCommand::Discord {
-                    command: ChannelsDiscordCommand::TestSend {
+                    command: ChannelsDiscordCommand::Verify {
                         account_id: "default".to_owned(),
                         to: "channel:123456".to_owned(),
                         text: "hello".to_owned(),
@@ -2155,6 +2211,40 @@ mod tests {
                         thread_id: Some("thread-1".to_owned()),
                         url: Some("http://127.0.0.1:7142".to_owned()),
                         token: Some("admin-token".to_owned()),
+                        principal: "user:local".to_owned(),
+                        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                        channel: None,
+                        json: false,
+                    },
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_channels_discord_verify_command_name() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "channels",
+            "discord",
+            "verify",
+            "--to",
+            "channel:123456",
+            "--confirm",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Channels {
+                command: ChannelsCommand::Discord {
+                    command: ChannelsDiscordCommand::Verify {
+                        account_id: "default".to_owned(),
+                        to: "channel:123456".to_owned(),
+                        text: "palyra discord test message".to_owned(),
+                        confirm: true,
+                        auto_reaction: None,
+                        thread_id: None,
+                        url: None,
+                        token: None,
                         principal: "user:local".to_owned(),
                         device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
                         channel: None,
