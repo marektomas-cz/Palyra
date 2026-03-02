@@ -138,6 +138,7 @@ impl Vault {
         }
 
         ensure_owner_only_dir(&root)?;
+        let root = canonicalize_existing_dir(root.as_path(), "vault root directory")?;
         let backend = select_backend(&root, config.backend_preference)?;
         let kek = derive_device_kek(identity_store_root.as_path())?;
         let vault = Self { root, backend, max_secret_bytes: config.max_secret_bytes, kek };
@@ -304,12 +305,9 @@ impl Vault {
         self.root.join(METADATA_FILE)
     }
 
-    fn metadata_lock_path(&self) -> PathBuf {
-        self.root.join(METADATA_LOCK_FILE)
-    }
-
     fn acquire_metadata_lock(&self) -> Result<MetadataLockGuard, VaultError> {
-        let lock_path = self.metadata_lock_path();
+        let lock_parent = canonicalize_existing_dir(self.root.as_path(), "vault root directory")?;
+        let lock_path = lock_parent.join(METADATA_LOCK_FILE);
         ensure_path_within_root(
             self.root.as_path(),
             lock_path.as_path(),
@@ -354,7 +352,8 @@ impl Vault {
     }
 
     fn read_metadata(&self) -> Result<MetadataFile, VaultError> {
-        let path = self.metadata_path();
+        let root = canonicalize_existing_dir(self.root.as_path(), "vault root directory")?;
+        let path = root.join(METADATA_FILE);
         ensure_path_within_root(self.root.as_path(), path.as_path(), "vault metadata path")?;
         if !path.exists() {
             return Ok(MetadataFile::default());
@@ -376,7 +375,8 @@ impl Vault {
     }
 
     fn write_metadata(&self, metadata: &MetadataFile) -> Result<(), VaultError> {
-        let path = self.metadata_path();
+        let root = canonicalize_existing_dir(self.root.as_path(), "vault root directory")?;
+        let path = root.join(METADATA_FILE);
         let tmp_path = path.with_extension(format!("tmp.{}", Ulid::new()));
         ensure_path_within_root(self.root.as_path(), path.as_path(), "vault metadata path")?;
         ensure_path_within_root(
@@ -481,7 +481,13 @@ fn maybe_reclaim_stale_lock_with_policy(
             "vault metadata lock path must end with '{METADATA_LOCK_FILE}'"
         )));
     }
-    let metadata = match fs::metadata(lock_path) {
+    let lock_parent = lock_path.parent().ok_or_else(|| {
+        VaultError::Io("vault metadata lock path must include a parent".to_owned())
+    })?;
+    let canonical_lock_parent =
+        canonicalize_existing_dir(lock_parent, "vault metadata lock parent directory")?;
+    let resolved_lock_path = canonical_lock_parent.join(METADATA_LOCK_FILE);
+    let metadata = match fs::metadata(&resolved_lock_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // Another process released the lock between `create_new` failure and inspection.
@@ -490,32 +496,32 @@ fn maybe_reclaim_stale_lock_with_policy(
         Err(error) => {
             return Err(VaultError::Io(format!(
                 "failed to inspect metadata lock {}: {error}",
-                lock_path.display()
+                resolved_lock_path.display()
             )));
         }
     };
     let modified = metadata.modified().map_err(|error| {
         VaultError::Io(format!(
             "failed to inspect metadata lock timestamp {}: {error}",
-            lock_path.display()
+            resolved_lock_path.display()
         ))
     })?;
     if now.duration_since(modified).unwrap_or(Duration::ZERO) < stale_age {
         return Ok(false);
     }
-    if let Ok(raw_marker) = fs::read_to_string(lock_path) {
+    if let Ok(raw_marker) = fs::read_to_string(&resolved_lock_path) {
         if let Some(marker) = parse_metadata_lock_marker(raw_marker.as_str()) {
             if metadata_lock_owner_is_alive(marker.pid) {
                 return Ok(false);
             }
         }
     }
-    match fs::remove_file(lock_path) {
+    match fs::remove_file(&resolved_lock_path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(VaultError::Io(format!(
             "failed to reclaim stale metadata lock {}: {error}",
-            lock_path.display()
+            resolved_lock_path.display()
         ))),
     }
 }
@@ -710,6 +716,44 @@ fn normalize_vault_root_path(raw: PathBuf) -> Result<PathBuf, VaultError> {
     Ok(normalized)
 }
 
+pub(crate) fn canonicalize_existing_dir(
+    path: &Path,
+    label: &'static str,
+) -> Result<PathBuf, VaultError> {
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        VaultError::Io(format!("failed to canonicalize {label} {}: {error}", path.display()))
+    })?;
+    if !canonical.is_dir() {
+        return Err(VaultError::Io(format!("{label} {} is not a directory", canonical.display())));
+    }
+    Ok(canonical)
+}
+
+pub(crate) fn normalize_storage_object_id(raw: &str) -> Result<String, VaultError> {
+    let normalized = raw.trim();
+    let digest = normalized.strip_prefix("obj_").ok_or_else(|| {
+        VaultError::InvalidObjectId(
+            "object id must have the shape 'obj_<64 lowercase hex characters>'".to_owned(),
+        )
+    })?;
+    if digest.len() != 64 || !digest.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(VaultError::InvalidObjectId(
+            "object id must have the shape 'obj_<64 lowercase hex characters>'".to_owned(),
+        ));
+    }
+    let decoded = hex::decode(digest).map_err(|error| {
+        VaultError::InvalidObjectId(format!(
+            "object id must contain valid hex digest bytes: {error}"
+        ))
+    })?;
+    if decoded.len() != 32 {
+        return Err(VaultError::InvalidObjectId(
+            "object id must include a 32-byte digest".to_owned(),
+        ));
+    }
+    Ok(format!("obj_{}", hex::encode(decoded)))
+}
+
 fn validate_no_parent_components(path: &Path, label: &'static str) -> Result<(), VaultError> {
     if path.as_os_str().is_empty() {
         return Err(VaultError::Io(format!("{label} cannot be empty")));
@@ -802,40 +846,57 @@ pub fn ensure_owner_only_dir(path: &Path) -> Result<(), VaultError> {
     fs::create_dir_all(path).map_err(|error| {
         VaultError::Io(format!("failed to create directory {}: {error}", path.display()))
     })?;
+    let canonical = canonicalize_existing_dir(path, "owner-only directory path")?;
     #[cfg(windows)]
     {
         let owner_sid = current_user_sid()?;
-        harden_windows_path_permissions(path, owner_sid.as_str(), true)?;
+        harden_windows_path_permissions(canonical.as_path(), owner_sid.as_str(), true)?;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            VaultError::Io(format!(
-                "failed to enforce owner-only directory permissions on {}: {error}",
-                path.display()
-            ))
-        })?;
+        fs::set_permissions(canonical.as_path(), fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                VaultError::Io(format!(
+                    "failed to enforce owner-only directory permissions on {}: {error}",
+                    canonical.display()
+                ))
+            },
+        )?;
     }
     Ok(())
 }
 
 pub fn ensure_owner_only_file(path: &Path) -> Result<(), VaultError> {
     validate_no_parent_components(path, "owner-only file path")?;
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        VaultError::Io(format!(
+            "failed to canonicalize owner-only file path {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !canonical.is_file() {
+        return Err(VaultError::Io(format!(
+            "owner-only file path {} is not a file",
+            canonical.display()
+        )));
+    }
     #[cfg(windows)]
     {
         let owner_sid = current_user_sid()?;
-        harden_windows_path_permissions(path, owner_sid.as_str(), false)?;
+        harden_windows_path_permissions(canonical.as_path(), owner_sid.as_str(), false)?;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-            VaultError::Io(format!(
-                "failed to enforce owner-only file permissions on {}: {error}",
-                path.display()
-            ))
-        })?;
+        fs::set_permissions(canonical.as_path(), fs::Permissions::from_mode(0o600)).map_err(
+            |error| {
+                VaultError::Io(format!(
+                    "failed to enforce owner-only file permissions on {}: {error}",
+                    canonical.display()
+                ))
+            },
+        )?;
     }
     Ok(())
 }
@@ -985,9 +1046,11 @@ mod tests {
 
             // Force metadata persistence failure after blob write by replacing metadata file path
             // with a directory before `write_metadata` attempts its atomic rename.
-            let metadata_path = self.root.join(super::METADATA_FILE);
+            let canonical_root =
+                super::canonicalize_existing_dir(self.root.as_path(), "metadata sabotage root")?;
+            let metadata_path = canonical_root.join(super::METADATA_FILE);
             super::ensure_path_within_root(
-                self.root.as_path(),
+                canonical_root.as_path(),
                 metadata_path.as_path(),
                 "metadata sabotage path",
             )?;
@@ -1093,8 +1156,10 @@ mod tests {
     #[test]
     fn vault_delete_restores_metadata_when_backend_delete_fails() -> Result<()> {
         let temp = tempdir()?;
-        let vault_root = temp.path().join("vault");
-        ensure_owner_only_dir(&vault_root)?;
+        let vault_root_raw = temp.path().join("vault");
+        ensure_owner_only_dir(&vault_root_raw)?;
+        let vault_root =
+            super::canonicalize_existing_dir(vault_root_raw.as_path(), "vault test root")?;
         let vault = Vault {
             root: vault_root,
             backend: Box::new(FailingDeleteBackend::default()),
@@ -1120,13 +1185,15 @@ mod tests {
     #[test]
     fn vault_put_secret_rolls_back_blob_when_metadata_write_fails() -> Result<()> {
         let temp = tempdir()?;
-        let vault_root = temp.path().join("vault");
-        ensure_owner_only_dir(&vault_root)?;
+        let vault_root_raw = temp.path().join("vault");
+        ensure_owner_only_dir(&vault_root_raw)?;
+        let vault_root =
+            super::canonicalize_existing_dir(vault_root_raw.as_path(), "vault test root")?;
         let objects = Arc::new(Mutex::new(HashMap::new()));
         let vault = Vault {
             root: vault_root.clone(),
             backend: Box::new(MetadataWriteFailureBackend {
-                root: vault_root,
+                root: vault_root.clone(),
                 objects: Arc::clone(&objects),
             }),
             max_secret_bytes: 1024,
@@ -1152,13 +1219,15 @@ mod tests {
     #[test]
     fn vault_put_secret_restores_previous_blob_when_metadata_write_fails() -> Result<()> {
         let temp = tempdir()?;
-        let vault_root = temp.path().join("vault");
-        ensure_owner_only_dir(&vault_root)?;
+        let vault_root_raw = temp.path().join("vault");
+        ensure_owner_only_dir(&vault_root_raw)?;
+        let vault_root =
+            super::canonicalize_existing_dir(vault_root_raw.as_path(), "vault test root")?;
         let objects = Arc::new(Mutex::new(HashMap::new()));
         let vault = Vault {
             root: vault_root.clone(),
             backend: Box::new(MetadataWriteFailureBackend {
-                root: vault_root,
+                root: vault_root.clone(),
                 objects: Arc::clone(&objects),
             }),
             max_secret_bytes: 1024,

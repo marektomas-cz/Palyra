@@ -8,7 +8,10 @@ use std::{
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ulid::Ulid;
 
-use crate::{ensure_owner_only_dir, ensure_owner_only_file, ensure_path_within_root, VaultError};
+use crate::{
+    canonicalize_existing_dir, ensure_owner_only_dir, ensure_owner_only_file,
+    ensure_path_within_root, normalize_storage_object_id, VaultError,
+};
 
 const BACKEND_MARKER_FILE: &str = "backend.kind";
 const OBJECTS_DIR: &str = "objects";
@@ -183,30 +186,14 @@ impl EncryptedFileBackend {
     fn new(root: &Path) -> Result<Self, VaultError> {
         let objects_root = root.join(OBJECTS_DIR);
         ensure_owner_only_dir(&objects_root)?;
+        let objects_root =
+            canonicalize_existing_dir(objects_root.as_path(), "encrypted-file objects directory")?;
         Ok(Self { objects_root })
     }
 
     fn object_path(&self, object_id: &str) -> Result<PathBuf, VaultError> {
-        let normalized = object_id.trim();
-        if normalized.is_empty() {
-            return Err(VaultError::InvalidObjectId(
-                "object id must only contain lowercase alnum, '_' or '-'".to_owned(),
-            ));
-        }
-        if normalized.contains("..") || normalized.contains('/') || normalized.contains('\\') {
-            return Err(VaultError::InvalidObjectId(
-                "object id cannot contain path separators or parent traversal sequences".to_owned(),
-            ));
-        }
-        if !normalized
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
-        {
-            return Err(VaultError::InvalidObjectId(
-                "object id must only contain lowercase alnum, '_' or '-'".to_owned(),
-            ));
-        }
-        let path = self.objects_root.join(normalized);
+        let normalized = normalize_storage_object_id(object_id)?;
+        let path = self.objects_root.join(normalized.as_str());
         ensure_path_within_root(
             self.objects_root.as_path(),
             path.as_path(),
@@ -287,15 +274,14 @@ impl BlobBackend for EncryptedFileBackend {
             path.as_path(),
             "encrypted-file object path",
         )?;
-        if !path.exists() {
-            return Ok(());
-        }
-        fs::remove_file(&path).map_err(|error| {
-            VaultError::Io(format!(
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(VaultError::Io(format!(
                 "failed to delete encrypted-file object {}: {error}",
                 path.display()
-            ))
-        })
+            ))),
+        }
     }
 }
 
