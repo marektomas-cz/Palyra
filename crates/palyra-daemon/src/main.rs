@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod agents;
 mod channel_router;
 mod channels;
@@ -398,6 +400,45 @@ struct ChannelTestSendRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ChannelRouterPreviewRequest {
+    channel: String,
+    text: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    sender_identity: Option<String>,
+    #[serde(default)]
+    sender_display: Option<String>,
+    #[serde(default)]
+    sender_verified: Option<bool>,
+    #[serde(default)]
+    is_direct_message: Option<bool>,
+    #[serde(default)]
+    requested_broadcast: Option<bool>,
+    #[serde(default)]
+    adapter_message_id: Option<String>,
+    #[serde(default)]
+    adapter_thread_id: Option<String>,
+    #[serde(default)]
+    max_payload_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelRouterPairingCodeMintRequest {
+    channel: String,
+    #[serde(default)]
+    issued_by: Option<String>,
+    #[serde(default)]
+    ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelRouterPairingsQuery {
+    #[serde(default)]
+    channel: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct DiscordOnboardingRequest {
     #[serde(default)]
     account_id: Option<String>,
@@ -416,6 +457,8 @@ struct DiscordOnboardingRequest {
     mention_patterns: Option<Vec<String>>,
     #[serde(default)]
     concurrency_limit: Option<u64>,
+    #[serde(default)]
+    direct_message_policy: Option<String>,
     #[serde(default)]
     broadcast_strategy: Option<String>,
     #[serde(default)]
@@ -503,6 +546,7 @@ struct DiscordRoutingPreview {
     allow_from: Vec<String>,
     deny_from: Vec<String>,
     allow_direct_messages: bool,
+    direct_message_policy: String,
     broadcast_strategy: String,
     concurrency_limit: u64,
 }
@@ -534,6 +578,7 @@ struct DiscordOnboardingPlan {
     allow_from: Vec<String>,
     deny_from: Vec<String>,
     allow_direct_messages: bool,
+    direct_message_policy: channel_router::DirectMessagePolicy,
     broadcast_strategy: channel_router::BroadcastStrategy,
     concurrency_limit: u64,
     confirm_open_guild_channels: bool,
@@ -1273,6 +1318,8 @@ async fn main() -> Result<()> {
         channel_router_default_channel_enabled = loaded.channel_router.default_channel_enabled,
         channel_router_default_allow_direct_messages =
             loaded.channel_router.default_allow_direct_messages,
+        channel_router_default_direct_message_policy =
+            loaded.channel_router.default_direct_message_policy.as_str(),
         channel_router_default_isolate_session_by_sender =
             loaded.channel_router.default_isolate_session_by_sender,
         channel_router_default_broadcast_strategy =
@@ -1415,6 +1462,14 @@ async fn main() -> Result<()> {
         .route("/admin/v1/channels/{connector_id}/logs", get(admin_channel_logs_handler))
         .route("/admin/v1/channels/{connector_id}/test", post(admin_channel_test_handler))
         .route("/admin/v1/channels/{connector_id}/test-send", post(admin_channel_test_send_handler))
+        .route("/admin/v1/channels/router/rules", get(admin_channel_router_rules_handler))
+        .route("/admin/v1/channels/router/warnings", get(admin_channel_router_warnings_handler))
+        .route("/admin/v1/channels/router/preview", post(admin_channel_router_preview_handler))
+        .route("/admin/v1/channels/router/pairings", get(admin_channel_router_pairings_handler))
+        .route(
+            "/admin/v1/channels/router/pairing-codes",
+            post(admin_channel_router_pairing_code_mint_handler),
+        )
         .route(
             "/admin/v1/channels/discord/onboarding/probe",
             post(admin_discord_onboarding_probe_handler),
@@ -1474,6 +1529,14 @@ async fn main() -> Result<()> {
         .route(
             "/console/v1/channels/{connector_id}/test-send",
             post(console_channel_test_send_handler),
+        )
+        .route("/console/v1/channels/router/rules", get(console_channel_router_rules_handler))
+        .route("/console/v1/channels/router/warnings", get(console_channel_router_warnings_handler))
+        .route("/console/v1/channels/router/preview", post(console_channel_router_preview_handler))
+        .route("/console/v1/channels/router/pairings", get(console_channel_router_pairings_handler))
+        .route(
+            "/console/v1/channels/router/pairing-codes",
+            post(console_channel_router_pairing_code_mint_handler),
         )
         .route(
             "/console/v1/channels/discord/onboarding/probe",
@@ -2360,6 +2423,113 @@ async fn admin_channel_test_send_handler(
         "dispatch": dispatch,
         "status": status,
         "runtime": runtime,
+    })))
+}
+
+async fn admin_channel_router_rules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let config = state.runtime.channel_router_config_snapshot();
+    let config_hash = state.runtime.channel_router_config_hash();
+    Ok(Json(json!({
+        "config": config,
+        "config_hash": config_hash,
+    })))
+}
+
+async fn admin_channel_router_warnings_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    Ok(Json(json!({
+        "warnings": state.runtime.channel_router_validation_warnings(),
+        "config_hash": state.runtime.channel_router_config_hash(),
+    })))
+}
+
+async fn admin_channel_router_preview_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ChannelRouterPreviewRequest>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let preview_input = build_channel_router_preview_input(payload)?;
+    let preview = state.runtime.channel_router_preview(&preview_input);
+    Ok(Json(json!({ "preview": preview })))
+}
+
+async fn admin_channel_router_pairings_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelRouterPairingsQuery>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let channel = query.channel.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    Ok(Json(json!({
+        "pairings": state.runtime.channel_router_pairing_snapshot(channel),
+        "config_hash": state.runtime.channel_router_config_hash(),
+    })))
+}
+
+async fn admin_channel_router_pairing_code_mint_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ChannelRouterPairingCodeMintRequest>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let channel = normalize_non_empty_field(payload.channel, "channel")?;
+    let issued_by =
+        payload.issued_by.unwrap_or_else(|| format!("{}@{}", context.principal, context.device_id));
+    let code = state
+        .runtime
+        .channel_router_mint_pairing_code(channel.as_str(), issued_by.as_str(), payload.ttl_ms)
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "code": code,
+        "config_hash": state.runtime.channel_router_config_hash(),
     })))
 }
 
@@ -3949,8 +4119,28 @@ async fn console_approval_decision_handler(
         })
         .await
         .map_err(runtime_status_response)?;
+    let pairing_outcome = if matches!(resolved.subject_type, ApprovalSubjectType::ChannelSend)
+        && resolved.subject_id.starts_with("dm_pairing:")
+    {
+        let outcome = state.runtime.channel_router_apply_pairing_approval(
+            resolved.approval_id.as_str(),
+            matches!(resolved.decision, Some(ApprovalDecision::Allow)),
+            resolved.decision_scope_ttl_ms,
+        );
+        Some(match outcome {
+            channel_router::PairingApprovalOutcome::Approved(_) => "approved",
+            channel_router::PairingApprovalOutcome::Denied => "denied",
+            channel_router::PairingApprovalOutcome::MissingPending => "missing_pending",
+            channel_router::PairingApprovalOutcome::PairingDisabled => "pairing_disabled",
+        })
+    } else {
+        None
+    };
     sync_console_chat_approval_to_stream(&state, &resolved).await;
-    Ok(Json(json!({ "approval": resolved })))
+    Ok(Json(json!({
+        "approval": resolved,
+        "dm_pairing": pairing_outcome,
+    })))
 }
 
 #[allow(clippy::result_large_err)]
@@ -4541,6 +4731,136 @@ async fn console_channel_test_send_handler(
     })))
 }
 
+async fn console_channel_router_rules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, false)?;
+    let config = state.runtime.channel_router_config_snapshot();
+    let config_hash = state.runtime.channel_router_config_hash();
+    Ok(Json(json!({
+        "config": config,
+        "config_hash": config_hash,
+    })))
+}
+
+async fn console_channel_router_warnings_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, false)?;
+    Ok(Json(json!({
+        "warnings": state.runtime.channel_router_validation_warnings(),
+        "config_hash": state.runtime.channel_router_config_hash(),
+    })))
+}
+
+async fn console_channel_router_preview_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ChannelRouterPreviewRequest>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let preview_input = build_channel_router_preview_input(payload)?;
+    let preview = state.runtime.channel_router_preview(&preview_input);
+    Ok(Json(json!({ "preview": preview })))
+}
+
+async fn console_channel_router_pairings_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelRouterPairingsQuery>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, false)?;
+    let channel = query.channel.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    Ok(Json(json!({
+        "pairings": state.runtime.channel_router_pairing_snapshot(channel),
+        "config_hash": state.runtime.channel_router_config_hash(),
+    })))
+}
+
+async fn console_channel_router_pairing_code_mint_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ChannelRouterPairingCodeMintRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let channel = normalize_non_empty_field(payload.channel, "channel")?;
+    let issued_by = payload
+        .issued_by
+        .unwrap_or_else(|| format!("{}@{}", session.context.principal, session.context.device_id));
+    let code = state
+        .runtime
+        .channel_router_mint_pairing_code(channel.as_str(), issued_by.as_str(), payload.ttl_ms)
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "code": code,
+        "config_hash": state.runtime.channel_router_config_hash(),
+    })))
+}
+
+#[allow(clippy::result_large_err)]
+fn build_channel_router_preview_input(
+    payload: ChannelRouterPreviewRequest,
+) -> Result<channel_router::InboundMessage, Response> {
+    let channel = normalize_non_empty_field(payload.channel, "channel")?;
+    if payload.text.trim().is_empty() {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "text cannot be empty for routing preview",
+        )));
+    }
+    Ok(channel_router::InboundMessage {
+        envelope_id: Ulid::new().to_string(),
+        channel,
+        conversation_id: payload.conversation_id.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }),
+        sender_handle: payload.sender_identity.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }),
+        sender_display: payload.sender_display.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }),
+        sender_verified: payload.sender_verified.unwrap_or(false),
+        text: payload.text,
+        max_payload_bytes: payload.max_payload_bytes.unwrap_or(64 * 1024),
+        is_direct_message: payload.is_direct_message.unwrap_or(false),
+        requested_broadcast: payload.requested_broadcast.unwrap_or(false),
+        adapter_message_id: payload.adapter_message_id.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }),
+        adapter_thread_id: payload.adapter_thread_id.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }),
+        retry_attempt: 0,
+    })
+}
+
 async fn console_discord_onboarding_probe_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4711,6 +5031,15 @@ fn build_discord_onboarding_plan(
     let mention_patterns = normalize_discord_mention_patterns(payload.mention_patterns.as_deref())?;
     let allow_from = normalize_discord_sender_filters(payload.allow_from.as_deref(), "allow_from")?;
     let deny_from = normalize_discord_sender_filters(payload.deny_from.as_deref(), "deny_from")?;
+    let direct_message_policy = if let Some(value) = payload.direct_message_policy.as_deref() {
+        channel_router::DirectMessagePolicy::parse(value).ok_or_else(|| {
+            runtime_status_response(tonic::Status::invalid_argument(
+                "direct_message_policy must be one of: deny, pairing, allow",
+            ))
+        })?
+    } else {
+        channel_router::DirectMessagePolicy::Pairing
+    };
     let broadcast_strategy = if let Some(value) = payload.broadcast_strategy.as_deref() {
         channel_router::BroadcastStrategy::parse(value).ok_or_else(|| {
             runtime_status_response(tonic::Status::invalid_argument(
@@ -4731,6 +5060,7 @@ fn build_discord_onboarding_plan(
         allow_from,
         deny_from,
         allow_direct_messages: true,
+        direct_message_policy,
         broadcast_strategy,
         concurrency_limit,
         confirm_open_guild_channels: payload.confirm_open_guild_channels.unwrap_or(false),
@@ -4757,6 +5087,7 @@ fn build_discord_routing_preview(plan: &DiscordOnboardingPlan) -> DiscordRouting
         allow_from: plan.allow_from.clone(),
         deny_from: plan.deny_from.clone(),
         allow_direct_messages: plan.allow_direct_messages,
+        direct_message_policy: plan.direct_message_policy.as_str().to_owned(),
         broadcast_strategy: plan.broadcast_strategy.as_str().to_owned(),
         concurrency_limit: plan.concurrency_limit,
     }
@@ -4770,25 +5101,25 @@ fn build_discord_onboarding_warnings(
     let mut warnings = Vec::new();
     match plan.inbound_scope {
         DiscordOnboardingScope::DmOnly => warnings.push(
-            "DM-only onboarding keeps guild replies mention-gated; strict DM-only channel filtering arrives in M46."
+            "DM-only onboarding keeps guild replies mention-gated and routes DMs through explicit pairing/allowlist policy."
                 .to_owned(),
         ),
         DiscordOnboardingScope::AllowlistedGuildChannels => {
             if plan.allow_from.is_empty() {
                 warnings.push(
-                    "Allowlisted guild scope is selected but allow_from is empty. Add sender allowlist entries now or refine strict channel allowlists in M46."
+                    "Allowlisted guild scope is selected but allow_from is empty. Add sender allowlist entries to avoid broad guild routing."
                         .to_owned(),
                 );
             } else {
                 warnings.push(
-                    "Allowlisted guild scope currently uses sender and mention gates; strict per-channel allowlists are finalized in M46."
+                    "Allowlisted guild scope uses sender + mention gates. Keep rules narrowly scoped to trusted operators."
                         .to_owned(),
                 );
             }
         }
         DiscordOnboardingScope::OpenGuildChannels => {
             warnings.push(
-                "Open guild channels can trigger unsolicited responses. Keep this mode temporary and move to scoped allowlists in M46."
+                "Open guild channels can trigger unsolicited responses. Keep this mode temporary and move to scoped allowlists."
                     .to_owned(),
             );
             if !require_open_scope_confirmation && !plan.confirm_open_guild_channels {
@@ -4802,6 +5133,12 @@ fn build_discord_onboarding_warnings(
     if matches!(plan.broadcast_strategy, channel_router::BroadcastStrategy::Allow) {
         warnings.push(
             "Broadcast strategy is set to allow. This enables broad outbound fan-out; keep deny unless explicitly required."
+                .to_owned(),
+        );
+    }
+    if matches!(plan.direct_message_policy, channel_router::DirectMessagePolicy::Allow) {
+        warnings.push(
+            "Direct message policy is set to allow. This bypasses pairing/allowlist safeguards for DMs."
                 .to_owned(),
         );
     }
@@ -5222,6 +5559,10 @@ fn build_discord_onboarding_rule(plan: &DiscordOnboardingPlan) -> toml::Value {
     map.insert(
         "allow_direct_messages".to_owned(),
         toml::Value::Boolean(plan.allow_direct_messages),
+    );
+    map.insert(
+        "direct_message_policy".to_owned(),
+        toml::Value::String(plan.direct_message_policy.as_str().to_owned()),
     );
     map.insert(
         "broadcast_strategy".to_owned(),
@@ -7108,6 +7449,7 @@ mod tests {
             require_mention: None,
             mention_patterns: None,
             concurrency_limit: None,
+            direct_message_policy: None,
             broadcast_strategy: None,
             confirm_open_guild_channels: None,
         };
@@ -7118,6 +7460,13 @@ mod tests {
             "M45 onboarding should default to DM-only scope"
         );
         assert!(plan.require_mention, "safe baseline should require mention by default");
+        assert!(
+            matches!(
+                plan.direct_message_policy,
+                crate::channel_router::DirectMessagePolicy::Pairing
+            ),
+            "safe baseline should default to DM pairing policy"
+        );
         assert_eq!(plan.connector_id, "discord:default");
     }
 

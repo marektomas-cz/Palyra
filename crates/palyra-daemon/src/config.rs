@@ -13,7 +13,9 @@ use palyra_common::{
 };
 use palyra_vault::VaultRef;
 
-use crate::channel_router::{BroadcastStrategy, ChannelRouterConfig, ChannelRoutingRule};
+use crate::channel_router::{
+    BroadcastStrategy, ChannelRouterConfig, ChannelRoutingRule, DirectMessagePolicy,
+};
 use crate::cron::CronTimezoneMode;
 use crate::model_provider::{
     validate_openai_base_url_network_policy, ModelProviderAuthProviderKind, ModelProviderConfig,
@@ -988,6 +990,14 @@ pub fn load_config() -> Result<LoadedConfig> {
                     file_routing.default_allow_direct_messages
                 {
                     channel_router.default_allow_direct_messages = default_allow_direct_messages;
+                }
+                if let Some(default_direct_message_policy) =
+                    file_routing.default_direct_message_policy
+                {
+                    channel_router.default_direct_message_policy = parse_direct_message_policy(
+                        default_direct_message_policy.as_str(),
+                        "channel_router.routing.default_direct_message_policy",
+                    )?;
                 }
                 if let Some(default_isolate_session_by_sender) =
                     file_routing.default_isolate_session_by_sender
@@ -2161,6 +2171,11 @@ fn parse_broadcast_strategy(raw: &str, source_name: &str) -> Result<BroadcastStr
         .ok_or_else(|| anyhow::anyhow!("{source_name} must be one of: deny, mention_only, allow"))
 }
 
+fn parse_direct_message_policy(raw: &str, source_name: &str) -> Result<DirectMessagePolicy> {
+    DirectMessagePolicy::parse(raw)
+        .ok_or_else(|| anyhow::anyhow!("{source_name} must be one of: deny, pairing, allow"))
+}
+
 fn parse_optional_text_field(
     raw: String,
     source_name: &str,
@@ -2322,6 +2337,14 @@ fn parse_channel_routing_rule(
     } else {
         defaults.default_broadcast_strategy
     };
+    let direct_message_policy = if let Some(value) = raw.direct_message_policy {
+        parse_direct_message_policy(
+            value.as_str(),
+            format!("{source_name}.direct_message_policy").as_str(),
+        )?
+    } else {
+        defaults.default_direct_message_policy
+    };
     let concurrency_limit = if let Some(value) = raw.concurrency_limit {
         Some(parse_positive_usize(value, format!("{source_name}.concurrency_limit").as_str())?)
     } else {
@@ -2337,6 +2360,7 @@ fn parse_channel_routing_rule(
         allow_direct_messages: raw
             .allow_direct_messages
             .unwrap_or(defaults.default_allow_direct_messages),
+        direct_message_policy,
         isolate_session_by_sender: raw
             .isolate_session_by_sender
             .unwrap_or(defaults.default_isolate_session_by_sender),
@@ -2443,10 +2467,10 @@ mod tests {
     use super::{
         parse_broadcast_strategy, parse_browser_service_endpoint,
         parse_canvas_host_public_base_url, parse_content_type_allowlist, parse_cron_timezone_mode,
-        parse_default_memory_ttl_ms, parse_dns_suffix_allowlist, parse_host_allowlist,
-        parse_http_header_allowlist, parse_journal_db_path, parse_memory_retention_vacuum_schedule,
-        parse_model_provider_auth_provider_kind, parse_openai_base_url,
-        parse_openai_embeddings_dims, parse_optional_auth_profile_id,
+        parse_default_memory_ttl_ms, parse_direct_message_policy, parse_dns_suffix_allowlist,
+        parse_host_allowlist, parse_http_header_allowlist, parse_journal_db_path,
+        parse_memory_retention_vacuum_schedule, parse_model_provider_auth_provider_kind,
+        parse_openai_base_url, parse_openai_embeddings_dims, parse_optional_auth_profile_id,
         parse_optional_browser_state_dir, parse_optional_openai_embeddings_model,
         parse_optional_vault_ref_field, parse_positive_u32, parse_positive_usize,
         parse_process_executable_allowlist, parse_process_runner_egress_enforcement_mode,
@@ -2456,7 +2480,7 @@ mod tests {
         GatewayTlsConfig, HttpFetchConfig, IdentityConfig, MemoryConfig, ModelProviderConfig,
         OrchestratorConfig, StorageConfig, ToolCallConfig,
     };
-    use crate::channel_router::BroadcastStrategy;
+    use crate::channel_router::{BroadcastStrategy, DirectMessagePolicy};
     use crate::model_provider::{ModelProviderAuthProviderKind, ModelProviderKind};
     use crate::sandbox_runner::{EgressEnforcementMode, SandboxProcessRunnerTier};
     use palyra_common::daemon_config_schema::RootFileConfig;
@@ -2611,6 +2635,7 @@ mod tests {
             !config.default_channel_enabled,
             "per-channel routing should default disabled until explicitly configured"
         );
+        assert_eq!(config.default_direct_message_policy, DirectMessagePolicy::Deny);
         assert_eq!(config.default_broadcast_strategy, BroadcastStrategy::Deny);
         assert_eq!(config.default_concurrency_limit, 2);
     }
@@ -2630,11 +2655,12 @@ mod tests {
             [channel_router.routing]
             default_channel_enabled = false
             default_allow_direct_messages = false
+            default_direct_message_policy = "pairing"
             default_isolate_session_by_sender = true
             default_broadcast_strategy = "mention_only"
             default_concurrency_limit = 3
             channels = [
-                { channel = "slack", enabled = true, mention_patterns = ["@palyra"], allow_from = ["U123"], allow_direct_messages = true, broadcast_strategy = "allow", concurrency_limit = 1 }
+                { channel = "slack", enabled = true, mention_patterns = ["@palyra"], allow_from = ["U123"], allow_direct_messages = true, direct_message_policy = "allow", broadcast_strategy = "allow", concurrency_limit = 1 }
             ]
             "#,
         )
@@ -2644,9 +2670,11 @@ mod tests {
         assert_eq!(channel_router.max_message_bytes, Some(2048));
         let routing = channel_router.routing.expect("routing section should exist");
         assert_eq!(routing.default_concurrency_limit, Some(3));
+        assert_eq!(routing.default_direct_message_policy.as_deref(), Some("pairing"));
         let channels = routing.channels.expect("channels list should exist");
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].channel.as_deref(), Some("slack"));
+        assert_eq!(channels[0].direct_message_policy.as_deref(), Some("allow"));
         assert_eq!(channels[0].broadcast_strategy.as_deref(), Some("allow"));
     }
 
@@ -2674,6 +2702,42 @@ mod tests {
             parse_broadcast_strategy("always", "channel_router.routing.default_broadcast_strategy")
                 .is_err(),
             "unsupported broadcast strategy should be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_direct_message_policy_accepts_and_rejects_expected_values() {
+        assert_eq!(
+            parse_direct_message_policy(
+                "deny",
+                "channel_router.routing.default_direct_message_policy",
+            )
+            .expect("deny should parse"),
+            DirectMessagePolicy::Deny
+        );
+        assert_eq!(
+            parse_direct_message_policy(
+                "pairing",
+                "channel_router.routing.default_direct_message_policy",
+            )
+            .expect("pairing should parse"),
+            DirectMessagePolicy::Pairing
+        );
+        assert_eq!(
+            parse_direct_message_policy(
+                "allow",
+                "channel_router.routing.default_direct_message_policy",
+            )
+            .expect("allow should parse"),
+            DirectMessagePolicy::Allow
+        );
+        assert!(
+            parse_direct_message_policy(
+                "always",
+                "channel_router.routing.default_direct_message_policy",
+            )
+            .is_err(),
+            "unsupported DM policy should be rejected"
         );
     }
 

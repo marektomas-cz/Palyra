@@ -54,11 +54,11 @@ use clap::{CommandFactory, Parser};
 use cli::{
     AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg, ApprovalsCommand,
     AuthCommand, AuthCredentialArg, AuthProfilesCommand, AuthProviderArg, AuthScopeArg,
-    BrowserCommand, ChannelsCommand, ChannelsDiscordCommand, Cli, Command as CliCommand,
-    CompletionShell, ConfigCommand, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
-    CronScheduleTypeArg, DaemonCommand, JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg,
-    MemorySourceArg, OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand,
-    SecretsCommand, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    BrowserCommand, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli,
+    Command as CliCommand, CompletionShell, ConfigCommand, CronCommand, CronConcurrencyPolicyArg,
+    CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, JournalCheckpointModeArg,
+    MemoryCommand, MemoryScopeArg, MemorySourceArg, OnboardingCommand, PatchCommand, PolicyCommand,
+    ProtocolCommand, SecretsCommand, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
 };
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -3309,6 +3309,9 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                 }
             }
         },
+        ChannelsCommand::Router { command } => {
+            run_channels_router(command)?;
+        }
         ChannelsCommand::List { url, token, principal, device_id, channel, json } => {
             let base_url = resolve_channels_base_url(url);
             let token = resolve_channels_token(token);
@@ -3523,6 +3526,335 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
         }
     }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn run_channels_router(command: ChannelsRouterCommand) -> Result<()> {
+    match command {
+        ChannelsRouterCommand::Rules { url, token, principal, device_id, channel, json } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint =
+                format!("{}/admin/v1/channels/router/rules", base_url.trim_end_matches('/'));
+            let client = build_channels_client()?;
+            let response = send_channels_request(
+                client.get(endpoint),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channel router rules endpoint",
+            )?;
+            emit_channel_router_rules(response, json)?;
+        }
+        ChannelsRouterCommand::Warnings { url, token, principal, device_id, channel, json } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint =
+                format!("{}/admin/v1/channels/router/warnings", base_url.trim_end_matches('/'));
+            let client = build_channels_client()?;
+            let response = send_channels_request(
+                client.get(endpoint),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channel router warnings endpoint",
+            )?;
+            emit_channel_router_warnings(response, json)?;
+        }
+        ChannelsRouterCommand::Preview {
+            route_channel,
+            text,
+            conversation_id,
+            sender_identity,
+            sender_display,
+            sender_verified,
+            is_direct_message,
+            requested_broadcast,
+            adapter_message_id,
+            adapter_thread_id,
+            max_payload_bytes,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let route_channel = normalize_route_channel_arg(route_channel)?;
+            let text = normalize_required_text_arg(text, "text")?;
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint =
+                format!("{}/admin/v1/channels/router/preview", base_url.trim_end_matches('/'));
+            let client = build_channels_client()?;
+            let payload = json!({
+                "channel": route_channel,
+                "text": text,
+                "conversation_id": conversation_id.and_then(normalize_optional_text_arg),
+                "sender_identity": sender_identity.and_then(normalize_optional_text_arg),
+                "sender_display": sender_display.and_then(normalize_optional_text_arg),
+                "sender_verified": sender_verified,
+                "is_direct_message": is_direct_message,
+                "requested_broadcast": requested_broadcast,
+                "adapter_message_id": adapter_message_id.and_then(normalize_optional_text_arg),
+                "adapter_thread_id": adapter_thread_id.and_then(normalize_optional_text_arg),
+                "max_payload_bytes": max_payload_bytes,
+            });
+            let response = send_channels_request(
+                client.post(endpoint).json(&payload),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channel router preview endpoint",
+            )?;
+            emit_channel_router_preview(response, json)?;
+        }
+        ChannelsRouterCommand::Pairings {
+            route_channel,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint =
+                format!("{}/admin/v1/channels/router/pairings", base_url.trim_end_matches('/'));
+            let client = build_channels_client()?;
+            let mut request = client.get(endpoint);
+            if let Some(route_channel) = route_channel {
+                let route_channel = normalize_route_channel_arg(route_channel)?;
+                request = request.query(&[("channel", route_channel.as_str())]);
+            }
+            let response = send_channels_request(
+                request,
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channel router pairings endpoint",
+            )?;
+            emit_channel_router_pairings(response, json)?;
+        }
+        ChannelsRouterCommand::MintPairingCode {
+            route_channel,
+            issued_by,
+            ttl_ms,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let route_channel = normalize_route_channel_arg(route_channel)?;
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint = format!(
+                "{}/admin/v1/channels/router/pairing-codes",
+                base_url.trim_end_matches('/')
+            );
+            let client = build_channels_client()?;
+            let payload = json!({
+                "channel": route_channel,
+                "issued_by": issued_by.and_then(normalize_optional_text_arg),
+                "ttl_ms": ttl_ms,
+            });
+            let response = send_channels_request(
+                client.post(endpoint).json(&payload),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channel router pairing-code mint endpoint",
+            )?;
+            emit_channel_router_pairing_code(response, json)?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_optional_text_arg(raw: String) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn normalize_required_text_arg(raw: String, name: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{name} cannot be empty");
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn normalize_route_channel_arg(raw: String) -> Result<String> {
+    normalize_required_text_arg(raw, "route_channel")
+}
+
+fn emit_channel_router_rules(payload: Value, json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .context("failed to encode channel router rules payload as JSON")?
+        );
+        return Ok(());
+    }
+
+    let config_hash = read_json_string(&payload, &["config_hash"]).unwrap_or("unknown");
+    let config = payload.get("config").cloned().unwrap_or(Value::Null);
+    let enabled = config.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let channels =
+        config.get("channels").and_then(Value::as_array).map(|value| value.len()).unwrap_or(0);
+    let default_dm_policy =
+        config.get("default_direct_message_policy").and_then(Value::as_str).unwrap_or("unknown");
+    let default_broadcast_strategy =
+        config.get("default_broadcast_strategy").and_then(Value::as_str).unwrap_or("unknown");
+
+    println!(
+        "channels.router.rules config_hash={} enabled={} channels={} default_direct_message_policy={} default_broadcast_strategy={}",
+        config_hash, enabled, channels, default_dm_policy, default_broadcast_strategy
+    );
+    Ok(())
+}
+
+fn emit_channel_router_warnings(payload: Value, json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .context("failed to encode channel router warnings payload as JSON")?
+        );
+        return Ok(());
+    }
+
+    let config_hash = read_json_string(&payload, &["config_hash"]).unwrap_or("unknown");
+    let warnings = payload.get("warnings").and_then(Value::as_array).cloned().unwrap_or_default();
+    println!("channels.router.warnings config_hash={} count={}", config_hash, warnings.len());
+    for warning in warnings {
+        if let Some(text) = warning.as_str() {
+            println!("channels.router.warning text={}", text);
+        }
+    }
+    Ok(())
+}
+
+fn emit_channel_router_preview(payload: Value, json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .context("failed to encode channel router preview payload as JSON")?
+        );
+        return Ok(());
+    }
+
+    let preview = payload.get("preview").cloned().unwrap_or(payload);
+    let accepted = preview.get("accepted").and_then(Value::as_bool).unwrap_or(false);
+    let reason = preview.get("reason").and_then(Value::as_str).unwrap_or("unknown");
+    let route_key = preview.get("route_key").and_then(Value::as_str).unwrap_or("");
+    let session_key = preview.get("session_key").and_then(Value::as_str).unwrap_or("");
+    let sender_identity = preview.get("sender_identity").and_then(Value::as_str).unwrap_or("");
+    let config_hash = preview.get("config_hash").and_then(Value::as_str).unwrap_or("unknown");
+    println!(
+        "channels.router.preview accepted={} reason={} route_key={} session_key={} sender_identity={} config_hash={}",
+        accepted, reason, route_key, session_key, sender_identity, config_hash
+    );
+    Ok(())
+}
+
+fn emit_channel_router_pairings(payload: Value, json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .context("failed to encode channel router pairings payload as JSON")?
+        );
+        return Ok(());
+    }
+
+    let config_hash = read_json_string(&payload, &["config_hash"]).unwrap_or("unknown");
+    let pairings = payload.get("pairings").and_then(Value::as_array).cloned().unwrap_or_default();
+    println!("channels.router.pairings config_hash={} channels={}", config_hash, pairings.len());
+    for pairing in pairings {
+        let channel = pairing.get("channel").and_then(Value::as_str).unwrap_or("unknown");
+        let pending = pairing.get("pending").and_then(Value::as_array).cloned().unwrap_or_default();
+        let paired = pairing.get("paired").and_then(Value::as_array).cloned().unwrap_or_default();
+        let active_codes =
+            pairing.get("active_codes").and_then(Value::as_array).cloned().unwrap_or_default();
+        println!(
+            "channels.router.pairing channel={} pending={} paired={} active_codes={}",
+            channel,
+            pending.len(),
+            paired.len(),
+            active_codes.len()
+        );
+
+        for entry in pending {
+            let sender = entry.get("sender_identity").and_then(Value::as_str).unwrap_or("unknown");
+            let code = entry.get("code").and_then(Value::as_str).unwrap_or("unknown");
+            let approval_id = entry.get("approval_id").and_then(Value::as_str).unwrap_or("");
+            let expires_at = entry.get("expires_at_unix_ms").and_then(Value::as_i64).unwrap_or(0);
+            println!(
+                "channels.router.pairing.pending channel={} sender={} code={} approval_id={} expires_at_unix_ms={}",
+                channel, sender, code, approval_id, expires_at
+            );
+        }
+        for entry in paired {
+            let sender = entry.get("sender_identity").and_then(Value::as_str).unwrap_or("unknown");
+            let approval_id = entry.get("approval_id").and_then(Value::as_str).unwrap_or("");
+            let expires_at = entry
+                .get("expires_at_unix_ms")
+                .and_then(Value::as_i64)
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            println!(
+                "channels.router.pairing.grant channel={} sender={} approval_id={} expires_at_unix_ms={}",
+                channel, sender, approval_id, expires_at
+            );
+        }
+        for entry in active_codes {
+            let code = entry.get("code").and_then(Value::as_str).unwrap_or("unknown");
+            let issued_by = entry.get("issued_by").and_then(Value::as_str).unwrap_or("unknown");
+            let expires_at = entry.get("expires_at_unix_ms").and_then(Value::as_i64).unwrap_or(0);
+            println!(
+                "channels.router.pairing.code channel={} code={} issued_by={} expires_at_unix_ms={}",
+                channel, code, issued_by, expires_at
+            );
+        }
+    }
+    Ok(())
+}
+
+fn emit_channel_router_pairing_code(payload: Value, json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .context("failed to encode channel router pairing code payload as JSON")?
+        );
+        return Ok(());
+    }
+
+    let config_hash = read_json_string(&payload, &["config_hash"]).unwrap_or("unknown");
+    let code = payload.get("code").cloned().unwrap_or(Value::Null);
+    let channel = code.get("channel").and_then(Value::as_str).unwrap_or("unknown");
+    let code_value = code.get("code").and_then(Value::as_str).unwrap_or("unknown");
+    let issued_by = code.get("issued_by").and_then(Value::as_str).unwrap_or("unknown");
+    let expires_at = code.get("expires_at_unix_ms").and_then(Value::as_i64).unwrap_or(0);
+    println!(
+        "channels.router.pairing-code channel={} code={} issued_by={} expires_at_unix_ms={} config_hash={}",
+        channel, code_value, issued_by, expires_at, config_hash
+    );
+    Ok(())
 }
 
 fn discord_connector_id(account_id: &str) -> Result<String> {

@@ -23,6 +23,12 @@ use crate::gateway::{
     GatewayAuthConfig, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
 };
 
+mod discord;
+
+pub use discord::{
+    discord_connector_id, discord_principal, discord_token_vault_ref, normalize_discord_account_id,
+};
+
 const CHANNEL_WORKER_DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const DEFAULT_CHANNEL_WORKER_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_LOG_PAGE_LIMIT: usize = 100;
@@ -122,7 +128,7 @@ impl ChannelPlatform {
             }
             return Ok(status);
         }
-        let spec = discord_connector_spec(normalized_account_id.as_str(), false);
+        let spec = discord::discord_connector_spec(normalized_account_id.as_str(), false);
         self.supervisor.register_connector(&spec)?;
         self.supervisor.status(spec.connector_id.as_str()).map_err(ChannelPlatformError::from)
     }
@@ -230,7 +236,7 @@ impl ChannelPlatform {
                 "test-send text cannot be empty".to_owned(),
             ));
         }
-        let target = normalize_discord_target(request.target.as_str())?;
+        let target = discord::normalize_discord_target(request.target.as_str())?;
         let thread_id = request
             .thread_id
             .as_deref()
@@ -328,7 +334,7 @@ fn default_connector_specs() -> Vec<ConnectorInstanceSpec> {
             egress_allowlist: Vec::new(),
             enabled: true,
         },
-        discord_connector_spec("default", false),
+        discord::discord_connector_spec("default", false),
         ConnectorInstanceSpec {
             connector_id: "slack:default".to_owned(),
             kind: ConnectorKind::Slack,
@@ -350,54 +356,6 @@ fn default_connector_specs() -> Vec<ConnectorInstanceSpec> {
     ]
 }
 
-#[must_use]
-pub fn discord_connector_id(account_id: &str) -> String {
-    format!("discord:{}", account_id.trim().to_ascii_lowercase())
-}
-
-#[must_use]
-pub fn discord_principal(account_id: &str) -> String {
-    format!("channel:{}", discord_connector_id(account_id))
-}
-
-#[must_use]
-pub fn discord_token_vault_ref(account_id: &str) -> String {
-    let normalized = account_id.trim().to_ascii_lowercase();
-    if normalized == "default" {
-        return "global/discord_bot_token".to_owned();
-    }
-    format!("global/discord_bot_token.{normalized}")
-}
-
-#[allow(clippy::result_large_err)]
-pub fn normalize_discord_account_id(raw: &str) -> Result<String, ChannelPlatformError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(ChannelPlatformError::InvalidInput(
-            "discord account_id cannot be empty".to_owned(),
-        ));
-    }
-    if !trimmed.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
-        return Err(ChannelPlatformError::InvalidInput(
-            "discord account_id contains unsupported characters".to_owned(),
-        ));
-    }
-    Ok(trimmed.to_ascii_lowercase())
-}
-
-fn discord_connector_spec(account_id: &str, enabled: bool) -> ConnectorInstanceSpec {
-    let normalized = account_id.trim().to_ascii_lowercase();
-    ConnectorInstanceSpec {
-        connector_id: discord_connector_id(normalized.as_str()),
-        kind: ConnectorKind::Discord,
-        principal: discord_principal(normalized.as_str()),
-        auth_profile_ref: Some(format!("discord.{normalized}")),
-        token_vault_ref: Some(discord_token_vault_ref(normalized.as_str())),
-        egress_allowlist: vec!["discord.com".to_owned(), "*.discord.com".to_owned()],
-        enabled,
-    }
-}
-
 struct GrpcChannelRouter {
     grpc_url: String,
     auth: GatewayAuthConfig,
@@ -413,6 +371,17 @@ impl ConnectorRouter for GrpcChannelRouter {
         validate_canonical_id(event.envelope_id.as_str()).map_err(|_| {
             ConnectorRouterError::Message("inbound envelope_id must be a canonical ULID".to_owned())
         })?;
+        let discord_connector = discord::is_discord_connector(event.connector_id.as_str());
+        let conversation_id = if discord_connector {
+            discord::canonical_discord_channel_identity(event.conversation_id.as_str())
+        } else {
+            event.conversation_id.clone()
+        };
+        let sender_handle = if discord_connector {
+            discord::canonical_discord_sender_identity(event.sender_id.as_str())
+        } else {
+            event.sender_id.clone()
+        };
         let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(
             self.grpc_url.clone(),
         )
@@ -428,10 +397,10 @@ impl ConnectorRouter for GrpcChannelRouter {
                 origin: Some(common_v1::EnvelopeOrigin {
                     r#type: common_v1::envelope_origin::OriginType::Channel as i32,
                     channel: event.connector_id.clone(),
-                    conversation_id: event.conversation_id.clone(),
+                    conversation_id,
                     sender_display: event.sender_display.clone().unwrap_or_default(),
-                    sender_handle: event.sender_id.clone(),
-                    sender_verified: false,
+                    sender_handle,
+                    sender_verified: discord_connector,
                 }),
                 content: Some(common_v1::MessageContent {
                     text: event.body.clone(),
@@ -519,30 +488,6 @@ fn non_empty(raw: String) -> Option<String> {
     }
 }
 
-#[allow(clippy::result_large_err)]
-fn normalize_discord_target(raw: &str) -> Result<String, ChannelPlatformError> {
-    let trimmed = raw.trim();
-    let normalized = trimmed
-        .strip_prefix("channel:")
-        .or_else(|| trimmed.strip_prefix("thread:"))
-        .map(str::trim)
-        .unwrap_or(trimmed);
-    if normalized.is_empty() {
-        return Err(ChannelPlatformError::InvalidInput(
-            "discord test target cannot be empty".to_owned(),
-        ));
-    }
-    if !normalized
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
-    {
-        return Err(ChannelPlatformError::InvalidInput(
-            "discord test target contains unsupported characters".to_owned(),
-        ));
-    }
-    Ok(normalized.to_owned())
-}
-
 fn unix_ms_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -553,8 +498,8 @@ fn unix_ms_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_connector_id, discord_token_vault_ref, normalize_discord_account_id,
-        normalize_discord_target, ChannelPlatformError,
+        discord, discord_connector_id, discord_token_vault_ref, normalize_discord_account_id,
+        ChannelPlatformError,
     };
 
     #[test]
@@ -583,19 +528,44 @@ mod tests {
 
     #[test]
     fn normalize_discord_target_rejects_empty_and_unsupported_values() {
-        let normalized = normalize_discord_target(" channel:123456 ")
+        let normalized = discord::normalize_discord_target(" channel:123456 ")
             .expect("channel prefix should normalize to a target id");
         assert_eq!(normalized, "123456");
-        let empty = normalize_discord_target("  ").expect_err("empty target should be rejected");
+        let empty =
+            discord::normalize_discord_target("  ").expect_err("empty target should be rejected");
         assert!(
             matches!(empty, ChannelPlatformError::InvalidInput(_)),
             "empty target should return InvalidInput"
         );
-        let unsupported = normalize_discord_target("channel:12 34")
+        let unsupported = discord::normalize_discord_target("channel:12 34")
             .expect_err("targets with spaces should be rejected");
         assert!(
             matches!(unsupported, ChannelPlatformError::InvalidInput(_)),
             "unsupported target should return InvalidInput"
+        );
+    }
+
+    #[test]
+    fn canonical_discord_identities_apply_expected_prefixes() {
+        assert_eq!(
+            discord::canonical_discord_sender_identity("12345"),
+            "discord:user:12345",
+            "plain sender ids should receive discord:user prefix"
+        );
+        assert_eq!(
+            discord::canonical_discord_sender_identity("<@!67890>"),
+            "discord:user:67890",
+            "mention syntax should normalize to canonical sender identity"
+        );
+        assert_eq!(
+            discord::canonical_discord_channel_identity("thread:abc"),
+            "discord:channel:abc",
+            "thread/channel aliases should normalize to canonical channel identity"
+        );
+        assert_eq!(
+            discord::canonical_discord_channel_identity("<#C123>"),
+            "discord:channel:c123",
+            "channel mention syntax should normalize to canonical channel identity"
         );
     }
 }

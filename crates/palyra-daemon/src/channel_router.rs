@@ -1,15 +1,24 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use ulid::Ulid;
 
 const DEFAULT_RETRY_BACKOFF_MS: u64 = 250;
 const MAX_PER_CHANNEL_QUARANTINE_ITEMS: usize = 256;
 const FALLBACK_SENDER_COMPONENT: &str = "unknown";
 const FALLBACK_CONVERSATION_COMPONENT: &str = "default";
+const MIN_DM_PAIRING_CODE_TTL_MS: u64 = 30_000;
+const DEFAULT_DM_PAIRING_CODE_TTL_MS: u64 = 10 * 60_000;
+const MAX_DM_PAIRING_CODE_TTL_MS: u64 = 24 * 60 * 60_000;
+const DM_PAIRING_CODE_LENGTH: usize = 8;
+const DEFAULT_DM_PAIRING_PENDING_TTL_MS: u64 = 15 * 60_000;
+const DEFAULT_DM_PAIRING_SESSION_TTL_MS: u64 = 8 * 60 * 60_000;
+const MAX_DM_PAIRING_SESSION_TTL_MS: u64 = 30 * 24 * 60 * 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,7 +49,112 @@ impl BroadcastStrategy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectMessagePolicy {
+    Deny,
+    Pairing,
+    Allow,
+}
+
+impl DirectMessagePolicy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::Pairing => "pairing",
+            Self::Allow => "allow",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deny" => Some(Self::Deny),
+            "pairing" | "pair" => Some(Self::Pairing),
+            "allow" => Some(Self::Allow),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairingCodeRecord {
+    pub code: String,
+    pub channel: String,
+    pub issued_by: String,
+    pub created_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairingPendingRecord {
+    pub channel: String,
+    pub sender_identity: String,
+    pub code: String,
+    pub requested_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub approval_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairingGrantRecord {
+    pub channel: String,
+    pub sender_identity: String,
+    pub approved_at_unix_ms: i64,
+    pub expires_at_unix_ms: Option<i64>,
+    pub approval_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChannelPairingSnapshot {
+    pub channel: String,
+    pub pending: Vec<PairingPendingRecord>,
+    pub paired: Vec<PairingGrantRecord>,
+    pub active_codes: Vec<PairingCodeRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingConsumeReason {
+    ChannelMissing,
+    SenderMissing,
+    InvalidCode,
+    CodeExpired,
+    PairingDisabled,
+    AlreadyPending,
+    AlreadyPaired,
+}
+
+impl PairingConsumeReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChannelMissing => "channel_missing",
+            Self::SenderMissing => "sender_missing_for_dm_pairing",
+            Self::InvalidCode => "direct_message_pairing_code_invalid",
+            Self::CodeExpired => "direct_message_pairing_code_expired",
+            Self::PairingDisabled => "direct_message_pairing_disabled",
+            Self::AlreadyPending => "direct_message_pairing_pending_approval",
+            Self::AlreadyPaired => "direct_message_pairing_already_active",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairingConsumeOutcome {
+    Pending(PairingPendingRecord),
+    Rejected(PairingConsumeReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairingApprovalOutcome {
+    Approved(PairingGrantRecord),
+    Denied,
+    MissingPending,
+    PairingDisabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChannelRoutingRule {
     pub channel: String,
     pub enabled: bool,
@@ -48,6 +162,7 @@ pub struct ChannelRoutingRule {
     pub allow_from: Vec<String>,
     pub deny_from: Vec<String>,
     pub allow_direct_messages: bool,
+    pub direct_message_policy: DirectMessagePolicy,
     pub isolate_session_by_sender: bool,
     pub response_prefix: Option<String>,
     pub auto_ack_text: Option<String>,
@@ -56,7 +171,7 @@ pub struct ChannelRoutingRule {
     pub concurrency_limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChannelRouterConfig {
     pub enabled: bool,
     pub max_message_bytes: usize,
@@ -66,6 +181,7 @@ pub struct ChannelRouterConfig {
     pub default_response_prefix: Option<String>,
     pub default_channel_enabled: bool,
     pub default_allow_direct_messages: bool,
+    pub default_direct_message_policy: DirectMessagePolicy,
     pub default_isolate_session_by_sender: bool,
     pub default_broadcast_strategy: BroadcastStrategy,
     pub default_concurrency_limit: usize,
@@ -83,6 +199,7 @@ impl Default for ChannelRouterConfig {
             default_response_prefix: None,
             default_channel_enabled: false,
             default_allow_direct_messages: false,
+            default_direct_message_policy: DirectMessagePolicy::Deny,
             default_isolate_session_by_sender: false,
             default_broadcast_strategy: BroadcastStrategy::Deny,
             default_concurrency_limit: 2,
@@ -136,6 +253,19 @@ pub struct RouteQueued {
     pub queue_depth: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RoutePreview {
+    pub accepted: bool,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_identity: Option<String>,
+    pub config_hash: String,
+}
+
 #[derive(Debug)]
 pub struct RoutedMessage {
     pub plan: RoutePlan,
@@ -179,6 +309,22 @@ struct ChannelRuntimeState {
     in_flight: usize,
     retry_queue: VecDeque<RetryQueueEntry>,
     quarantine: VecDeque<QuarantinedMessage>,
+    pairing_codes: HashMap<String, PairingCodeRecord>,
+    pairing_pending_by_sender: HashMap<String, PairingPendingRecord>,
+    pairing_pending_by_approval: HashMap<String, String>,
+    pairing_grants: HashMap<String, PairingGrantRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteCandidate {
+    channel: String,
+    rule: ChannelRoutingRule,
+    sender_identity: Option<String>,
+    route_key: String,
+    session_key: String,
+    session_label: Option<String>,
+    in_reply_to_message_id: Option<String>,
+    reply_thread_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -191,6 +337,386 @@ impl ChannelRouter {
     #[must_use]
     pub fn new(config: ChannelRouterConfig) -> Self {
         Self { config, state: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    #[must_use]
+    pub fn config_hash(&self) -> String {
+        let payload = serde_json::to_vec(&self.config).unwrap_or_default();
+        sha256_hex(payload.as_slice())
+    }
+
+    #[must_use]
+    pub fn validation_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if !self.config.enabled {
+            warnings.push(
+                "channel_router.enabled=false: inbound channel routing is globally disabled"
+                    .to_owned(),
+            );
+        }
+        if matches!(self.config.default_broadcast_strategy, BroadcastStrategy::Allow) {
+            warnings.push(
+                "default_broadcast_strategy=allow enables fan-out by default across unmatched channels"
+                    .to_owned(),
+            );
+        }
+        if self.config.default_allow_direct_messages
+            && matches!(self.config.default_direct_message_policy, DirectMessagePolicy::Allow)
+        {
+            warnings.push(
+                "default direct_message_policy=allow permits all direct messages for channels without explicit overrides"
+                    .to_owned(),
+            );
+        }
+        for rule in &self.config.channels {
+            if !rule.enabled {
+                continue;
+            }
+            if rule.mention_patterns.is_empty() && !rule.allow_direct_messages {
+                warnings.push(format!(
+                    "channel '{}' is enabled but has no mention_patterns and direct messages disabled; no inbound text can match",
+                    rule.channel
+                ));
+            }
+            if !rule.allow_direct_messages
+                && !matches!(rule.direct_message_policy, DirectMessagePolicy::Deny)
+            {
+                warnings.push(format!(
+                    "channel '{}' sets direct_message_policy='{}' while allow_direct_messages=false; DM policy will not be reachable",
+                    rule.channel,
+                    rule.direct_message_policy.as_str()
+                ));
+            }
+            if rule.allow_direct_messages
+                && matches!(rule.direct_message_policy, DirectMessagePolicy::Allow)
+                && rule.allow_from.is_empty()
+            {
+                warnings.push(format!(
+                    "channel '{}' allows all direct messages without allowlist or pairing guardrails",
+                    rule.channel
+                ));
+            }
+            if matches!(rule.broadcast_strategy, BroadcastStrategy::Allow) {
+                warnings.push(format!(
+                    "channel '{}' sets broadcast_strategy=allow; ensure policy gate for message.broadcast is intentionally enabled",
+                    rule.channel
+                ));
+            }
+            let deny = rule
+                .deny_from
+                .iter()
+                .map(String::as_str)
+                .map(normalize_identifier_match)
+                .collect::<HashSet<_>>();
+            for allowed in &rule.allow_from {
+                let normalized = normalize_identifier_match(allowed.as_str());
+                if deny.contains(normalized.as_str()) {
+                    warnings.push(format!(
+                        "channel '{}' contains sender '{}' in both allow_from and deny_from; deny list wins",
+                        rule.channel, normalized
+                    ));
+                }
+            }
+        }
+        warnings
+    }
+
+    #[must_use]
+    pub fn preview_route(&self, message: &InboundMessage) -> RoutePreview {
+        let config_hash = self.config_hash();
+        if !self.config.enabled {
+            return RoutePreview {
+                accepted: false,
+                reason: "channel_router_disabled".to_owned(),
+                route_key: None,
+                session_key: None,
+                sender_identity: sender_identity(message),
+                config_hash,
+            };
+        }
+        let Some(channel) = normalize_non_empty(message.channel.as_str()) else {
+            return RoutePreview {
+                accepted: false,
+                reason: "channel_missing".to_owned(),
+                route_key: None,
+                session_key: None,
+                sender_identity: sender_identity(message),
+                config_hash,
+            };
+        };
+        if message.text.trim().is_empty() {
+            return RoutePreview {
+                accepted: false,
+                reason: "message_empty".to_owned(),
+                route_key: None,
+                session_key: None,
+                sender_identity: sender_identity(message),
+                config_hash,
+            };
+        }
+        if message.text.len() > self.config.max_message_bytes
+            || (message.max_payload_bytes as usize) > self.config.max_message_bytes
+        {
+            return RoutePreview {
+                accepted: false,
+                reason: "message_oversized".to_owned(),
+                route_key: None,
+                session_key: None,
+                sender_identity: sender_identity(message),
+                config_hash,
+            };
+        }
+        match self.evaluate_route_policy(channel.as_str(), message) {
+            Ok(candidate) => RoutePreview {
+                accepted: true,
+                reason: "routed".to_owned(),
+                route_key: Some(candidate.route_key),
+                session_key: Some(candidate.session_key),
+                sender_identity: candidate.sender_identity,
+                config_hash,
+            },
+            Err(rejection) => RoutePreview {
+                accepted: false,
+                reason: rejection.reason,
+                route_key: None,
+                session_key: None,
+                sender_identity: sender_identity(message),
+                config_hash,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn pairing_snapshot(&self, channel: Option<&str>) -> Vec<ChannelPairingSnapshot> {
+        let filter = channel.and_then(normalize_non_empty);
+        let Ok(mut guard) = self.state.lock() else {
+            return Vec::new();
+        };
+        let now = current_unix_ms();
+        let mut snapshots = Vec::new();
+        for (state_channel, state) in guard.iter_mut() {
+            if filter.as_deref().is_some_and(|value| !state_channel.eq_ignore_ascii_case(value)) {
+                continue;
+            }
+            Self::prune_pairing_state(state, now);
+            if state.pairing_codes.is_empty()
+                && state.pairing_pending_by_sender.is_empty()
+                && state.pairing_grants.is_empty()
+            {
+                continue;
+            }
+            let mut active_codes = state.pairing_codes.values().cloned().collect::<Vec<_>>();
+            active_codes.sort_by(|left, right| {
+                left.expires_at_unix_ms
+                    .cmp(&right.expires_at_unix_ms)
+                    .then_with(|| left.code.cmp(&right.code))
+            });
+            let mut pending = state.pairing_pending_by_sender.values().cloned().collect::<Vec<_>>();
+            pending.sort_by(|left, right| {
+                left.requested_at_unix_ms
+                    .cmp(&right.requested_at_unix_ms)
+                    .then_with(|| left.sender_identity.cmp(&right.sender_identity))
+            });
+            let mut paired = state.pairing_grants.values().cloned().collect::<Vec<_>>();
+            paired.sort_by(|left, right| {
+                left.approved_at_unix_ms
+                    .cmp(&right.approved_at_unix_ms)
+                    .then_with(|| left.sender_identity.cmp(&right.sender_identity))
+            });
+            snapshots.push(ChannelPairingSnapshot {
+                channel: state_channel.clone(),
+                pending,
+                paired,
+                active_codes,
+            });
+        }
+        snapshots.sort_by(|left, right| left.channel.cmp(&right.channel));
+        snapshots
+    }
+
+    pub fn mint_pairing_code(
+        &self,
+        channel: &str,
+        issued_by: &str,
+        ttl_ms: Option<u64>,
+    ) -> Result<PairingCodeRecord, PairingConsumeReason> {
+        let Some(channel) = normalize_non_empty(channel) else {
+            return Err(PairingConsumeReason::ChannelMissing);
+        };
+        let rule = self.resolve_rule(channel.as_str());
+        if !rule.allow_direct_messages
+            || !matches!(rule.direct_message_policy, DirectMessagePolicy::Pairing)
+        {
+            return Err(PairingConsumeReason::PairingDisabled);
+        }
+        let issued_by = normalize_non_empty(issued_by).unwrap_or_else(|| "operator".to_owned());
+        let ttl_ms =
+            Self::normalize_pairing_code_ttl_ms(ttl_ms.unwrap_or(DEFAULT_DM_PAIRING_CODE_TTL_MS));
+        let now = current_unix_ms();
+        let expires_at_unix_ms = now.saturating_add(ttl_ms as i64);
+        let Ok(mut guard) = self.state.lock() else {
+            return Err(PairingConsumeReason::PairingDisabled);
+        };
+        let state = guard.entry(channel.clone()).or_default();
+        Self::prune_pairing_state(state, now);
+        let mut code = String::new();
+        for _ in 0..8 {
+            code = Self::generate_pairing_code();
+            if !state.pairing_codes.contains_key(code.as_str()) {
+                break;
+            }
+        }
+        if code.is_empty() || state.pairing_codes.contains_key(code.as_str()) {
+            return Err(PairingConsumeReason::InvalidCode);
+        }
+        let record = PairingCodeRecord {
+            code: code.clone(),
+            channel,
+            issued_by,
+            created_at_unix_ms: now,
+            expires_at_unix_ms,
+        };
+        state.pairing_codes.insert(code, record.clone());
+        Ok(record)
+    }
+
+    #[must_use]
+    pub fn consume_pairing_code(
+        &self,
+        channel: &str,
+        sender_identity: Option<&str>,
+        code: &str,
+        pending_ttl_ms: Option<u64>,
+    ) -> PairingConsumeOutcome {
+        let Some(channel) = normalize_non_empty(channel) else {
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::ChannelMissing);
+        };
+        let rule = self.resolve_rule(channel.as_str());
+        if !rule.allow_direct_messages
+            || !matches!(rule.direct_message_policy, DirectMessagePolicy::Pairing)
+        {
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::PairingDisabled);
+        }
+        let Some(sender_identity) = sender_identity
+            .and_then(normalize_non_empty)
+            .map(|value| normalize_identifier_match(value.as_str()))
+        else {
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::SenderMissing);
+        };
+        let Some(code) = Self::sanitize_pairing_code(code) else {
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::InvalidCode);
+        };
+        let now = current_unix_ms();
+        let pending_ttl_ms = Self::normalize_pairing_pending_ttl_ms(
+            pending_ttl_ms.unwrap_or(DEFAULT_DM_PAIRING_PENDING_TTL_MS),
+        );
+        let Ok(mut guard) = self.state.lock() else {
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::PairingDisabled);
+        };
+        let state = guard.entry(channel.clone()).or_default();
+        Self::prune_pairing_state(state, now);
+        if state.pairing_grants.contains_key(sender_identity.as_str()) {
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::AlreadyPaired);
+        }
+        if state.pairing_pending_by_sender.contains_key(sender_identity.as_str()) {
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::AlreadyPending);
+        }
+        let Some(active_code) = state.pairing_codes.get(code.as_str()) else {
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::InvalidCode);
+        };
+        if active_code.expires_at_unix_ms <= now {
+            state.pairing_codes.remove(code.as_str());
+            return PairingConsumeOutcome::Rejected(PairingConsumeReason::CodeExpired);
+        }
+        state.pairing_codes.remove(code.as_str());
+        let pending = PairingPendingRecord {
+            channel,
+            sender_identity: sender_identity.clone(),
+            code,
+            requested_at_unix_ms: now,
+            expires_at_unix_ms: now.saturating_add(pending_ttl_ms as i64),
+            approval_id: None,
+        };
+        state.pairing_pending_by_sender.insert(sender_identity, pending.clone());
+        PairingConsumeOutcome::Pending(pending)
+    }
+
+    #[must_use]
+    pub fn attach_pairing_pending_approval(
+        &self,
+        channel: &str,
+        sender_identity: &str,
+        approval_id: &str,
+    ) -> Option<PairingPendingRecord> {
+        let channel = normalize_non_empty(channel)?;
+        let sender_identity = normalize_non_empty(sender_identity)
+            .map(|value| normalize_identifier_match(value.as_str()))?;
+        let approval_id = normalize_non_empty(approval_id)?;
+        let now = current_unix_ms();
+        let Ok(mut guard) = self.state.lock() else {
+            return None;
+        };
+        let state = guard.get_mut(channel.as_str())?;
+        Self::prune_pairing_state(state, now);
+        let pending = state.pairing_pending_by_sender.get_mut(sender_identity.as_str())?;
+        if let Some(previous) = pending.approval_id.as_deref() {
+            state.pairing_pending_by_approval.remove(previous);
+        }
+        pending.approval_id = Some(approval_id.clone());
+        state.pairing_pending_by_approval.insert(approval_id, sender_identity);
+        Some(pending.clone())
+    }
+
+    #[must_use]
+    pub fn apply_pairing_approval(
+        &self,
+        approval_id: &str,
+        approved: bool,
+        decision_scope_ttl_ms: Option<i64>,
+    ) -> PairingApprovalOutcome {
+        let Some(approval_id) = normalize_non_empty(approval_id) else {
+            return PairingApprovalOutcome::MissingPending;
+        };
+        let now = current_unix_ms();
+        let Ok(mut guard) = self.state.lock() else {
+            return PairingApprovalOutcome::MissingPending;
+        };
+        for (channel, state) in guard.iter_mut() {
+            Self::prune_pairing_state(state, now);
+            let Some(sender_identity) =
+                state.pairing_pending_by_approval.remove(approval_id.as_str())
+            else {
+                continue;
+            };
+            let Some(pending) = state.pairing_pending_by_sender.remove(sender_identity.as_str())
+            else {
+                continue;
+            };
+            let rule = self.resolve_rule(channel.as_str());
+            if !rule.allow_direct_messages
+                || !matches!(rule.direct_message_policy, DirectMessagePolicy::Pairing)
+            {
+                return PairingApprovalOutcome::PairingDisabled;
+            }
+            if !approved {
+                return PairingApprovalOutcome::Denied;
+            }
+            let ttl_ms = Self::normalize_pairing_session_ttl_ms(
+                decision_scope_ttl_ms
+                    .and_then(|value| if value > 0 { Some(value as u64) } else { None })
+                    .unwrap_or(DEFAULT_DM_PAIRING_SESSION_TTL_MS),
+            );
+            let grant = PairingGrantRecord {
+                channel: pending.channel,
+                sender_identity: pending.sender_identity.clone(),
+                approved_at_unix_ms: now,
+                expires_at_unix_ms: Some(now.saturating_add(ttl_ms as i64)),
+                approval_id: Some(approval_id.clone()),
+            };
+            state.pairing_grants.insert(pending.sender_identity, grant.clone());
+            return PairingApprovalOutcome::Approved(grant);
+        }
+        PairingApprovalOutcome::MissingPending
     }
 
     #[must_use]
@@ -214,13 +740,6 @@ impl ChannelRouter {
         }
         let channel = normalized_channel.expect("checked above");
         self.dequeue_retry(channel.as_str(), message.envelope_id.as_str());
-        let rule = self.resolve_rule(channel.as_str());
-        if !rule.enabled {
-            return RouteOutcome::Rejected(RouteRejection {
-                reason: "channel_disabled".to_owned(),
-                quarantined: false,
-            });
-        }
         if message.text.trim().is_empty() {
             return RouteOutcome::Rejected(RouteRejection {
                 reason: "message_empty".to_owned(),
@@ -243,70 +762,15 @@ impl ChannelRouter {
                 ),
             });
         }
-
-        let sender_identity = sender_identity(message);
-        let normalized_sender = sender_identity.as_deref().map(normalize_identifier_match);
-        if !rule.deny_from.is_empty()
-            && normalized_sender.as_deref().is_some_and(|sender| {
-                rule.deny_from.iter().any(|blocked| normalize_identifier_match(blocked) == sender)
-            })
-        {
-            return RouteOutcome::Rejected(RouteRejection {
-                reason: "sender_denied".to_owned(),
-                quarantined: false,
-            });
-        }
-        if !rule.allow_from.is_empty() {
-            if !message.sender_verified {
-                return RouteOutcome::Rejected(RouteRejection {
-                    reason: "sender_unverified_for_allowlist".to_owned(),
-                    quarantined: false,
-                });
-            }
-            let Some(sender) = normalized_sender.as_deref() else {
-                return RouteOutcome::Rejected(RouteRejection {
-                    reason: "sender_missing_for_allowlist".to_owned(),
-                    quarantined: false,
-                });
-            };
-            if !rule.allow_from.iter().any(|value| normalize_identifier_match(value) == sender) {
-                return RouteOutcome::Rejected(RouteRejection {
-                    reason: "sender_not_allowlisted".to_owned(),
-                    quarantined: false,
-                });
-            }
-        }
-
-        let mention_match =
-            has_mention_match(message.text.as_str(), rule.mention_patterns.as_slice());
-        let direct_message_allowed = message.is_direct_message && rule.allow_direct_messages;
-        if !mention_match && !direct_message_allowed {
-            return RouteOutcome::Rejected(RouteRejection {
-                reason: "no_matching_mention_or_dm_policy".to_owned(),
-                quarantined: false,
-            });
-        }
-
-        if message.requested_broadcast {
-            match rule.broadcast_strategy {
-                BroadcastStrategy::Deny => {
-                    return RouteOutcome::Rejected(RouteRejection {
-                        reason: "broadcast_denied_by_policy".to_owned(),
-                        quarantined: false,
-                    });
-                }
-                BroadcastStrategy::MentionOnly if !mention_match => {
-                    return RouteOutcome::Rejected(RouteRejection {
-                        reason: "broadcast_requires_mention_match".to_owned(),
-                        quarantined: false,
-                    });
-                }
-                BroadcastStrategy::MentionOnly | BroadcastStrategy::Allow => {}
-            }
-        }
-
-        let concurrency_limit =
-            rule.concurrency_limit.unwrap_or(self.config.default_concurrency_limit).max(1);
+        let candidate = match self.evaluate_route_policy(channel.as_str(), message) {
+            Ok(candidate) => candidate,
+            Err(rejection) => return RouteOutcome::Rejected(rejection),
+        };
+        let concurrency_limit = candidate
+            .rule
+            .concurrency_limit
+            .unwrap_or(self.config.default_concurrency_limit)
+            .max(1);
         let permit = match self.acquire_channel_slot(channel.as_str(), concurrency_limit) {
             Ok(permit) => permit,
             Err(queue_depth) => {
@@ -339,41 +803,23 @@ impl ChannelRouter {
             }
         };
 
-        let conversation_component = normalize_session_component(
-            message.conversation_id.as_deref().unwrap_or(FALLBACK_CONVERSATION_COMPONENT),
-        );
-        let sender_component = normalize_session_component(
-            sender_identity.as_deref().unwrap_or(FALLBACK_SENDER_COMPONENT),
-        );
-        let route_key = format!("channel:{channel}:conversation:{conversation_component}");
-        let session_key = if rule.isolate_session_by_sender {
-            format!("{route_key}:sender:{sender_component}")
-        } else {
-            route_key.clone()
-        };
-        let session_label =
-            normalize_non_empty(message.conversation_id.as_deref().unwrap_or_default());
-
         RouteOutcome::Routed(Box::new(RoutedMessage {
             plan: RoutePlan {
-                channel,
-                route_key,
-                session_key,
-                session_label,
-                sender_identity,
+                channel: candidate.channel,
+                route_key: candidate.route_key,
+                session_key: candidate.session_key,
+                session_label: candidate.session_label,
+                sender_identity: candidate.sender_identity,
                 is_broadcast: message.requested_broadcast,
-                response_prefix: rule
+                response_prefix: candidate
+                    .rule
                     .response_prefix
                     .clone()
                     .or_else(|| self.config.default_response_prefix.clone()),
-                auto_ack_text: rule.auto_ack_text.clone(),
-                auto_reaction: rule.auto_reaction.clone(),
-                in_reply_to_message_id: normalize_non_empty(
-                    message.adapter_message_id.as_deref().unwrap_or_default(),
-                ),
-                reply_thread_id: normalize_non_empty(
-                    message.adapter_thread_id.as_deref().unwrap_or_default(),
-                ),
+                auto_ack_text: candidate.rule.auto_ack_text.clone(),
+                auto_reaction: candidate.rule.auto_reaction.clone(),
+                in_reply_to_message_id: candidate.in_reply_to_message_id,
+                reply_thread_id: candidate.reply_thread_id,
             },
             lease: permit,
         }))
@@ -456,6 +902,7 @@ impl ChannelRouter {
                 allow_from: Vec::new(),
                 deny_from: Vec::new(),
                 allow_direct_messages: self.config.default_allow_direct_messages,
+                direct_message_policy: self.config.default_direct_message_policy,
                 isolate_session_by_sender: self.config.default_isolate_session_by_sender,
                 response_prefix: None,
                 auto_ack_text: None,
@@ -463,6 +910,203 @@ impl ChannelRouter {
                 broadcast_strategy: self.config.default_broadcast_strategy,
                 concurrency_limit: Some(self.config.default_concurrency_limit),
             })
+    }
+
+    fn evaluate_route_policy(
+        &self,
+        channel: &str,
+        message: &InboundMessage,
+    ) -> Result<RouteCandidate, RouteRejection> {
+        let rule = self.resolve_rule(channel);
+        if !rule.enabled {
+            return Err(RouteRejection {
+                reason: "channel_disabled".to_owned(),
+                quarantined: false,
+            });
+        }
+        let sender_identity = sender_identity(message);
+        let normalized_sender = sender_identity.as_deref().map(normalize_identifier_match);
+        if !rule.deny_from.is_empty()
+            && normalized_sender.as_deref().is_some_and(|sender| {
+                rule.deny_from.iter().any(|blocked| normalize_identifier_match(blocked) == sender)
+            })
+        {
+            return Err(RouteRejection { reason: "sender_denied".to_owned(), quarantined: false });
+        }
+        let sender_allowlisted = normalized_sender
+            .as_deref()
+            .is_some_and(|sender| self.sender_is_allowlisted(&rule, sender));
+        let strict_allowlist = !(rule.allow_from.is_empty()
+            || message.is_direct_message
+                && matches!(rule.direct_message_policy, DirectMessagePolicy::Pairing));
+        if strict_allowlist {
+            if !message.sender_verified {
+                return Err(RouteRejection {
+                    reason: "sender_unverified_for_allowlist".to_owned(),
+                    quarantined: false,
+                });
+            }
+            let Some(sender) = normalized_sender.as_deref() else {
+                return Err(RouteRejection {
+                    reason: "sender_missing_for_allowlist".to_owned(),
+                    quarantined: false,
+                });
+            };
+            if !self.sender_is_allowlisted(&rule, sender) {
+                return Err(RouteRejection {
+                    reason: "sender_not_allowlisted".to_owned(),
+                    quarantined: false,
+                });
+            }
+        }
+        let mention_match =
+            has_mention_match(message.text.as_str(), rule.mention_patterns.as_slice());
+        if message.is_direct_message {
+            if !rule.allow_direct_messages {
+                return Err(RouteRejection {
+                    reason: "direct_message_disabled".to_owned(),
+                    quarantined: false,
+                });
+            }
+            match rule.direct_message_policy {
+                DirectMessagePolicy::Deny => {
+                    return Err(RouteRejection {
+                        reason: "direct_message_denied_by_policy".to_owned(),
+                        quarantined: false,
+                    });
+                }
+                DirectMessagePolicy::Allow => {}
+                DirectMessagePolicy::Pairing => {
+                    let Some(sender) = normalized_sender.as_deref() else {
+                        return Err(RouteRejection {
+                            reason: PairingConsumeReason::SenderMissing.as_str().to_owned(),
+                            quarantined: false,
+                        });
+                    };
+                    if !message.sender_verified {
+                        return Err(RouteRejection {
+                            reason: "sender_unverified_for_dm_pairing".to_owned(),
+                            quarantined: false,
+                        });
+                    }
+                    if !sender_allowlisted && !self.is_sender_paired(channel, sender) {
+                        return Err(RouteRejection {
+                            reason: "direct_message_pairing_required".to_owned(),
+                            quarantined: false,
+                        });
+                    }
+                }
+            }
+        } else if !mention_match {
+            return Err(RouteRejection {
+                reason: "no_matching_mention_or_dm_policy".to_owned(),
+                quarantined: false,
+            });
+        }
+        if message.requested_broadcast {
+            match rule.broadcast_strategy {
+                BroadcastStrategy::Deny => {
+                    return Err(RouteRejection {
+                        reason: "broadcast_denied_by_policy".to_owned(),
+                        quarantined: false,
+                    });
+                }
+                BroadcastStrategy::MentionOnly if !mention_match => {
+                    return Err(RouteRejection {
+                        reason: "broadcast_requires_mention_match".to_owned(),
+                        quarantined: false,
+                    });
+                }
+                BroadcastStrategy::MentionOnly | BroadcastStrategy::Allow => {}
+            }
+        }
+        let conversation_component = normalize_session_component(
+            message.conversation_id.as_deref().unwrap_or(FALLBACK_CONVERSATION_COMPONENT),
+        );
+        let sender_component = normalize_session_component(
+            sender_identity.as_deref().unwrap_or(FALLBACK_SENDER_COMPONENT),
+        );
+        let route_key = format!("channel:{channel}:conversation:{conversation_component}");
+        let session_key = if rule.isolate_session_by_sender {
+            format!("{route_key}:sender:{sender_component}")
+        } else {
+            route_key.clone()
+        };
+        Ok(RouteCandidate {
+            channel: channel.to_owned(),
+            rule,
+            sender_identity,
+            route_key,
+            session_key,
+            session_label: normalize_non_empty(
+                message.conversation_id.as_deref().unwrap_or_default(),
+            ),
+            in_reply_to_message_id: normalize_non_empty(
+                message.adapter_message_id.as_deref().unwrap_or_default(),
+            ),
+            reply_thread_id: normalize_non_empty(
+                message.adapter_thread_id.as_deref().unwrap_or_default(),
+            ),
+        })
+    }
+
+    fn sender_is_allowlisted(&self, rule: &ChannelRoutingRule, sender: &str) -> bool {
+        rule.allow_from.iter().any(|value| normalize_identifier_match(value.as_str()) == sender)
+    }
+
+    fn is_sender_paired(&self, channel: &str, sender_identity: &str) -> bool {
+        let Ok(mut guard) = self.state.lock() else {
+            return false;
+        };
+        let Some(state) = guard.get_mut(channel) else {
+            return false;
+        };
+        let now = current_unix_ms();
+        Self::prune_pairing_state(state, now);
+        state.pairing_grants.contains_key(sender_identity)
+    }
+
+    fn generate_pairing_code() -> String {
+        let raw = Ulid::new().to_string();
+        raw[raw.len().saturating_sub(DM_PAIRING_CODE_LENGTH)..].to_owned()
+    }
+
+    fn sanitize_pairing_code(code: &str) -> Option<String> {
+        let sanitized = code
+            .trim()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_uppercase();
+        if sanitized.len() != DM_PAIRING_CODE_LENGTH {
+            return None;
+        }
+        Some(sanitized)
+    }
+
+    fn prune_pairing_state(state: &mut ChannelRuntimeState, now_unix_ms: i64) {
+        state.pairing_codes.retain(|_, record| record.expires_at_unix_ms > now_unix_ms);
+        state.pairing_pending_by_sender.retain(|_, record| record.expires_at_unix_ms > now_unix_ms);
+        let pending_senders =
+            state.pairing_pending_by_sender.keys().cloned().collect::<HashSet<_>>();
+        state.pairing_pending_by_approval.retain(|_, sender| pending_senders.contains(sender));
+        state.pairing_grants.retain(|_, grant| {
+            grant
+                .expires_at_unix_ms
+                .is_none_or(|expires_at_unix_ms| expires_at_unix_ms > now_unix_ms)
+        });
+    }
+
+    fn normalize_pairing_code_ttl_ms(value: u64) -> u64 {
+        value.clamp(MIN_DM_PAIRING_CODE_TTL_MS, MAX_DM_PAIRING_CODE_TTL_MS)
+    }
+
+    fn normalize_pairing_pending_ttl_ms(value: u64) -> u64 {
+        value.clamp(MIN_DM_PAIRING_CODE_TTL_MS, MAX_DM_PAIRING_CODE_TTL_MS)
+    }
+
+    fn normalize_pairing_session_ttl_ms(value: u64) -> u64 {
+        value.clamp(MIN_DM_PAIRING_CODE_TTL_MS, MAX_DM_PAIRING_SESSION_TTL_MS)
     }
 
     fn acquire_channel_slot(
@@ -650,10 +1294,16 @@ fn current_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn sha256_hex(payload: &[u8]) -> String {
+    let digest = Sha256::digest(payload);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BroadcastStrategy, ChannelRouter, ChannelRouterConfig, ChannelRoutingRule, InboundMessage,
+        BroadcastStrategy, ChannelRouter, ChannelRouterConfig, ChannelRoutingRule,
+        DirectMessagePolicy, InboundMessage, PairingApprovalOutcome, PairingConsumeOutcome,
         RetryDisposition, RouteOutcome,
     };
 
@@ -667,6 +1317,7 @@ mod tests {
             default_response_prefix: Some("Palyra: ".to_owned()),
             default_channel_enabled: false,
             default_allow_direct_messages: false,
+            default_direct_message_policy: DirectMessagePolicy::Deny,
             default_isolate_session_by_sender: false,
             default_broadcast_strategy: BroadcastStrategy::Deny,
             default_concurrency_limit: 2,
@@ -677,6 +1328,7 @@ mod tests {
                 allow_from: vec![],
                 deny_from: vec![],
                 allow_direct_messages: false,
+                direct_message_policy: DirectMessagePolicy::Deny,
                 isolate_session_by_sender: false,
                 response_prefix: Some("[bot] ".to_owned()),
                 auto_ack_text: Some("processing".to_owned()),
@@ -753,6 +1405,7 @@ mod tests {
     fn direct_message_policy_allows_messages_without_mentions() {
         let mut config = baseline_config();
         config.channels[0].allow_direct_messages = true;
+        config.channels[0].direct_message_policy = DirectMessagePolicy::Allow;
         let router = ChannelRouter::new(config);
         let mut message = inbound("plain dm question");
         message.is_direct_message = true;
@@ -765,6 +1418,7 @@ mod tests {
         let mut config = baseline_config();
         config.default_channel_enabled = true;
         config.default_allow_direct_messages = true;
+        config.default_direct_message_policy = DirectMessagePolicy::Allow;
         config.channels.clear();
         let router = ChannelRouter::new(config);
         let mut message = inbound("plain dm broadcast request");
@@ -875,5 +1529,68 @@ mod tests {
             "queue depth should stay capped when additional retry cannot be enqueued"
         );
         assert_eq!(router.quarantine_len("slack"), 1);
+    }
+
+    #[test]
+    fn dm_pairing_policy_rejects_unpaired_sender() {
+        let mut config = baseline_config();
+        config.channels[0].allow_direct_messages = true;
+        config.channels[0].direct_message_policy = DirectMessagePolicy::Pairing;
+        let router = ChannelRouter::new(config);
+
+        let mut message = inbound("dm hello");
+        message.is_direct_message = true;
+        let outcome = router.begin_route(&message);
+        assert!(matches!(
+            outcome,
+            RouteOutcome::Rejected(ref rejection)
+                if rejection.reason == "direct_message_pairing_required"
+        ));
+    }
+
+    #[test]
+    fn dm_pairing_code_flow_grants_access_after_approval() {
+        let mut config = baseline_config();
+        config.channels[0].allow_direct_messages = true;
+        config.channels[0].direct_message_policy = DirectMessagePolicy::Pairing;
+        let router = ChannelRouter::new(config);
+
+        let code = router
+            .mint_pairing_code("slack", "admin:ops", Some(60_000))
+            .expect("pairing code mint should succeed");
+        let consume = router.consume_pairing_code("slack", Some("U123"), code.code.as_str(), None);
+        let PairingConsumeOutcome::Pending(pending) = consume else {
+            panic!("valid pairing code should create pending approval request");
+        };
+        assert_eq!(pending.sender_identity, "u123");
+
+        let approval_id = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
+        let pending = router
+            .attach_pairing_pending_approval("slack", "u123", approval_id)
+            .expect("pending pairing should attach approval id");
+        assert_eq!(pending.approval_id.as_deref(), Some(approval_id));
+
+        let approval = router.apply_pairing_approval(approval_id, true, Some(120_000));
+        let PairingApprovalOutcome::Approved(grant) = approval else {
+            panic!("approval allow should create active pairing grant");
+        };
+        assert_eq!(grant.sender_identity, "u123");
+
+        let mut message = inbound("dm hello after pairing");
+        message.is_direct_message = true;
+        let outcome = router.begin_route(&message);
+        assert!(
+            matches!(outcome, RouteOutcome::Routed(_)),
+            "paired sender should pass DM policy checks"
+        );
+    }
+
+    #[test]
+    fn preview_route_reports_rejection_reason_and_hash() {
+        let router = ChannelRouter::new(baseline_config());
+        let preview = router.preview_route(&inbound("hello team"));
+        assert!(!preview.accepted);
+        assert_eq!(preview.reason, "no_matching_mention_or_dm_policy");
+        assert_eq!(preview.config_hash.len(), 64);
     }
 }

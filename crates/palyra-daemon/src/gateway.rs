@@ -55,8 +55,10 @@ use crate::{
         AgentSetDefaultOutcome,
     },
     channel_router::{
-        ChannelRouter, ChannelRouterConfig, InboundMessage as ChannelInboundMessage,
-        RetryDisposition, RouteOutcome, RoutedMessage as ChannelRoutedMessage,
+        ChannelPairingSnapshot, ChannelRouter, ChannelRouterConfig,
+        InboundMessage as ChannelInboundMessage, PairingApprovalOutcome, PairingCodeRecord,
+        PairingConsumeOutcome, RetryDisposition, RouteOutcome, RoutePreview as ChannelRoutePreview,
+        RoutedMessage as ChannelRoutedMessage,
     },
     cron::{normalize_schedule, schedule_to_proto, trigger_job_now, CronTimezoneMode},
     journal::{
@@ -3317,6 +3319,78 @@ impl GatewayRuntimeState {
         }
     }
 
+    #[must_use]
+    pub fn channel_router_config_snapshot(&self) -> ChannelRouterConfig {
+        self.config.channel_router.clone()
+    }
+
+    #[must_use]
+    pub fn channel_router_config_hash(&self) -> String {
+        self.channel_router.config_hash()
+    }
+
+    #[must_use]
+    pub fn channel_router_validation_warnings(&self) -> Vec<String> {
+        self.channel_router.validation_warnings()
+    }
+
+    #[must_use]
+    pub fn channel_router_preview(&self, message: &ChannelInboundMessage) -> ChannelRoutePreview {
+        self.channel_router.preview_route(message)
+    }
+
+    #[must_use]
+    pub fn channel_router_pairing_snapshot(
+        &self,
+        channel: Option<&str>,
+    ) -> Vec<ChannelPairingSnapshot> {
+        self.channel_router.pairing_snapshot(channel)
+    }
+
+    pub fn channel_router_mint_pairing_code(
+        &self,
+        channel: &str,
+        issued_by: &str,
+        ttl_ms: Option<u64>,
+    ) -> Result<PairingCodeRecord, Status> {
+        self.channel_router
+            .mint_pairing_code(channel, issued_by, ttl_ms)
+            .map_err(|reason| Status::failed_precondition(reason.as_str()))
+    }
+
+    #[must_use]
+    pub fn channel_router_consume_pairing_code(
+        &self,
+        channel: &str,
+        sender_identity: Option<&str>,
+        code: &str,
+        pending_ttl_ms: Option<u64>,
+    ) -> PairingConsumeOutcome {
+        self.channel_router.consume_pairing_code(channel, sender_identity, code, pending_ttl_ms)
+    }
+
+    #[must_use]
+    pub fn channel_router_attach_pairing_pending_approval(
+        &self,
+        channel: &str,
+        sender_identity: &str,
+        approval_id: &str,
+    ) -> bool {
+        self.channel_router
+            .attach_pairing_pending_approval(channel, sender_identity, approval_id)
+            .is_some()
+    }
+
+    #[must_use]
+    pub fn channel_router_apply_pairing_approval(
+        &self,
+        approval_id: &str,
+        approved: bool,
+        decision_scope_ttl_ms: Option<i64>,
+    ) -> PairingApprovalOutcome {
+        self.channel_router.apply_pairing_approval(approval_id, approved, decision_scope_ttl_ms)
+    }
+
     pub fn clear_memory_search_cache(&self) {
         match self.memory_search_cache.lock() {
             Ok(mut cache) => {
@@ -6051,6 +6125,255 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             retry_attempt,
         };
         self.state.counters.channel_messages_inbound.fetch_add(1, Ordering::Relaxed);
+        let route_config_hash = self.state.channel_router_config_hash();
+        let actor_connector = input.channel.clone();
+        let actor_gateway_principal = context.principal.clone();
+        let actor_gateway_device_id = context.device_id.clone();
+
+        if input.is_direct_message {
+            if let Some(pairing_code) = extract_pairing_code_command(input.text.as_str()) {
+                let pairing_result = self.state.channel_router_consume_pairing_code(
+                    input.channel.as_str(),
+                    input.sender_handle.as_deref(),
+                    pairing_code.as_str(),
+                    None,
+                );
+                match pairing_result {
+                    PairingConsumeOutcome::Pending(pending) => {
+                        let session_id = Ulid::new().to_string();
+                        let run_id = Ulid::new().to_string();
+                        let approval_record = self
+                            .state
+                            .create_approval_record(ApprovalCreateRequest {
+                                approval_id: Ulid::new().to_string(),
+                                session_id: session_id.clone(),
+                                run_id: run_id.clone(),
+                                principal: context.principal.clone(),
+                                device_id: context.device_id.clone(),
+                                channel: Some(input.channel.clone()),
+                                subject_type: ApprovalSubjectType::ChannelSend,
+                                subject_id: format!(
+                                    "dm_pairing:{}:{}",
+                                    pending.channel, pending.sender_identity
+                                ),
+                                request_summary: format!(
+                                    "Approve DM pairing for sender '{}' on channel '{}'",
+                                    pending.sender_identity, pending.channel
+                                ),
+                                policy_snapshot: ApprovalPolicySnapshot {
+                                    policy_id: "channel_router.dm_pairing.v1".to_owned(),
+                                    policy_hash: route_config_hash.clone(),
+                                    evaluation_summary:
+                                        "direct_message_policy=pairing approval_required=true"
+                                            .to_owned(),
+                                },
+                                prompt: ApprovalPromptRecord {
+                                    title: "Approve DM pairing request".to_owned(),
+                                    risk_level: ApprovalRiskLevel::Medium,
+                                    subject_id: format!(
+                                        "dm_pairing:{}:{}",
+                                        pending.channel, pending.sender_identity
+                                    ),
+                                    summary: format!(
+                                        "Sender '{}' requested DM pairing for '{}'",
+                                        pending.sender_identity, pending.channel
+                                    ),
+                                    options: vec![
+                                        ApprovalPromptOption {
+                                            option_id: "allow_session".to_owned(),
+                                            label: "Allow session".to_owned(),
+                                            description:
+                                                "Allow direct messages for the current operator session"
+                                                    .to_owned(),
+                                            default_selected: true,
+                                            decision_scope: ApprovalDecisionScope::Session,
+                                            timebox_ttl_ms: None,
+                                        },
+                                        ApprovalPromptOption {
+                                            option_id: "allow_8h".to_owned(),
+                                            label: "Allow 8 hours".to_owned(),
+                                            description:
+                                                "Approve DM pairing for a limited 8-hour window"
+                                                    .to_owned(),
+                                            default_selected: false,
+                                            decision_scope: ApprovalDecisionScope::Timeboxed,
+                                            timebox_ttl_ms: Some(8 * 60 * 60 * 1_000),
+                                        },
+                                        ApprovalPromptOption {
+                                            option_id: "deny".to_owned(),
+                                            label: "Deny".to_owned(),
+                                            description:
+                                                "Reject this pairing request and keep DM blocked"
+                                                    .to_owned(),
+                                            default_selected: false,
+                                            decision_scope: ApprovalDecisionScope::Once,
+                                            timebox_ttl_ms: None,
+                                        },
+                                    ],
+                                    timeout_seconds: APPROVAL_PROMPT_TIMEOUT_SECONDS,
+                                    details_json: json!({
+                                        "channel": pending.channel,
+                                        "sender_identity": pending.sender_identity,
+                                        "pairing_code": pending.code,
+                                        "expires_at_unix_ms": pending.expires_at_unix_ms,
+                                    })
+                                    .to_string(),
+                                    policy_explanation:
+                                        "DM pairing requires explicit operator approval before routing."
+                                            .to_owned(),
+                                },
+                            })
+                            .await?;
+                        let attached = self.state.channel_router_attach_pairing_pending_approval(
+                            pending.channel.as_str(),
+                            pending.sender_identity.as_str(),
+                            approval_record.approval_id.as_str(),
+                        );
+                        if !attached {
+                            return Err(Status::internal(
+                                "failed to attach DM pairing approval state",
+                            ));
+                        }
+                        self.state
+                            .counters
+                            .channel_messages_rejected
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.state.counters.channel_router_queue_depth.store(
+                            self.state.channel_router.queue_depth() as u64,
+                            Ordering::Relaxed,
+                        );
+                        let _ = record_message_router_journal_event(
+                            &self.state,
+                            &context,
+                            session_id.as_str(),
+                            run_id.as_str(),
+                            "message.received",
+                            common_v1::journal_event::EventActor::User as i32,
+                            json!({
+                                "event": "message.received",
+                                "envelope_id": input.envelope_id.clone(),
+                                "channel": input.channel.clone(),
+                                "requested_broadcast": input.requested_broadcast,
+                                "is_direct_message": input.is_direct_message,
+                                "config_hash": route_config_hash.clone(),
+                                "actor": {
+                                    "connector_channel": actor_connector.clone(),
+                                    "gateway_principal": actor_gateway_principal.clone(),
+                                    "gateway_device_id": actor_gateway_device_id.clone(),
+                                }
+                            }),
+                        )
+                        .await;
+                        let _ = record_message_router_journal_event(
+                            &self.state,
+                            &context,
+                            session_id.as_str(),
+                            run_id.as_str(),
+                            "message.rejected",
+                            common_v1::journal_event::EventActor::System as i32,
+                            json!({
+                                "event": "message.rejected",
+                                "envelope_id": input.envelope_id.clone(),
+                                "channel": input.channel.clone(),
+                                "reason": "direct_message_pairing_pending_approval",
+                                "approval_id": approval_record.approval_id,
+                                "queued_for_retry": false,
+                                "quarantined": false,
+                                "config_hash": route_config_hash.clone(),
+                                "actor": {
+                                    "connector_channel": actor_connector.clone(),
+                                    "gateway_principal": actor_gateway_principal.clone(),
+                                    "gateway_device_id": actor_gateway_device_id.clone(),
+                                }
+                            }),
+                        )
+                        .await;
+                        return Ok(Response::new(gateway_v1::RouteMessageResponse {
+                            v: CANONICAL_PROTOCOL_MAJOR,
+                            accepted: false,
+                            queued_for_retry: false,
+                            decision_reason: "direct_message_pairing_pending_approval".to_owned(),
+                            session_id: None,
+                            run_id: None,
+                            outputs: Vec::new(),
+                            route_key: String::new(),
+                            retry_attempt,
+                            queue_depth: self.state.channel_router.queue_depth() as u32,
+                        }));
+                    }
+                    PairingConsumeOutcome::Rejected(reason) => {
+                        self.state
+                            .counters
+                            .channel_messages_rejected
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.state.counters.channel_router_queue_depth.store(
+                            self.state.channel_router.queue_depth() as u64,
+                            Ordering::Relaxed,
+                        );
+                        let session_id = Ulid::new().to_string();
+                        let run_id = Ulid::new().to_string();
+                        let reason_label = reason.as_str().to_owned();
+                        let _ = record_message_router_journal_event(
+                            &self.state,
+                            &context,
+                            session_id.as_str(),
+                            run_id.as_str(),
+                            "message.received",
+                            common_v1::journal_event::EventActor::User as i32,
+                            json!({
+                                "event": "message.received",
+                                "envelope_id": input.envelope_id.clone(),
+                                "channel": input.channel.clone(),
+                                "requested_broadcast": input.requested_broadcast,
+                                "is_direct_message": input.is_direct_message,
+                                "config_hash": route_config_hash.clone(),
+                                "actor": {
+                                    "connector_channel": actor_connector.clone(),
+                                    "gateway_principal": actor_gateway_principal.clone(),
+                                    "gateway_device_id": actor_gateway_device_id.clone(),
+                                }
+                            }),
+                        )
+                        .await;
+                        let _ = record_message_router_journal_event(
+                            &self.state,
+                            &context,
+                            session_id.as_str(),
+                            run_id.as_str(),
+                            "message.rejected",
+                            common_v1::journal_event::EventActor::System as i32,
+                            json!({
+                                "event": "message.rejected",
+                                "envelope_id": input.envelope_id.clone(),
+                                "channel": input.channel.clone(),
+                                "reason": reason_label.clone(),
+                                "queued_for_retry": false,
+                                "quarantined": false,
+                                "config_hash": route_config_hash.clone(),
+                                "actor": {
+                                    "connector_channel": actor_connector.clone(),
+                                    "gateway_principal": actor_gateway_principal.clone(),
+                                    "gateway_device_id": actor_gateway_device_id.clone(),
+                                }
+                            }),
+                        )
+                        .await;
+                        return Ok(Response::new(gateway_v1::RouteMessageResponse {
+                            v: CANONICAL_PROTOCOL_MAJOR,
+                            accepted: false,
+                            queued_for_retry: false,
+                            decision_reason: reason_label,
+                            session_id: None,
+                            run_id: None,
+                            outputs: Vec::new(),
+                            route_key: String::new(),
+                            retry_attempt,
+                            queue_depth: self.state.channel_router.queue_depth() as u32,
+                        }));
+                    }
+                }
+            }
+        }
 
         match self.state.channel_router.begin_route(&input) {
             RouteOutcome::Rejected(rejection) => {
@@ -6081,6 +6404,12 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "channel": channel,
                         "requested_broadcast": input.requested_broadcast,
                         "is_direct_message": input.is_direct_message,
+                        "config_hash": route_config_hash.clone(),
+                        "actor": {
+                            "connector_channel": actor_connector.clone(),
+                            "gateway_principal": actor_gateway_principal.clone(),
+                            "gateway_device_id": actor_gateway_device_id.clone(),
+                        }
                     }),
                 )
                 .await;
@@ -6096,7 +6425,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "envelope_id": input.envelope_id.clone(),
                         "channel": input.channel.clone(),
                         "reason": rejection_reason.clone(),
+                        "queued_for_retry": false,
                         "quarantined": rejection.quarantined,
+                        "config_hash": route_config_hash.clone(),
+                        "actor": {
+                            "connector_channel": actor_connector.clone(),
+                            "gateway_principal": actor_gateway_principal.clone(),
+                            "gateway_device_id": actor_gateway_device_id.clone(),
+                        }
                     }),
                 )
                 .await;
@@ -6135,6 +6471,12 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "channel": input.channel.clone(),
                         "requested_broadcast": input.requested_broadcast,
                         "is_direct_message": input.is_direct_message,
+                        "config_hash": route_config_hash.clone(),
+                        "actor": {
+                            "connector_channel": actor_connector.clone(),
+                            "gateway_principal": actor_gateway_principal.clone(),
+                            "gateway_device_id": actor_gateway_device_id.clone(),
+                        }
                     }),
                 )
                 .await;
@@ -6151,7 +6493,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "channel": input.channel.clone(),
                         "reason": queue_reason.clone(),
                         "queued_for_retry": true,
+                        "quarantined": false,
                         "retry_after_ms": queued.retry_after_ms,
+                        "config_hash": route_config_hash.clone(),
+                        "actor": {
+                            "connector_channel": actor_connector.clone(),
+                            "gateway_principal": actor_gateway_principal.clone(),
+                            "gateway_device_id": actor_gateway_device_id.clone(),
+                        }
                     }),
                 )
                 .await;
@@ -6198,6 +6547,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             "channel": input.channel.clone(),
                             "reason": error.message(),
                             "policy_action": route_action,
+                            "queued_for_retry": false,
+                            "quarantined": false,
+                            "config_hash": route_config_hash.clone(),
+                            "actor": {
+                                "connector_channel": actor_connector.clone(),
+                                "gateway_principal": actor_gateway_principal.clone(),
+                                "gateway_device_id": actor_gateway_device_id.clone(),
+                            }
                         }),
                     )
                     .await;
@@ -6260,6 +6617,12 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "channel": input.channel.clone(),
                         "session_key": plan.session_key.clone(),
                         "route_key": plan.route_key.clone(),
+                        "config_hash": route_config_hash.clone(),
+                        "actor": {
+                            "connector_channel": actor_connector.clone(),
+                            "gateway_principal": actor_gateway_principal.clone(),
+                            "gateway_device_id": actor_gateway_device_id.clone(),
+                        }
                     }),
                 )
                 .await;
@@ -6323,6 +6686,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                     RetryDisposition::Queued => "queued",
                                     RetryDisposition::Quarantined => "quarantined",
                                 },
+                                "queued_for_retry": matches!(retry_disposition, RetryDisposition::Queued),
+                                "quarantined": matches!(retry_disposition, RetryDisposition::Quarantined),
+                                "config_hash": route_config_hash.clone(),
+                                "actor": {
+                                    "connector_channel": actor_connector.clone(),
+                                    "gateway_principal": actor_gateway_principal.clone(),
+                                    "gateway_device_id": actor_gateway_device_id.clone(),
+                                }
                             }),
                         )
                         .await;
@@ -6404,6 +6775,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             "channel": plan.channel.clone(),
                             "reason": error.message(),
                             "policy_action": "channel.send",
+                            "queued_for_retry": false,
+                            "quarantined": false,
+                            "config_hash": route_config_hash.clone(),
+                            "actor": {
+                                "connector_channel": actor_connector.clone(),
+                                "gateway_principal": actor_gateway_principal.clone(),
+                                "gateway_device_id": actor_gateway_device_id.clone(),
+                            }
                         }),
                     )
                     .await;
@@ -6472,6 +6851,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "session_id": session_id,
                         "run_id": run_id,
                         "broadcast": plan.is_broadcast,
+                        "queued_for_retry": false,
+                        "quarantined": false,
+                        "config_hash": route_config_hash.clone(),
+                        "actor": {
+                            "connector_channel": actor_connector.clone(),
+                            "gateway_principal": actor_gateway_principal.clone(),
+                            "gateway_device_id": actor_gateway_device_id.clone(),
+                        }
                     }),
                 )
                 .await;
@@ -6487,6 +6874,12 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "envelope_id": envelope_id,
                         "channel": plan.channel.clone(),
                         "reply_preview": truncate_with_ellipsis(reply_text.clone(), 256),
+                        "config_hash": route_config_hash.clone(),
+                        "actor": {
+                            "connector_channel": actor_connector.clone(),
+                            "gateway_principal": actor_gateway_principal.clone(),
+                            "gateway_device_id": actor_gateway_device_id.clone(),
+                        }
                     }),
                 )
                 .await;
@@ -14702,6 +15095,19 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         diff |= usize::from(lhs ^ rhs);
     }
     diff == 0
+}
+
+fn extract_pairing_code_command(raw: &str) -> Option<String> {
+    let mut parts = raw.split_whitespace();
+    let command = parts.next()?.trim().to_ascii_lowercase();
+    if command != "pair" {
+        return None;
+    }
+    let code = parts.next()?.trim();
+    if code.is_empty() {
+        return None;
+    }
+    Some(code.to_owned())
 }
 
 fn non_empty(input: String) -> Option<String> {

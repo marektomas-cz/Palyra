@@ -160,6 +160,22 @@ describe("M35 web console app", () => {
         ]
       }),
       jsonResponse({
+        config: {
+          enabled: true,
+          default_direct_message_policy: "deny",
+          channels: [{ channel: "echo:default", enabled: true }]
+        },
+        config_hash: "router-hash-1"
+      }),
+      jsonResponse({
+        warnings: [],
+        config_hash: "router-hash-1"
+      }),
+      jsonResponse({
+        pairings: [],
+        config_hash: "router-hash-1"
+      }),
+      jsonResponse({
         connector: {
           connector_id: "echo:default",
           kind: "echo",
@@ -194,6 +210,22 @@ describe("M35 web console app", () => {
       jsonResponse({
         events: [],
         dead_letters: []
+      }),
+      jsonResponse({
+        config: {
+          enabled: true,
+          default_direct_message_policy: "deny",
+          channels: [{ channel: "echo:default", enabled: true }]
+        },
+        config_hash: "router-hash-2"
+      }),
+      jsonResponse({
+        warnings: [],
+        config_hash: "router-hash-2"
+      }),
+      jsonResponse({
+        pairings: [],
+        config_hash: "router-hash-2"
       })
     ]);
     vi.stubGlobal("fetch", fetchMock);
@@ -209,8 +241,8 @@ describe("M35 web console app", () => {
       expect(screen.getByText("Connector disabled.")).toBeInTheDocument();
     });
 
-    expect(requestUrl(fetchMock.mock.calls[5][0])).toBe("/console/v1/channels/echo%3Adefault/enabled");
-    const request = fetchMock.mock.calls[5][1];
+    expect(requestUrl(fetchMock.mock.calls[8][0])).toBe("/console/v1/channels/echo%3Adefault/enabled");
+    const request = fetchMock.mock.calls[8][1];
     const headers = new Headers(request?.headers);
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(request?.method).toBe("POST");
@@ -252,6 +284,22 @@ describe("M35 web console app", () => {
       }),
       jsonResponse({ events: [], dead_letters: [] }),
       jsonResponse({
+        config: {
+          enabled: true,
+          default_direct_message_policy: "deny",
+          channels: [{ channel: "discord:default", enabled: true }]
+        },
+        config_hash: "router-hash-1"
+      }),
+      jsonResponse({
+        warnings: [],
+        config_hash: "router-hash-1"
+      }),
+      jsonResponse({
+        pairings: [],
+        config_hash: "router-hash-1"
+      }),
+      jsonResponse({
         connector_id: "discord:default",
         account_id: "default",
         mode: "local",
@@ -284,7 +332,23 @@ describe("M35 web console app", () => {
           queue_depth: { pending_outbox: 0, dead_letters: 0 }
         }
       }),
-      jsonResponse({ events: [], dead_letters: [] })
+      jsonResponse({ events: [], dead_letters: [] }),
+      jsonResponse({
+        config: {
+          enabled: true,
+          default_direct_message_policy: "deny",
+          channels: [{ channel: "discord:default", enabled: true }]
+        },
+        config_hash: "router-hash-2"
+      }),
+      jsonResponse({
+        warnings: [],
+        config_hash: "router-hash-2"
+      }),
+      jsonResponse({
+        pairings: [],
+        config_hash: "router-hash-2"
+      })
     ]);
     vi.stubGlobal("fetch", fetchMock);
 
@@ -301,8 +365,8 @@ describe("M35 web console app", () => {
       expect(screen.getByText("Discord preflight OK for palyra-bot (123).")).toBeInTheDocument();
     });
 
-    expect(requestUrl(fetchMock.mock.calls[5][0])).toBe("/console/v1/channels/discord/onboarding/probe");
-    const request = fetchMock.mock.calls[5][1];
+    expect(requestUrl(fetchMock.mock.calls[8][0])).toBe("/console/v1/channels/discord/onboarding/probe");
+    const request = fetchMock.mock.calls[8][1];
     const headers = new Headers(request?.headers);
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(request?.method).toBe("POST");

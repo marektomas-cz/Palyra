@@ -238,6 +238,7 @@ pub struct FileCanvasHostConfig {
 pub struct FileChannelRoutingConfig {
     pub default_channel_enabled: Option<bool>,
     pub default_allow_direct_messages: Option<bool>,
+    pub default_direct_message_policy: Option<String>,
     pub default_isolate_session_by_sender: Option<bool>,
     pub default_broadcast_strategy: Option<String>,
     pub default_concurrency_limit: Option<u64>,
@@ -253,6 +254,7 @@ pub struct FileChannelRoutingRule {
     pub allow_from: Option<Vec<String>>,
     pub deny_from: Option<Vec<String>>,
     pub allow_direct_messages: Option<bool>,
+    pub direct_message_policy: Option<String>,
     pub isolate_session_by_sender: Option<bool>,
     pub response_prefix: Option<String>,
     pub auto_ack_text: Option<String>,

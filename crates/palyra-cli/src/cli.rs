@@ -636,10 +636,118 @@ pub enum ChannelsDiscordCommand {
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum ChannelsRouterCommand {
+    Rules {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Warnings {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Preview {
+        #[arg(long = "route-channel")]
+        route_channel: String,
+        #[arg(long)]
+        text: String,
+        #[arg(long)]
+        conversation_id: Option<String>,
+        #[arg(long)]
+        sender_identity: Option<String>,
+        #[arg(long)]
+        sender_display: Option<String>,
+        #[arg(long, default_value_t = true)]
+        sender_verified: bool,
+        #[arg(long, default_value_t = true)]
+        is_direct_message: bool,
+        #[arg(long, default_value_t = false)]
+        requested_broadcast: bool,
+        #[arg(long)]
+        adapter_message_id: Option<String>,
+        #[arg(long)]
+        adapter_thread_id: Option<String>,
+        #[arg(long)]
+        max_payload_bytes: Option<u64>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Pairings {
+        #[arg(long = "route-channel")]
+        route_channel: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    MintPairingCode {
+        #[arg(long = "route-channel")]
+        route_channel: String,
+        #[arg(long)]
+        issued_by: Option<String>,
+        #[arg(long)]
+        ttl_ms: Option<u64>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ChannelsCommand {
     Discord {
         #[command(subcommand)]
         command: ChannelsDiscordCommand,
+    },
+    Router {
+        #[command(subcommand)]
+        command: ChannelsRouterCommand,
     },
     List {
         #[arg(long)]
@@ -1307,12 +1415,12 @@ mod tests {
     use super::{
         AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg,
         ApprovalsCommand, AuthCommand, AuthCredentialArg, AuthProfilesCommand, AuthProviderArg,
-        AuthScopeArg, BrowserCommand, ChannelsCommand, ChannelsDiscordCommand, Cli, Command,
-        CompletionShell, ConfigCommand, CronCommand, CronConcurrencyPolicyArg,
-        CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, JournalCheckpointModeArg,
-        MemoryCommand, MemoryScopeArg, MemorySourceArg, OnboardingCommand, PatchCommand,
-        PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand, SkillsPackageCommand,
-        SupportBundleCommand,
+        AuthScopeArg, BrowserCommand, ChannelsCommand, ChannelsDiscordCommand,
+        ChannelsRouterCommand, Cli, Command, CompletionShell, ConfigCommand, CronCommand,
+        CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
+        JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg,
+        OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand, SecretsCommand,
+        SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
     };
     #[cfg(not(windows))]
     use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -2251,6 +2359,90 @@ mod tests {
                         json: false,
                     },
                 }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_channels_router_preview() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "channels",
+            "router",
+            "preview",
+            "--route-channel",
+            "discord:default",
+            "--text",
+            "pair ABCDEF",
+            "--sender-identity",
+            "discord:user:12345",
+            "--max-payload-bytes",
+            "2048",
+            "--json",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Channels {
+                command: ChannelsCommand::Router {
+                    command: ChannelsRouterCommand::Preview {
+                        route_channel: "discord:default".to_owned(),
+                        text: "pair ABCDEF".to_owned(),
+                        conversation_id: None,
+                        sender_identity: Some("discord:user:12345".to_owned()),
+                        sender_display: None,
+                        sender_verified: true,
+                        is_direct_message: true,
+                        requested_broadcast: false,
+                        adapter_message_id: None,
+                        adapter_thread_id: None,
+                        max_payload_bytes: Some(2048),
+                        url: None,
+                        token: None,
+                        principal: "user:local".to_owned(),
+                        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                        channel: None,
+                        json: true,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_channels_router_mint_pairing_code() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "channels",
+            "router",
+            "mint-pairing-code",
+            "--route-channel",
+            "discord:default",
+            "--issued-by",
+            "admin:ops@01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--ttl-ms",
+            "600000",
+            "--url",
+            "http://127.0.0.1:7142",
+            "--token",
+            "admin-token",
+            "--json",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Channels {
+                command: ChannelsCommand::Router {
+                    command: ChannelsRouterCommand::MintPairingCode {
+                        route_channel: "discord:default".to_owned(),
+                        issued_by: Some("admin:ops@01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+                        ttl_ms: Some(600000),
+                        url: Some("http://127.0.0.1:7142".to_owned()),
+                        token: Some("admin-token".to_owned()),
+                        principal: "user:local".to_owned(),
+                        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                        channel: None,
+                        json: true,
+                    },
+                },
             }
         );
     }

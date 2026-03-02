@@ -117,6 +117,25 @@ export function App() {
   const [channelsDiscordAutoReaction, setChannelsDiscordAutoReaction] = useState("");
   const [channelsDiscordThreadId, setChannelsDiscordThreadId] = useState("");
   const [channelsDiscordConfirm, setChannelsDiscordConfirm] = useState(false);
+  const [channelRouterRules, setChannelRouterRules] = useState<JsonObject | null>(null);
+  const [channelRouterConfigHash, setChannelRouterConfigHash] = useState("");
+  const [channelRouterWarnings, setChannelRouterWarnings] = useState<string[]>([]);
+  const [channelRouterPreviewChannel, setChannelRouterPreviewChannel] = useState("");
+  const [channelRouterPreviewText, setChannelRouterPreviewText] = useState("pair 000000");
+  const [channelRouterPreviewConversationId, setChannelRouterPreviewConversationId] = useState("");
+  const [channelRouterPreviewSenderIdentity, setChannelRouterPreviewSenderIdentity] = useState("");
+  const [channelRouterPreviewSenderDisplay, setChannelRouterPreviewSenderDisplay] = useState("");
+  const [channelRouterPreviewSenderVerified, setChannelRouterPreviewSenderVerified] = useState(true);
+  const [channelRouterPreviewIsDirectMessage, setChannelRouterPreviewIsDirectMessage] = useState(true);
+  const [channelRouterPreviewRequestedBroadcast, setChannelRouterPreviewRequestedBroadcast] = useState(false);
+  const [channelRouterPreviewMaxPayloadBytes, setChannelRouterPreviewMaxPayloadBytes] = useState("2048");
+  const [channelRouterPreviewResult, setChannelRouterPreviewResult] = useState<JsonObject | null>(null);
+  const [channelRouterPairingsFilterChannel, setChannelRouterPairingsFilterChannel] = useState("");
+  const [channelRouterPairings, setChannelRouterPairings] = useState<JsonObject[]>([]);
+  const [channelRouterMintChannel, setChannelRouterMintChannel] = useState("");
+  const [channelRouterMintIssuedBy, setChannelRouterMintIssuedBy] = useState("");
+  const [channelRouterMintTtlMs, setChannelRouterMintTtlMs] = useState("600000");
+  const [channelRouterMintResult, setChannelRouterMintResult] = useState<JsonObject | null>(null);
   const [discordWizardBusy, setDiscordWizardBusy] = useState(false);
   const [discordWizardAccountId, setDiscordWizardAccountId] = useState("default");
   const [discordWizardMode, setDiscordWizardMode] = useState<"local" | "remote_vps">("local");
@@ -412,6 +431,29 @@ export function App() {
     setChannelsDeadLetters(toJsonObjectArray(response.dead_letters));
   }
 
+  async function refreshChannelRouter(pairingsFilterOverride?: string): Promise<void> {
+    const pairingsChannel = (pairingsFilterOverride ?? channelRouterPairingsFilterChannel).trim();
+    const pairingsParams = new URLSearchParams();
+    if (pairingsChannel.length > 0) {
+      pairingsParams.set("channel", pairingsChannel);
+    }
+
+    const [rulesResponse, warningsResponse, pairingsResponse] = await Promise.all([
+      api.getChannelRouterRules(),
+      api.getChannelRouterWarnings(),
+      api.listChannelRouterPairings(pairingsParams.size > 0 ? pairingsParams : undefined)
+    ]);
+
+    setChannelRouterRules(isJsonObject(rulesResponse.config) ? rulesResponse.config : null);
+    setChannelRouterConfigHash(
+      typeof rulesResponse.config_hash === "string" && rulesResponse.config_hash.trim().length > 0
+        ? rulesResponse.config_hash
+        : (typeof warningsResponse.config_hash === "string" ? warningsResponse.config_hash : "")
+    );
+    setChannelRouterWarnings(toStringArray(warningsResponse.warnings));
+    setChannelRouterPairings(toJsonObjectArray(pairingsResponse.pairings));
+  }
+
   async function refreshChannels(preferredConnectorId?: string): Promise<void> {
     setChannelsBusy(true);
     setError(null);
@@ -434,12 +476,30 @@ export function App() {
         setChannelsSelectedStatus(null);
         setChannelsEvents([]);
         setChannelsDeadLetters([]);
+        setChannelRouterRules(null);
+        setChannelRouterConfigHash("");
+        setChannelRouterWarnings([]);
+        setChannelRouterPairings([]);
         return;
       }
 
       const statusResponse = await api.getChannelStatus(nextConnectorId);
       setChannelsSelectedStatus(isJsonObject(statusResponse.connector) ? statusResponse.connector : null);
+      setChannelRouterPreviewChannel((previous) =>
+        previous.trim().length > 0 ? previous : nextConnectorId
+      );
+      setChannelRouterMintChannel((previous) =>
+        previous.trim().length > 0 ? previous : nextConnectorId
+      );
+      const pairingsFilter =
+        channelRouterPairingsFilterChannel.trim().length > 0
+          ? channelRouterPairingsFilterChannel.trim()
+          : nextConnectorId;
+      if (channelRouterPairingsFilterChannel.trim().length === 0) {
+        setChannelRouterPairingsFilterChannel(nextConnectorId);
+      }
       await refreshChannelLogs(nextConnectorId);
+      await refreshChannelRouter(pairingsFilter);
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -455,10 +515,21 @@ export function App() {
     setChannelsBusy(true);
     setError(null);
     try {
-      setChannelsSelectedConnectorId(connectorId);
-      const statusResponse = await api.getChannelStatus(connectorId);
+      const normalizedConnectorId = connectorId.trim();
+      setChannelsSelectedConnectorId(normalizedConnectorId);
+      const statusResponse = await api.getChannelStatus(normalizedConnectorId);
       setChannelsSelectedStatus(isJsonObject(statusResponse.connector) ? statusResponse.connector : null);
-      await refreshChannelLogs(connectorId);
+      setChannelRouterPreviewChannel(normalizedConnectorId);
+      setChannelRouterMintChannel(normalizedConnectorId);
+      const pairingsFilter =
+        channelRouterPairingsFilterChannel.trim().length > 0
+          ? channelRouterPairingsFilterChannel.trim()
+          : normalizedConnectorId;
+      if (channelRouterPairingsFilterChannel.trim().length === 0) {
+        setChannelRouterPairingsFilterChannel(normalizedConnectorId);
+      }
+      await refreshChannelLogs(normalizedConnectorId);
+      await refreshChannelRouter(pairingsFilter);
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -590,6 +661,107 @@ export function App() {
       setChannelsDiscordConfirm(false);
       await refreshChannelLogs(channelsSelectedConnectorId.trim());
       await refreshChannels(channelsSelectedConnectorId.trim());
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setChannelsBusy(false);
+    }
+  }
+
+  async function refreshChannelRouterPairings(): Promise<void> {
+    setChannelsBusy(true);
+    setError(null);
+    try {
+      const filterChannel = channelRouterPairingsFilterChannel.trim();
+      await refreshChannelRouter(filterChannel.length > 0 ? filterChannel : undefined);
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setChannelsBusy(false);
+    }
+  }
+
+  async function submitChannelRouterPreview(
+    event: React.FormEvent<HTMLFormElement>
+  ): Promise<void> {
+    event.preventDefault();
+    const routeChannel = channelRouterPreviewChannel.trim();
+    const text = channelRouterPreviewText.trim();
+    if (routeChannel.length === 0) {
+      setError("Router preview channel cannot be empty.");
+      return;
+    }
+    if (text.length === 0) {
+      setError("Router preview text cannot be empty.");
+      return;
+    }
+
+    setChannelsBusy(true);
+    setError(null);
+    try {
+      const maxPayloadBytes = parseInteger(channelRouterPreviewMaxPayloadBytes);
+      const response = await api.previewChannelRoute({
+        channel: routeChannel,
+        text,
+        conversation_id: emptyToUndefined(channelRouterPreviewConversationId),
+        sender_identity: emptyToUndefined(channelRouterPreviewSenderIdentity),
+        sender_display: emptyToUndefined(channelRouterPreviewSenderDisplay),
+        sender_verified: channelRouterPreviewSenderVerified,
+        is_direct_message: channelRouterPreviewIsDirectMessage,
+        requested_broadcast: channelRouterPreviewRequestedBroadcast,
+        max_payload_bytes: maxPayloadBytes !== null && maxPayloadBytes > 0 ? maxPayloadBytes : undefined
+      });
+      setChannelRouterPreviewResult(isJsonObject(response.preview) ? response.preview : null);
+      if (isJsonObject(response.preview)) {
+        const accepted = response.preview.accepted === true ? "accepted" : "rejected";
+        const reason = readString(response.preview, "reason") ?? "unknown";
+        setNotice(`Route preview ${accepted}: ${reason}.`);
+      } else {
+        setNotice("Route preview completed.");
+      }
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setChannelsBusy(false);
+    }
+  }
+
+  async function mintChannelRouterPairingCode(
+    event: React.FormEvent<HTMLFormElement>
+  ): Promise<void> {
+    event.preventDefault();
+    const routeChannel = channelRouterMintChannel.trim();
+    if (routeChannel.length === 0) {
+      setError("Pairing code channel cannot be empty.");
+      return;
+    }
+
+    const parsedTtl = parseInteger(channelRouterMintTtlMs);
+    if (parsedTtl !== null && parsedTtl <= 0) {
+      setError("Pairing code TTL must be a positive integer.");
+      return;
+    }
+
+    setChannelsBusy(true);
+    setError(null);
+    try {
+      const response = await api.mintChannelRouterPairingCode({
+        channel: routeChannel,
+        issued_by: emptyToUndefined(channelRouterMintIssuedBy),
+        ttl_ms: parsedTtl !== null ? parsedTtl : undefined
+      });
+      setChannelRouterMintResult(isJsonObject(response.code) ? response.code : null);
+      await refreshChannelRouter(
+        channelRouterPairingsFilterChannel.trim().length > 0
+          ? channelRouterPairingsFilterChannel.trim()
+          : routeChannel
+      );
+      if (isJsonObject(response.code)) {
+        const code = readString(response.code, "code") ?? "(missing)";
+        setNotice(`Pairing code minted: ${code}.`);
+      } else {
+        setNotice("Pairing code minted.");
+      }
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -1751,6 +1923,200 @@ export function App() {
           </section>
 
           <section className="console-subpanel">
+            <div className="console-card__header">
+              <h3>Router rules + warnings (M46)</h3>
+              <button
+                type="button"
+                onClick={() => void refreshChannelRouterPairings()}
+                disabled={channelsBusy}
+              >
+                {channelsBusy ? "Refreshing..." : "Refresh router"}
+              </button>
+            </div>
+            <p>
+              <strong>Config hash:</strong> {channelRouterConfigHash.length > 0 ? channelRouterConfigHash : "n/a"}
+            </p>
+            {channelRouterWarnings.length === 0 ? (
+              <p>No router validation warnings.</p>
+            ) : (
+              <ul className="console-list">
+                {channelRouterWarnings.map((warning, index) => (
+                  <li key={`${warning}-${index}`}>{warning}</li>
+                ))}
+              </ul>
+            )}
+            {channelRouterRules === null ? (
+              <p>Router config not loaded.</p>
+            ) : (
+              <pre>{toPrettyJson(channelRouterRules, revealSensitiveValues)}</pre>
+            )}
+          </section>
+
+          <section className="console-subpanel">
+            <h3>Route preview</h3>
+            <form
+              className="console-form"
+              onSubmit={(event) => {
+                void submitChannelRouterPreview(event);
+              }}
+            >
+              <div className="console-grid-3">
+                <label>
+                  Route channel
+                  <input
+                    value={channelRouterPreviewChannel}
+                    onChange={(event) => setChannelRouterPreviewChannel(event.target.value)}
+                    placeholder="discord:default"
+                    required
+                  />
+                </label>
+                <label>
+                  Conversation ID (optional)
+                  <input
+                    value={channelRouterPreviewConversationId}
+                    onChange={(event) => setChannelRouterPreviewConversationId(event.target.value)}
+                  />
+                </label>
+                <label>
+                  Max payload bytes
+                  <input
+                    value={channelRouterPreviewMaxPayloadBytes}
+                    onChange={(event) => setChannelRouterPreviewMaxPayloadBytes(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="console-grid-2">
+                <label>
+                  Sender identity (optional)
+                  <input
+                    value={channelRouterPreviewSenderIdentity}
+                    onChange={(event) => setChannelRouterPreviewSenderIdentity(event.target.value)}
+                    placeholder="discord:user:1234567890"
+                  />
+                </label>
+                <label>
+                  Sender display (optional)
+                  <input
+                    value={channelRouterPreviewSenderDisplay}
+                    onChange={(event) => setChannelRouterPreviewSenderDisplay(event.target.value)}
+                  />
+                </label>
+              </div>
+              <label>
+                Message text
+                <textarea
+                  rows={2}
+                  value={channelRouterPreviewText}
+                  onChange={(event) => setChannelRouterPreviewText(event.target.value)}
+                  required
+                />
+              </label>
+              <div className="console-grid-3">
+                <label className="console-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={channelRouterPreviewSenderVerified}
+                    onChange={(event) => setChannelRouterPreviewSenderVerified(event.target.checked)}
+                  />
+                  Sender verified
+                </label>
+                <label className="console-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={channelRouterPreviewIsDirectMessage}
+                    onChange={(event) => setChannelRouterPreviewIsDirectMessage(event.target.checked)}
+                  />
+                  Treat as direct message
+                </label>
+                <label className="console-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={channelRouterPreviewRequestedBroadcast}
+                    onChange={(event) => setChannelRouterPreviewRequestedBroadcast(event.target.checked)}
+                  />
+                  Request broadcast
+                </label>
+              </div>
+              <button type="submit" disabled={channelsBusy}>
+                {channelsBusy ? "Previewing..." : "Preview route"}
+              </button>
+            </form>
+            {channelRouterPreviewResult === null ? (
+              <p>No preview result yet.</p>
+            ) : (
+              <pre>{toPrettyJson(channelRouterPreviewResult, revealSensitiveValues)}</pre>
+            )}
+          </section>
+
+          <section className="console-subpanel">
+            <h3>DM pairing controls</h3>
+            <form
+              className="console-form"
+              onSubmit={(event) => {
+                void mintChannelRouterPairingCode(event);
+              }}
+            >
+              <div className="console-grid-3">
+                <label>
+                  Pairing channel
+                  <input
+                    value={channelRouterMintChannel}
+                    onChange={(event) => setChannelRouterMintChannel(event.target.value)}
+                    placeholder="discord:default"
+                    required
+                  />
+                </label>
+                <label>
+                  Issued by (optional)
+                  <input
+                    value={channelRouterMintIssuedBy}
+                    onChange={(event) => setChannelRouterMintIssuedBy(event.target.value)}
+                    placeholder="admin:web-console@device"
+                  />
+                </label>
+                <label>
+                  TTL ms (optional)
+                  <input
+                    value={channelRouterMintTtlMs}
+                    onChange={(event) => setChannelRouterMintTtlMs(event.target.value)}
+                  />
+                </label>
+              </div>
+              <button type="submit" disabled={channelsBusy}>
+                {channelsBusy ? "Minting..." : "Mint pairing code"}
+              </button>
+            </form>
+            {channelRouterMintResult !== null && (
+              <pre>{toPrettyJson(channelRouterMintResult, revealSensitiveValues)}</pre>
+            )}
+
+            <div className="console-grid-3">
+              <label>
+                Pairings filter channel
+                <input
+                  value={channelRouterPairingsFilterChannel}
+                  onChange={(event) => setChannelRouterPairingsFilterChannel(event.target.value)}
+                  placeholder="discord:default"
+                />
+              </label>
+              <div className="console-inline-actions">
+                <button
+                  type="button"
+                  onClick={() => void refreshChannelRouterPairings()}
+                  disabled={channelsBusy}
+                >
+                  {channelsBusy ? "Loading..." : "Reload pairings"}
+                </button>
+              </div>
+            </div>
+            {channelRouterPairings.length === 0 ? (
+              <p>No pairing records for current filter.</p>
+            ) : (
+              <pre>{toPrettyJson(channelRouterPairings, revealSensitiveValues)}</pre>
+            )}
+          </section>
+
+          <section className="console-subpanel">
             <h3>Test message</h3>
             <form
               className="console-form"
@@ -2312,6 +2678,16 @@ function toJsonObjectArray(values: JsonValue[]): JsonObject[] {
   const rows: JsonObject[] = [];
   for (const value of values) {
     if (isJsonObject(value)) {
+      rows.push(value);
+    }
+  }
+  return rows;
+}
+
+function toStringArray(values: JsonValue[]): string[] {
+  const rows: string[] = [];
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
       rows.push(value);
     }
   }

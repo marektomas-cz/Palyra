@@ -423,6 +423,58 @@ export class ConsoleApiClient {
     );
   }
 
+  async getChannelRouterRules(): Promise<{ config: JsonValue; config_hash: string }> {
+    return this.request("/console/v1/channels/router/rules");
+  }
+
+  async getChannelRouterWarnings(): Promise<{ warnings: JsonValue[]; config_hash: string }> {
+    return this.request("/console/v1/channels/router/warnings");
+  }
+
+  async previewChannelRoute(
+    payload: {
+      channel: string;
+      text: string;
+      conversation_id?: string;
+      sender_identity?: string;
+      sender_display?: string;
+      sender_verified?: boolean;
+      is_direct_message?: boolean;
+      requested_broadcast?: boolean;
+      adapter_message_id?: string;
+      adapter_thread_id?: string;
+      max_payload_bytes?: number;
+    }
+  ): Promise<{ preview: JsonValue }> {
+    return this.request(
+      "/console/v1/channels/router/preview",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      { csrf: true }
+    );
+  }
+
+  async listChannelRouterPairings(
+    params?: URLSearchParams
+  ): Promise<{ pairings: JsonValue[]; config_hash: string }> {
+    return this.request(buildPathWithQuery("/console/v1/channels/router/pairings", params));
+  }
+
+  async mintChannelRouterPairingCode(
+    payload: { channel: string; issued_by?: string; ttl_ms?: number }
+  ): Promise<{ code: JsonValue; config_hash: string }> {
+    return this.request(
+      "/console/v1/channels/router/pairing-codes",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      { csrf: true }
+    );
+  }
+
   async probeDiscordOnboarding(
     payload: {
       account_id?: string;

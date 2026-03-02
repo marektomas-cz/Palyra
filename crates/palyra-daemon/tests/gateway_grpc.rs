@@ -6212,11 +6212,12 @@ retry_backoff_ms = 25
 [channel_router.routing]
 default_channel_enabled = false
 default_allow_direct_messages = false
+default_direct_message_policy = \"deny\"
 default_isolate_session_by_sender = false
 default_broadcast_strategy = \"deny\"
 default_concurrency_limit = 2
 channels = [
-  { channel = \"cli\", enabled = true, mention_patterns = [\"@palyra\"], allow_direct_messages = true, isolate_session_by_sender = false, response_prefix = \"[cli] \", auto_ack_text = \"processing\", auto_reaction = \"eyes\", broadcast_strategy = \"mention_only\", concurrency_limit = 1 }
+  { channel = \"cli\", enabled = true, mention_patterns = [\"@palyra\"], allow_direct_messages = true, direct_message_policy = \"allow\", isolate_session_by_sender = false, response_prefix = \"[cli] \", auto_ack_text = \"processing\", auto_reaction = \"eyes\", broadcast_strategy = \"mention_only\", concurrency_limit = 1 }
 ]
 ";
     fs::write(&config_path, config_body).with_context(|| {
