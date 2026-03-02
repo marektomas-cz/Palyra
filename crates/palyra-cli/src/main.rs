@@ -3764,12 +3764,11 @@ fn emit_channel_router_preview(payload: Value, json_output: bool) -> Result<()> 
     let accepted = preview.get("accepted").and_then(Value::as_bool).unwrap_or(false);
     let reason = preview.get("reason").and_then(Value::as_str).unwrap_or("unknown");
     let route_key = preview.get("route_key").and_then(Value::as_str).unwrap_or("");
-    let session_key = if preview.get("session_key").is_some() { REDACTED } else { "" };
     let sender_identity = preview.get("sender_identity").and_then(Value::as_str).unwrap_or("");
     let config_hash = preview.get("config_hash").and_then(Value::as_str).unwrap_or("unknown");
     println!(
-        "channels.router.preview accepted={} reason={} route_key={} session_key={} sender_identity={} config_hash={}",
-        accepted, reason, route_key, session_key, sender_identity, config_hash
+        "channels.router.preview accepted={} reason={} route_key={} sender_identity={} config_hash={}",
+        accepted, reason, route_key, sender_identity, config_hash
     );
     Ok(())
 }
