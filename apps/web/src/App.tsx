@@ -2652,6 +2652,10 @@ export function App() {
                 <pre>{toPrettyJson(diagnosticsSnapshot["browserd"] ?? null, revealSensitiveValues)}</pre>
               </section>
               <section className="console-subpanel">
+                <h3>Deployment Posture</h3>
+                <pre>{toPrettyJson(diagnosticsSnapshot["deployment"] ?? null, revealSensitiveValues)}</pre>
+              </section>
+              <section className="console-subpanel">
                 <h3>Memory Runtime</h3>
                 <pre>{toPrettyJson(diagnosticsSnapshot["memory"] ?? null, revealSensitiveValues)}</pre>
               </section>

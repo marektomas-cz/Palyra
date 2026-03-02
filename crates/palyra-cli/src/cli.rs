@@ -10,6 +10,16 @@ pub struct Cli {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
     Version,
+    Init {
+        #[arg(long, value_enum, default_value_t = InitModeArg::Local)]
+        mode: InitModeArg,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long, value_enum, default_value_t = InitTlsScaffoldArg::BringYourOwn)]
+        tls_scaffold: InitTlsScaffoldArg,
+    },
     Doctor {
         #[arg(long, default_value_t = false)]
         strict: bool,
@@ -198,6 +208,19 @@ pub enum AgentCommand {
         #[arg(long, default_value_t = false)]
         allow_sensitive_tools: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InitModeArg {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InitTlsScaffoldArg {
+    None,
+    BringYourOwn,
+    SelfSigned,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -1418,9 +1441,9 @@ mod tests {
         AuthScopeArg, BrowserCommand, ChannelsCommand, ChannelsDiscordCommand,
         ChannelsRouterCommand, Cli, Command, CompletionShell, ConfigCommand, CronCommand,
         CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
-        JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg,
-        OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand, SecretsCommand,
-        SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+        InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg,
+        MemorySourceArg, OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand,
+        SecretsCommand, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
     };
     #[cfg(not(windows))]
     use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -1429,6 +1452,30 @@ mod tests {
     fn parse_version_subcommand() {
         let parsed = Cli::parse_from(["palyra", "version"]);
         assert_eq!(parsed.command, Command::Version);
+    }
+
+    #[test]
+    fn parse_init_remote_with_overrides() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "init",
+            "--mode",
+            "remote",
+            "--path",
+            "config/palyra.toml",
+            "--force",
+            "--tls-scaffold",
+            "self-signed",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Init {
+                mode: InitModeArg::Remote,
+                path: Some("config/palyra.toml".to_owned()),
+                force: true,
+                tls_scaffold: InitTlsScaffoldArg::SelfSigned,
+            }
+        );
     }
 
     #[test]

@@ -183,6 +183,35 @@ struct AppState {
     console_sessions: Arc<Mutex<HashMap<String, ConsoleSession>>>,
     relay_tokens: Arc<Mutex<HashMap<String, ConsoleRelayToken>>>,
     console_chat_streams: Arc<Mutex<HashMap<String, ConsoleChatRunStream>>>,
+    deployment: DeploymentRuntimeSnapshot,
+    remote_admin_access: Arc<Mutex<Option<RemoteAdminAccessAttempt>>>,
+}
+
+#[derive(Debug, Clone)]
+struct DeploymentRuntimeSnapshot {
+    mode: String,
+    bind_profile: String,
+    admin_bind_addr: String,
+    admin_port: u16,
+    grpc_bind_addr: String,
+    grpc_port: u16,
+    quic_bind_addr: String,
+    quic_port: u16,
+    quic_enabled: bool,
+    gateway_tls_enabled: bool,
+    admin_auth_required: bool,
+    dangerous_remote_bind_ack_config: bool,
+    dangerous_remote_bind_ack_env: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RemoteAdminAccessAttempt {
+    observed_at_unix_ms: i64,
+    remote_ip_fingerprint: String,
+    method: String,
+    path: String,
+    status_code: u16,
+    outcome: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1215,6 +1244,8 @@ async fn main() -> Result<()> {
         config_source = %loaded.source,
         config_version = loaded.config_version,
         config_migrated_from_version = ?loaded.migrated_from_version,
+        deployment_mode = loaded.deployment.mode.as_str(),
+        deployment_dangerous_remote_bind_ack = loaded.deployment.dangerous_remote_bind_ack,
         admin_bind_addr = %loaded.daemon.bind_addr,
         admin_port = loaded.daemon.port,
         grpc_bind_addr = %loaded.gateway.grpc_bind_addr,
@@ -1222,6 +1253,7 @@ async fn main() -> Result<()> {
         quic_bind_addr = %loaded.gateway.quic_bind_addr,
         quic_port = loaded.gateway.quic_port,
         quic_enabled = loaded.gateway.quic_enabled,
+        gateway_bind_profile = loaded.gateway.bind_profile.as_str(),
         allow_insecure_remote = loaded.gateway.allow_insecure_remote,
         gateway_identity_store_dir = ?loaded.gateway.identity_store_dir.as_ref().map(|path| path.display().to_string()),
         gateway_vault_get_approval_required_refs = ?loaded.gateway.vault_get_approval_required_refs,
@@ -1363,14 +1395,19 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    let dangerous_remote_bind_ack_env = dangerous_remote_bind_acknowledged()?;
     enforce_remote_bind_guard(
-        admin_address,
-        grpc_address,
-        quic_address,
-        loaded.gateway.allow_insecure_remote,
-        loaded.gateway.tls.enabled,
-        node_rpc_mtls_required,
-        dangerous_remote_bind_acknowledged()?,
+        RemoteBindEndpoints { admin_address, grpc_address, quic_address },
+        RemoteBindGuardConfig {
+            bind_profile: loaded.gateway.bind_profile,
+            allow_insecure_remote: loaded.gateway.allow_insecure_remote,
+            gateway_tls_enabled: loaded.gateway.tls.enabled,
+            admin_auth_required: loaded.admin.require_auth,
+            admin_token_configured: loaded.admin.auth_token.is_some(),
+            node_rpc_mtls_required,
+            config_dangerous_remote_bind_ack: loaded.deployment.dangerous_remote_bind_ack,
+            env_dangerous_remote_bind_ack: dangerous_remote_bind_ack_env,
+        },
     )?;
 
     let admin_listener = tokio::net::TcpListener::bind(admin_address)
@@ -1448,6 +1485,22 @@ async fn main() -> Result<()> {
         console_sessions: Arc::new(Mutex::new(HashMap::new())),
         relay_tokens: Arc::new(Mutex::new(HashMap::new())),
         console_chat_streams: Arc::new(Mutex::new(HashMap::new())),
+        deployment: DeploymentRuntimeSnapshot {
+            mode: loaded.deployment.mode.as_str().to_owned(),
+            bind_profile: loaded.gateway.bind_profile.as_str().to_owned(),
+            admin_bind_addr: loaded.daemon.bind_addr.clone(),
+            admin_port: loaded.daemon.port,
+            grpc_bind_addr: loaded.gateway.grpc_bind_addr.clone(),
+            grpc_port: loaded.gateway.grpc_port,
+            quic_bind_addr: loaded.gateway.quic_bind_addr.clone(),
+            quic_port: loaded.gateway.quic_port,
+            quic_enabled: loaded.gateway.quic_enabled,
+            gateway_tls_enabled: loaded.gateway.tls.enabled,
+            admin_auth_required: loaded.admin.require_auth,
+            dangerous_remote_bind_ack_config: loaded.deployment.dangerous_remote_bind_ack,
+            dangerous_remote_bind_ack_env,
+        },
+        remote_admin_access: Arc::new(Mutex::new(None)),
     };
     let admin_routes = Router::new()
         .route("/admin/v1/status", get(admin_status_handler))
@@ -1977,14 +2030,85 @@ async fn admin_rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    let method = request.method().as_str().to_owned();
+    let path = request.uri().path().to_owned();
     if !consume_admin_rate_limit(&state, remote_addr) {
         state.runtime.record_denied();
-        return runtime_status_response(tonic::Status::resource_exhausted(format!(
+        let response = runtime_status_response(tonic::Status::resource_exhausted(format!(
             "admin API rate limit exceeded for {}",
             remote_addr.ip()
         )));
+        record_remote_admin_access_attempt(
+            &state,
+            remote_addr,
+            method.as_str(),
+            path.as_str(),
+            response.status(),
+        );
+        return response;
     }
-    next.run(request).await
+    let response = next.run(request).await;
+    record_remote_admin_access_attempt(
+        &state,
+        remote_addr,
+        method.as_str(),
+        path.as_str(),
+        response.status(),
+    );
+    response
+}
+
+fn record_remote_admin_access_attempt(
+    state: &AppState,
+    remote_addr: SocketAddr,
+    method: &str,
+    path: &str,
+    status: StatusCode,
+) {
+    if remote_addr.ip().is_loopback() {
+        return;
+    }
+    let observed_at_unix_ms = unix_ms_now().unwrap_or_default();
+    let attempt = RemoteAdminAccessAttempt {
+        observed_at_unix_ms,
+        remote_ip_fingerprint: fingerprint_remote_ip(remote_addr.ip()),
+        method: method.to_owned(),
+        path: path.to_owned(),
+        status_code: status.as_u16(),
+        outcome: admin_access_outcome(status).to_owned(),
+    };
+    let mut slot = lock_remote_admin_access(&state.remote_admin_access);
+    *slot = Some(attempt);
+}
+
+fn fingerprint_remote_ip(ip: IpAddr) -> String {
+    let digest = sha256_hex(ip.to_string().as_bytes());
+    let prefix = &digest[..16];
+    format!("sha256:{prefix}")
+}
+
+fn admin_access_outcome(status: StatusCode) -> &'static str {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        "rate_limited"
+    } else if status.is_success() || status.is_redirection() {
+        "allowed"
+    } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        "denied"
+    } else {
+        "error"
+    }
+}
+
+fn lock_remote_admin_access<'a>(
+    slot: &'a Arc<Mutex<Option<RemoteAdminAccessAttempt>>>,
+) -> std::sync::MutexGuard<'a, Option<RemoteAdminAccessAttempt>> {
+    match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("remote admin access record lock poisoned; recovering");
+            poisoned.into_inner()
+        }
+    }
 }
 
 fn consume_canvas_rate_limit(state: &AppState, remote_addr: SocketAddr) -> bool {
@@ -2861,6 +2985,7 @@ async fn console_diagnostics_handler(
     let memory_status =
         state.runtime.memory_maintenance_status().await.map_err(runtime_status_response)?;
     let memory_runtime_config = state.runtime.memory_config_snapshot();
+    let deployment_payload = collect_console_deployment_diagnostics(&state);
     let generated_at_unix_ms = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
@@ -2879,6 +3004,7 @@ async fn console_diagnostics_handler(
         },
         "auth_profiles": auth_payload,
         "browserd": browser_payload,
+        "deployment": deployment_payload,
         "memory": {
             "usage": memory_status.usage,
             "retention": {
@@ -2973,6 +3099,64 @@ async fn collect_console_browser_diagnostics(state: &AppState) -> Value {
     });
     redact_console_diagnostics_value(&mut payload, None);
     payload
+}
+
+fn collect_console_deployment_diagnostics(state: &AppState) -> Value {
+    let last_remote_admin_access =
+        lock_remote_admin_access(&state.remote_admin_access).as_ref().cloned();
+    let admin_remote = !state
+        .deployment
+        .admin_bind_addr
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false);
+    let grpc_remote = !state
+        .deployment
+        .grpc_bind_addr
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false);
+    let quic_remote = state.deployment.quic_enabled
+        && !state
+            .deployment
+            .quic_bind_addr
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+
+    let mut warnings = Vec::<String>::new();
+    if !state.deployment.gateway_tls_enabled && (admin_remote || grpc_remote || quic_remote) {
+        warnings.push("Remote bind without TLS blocked".to_owned());
+    }
+    if admin_remote || grpc_remote || quic_remote {
+        warnings.push("Dashboard exposed publicly; ensure WAF/reverse proxy".to_owned());
+    }
+
+    json!({
+        "mode": state.deployment.mode,
+        "bind_profile": state.deployment.bind_profile,
+        "bind_addresses": {
+            "admin": format!("{}:{}", state.deployment.admin_bind_addr, state.deployment.admin_port),
+            "grpc": format!("{}:{}", state.deployment.grpc_bind_addr, state.deployment.grpc_port),
+            "quic": if state.deployment.quic_enabled {
+                Value::String(format!("{}:{}", state.deployment.quic_bind_addr, state.deployment.quic_port))
+            } else {
+                Value::String("disabled".to_owned())
+            },
+        },
+        "tls": {
+            "gateway_enabled": state.deployment.gateway_tls_enabled,
+        },
+        "admin_auth_required": state.deployment.admin_auth_required,
+        "dangerous_remote_bind_ack": {
+            "config": state.deployment.dangerous_remote_bind_ack_config,
+            "env": state.deployment.dangerous_remote_bind_ack_env,
+            "env_name": DANGEROUS_REMOTE_BIND_ACK_ENV,
+        },
+        "remote_bind_detected": admin_remote || grpc_remote || quic_remote,
+        "last_remote_admin_access_attempt": last_remote_admin_access,
+        "warnings": warnings,
+    })
 }
 
 async fn collect_console_browser_relay_failure_metrics(state: &AppState) -> (u64, Vec<String>) {
@@ -7280,43 +7464,99 @@ fn build_node_rpc_tls_config(
     tls_config
 }
 
-fn enforce_remote_bind_guard(
+#[derive(Debug, Clone, Copy)]
+struct RemoteBindEndpoints {
     admin_address: SocketAddr,
     grpc_address: SocketAddr,
     quic_address: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RemoteBindGuardConfig {
+    bind_profile: config::GatewayBindProfile,
     allow_insecure_remote: bool,
     gateway_tls_enabled: bool,
+    admin_auth_required: bool,
+    admin_token_configured: bool,
     node_rpc_mtls_required: bool,
-    dangerous_remote_bind_acknowledged: bool,
+    config_dangerous_remote_bind_ack: bool,
+    env_dangerous_remote_bind_ack: bool,
+}
+
+fn enforce_remote_bind_guard(
+    endpoints: RemoteBindEndpoints,
+    config: RemoteBindGuardConfig,
 ) -> Result<()> {
+    let admin_address = endpoints.admin_address;
+    let grpc_address = endpoints.grpc_address;
+    let quic_address = endpoints.quic_address;
     let admin_remote = !admin_address.ip().is_loopback();
     let grpc_remote = !grpc_address.ip().is_loopback();
     let quic_remote = quic_address.is_some_and(|address| !address.ip().is_loopback());
     let quic_display =
         quic_address.map(|address| address.to_string()).unwrap_or_else(|| "disabled".to_owned());
-    if (admin_remote || grpc_remote || quic_remote) && !allow_insecure_remote {
+    let remote_bind_detected = admin_remote || grpc_remote || quic_remote;
+    if !remote_bind_detected {
+        return Ok(());
+    }
+
+    let bind_profile_allows_remote =
+        matches!(config.bind_profile, config::GatewayBindProfile::PublicTls)
+            || config.allow_insecure_remote;
+    if !bind_profile_allows_remote {
         anyhow::bail!(
-            "refusing non-loopback bind without explicit insecure opt-in: admin={} grpc={} quic={} (set gateway.allow_insecure_remote=true or PALYRA_GATEWAY_ALLOW_INSECURE_REMOTE=true to override)",
+            "refusing non-loopback bind while gateway.bind_profile=loopback_only: admin={} grpc={} quic={} (set gateway.bind_profile=public_tls for hardened remote exposure, or keep loopback-only and use SSH tunnel/reverse proxy)",
             admin_address,
             grpc_address,
             quic_display,
         );
     }
-    let requires_danger_ack = admin_remote
-        || (grpc_remote && (!gateway_tls_enabled || !node_rpc_mtls_required))
-        || (quic_remote && !node_rpc_mtls_required);
-    if requires_danger_ack && !dangerous_remote_bind_acknowledged {
+
+    if !config.gateway_tls_enabled {
         anyhow::bail!(
-            "refusing insecure remote bind without explicit danger acknowledgement: admin={} grpc={} quic={} gateway_tls_enabled={} node_rpc_mtls_required={} (set {}=true to acknowledge risk, or keep admin loopback and enable gateway TLS + node RPC mTLS)",
+            "refusing remote bind without TLS: admin={} grpc={} quic={} (set gateway.tls.enabled=true and configure cert/key paths)",
             admin_address,
             grpc_address,
             quic_display,
-            gateway_tls_enabled,
-            node_rpc_mtls_required,
+        );
+    }
+
+    if !config.admin_auth_required || !config.admin_token_configured {
+        anyhow::bail!(
+            "refusing remote bind without authenticated admin surface: admin.require_auth={} admin_token_configured={} (configure admin.require_auth=true with admin.auth_token or PALYRA_ADMIN_TOKEN)",
+            config.admin_auth_required,
+            config.admin_token_configured,
+        );
+    }
+
+    if !config.node_rpc_mtls_required && (grpc_remote || quic_remote) {
+        anyhow::bail!(
+            "refusing remote gRPC/QUIC bind without node RPC mTLS: grpc={} quic={} (enable mTLS by keeping identity.allow_insecure_node_rpc_without_mtls=false)",
+            grpc_address,
+            quic_display,
+        );
+    }
+
+    if !admin_rate_limiting_enabled() {
+        anyhow::bail!(
+            "refusing remote bind because admin API rate limits are disabled (window_ms={} max_requests={})",
+            ADMIN_RATE_LIMIT_WINDOW_MS,
+            ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        );
+    }
+
+    if !(config.config_dangerous_remote_bind_ack && config.env_dangerous_remote_bind_ack) {
+        anyhow::bail!(
+            "refusing remote bind without explicit dual acknowledgement: deployment.dangerous_remote_bind_ack=true and {}=true are both required",
             DANGEROUS_REMOTE_BIND_ACK_ENV,
         );
     }
+
     Ok(())
+}
+
+fn admin_rate_limiting_enabled() -> bool {
+    ADMIN_RATE_LIMIT_WINDOW_MS > 0 && ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW > 0
 }
 
 fn dangerous_remote_bind_acknowledged() -> Result<bool> {
@@ -7364,12 +7604,13 @@ mod tests {
         sha256_hex, validate_admin_auth_config, validate_canvas_http_canvas_id,
         validate_canvas_http_token_query, validate_process_runner_backend_policy,
         ConsoleRelayToken, DiscordOnboardingRequest, DiscordOnboardingScope,
-        DiscordPrivilegedIntentStatus, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
-        ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CANVAS_HTTP_MAX_TOKEN_BYTES,
-        CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
-        CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS, CONSOLE_RELAY_TOKEN_MAX_TTL_MS,
-        CONSOLE_RELAY_TOKEN_MIN_TTL_MS, DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS,
-        DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT, DISCORD_APP_FLAG_GATEWAY_PRESENCE,
+        DiscordPrivilegedIntentStatus, RemoteBindEndpoints, RemoteBindGuardConfig,
+        ADMIN_RATE_LIMIT_MAX_IP_BUCKETS, ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        CANVAS_HTTP_MAX_TOKEN_BYTES, CANVAS_RATE_LIMIT_MAX_IP_BUCKETS,
+        CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS,
+        CONSOLE_RELAY_TOKEN_MAX_TTL_MS, CONSOLE_RELAY_TOKEN_MIN_TTL_MS,
+        DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS, DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT,
+        DISCORD_APP_FLAG_GATEWAY_PRESENCE,
     };
     use crate::gateway::GatewayAuthConfig;
     use crate::model_provider::{
@@ -7537,94 +7778,182 @@ mod tests {
     #[test]
     fn remote_bind_guard_allows_loopback_without_opt_in() {
         let result = enforce_remote_bind_guard(
-            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
-            "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
-            None,
-            false,
-            false,
-            true,
-            false,
+            RemoteBindEndpoints {
+                admin_address: "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
+                grpc_address: "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
+                quic_address: None,
+            },
+            RemoteBindGuardConfig {
+                bind_profile: crate::config::GatewayBindProfile::LoopbackOnly,
+                allow_insecure_remote: false,
+                gateway_tls_enabled: false,
+                admin_auth_required: true,
+                admin_token_configured: true,
+                node_rpc_mtls_required: true,
+                config_dangerous_remote_bind_ack: false,
+                env_dangerous_remote_bind_ack: false,
+            },
         );
-        assert!(result.is_ok(), "loopback bind should not require insecure opt-in");
+        assert!(result.is_ok(), "loopback bind should always be allowed");
     }
 
     #[test]
-    fn remote_bind_guard_rejects_non_loopback_without_opt_in() {
+    fn remote_bind_guard_rejects_non_loopback_when_bind_profile_is_loopback_only() {
         let result = enforce_remote_bind_guard(
-            "0.0.0.0:7142".parse().expect("remote endpoint should parse"),
-            "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
-            None,
-            false,
-            false,
-            true,
-            false,
+            RemoteBindEndpoints {
+                admin_address: "0.0.0.0:7142".parse().expect("remote endpoint should parse"),
+                grpc_address: "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
+                quic_address: None,
+            },
+            RemoteBindGuardConfig {
+                bind_profile: crate::config::GatewayBindProfile::LoopbackOnly,
+                allow_insecure_remote: false,
+                gateway_tls_enabled: true,
+                admin_auth_required: true,
+                admin_token_configured: true,
+                node_rpc_mtls_required: true,
+                config_dangerous_remote_bind_ack: true,
+                env_dangerous_remote_bind_ack: true,
+            },
         );
-        assert!(result.is_err(), "non-loopback bind should require explicit opt-in");
+        assert!(result.is_err(), "loopback bind profile should block remote exposure");
     }
 
     #[test]
-    fn remote_bind_guard_allows_tls_grpc_remote_with_explicit_opt_in() {
+    fn remote_bind_guard_rejects_remote_bind_without_tls() {
         let result = enforce_remote_bind_guard(
-            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
-            "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
-            None,
-            true,
-            true,
-            true,
-            false,
+            RemoteBindEndpoints {
+                admin_address: "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
+                grpc_address: "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
+                quic_address: None,
+            },
+            RemoteBindGuardConfig {
+                bind_profile: crate::config::GatewayBindProfile::PublicTls,
+                allow_insecure_remote: true,
+                gateway_tls_enabled: false,
+                admin_auth_required: true,
+                admin_token_configured: true,
+                node_rpc_mtls_required: true,
+                config_dangerous_remote_bind_ack: true,
+                env_dangerous_remote_bind_ack: true,
+            },
         );
-        assert!(
-            result.is_ok(),
-            "TLS-enabled remote gRPC bind should be allowed with explicit opt-in"
-        );
+        assert!(result.is_err(), "remote bind without TLS must fail closed");
     }
 
     #[test]
-    fn remote_bind_guard_requires_danger_ack_for_non_tls_grpc_remote() {
+    fn remote_bind_guard_rejects_remote_bind_without_admin_auth() {
         let result = enforce_remote_bind_guard(
-            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
-            "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
-            None,
-            true,
-            false,
-            true,
-            false,
-        );
-        assert!(
-            result.is_err(),
-            "non-TLS remote gRPC bind should require explicit danger acknowledgement"
-        );
-    }
-
-    #[test]
-    fn remote_bind_guard_allows_non_tls_grpc_remote_with_danger_ack() {
-        let result = enforce_remote_bind_guard(
-            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
-            "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
-            None,
-            true,
-            false,
-            true,
-            true,
-        );
-        assert!(result.is_ok(), "danger acknowledgement should allow non-TLS remote gRPC bind");
-    }
-
-    #[test]
-    fn remote_bind_guard_requires_danger_ack_for_remote_admin_bind() {
-        let result = enforce_remote_bind_guard(
-            "0.0.0.0:7142".parse().expect("remote endpoint should parse"),
-            "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
-            None,
-            true,
-            true,
-            true,
-            false,
+            RemoteBindEndpoints {
+                admin_address: "0.0.0.0:7142".parse().expect("remote endpoint should parse"),
+                grpc_address: "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
+                quic_address: None,
+            },
+            RemoteBindGuardConfig {
+                bind_profile: crate::config::GatewayBindProfile::PublicTls,
+                allow_insecure_remote: true,
+                gateway_tls_enabled: true,
+                admin_auth_required: false,
+                admin_token_configured: true,
+                node_rpc_mtls_required: true,
+                config_dangerous_remote_bind_ack: true,
+                env_dangerous_remote_bind_ack: true,
+            },
         );
         assert!(
             result.is_err(),
-            "remote admin bind should require explicit danger acknowledgement"
+            "remote bind without authenticated admin surface must fail closed"
         );
+    }
+
+    #[test]
+    fn remote_bind_guard_requires_dual_ack_for_remote_exposure() {
+        let result = enforce_remote_bind_guard(
+            RemoteBindEndpoints {
+                admin_address: "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
+                grpc_address: "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
+                quic_address: None,
+            },
+            RemoteBindGuardConfig {
+                bind_profile: crate::config::GatewayBindProfile::PublicTls,
+                allow_insecure_remote: true,
+                gateway_tls_enabled: true,
+                admin_auth_required: true,
+                admin_token_configured: true,
+                node_rpc_mtls_required: true,
+                config_dangerous_remote_bind_ack: false,
+                env_dangerous_remote_bind_ack: true,
+            },
+        );
+        assert!(result.is_err(), "both config and env acknowledgements must be required");
+    }
+
+    #[test]
+    fn remote_bind_guard_rejects_remote_grpc_without_node_rpc_mtls() {
+        let result = enforce_remote_bind_guard(
+            RemoteBindEndpoints {
+                admin_address: "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
+                grpc_address: "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
+                quic_address: None,
+            },
+            RemoteBindGuardConfig {
+                bind_profile: crate::config::GatewayBindProfile::PublicTls,
+                allow_insecure_remote: true,
+                gateway_tls_enabled: true,
+                admin_auth_required: true,
+                admin_token_configured: true,
+                node_rpc_mtls_required: false,
+                config_dangerous_remote_bind_ack: true,
+                env_dangerous_remote_bind_ack: true,
+            },
+        );
+        assert!(result.is_err(), "remote gRPC should require node RPC mTLS");
+    }
+
+    #[test]
+    fn remote_bind_guard_rejects_remote_quic_without_node_rpc_mtls() {
+        let result = enforce_remote_bind_guard(
+            RemoteBindEndpoints {
+                admin_address: "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
+                grpc_address: "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
+                quic_address: Some(
+                    "0.0.0.0:7444".parse().expect("remote QUIC endpoint should parse"),
+                ),
+            },
+            RemoteBindGuardConfig {
+                bind_profile: crate::config::GatewayBindProfile::PublicTls,
+                allow_insecure_remote: true,
+                gateway_tls_enabled: true,
+                admin_auth_required: true,
+                admin_token_configured: true,
+                node_rpc_mtls_required: false,
+                config_dangerous_remote_bind_ack: true,
+                env_dangerous_remote_bind_ack: true,
+            },
+        );
+        assert!(result.is_err(), "remote QUIC should require node RPC mTLS");
+    }
+
+    #[test]
+    fn remote_bind_guard_allows_hardened_remote_profile() {
+        let result = enforce_remote_bind_guard(
+            RemoteBindEndpoints {
+                admin_address: "0.0.0.0:7142".parse().expect("remote endpoint should parse"),
+                grpc_address: "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
+                quic_address: None,
+            },
+            RemoteBindGuardConfig {
+                bind_profile: crate::config::GatewayBindProfile::PublicTls,
+                allow_insecure_remote: true,
+                gateway_tls_enabled: true,
+                admin_auth_required: true,
+                admin_token_configured: true,
+                node_rpc_mtls_required: true,
+                config_dangerous_remote_bind_ack: true,
+                env_dangerous_remote_bind_ack: true,
+            },
+        );
+        assert!(result.is_ok(), "hardened public TLS profile should allow remote bind");
     }
 
     #[test]
@@ -7635,71 +7964,6 @@ mod tests {
             loopback_grpc_url("0.0.0.0:7443".parse().expect("socket address should parse"), true);
         assert_eq!(plain_url, "http://127.0.0.1:7443");
         assert_eq!(tls_url, "https://127.0.0.1:7443");
-    }
-
-    #[test]
-    fn remote_bind_guard_requires_danger_ack_for_remote_grpc_when_node_rpc_mtls_disabled() {
-        let result = enforce_remote_bind_guard(
-            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
-            "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
-            None,
-            true,
-            true,
-            false,
-            false,
-        );
-        assert!(
-            result.is_err(),
-            "remote gRPC bind should require danger acknowledgement when node RPC mTLS is disabled"
-        );
-    }
-
-    #[test]
-    fn remote_bind_guard_allows_remote_grpc_with_node_rpc_mtls_disabled_and_danger_ack() {
-        let result = enforce_remote_bind_guard(
-            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
-            "0.0.0.0:7443".parse().expect("remote endpoint should parse"),
-            None,
-            true,
-            true,
-            false,
-            true,
-        );
-        assert!(
-            result.is_ok(),
-            "danger acknowledgement should allow remote gRPC bind when node RPC mTLS is disabled"
-        );
-    }
-
-    #[test]
-    fn remote_bind_guard_rejects_quic_remote_without_opt_in() {
-        let result = enforce_remote_bind_guard(
-            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
-            "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
-            Some("0.0.0.0:7444".parse().expect("remote QUIC endpoint should parse")),
-            false,
-            true,
-            true,
-            false,
-        );
-        assert!(result.is_err(), "remote QUIC bind should require explicit insecure opt-in");
-    }
-
-    #[test]
-    fn remote_bind_guard_requires_danger_ack_for_remote_quic_when_node_rpc_mtls_disabled() {
-        let result = enforce_remote_bind_guard(
-            "127.0.0.1:7142".parse().expect("loopback endpoint should parse"),
-            "127.0.0.1:7443".parse().expect("loopback endpoint should parse"),
-            Some("0.0.0.0:7444".parse().expect("remote QUIC endpoint should parse")),
-            true,
-            true,
-            false,
-            false,
-        );
-        assert!(
-            result.is_err(),
-            "remote QUIC bind should require danger acknowledgement when node RPC mTLS is disabled"
-        );
     }
 
     #[test]

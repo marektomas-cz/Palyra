@@ -92,11 +92,16 @@ const DEFAULT_CANVAS_HOST_MAX_STATE_BYTES: u64 = 64 * 1024;
 const DEFAULT_CANVAS_HOST_MAX_BUNDLE_BYTES: u64 = 512 * 1024;
 const DEFAULT_CANVAS_HOST_MAX_ASSETS_PER_BUNDLE: u32 = 32;
 const DEFAULT_CANVAS_HOST_MAX_UPDATES_PER_MINUTE: u32 = 120;
+const DEFAULT_DEPLOYMENT_MODE: DeploymentMode = DeploymentMode::LocalDesktop;
+const DEFAULT_GATEWAY_BIND_PROFILE: GatewayBindProfile = GatewayBindProfile::LoopbackOnly;
+const DEFAULT_DANGEROUS_REMOTE_BIND_ACK: bool = false;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedConfig {
     pub source: String,
     pub config_version: u32,
     pub migrated_from_version: Option<u32>,
+    pub deployment: DeploymentConfig,
     pub daemon: DaemonConfig,
     pub gateway: GatewayConfig,
     pub cron: CronConfig,
@@ -112,6 +117,62 @@ pub struct LoadedConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentConfig {
+    pub mode: DeploymentMode,
+    pub dangerous_remote_bind_ack: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentMode {
+    LocalDesktop,
+    RemoteVps,
+}
+
+impl DeploymentMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalDesktop => "local_desktop",
+            Self::RemoteVps => "remote_vps",
+        }
+    }
+
+    pub fn parse(raw: &str, source_name: &str) -> Result<Self> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "local_desktop" | "local-desktop" | "local" => Ok(Self::LocalDesktop),
+            "remote_vps" | "remote-vps" | "remote" | "vps" => Ok(Self::RemoteVps),
+            _ => anyhow::bail!("{source_name} must be one of: local_desktop | remote_vps"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayBindProfile {
+    LoopbackOnly,
+    PublicTls,
+}
+
+impl GatewayBindProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LoopbackOnly => "loopback_only",
+            Self::PublicTls => "public_tls",
+        }
+    }
+
+    pub fn parse(raw: &str, source_name: &str) -> Result<Self> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "loopback_only" | "loopback-only" | "loopback" => Ok(Self::LoopbackOnly),
+            "public_tls" | "public-tls" | "public" => Ok(Self::PublicTls),
+            _ => anyhow::bail!("{source_name} must be one of: loopback_only | public_tls"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonConfig {
     pub bind_addr: String,
     pub port: u16,
@@ -124,6 +185,7 @@ pub struct GatewayConfig {
     pub quic_bind_addr: String,
     pub quic_port: u16,
     pub quic_enabled: bool,
+    pub bind_profile: GatewayBindProfile,
     pub allow_insecure_remote: bool,
     pub identity_store_dir: Option<PathBuf>,
     pub vault_get_approval_required_refs: Vec<String>,
@@ -279,6 +341,15 @@ impl Default for DaemonConfig {
     }
 }
 
+impl Default for DeploymentConfig {
+    fn default() -> Self {
+        Self {
+            mode: DEFAULT_DEPLOYMENT_MODE,
+            dangerous_remote_bind_ack: DEFAULT_DANGEROUS_REMOTE_BIND_ACK,
+        }
+    }
+}
+
 impl Default for IdentityConfig {
     fn default() -> Self {
         Self { allow_insecure_node_rpc_without_mtls: DEFAULT_ALLOW_INSECURE_NODE_RPC_WITHOUT_MTLS }
@@ -304,6 +375,7 @@ impl Default for GatewayConfig {
             quic_bind_addr: DEFAULT_QUIC_BIND_ADDR.to_owned(),
             quic_port: DEFAULT_QUIC_PORT,
             quic_enabled: DEFAULT_QUIC_ENABLED,
+            bind_profile: DEFAULT_GATEWAY_BIND_PROFILE,
             allow_insecure_remote: DEFAULT_GATEWAY_ALLOW_INSECURE_REMOTE,
             identity_store_dir: None,
             vault_get_approval_required_refs: DEFAULT_GATEWAY_VAULT_GET_APPROVAL_REQUIRED_REFS
@@ -483,6 +555,7 @@ impl Default for AdminConfig {
 }
 
 pub fn load_config() -> Result<LoadedConfig> {
+    let mut deployment = DeploymentConfig::default();
     let mut daemon = DaemonConfig::default();
     let mut gateway = GatewayConfig::default();
     let mut cron = CronConfig::default();
@@ -508,6 +581,14 @@ pub fn load_config() -> Result<LoadedConfig> {
         if migration.migrated {
             migrated_from_version = Some(migration.source_version);
         }
+        if let Some(file_deployment) = parsed.deployment {
+            if let Some(mode) = file_deployment.mode {
+                deployment.mode = DeploymentMode::parse(mode.as_str(), "deployment.mode")?;
+            }
+            if let Some(dangerous_remote_bind_ack) = file_deployment.dangerous_remote_bind_ack {
+                deployment.dangerous_remote_bind_ack = dangerous_remote_bind_ack;
+            }
+        }
         if let Some(file_daemon) = parsed.daemon {
             if let Some(bind_addr) = file_daemon.bind_addr {
                 daemon.bind_addr = bind_addr;
@@ -531,6 +612,10 @@ pub fn load_config() -> Result<LoadedConfig> {
             }
             if let Some(quic_enabled) = file_gateway.quic_enabled {
                 gateway.quic_enabled = quic_enabled;
+            }
+            if let Some(bind_profile) = file_gateway.bind_profile {
+                gateway.bind_profile =
+                    GatewayBindProfile::parse(bind_profile.as_str(), "gateway.bind_profile")?;
             }
             if let Some(allow_insecure_remote) = file_gateway.allow_insecure_remote {
                 gateway.allow_insecure_remote = allow_insecure_remote;
@@ -1116,6 +1201,18 @@ pub fn load_config() -> Result<LoadedConfig> {
         source.push_str(" +env(PALYRA_DAEMON_PORT)");
     }
 
+    if let Ok(mode) = env::var("PALYRA_DEPLOYMENT_MODE") {
+        deployment.mode = DeploymentMode::parse(mode.as_str(), "PALYRA_DEPLOYMENT_MODE")?;
+        source.push_str(" +env(PALYRA_DEPLOYMENT_MODE)");
+    }
+
+    if let Ok(dangerous_remote_bind_ack) = env::var("PALYRA_DEPLOYMENT_DANGEROUS_REMOTE_BIND_ACK") {
+        deployment.dangerous_remote_bind_ack = dangerous_remote_bind_ack
+            .parse::<bool>()
+            .context("PALYRA_DEPLOYMENT_DANGEROUS_REMOTE_BIND_ACK must be true or false")?;
+        source.push_str(" +env(PALYRA_DEPLOYMENT_DANGEROUS_REMOTE_BIND_ACK)");
+    }
+
     if let Ok(grpc_bind_addr) = env::var("PALYRA_GATEWAY_GRPC_BIND_ADDR") {
         gateway.grpc_bind_addr = grpc_bind_addr;
         source.push_str(" +env(PALYRA_GATEWAY_GRPC_BIND_ADDR)");
@@ -1143,6 +1240,12 @@ pub fn load_config() -> Result<LoadedConfig> {
             .parse::<bool>()
             .context("PALYRA_GATEWAY_QUIC_ENABLED must be true or false")?;
         source.push_str(" +env(PALYRA_GATEWAY_QUIC_ENABLED)");
+    }
+
+    if let Ok(bind_profile) = env::var("PALYRA_GATEWAY_BIND_PROFILE") {
+        gateway.bind_profile =
+            GatewayBindProfile::parse(bind_profile.as_str(), "PALYRA_GATEWAY_BIND_PROFILE")?;
+        source.push_str(" +env(PALYRA_GATEWAY_BIND_PROFILE)");
     }
 
     if let Ok(allow_insecure_remote) = env::var("PALYRA_GATEWAY_ALLOW_INSECURE_REMOTE") {
@@ -1801,6 +1904,7 @@ pub fn load_config() -> Result<LoadedConfig> {
         source,
         config_version,
         migrated_from_version,
+        deployment,
         daemon,
         gateway,
         cron,
@@ -2476,9 +2580,10 @@ mod tests {
         parse_process_executable_allowlist, parse_process_runner_egress_enforcement_mode,
         parse_process_runner_tier, parse_root_file_config, parse_storage_prefix_allowlist,
         parse_tool_allowlist, parse_vault_dir, parse_vault_ref_allowlist, AdminConfig,
-        BrowserServiceConfig, CanvasHostConfig, ChannelRouterConfig, CronConfig, GatewayConfig,
-        GatewayTlsConfig, HttpFetchConfig, IdentityConfig, MemoryConfig, ModelProviderConfig,
-        OrchestratorConfig, StorageConfig, ToolCallConfig,
+        BrowserServiceConfig, CanvasHostConfig, ChannelRouterConfig, CronConfig, DeploymentConfig,
+        DeploymentMode, GatewayBindProfile, GatewayConfig, GatewayTlsConfig, HttpFetchConfig,
+        IdentityConfig, MemoryConfig, ModelProviderConfig, OrchestratorConfig, StorageConfig,
+        ToolCallConfig,
     };
     use crate::channel_router::{BroadcastStrategy, DirectMessagePolicy};
     use crate::model_provider::{ModelProviderAuthProviderKind, ModelProviderKind};
@@ -2505,6 +2610,16 @@ mod tests {
     }
 
     #[test]
+    fn deployment_config_defaults_to_local_desktop_with_danger_ack_disabled() {
+        let config = DeploymentConfig::default();
+        assert_eq!(config.mode, DeploymentMode::LocalDesktop);
+        assert!(
+            !config.dangerous_remote_bind_ack,
+            "danger acknowledgement must default to disabled"
+        );
+    }
+
+    #[test]
     fn gateway_config_defaults_to_quic_and_grpc_loopback() {
         let config = GatewayConfig::default();
         assert_eq!(config.grpc_bind_addr, "127.0.0.1");
@@ -2512,6 +2627,11 @@ mod tests {
         assert_eq!(config.quic_bind_addr, "127.0.0.1");
         assert_eq!(config.quic_port, 7444);
         assert!(config.quic_enabled, "gateway transport should default to QUIC-enabled mode");
+        assert_eq!(
+            config.bind_profile,
+            GatewayBindProfile::LoopbackOnly,
+            "gateway bind profile should default to loopback-only"
+        );
         assert!(
             !config.allow_insecure_remote,
             "remote exposure must require explicit insecure opt-in"
@@ -2524,6 +2644,26 @@ mod tests {
         assert_eq!(config.max_tape_entries_per_response, 1_000);
         assert_eq!(config.max_tape_bytes_per_response, 2 * 1024 * 1024);
         assert_eq!(config.tls, GatewayTlsConfig::default());
+    }
+
+    #[test]
+    fn deployment_and_gateway_bind_profile_parse_expected_values() {
+        let (parsed, _) = parse_root_file_config(
+            r#"
+            [deployment]
+            mode = "remote_vps"
+            dangerous_remote_bind_ack = true
+
+            [gateway]
+            bind_profile = "public_tls"
+            "#,
+        )
+        .expect("deployment and bind profile should parse");
+        let deployment = parsed.deployment.expect("deployment section should exist");
+        assert_eq!(deployment.mode.as_deref(), Some("remote_vps"));
+        assert_eq!(deployment.dangerous_remote_bind_ack, Some(true));
+        let gateway = parsed.gateway.expect("gateway section should exist");
+        assert_eq!(gateway.bind_profile.as_deref(), Some("public_tls"));
     }
 
     #[test]
@@ -3036,6 +3176,13 @@ mod tests {
         let result: Result<RootFileConfig, _> =
             toml::from_str("[daemon]\nport=7142\nunexpected=true\n");
         assert!(result.is_err(), "unknown daemon keys must be rejected");
+    }
+
+    #[test]
+    fn config_rejects_unknown_deployment_key() {
+        let result: Result<RootFileConfig, _> =
+            toml::from_str("[deployment]\nmode='local_desktop'\nunexpected=true\n");
+        assert!(result.is_err(), "unknown deployment keys must be rejected");
     }
 
     #[test]

@@ -56,20 +56,20 @@ use cli::{
     AuthCommand, AuthCredentialArg, AuthProfilesCommand, AuthProviderArg, AuthScopeArg,
     BrowserCommand, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli,
     Command as CliCommand, CompletionShell, ConfigCommand, CronCommand, CronConcurrencyPolicyArg,
-    CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, JournalCheckpointModeArg,
-    MemoryCommand, MemoryScopeArg, MemorySourceArg, OnboardingCommand, PatchCommand, PolicyCommand,
-    ProtocolCommand, SecretsCommand, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, InitModeArg, InitTlsScaffoldArg,
+    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, OnboardingCommand,
+    PatchCommand, PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand,
+    SkillsPackageCommand, SupportBundleCommand,
 };
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
-use palyra_common::default_identity_store_root;
 use palyra_common::{
     build_metadata,
     config_system::{
         backup_path, format_toml_value, get_value_at_path, parse_document_with_migration,
-        parse_toml_value_literal, recover_config_from_backup, set_value_at_path,
-        unset_value_at_path, write_document_with_backups, ConfigMigrationInfo,
+        parse_toml_value_literal, recover_config_from_backup, serialize_document_pretty,
+        set_value_at_path, unset_value_at_path, write_document_with_backups, ConfigMigrationInfo,
     },
     daemon_config_schema::{is_secret_config_path, redact_secret_config_values, RootFileConfig},
     default_config_search_paths, parse_config_path, parse_daemon_bind_socket,
@@ -81,6 +81,7 @@ use palyra_common::{
     },
     HealthResponse, CANONICAL_JSON_ENVELOPE_VERSION, CANONICAL_PROTOCOL_MAJOR,
 };
+use palyra_common::{default_identity_store_root, default_state_root};
 use palyra_identity::DeviceIdentity;
 use palyra_identity::FilesystemSecretStore;
 #[cfg(not(windows))]
@@ -119,11 +120,15 @@ const BASE_HEALTH_BACKOFF_MS: u64 = 100;
 const MAX_GRPC_ATTEMPTS: usize = 3;
 const BASE_GRPC_BACKOFF_MS: u64 = 100;
 const RUN_STREAM_REQUEST_VERSION: u32 = 1;
+const DEFAULT_DAEMON_BIND_ADDR: &str = "127.0.0.1";
+const DEFAULT_DAEMON_PORT: u16 = 7142;
 const DEFAULT_GATEWAY_GRPC_BIND_ADDR: &str = "127.0.0.1";
 const DEFAULT_GATEWAY_GRPC_PORT: u16 = 7443;
 const DEFAULT_GATEWAY_QUIC_BIND_ADDR: &str = "127.0.0.1";
 const DEFAULT_GATEWAY_QUIC_PORT: u16 = 7444;
 const DEFAULT_GATEWAY_QUIC_ENABLED: bool = true;
+const DEFAULT_GATEWAY_BIND_PROFILE: &str = "loopback_only";
+const DEFAULT_DEPLOYMENT_MODE: &str = "local_desktop";
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7142";
 const DEFAULT_JOURNAL_DB_PATH: &str = "data/journal.sqlite3";
 const DEFAULT_BROWSER_URL: &str = "http://127.0.0.1:7143";
@@ -145,6 +150,7 @@ const MAX_REGISTRY_PAGES: usize = 20;
 const REGISTRY_SIGNATURE_ALGORITHM: &str = "ed25519-sha256";
 const JOURNAL_CHECKPOINT_ATTESTATION_SCHEMA_VERSION: u32 = 1;
 const JOURNAL_CHECKPOINT_ATTESTATION_ALGORITHM: &str = "ed25519-sha256";
+const DANGEROUS_REMOTE_BIND_ACK_ENV: &str = "PALYRA_GATEWAY_DANGEROUS_REMOTE_BIND_ACK";
 const TRUST_STORE_INTEGRITY_VAULT_SCOPE: VaultScope = VaultScope::Global;
 const TRUST_STORE_INTEGRITY_VAULT_KEY_PREFIX: &str = "skills.trust_store.integrity.";
 
@@ -152,6 +158,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         CliCommand::Version => print_version(),
+        CliCommand::Init { mode, path, force, tls_scaffold } => {
+            run_init(mode, path, force, tls_scaffold)
+        }
         CliCommand::Doctor { strict, json } => run_doctor(strict, json),
         CliCommand::Status { url, grpc_url, admin, token, principal, device_id, channel } => {
             run_status(url, grpc_url, admin, token, principal, device_id, channel)
@@ -186,6 +195,266 @@ fn print_version() -> Result<()> {
         build.version, build.git_hash, build.build_profile
     );
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitMode {
+    LocalDesktop,
+    RemoteVps,
+}
+
+impl InitMode {
+    fn from_arg(value: InitModeArg) -> Self {
+        match value {
+            InitModeArg::Local => Self::LocalDesktop,
+            InitModeArg::Remote => Self::RemoteVps,
+        }
+    }
+
+    const fn deployment_mode(self) -> &'static str {
+        match self {
+            Self::LocalDesktop => "local_desktop",
+            Self::RemoteVps => "remote_vps",
+        }
+    }
+}
+
+fn run_init(
+    mode: InitModeArg,
+    path: Option<String>,
+    force: bool,
+    tls_scaffold: InitTlsScaffoldArg,
+) -> Result<()> {
+    let mode = InitMode::from_arg(mode);
+    let config_path = resolve_init_path(path)?;
+    if config_path.exists() && !force {
+        anyhow::bail!(
+            "init target already exists: {} (use --force to overwrite)",
+            config_path.display()
+        );
+    }
+    if let Some(parent) = config_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory {}", parent.display())
+            })?;
+        }
+    }
+
+    let state_root = resolve_init_state_root()?;
+    fs::create_dir_all(state_root.as_path())
+        .with_context(|| format!("failed to create state root {}", state_root.display()))?;
+    let identity_store_dir = state_root.join("identity");
+    let vault_dir = state_root.join("vault");
+    fs::create_dir_all(identity_store_dir.as_path()).with_context(|| {
+        format!("failed to create identity store directory {}", identity_store_dir.display())
+    })?;
+    fs::create_dir_all(vault_dir.as_path())
+        .with_context(|| format!("failed to create vault directory {}", vault_dir.display()))?;
+
+    let tls_paths =
+        if mode == InitMode::RemoteVps && !matches!(tls_scaffold, InitTlsScaffoldArg::None) {
+            let tls_root = config_path
+                .parent()
+                .filter(|value| !value.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("tls");
+            fs::create_dir_all(tls_root.as_path()).with_context(|| {
+                format!("failed to create TLS scaffold directory {}", tls_root.display())
+            })?;
+            Some((tls_root.join("gateway.crt"), tls_root.join("gateway.key")))
+        } else {
+            None
+        };
+
+    let admin_token = generate_admin_token();
+    let document = build_init_config_document(
+        mode,
+        identity_store_dir.as_path(),
+        vault_dir.as_path(),
+        admin_token.as_str(),
+        tls_paths.as_ref(),
+    )?;
+    validate_daemon_compatible_document(&document)
+        .context("generated init config does not match daemon schema")?;
+    let rendered =
+        serialize_document_pretty(&document).context("failed to serialize init config document")?;
+    fs::write(config_path.as_path(), rendered)
+        .with_context(|| format!("failed to write init config {}", config_path.display()))?;
+
+    println!(
+        "init.status=complete mode={} config_path={} force={}",
+        mode.deployment_mode(),
+        config_path.display(),
+        force
+    );
+    println!(
+        "init.state_root={} identity_store={} vault_dir={}",
+        state_root.display(),
+        identity_store_dir.display(),
+        vault_dir.display()
+    );
+    println!("init.admin_token_generated=true location=config(admin.auth_token)");
+
+    if mode == InitMode::RemoteVps {
+        emit_remote_init_guidance(tls_scaffold, tls_paths.as_ref())?;
+    }
+
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn resolve_init_path(path: Option<String>) -> Result<PathBuf> {
+    if let Some(path) = path {
+        return parse_config_path(path.as_str())
+            .with_context(|| format!("init config path is invalid: {}", path));
+    }
+    Ok(PathBuf::from("palyra.toml"))
+}
+
+fn resolve_init_state_root() -> Result<PathBuf> {
+    if let Ok(raw_state_root) = env::var("PALYRA_STATE_ROOT") {
+        let trimmed = raw_state_root.trim();
+        if !trimmed.is_empty() {
+            return parse_config_path(trimmed)
+                .with_context(|| "PALYRA_STATE_ROOT contains an invalid path");
+        }
+    }
+    default_state_root().context("failed to resolve default state root")
+}
+
+fn generate_admin_token() -> String {
+    format!("palyra_admin_{}_{}", Ulid::new(), Ulid::new())
+}
+
+fn build_init_config_document(
+    mode: InitMode,
+    identity_store_dir: &Path,
+    vault_dir: &Path,
+    admin_token: &str,
+    tls_paths: Option<&(PathBuf, PathBuf)>,
+) -> Result<toml::Value> {
+    let (mut document, _) =
+        parse_document_with_migration("").context("failed to initialize config document")?;
+    set_value_at_path(
+        &mut document,
+        "deployment.mode",
+        toml::Value::String(mode.deployment_mode().to_owned()),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "deployment.dangerous_remote_bind_ack",
+        toml::Value::Boolean(false),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "daemon.bind_addr",
+        toml::Value::String(DEFAULT_DAEMON_BIND_ADDR.to_owned()),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "daemon.port",
+        toml::Value::Integer(i64::from(DEFAULT_DAEMON_PORT)),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "gateway.grpc_bind_addr",
+        toml::Value::String(DEFAULT_GATEWAY_GRPC_BIND_ADDR.to_owned()),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "gateway.grpc_port",
+        toml::Value::Integer(i64::from(DEFAULT_GATEWAY_GRPC_PORT)),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "gateway.quic_bind_addr",
+        toml::Value::String(DEFAULT_GATEWAY_QUIC_BIND_ADDR.to_owned()),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "gateway.quic_port",
+        toml::Value::Integer(i64::from(DEFAULT_GATEWAY_QUIC_PORT)),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "gateway.quic_enabled",
+        toml::Value::Boolean(DEFAULT_GATEWAY_QUIC_ENABLED),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "gateway.bind_profile",
+        toml::Value::String("loopback_only".to_owned()),
+    )?;
+    set_value_at_path(&mut document, "gateway.allow_insecure_remote", toml::Value::Boolean(false))?;
+    set_value_at_path(
+        &mut document,
+        "gateway.identity_store_dir",
+        toml::Value::String(identity_store_dir.to_string_lossy().into_owned()),
+    )?;
+    set_value_at_path(&mut document, "admin.require_auth", toml::Value::Boolean(true))?;
+    set_value_at_path(
+        &mut document,
+        "admin.auth_token",
+        toml::Value::String(admin_token.to_owned()),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "storage.vault_dir",
+        toml::Value::String(vault_dir.to_string_lossy().into_owned()),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "orchestrator.runloop_v1_enabled",
+        toml::Value::Boolean(true),
+    )?;
+
+    if let Some((cert_path, key_path)) = tls_paths {
+        set_value_at_path(&mut document, "gateway.tls.enabled", toml::Value::Boolean(false))?;
+        set_value_at_path(
+            &mut document,
+            "gateway.tls.cert_path",
+            toml::Value::String(cert_path.to_string_lossy().into_owned()),
+        )?;
+        set_value_at_path(
+            &mut document,
+            "gateway.tls.key_path",
+            toml::Value::String(key_path.to_string_lossy().into_owned()),
+        )?;
+    }
+
+    Ok(document)
+}
+
+fn emit_remote_init_guidance(
+    tls_scaffold: InitTlsScaffoldArg,
+    tls_paths: Option<&(PathBuf, PathBuf)>,
+) -> Result<()> {
+    println!("init.remote_guide.ssh_tunnel=ssh -L 7142:127.0.0.1:7142 <user>@<host>");
+    println!(
+        "init.remote_guide.reverse_proxy=terminate TLS at reverse proxy and forward to http://127.0.0.1:7142"
+    );
+    println!(
+        "init.remote_guide.public_exposure=requires gateway.bind_profile=public_tls + gateway.tls.enabled=true + admin.require_auth=true + deployment.dangerous_remote_bind_ack=true + {}=true",
+        DANGEROUS_REMOTE_BIND_ACK_ENV
+    );
+
+    if let Some((cert_path, key_path)) = tls_paths {
+        println!(
+            "init.remote_guide.tls_paths cert_path={} key_path={}",
+            cert_path.display(),
+            key_path.display()
+        );
+        if matches!(tls_scaffold, InitTlsScaffoldArg::SelfSigned) {
+            println!(
+                "init.remote_guide.self_signed_hint=openssl req -x509 -newkey rsa:4096 -keyout {} -out {} -days 365 -nodes -subj \"/CN=palyra.local\"",
+                key_path.display(),
+                cert_path.display()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn run_doctor(strict: bool, json: bool) -> Result<()> {
@@ -225,6 +494,18 @@ fn run_doctor(strict: bool, json: bool) -> Result<()> {
             report.sandbox.tier_c_strict_offline_only,
             report.sandbox.tier_c_windows_backend_supported
         );
+        println!(
+            "doctor.deployment mode={} bind_profile={} remote_bind_detected={} gateway_tls_enabled={} admin_auth_required={} admin_token_configured={}",
+            report.deployment.mode,
+            report.deployment.bind_profile,
+            report.deployment.remote_bind_detected,
+            report.deployment.gateway_tls_enabled,
+            report.deployment.admin_auth_required,
+            report.deployment.admin_token_configured,
+        );
+        for warning in report.deployment.warnings.as_slice() {
+            println!("doctor.warning={warning}");
+        }
         if checks.iter().any(|check| check.key == "memory_embeddings_model_configured" && !check.ok)
         {
             println!(
@@ -356,6 +637,7 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
     let identity = collect_doctor_identity_snapshot();
     let (connectivity, admin_payload, admin_error) = collect_doctor_connectivity_snapshot();
     let provider_auth = collect_doctor_provider_auth_snapshot(admin_payload, admin_error);
+    let deployment = collect_doctor_deployment_snapshot();
 
     let required_checks_total = checks.iter().filter(|check| check.required).count();
     let required_checks_ok = checks.iter().filter(|check| check.required && check.ok).count();
@@ -378,6 +660,7 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
             tier_c_strict_offline_only: process_runner_tier_c_strict_offline_config_ok(),
             tier_c_windows_backend_supported: process_runner_tier_c_windows_backend_config_ok(),
         },
+        deployment,
     })
 }
 
@@ -562,6 +845,211 @@ fn collect_doctor_provider_auth_snapshot(
         redact_json_value_tree(summary, None);
     }
     DoctorProviderAuthSnapshot { fetched: true, model_provider, auth_summary, error: admin_error }
+}
+
+fn collect_doctor_deployment_snapshot() -> DoctorDeploymentSnapshot {
+    let parsed = read_doctor_root_file_config().ok().flatten();
+
+    let mut mode = parsed
+        .as_ref()
+        .and_then(|config| config.deployment.as_ref())
+        .and_then(|deployment| deployment.mode.as_ref())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_DEPLOYMENT_MODE.to_owned());
+    if let Ok(raw) = env::var("PALYRA_DEPLOYMENT_MODE") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            mode = trimmed.to_ascii_lowercase();
+        }
+    }
+
+    let mut bind_profile = parsed
+        .as_ref()
+        .and_then(|config| config.gateway.as_ref())
+        .and_then(|gateway| gateway.bind_profile.as_ref())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_GATEWAY_BIND_PROFILE.to_owned());
+    if let Ok(raw) = env::var("PALYRA_GATEWAY_BIND_PROFILE") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            bind_profile = trimmed.to_ascii_lowercase();
+        }
+    }
+
+    let mut admin_bind_addr = parsed
+        .as_ref()
+        .and_then(|config| config.daemon.as_ref())
+        .and_then(|daemon| daemon.bind_addr.as_ref())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_DAEMON_BIND_ADDR.to_owned());
+    if let Ok(raw) = env::var("PALYRA_DAEMON_BIND_ADDR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            admin_bind_addr = trimmed.to_owned();
+        }
+    }
+    let mut admin_port = parsed
+        .as_ref()
+        .and_then(|config| config.daemon.as_ref())
+        .and_then(|daemon| daemon.port)
+        .unwrap_or(DEFAULT_DAEMON_PORT);
+    if let Ok(raw) = env::var("PALYRA_DAEMON_PORT") {
+        if let Ok(parsed_port) = raw.trim().parse::<u16>() {
+            admin_port = parsed_port;
+        }
+    }
+
+    let mut grpc_bind_addr = parsed
+        .as_ref()
+        .and_then(|config| config.gateway.as_ref())
+        .and_then(|gateway| gateway.grpc_bind_addr.as_ref())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_GATEWAY_GRPC_BIND_ADDR.to_owned());
+    if let Ok(raw) = env::var("PALYRA_GATEWAY_GRPC_BIND_ADDR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            grpc_bind_addr = trimmed.to_owned();
+        }
+    }
+    let mut grpc_port = parsed
+        .as_ref()
+        .and_then(|config| config.gateway.as_ref())
+        .and_then(|gateway| gateway.grpc_port)
+        .unwrap_or(DEFAULT_GATEWAY_GRPC_PORT);
+    if let Ok(raw) = env::var("PALYRA_GATEWAY_GRPC_PORT") {
+        if let Ok(parsed_port) = raw.trim().parse::<u16>() {
+            grpc_port = parsed_port;
+        }
+    }
+
+    let mut quic_bind_addr = parsed
+        .as_ref()
+        .and_then(|config| config.gateway.as_ref())
+        .and_then(|gateway| gateway.quic_bind_addr.as_ref())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_GATEWAY_QUIC_BIND_ADDR.to_owned());
+    if let Ok(raw) = env::var("PALYRA_GATEWAY_QUIC_BIND_ADDR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            quic_bind_addr = trimmed.to_owned();
+        }
+    }
+    let mut quic_port = parsed
+        .as_ref()
+        .and_then(|config| config.gateway.as_ref())
+        .and_then(|gateway| gateway.quic_port)
+        .unwrap_or(DEFAULT_GATEWAY_QUIC_PORT);
+    if let Ok(raw) = env::var("PALYRA_GATEWAY_QUIC_PORT") {
+        if let Ok(parsed_port) = raw.trim().parse::<u16>() {
+            quic_port = parsed_port;
+        }
+    }
+    let mut quic_enabled = parsed
+        .as_ref()
+        .and_then(|config| config.gateway.as_ref())
+        .and_then(|gateway| gateway.quic_enabled)
+        .unwrap_or(DEFAULT_GATEWAY_QUIC_ENABLED);
+    if let Ok(raw) = env::var("PALYRA_GATEWAY_QUIC_ENABLED") {
+        if let Ok(parsed_value) = raw.trim().parse::<bool>() {
+            quic_enabled = parsed_value;
+        }
+    }
+
+    let mut gateway_tls_enabled = parsed
+        .as_ref()
+        .and_then(|config| config.gateway.as_ref())
+        .and_then(|gateway| gateway.tls.as_ref())
+        .and_then(|tls| tls.enabled)
+        .unwrap_or(false);
+    if let Ok(raw) = env::var("PALYRA_GATEWAY_TLS_ENABLED") {
+        if let Ok(parsed_value) = raw.trim().parse::<bool>() {
+            gateway_tls_enabled = parsed_value;
+        }
+    }
+
+    let mut admin_auth_required = parsed
+        .as_ref()
+        .and_then(|config| config.admin.as_ref())
+        .and_then(|admin| admin.require_auth)
+        .unwrap_or(true);
+    if let Ok(raw) = env::var("PALYRA_ADMIN_REQUIRE_AUTH") {
+        if let Ok(parsed_value) = raw.trim().parse::<bool>() {
+            admin_auth_required = parsed_value;
+        }
+    }
+
+    let file_admin_token_configured = parsed
+        .as_ref()
+        .and_then(|config| config.admin.as_ref())
+        .and_then(|admin| admin.auth_token.as_ref())
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+    let env_admin_token_configured =
+        env::var("PALYRA_ADMIN_TOKEN").ok().map(|token| !token.trim().is_empty()).unwrap_or(false);
+    let admin_token_configured = file_admin_token_configured || env_admin_token_configured;
+
+    let mut dangerous_remote_bind_ack_config = parsed
+        .as_ref()
+        .and_then(|config| config.deployment.as_ref())
+        .and_then(|deployment| deployment.dangerous_remote_bind_ack)
+        .unwrap_or(false);
+    if let Ok(raw) = env::var("PALYRA_DEPLOYMENT_DANGEROUS_REMOTE_BIND_ACK") {
+        if let Ok(parsed_value) = raw.trim().parse::<bool>() {
+            dangerous_remote_bind_ack_config = parsed_value;
+        }
+    }
+    let dangerous_remote_bind_ack_env = env::var(DANGEROUS_REMOTE_BIND_ACK_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<bool>().ok())
+        .unwrap_or(false);
+
+    let admin_remote = bind_is_non_loopback(admin_bind_addr.as_str(), admin_port);
+    let grpc_remote = bind_is_non_loopback(grpc_bind_addr.as_str(), grpc_port);
+    let quic_remote = quic_enabled && bind_is_non_loopback(quic_bind_addr.as_str(), quic_port);
+    let remote_bind_detected = admin_remote || grpc_remote || quic_remote;
+
+    let mut warnings = Vec::new();
+    if remote_bind_detected && !gateway_tls_enabled {
+        warnings.push("Remote bind without TLS blocked".to_owned());
+    }
+    if remote_bind_detected {
+        warnings.push("Dashboard exposed publicly; ensure WAF/reverse proxy".to_owned());
+    }
+    if remote_bind_detected && (!admin_auth_required || !admin_token_configured) {
+        warnings.push("Remote bind requires admin authentication with configured token".to_owned());
+    }
+
+    DoctorDeploymentSnapshot {
+        mode,
+        bind_profile,
+        binds: DoctorDeploymentBindSnapshot {
+            admin: format!("{admin_bind_addr}:{admin_port}"),
+            grpc: format!("{grpc_bind_addr}:{grpc_port}"),
+            quic: if quic_enabled {
+                format!("{quic_bind_addr}:{quic_port}")
+            } else {
+                "disabled".to_owned()
+            },
+        },
+        gateway_tls_enabled,
+        admin_auth_required,
+        admin_token_configured,
+        dangerous_remote_bind_ack_config,
+        dangerous_remote_bind_ack_env,
+        remote_bind_detected,
+        warnings,
+    }
+}
+
+fn bind_is_non_loopback(bind_addr: &str, port: u16) -> bool {
+    parse_daemon_bind_socket(bind_addr, port)
+        .map(|socket| !socket.ip().is_loopback())
+        .unwrap_or(true)
 }
 
 fn is_directory_writable(path: &Path) -> Result<bool> {
@@ -9003,6 +9491,7 @@ struct DoctorReport {
     connectivity: DoctorConnectivitySnapshot,
     provider_auth: DoctorProviderAuthSnapshot,
     sandbox: DoctorSandboxSnapshot,
+    deployment: DoctorDeploymentSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -9063,6 +9552,27 @@ struct DoctorSandboxSnapshot {
     tier_b_egress_allowlists_preflight_only: bool,
     tier_c_strict_offline_only: bool,
     tier_c_windows_backend_supported: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorDeploymentSnapshot {
+    mode: String,
+    bind_profile: String,
+    binds: DoctorDeploymentBindSnapshot,
+    gateway_tls_enabled: bool,
+    admin_auth_required: bool,
+    admin_token_configured: bool,
+    dangerous_remote_bind_ack_config: bool,
+    dangerous_remote_bind_ack_env: bool,
+    remote_bind_detected: bool,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorDeploymentBindSnapshot {
+    admin: String,
+    grpc: String,
+    quic: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -10121,14 +10631,82 @@ tier = "c"
 }
 
 #[cfg(test)]
+mod init_command_tests {
+    use std::path::PathBuf;
+
+    use super::{build_init_config_document, InitMode};
+
+    fn read_string(document: &toml::Value, key: &str) -> Option<String> {
+        let mut cursor = document;
+        for segment in key.split('.') {
+            cursor = cursor.get(segment)?;
+        }
+        cursor.as_str().map(ToOwned::to_owned)
+    }
+
+    fn read_bool(document: &toml::Value, key: &str) -> Option<bool> {
+        let mut cursor = document;
+        for segment in key.split('.') {
+            cursor = cursor.get(segment)?;
+        }
+        cursor.as_bool()
+    }
+
+    #[test]
+    fn local_init_document_uses_loopback_defaults() {
+        let document = build_init_config_document(
+            InitMode::LocalDesktop,
+            PathBuf::from("state/identity").as_path(),
+            PathBuf::from("state/vault").as_path(),
+            "token-local",
+            None,
+        )
+        .expect("local init document should build");
+
+        assert_eq!(read_string(&document, "deployment.mode").as_deref(), Some("local_desktop"));
+        assert_eq!(
+            read_string(&document, "gateway.bind_profile").as_deref(),
+            Some("loopback_only")
+        );
+        assert_eq!(read_string(&document, "admin.auth_token").as_deref(), Some("token-local"));
+        assert_eq!(read_bool(&document, "admin.require_auth"), Some(true));
+        assert_eq!(read_bool(&document, "gateway.tls.enabled"), None);
+    }
+
+    #[test]
+    fn remote_init_document_includes_tls_scaffold_paths_when_requested() {
+        let tls_paths = (PathBuf::from("tls/gateway.crt"), PathBuf::from("tls/gateway.key"));
+        let document = build_init_config_document(
+            InitMode::RemoteVps,
+            PathBuf::from("state/identity").as_path(),
+            PathBuf::from("state/vault").as_path(),
+            "token-remote",
+            Some(&tls_paths),
+        )
+        .expect("remote init document should build");
+
+        assert_eq!(read_string(&document, "deployment.mode").as_deref(), Some("remote_vps"));
+        assert_eq!(read_bool(&document, "gateway.tls.enabled"), Some(false));
+        assert_eq!(
+            read_string(&document, "gateway.tls.cert_path").as_deref(),
+            Some("tls/gateway.crt")
+        );
+        assert_eq!(
+            read_string(&document, "gateway.tls.key_path").as_deref(),
+            Some("tls/gateway.key")
+        );
+    }
+}
+
+#[cfg(test)]
 mod diagnostics_bundle_tests {
     use super::{
         encode_support_bundle_with_cap, extract_support_bundle_error_message, DoctorConfigSnapshot,
-        DoctorConnectivityProbe, DoctorConnectivitySnapshot, DoctorIdentitySnapshot,
-        DoctorProviderAuthSnapshot, DoctorReport, DoctorSandboxSnapshot, DoctorSummary,
-        SupportBundle, SupportBundleBuildSnapshot, SupportBundleConfigSnapshot,
-        SupportBundleDiagnosticsSnapshot, SupportBundleJournalErrorRecord,
-        SupportBundleJournalSnapshot,
+        DoctorConnectivityProbe, DoctorConnectivitySnapshot, DoctorDeploymentBindSnapshot,
+        DoctorDeploymentSnapshot, DoctorIdentitySnapshot, DoctorProviderAuthSnapshot, DoctorReport,
+        DoctorSandboxSnapshot, DoctorSummary, SupportBundle, SupportBundleBuildSnapshot,
+        SupportBundleConfigSnapshot, SupportBundleDiagnosticsSnapshot,
+        SupportBundleJournalErrorRecord, SupportBundleJournalSnapshot,
     };
     use serde_json::{json, Value};
 
@@ -10170,6 +10748,22 @@ mod diagnostics_bundle_tests {
                 tier_b_egress_allowlists_preflight_only: true,
                 tier_c_strict_offline_only: true,
                 tier_c_windows_backend_supported: true,
+            },
+            deployment: DoctorDeploymentSnapshot {
+                mode: "local_desktop".to_owned(),
+                bind_profile: "loopback_only".to_owned(),
+                binds: DoctorDeploymentBindSnapshot {
+                    admin: "127.0.0.1:7142".to_owned(),
+                    grpc: "127.0.0.1:7443".to_owned(),
+                    quic: "127.0.0.1:7444".to_owned(),
+                },
+                gateway_tls_enabled: false,
+                admin_auth_required: true,
+                admin_token_configured: true,
+                dangerous_remote_bind_ack_config: false,
+                dangerous_remote_bind_ack_env: false,
+                remote_bind_detected: false,
+                warnings: Vec::new(),
             },
         }
     }

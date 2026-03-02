@@ -62,6 +62,7 @@ fn normalize_config_path(path: &str) -> String {
 #[serde(deny_unknown_fields)]
 pub struct RootFileConfig {
     pub version: Option<u32>,
+    pub deployment: Option<FileDeploymentConfig>,
     pub daemon: Option<FileDaemonConfig>,
     pub gateway: Option<FileGatewayConfig>,
     pub cron: Option<FileCronConfig>,
@@ -74,6 +75,13 @@ pub struct RootFileConfig {
     pub admin: Option<FileAdminConfig>,
     pub identity: Option<FileIdentityConfig>,
     pub storage: Option<FileStorageConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileDeploymentConfig {
+    pub mode: Option<String>,
+    pub dangerous_remote_bind_ack: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,6 +99,7 @@ pub struct FileGatewayConfig {
     pub quic_bind_addr: Option<String>,
     pub quic_port: Option<u16>,
     pub quic_enabled: Option<bool>,
+    pub bind_profile: Option<String>,
     pub allow_insecure_remote: Option<bool>,
     pub identity_store_dir: Option<String>,
     pub vault_get_approval_required_refs: Option<Vec<String>>,

@@ -12,7 +12,7 @@ This package now hosts the Web Console runtime.
   - skills install/verify/audit/quarantine/enable,
   - browser profile/relay/download controls,
   - audit event browsing with server-side filters,
-  - diagnostics snapshot surface (model provider status + rate limits, auth profile health, browserd sessions/budgets/failures).
+  - diagnostics snapshot surface (model provider status + rate limits, auth profile health, browserd sessions/budgets/failures, deployment posture/bind exposure summary).
 - Sensitive-value safety baseline in UI:
   - sensitive keys are redacted by default,
   - explicit reveal toggle is required.
