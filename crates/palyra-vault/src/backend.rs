@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -15,6 +16,7 @@ use crate::{
 
 const BACKEND_MARKER_FILE: &str = "backend.kind";
 const OBJECTS_DIR: &str = "objects";
+const OBJECTS_STORE_FILE: &str = "objects.store.json";
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE_NAME: &str = "palyra.vault.v1";
 #[cfg(target_os = "linux")]
@@ -180,6 +182,7 @@ fn backend_for_kind(kind: BackendKind, root: &Path) -> Result<Box<dyn BlobBacken
 #[derive(Debug, Clone)]
 struct EncryptedFileBackend {
     objects_root: PathBuf,
+    store_path: PathBuf,
 }
 
 impl EncryptedFileBackend {
@@ -188,18 +191,73 @@ impl EncryptedFileBackend {
         ensure_owner_only_dir(&objects_root)?;
         let objects_root =
             canonicalize_existing_dir(objects_root.as_path(), "encrypted-file objects directory")?;
-        Ok(Self { objects_root })
+        let store_path = objects_root.join(OBJECTS_STORE_FILE);
+        ensure_path_within_root(
+            objects_root.as_path(),
+            store_path.as_path(),
+            "encrypted-file objects store path",
+        )?;
+        if !store_path.exists() {
+            fs::write(&store_path, b"{}").map_err(|error| {
+                VaultError::Io(format!(
+                    "failed to initialize encrypted-file objects store {}: {error}",
+                    store_path.display()
+                ))
+            })?;
+            ensure_owner_only_file(&store_path)?;
+        }
+        Ok(Self { objects_root, store_path })
     }
 
-    fn object_path(&self, object_id: &str) -> Result<PathBuf, VaultError> {
-        let normalized = normalize_storage_object_id(object_id)?;
-        let path = self.objects_root.join(normalized.as_str());
+    fn read_store(&self) -> Result<BTreeMap<String, Vec<u8>>, VaultError> {
+        let bytes = fs::read(&self.store_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                VaultError::NotFound
+            } else {
+                VaultError::Io(format!(
+                    "failed to read encrypted-file objects store {}: {error}",
+                    self.store_path.display()
+                ))
+            }
+        })?;
+        let parsed = serde_json::from_slice::<BTreeMap<String, Vec<u8>>>(bytes.as_slice())
+            .map_err(|error| {
+                VaultError::Io(format!(
+                    "failed to parse encrypted-file objects store {}: {error}",
+                    self.store_path.display()
+                ))
+            })?;
+        Ok(parsed)
+    }
+
+    fn write_store(&self, store: &BTreeMap<String, Vec<u8>>) -> Result<(), VaultError> {
+        let payload = serde_json::to_vec(store).map_err(|error| {
+            VaultError::Io(format!(
+                "failed to serialize encrypted-file objects store {}: {error}",
+                self.store_path.display()
+            ))
+        })?;
+        let tmp_path = self.store_path.with_extension(format!("tmp.{}", Ulid::new()));
         ensure_path_within_root(
             self.objects_root.as_path(),
-            path.as_path(),
-            "encrypted-file object path",
+            tmp_path.as_path(),
+            "encrypted-file temporary objects store path",
         )?;
-        Ok(path)
+        fs::write(&tmp_path, payload).map_err(|error| {
+            VaultError::Io(format!(
+                "failed to write encrypted-file temporary objects store {}: {error}",
+                tmp_path.display()
+            ))
+        })?;
+        ensure_owner_only_file(&tmp_path)?;
+        fs::rename(&tmp_path, &self.store_path).map_err(|error| {
+            VaultError::Io(format!(
+                "failed to finalize encrypted-file objects store {}: {error}",
+                self.store_path.display()
+            ))
+        })?;
+        ensure_owner_only_file(&self.store_path)?;
+        Ok(())
     }
 }
 
@@ -209,79 +267,34 @@ impl BlobBackend for EncryptedFileBackend {
     }
 
     fn put_blob(&self, object_id: &str, payload: &[u8]) -> Result<(), VaultError> {
-        let path = self.object_path(object_id)?;
-        let tmp_path = path.with_extension(format!("tmp.{}", Ulid::new()));
-        ensure_path_within_root(
-            self.objects_root.as_path(),
-            tmp_path.as_path(),
-            "encrypted-file temporary object path",
-        )?;
-        let mut file =
-            fs::OpenOptions::new().create_new(true).write(true).open(&tmp_path).map_err(
-                |error| {
-                    VaultError::Io(format!(
-                        "failed to create encrypted-file temporary object {}: {error}",
-                        tmp_path.display()
-                    ))
-                },
-            )?;
-        ensure_owner_only_file(&tmp_path)?;
-        file.write_all(payload).map_err(|error| {
-            VaultError::Io(format!(
-                "failed to write encrypted-file object {}: {error}",
-                tmp_path.display()
-            ))
-        })?;
-        file.sync_all().map_err(|error| {
-            VaultError::Io(format!(
-                "failed to fsync encrypted-file object {}: {error}",
-                tmp_path.display()
-            ))
-        })?;
-        fs::rename(&tmp_path, &path).map_err(|error| {
-            VaultError::Io(format!(
-                "failed to finalize encrypted-file object {}: {error}",
-                path.display()
-            ))
-        })?;
-        ensure_owner_only_file(&path)?;
+        let object_key = normalize_storage_object_id(object_id)?;
+        let mut store = match self.read_store() {
+            Ok(store) => store,
+            Err(VaultError::NotFound) => BTreeMap::new(),
+            Err(error) => return Err(error),
+        };
+        store.insert(object_key, payload.to_vec());
+        self.write_store(&store)?;
         Ok(())
     }
 
     fn get_blob(&self, object_id: &str) -> Result<Vec<u8>, VaultError> {
-        let path = self.object_path(object_id)?;
-        ensure_path_within_root(
-            self.objects_root.as_path(),
-            path.as_path(),
-            "encrypted-file object path",
-        )?;
-        fs::read(&path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                VaultError::NotFound
-            } else {
-                VaultError::Io(format!(
-                    "failed to read encrypted-file object {}: {error}",
-                    path.display()
-                ))
-            }
-        })
+        let object_key = normalize_storage_object_id(object_id)?;
+        let store = self.read_store()?;
+        store.get(object_key.as_str()).cloned().ok_or(VaultError::NotFound)
     }
 
     fn delete_blob(&self, object_id: &str) -> Result<(), VaultError> {
-        let path = self.object_path(object_id)?;
-        ensure_path_within_root(
-            self.objects_root.as_path(),
-            path.as_path(),
-            "encrypted-file object path",
-        )?;
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(VaultError::Io(format!(
-                "failed to delete encrypted-file object {}: {error}",
-                path.display()
-            ))),
+        let object_key = normalize_storage_object_id(object_id)?;
+        let mut store = match self.read_store() {
+            Ok(store) => store,
+            Err(VaultError::NotFound) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if store.remove(object_key.as_str()).is_none() {
+            return Ok(());
         }
+        self.write_store(&store)
     }
 }
 
