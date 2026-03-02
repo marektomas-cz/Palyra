@@ -3748,6 +3748,9 @@ fn emit_channel_router_warnings(payload: Value, json_output: bool) -> Result<()>
 }
 
 fn emit_channel_router_preview(payload: Value, json_output: bool) -> Result<()> {
+    let mut payload = payload;
+    redact_channel_router_preview_session_key(&mut payload);
+
     if json_output {
         println!(
             "{}",
@@ -3761,7 +3764,7 @@ fn emit_channel_router_preview(payload: Value, json_output: bool) -> Result<()> 
     let accepted = preview.get("accepted").and_then(Value::as_bool).unwrap_or(false);
     let reason = preview.get("reason").and_then(Value::as_str).unwrap_or("unknown");
     let route_key = preview.get("route_key").and_then(Value::as_str).unwrap_or("");
-    let session_key = preview.get("session_key").and_then(Value::as_str).unwrap_or("");
+    let session_key = if preview.get("session_key").is_some() { REDACTED } else { "" };
     let sender_identity = preview.get("sender_identity").and_then(Value::as_str).unwrap_or("");
     let config_hash = preview.get("config_hash").and_then(Value::as_str).unwrap_or("unknown");
     println!(
@@ -3769,6 +3772,15 @@ fn emit_channel_router_preview(payload: Value, json_output: bool) -> Result<()> 
         accepted, reason, route_key, session_key, sender_identity, config_hash
     );
     Ok(())
+}
+
+fn redact_channel_router_preview_session_key(payload: &mut Value) {
+    let target = if let Some(preview) = payload.get_mut("preview") { preview } else { payload };
+    if let Some(object) = target.as_object_mut() {
+        if object.contains_key("session_key") {
+            object.insert("session_key".to_owned(), Value::String(REDACTED.to_owned()));
+        }
+    }
 }
 
 fn emit_channel_router_pairings(payload: Value, json_output: bool) -> Result<()> {
@@ -9937,6 +9949,40 @@ tier = "c"
         let value = toml::Value::Integer(7443);
         let rendered = super::format_config_get_display_value("gateway.grpc_port", &value, false);
         assert_eq!(rendered, "7443");
+    }
+
+    #[test]
+    fn redact_channel_router_preview_session_key_redacts_nested_preview_payload() {
+        let mut payload = serde_json::json!({
+            "preview": {
+                "accepted": true,
+                "session_key": "session-123",
+            }
+        });
+        super::redact_channel_router_preview_session_key(&mut payload);
+        assert_eq!(
+            payload
+                .get("preview")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|preview| preview.get("session_key"))
+                .and_then(serde_json::Value::as_str),
+            Some(super::REDACTED),
+            "session_key should be redacted in nested preview payloads"
+        );
+    }
+
+    #[test]
+    fn redact_channel_router_preview_session_key_redacts_top_level_payload() {
+        let mut payload = serde_json::json!({
+            "accepted": true,
+            "session_key": "session-123",
+        });
+        super::redact_channel_router_preview_session_key(&mut payload);
+        assert_eq!(
+            payload.get("session_key").and_then(serde_json::Value::as_str),
+            Some(super::REDACTED),
+            "session_key should be redacted when preview is represented as top-level payload"
+        );
     }
 
     #[cfg(not(windows))]
