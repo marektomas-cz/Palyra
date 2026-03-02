@@ -95,6 +95,8 @@ const CHROMIUM_PATH_ENV: &str = "PALYRA_BROWSERD_CHROMIUM_PATH";
 const CHROMIUM_ENGINE_MODE_ENV: &str = "PALYRA_BROWSERD_ENGINE_MODE";
 const CHROMIUM_STARTUP_TIMEOUT_ENV: &str = "PALYRA_BROWSERD_CHROMIUM_STARTUP_TIMEOUT_MS";
 const DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS: u64 = 20_000;
+const CHROMIUM_NEW_TAB_MAX_ATTEMPTS: usize = 3;
+const CHROMIUM_NEW_TAB_RETRY_DELAY_MS: u64 = 200;
 const STATE_FILE_MAGIC: &[u8; 4] = b"PBS1";
 const STATE_NONCE_LEN: usize = 12;
 const STATE_KEY_LEN: usize = 32;
@@ -3877,6 +3879,46 @@ fn configure_chromium_tab(
     Ok(())
 }
 
+fn chromium_new_tab_error_is_retryable(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("event waited for never came")
+}
+
+fn create_configured_chromium_tab_with_retry(
+    browser: &Arc<HeadlessBrowser>,
+    allow_private_targets: bool,
+    timeout: Duration,
+    security_incident: Arc<std::sync::Mutex<Option<String>>>,
+    failure_prefix: &str,
+) -> Result<Arc<HeadlessTab>, String> {
+    for attempt in 1..=CHROMIUM_NEW_TAB_MAX_ATTEMPTS {
+        match browser.new_tab() {
+            Ok(tab) => {
+                configure_chromium_tab(&tab, allow_private_targets, timeout, security_incident)?;
+                return Ok(tab);
+            }
+            Err(error) => {
+                let error_message = error.to_string();
+                if attempt < CHROMIUM_NEW_TAB_MAX_ATTEMPTS
+                    && chromium_new_tab_error_is_retryable(error_message.as_str())
+                {
+                    warn!(
+                        attempt,
+                        max_attempts = CHROMIUM_NEW_TAB_MAX_ATTEMPTS,
+                        error = error_message.as_str(),
+                        "chromium new_tab reported retryable startup race; retrying"
+                    );
+                    std::thread::sleep(Duration::from_millis(CHROMIUM_NEW_TAB_RETRY_DELAY_MS));
+                    continue;
+                }
+                return Err(format!("{failure_prefix}: {error_message}"));
+            }
+        }
+    }
+    Err(format!(
+        "{failure_prefix}: tab creation exhausted retry attempts without a terminal result"
+    ))
+}
+
 async fn initialize_chromium_session_runtime(
     runtime: &BrowserRuntimeState,
     session_id: &str,
@@ -3909,14 +3951,12 @@ async fn initialize_chromium_session_runtime(
                 })?);
             let mut tabs = HashMap::new();
             for tab_id in tab_order.iter() {
-                let tab = browser.new_tab().map_err(|error| {
-                    format!("failed to create Chromium tab for session restore: {error}")
-                })?;
-                configure_chromium_tab(
-                    &tab,
+                let tab = create_configured_chromium_tab_with_retry(
+                    &browser,
                     allow_private_targets,
                     navigation_timeout,
                     Arc::clone(&security_incident),
+                    "failed to create Chromium tab for session restore",
                 )?;
                 tabs.insert(tab_id.clone(), tab);
             }
@@ -3960,16 +4000,13 @@ async fn chromium_open_tab_runtime(
         (Arc::clone(&chromium_session.browser), Arc::clone(&chromium_session.security_incident))
     };
     let tab = run_chromium_blocking("chromium open tab", move || {
-        let tab = browser
-            .new_tab()
-            .map_err(|error| format!("failed to allocate Chromium tab: {error}"))?;
-        configure_chromium_tab(
-            &tab,
+        create_configured_chromium_tab_with_retry(
+            &browser,
             allow_private_targets,
             Duration::from_millis(timeout_ms),
             security_incident,
-        )?;
-        Ok(tab)
+            "failed to allocate Chromium tab",
+        )
     })
     .await?;
     let mut chromium_sessions = runtime.chromium_sessions.lock().await;
