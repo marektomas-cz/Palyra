@@ -43,7 +43,7 @@ proptest = "1.6.0"
 libc = "0.2.171"
 protoc-bin-vendored = "3.0.0"
 prost = "0.14.3"
-rand = "0.9.2"
+rand = "0.10.0"
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "form", "json", "native-tls", "query"] }
 rpassword = "7.3.1"
 rcgen = { version = "0.14.7", features = ["x509-parser"] }
