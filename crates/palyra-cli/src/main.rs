@@ -3128,13 +3128,7 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                     channel.clone(),
                     "failed to call discord onboarding probe endpoint",
                 )?;
-                let bot_id = read_json_string(&probe_response, &["bot", "id"]).unwrap_or("unknown");
-                let bot_username =
-                    read_json_string(&probe_response, &["bot", "username"]).unwrap_or("unknown");
-                eprintln!(
-                    "discord setup preflight: token valid for bot {} ({})",
-                    bot_username, bot_id
-                );
+                eprintln!("discord setup preflight: token validation succeeded");
                 emit_discord_onboarding_warnings(&probe_response);
 
                 let inbound_scope = prompt_discord_setup_scope()?;
@@ -3204,10 +3198,8 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
                     println!(
-                        "channels.discord.setup connector_id={} bot_id={} bot_username={} token_vault_ref={} config_path={} restart_required_for_routing_rules={}",
+                        "channels.discord.setup connector_id={} token_vault_ref={} config_path={} restart_required_for_routing_rules={}",
                         connector_id,
-                        bot_id,
-                        bot_username,
                         token_vault_ref,
                         config_path,
                         restart_required

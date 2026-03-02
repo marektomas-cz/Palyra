@@ -8,7 +8,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ulid::Ulid;
 
-use crate::{ensure_owner_only_dir, ensure_owner_only_file, VaultError};
+use crate::{ensure_owner_only_dir, ensure_owner_only_file, ensure_path_within_root, VaultError};
 
 const BACKEND_MARKER_FILE: &str = "backend.kind";
 const OBJECTS_DIR: &str = "objects";
@@ -72,14 +72,14 @@ pub enum BackendPreference {
     EncryptedFile,
 }
 
-pub trait BlobBackend: Send + Sync {
+pub(crate) trait BlobBackend: Send + Sync {
     fn kind(&self) -> BackendKind;
     fn put_blob(&self, object_id: &str, payload: &[u8]) -> Result<(), VaultError>;
     fn get_blob(&self, object_id: &str) -> Result<Vec<u8>, VaultError>;
     fn delete_blob(&self, object_id: &str) -> Result<(), VaultError>;
 }
 
-pub fn select_backend(
+pub(crate) fn select_backend(
     root: &Path,
     preference: BackendPreference,
 ) -> Result<Box<dyn BlobBackend>, VaultError> {
@@ -187,16 +187,32 @@ impl EncryptedFileBackend {
     }
 
     fn object_path(&self, object_id: &str) -> Result<PathBuf, VaultError> {
-        if object_id.is_empty()
-            || !object_id
-                .chars()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
+        let normalized = object_id.trim();
+        if normalized.is_empty() {
+            return Err(VaultError::InvalidObjectId(
+                "object id must only contain lowercase alnum, '_' or '-'".to_owned(),
+            ));
+        }
+        if normalized.contains("..") || normalized.contains('/') || normalized.contains('\\') {
+            return Err(VaultError::InvalidObjectId(
+                "object id cannot contain path separators or parent traversal sequences".to_owned(),
+            ));
+        }
+        if !normalized
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
         {
             return Err(VaultError::InvalidObjectId(
                 "object id must only contain lowercase alnum, '_' or '-'".to_owned(),
             ));
         }
-        Ok(self.objects_root.join(object_id))
+        let path = self.objects_root.join(normalized);
+        ensure_path_within_root(
+            self.objects_root.as_path(),
+            path.as_path(),
+            "encrypted-file object path",
+        )?;
+        Ok(path)
     }
 }
 
@@ -208,6 +224,11 @@ impl BlobBackend for EncryptedFileBackend {
     fn put_blob(&self, object_id: &str, payload: &[u8]) -> Result<(), VaultError> {
         let path = self.object_path(object_id)?;
         let tmp_path = path.with_extension(format!("tmp.{}", Ulid::new()));
+        ensure_path_within_root(
+            self.objects_root.as_path(),
+            tmp_path.as_path(),
+            "encrypted-file temporary object path",
+        )?;
         let mut file =
             fs::OpenOptions::new().create_new(true).write(true).open(&tmp_path).map_err(
                 |error| {
@@ -242,6 +263,11 @@ impl BlobBackend for EncryptedFileBackend {
 
     fn get_blob(&self, object_id: &str) -> Result<Vec<u8>, VaultError> {
         let path = self.object_path(object_id)?;
+        ensure_path_within_root(
+            self.objects_root.as_path(),
+            path.as_path(),
+            "encrypted-file object path",
+        )?;
         fs::read(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 VaultError::NotFound
@@ -256,6 +282,11 @@ impl BlobBackend for EncryptedFileBackend {
 
     fn delete_blob(&self, object_id: &str) -> Result<(), VaultError> {
         let path = self.object_path(object_id)?;
+        ensure_path_within_root(
+            self.objects_root.as_path(),
+            path.as_path(),
+            "encrypted-file object path",
+        )?;
         if !path.exists() {
             return Ok(());
         }

@@ -8,7 +8,7 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -123,13 +123,14 @@ impl Vault {
                 .context("failed to resolve default identity store root")
                 .map_err(|error| VaultError::Io(error.to_string()))?
         };
-        let root = if let Some(path) = config.root {
+        let root_raw = if let Some(path) = config.root {
             path
         } else if let Ok(path) = std::env::var("PALYRA_VAULT_DIR") {
             PathBuf::from(path)
         } else {
             default_vault_root(identity_store_root.as_path())
         };
+        let root = normalize_vault_root_path(root_raw)?;
         if config.max_secret_bytes == 0 {
             return Err(VaultError::InvalidKey(
                 "max secret bytes must be greater than zero".to_owned(),
@@ -287,7 +288,13 @@ impl Vault {
 
     fn ensure_metadata_exists(&self) -> Result<(), VaultError> {
         let _lock = self.acquire_metadata_lock()?;
-        if self.metadata_path().exists() {
+        let metadata_path = self.metadata_path();
+        ensure_path_within_root(
+            self.root.as_path(),
+            metadata_path.as_path(),
+            "vault metadata path",
+        )?;
+        if metadata_path.exists() {
             return Ok(());
         }
         self.write_metadata(&MetadataFile::default())
@@ -303,6 +310,11 @@ impl Vault {
 
     fn acquire_metadata_lock(&self) -> Result<MetadataLockGuard, VaultError> {
         let lock_path = self.metadata_lock_path();
+        ensure_path_within_root(
+            self.root.as_path(),
+            lock_path.as_path(),
+            "vault metadata lock path",
+        )?;
         let started = SystemTime::now();
         loop {
             match fs::OpenOptions::new().create_new(true).write(true).open(&lock_path) {
@@ -343,6 +355,7 @@ impl Vault {
 
     fn read_metadata(&self) -> Result<MetadataFile, VaultError> {
         let path = self.metadata_path();
+        ensure_path_within_root(self.root.as_path(), path.as_path(), "vault metadata path")?;
         if !path.exists() {
             return Ok(MetadataFile::default());
         }
@@ -365,6 +378,12 @@ impl Vault {
     fn write_metadata(&self, metadata: &MetadataFile) -> Result<(), VaultError> {
         let path = self.metadata_path();
         let tmp_path = path.with_extension(format!("tmp.{}", Ulid::new()));
+        ensure_path_within_root(self.root.as_path(), path.as_path(), "vault metadata path")?;
+        ensure_path_within_root(
+            self.root.as_path(),
+            tmp_path.as_path(),
+            "vault metadata temporary path",
+        )?;
         let payload = serde_json::to_vec_pretty(metadata).map_err(|error| {
             VaultError::Io(format!("failed to serialize metadata file {}: {error}", path.display()))
         })?;
@@ -456,6 +475,12 @@ fn maybe_reclaim_stale_lock_with_policy(
     now: SystemTime,
     stale_age: Duration,
 ) -> Result<bool, VaultError> {
+    validate_no_parent_components(lock_path, "vault metadata lock path")?;
+    if lock_path.file_name().and_then(|value| value.to_str()) != Some(METADATA_LOCK_FILE) {
+        return Err(VaultError::Io(format!(
+            "vault metadata lock path must end with '{METADATA_LOCK_FILE}'"
+        )));
+    }
     let metadata = match fs::metadata(lock_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -669,6 +694,47 @@ fn default_vault_root(identity_store_root: &Path) -> PathBuf {
     identity_store_root.join("vault")
 }
 
+fn normalize_vault_root_path(raw: PathBuf) -> Result<PathBuf, VaultError> {
+    if raw.as_os_str().is_empty() {
+        return Err(VaultError::InvalidKey("vault root path cannot be empty".to_owned()));
+    }
+    let normalized = if raw.is_absolute() {
+        raw
+    } else {
+        let current_dir = std::env::current_dir().map_err(|error| {
+            VaultError::Io(format!("failed to resolve current directory for vault root: {error}"))
+        })?;
+        current_dir.join(raw)
+    };
+    validate_no_parent_components(normalized.as_path(), "vault root path")?;
+    Ok(normalized)
+}
+
+fn validate_no_parent_components(path: &Path, label: &'static str) -> Result<(), VaultError> {
+    if path.as_os_str().is_empty() {
+        return Err(VaultError::Io(format!("{label} cannot be empty")));
+    }
+    if path.components().any(|component| matches!(component, Component::ParentDir)) {
+        return Err(VaultError::Io(format!(
+            "{label} cannot contain parent directory traversal components"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_path_within_root(
+    root: &Path,
+    path: &Path,
+    label: &'static str,
+) -> Result<(), VaultError> {
+    validate_no_parent_components(root, "vault root path")?;
+    validate_no_parent_components(path, label)?;
+    if !path.starts_with(root) {
+        return Err(VaultError::Io(format!("{label} escapes the vault root boundary")));
+    }
+    Ok(())
+}
+
 fn build_aad(scope: &VaultScope, key: &str) -> Vec<u8> {
     format!("{AAD_PREFIX}|{}|{key}", scope.as_storage_str()).into_bytes()
 }
@@ -732,6 +798,7 @@ impl Drop for SensitiveBytes {
 }
 
 pub fn ensure_owner_only_dir(path: &Path) -> Result<(), VaultError> {
+    validate_no_parent_components(path, "owner-only directory path")?;
     fs::create_dir_all(path).map_err(|error| {
         VaultError::Io(format!("failed to create directory {}: {error}", path.display()))
     })?;
@@ -754,6 +821,7 @@ pub fn ensure_owner_only_dir(path: &Path) -> Result<(), VaultError> {
 }
 
 pub fn ensure_owner_only_file(path: &Path) -> Result<(), VaultError> {
+    validate_no_parent_components(path, "owner-only file path")?;
     #[cfg(windows)]
     {
         let owner_sid = current_user_sid()?;
@@ -918,6 +986,11 @@ mod tests {
             // Force metadata persistence failure after blob write by replacing metadata file path
             // with a directory before `write_metadata` attempts its atomic rename.
             let metadata_path = self.root.join(super::METADATA_FILE);
+            super::ensure_path_within_root(
+                self.root.as_path(),
+                metadata_path.as_path(),
+                "metadata sabotage path",
+            )?;
             if metadata_path.exists() {
                 if metadata_path.is_dir() {
                     std::fs::remove_dir_all(&metadata_path).map_err(|error| {
