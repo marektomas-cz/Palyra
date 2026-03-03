@@ -48,6 +48,22 @@ If the report includes sensitive data (tokens, credentials, customer data), **re
 This project aims to:
 - work towards a fix as quickly as practical, depending on severity and complexity
 
+## Downstream patched advisories
+
+In rare cases, an upstream fix may not be immediately resolvable due transitive dependency
+constraints. In that case, the repository may temporarily ship a narrowly-scoped downstream patch
+with:
+
+- a committed patch source path,
+- regression tests that exercise the vulnerable code path,
+- release-mode validation in CI for impacted targets,
+- explicit documentation and an exit plan back to upstream.
+
+Current example:
+
+- `GHSA-wrw7-89jp-8q8g` (`glib`) for desktop Linux runtime, patched downstream in
+  `apps/desktop/src-tauri/third_party/glib-0.18.5-patched`.
+
 ## Security best practices for contributors
 
 - Keep CI green and do not bypass security checks.

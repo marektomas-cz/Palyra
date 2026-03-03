@@ -4,11 +4,11 @@
 
 ## Platform support (v1)
 
-- Supported: **Windows** and **macOS**.
-- Linux desktop runtime is temporarily disabled because upstream Tauri Linux GTK bindings are
-  pinned to `glib < 0.20.0`, and `glib` advisory `GHSA-wrw7-89jp-8q8g` is patched only from
-  `0.20.0`.
-- Linux support will be re-enabled when upstream dependency constraints permit a patched graph.
+- Supported: **Windows**, **macOS**, and **Linux**.
+- Linux path currently uses a downstream backport patch for
+  `GHSA-wrw7-89jp-8q8g` / `RUSTSEC-2024-0429` in `glib 0.18.5` because
+  upstream Tauri Linux dependency constraints still pin the graph below `glib 0.20.0`.
+- Patch source is vendored at `src-tauri/third_party/glib-0.18.5-patched`.
 
 ## What it does
 
@@ -32,6 +32,9 @@
 - Logs are redacted with shared `palyra-common` redaction helpers.
 - No channel secrets are stored by the desktop app.
 - App-local state is stored in `<state_root>/desktop-control-center/state.json`.
+- Linux `glib` advisory mitigation is documented in:
+  - `src-tauri/docs/security/advisories/GHSA-wrw7-89jp-8q8g.md`
+  - `src-tauri/docs/security/dependency-graph/glib.md`
 
 ## Running locally
 
@@ -45,6 +48,12 @@ cargo build --workspace --locked
 
 ```bash
 cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
+```
+
+Linux release-mode regression check:
+
+```bash
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --release --locked
 ```
 
 3. If binaries are not on `PATH`, set explicit overrides:
