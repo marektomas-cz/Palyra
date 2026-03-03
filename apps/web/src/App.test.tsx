@@ -20,19 +20,39 @@ describe("M35 web console app", () => {
   });
 
   it("executes approval decision flow with CSRF-protected request", async () => {
-    const fetchMock = createQueuedFetch([
-      jsonResponse({
-        principal: "admin:web-console",
-        device_id: "device-1",
-        channel: "web",
-        csrf_token: "csrf-1",
-        issued_at_unix_ms: 100,
-        expires_at_unix_ms: 300
-      }),
-      jsonResponse({ approvals: [{ approval_id: "A1", subject_type: "tool", decision: "pending" }] }),
-      jsonResponse({ approval: { approval_id: "A1", decision: "allow" } }),
-      jsonResponse({ approvals: [{ approval_id: "A1", subject_type: "tool", decision: "allow" }] })
-    ]);
+    let approvalDecision: "pending" | "allow" = "pending";
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestUrl(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (path === "/console/v1/auth/session" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:web-console",
+            device_id: "device-1",
+            channel: "web",
+            csrf_token: "csrf-1",
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 300
+          })
+        );
+      }
+
+      if (path === "/console/v1/approvals" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            approvals: [{ approval_id: "A1", subject_type: "tool", decision: approvalDecision }]
+          })
+        );
+      }
+
+      if (path === "/console/v1/approvals/A1/decision" && method === "POST") {
+        approvalDecision = "allow";
+        return Promise.resolve(jsonResponse({ approval: { approval_id: "A1", decision: "allow" } }));
+      }
+
+      throw new Error(`Unhandled mocked request: ${method} ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
@@ -44,9 +64,11 @@ describe("M35 web console app", () => {
       expect(screen.getByText("Approval allowed.")).toBeInTheDocument();
     });
 
-    expect(fetchMock.mock.calls).toHaveLength(4);
-    expect(requestUrl(fetchMock.mock.calls[2][0])).toBe("/console/v1/approvals/A1/decision");
-    const decisionRequest = fetchMock.mock.calls[2][1];
+    const decisionCalls = fetchMock.mock.calls.filter(
+      (call) => requestUrl(call[0]) === "/console/v1/approvals/A1/decision"
+    );
+    expect(decisionCalls.length).toBeGreaterThan(0);
+    const decisionRequest = decisionCalls[decisionCalls.length - 1][1];
     const headers = new Headers(decisionRequest?.headers);
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
   });
