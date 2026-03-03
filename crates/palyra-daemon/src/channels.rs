@@ -27,7 +27,8 @@ use crate::gateway::{
 mod discord;
 
 pub use discord::{
-    discord_connector_id, discord_principal, discord_token_vault_ref, normalize_discord_account_id,
+    discord_connector_id, discord_default_egress_allowlist, discord_principal,
+    discord_token_vault_ref, normalize_discord_account_id,
 };
 
 const CHANNEL_WORKER_DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";

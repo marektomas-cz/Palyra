@@ -60,6 +60,11 @@ pub(super) fn discord_connector_spec(account_id: &str, enabled: bool) -> Connect
 }
 
 #[must_use]
+pub fn discord_default_egress_allowlist() -> Vec<String> {
+    discord_connector_spec("default", false).egress_allowlist
+}
+
+#[must_use]
 pub(super) fn is_discord_connector(connector_id: &str) -> bool {
     connector_id.trim().to_ascii_lowercase().starts_with("discord:")
 }

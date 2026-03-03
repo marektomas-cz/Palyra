@@ -609,6 +609,8 @@ struct DiscordOnboardingPreflightResponse {
     application: Option<DiscordApplicationSummary>,
     invite_url_template: String,
     required_permissions: Vec<String>,
+    egress_allowlist: Vec<String>,
+    security_defaults: Vec<String>,
     routing_preview: DiscordRoutingPreview,
     inbound_monitor: DiscordInboundMonitorSummary,
     warnings: Vec<String>,
@@ -5207,6 +5209,8 @@ async fn evaluate_discord_onboarding_request(
             "Embed Links".to_owned(),
             "Attach Files".to_owned(),
         ],
+        egress_allowlist: channels::discord_default_egress_allowlist(),
+        security_defaults: build_discord_onboarding_security_defaults(&plan),
         routing_preview: build_discord_routing_preview(&plan),
         inbound_monitor,
         warnings,
@@ -5386,6 +5390,29 @@ fn build_discord_onboarding_warnings(
         );
     }
     warnings
+}
+
+fn build_discord_onboarding_security_defaults(plan: &DiscordOnboardingPlan) -> Vec<String> {
+    let mut defaults = vec![
+        "Connector ingress auth can be scoped with admin.connector_token / PALYRA_CONNECTOR_TOKEN instead of reusing admin token."
+            .to_owned(),
+        "Discord attachment downloads are deny-by-default in current scope; connector forwards metadata only."
+            .to_owned(),
+        "Discord egress is restricted to explicit allowlist domains (API, gateway, CDN variants)."
+            .to_owned(),
+    ];
+    defaults.push(if plan.require_mention {
+        "Guild routing is mention-gated by default using canonical <@bot_id>/<@!bot_id> patterns."
+            .to_owned()
+    } else {
+        "Guild routing mention gate is disabled for this plan; keep scope narrow and explicitly approved."
+            .to_owned()
+    });
+    defaults.push(format!(
+        "DM policy default is '{}'; pairing keeps direct-message senders explicit and auditable.",
+        plan.direct_message_policy.as_str()
+    ));
+    defaults
 }
 
 fn load_discord_inbound_monitor_summary(
@@ -7732,19 +7759,20 @@ mod tests {
 
     use super::{
         build_discord_inbound_monitor_warnings, build_discord_onboarding_plan,
-        build_memory_embedding_provider, clamp_console_relay_token_ttl_ms,
-        connector_db_path_from_journal_path, constant_time_eq_bytes,
-        consume_admin_rate_limit_with_now, consume_canvas_rate_limit_with_now,
-        enforce_remote_bind_guard, finalize_discord_onboarding_plan, find_hashed_secret_map_key,
-        loopback_grpc_url, mint_console_relay_token, mint_console_secret_token,
-        normalize_discord_token, parse_offline_env_flag, prune_console_relay_tokens,
-        redact_console_diagnostics_value, resolve_discord_intents_from_flags,
-        resolve_model_provider_secret, runtime_status_response, sanitize_http_error_message,
-        sha256_hex, summarize_discord_inbound_monitor, validate_admin_auth_config,
-        validate_canvas_http_canvas_id, validate_canvas_http_token_query,
-        validate_process_runner_backend_policy, ConsoleRelayToken, DiscordBotIdentitySummary,
-        DiscordOnboardingRequest, DiscordOnboardingScope, DiscordPrivilegedIntentStatus,
-        RemoteBindEndpoints, RemoteBindGuardConfig, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
+        build_discord_onboarding_security_defaults, build_memory_embedding_provider,
+        clamp_console_relay_token_ttl_ms, connector_db_path_from_journal_path,
+        constant_time_eq_bytes, consume_admin_rate_limit_with_now,
+        consume_canvas_rate_limit_with_now, enforce_remote_bind_guard,
+        finalize_discord_onboarding_plan, find_hashed_secret_map_key, loopback_grpc_url,
+        mint_console_relay_token, mint_console_secret_token, normalize_discord_token,
+        parse_offline_env_flag, prune_console_relay_tokens, redact_console_diagnostics_value,
+        resolve_discord_intents_from_flags, resolve_model_provider_secret, runtime_status_response,
+        sanitize_http_error_message, sha256_hex, summarize_discord_inbound_monitor,
+        validate_admin_auth_config, validate_canvas_http_canvas_id,
+        validate_canvas_http_token_query, validate_process_runner_backend_policy,
+        ConsoleRelayToken, DiscordBotIdentitySummary, DiscordOnboardingRequest,
+        DiscordOnboardingScope, DiscordPrivilegedIntentStatus, RemoteBindEndpoints,
+        RemoteBindGuardConfig, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
         ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CANVAS_HTTP_MAX_TOKEN_BYTES,
         CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
         CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS, CONSOLE_RELAY_TOKEN_MAX_TTL_MS,
@@ -7848,6 +7876,34 @@ mod tests {
             "safe baseline should default to DM pairing policy"
         );
         assert_eq!(plan.connector_id, "discord:default");
+    }
+
+    #[test]
+    fn discord_onboarding_security_defaults_include_attachment_and_auth_posture() {
+        let payload = DiscordOnboardingRequest {
+            account_id: Some("default".to_owned()),
+            token: "token".to_owned(),
+            mode: None,
+            inbound_scope: None,
+            allow_from: None,
+            deny_from: None,
+            require_mention: None,
+            mention_patterns: None,
+            concurrency_limit: None,
+            direct_message_policy: None,
+            broadcast_strategy: None,
+            confirm_open_guild_channels: None,
+        };
+        let plan = build_discord_onboarding_plan(&payload).expect("plan should parse");
+        let defaults = build_discord_onboarding_security_defaults(&plan);
+        assert!(
+            defaults.iter().any(|entry| entry.contains("metadata only")),
+            "security defaults should mention metadata-only attachment posture"
+        );
+        assert!(
+            defaults.iter().any(|entry| entry.contains("connector_token")),
+            "security defaults should mention connector-scoped auth posture"
+        );
     }
 
     #[test]

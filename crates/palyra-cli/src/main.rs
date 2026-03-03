@@ -3622,6 +3622,7 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                 eprintln!("discord setup preflight: token validation succeeded");
                 emit_discord_onboarding_warnings(&probe_response);
                 emit_discord_inbound_monitor_summary(&probe_response);
+                emit_discord_onboarding_defaults(&probe_response);
 
                 let inbound_scope = prompt_discord_setup_scope()?;
                 let allow_from = prompt_discord_sender_filters(
@@ -3698,6 +3699,7 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                     );
                     emit_discord_onboarding_warnings(&response);
                     emit_discord_inbound_monitor_summary(&response);
+                    emit_discord_onboarding_defaults(&response);
                 }
             }
             ChannelsDiscordCommand::Status {
@@ -9347,6 +9349,24 @@ fn emit_discord_inbound_monitor_summary(payload: &Value) {
         last_inbound_unix_ms,
         last_event_type
     );
+}
+
+fn emit_discord_onboarding_defaults(payload: &Value) {
+    let preflight = payload.get("preflight").unwrap_or(payload);
+    if let Some(allowlist) = preflight.get("egress_allowlist").and_then(Value::as_array) {
+        for host in allowlist {
+            if let Some(value) = host.as_str() {
+                eprintln!("discord.egress_allowlist {value}");
+            }
+        }
+    }
+    if let Some(defaults) = preflight.get("security_defaults").and_then(Value::as_array) {
+        for entry in defaults {
+            if let Some(value) = entry.as_str() {
+                eprintln!("discord.security_default {value}");
+            }
+        }
+    }
 }
 
 fn prompt_yes_no(prompt: &str) -> Result<bool> {
