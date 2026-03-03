@@ -6,10 +6,11 @@ use std::{
 
 use palyra_common::{validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
 use palyra_connectors::{
-    connectors::default_adapters, ConnectorInstanceSpec, ConnectorKind, ConnectorRouter,
-    ConnectorRouterError, ConnectorStatusSnapshot, ConnectorSupervisor, ConnectorSupervisorConfig,
-    ConnectorSupervisorError, InboundIngestOutcome, InboundMessageEvent, OutboundMessageRequest,
-    RouteInboundResult, RoutedOutboundMessage,
+    connectors::default_adapters, AttachmentKind, AttachmentRef, ConnectorInstanceSpec,
+    ConnectorKind, ConnectorRouter, ConnectorRouterError, ConnectorStatusSnapshot,
+    ConnectorSupervisor, ConnectorSupervisorConfig, ConnectorSupervisorError, InboundIngestOutcome,
+    InboundMessageEvent, OutboundAttachment, OutboundMessageRequest, RouteInboundResult,
+    RoutedOutboundMessage,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -202,6 +203,7 @@ impl ChannelPlatform {
             received_at_unix_ms: unix_ms_now(),
             is_direct_message: request.is_direct_message,
             requested_broadcast: request.requested_broadcast,
+            attachments: Vec::new(),
         };
         self.supervisor.ingest_inbound(event).await.map_err(ChannelPlatformError::from)
     }
@@ -260,6 +262,7 @@ impl ChannelPlatform {
             broadcast: false,
             auto_ack_text: None,
             auto_reaction,
+            attachments: Vec::new(),
             timeout_ms: 30_000,
             max_payload_bytes: self.supervisor_config().max_outbound_body_bytes,
         };
@@ -382,6 +385,9 @@ impl ConnectorRouter for GrpcChannelRouter {
         } else {
             event.sender_id.clone()
         };
+        let content_text =
+            with_attachment_context(event.body.as_str(), event.attachments.as_slice());
+        let message_attachments = to_proto_message_attachments(event.attachments.as_slice());
         let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(
             self.grpc_url.clone(),
         )
@@ -403,11 +409,11 @@ impl ConnectorRouter for GrpcChannelRouter {
                     sender_verified: discord_connector,
                 }),
                 content: Some(common_v1::MessageContent {
-                    text: event.body.clone(),
-                    attachments: Vec::new(),
+                    text: content_text.clone(),
+                    attachments: message_attachments,
                 }),
                 security: None,
-                max_payload_bytes: u64::try_from(event.body.len()).unwrap_or(u64::MAX),
+                max_payload_bytes: u64::try_from(content_text.len()).unwrap_or(u64::MAX),
             }),
             is_direct_message: event.is_direct_message,
             request_broadcast: event.requested_broadcast,
@@ -466,6 +472,7 @@ impl ConnectorRouter for GrpcChannelRouter {
                 broadcast: output.broadcast,
                 auto_ack_text: non_empty(output.auto_ack_text),
                 auto_reaction: non_empty(output.auto_reaction),
+                attachments: from_proto_message_attachments(output.attachments.as_slice()),
             })
             .collect();
         Ok(RouteInboundResult {
@@ -488,6 +495,114 @@ fn non_empty(raw: String) -> Option<String> {
     }
 }
 
+fn with_attachment_context(text: &str, attachments: &[AttachmentRef]) -> String {
+    let Some(summary) = render_attachment_context(attachments) else {
+        return text.to_owned();
+    };
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        summary
+    } else {
+        format!("{trimmed}\n\n{summary}")
+    }
+}
+
+fn render_attachment_context(attachments: &[AttachmentRef]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(attachments.len().saturating_add(1));
+    lines.push("[attachment-metadata]".to_owned());
+    for (index, attachment) in attachments.iter().enumerate() {
+        lines.push(format!("- {}: {}", index.saturating_add(1), summarize_attachment(attachment)));
+    }
+    Some(lines.join("\n"))
+}
+
+fn summarize_attachment(attachment: &AttachmentRef) -> String {
+    let kind = match attachment.kind {
+        AttachmentKind::Image => "image",
+        AttachmentKind::File => "file",
+    };
+    let source = attachment
+        .url
+        .as_deref()
+        .or(attachment.artifact_ref.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let filename = attachment
+        .filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let content_type = attachment
+        .content_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let size = attachment
+        .size_bytes
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    format!(
+        "kind={kind}, filename={filename}, content_type={content_type}, size_bytes={size}, source={source}"
+    )
+}
+
+fn to_proto_message_attachments(
+    attachments: &[AttachmentRef],
+) -> Vec<common_v1::MessageAttachment> {
+    attachments
+        .iter()
+        .map(|attachment| {
+            let artifact_id = attachment
+                .artifact_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| common_v1::CanonicalId { ulid: value.to_owned() });
+            common_v1::MessageAttachment {
+                kind: attachment_kind_to_proto(attachment.kind),
+                artifact_id,
+                size_bytes: attachment.size_bytes.unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+fn from_proto_message_attachments(
+    attachments: &[common_v1::MessageAttachment],
+) -> Vec<OutboundAttachment> {
+    attachments
+        .iter()
+        .map(|attachment| OutboundAttachment {
+            kind: attachment_kind_from_proto(attachment.kind),
+            url: None,
+            artifact_ref: attachment.artifact_id.as_ref().map(|value| value.ulid.clone()),
+            filename: None,
+            content_type: None,
+            size_bytes: if attachment.size_bytes > 0 { Some(attachment.size_bytes) } else { None },
+        })
+        .collect()
+}
+
+fn attachment_kind_to_proto(kind: AttachmentKind) -> i32 {
+    match kind {
+        AttachmentKind::Image => common_v1::message_attachment::AttachmentKind::Image as i32,
+        AttachmentKind::File => common_v1::message_attachment::AttachmentKind::File as i32,
+    }
+}
+
+fn attachment_kind_from_proto(kind: i32) -> AttachmentKind {
+    match common_v1::message_attachment::AttachmentKind::try_from(kind).ok() {
+        Some(common_v1::message_attachment::AttachmentKind::Image) => AttachmentKind::Image,
+        _ => AttachmentKind::File,
+    }
+}
+
 fn unix_ms_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -497,8 +612,11 @@ fn unix_ms_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use palyra_connectors::{AttachmentKind, AttachmentRef};
+
     use super::{
         discord, discord_connector_id, discord_token_vault_ref, normalize_discord_account_id,
+        render_attachment_context, to_proto_message_attachments, with_attachment_context,
         ChannelPlatformError,
     };
 
@@ -524,6 +642,22 @@ mod tests {
             "global/discord_bot_token.ops",
             "non-default account should use scoped vault key suffix"
         );
+        let spec = discord::discord_connector_spec("default", false);
+        for host in [
+            "discord.com",
+            "*.discord.com",
+            "discordapp.com",
+            "*.discordapp.com",
+            "discord.gg",
+            "*.discord.gg",
+            "discordapp.net",
+            "*.discordapp.net",
+        ] {
+            assert!(
+                spec.egress_allowlist.iter().any(|entry| entry == host),
+                "discord connector allowlist should include {host}"
+            );
+        }
     }
 
     #[test]
@@ -566,6 +700,64 @@ mod tests {
             discord::canonical_discord_channel_identity("<#C123>"),
             "discord:channel:c123",
             "channel mention syntax should normalize to canonical channel identity"
+        );
+    }
+
+    #[test]
+    fn attachment_context_block_preserves_text_and_metadata_fields() {
+        let text = with_attachment_context(
+            "user message",
+            &[AttachmentRef {
+                kind: AttachmentKind::Image,
+                url: Some("https://cdn.discordapp.com/a.png".to_owned()),
+                artifact_ref: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+                filename: Some("a.png".to_owned()),
+                content_type: Some("image/png".to_owned()),
+                size_bytes: Some(512),
+            }],
+        );
+        assert!(
+            text.contains("[attachment-metadata]"),
+            "attachment context marker must be appended when attachments are present"
+        );
+        assert!(
+            text.contains("filename=a.png"),
+            "attachment filename should be represented in metadata block"
+        );
+        assert!(
+            text.starts_with("user message"),
+            "original message text should stay at the beginning"
+        );
+    }
+
+    #[test]
+    fn proto_attachment_mapping_preserves_kind_and_size() {
+        let attachments = to_proto_message_attachments(&[AttachmentRef {
+            kind: AttachmentKind::Image,
+            url: None,
+            artifact_ref: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+            filename: None,
+            content_type: None,
+            size_bytes: Some(4_096),
+        }]);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].kind,
+            crate::gateway::proto::palyra::common::v1::message_attachment::AttachmentKind::Image
+                as i32
+        );
+        assert_eq!(attachments[0].size_bytes, 4_096);
+        assert_eq!(
+            attachments[0].artifact_id.as_ref().map(|value| value.ulid.as_str()),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+    }
+
+    #[test]
+    fn attachment_context_renderer_returns_none_for_empty_slice() {
+        assert!(
+            render_attachment_context(&[]).is_none(),
+            "empty attachment list should not emit metadata block"
         );
     }
 }

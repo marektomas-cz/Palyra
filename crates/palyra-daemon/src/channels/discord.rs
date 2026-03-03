@@ -45,7 +45,16 @@ pub(super) fn discord_connector_spec(account_id: &str, enabled: bool) -> Connect
         principal: discord_principal(normalized.as_str()),
         auth_profile_ref: Some(format!("discord.{normalized}")),
         token_vault_ref: Some(discord_token_vault_ref(normalized.as_str())),
-        egress_allowlist: vec!["discord.com".to_owned(), "*.discord.com".to_owned()],
+        egress_allowlist: vec![
+            "discord.com".to_owned(),
+            "*.discord.com".to_owned(),
+            "discordapp.com".to_owned(),
+            "*.discordapp.com".to_owned(),
+            "discord.gg".to_owned(),
+            "*.discord.gg".to_owned(),
+            "discordapp.net".to_owned(),
+            "*.discordapp.net".to_owned(),
+        ],
         enabled,
     }
 }

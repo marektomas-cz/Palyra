@@ -428,6 +428,7 @@ impl ConnectorSupervisor {
                 broadcast: output.broadcast,
                 auto_ack_text: output.auto_ack_text.clone(),
                 auto_reaction: output.auto_reaction.clone(),
+                attachments: output.attachments.clone(),
                 timeout_ms: 30_000,
                 max_payload_bytes: self.config.max_outbound_body_bytes,
             };
@@ -782,6 +783,7 @@ mod tests {
                     broadcast: false,
                     auto_ack_text: None,
                     auto_reaction: None,
+                    attachments: Vec::new(),
                 }],
                 route_key: Some("channel:echo:conversation:c1".to_owned()),
                 retry_attempt: 0,
@@ -869,6 +871,7 @@ mod tests {
             received_at_unix_ms: 1_000,
             is_direct_message: true,
             requested_broadcast: false,
+            attachments: Vec::new(),
         }
     }
 

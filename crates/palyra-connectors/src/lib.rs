@@ -5,9 +5,10 @@ pub mod storage;
 pub mod supervisor;
 
 pub use protocol::{
-    ConnectorInstanceSpec, ConnectorKind, ConnectorLiveness, ConnectorQueueDepth,
-    ConnectorReadiness, ConnectorStatusSnapshot, DeliveryOutcome, InboundMessageEvent,
-    OutboundMessageRequest, RetryClass, RouteInboundResult, RoutedOutboundMessage,
+    AttachmentKind, AttachmentRef, ConnectorInstanceSpec, ConnectorKind, ConnectorLiveness,
+    ConnectorQueueDepth, ConnectorReadiness, ConnectorStatusSnapshot, DeliveryOutcome,
+    InboundMessageEvent, OutboundAttachment, OutboundMessageRequest, RetryClass,
+    RouteInboundResult, RoutedOutboundMessage,
 };
 pub use storage::{
     ConnectorEventRecord, ConnectorInstanceRecord, ConnectorStore, ConnectorStoreError,

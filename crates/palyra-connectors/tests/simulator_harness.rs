@@ -43,6 +43,7 @@ impl ConnectorRouter for SimulatorRouter {
                 broadcast: event.requested_broadcast,
                 auto_ack_text: None,
                 auto_reaction: None,
+                attachments: Vec::new(),
             }],
             route_key: Some(format!(
                 "channel:{}:conversation:{}",
@@ -193,6 +194,7 @@ fn fixture_to_event(fixture: InboundFixture) -> InboundMessageEvent {
         received_at_unix_ms: 1_000,
         is_direct_message: fixture.is_direct_message,
         requested_broadcast: fixture.requested_broadcast,
+        attachments: Vec::new(),
     }
 }
 

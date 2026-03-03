@@ -9,6 +9,10 @@ const MAX_ENVELOPE_ID_BYTES: usize = 128;
 const MAX_CONVERSATION_ID_BYTES: usize = 256;
 const MAX_IDENTITY_BYTES: usize = 256;
 const MAX_MESSAGE_BYTES: usize = 128 * 1024;
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 32;
+const MAX_ATTACHMENT_REF_BYTES: usize = 1_024;
+const MAX_ATTACHMENT_FILENAME_BYTES: usize = 512;
+const MAX_ATTACHMENT_CONTENT_TYPE_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -142,6 +146,54 @@ impl ConnectorInstanceSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+    #[default]
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AttachmentRef {
+    #[serde(default)]
+    pub kind: AttachmentKind,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub artifact_ref: Option<String>,
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+impl AttachmentRef {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        validate_optional_field(self.url.as_deref(), "attachments.url", MAX_ATTACHMENT_REF_BYTES)?;
+        validate_optional_field(
+            self.artifact_ref.as_deref(),
+            "attachments.artifact_ref",
+            MAX_ATTACHMENT_REF_BYTES,
+        )?;
+        validate_optional_field(
+            self.filename.as_deref(),
+            "attachments.filename",
+            MAX_ATTACHMENT_FILENAME_BYTES,
+        )?;
+        validate_optional_field(
+            self.content_type.as_deref(),
+            "attachments.content_type",
+            MAX_ATTACHMENT_CONTENT_TYPE_BYTES,
+        )?;
+        Ok(())
+    }
+}
+
+pub type OutboundAttachment = AttachmentRef;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundMessageEvent {
     pub envelope_id: String,
@@ -156,6 +208,8 @@ pub struct InboundMessageEvent {
     pub received_at_unix_ms: i64,
     pub is_direct_message: bool,
     pub requested_broadcast: bool,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 impl InboundMessageEvent {
@@ -177,6 +231,7 @@ impl InboundMessageEvent {
         )?;
         validate_non_empty_identifier(self.sender_id.as_str(), "sender_id", MAX_IDENTITY_BYTES)?;
         validate_message_body(self.body.as_str(), max_body_bytes, "body")?;
+        validate_attachments(self.attachments.as_slice())?;
         Ok(())
     }
 }
@@ -189,6 +244,8 @@ pub struct RoutedOutboundMessage {
     pub broadcast: bool,
     pub auto_ack_text: Option<String>,
     pub auto_reaction: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<OutboundAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +269,8 @@ pub struct OutboundMessageRequest {
     pub broadcast: bool,
     pub auto_ack_text: Option<String>,
     pub auto_reaction: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<OutboundAttachment>,
     pub timeout_ms: u64,
     pub max_payload_bytes: usize,
 }
@@ -234,6 +293,7 @@ impl OutboundMessageRequest {
             MAX_CONVERSATION_ID_BYTES,
         )?;
         validate_message_body(self.text.as_str(), max_text_bytes, "text")?;
+        validate_attachments(self.attachments.as_slice())?;
         if self.timeout_ms == 0 {
             return Err(ProtocolError::InvalidField {
                 field: "timeout_ms",
@@ -353,11 +413,38 @@ fn validate_host_pattern(raw: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+fn validate_optional_field(
+    raw: Option<&str>,
+    field: &'static str,
+    max_bytes: usize,
+) -> Result<(), ProtocolError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if value.len() > max_bytes {
+        return Err(ProtocolError::InvalidField { field, reason: "value exceeds size limit" });
+    }
+    Ok(())
+}
+
+fn validate_attachments(attachments: &[AttachmentRef]) -> Result<(), ProtocolError> {
+    if attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(ProtocolError::InvalidField {
+            field: "attachments",
+            reason: "message exceeds attachment count limit",
+        });
+    }
+    for attachment in attachments {
+        attachment.validate()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectorInstanceSpec, ConnectorKind, InboundMessageEvent, OutboundMessageRequest,
-        ProtocolError,
+        AttachmentKind, AttachmentRef, ConnectorInstanceSpec, ConnectorKind, InboundMessageEvent,
+        OutboundMessageRequest, ProtocolError,
     };
 
     #[test]
@@ -395,6 +482,7 @@ mod tests {
             received_at_unix_ms: 1,
             is_direct_message: true,
             requested_broadcast: false,
+            attachments: Vec::new(),
         };
         assert_eq!(
             event.validate(1024),
@@ -414,6 +502,7 @@ mod tests {
             broadcast: false,
             auto_ack_text: None,
             auto_reaction: None,
+            attachments: Vec::new(),
             timeout_ms: 0,
             max_payload_bytes: 0,
         };
@@ -422,6 +511,42 @@ mod tests {
             Err(ProtocolError::InvalidField {
                 field: "timeout_ms",
                 reason: "must be greater than zero"
+            })
+        );
+    }
+
+    #[test]
+    fn inbound_validation_rejects_excessive_attachment_count() {
+        let mut event = InboundMessageEvent {
+            envelope_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            connector_id: "echo:default".to_owned(),
+            conversation_id: "c1".to_owned(),
+            thread_id: None,
+            sender_id: "sender".to_owned(),
+            sender_display: None,
+            body: "hello".to_owned(),
+            adapter_message_id: None,
+            adapter_thread_id: None,
+            received_at_unix_ms: 1,
+            is_direct_message: true,
+            requested_broadcast: false,
+            attachments: Vec::new(),
+        };
+        event.attachments = (0..33)
+            .map(|index| AttachmentRef {
+                kind: AttachmentKind::Image,
+                url: Some(format!("https://cdn.example.test/{index}.png")),
+                artifact_ref: None,
+                filename: Some(format!("{index}.png")),
+                content_type: Some("image/png".to_owned()),
+                size_bytes: Some(1_024),
+            })
+            .collect();
+        assert_eq!(
+            event.validate(1024),
+            Err(ProtocolError::InvalidField {
+                field: "attachments",
+                reason: "message exceeds attachment count limit",
             })
         );
     }

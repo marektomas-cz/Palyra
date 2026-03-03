@@ -27,8 +27,16 @@ const IDENTITY_CACHE_TTL_MS: i64 = 5 * 60 * 1_000;
 const MAX_DELIVERY_CACHE: usize = 4_096;
 const MAX_ROUTE_LIMIT_CACHE: usize = 256;
 const DEFAULT_MIN_RATE_LIMIT_RETRY_MS: u64 = 250;
-const DISCORD_FALLBACK_ALLOWLIST: [&str; 4] =
-    ["discord.com", "*.discord.com", "discordapp.com", "*.discordapp.com"];
+const DISCORD_FALLBACK_ALLOWLIST: [&str; 8] = [
+    "discord.com",
+    "*.discord.com",
+    "discordapp.com",
+    "*.discordapp.com",
+    "discord.gg",
+    "*.discord.gg",
+    "discordapp.net",
+    "*.discordapp.net",
+];
 
 #[derive(Debug, Clone)]
 pub struct DiscordAdapterConfig {
@@ -130,7 +138,23 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
             }
         };
 
-        let route_key = format!("discord:post:/channels/{conversation_id}/messages");
+        let target_channel_id = match request
+            .reply_thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(thread_id) => match normalize_discord_target(thread_id) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.record_last_error(error.to_string().as_str());
+                    return Ok(DeliveryOutcome::PermanentFailure { reason: error.to_string() });
+                }
+            },
+            None => conversation_id.clone(),
+        };
+
+        let route_key = format!("discord:post:/channels/{target_channel_id}/messages");
         let now_unix_ms = unix_ms_now();
         if let Some(retry_after_ms) =
             self.preflight_retry_after_ms(route_key.as_str(), now_unix_ms)?
@@ -174,17 +198,14 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
             return Ok(outcome);
         }
 
-        let message_url = match build_messages_url(
-            &self.config.api_base_url,
-            conversation_id.as_str(),
-            request.reply_thread_id.as_deref(),
-        ) {
-            Ok(url) => url,
-            Err(error) => {
-                self.record_last_error(error.to_string().as_str());
-                return Ok(DeliveryOutcome::PermanentFailure { reason: error.to_string() });
-            }
-        };
+        let message_url =
+            match build_messages_url(&self.config.api_base_url, target_channel_id.as_str()) {
+                Ok(url) => url,
+                Err(error) => {
+                    self.record_last_error(error.to_string().as_str());
+                    return Ok(DeliveryOutcome::PermanentFailure { reason: error.to_string() });
+                }
+            };
         if let Err(error) = self.validate_url_target(&guard, &message_url) {
             self.record_last_error(error.to_string().as_str());
             return Ok(DeliveryOutcome::PermanentFailure { reason: error.to_string() });
@@ -282,12 +303,10 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
 
         if self.config.enable_auto_reactions {
             if let Some(auto_reaction) = request.auto_reaction.as_deref() {
-                let reaction_channel =
-                    request.reply_thread_id.as_deref().unwrap_or(conversation_id.as_str());
                 self.send_auto_reaction(
                     &guard,
                     &credential,
-                    reaction_channel,
+                    target_channel_id.as_str(),
                     native_message_id.as_str(),
                     auto_reaction,
                 )
@@ -356,20 +375,12 @@ fn build_users_me_url(api_base: &Url) -> Result<Url, ConnectorAdapterError> {
     })
 }
 
-fn build_messages_url(
-    api_base: &Url,
-    channel_id: &str,
-    thread_id: Option<&str>,
-) -> Result<Url, ConnectorAdapterError> {
+fn build_messages_url(api_base: &Url, channel_id: &str) -> Result<Url, ConnectorAdapterError> {
     let candidate =
         format!("{}/channels/{}/messages", api_base.as_str().trim_end_matches('/'), channel_id);
-    let mut url = Url::parse(candidate.as_str()).map_err(|error| {
+    Url::parse(candidate.as_str()).map_err(|error| {
         ConnectorAdapterError::Backend(format!("discord API URL invalid: {error}"))
-    })?;
-    if let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) {
-        url.query_pairs_mut().append_pair("thread_id", thread_id);
-    }
-    Ok(url)
+    })
 }
 
 fn build_reaction_url(
@@ -1001,6 +1012,7 @@ mod tests {
             broadcast: false,
             auto_ack_text: None,
             auto_reaction: None,
+            attachments: Vec::new(),
             timeout_ms: 30_000,
             max_payload_bytes: 16_384,
         }
@@ -1127,8 +1139,12 @@ mod tests {
         let message_post =
             captured.iter().find(|entry| entry.method == "POST").expect("expected POST call");
         assert!(
-            message_post.url.contains("thread_id=thread-123"),
-            "thread id must be appended to Discord message route"
+            message_post.url.contains("/channels/thread-123/messages"),
+            "thread replies must target the thread channel route"
+        );
+        assert!(
+            !message_post.url.contains("thread_id="),
+            "discord bot token send should not use thread_id query parameter"
         );
         let payload = message_post.payload.as_ref().expect("POST call should include payload");
         assert_eq!(
@@ -1234,6 +1250,23 @@ mod tests {
             Some("palyra"),
             "snapshot should include validated bot identity metadata"
         );
+    }
+
+    #[test]
+    fn build_net_guard_default_allowlist_covers_gateway_and_cdn_hosts() {
+        let adapter = DiscordConnectorAdapter::new();
+        let mut instance = sample_instance();
+        instance.egress_allowlist.clear();
+        let guard = adapter
+            .build_net_guard(&instance)
+            .expect("fallback allowlist should build a valid net guard");
+        for host in
+            ["discord.com", "gateway.discord.gg", "cdn.discordapp.net", "media.discordapp.com"]
+        {
+            guard.validate_target(host, &[]).unwrap_or_else(|error| {
+                panic!("host '{host}' should pass fallback allowlist: {error}")
+            });
+        }
     }
 }
 
