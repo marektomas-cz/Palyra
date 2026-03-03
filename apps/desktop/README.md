@@ -2,6 +2,14 @@
 
 `apps/desktop` now hosts the **Palyra Desktop Control Center v1** implemented with Tauri.
 
+## Platform support (v1)
+
+- Supported: **Windows** and **macOS**.
+- Linux desktop runtime is temporarily disabled because upstream Tauri Linux GTK bindings are
+  pinned to `glib < 0.20.0`, and `glib` advisory `GHSA-wrw7-89jp-8q8g` is patched only from
+  `0.20.0`.
+- Linux support will be re-enabled when upstream dependency constraints permit a patched graph.
+
 ## What it does
 
 - Starts/stops/restarts `palyrad` sidecar process.

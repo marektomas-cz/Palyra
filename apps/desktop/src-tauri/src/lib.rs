@@ -1,3 +1,5 @@
+#![cfg(any(target_os = "windows", target_os = "macos"))]
+
 use std::{
     collections::VecDeque,
     env, fs,
