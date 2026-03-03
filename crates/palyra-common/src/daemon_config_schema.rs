@@ -5,6 +5,7 @@ const REDACTED_CONFIG_VALUE: &str = "<redacted>";
 
 pub const SECRET_CONFIG_PATHS: &[&str] = &[
     "admin.auth_token",
+    "admin.connector_token",
     "model_provider.openai_api_key",
     "model_provider.openai_api_key_vault_ref",
     "gateway.admin_token",
@@ -318,6 +319,7 @@ pub struct FileWasmRuntimeConfig {
 pub struct FileAdminConfig {
     pub require_auth: Option<bool>,
     pub auth_token: Option<String>,
+    pub connector_token: Option<String>,
     pub bound_principal: Option<String>,
 }
 
@@ -349,6 +351,7 @@ mod tests {
         assert!(is_secret_config_path("tool_call.browser_service.auth_token"));
         assert!(is_secret_config_path("tool_call.browser_service.state_key_vault_ref"));
         assert!(is_secret_config_path(" admin.auth_token "));
+        assert!(is_secret_config_path("admin.connector_token"));
         assert!(!is_secret_config_path("daemon.port"));
     }
 
@@ -359,6 +362,7 @@ mod tests {
             version = 1
             [admin]
             auth_token = "token-value"
+            connector_token = "connector-token-value"
             [model_provider]
             openai_api_key = "sk-secret"
             openai_api_key_vault_ref = "vault://global/openai_api_key"
@@ -377,6 +381,13 @@ mod tests {
             document
                 .get("admin")
                 .and_then(|admin| admin.get("auth_token"))
+                .and_then(toml::Value::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            document
+                .get("admin")
+                .and_then(|admin| admin.get("connector_token"))
                 .and_then(toml::Value::as_str),
             Some("<redacted>")
         );

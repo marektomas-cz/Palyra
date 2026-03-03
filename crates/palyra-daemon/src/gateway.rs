@@ -455,6 +455,7 @@ pub struct GatewayJournalConfigSnapshot {
 pub struct GatewayAuthConfig {
     pub require_auth: bool,
     pub admin_token: Option<String>,
+    pub connector_token: Option<String>,
     pub bound_principal: Option<String>,
 }
 
@@ -5529,7 +5530,7 @@ impl GatewayServiceImpl {
         metadata: &MetadataMap,
         method: &'static str,
     ) -> Result<RequestContext, Status> {
-        authorize_metadata(metadata, &self.auth).map_err(|error| {
+        authorize_metadata(metadata, &self.auth, method).map_err(|error| {
             self.state.record_denied();
             warn!(method, error = %error, "gateway rpc authorization denied");
             Status::permission_denied(error.to_string())
@@ -5564,7 +5565,7 @@ impl CronServiceImpl {
         metadata: &MetadataMap,
         method: &'static str,
     ) -> Result<RequestContext, Status> {
-        authorize_metadata(metadata, &self.auth).map_err(|error| {
+        authorize_metadata(metadata, &self.auth, method).map_err(|error| {
             self.state.record_denied();
             warn!(method, error = %error, "cron rpc authorization denied");
             Status::permission_denied(error.to_string())
@@ -5590,7 +5591,7 @@ impl ApprovalsServiceImpl {
         metadata: &MetadataMap,
         method: &'static str,
     ) -> Result<RequestContext, Status> {
-        authorize_metadata(metadata, &self.auth).map_err(|error| {
+        authorize_metadata(metadata, &self.auth, method).map_err(|error| {
             self.state.record_denied();
             warn!(method, error = %error, "approvals rpc authorization denied");
             Status::permission_denied(error.to_string())
@@ -5616,7 +5617,7 @@ impl MemoryServiceImpl {
         metadata: &MetadataMap,
         method: &'static str,
     ) -> Result<RequestContext, Status> {
-        authorize_metadata(metadata, &self.auth).map_err(|error| {
+        authorize_metadata(metadata, &self.auth, method).map_err(|error| {
             self.state.record_denied();
             warn!(method, error = %error, "memory rpc authorization denied");
             Status::permission_denied(error.to_string())
@@ -5642,7 +5643,7 @@ impl VaultServiceImpl {
         metadata: &MetadataMap,
         method: &'static str,
     ) -> Result<RequestContext, Status> {
-        authorize_metadata(metadata, &self.auth).map_err(|error| {
+        authorize_metadata(metadata, &self.auth, method).map_err(|error| {
             self.state.record_denied();
             warn!(method, error = %error, "vault rpc authorization denied");
             Status::permission_denied(error.to_string())
@@ -5673,7 +5674,7 @@ impl AuthServiceImpl {
         metadata: &MetadataMap,
         method: &'static str,
     ) -> Result<RequestContext, Status> {
-        authorize_metadata(metadata, &self.auth).map_err(|error| {
+        authorize_metadata(metadata, &self.auth, method).map_err(|error| {
             self.state.record_denied();
             warn!(method, error = %error, "auth rpc authorization denied");
             Status::permission_denied(error.to_string())
@@ -5699,7 +5700,7 @@ impl CanvasServiceImpl {
         metadata: &MetadataMap,
         method: &'static str,
     ) -> Result<RequestContext, Status> {
-        authorize_metadata(metadata, &self.auth).map_err(|error| {
+        authorize_metadata(metadata, &self.auth, method).map_err(|error| {
             self.state.record_denied();
             warn!(method, error = %error, "canvas rpc authorization denied");
             Status::permission_denied(error.to_string())
@@ -14981,23 +14982,64 @@ pub fn request_context_from_headers(headers: &HeaderMap) -> Result<RequestContex
 fn authorize_metadata(
     metadata: &MetadataMap,
     auth: &GatewayAuthConfig,
+    method: &'static str,
 ) -> Result<RequestContext, AuthError> {
-    if auth.require_auth {
-        let token = auth.admin_token.as_ref().ok_or(AuthError::MissingConfiguredToken)?;
+    let token_kind = if auth.require_auth {
         let candidate = extract_bearer_token(
             metadata.get(AUTHORIZATION.as_str()).and_then(|value| value.to_str().ok()),
         )
         .ok_or(AuthError::InvalidAuthorizationHeader)?;
-        if !constant_time_eq(token.as_bytes(), candidate.as_bytes()) {
-            return Err(AuthError::InvalidToken);
-        }
-    }
+        resolve_rpc_token_kind(candidate, auth, method)?
+    } else {
+        RpcTokenKind::Admin
+    };
 
     let context = request_context_from_header_resolver(|name| {
         metadata.get(name).and_then(|value| value.to_str().ok()).map(ToOwned::to_owned)
     })?;
-    enforce_token_principal_binding(context.principal.as_str(), auth)?;
+    match token_kind {
+        RpcTokenKind::Admin => enforce_token_principal_binding(context.principal.as_str(), auth)?,
+        RpcTokenKind::Connector => enforce_connector_token_context_binding(&context)?,
+    }
     Ok(context)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RpcTokenKind {
+    Admin,
+    Connector,
+}
+
+fn resolve_rpc_token_kind(
+    candidate: &str,
+    auth: &GatewayAuthConfig,
+    method: &'static str,
+) -> Result<RpcTokenKind, AuthError> {
+    let admin_token = auth.admin_token.as_ref().ok_or(AuthError::MissingConfiguredToken)?;
+    if constant_time_eq(admin_token.as_bytes(), candidate.as_bytes()) {
+        return Ok(RpcTokenKind::Admin);
+    }
+    if method.eq_ignore_ascii_case("RouteMessage") {
+        if let Some(connector_token) = auth.connector_token.as_deref() {
+            if constant_time_eq(connector_token.as_bytes(), candidate.as_bytes()) {
+                return Ok(RpcTokenKind::Connector);
+            }
+        }
+    }
+    Err(AuthError::InvalidToken)
+}
+
+fn enforce_connector_token_context_binding(context: &RequestContext) -> Result<(), AuthError> {
+    let Some(channel) = context.channel.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    else {
+        return Err(AuthError::InvalidToken);
+    };
+    let expected_principal = format!("channel:{channel}");
+    if context.principal.eq_ignore_ascii_case(expected_principal.as_str()) {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidToken)
+    }
 }
 
 fn enforce_token_principal_binding(
@@ -15146,18 +15188,18 @@ mod tests {
 
     use super::{
         apply_tool_approval_outcome, authorize_approvals_action, authorize_headers,
-        best_effort_mark_approval_error, constant_time_eq, enforce_memory_item_scope,
-        enforce_vault_get_approval_policy, enforce_vault_scope_access, execute_http_fetch_tool,
-        execute_memory_search_tool, execute_workspace_patch_tool, extend_patch_string_defaults,
-        parse_patch_string_array_field, principal_has_sensitive_service_role,
-        record_auth_refresh_journal_event, request_context_from_headers,
-        resolve_cron_job_channel_for_create, resolve_fetch_target_addresses,
-        validate_resolved_fetch_addresses, vault_get_requires_approval,
-        workspace_patch_metrics_from_output, AuthError, GatewayAuthConfig,
-        GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
-        MemoryRuntimeConfig, ProviderRequest, RequestContext, SensitiveServiceRole,
-        ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
-        MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
+        authorize_metadata, best_effort_mark_approval_error, constant_time_eq,
+        enforce_memory_item_scope, enforce_vault_get_approval_policy, enforce_vault_scope_access,
+        execute_http_fetch_tool, execute_memory_search_tool, execute_workspace_patch_tool,
+        extend_patch_string_defaults, parse_patch_string_array_field,
+        principal_has_sensitive_service_role, record_auth_refresh_journal_event,
+        request_context_from_headers, resolve_cron_job_channel_for_create,
+        resolve_fetch_target_addresses, validate_resolved_fetch_addresses,
+        vault_get_requires_approval, workspace_patch_metrics_from_output, AuthError,
+        GatewayAuthConfig, GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot,
+        GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest, RequestContext,
+        SensitiveServiceRole, ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID,
+        HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
         VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
     };
 
@@ -15626,6 +15668,7 @@ mod tests {
         let auth = GatewayAuthConfig {
             require_auth: true,
             admin_token: Some("secret".to_owned()),
+            connector_token: None,
             bound_principal: Some("user:ops".to_owned()),
         };
         let headers = HeaderMap::new();
@@ -15638,6 +15681,7 @@ mod tests {
         let auth = GatewayAuthConfig {
             require_auth: true,
             admin_token: Some("secret".to_owned()),
+            connector_token: None,
             bound_principal: Some("user:ops".to_owned()),
         };
         let mut headers = HeaderMap::new();
@@ -15652,6 +15696,7 @@ mod tests {
         let auth = GatewayAuthConfig {
             require_auth: true,
             admin_token: Some("secret".to_owned()),
+            connector_token: None,
             bound_principal: Some("user:ops".to_owned()),
         };
         let mut headers = HeaderMap::new();
@@ -15659,6 +15704,95 @@ mod tests {
         headers.insert(HEADER_PRINCIPAL, HeaderValue::from_static("user:ops"));
         let result = authorize_headers(&headers, &auth);
         assert!(result.is_ok(), "bearer auth scheme should be parsed case-insensitively");
+    }
+
+    #[test]
+    fn authorize_metadata_route_message_accepts_connector_token() {
+        let auth = GatewayAuthConfig {
+            require_auth: true,
+            admin_token: Some("admin-secret".to_owned()),
+            connector_token: Some("connector-secret".to_owned()),
+            bound_principal: Some("admin:ops".to_owned()),
+        };
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert(
+            AUTHORIZATION.as_str(),
+            "Bearer connector-secret".parse().expect("authorization metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_PRINCIPAL,
+            "channel:discord:default".parse().expect("principal metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_DEVICE_ID,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("device metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_CHANNEL,
+            "discord:default".parse().expect("channel metadata should parse"),
+        );
+        let context = authorize_metadata(&metadata, &auth, "RouteMessage")
+            .expect("connector token should be accepted for RouteMessage");
+        assert_eq!(context.principal, "channel:discord:default");
+        assert_eq!(context.channel.as_deref(), Some("discord:default"));
+    }
+
+    #[test]
+    fn authorize_metadata_rejects_connector_token_for_non_route_message_method() {
+        let auth = GatewayAuthConfig {
+            require_auth: true,
+            admin_token: Some("admin-secret".to_owned()),
+            connector_token: Some("connector-secret".to_owned()),
+            bound_principal: Some("admin:ops".to_owned()),
+        };
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert(
+            AUTHORIZATION.as_str(),
+            "Bearer connector-secret".parse().expect("authorization metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_PRINCIPAL,
+            "channel:discord:default".parse().expect("principal metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_DEVICE_ID,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("device metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_CHANNEL,
+            "discord:default".parse().expect("channel metadata should parse"),
+        );
+        let result = authorize_metadata(&metadata, &auth, "RunStream");
+        assert_eq!(result, Err(AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn authorize_metadata_rejects_connector_token_when_principal_channel_mismatch() {
+        let auth = GatewayAuthConfig {
+            require_auth: true,
+            admin_token: Some("admin-secret".to_owned()),
+            connector_token: Some("connector-secret".to_owned()),
+            bound_principal: Some("admin:ops".to_owned()),
+        };
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert(
+            AUTHORIZATION.as_str(),
+            "Bearer connector-secret".parse().expect("authorization metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_PRINCIPAL,
+            "channel:discord:other".parse().expect("principal metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_DEVICE_ID,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("device metadata should parse"),
+        );
+        metadata.insert(
+            HEADER_CHANNEL,
+            "discord:default".parse().expect("channel metadata should parse"),
+        );
+        let result = authorize_metadata(&metadata, &auth, "RouteMessage");
+        assert_eq!(result, Err(AuthError::InvalidToken));
     }
 
     fn test_memory_item(channel: Option<&str>) -> MemoryItemRecord {
@@ -15855,6 +15989,7 @@ mod tests {
         let auth = GatewayAuthConfig {
             require_auth: true,
             admin_token: Some("secret".to_owned()),
+            connector_token: None,
             bound_principal: Some("user:ops".to_owned()),
         };
         let mut headers = HeaderMap::new();
@@ -16194,6 +16329,7 @@ mod tests {
             &GatewayAuthConfig {
                 require_auth: true,
                 admin_token: Some("token".to_owned()),
+                connector_token: None,
                 bound_principal: Some("user:ops".to_owned()),
             },
         );
@@ -16246,6 +16382,7 @@ mod tests {
             &GatewayAuthConfig {
                 require_auth: true,
                 admin_token: Some("token".to_owned()),
+                connector_token: None,
                 bound_principal: Some("user:ops".to_owned()),
             },
         );

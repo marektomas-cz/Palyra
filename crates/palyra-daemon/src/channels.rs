@@ -422,15 +422,13 @@ impl ConnectorRouter for GrpcChannelRouter {
             retry_attempt: 0,
             session_label: String::new(),
         });
-        let effective_principal = if self.auth.require_auth {
-            self.auth.bound_principal.as_deref().unwrap_or(principal)
-        } else {
-            principal
-        };
+        let (effective_principal, authorization_header) =
+            resolve_connector_gateway_auth(&self.auth, principal)
+                .map_err(|error| ConnectorRouterError::Message(error.to_string()))?;
         let metadata = request.metadata_mut();
         metadata.insert(
             HEADER_PRINCIPAL,
-            MetadataValue::try_from(effective_principal)
+            MetadataValue::try_from(effective_principal.as_str())
                 .map_err(|error| ConnectorRouterError::Message(error.to_string()))?,
         );
         metadata.insert(
@@ -443,16 +441,10 @@ impl ConnectorRouter for GrpcChannelRouter {
             MetadataValue::try_from(event.connector_id.as_str())
                 .map_err(|error| ConnectorRouterError::Message(error.to_string()))?,
         );
-        if self.auth.require_auth {
-            let Some(token) = self.auth.admin_token.as_deref() else {
-                return Err(ConnectorRouterError::Message(
-                    "admin auth is required but no admin token is configured".to_owned(),
-                ));
-            };
-            let bearer = format!("Bearer {token}");
+        if let Some(authorization_header) = authorization_header {
             metadata.insert(
                 "authorization",
-                MetadataValue::try_from(bearer.as_str())
+                MetadataValue::try_from(authorization_header.as_str())
                     .map_err(|error| ConnectorRouterError::Message(error.to_string()))?,
             );
         }
@@ -484,6 +476,27 @@ impl ConnectorRouter for GrpcChannelRouter {
             retry_attempt: response.retry_attempt,
         })
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn resolve_connector_gateway_auth(
+    auth: &GatewayAuthConfig,
+    connector_principal: &str,
+) -> Result<(String, Option<String>), ConnectorSupervisorError> {
+    if !auth.require_auth {
+        return Ok((connector_principal.to_owned(), None));
+    }
+    if let Some(connector_token) = auth.connector_token.as_deref() {
+        return Ok((connector_principal.to_owned(), Some(format!("Bearer {connector_token}"))));
+    }
+    let admin_token = auth.admin_token.as_deref().ok_or_else(|| {
+        ConnectorSupervisorError::Router(
+            "admin auth is required but no admin token is configured".to_owned(),
+        )
+    })?;
+    let effective_principal =
+        auth.bound_principal.as_deref().unwrap_or(connector_principal).to_owned();
+    Ok((effective_principal, Some(format!("Bearer {admin_token}"))))
 }
 
 fn non_empty(raw: String) -> Option<String> {
@@ -612,13 +625,14 @@ fn unix_ms_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use palyra_connectors::{AttachmentKind, AttachmentRef};
+    use palyra_connectors::{AttachmentKind, AttachmentRef, ConnectorSupervisorError};
 
     use super::{
         discord, discord_connector_id, discord_token_vault_ref, normalize_discord_account_id,
-        render_attachment_context, to_proto_message_attachments, with_attachment_context,
-        ChannelPlatformError,
+        render_attachment_context, resolve_connector_gateway_auth, to_proto_message_attachments,
+        with_attachment_context, ChannelPlatformError,
     };
+    use crate::gateway::GatewayAuthConfig;
 
     #[test]
     fn discord_account_id_normalization_enforces_supported_charset() {
@@ -758,6 +772,66 @@ mod tests {
         assert!(
             render_attachment_context(&[]).is_none(),
             "empty attachment list should not emit metadata block"
+        );
+    }
+
+    #[test]
+    fn connector_gateway_auth_prefers_connector_token_over_admin_binding() {
+        let auth = GatewayAuthConfig {
+            require_auth: true,
+            admin_token: Some("admin-secret".to_owned()),
+            connector_token: Some("connector-secret".to_owned()),
+            bound_principal: Some("admin:ops".to_owned()),
+        };
+        let (principal, authorization) =
+            resolve_connector_gateway_auth(&auth, "channel:discord:default")
+                .expect("connector auth resolution should succeed");
+        assert_eq!(
+            principal, "channel:discord:default",
+            "connector token path must preserve channel principal"
+        );
+        assert_eq!(
+            authorization.as_deref(),
+            Some("Bearer connector-secret"),
+            "connector token should be used when configured"
+        );
+    }
+
+    #[test]
+    fn connector_gateway_auth_uses_admin_token_and_bound_principal_when_connector_token_missing() {
+        let auth = GatewayAuthConfig {
+            require_auth: true,
+            admin_token: Some("admin-secret".to_owned()),
+            connector_token: None,
+            bound_principal: Some("admin:ops".to_owned()),
+        };
+        let (principal, authorization) =
+            resolve_connector_gateway_auth(&auth, "channel:discord:default")
+                .expect("admin auth fallback should succeed");
+        assert_eq!(
+            principal, "admin:ops",
+            "admin fallback should preserve configured principal binding behavior"
+        );
+        assert_eq!(
+            authorization.as_deref(),
+            Some("Bearer admin-secret"),
+            "admin token should be used when connector token is absent"
+        );
+    }
+
+    #[test]
+    fn connector_gateway_auth_requires_configured_token_when_auth_is_enabled() {
+        let auth = GatewayAuthConfig {
+            require_auth: true,
+            admin_token: None,
+            connector_token: None,
+            bound_principal: None,
+        };
+        let error = resolve_connector_gateway_auth(&auth, "channel:discord:default")
+            .expect_err("auth-enabled path without token should fail");
+        assert!(
+            matches!(error, ConnectorSupervisorError::Router(_)),
+            "missing token should be surfaced as router error for deterministic channel logs"
         );
     }
 }

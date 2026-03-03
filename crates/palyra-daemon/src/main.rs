@@ -1041,6 +1041,7 @@ async fn main() -> Result<()> {
     let auth = GatewayAuthConfig {
         require_auth: loaded.admin.require_auth,
         admin_token: loaded.admin.auth_token.clone(),
+        connector_token: loaded.admin.connector_token.clone(),
         bound_principal: loaded.admin.bound_principal.clone(),
     };
     validate_admin_auth_config(&auth)?;
@@ -8318,6 +8319,7 @@ mod tests {
         let error = validate_admin_auth_config(&GatewayAuthConfig {
             require_auth: true,
             admin_token: None,
+            connector_token: None,
             bound_principal: Some("user:ops".to_owned()),
         })
         .expect_err("missing admin token should fail preflight validation");
@@ -8332,6 +8334,7 @@ mod tests {
         let result = validate_admin_auth_config(&GatewayAuthConfig {
             require_auth: false,
             admin_token: None,
+            connector_token: None,
             bound_principal: None,
         });
         assert!(result.is_ok(), "disabled auth should allow missing token");

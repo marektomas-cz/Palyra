@@ -319,6 +319,7 @@ pub struct CanvasHostConfig {
 pub struct AdminConfig {
     pub require_auth: bool,
     pub auth_token: Option<String>,
+    pub connector_token: Option<String>,
     pub bound_principal: Option<String>,
 }
 
@@ -550,7 +551,12 @@ impl Default for CanvasHostConfig {
 
 impl Default for AdminConfig {
     fn default() -> Self {
-        Self { require_auth: DEFAULT_ADMIN_REQUIRE_AUTH, auth_token: None, bound_principal: None }
+        Self {
+            require_auth: DEFAULT_ADMIN_REQUIRE_AUTH,
+            auth_token: None,
+            connector_token: None,
+            bound_principal: None,
+        }
     }
 }
 
@@ -1156,6 +1162,10 @@ pub fn load_config() -> Result<LoadedConfig> {
             if let Some(auth_token) = file_admin.auth_token {
                 admin.auth_token =
                     if auth_token.trim().is_empty() { None } else { Some(auth_token) };
+            }
+            if let Some(connector_token) = file_admin.connector_token {
+                admin.connector_token =
+                    if connector_token.trim().is_empty() { None } else { Some(connector_token) };
             }
             if let Some(bound_principal) = file_admin.bound_principal {
                 let trimmed = bound_principal.trim();
@@ -1841,6 +1851,12 @@ pub fn load_config() -> Result<LoadedConfig> {
     if let Ok(admin_token) = env::var("PALYRA_ADMIN_TOKEN") {
         admin.auth_token = if admin_token.trim().is_empty() { None } else { Some(admin_token) };
         source.push_str(" +env(PALYRA_ADMIN_TOKEN)");
+    }
+
+    if let Ok(connector_token) = env::var("PALYRA_CONNECTOR_TOKEN") {
+        admin.connector_token =
+            if connector_token.trim().is_empty() { None } else { Some(connector_token) };
+        source.push_str(" +env(PALYRA_CONNECTOR_TOKEN)");
     }
 
     if let Ok(bound_principal) = env::var("PALYRA_ADMIN_BOUND_PRINCIPAL") {
@@ -3121,6 +3137,10 @@ mod tests {
         let config = AdminConfig::default();
         assert!(config.require_auth, "admin auth should default to required");
         assert!(config.auth_token.is_none(), "admin token should default to missing");
+        assert!(
+            config.connector_token.is_none(),
+            "connector token should default to missing until explicitly configured"
+        );
         assert!(
             config.bound_principal.is_none(),
             "admin token principal binding should default to missing until explicitly configured"
