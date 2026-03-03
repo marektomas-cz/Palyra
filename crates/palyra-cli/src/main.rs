@@ -3621,6 +3621,7 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                 )?;
                 eprintln!("discord setup preflight: token validation succeeded");
                 emit_discord_onboarding_warnings(&probe_response);
+                emit_discord_inbound_monitor_summary(&probe_response);
 
                 let inbound_scope = prompt_discord_setup_scope()?;
                 let allow_from = prompt_discord_sender_filters(
@@ -3696,6 +3697,7 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                         restart_required
                     );
                     emit_discord_onboarding_warnings(&response);
+                    emit_discord_inbound_monitor_summary(&response);
                 }
             }
             ChannelsDiscordCommand::Status {
@@ -9319,6 +9321,32 @@ fn emit_discord_onboarding_warnings(payload: &Value) {
             eprintln!("policy-warning: {text}");
         }
     }
+}
+
+fn emit_discord_inbound_monitor_summary(payload: &Value) {
+    let inbound_monitor = payload.get("inbound_monitor").or_else(|| {
+        payload.get("preflight").and_then(|preflight| preflight.get("inbound_monitor"))
+    });
+    let Some(summary) = inbound_monitor.and_then(Value::as_object) else {
+        return;
+    };
+    let connector_registered =
+        summary.get("connector_registered").and_then(Value::as_bool).unwrap_or(false);
+    let gateway_connected =
+        summary.get("gateway_connected").and_then(Value::as_bool).unwrap_or(false);
+    let recent_inbound = summary.get("recent_inbound").and_then(Value::as_bool).unwrap_or(false);
+    let last_inbound_unix_ms =
+        summary.get("last_inbound_unix_ms").and_then(Value::as_i64).unwrap_or_default();
+    let last_event_type =
+        summary.get("last_event_type").and_then(Value::as_str).unwrap_or("unknown");
+    eprintln!(
+        "discord.inbound_monitor connector_registered={} gateway_connected={} recent_inbound={} last_inbound_unix_ms={} last_event_type={}",
+        connector_registered,
+        gateway_connected,
+        recent_inbound,
+        last_inbound_unix_ms,
+        last_event_type
+    );
 }
 
 fn prompt_yes_no(prompt: &str) -> Result<bool> {

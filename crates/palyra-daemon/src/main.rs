@@ -129,6 +129,9 @@ const HTTP_MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const DISCORD_ONBOARDING_HTTP_TIMEOUT_MS: u64 = 5_000;
 const DISCORD_ONBOARDING_CONFIG_BACKUPS: usize = 2;
+const DISCORD_ONBOARDING_INBOUND_RECENT_WINDOW_MS: i64 = 15 * 60 * 1_000;
+const DISCORD_ONBOARDING_MONITOR_WAIT_TIMEOUT_MS: u64 = 5_000;
+const DISCORD_ONBOARDING_MONITOR_WAIT_POLL_MS: u64 = 250;
 const DISCORD_APP_FLAG_GATEWAY_PRESENCE: u64 = 1 << 12;
 const DISCORD_APP_FLAG_GATEWAY_PRESENCE_LIMITED: u64 = 1 << 13;
 const DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS: u64 = 1 << 14;
@@ -581,6 +584,21 @@ struct DiscordRoutingPreview {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct DiscordInboundMonitorSummary {
+    connector_registered: bool,
+    gateway_connected: bool,
+    recent_inbound: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_inbound_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_connect_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_disconnect_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_event_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct DiscordOnboardingPreflightResponse {
     connector_id: String,
     account_id: String,
@@ -592,6 +610,7 @@ struct DiscordOnboardingPreflightResponse {
     invite_url_template: String,
     required_permissions: Vec<String>,
     routing_preview: DiscordRoutingPreview,
+    inbound_monitor: DiscordInboundMonitorSummary,
     warnings: Vec<String>,
     policy_warnings: Vec<String>,
 }
@@ -5115,6 +5134,10 @@ async fn apply_discord_onboarding(
         .channels
         .runtime_snapshot(evaluation.plan.connector_id.as_str())
         .map_err(channel_platform_error_response)?;
+    let inbound_monitor =
+        wait_for_discord_inbound_monitor_summary(state, evaluation.plan.connector_id.as_str())
+            .await;
+    let inbound_monitor_warnings = build_discord_inbound_monitor_warnings(&inbound_monitor);
 
     Ok(json!({
         "preflight": evaluation.preflight,
@@ -5129,6 +5152,8 @@ async fn apply_discord_onboarding(
         },
         "status": status,
         "runtime": runtime,
+        "inbound_monitor": inbound_monitor,
+        "inbound_monitor_warnings": inbound_monitor_warnings,
     }))
 }
 
@@ -5151,12 +5176,14 @@ async fn evaluate_discord_onboarding_request(
     }
 
     let (bot, application) = probe_discord_bot_identity(token.as_str()).await?;
-    plan = finalize_discord_onboarding_plan(plan, bot.id.as_str());
-    let warnings = build_discord_onboarding_warnings(
+    plan = finalize_discord_onboarding_plan(plan, &bot);
+    let inbound_monitor = load_discord_inbound_monitor_summary(state, plan.connector_id.as_str());
+    let mut warnings = build_discord_onboarding_warnings(
         &plan,
         application.as_ref(),
         require_open_scope_confirmation,
     );
+    warnings.extend(build_discord_inbound_monitor_warnings(&inbound_monitor));
     let policy_warnings = evaluate_discord_policy_warnings(state, &plan);
     let invite_client_id = application
         .as_ref()
@@ -5181,6 +5208,7 @@ async fn evaluate_discord_onboarding_request(
             "Attach Files".to_owned(),
         ],
         routing_preview: build_discord_routing_preview(&plan),
+        inbound_monitor,
         warnings,
         policy_warnings,
     };
@@ -5254,12 +5282,23 @@ fn build_discord_onboarding_plan(
 
 fn finalize_discord_onboarding_plan(
     mut plan: DiscordOnboardingPlan,
-    bot_id: &str,
+    bot: &DiscordBotIdentitySummary,
 ) -> DiscordOnboardingPlan {
-    if plan.require_mention && plan.mention_patterns.is_empty() {
-        plan.mention_patterns = default_discord_mention_patterns(bot_id);
+    if plan.require_mention {
+        merge_discord_mention_patterns(
+            &mut plan.mention_patterns,
+            default_discord_mention_patterns(bot.id.as_str(), bot.username.as_str()),
+        );
     }
     plan
+}
+
+fn merge_discord_mention_patterns(target: &mut Vec<String>, additions: Vec<String>) {
+    for candidate in additions {
+        if !target.iter().any(|existing| existing == &candidate) {
+            target.push(candidate);
+        }
+    }
 }
 
 fn build_discord_routing_preview(plan: &DiscordOnboardingPlan) -> DiscordRoutingPreview {
@@ -5343,6 +5382,98 @@ fn build_discord_onboarding_warnings(
     } else {
         warnings.push(
             "Unable to read Discord application flags; intents checks are best-effort and were not confirmed."
+                .to_owned(),
+        );
+    }
+    warnings
+}
+
+fn load_discord_inbound_monitor_summary(
+    state: &AppState,
+    connector_id: &str,
+) -> DiscordInboundMonitorSummary {
+    let connector_registered = state.channels.status(connector_id).is_ok();
+    let runtime = state.channels.runtime_snapshot(connector_id).ok().flatten();
+    summarize_discord_inbound_monitor(connector_registered, runtime.as_ref())
+}
+
+async fn wait_for_discord_inbound_monitor_summary(
+    state: &AppState,
+    connector_id: &str,
+) -> DiscordInboundMonitorSummary {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(DISCORD_ONBOARDING_MONITOR_WAIT_TIMEOUT_MS);
+    loop {
+        let summary = load_discord_inbound_monitor_summary(state, connector_id);
+        if summary.gateway_connected || summary.recent_inbound || started.elapsed() >= timeout {
+            return summary;
+        }
+        tokio::time::sleep(Duration::from_millis(DISCORD_ONBOARDING_MONITOR_WAIT_POLL_MS)).await;
+    }
+}
+
+fn summarize_discord_inbound_monitor(
+    connector_registered: bool,
+    runtime: Option<&Value>,
+) -> DiscordInboundMonitorSummary {
+    let inbound = runtime.and_then(|value| value.get("inbound"));
+    let gateway_connected = inbound
+        .and_then(|value| value.get("gateway_connected"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let last_inbound_unix_ms =
+        inbound.and_then(|value| value.get("last_inbound_unix_ms")).and_then(Value::as_i64);
+    let last_connect_unix_ms =
+        inbound.and_then(|value| value.get("last_connect_unix_ms")).and_then(Value::as_i64);
+    let last_disconnect_unix_ms =
+        inbound.and_then(|value| value.get("last_disconnect_unix_ms")).and_then(Value::as_i64);
+    let last_event_type = inbound
+        .and_then(|value| value.get("last_event_type"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let now_unix_ms = unix_ms_now().unwrap_or_default();
+    let recent_inbound = last_inbound_unix_ms.is_some_and(|observed_at| {
+        observed_at > 0
+            && now_unix_ms.saturating_sub(observed_at)
+                <= DISCORD_ONBOARDING_INBOUND_RECENT_WINDOW_MS
+    });
+    DiscordInboundMonitorSummary {
+        connector_registered,
+        gateway_connected,
+        recent_inbound,
+        last_inbound_unix_ms,
+        last_connect_unix_ms,
+        last_disconnect_unix_ms,
+        last_event_type,
+    }
+}
+
+fn build_discord_inbound_monitor_warnings(summary: &DiscordInboundMonitorSummary) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !summary.connector_registered {
+        warnings.push(
+            "Inbound monitor check: connector is not registered yet. Apply onboarding to start gateway monitor."
+                .to_owned(),
+        );
+        return warnings;
+    }
+    if !summary.gateway_connected {
+        warnings.push(
+            "Inbound monitor check: gateway monitor is not connected yet. Verify token, intents, and Discord egress allowlist."
+                .to_owned(),
+        );
+        return warnings;
+    }
+    if summary.last_inbound_unix_ms.is_none() {
+        warnings.push(
+            "Inbound monitor check: gateway monitor is connected but no inbound messages were observed yet. Send a DM or <@bot_id> mention to confirm ingest."
+                .to_owned(),
+        );
+        return warnings;
+    }
+    if !summary.recent_inbound {
+        warnings.push(
+            "Inbound monitor check: last inbound event is stale. Send a fresh DM or mention and verify last_inbound_unix_ms updates."
                 .to_owned(),
         );
     }
@@ -5634,9 +5765,14 @@ fn normalize_discord_mention_patterns(raw: Option<&[String]>) -> Result<Vec<Stri
     Ok(patterns)
 }
 
-fn default_discord_mention_patterns(bot_id: &str) -> Vec<String> {
+fn default_discord_mention_patterns(bot_id: &str, bot_username: &str) -> Vec<String> {
     let mut patterns = Vec::new();
-    for value in [format!("<@{bot_id}>"), format!("<@!{bot_id}>"), "@palyra".to_owned()] {
+    let mut defaults = vec![format!("<@{bot_id}>"), format!("<@!{bot_id}>"), "@palyra".to_owned()];
+    let normalized_username = bot_username.trim().to_ascii_lowercase();
+    if !normalized_username.is_empty() {
+        defaults.push(format!("@{normalized_username}"));
+    }
+    for value in defaults {
         let normalized = value.trim().to_ascii_lowercase();
         if !normalized.is_empty() && !patterns.iter().any(|existing| existing == &normalized) {
             patterns.push(normalized);
@@ -7591,27 +7727,29 @@ mod tests {
         AuthProviderKind,
     };
     use palyra_vault::{BackendPreference, Vault, VaultConfig as VaultConfigOptions, VaultRef};
+    use serde_json::json;
     use tempfile::TempDir;
 
     use super::{
-        build_discord_onboarding_plan, build_memory_embedding_provider,
-        clamp_console_relay_token_ttl_ms, connector_db_path_from_journal_path,
-        constant_time_eq_bytes, consume_admin_rate_limit_with_now,
-        consume_canvas_rate_limit_with_now, enforce_remote_bind_guard, find_hashed_secret_map_key,
+        build_discord_inbound_monitor_warnings, build_discord_onboarding_plan,
+        build_memory_embedding_provider, clamp_console_relay_token_ttl_ms,
+        connector_db_path_from_journal_path, constant_time_eq_bytes,
+        consume_admin_rate_limit_with_now, consume_canvas_rate_limit_with_now,
+        enforce_remote_bind_guard, finalize_discord_onboarding_plan, find_hashed_secret_map_key,
         loopback_grpc_url, mint_console_relay_token, mint_console_secret_token,
         normalize_discord_token, parse_offline_env_flag, prune_console_relay_tokens,
         redact_console_diagnostics_value, resolve_discord_intents_from_flags,
         resolve_model_provider_secret, runtime_status_response, sanitize_http_error_message,
-        sha256_hex, validate_admin_auth_config, validate_canvas_http_canvas_id,
-        validate_canvas_http_token_query, validate_process_runner_backend_policy,
-        ConsoleRelayToken, DiscordOnboardingRequest, DiscordOnboardingScope,
-        DiscordPrivilegedIntentStatus, RemoteBindEndpoints, RemoteBindGuardConfig,
-        ADMIN_RATE_LIMIT_MAX_IP_BUCKETS, ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
-        CANVAS_HTTP_MAX_TOKEN_BYTES, CANVAS_RATE_LIMIT_MAX_IP_BUCKETS,
-        CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS,
-        CONSOLE_RELAY_TOKEN_MAX_TTL_MS, CONSOLE_RELAY_TOKEN_MIN_TTL_MS,
-        DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS, DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT,
-        DISCORD_APP_FLAG_GATEWAY_PRESENCE,
+        sha256_hex, summarize_discord_inbound_monitor, validate_admin_auth_config,
+        validate_canvas_http_canvas_id, validate_canvas_http_token_query,
+        validate_process_runner_backend_policy, ConsoleRelayToken, DiscordBotIdentitySummary,
+        DiscordOnboardingRequest, DiscordOnboardingScope, DiscordPrivilegedIntentStatus,
+        RemoteBindEndpoints, RemoteBindGuardConfig, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
+        ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CANVAS_HTTP_MAX_TOKEN_BYTES,
+        CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS, CONSOLE_RELAY_TOKEN_MAX_TTL_MS,
+        CONSOLE_RELAY_TOKEN_MIN_TTL_MS, DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS,
+        DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT, DISCORD_APP_FLAG_GATEWAY_PRESENCE,
     };
     use crate::gateway::GatewayAuthConfig;
     use crate::model_provider::{
@@ -7710,6 +7848,82 @@ mod tests {
             "safe baseline should default to DM pairing policy"
         );
         assert_eq!(plan.connector_id, "discord:default");
+    }
+
+    #[test]
+    fn finalize_discord_onboarding_plan_merges_required_bot_mentions() {
+        let payload = DiscordOnboardingRequest {
+            account_id: Some("default".to_owned()),
+            token: "token".to_owned(),
+            mode: None,
+            inbound_scope: None,
+            allow_from: None,
+            deny_from: None,
+            require_mention: Some(true),
+            mention_patterns: Some(vec!["@ops".to_owned()]),
+            concurrency_limit: None,
+            direct_message_policy: None,
+            broadcast_strategy: None,
+            confirm_open_guild_channels: None,
+        };
+        let plan = build_discord_onboarding_plan(&payload).expect("plan should parse");
+        let finalized = finalize_discord_onboarding_plan(
+            plan,
+            &DiscordBotIdentitySummary {
+                id: "123456".to_owned(),
+                username: "Palyra-Bot".to_owned(),
+            },
+        );
+        assert!(
+            finalized.mention_patterns.iter().any(|value| value == "<@123456>"),
+            "canonical <@bot_id> mention should be present"
+        );
+        assert!(
+            finalized.mention_patterns.iter().any(|value| value == "<@!123456>"),
+            "canonical <@!bot_id> mention should be present"
+        );
+        assert!(
+            finalized.mention_patterns.iter().any(|value| value == "@palyra-bot"),
+            "bot username alias should be present"
+        );
+        assert!(
+            finalized.mention_patterns.iter().any(|value| value == "@ops"),
+            "existing custom mention patterns should be preserved"
+        );
+    }
+
+    #[test]
+    fn summarize_discord_inbound_monitor_marks_recent_inbound() {
+        let now = super::unix_ms_now().expect("current unix ms should resolve");
+        let runtime = json!({
+            "inbound": {
+                "gateway_connected": true,
+                "last_inbound_unix_ms": now - 1_000,
+                "last_connect_unix_ms": now - 10_000,
+                "last_disconnect_unix_ms": null,
+                "last_event_type": "MESSAGE_CREATE"
+            }
+        });
+        let summary = summarize_discord_inbound_monitor(true, Some(&runtime));
+        assert!(summary.connector_registered, "connector registration should be preserved");
+        assert!(summary.gateway_connected, "gateway_connected should parse from runtime snapshot");
+        assert!(summary.recent_inbound, "fresh inbound event should be marked as recent");
+        assert_eq!(summary.last_event_type.as_deref(), Some("MESSAGE_CREATE"));
+    }
+
+    #[test]
+    fn inbound_monitor_warnings_report_unconnected_gateway() {
+        let runtime = json!({
+            "inbound": {
+                "gateway_connected": false
+            }
+        });
+        let summary = summarize_discord_inbound_monitor(true, Some(&runtime));
+        let warnings = build_discord_inbound_monitor_warnings(&summary);
+        assert!(
+            warnings.iter().any(|warning| warning.contains("not connected")),
+            "unconnected monitor should emit actionable warning"
+        );
     }
 
     #[test]
