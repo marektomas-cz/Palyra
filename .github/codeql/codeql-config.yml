@@ -1,0 +1,4 @@
+name: Palyra CodeQL Config
+
+paths-ignore:
+  - apps/desktop/src-tauri/third_party/**

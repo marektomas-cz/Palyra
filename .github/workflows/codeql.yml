@@ -38,6 +38,7 @@ jobs:
         uses: github/codeql-action/init@89a39a4e59826350b863aa6b6252a07ad50cf83e
         with:
           languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
           # For Rust and other compiled languages, CodeQL supports build-mode: none.
           # (No build step required; keep CI lightweight.)
           build-mode: none
