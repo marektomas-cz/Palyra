@@ -8,13 +8,22 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
 use palyra_common::redaction::redact_auth_error;
 use reqwest::{redirect::Policy, Client, Url};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
+use tokio::time::{interval, MissedTickBehavior};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use ulid::Ulid;
 
 use crate::{
     net::ConnectorNetGuard,
-    protocol::{ConnectorKind, DeliveryOutcome, OutboundMessageRequest, RetryClass},
+    protocol::{
+        AttachmentKind, AttachmentRef, ConnectorKind, DeliveryOutcome, InboundMessageEvent,
+        OutboundMessageRequest, RetryClass,
+    },
     storage::ConnectorInstanceRecord,
     supervisor::{ConnectorAdapter, ConnectorAdapterError},
 };
@@ -23,6 +32,14 @@ const DISCORD_DEFAULT_API_BASE: &str = "https://discord.com/api/v10";
 const DISCORD_DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const DISCORD_MAX_MESSAGE_CHARS: usize = 2_000;
 const DISCORD_MAX_MESSAGE_LINES: usize = 17;
+const DISCORD_GATEWAY_VERSION: &str = "10";
+const DISCORD_GATEWAY_ENCODING: &str = "json";
+const DISCORD_GATEWAY_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
+const DISCORD_GATEWAY_HEARTBEAT_FALLBACK_MS: u64 = 45_000;
+const DISCORD_GATEWAY_MONITOR_MIN_BACKOFF_MS: u64 = 1_000;
+const DISCORD_GATEWAY_MONITOR_MAX_BACKOFF_MS: u64 = 60_000;
+const DISCORD_GATEWAY_MONITOR_JITTER_MAX_MS: u64 = 500;
+const DISCORD_INBOUND_BUFFER_CAPACITY: usize = 512;
 const IDENTITY_CACHE_TTL_MS: i64 = 5 * 60 * 1_000;
 const MAX_DELIVERY_CACHE: usize = 4_096;
 const MAX_ROUTE_LIMIT_CACHE: usize = 256;
@@ -45,6 +62,8 @@ pub struct DiscordAdapterConfig {
     pub max_chunk_chars: usize,
     pub max_chunk_lines: usize,
     pub enable_auto_reactions: bool,
+    pub enable_inbound_gateway: bool,
+    pub inbound_buffer_capacity: usize,
 }
 
 #[async_trait]
@@ -118,7 +137,27 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
             "global_rate_limit_until_unix_ms": state.global_blocked_until_unix_ms,
             "route_rate_limits": routes,
             "idempotency_cache_size": state.delivered_native_ids.len(),
+            "inbound": {
+                "last_inbound_unix_ms": state.last_inbound_unix_ms,
+                "gateway_connected": state.gateway_connected,
+                "last_connect_unix_ms": state.gateway_last_connect_unix_ms,
+                "last_disconnect_unix_ms": state.gateway_last_disconnect_unix_ms,
+                "last_event_type": state.gateway_last_event_type,
+            },
         }))
+    }
+
+    async fn poll_inbound(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        limit: usize,
+    ) -> Result<Vec<InboundMessageEvent>, ConnectorAdapterError> {
+        if !self.config.enable_inbound_gateway {
+            return Ok(Vec::new());
+        }
+        let max_events = limit.max(1);
+        self.ensure_inbound_monitor(instance).await?;
+        self.drain_inbound_events(instance.connector_id.as_str(), max_events)
     }
 
     async fn send_outbound(
@@ -820,9 +859,9 @@ mod tests {
     };
 
     use super::{
-        chunk_discord_text, parse_fence_line, DiscordAdapterConfig, DiscordConnectorAdapter,
-        DiscordCredential, DiscordCredentialResolver, DiscordTransport, DiscordTransportResponse,
-        OpenFence,
+        chunk_discord_text, deterministic_inbound_envelope_id, normalize_discord_message_create,
+        parse_fence_line, DiscordAdapterConfig, DiscordConnectorAdapter, DiscordCredential,
+        DiscordCredentialResolver, DiscordTransport, DiscordTransportResponse, OpenFence,
     };
     use crate::{
         protocol::{ConnectorKind, DeliveryOutcome, OutboundMessageRequest, RetryClass},
@@ -831,7 +870,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use reqwest::Url;
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     #[derive(Debug, Default)]
     struct StaticCredentialResolver {
@@ -1253,6 +1292,75 @@ mod tests {
     }
 
     #[test]
+    fn inbound_envelope_id_is_stable_for_same_message() {
+        let first = deterministic_inbound_envelope_id("discord:default", "1234567890");
+        let second = deterministic_inbound_envelope_id("discord:default", "1234567890");
+        let third = deterministic_inbound_envelope_id("discord:default", "1234567891");
+        assert_eq!(first, second, "same connector/message pair must produce stable envelope ids");
+        assert_ne!(first, third, "different messages must produce different envelope ids");
+    }
+
+    #[test]
+    fn normalize_message_create_maps_thread_and_attachments() {
+        let payload = json!({
+            "id": "175928847299117063",
+            "channel_id": "thread-123",
+            "guild_id": "guild-1",
+            "content": "<@bot-1> check this",
+            "author": {
+                "id": "user-7",
+                "username": "operator",
+                "global_name": "Operator"
+            },
+            "member": {
+                "nick": "Op"
+            },
+            "message_reference": {
+                "channel_id": "parent-777"
+            },
+            "attachments": [
+                {
+                    "url": "https://cdn.discordapp.net/attachments/abc/screenshot.png",
+                    "filename": "screenshot.png",
+                    "size": 4096,
+                    "content_type": "image/png"
+                }
+            ]
+        });
+
+        let normalized =
+            normalize_discord_message_create("discord:default", &payload, Some("bot-1"))
+                .expect("payload should map to inbound event");
+        assert_eq!(normalized.connector_id, "discord:default");
+        assert_eq!(normalized.conversation_id, "thread-123");
+        assert_eq!(normalized.adapter_message_id.as_deref(), Some("175928847299117063"));
+        assert_eq!(normalized.adapter_thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(normalized.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(normalized.sender_id, "user-7");
+        assert_eq!(normalized.sender_display.as_deref(), Some("Op"));
+        assert!(!normalized.is_direct_message, "guild message must not be marked as DM");
+        assert_eq!(normalized.attachments.len(), 1);
+        assert_eq!(normalized.attachments[0].kind, crate::protocol::AttachmentKind::Image);
+    }
+
+    #[test]
+    fn normalize_message_create_ignores_self_messages() {
+        let payload = json!({
+            "id": "175928847299117064",
+            "channel_id": "dm-42",
+            "content": "hello",
+            "author": {
+                "id": "bot-1",
+                "username": "palyra"
+            },
+            "attachments": []
+        });
+        let normalized =
+            normalize_discord_message_create("discord:default", &payload, Some("bot-1"));
+        assert!(normalized.is_none(), "connector must ignore its own bot messages");
+    }
+
+    #[test]
     fn build_net_guard_default_allowlist_covers_gateway_and_cdn_hosts() {
         let adapter = DiscordConnectorAdapter::new();
         let mut instance = sample_instance();
@@ -1279,6 +1387,8 @@ impl Default for DiscordAdapterConfig {
             max_chunk_chars: DISCORD_MAX_MESSAGE_CHARS,
             max_chunk_lines: DISCORD_MAX_MESSAGE_LINES,
             enable_auto_reactions: true,
+            enable_inbound_gateway: true,
+            inbound_buffer_capacity: DISCORD_INBOUND_BUFFER_CAPACITY,
         }
     }
 }
@@ -1479,6 +1589,11 @@ struct DiscordRuntimeState {
     token_suffix: Option<String>,
     bot_identity: Option<DiscordBotIdentity>,
     bot_identity_checked_at_unix_ms: Option<i64>,
+    last_inbound_unix_ms: Option<i64>,
+    gateway_connected: bool,
+    gateway_last_connect_unix_ms: Option<i64>,
+    gateway_last_disconnect_unix_ms: Option<i64>,
+    gateway_last_event_type: Option<String>,
     last_error: Option<String>,
 }
 
@@ -1491,11 +1606,34 @@ struct RateLimitSnapshot {
     global: bool,
 }
 
+#[derive(Debug, Default)]
+struct DiscordGatewayResumeState {
+    session_id: Option<String>,
+    seq: Option<i64>,
+    bot_user_id: Option<String>,
+}
+
+struct DiscordInboundMonitorHandle {
+    receiver: mpsc::Receiver<InboundMessageEvent>,
+}
+
+#[derive(Clone)]
+struct DiscordGatewayMonitorContext {
+    connector_id: String,
+    instance: ConnectorInstanceRecord,
+    config: DiscordAdapterConfig,
+    transport: Arc<dyn DiscordTransport>,
+    credential_resolver: Arc<dyn DiscordCredentialResolver>,
+    runtime_state: Arc<Mutex<DiscordRuntimeState>>,
+    sender: mpsc::Sender<InboundMessageEvent>,
+}
+
 pub struct DiscordConnectorAdapter {
     config: DiscordAdapterConfig,
     transport: Arc<dyn DiscordTransport>,
     credential_resolver: Arc<dyn DiscordCredentialResolver>,
-    state: Mutex<DiscordRuntimeState>,
+    state: Arc<Mutex<DiscordRuntimeState>>,
+    inbound_monitors: Mutex<HashMap<String, DiscordInboundMonitorHandle>>,
 }
 
 impl std::fmt::Debug for DiscordConnectorAdapter {
@@ -1543,8 +1681,77 @@ impl DiscordConnectorAdapter {
             config,
             transport,
             credential_resolver,
-            state: Mutex::new(DiscordRuntimeState::default()),
+            state: Arc::new(Mutex::new(DiscordRuntimeState::default())),
+            inbound_monitors: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn ensure_inbound_monitor(
+        &self,
+        instance: &ConnectorInstanceRecord,
+    ) -> Result<(), ConnectorAdapterError> {
+        let connector_id = instance.connector_id.clone();
+        {
+            let monitors = self.inbound_monitors.lock().map_err(|_| {
+                ConnectorAdapterError::Backend(
+                    "discord inbound monitor registry lock poisoned".to_owned(),
+                )
+            })?;
+            if monitors.contains_key(connector_id.as_str()) {
+                return Ok(());
+            }
+        }
+
+        let (sender, receiver) = mpsc::channel(self.config.inbound_buffer_capacity.max(1));
+        let context = DiscordGatewayMonitorContext {
+            connector_id: connector_id.clone(),
+            instance: instance.clone(),
+            config: self.config.clone(),
+            transport: Arc::clone(&self.transport),
+            credential_resolver: Arc::clone(&self.credential_resolver),
+            runtime_state: Arc::clone(&self.state),
+            sender,
+        };
+        tokio::spawn(async move {
+            run_discord_gateway_monitor(context).await;
+        });
+
+        let mut monitors = self.inbound_monitors.lock().map_err(|_| {
+            ConnectorAdapterError::Backend(
+                "discord inbound monitor registry lock poisoned".to_owned(),
+            )
+        })?;
+        monitors.insert(connector_id, DiscordInboundMonitorHandle { receiver });
+        Ok(())
+    }
+
+    fn drain_inbound_events(
+        &self,
+        connector_id: &str,
+        max_events: usize,
+    ) -> Result<Vec<InboundMessageEvent>, ConnectorAdapterError> {
+        let mut monitors = self.inbound_monitors.lock().map_err(|_| {
+            ConnectorAdapterError::Backend(
+                "discord inbound monitor registry lock poisoned".to_owned(),
+            )
+        })?;
+        let Some(handle) = monitors.get_mut(connector_id) else {
+            return Ok(Vec::new());
+        };
+
+        let mut events = Vec::new();
+        let limit = max_events.max(1);
+        while events.len() < limit {
+            match handle.receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    monitors.remove(connector_id);
+                    break;
+                }
+            }
+        }
+        Ok(events)
     }
 
     fn lock_state(
@@ -1559,14 +1766,7 @@ impl DiscordConnectorAdapter {
         &self,
         instance: &ConnectorInstanceRecord,
     ) -> Result<ConnectorNetGuard, ConnectorAdapterError> {
-        let allowlist = if instance.egress_allowlist.is_empty() {
-            DISCORD_FALLBACK_ALLOWLIST.iter().map(|entry| (*entry).to_owned()).collect::<Vec<_>>()
-        } else {
-            instance.egress_allowlist.clone()
-        };
-        ConnectorNetGuard::new(allowlist.as_slice()).map_err(|error| {
-            ConnectorAdapterError::Backend(format!("discord egress allowlist rejected: {error}"))
-        })
+        build_discord_net_guard(instance)
     }
 
     fn validate_url_target(
@@ -1574,20 +1774,7 @@ impl DiscordConnectorAdapter {
         guard: &ConnectorNetGuard,
         url: &Url,
     ) -> Result<(), ConnectorAdapterError> {
-        let Some(host) = url.host_str() else {
-            return Err(ConnectorAdapterError::Backend(
-                "discord request URL is missing host".to_owned(),
-            ));
-        };
-        let mut resolved = Vec::new();
-        if let Ok(addrs) = (host, 443_u16).to_socket_addrs() {
-            resolved.extend(addrs.map(|entry| entry.ip()));
-            resolved.sort_unstable();
-            resolved.dedup();
-        }
-        guard.validate_target(host, resolved.as_slice()).map_err(|error| {
-            ConnectorAdapterError::Backend(format!("discord egress denied: {error}"))
-        })
+        validate_discord_url_target(guard, url)
     }
 
     fn cached_delivery(&self, envelope_id: &str) -> Result<Option<String>, ConnectorAdapterError> {
@@ -1888,4 +2075,588 @@ impl DiscordConnectorAdapter {
             self.record_last_error(reason.as_str());
         }
     }
+}
+
+async fn run_discord_gateway_monitor(context: DiscordGatewayMonitorContext) {
+    let mut resume_state = DiscordGatewayResumeState::default();
+    let mut attempts = 0_u32;
+
+    loop {
+        let result = run_discord_gateway_session(&context, &mut resume_state).await;
+        let now_unix_ms = unix_ms_now();
+        if let Ok(mut state) = context.runtime_state.lock() {
+            state.gateway_connected = false;
+            state.gateway_last_disconnect_unix_ms = Some(now_unix_ms);
+        }
+
+        match result {
+            Ok(()) => {
+                attempts = 0;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(error) => {
+                attempts = attempts.saturating_add(1);
+                let message = redact_auth_error(error.to_string().as_str());
+                if let Ok(mut state) = context.runtime_state.lock() {
+                    state.last_error = Some(message);
+                }
+                let delay_ms = monitor_backoff_ms(attempts);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+}
+
+async fn run_discord_gateway_session(
+    context: &DiscordGatewayMonitorContext,
+    resume_state: &mut DiscordGatewayResumeState,
+) -> Result<(), ConnectorAdapterError> {
+    let credential = context.credential_resolver.resolve_credential(&context.instance).await?;
+    let guard = build_discord_net_guard(&context.instance)?;
+
+    let gateway_probe_url = build_gateway_bot_url(&context.config.api_base_url)?;
+    validate_discord_url_target(&guard, &gateway_probe_url)?;
+    let gateway_probe = context
+        .transport
+        .get(&gateway_probe_url, credential.token.as_str(), context.config.request_timeout_ms)
+        .await?;
+    if gateway_probe.status == 401 || gateway_probe.status == 403 {
+        return Err(ConnectorAdapterError::Backend(redact_auth_error(
+            format!(
+                "discord gateway lookup unauthorized (status={}): {}",
+                gateway_probe.status,
+                parse_discord_error_summary(gateway_probe.body.as_str())
+                    .unwrap_or_else(|| "unauthorized".to_owned())
+            )
+            .as_str(),
+        )));
+    }
+    if !(200..300).contains(&gateway_probe.status) {
+        return Err(ConnectorAdapterError::Backend(format!(
+            "discord gateway lookup failed (status={}): {}",
+            gateway_probe.status,
+            parse_discord_error_summary(gateway_probe.body.as_str())
+                .unwrap_or_else(|| "unexpected response".to_owned())
+        )));
+    }
+    let gateway_url = parse_gateway_ws_url(gateway_probe.body.as_str())?;
+    let gateway_url = normalize_gateway_ws_url(gateway_url)?;
+    validate_discord_url_target(&guard, &gateway_url)?;
+
+    let connect_result = tokio::time::timeout(
+        Duration::from_millis(context.config.request_timeout_ms.max(1)),
+        connect_async(gateway_url.as_str()),
+    )
+    .await
+    .map_err(|_| ConnectorAdapterError::Backend("discord gateway connection timed out".to_owned()))?
+    .map_err(|error| {
+        ConnectorAdapterError::Backend(format!("discord gateway connection failed: {error}"))
+    })?;
+    let (socket, _response) = connect_result;
+    let (mut sink, mut stream) = socket.split();
+
+    let now_unix_ms = unix_ms_now();
+    if let Ok(mut state) = context.runtime_state.lock() {
+        state.gateway_connected = true;
+        state.gateway_last_connect_unix_ms = Some(now_unix_ms);
+        state.last_error = None;
+    }
+
+    let mut heartbeat = interval(Duration::from_millis(DISCORD_GATEWAY_HEARTBEAT_FALLBACK_MS));
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut hello_received = false;
+
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick(), if hello_received => {
+                let heartbeat_payload = resume_state.seq.map(Value::from).unwrap_or(Value::Null);
+                send_gateway_op(&mut sink, 1, heartbeat_payload).await?;
+            }
+            maybe_message = stream.next() => {
+                let Some(message) = maybe_message else {
+                    return Err(ConnectorAdapterError::Backend(
+                        "discord gateway closed the websocket stream".to_owned(),
+                    ));
+                };
+                let message = message.map_err(|error| {
+                    ConnectorAdapterError::Backend(format!("discord gateway read failed: {error}"))
+                })?;
+                let raw_text = match message {
+                    Message::Text(payload) => payload.to_string(),
+                    Message::Binary(payload) => String::from_utf8_lossy(payload.as_ref()).to_string(),
+                    Message::Ping(payload) => {
+                        sink.send(Message::Pong(payload)).await.map_err(|error| {
+                            ConnectorAdapterError::Backend(format!("discord gateway pong failed: {error}"))
+                        })?;
+                        continue;
+                    }
+                    Message::Close(frame) => {
+                        let reason = frame
+                            .map(|value| value.reason.to_string())
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| "no close reason".to_owned());
+                        return Err(ConnectorAdapterError::Backend(format!(
+                            "discord gateway closed websocket: {reason}"
+                        )));
+                    }
+                    Message::Pong(_) | Message::Frame(_) => continue,
+                };
+
+                let envelope = parse_gateway_envelope(raw_text.as_str())?;
+                if let Some(seq) = envelope.seq {
+                    resume_state.seq = Some(seq);
+                }
+                if let Some(event_type) = envelope.event_type.as_deref() {
+                    if let Ok(mut state) = context.runtime_state.lock() {
+                        state.gateway_last_event_type = Some(event_type.to_owned());
+                    }
+                }
+
+                match envelope.op {
+                    10 => {
+                        let heartbeat_interval_ms = envelope
+                            .data
+                            .get("heartbeat_interval")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(DISCORD_GATEWAY_HEARTBEAT_FALLBACK_MS)
+                            .max(250);
+                        heartbeat = interval(Duration::from_millis(heartbeat_interval_ms));
+                        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                        hello_received = true;
+
+                        if let (Some(session_id), Some(seq)) =
+                            (resume_state.session_id.clone(), resume_state.seq)
+                        {
+                            send_gateway_op(
+                                &mut sink,
+                                6,
+                                json!({
+                                    "token": credential.token,
+                                    "session_id": session_id,
+                                    "seq": seq,
+                                }),
+                            )
+                            .await?;
+                        } else {
+                            send_gateway_op(
+                                &mut sink,
+                                2,
+                                json!({
+                                    "token": credential.token,
+                                    "intents": DISCORD_GATEWAY_INTENTS,
+                                    "properties": {
+                                        "os": std::env::consts::OS,
+                                        "browser": "palyra",
+                                        "device": "palyra",
+                                    },
+                                }),
+                            )
+                            .await?;
+                        }
+                    }
+                    11 => {}
+                    1 => {
+                        let heartbeat_payload = resume_state.seq.map(Value::from).unwrap_or(Value::Null);
+                        send_gateway_op(&mut sink, 1, heartbeat_payload).await?;
+                    }
+                    7 => {
+                        return Err(ConnectorAdapterError::Backend(
+                            "discord gateway requested reconnect".to_owned(),
+                        ));
+                    }
+                    9 => {
+                        let resumable = envelope.data.as_bool().unwrap_or(false);
+                        if !resumable {
+                            resume_state.session_id = None;
+                            resume_state.seq = None;
+                        }
+                        return Err(ConnectorAdapterError::Backend(
+                            "discord gateway invalidated session".to_owned(),
+                        ));
+                    }
+                    0 => {
+                        let event_type = envelope.event_type.unwrap_or_default();
+                        match event_type.as_str() {
+                            "READY" => {
+                                resume_state.session_id = envelope
+                                    .data
+                                    .get("session_id")
+                                    .and_then(Value::as_str)
+                                    .map(ToOwned::to_owned);
+                                resume_state.bot_user_id = envelope
+                                    .data
+                                    .get("user")
+                                    .and_then(|value| value.get("id"))
+                                    .and_then(Value::as_str)
+                                    .map(ToOwned::to_owned);
+                            }
+                            "MESSAGE_CREATE" => {
+                                let inbound = normalize_discord_message_create(
+                                    context.connector_id.as_str(),
+                                    &envelope.data,
+                                    resume_state.bot_user_id.as_deref(),
+                                );
+                                if let Some(event) = inbound {
+                                    if let Ok(mut state) = context.runtime_state.lock() {
+                                        state.last_inbound_unix_ms = Some(event.received_at_unix_ms);
+                                    }
+                                    match context.sender.try_send(event) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            if let Ok(mut state) = context.runtime_state.lock() {
+                                                state.last_error = Some(
+                                                    "discord inbound queue full; dropping event".to_owned(),
+                                                );
+                                            }
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            return Err(ConnectorAdapterError::Backend(
+                                                "discord inbound queue closed".to_owned(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn send_gateway_op<S>(sink: &mut S, op: i64, data: Value) -> Result<(), ConnectorAdapterError>
+where
+    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let payload = json!({
+        "op": op,
+        "d": data,
+    });
+    sink.send(Message::Text(payload.to_string().into())).await.map_err(|error| {
+        ConnectorAdapterError::Backend(format!("discord gateway write failed: {error}"))
+    })
+}
+
+#[derive(Debug, Clone)]
+struct DiscordGatewayEnvelope {
+    op: i64,
+    data: Value,
+    seq: Option<i64>,
+    event_type: Option<String>,
+}
+
+fn parse_gateway_envelope(raw: &str) -> Result<DiscordGatewayEnvelope, ConnectorAdapterError> {
+    let payload = serde_json::from_str::<Value>(raw).map_err(|error| {
+        ConnectorAdapterError::Backend(format!(
+            "discord gateway payload is not valid JSON: {error}"
+        ))
+    })?;
+    let op = payload.get("op").and_then(Value::as_i64).ok_or_else(|| {
+        ConnectorAdapterError::Backend("discord gateway payload missing op code".to_owned())
+    })?;
+    Ok(DiscordGatewayEnvelope {
+        op,
+        data: payload.get("d").cloned().unwrap_or(Value::Null),
+        seq: payload.get("s").and_then(Value::as_i64),
+        event_type: payload
+            .get("t")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    })
+}
+
+fn build_discord_net_guard(
+    instance: &ConnectorInstanceRecord,
+) -> Result<ConnectorNetGuard, ConnectorAdapterError> {
+    let allowlist = if instance.egress_allowlist.is_empty() {
+        DISCORD_FALLBACK_ALLOWLIST.iter().map(|entry| (*entry).to_owned()).collect::<Vec<_>>()
+    } else {
+        instance.egress_allowlist.clone()
+    };
+    ConnectorNetGuard::new(allowlist.as_slice()).map_err(|error| {
+        ConnectorAdapterError::Backend(format!("discord egress allowlist rejected: {error}"))
+    })
+}
+
+fn validate_discord_url_target(
+    guard: &ConnectorNetGuard,
+    url: &Url,
+) -> Result<(), ConnectorAdapterError> {
+    let Some(host) = url.host_str() else {
+        return Err(ConnectorAdapterError::Backend(
+            "discord request URL is missing host".to_owned(),
+        ));
+    };
+    let default_port =
+        if url.scheme().eq_ignore_ascii_case("ws") || url.scheme().eq_ignore_ascii_case("http") {
+            80_u16
+        } else {
+            443_u16
+        };
+    let port = url.port().unwrap_or(default_port);
+    let mut resolved = Vec::new();
+    if let Ok(addrs) = (host, port).to_socket_addrs() {
+        resolved.extend(addrs.map(|entry| entry.ip()));
+        resolved.sort_unstable();
+        resolved.dedup();
+    }
+    guard
+        .validate_target(host, resolved.as_slice())
+        .map_err(|error| ConnectorAdapterError::Backend(format!("discord egress denied: {error}")))
+}
+
+fn build_gateway_bot_url(api_base: &Url) -> Result<Url, ConnectorAdapterError> {
+    let candidate = format!("{}/gateway/bot", api_base.as_str().trim_end_matches('/'));
+    Url::parse(candidate.as_str()).map_err(|error| {
+        ConnectorAdapterError::Backend(format!("discord API URL invalid: {error}"))
+    })
+}
+
+fn parse_gateway_ws_url(raw_body: &str) -> Result<Url, ConnectorAdapterError> {
+    let payload = serde_json::from_str::<Value>(raw_body).map_err(|error| {
+        ConnectorAdapterError::Backend(format!(
+            "discord gateway metadata payload is not valid JSON: {error}"
+        ))
+    })?;
+    let raw_url = payload
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ConnectorAdapterError::Backend(
+                "discord gateway metadata missing 'url' field".to_owned(),
+            )
+        })?;
+    Url::parse(raw_url).map_err(|error| {
+        ConnectorAdapterError::Backend(format!("discord gateway URL is invalid: {error}"))
+    })
+}
+
+fn normalize_gateway_ws_url(mut url: Url) -> Result<Url, ConnectorAdapterError> {
+    let normalized_scheme = match url.scheme() {
+        "https" => "wss".to_owned(),
+        "http" => "ws".to_owned(),
+        "wss" | "ws" => url.scheme().to_owned(),
+        _ => {
+            return Err(ConnectorAdapterError::Backend(format!(
+                "discord gateway URL uses unsupported scheme '{}'",
+                url.scheme()
+            )));
+        }
+    };
+    if url.scheme() != normalized_scheme.as_str() {
+        url.set_scheme(normalized_scheme.as_str()).map_err(|_| {
+            ConnectorAdapterError::Backend(
+                "failed to normalize discord gateway URL scheme".to_owned(),
+            )
+        })?;
+    }
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        pairs.append_pair("v", DISCORD_GATEWAY_VERSION);
+        pairs.append_pair("encoding", DISCORD_GATEWAY_ENCODING);
+    }
+    Ok(url)
+}
+
+fn monitor_backoff_ms(attempts: u32) -> u64 {
+    let exponent = attempts.min(6);
+    let base = DISCORD_GATEWAY_MONITOR_MIN_BACKOFF_MS
+        .saturating_mul(1_u64 << exponent)
+        .min(DISCORD_GATEWAY_MONITOR_MAX_BACKOFF_MS);
+    base.saturating_add(monitor_jitter_ms()).min(DISCORD_GATEWAY_MONITOR_MAX_BACKOFF_MS)
+}
+
+fn monitor_jitter_ms() -> u64 {
+    if DISCORD_GATEWAY_MONITOR_JITTER_MAX_MS <= 1 {
+        return 0;
+    }
+    unix_ms_now().unsigned_abs() % DISCORD_GATEWAY_MONITOR_JITTER_MAX_MS
+}
+
+fn deterministic_inbound_envelope_id(connector_id: &str, message_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(connector_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(message_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ulid::from_bytes(bytes).to_string()
+}
+
+fn normalize_discord_message_create(
+    connector_id: &str,
+    payload: &Value,
+    bot_user_id: Option<&str>,
+) -> Option<InboundMessageEvent> {
+    let message_id = payload.get("id").and_then(Value::as_str).map(str::trim)?;
+    if message_id.is_empty() {
+        return None;
+    }
+    let channel_id = payload.get("channel_id").and_then(Value::as_str).map(str::trim)?;
+    if channel_id.is_empty() {
+        return None;
+    }
+    let author = payload.get("author")?;
+    let sender_id = author.get("id").and_then(Value::as_str).map(str::trim)?;
+    if sender_id.is_empty() {
+        return None;
+    }
+    if bot_user_id.is_some_and(|value| value.eq_ignore_ascii_case(sender_id)) {
+        return None;
+    }
+
+    let attachments = parse_discord_attachments(payload.get("attachments"));
+    let body_text = payload
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
+    if body_text.is_empty() && attachments.is_empty() {
+        return None;
+    }
+    let normalized_body = if body_text.is_empty() { "[attachment]".to_owned() } else { body_text };
+    let is_direct_message = payload.get("guild_id").and_then(Value::as_str).is_none();
+    let thread_id = parse_discord_thread_id(payload, channel_id);
+    let received_at_unix_ms =
+        parse_discord_snowflake_unix_ms(message_id).unwrap_or_else(unix_ms_now);
+    let sender_display = resolve_discord_sender_display(payload);
+    Some(InboundMessageEvent {
+        envelope_id: deterministic_inbound_envelope_id(connector_id, message_id),
+        connector_id: connector_id.to_owned(),
+        conversation_id: channel_id.to_owned(),
+        thread_id: thread_id.clone(),
+        sender_id: sender_id.to_owned(),
+        sender_display,
+        body: normalized_body,
+        adapter_message_id: Some(message_id.to_owned()),
+        adapter_thread_id: thread_id,
+        received_at_unix_ms,
+        is_direct_message,
+        requested_broadcast: false,
+        attachments,
+    })
+}
+
+fn resolve_discord_sender_display(payload: &Value) -> Option<String> {
+    payload
+        .get("member")
+        .and_then(|member| member.get("nick"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            payload
+                .get("author")
+                .and_then(|author| author.get("global_name"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            payload
+                .get("author")
+                .and_then(|author| author.get("username"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn parse_discord_thread_id(payload: &Value, channel_id: &str) -> Option<String> {
+    if payload.get("thread").and_then(|value| value.get("id")).and_then(Value::as_str).is_some() {
+        return Some(channel_id.to_owned());
+    }
+    let parent_channel_id = payload
+        .get("message_reference")
+        .and_then(|value| value.get("channel_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(parent_channel_id) = parent_channel_id {
+        if !parent_channel_id.eq_ignore_ascii_case(channel_id) {
+            return Some(channel_id.to_owned());
+        }
+    }
+    None
+}
+
+fn parse_discord_attachments(raw: Option<&Value>) -> Vec<AttachmentRef> {
+    let Some(entries) = raw.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let url = entry
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let filename = entry
+                .get("filename")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let content_type = entry
+                .get("content_type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let size_bytes = entry.get("size").and_then(Value::as_u64);
+            if url.is_none() && filename.is_none() && content_type.is_none() && size_bytes.is_none()
+            {
+                return None;
+            }
+            let kind = if content_type
+                .as_deref()
+                .map(|value| value.to_ascii_lowercase().starts_with("image/"))
+                .unwrap_or(false)
+                || filename.as_deref().map(|value| value.to_ascii_lowercase()).is_some_and(
+                    |value| {
+                        value.ends_with(".png")
+                            || value.ends_with(".jpg")
+                            || value.ends_with(".jpeg")
+                            || value.ends_with(".gif")
+                            || value.ends_with(".webp")
+                            || value.ends_with(".bmp")
+                            || value.ends_with(".svg")
+                    },
+                ) {
+                AttachmentKind::Image
+            } else {
+                AttachmentKind::File
+            };
+            Some(AttachmentRef {
+                kind,
+                url,
+                artifact_ref: None,
+                filename,
+                content_type,
+                size_bytes,
+            })
+        })
+        .collect()
+}
+
+fn parse_discord_snowflake_unix_ms(raw: &str) -> Option<i64> {
+    let parsed = raw.trim().parse::<u64>().ok()?;
+    let discord_epoch_ms = 1_420_070_400_000_u64;
+    let unix_ms = (parsed >> 22).saturating_add(discord_epoch_ms);
+    i64::try_from(unix_ms).ok()
 }

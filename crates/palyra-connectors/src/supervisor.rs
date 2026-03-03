@@ -115,6 +115,14 @@ pub trait ConnectorAdapter: Send + Sync {
         None
     }
 
+    async fn poll_inbound(
+        &self,
+        _instance: &crate::storage::ConnectorInstanceRecord,
+        _limit: usize,
+    ) -> Result<Vec<InboundMessageEvent>, ConnectorAdapterError> {
+        Ok(Vec::new())
+    }
+
     async fn send_outbound(
         &self,
         instance: &crate::storage::ConnectorInstanceRecord,
@@ -489,6 +497,34 @@ impl ConnectorSupervisor {
         })
     }
 
+    pub async fn poll_inbound(
+        &self,
+        per_connector_limit: usize,
+    ) -> Result<usize, ConnectorSupervisorError> {
+        let limit = per_connector_limit.max(1);
+        let instances = self.store.list_instances()?;
+        let mut processed = 0_usize;
+
+        for instance in instances {
+            if !instance.enabled {
+                continue;
+            }
+            let Some(adapter) = self.adapters.get(&instance.kind) else {
+                continue;
+            };
+            let inbound = adapter
+                .poll_inbound(&instance, limit)
+                .await
+                .map_err(|error| ConnectorSupervisorError::Adapter(error.to_string()))?;
+            for event in inbound {
+                self.ingest_inbound(event).await?;
+                processed = processed.saturating_add(1);
+            }
+        }
+
+        Ok(processed)
+    }
+
     pub async fn drain_due_outbox(
         &self,
         limit: usize,
@@ -745,7 +781,11 @@ fn unix_ms_now() -> Result<i64, ConnectorSupervisorError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex, time::Duration};
+    use std::{
+        collections::{HashMap, VecDeque},
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use tempfile::TempDir;
 
@@ -794,12 +834,43 @@ mod tests {
     #[derive(Default)]
     struct FlakyAdapter {
         attempts: Mutex<HashMap<String, usize>>,
+        inbound_events: Mutex<VecDeque<crate::protocol::InboundMessageEvent>>,
+    }
+
+    impl FlakyAdapter {
+        fn push_inbound(&self, event: crate::protocol::InboundMessageEvent) {
+            self.inbound_events
+                .lock()
+                .expect("inbound queue lock should not be poisoned")
+                .push_back(event);
+        }
     }
 
     #[async_trait]
     impl ConnectorAdapter for FlakyAdapter {
         fn kind(&self) -> ConnectorKind {
             ConnectorKind::Echo
+        }
+
+        async fn poll_inbound(
+            &self,
+            _instance: &crate::storage::ConnectorInstanceRecord,
+            limit: usize,
+        ) -> Result<Vec<crate::protocol::InboundMessageEvent>, ConnectorAdapterError> {
+            let mut queue = self.inbound_events.lock().map_err(|_| {
+                ConnectorAdapterError::Backend(
+                    "flaky adapter inbound queue lock poisoned".to_owned(),
+                )
+            })?;
+            let mut events = Vec::new();
+            let max = limit.max(1);
+            while events.len() < max {
+                let Some(event) = queue.pop_front() else {
+                    break;
+                };
+                events.push(event);
+            }
+            Ok(events)
         }
 
         async fn send_outbound(
@@ -825,16 +896,17 @@ mod tests {
         }
     }
 
-    fn open_supervisor() -> (TempDir, ConnectorSupervisor) {
+    fn open_supervisor() -> (TempDir, ConnectorSupervisor, Arc<FlakyAdapter>) {
         let tempdir = TempDir::new().expect("tempdir should initialize");
         let store = std::sync::Arc::new(
             ConnectorStore::open(tempdir.path().join("connectors.sqlite3"))
                 .expect("store should initialize"),
         );
+        let adapter = Arc::new(FlakyAdapter::default());
         let supervisor = ConnectorSupervisor::new(
             store,
             std::sync::Arc::new(RouterStub),
-            vec![std::sync::Arc::new(FlakyAdapter::default())],
+            vec![adapter.clone()],
             ConnectorSupervisorConfig {
                 min_retry_delay_ms: 1,
                 base_retry_delay_ms: 1,
@@ -842,7 +914,7 @@ mod tests {
                 ..ConnectorSupervisorConfig::default()
             },
         );
-        (tempdir, supervisor)
+        (tempdir, supervisor, adapter)
     }
 
     fn sample_spec() -> ConnectorInstanceSpec {
@@ -877,7 +949,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_inbound_does_not_create_duplicate_outbound() {
-        let (_tempdir, supervisor) = open_supervisor();
+        let (_tempdir, supervisor, _adapter) = open_supervisor();
         supervisor.register_connector(&sample_spec()).expect("register should succeed");
 
         let first = supervisor
@@ -897,7 +969,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_retry_is_replayed_and_delivered_once() {
-        let (_tempdir, supervisor) = open_supervisor();
+        let (_tempdir, supervisor, _adapter) = open_supervisor();
         supervisor.register_connector(&sample_spec()).expect("register should succeed");
 
         let ingest = supervisor
@@ -920,5 +992,18 @@ mod tests {
         let status = supervisor.status("echo:default").expect("status should resolve");
         assert!(delivered >= 1, "retry drain should eventually deliver");
         assert!(status.restart_count >= 1, "restart counter should increment on restart retry");
+    }
+
+    #[tokio::test]
+    async fn poll_inbound_routes_events_from_adapter_queue() {
+        let (_tempdir, supervisor, adapter) = open_supervisor();
+        supervisor.register_connector(&sample_spec()).expect("register should succeed");
+        adapter.push_inbound(sample_inbound("hello from poll"));
+
+        let processed = supervisor.poll_inbound(8).await.expect("poll should succeed");
+
+        assert_eq!(processed, 1, "one inbound event should be processed");
+        let status = supervisor.status("echo:default").expect("status should resolve");
+        assert!(status.last_inbound_unix_ms.is_some(), "poll should update last inbound timestamp");
     }
 }

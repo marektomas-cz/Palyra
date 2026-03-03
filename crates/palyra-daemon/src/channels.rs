@@ -292,6 +292,13 @@ impl ChannelPlatform {
             .map_err(ChannelPlatformError::from)
     }
 
+    pub async fn poll_inbound(&self) -> Result<usize, ChannelPlatformError> {
+        self.supervisor
+            .poll_inbound(self.supervisor_config().immediate_drain_batch_size)
+            .await
+            .map_err(ChannelPlatformError::from)
+    }
+
     #[must_use]
     pub fn worker_interval(&self) -> Duration {
         self.worker_interval
@@ -303,6 +310,9 @@ impl ChannelPlatform {
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
                 ticker.tick().await;
+                if let Err(error) = self.poll_inbound().await {
+                    warn!(error = %error, "channel connector worker inbound poll failed");
+                }
                 if let Err(error) = self.drain_due().await {
                     warn!(error = %error, "channel connector worker drain failed");
                 }
