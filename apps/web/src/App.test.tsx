@@ -701,13 +701,14 @@ function jsonResponse(payload: unknown, status = 200): Response {
 }
 
 function requestUrl(input: RequestInfo | URL): string {
-  if (typeof input === "string") {
-    return input;
+  const raw =
+    typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  try {
+    // Normalize request URL shape across runtimes (relative path vs absolute URL).
+    return new URL(raw, "http://localhost").pathname;
+  } catch {
+    return raw;
   }
-  if (input instanceof URL) {
-    return input.toString();
-  }
-  return input.url;
 }
 
 function requestBody(body: BodyInit | null | undefined): string {
