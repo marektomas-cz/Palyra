@@ -5402,7 +5402,7 @@ fn build_discord_onboarding_security_defaults(plan: &DiscordOnboardingPlan) -> V
             .to_owned(),
     ];
     defaults.push(if plan.require_mention {
-        "Guild routing is mention-gated by default using canonical <@bot_id>/<@!bot_id> patterns."
+        "Guild routing is mention-gated by default using canonical <@bot_id>/<@!bot_id> patterns; @everyone/@here are deny-by-default triggers unless explicitly configured."
             .to_owned()
     } else {
         "Guild routing mention gate is disabled for this plan; keep scope narrow and explicitly approved."

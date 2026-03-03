@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 use crate::{
@@ -31,6 +31,9 @@ pub struct ConnectorSupervisorConfig {
     pub immediate_drain_batch_size: usize,
     pub background_drain_batch_size: usize,
 }
+
+const CONNECTOR_METRICS_EVENT_WINDOW: usize = 2_048;
+const CONNECTOR_POLICY_DENIAL_REASON_LIMIT: usize = 16;
 
 impl Default for ConnectorSupervisorConfig {
     fn default() -> Self {
@@ -73,6 +76,31 @@ pub struct InboundIngestOutcome {
     pub route_key: Option<String>,
     pub enqueued_outbound: usize,
     pub immediate_delivery: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct RouteMessageLatencySnapshot {
+    sample_count: u64,
+    avg_ms: u64,
+    max_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PolicyDenialReasonCount {
+    reason: String,
+    count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct ConnectorRuntimeMetricsSnapshot {
+    event_window_size: u64,
+    inbound_events_processed: u64,
+    inbound_dedupe_hits: u64,
+    outbound_sends_ok: u64,
+    outbound_sends_retry: u64,
+    outbound_sends_dead_letter: u64,
+    route_message_latency_ms: RouteMessageLatencySnapshot,
+    policy_denials: Vec<PolicyDenialReasonCount>,
 }
 
 #[derive(Debug, Error)]
@@ -268,10 +296,100 @@ impl ConnectorSupervisor {
         let Some(instance) = self.store.get_instance(connector_id)? else {
             return Err(ConnectorSupervisorError::NotFound(connector_id.to_owned()));
         };
-        let Some(adapter) = self.adapters.get(&instance.kind) else {
-            return Ok(None);
+        let adapter_runtime = self
+            .adapters
+            .get(&instance.kind)
+            .and_then(|adapter| adapter.runtime_snapshot(&instance));
+        let metrics = self.build_runtime_metrics(instance.connector_id.as_str())?;
+        let mut runtime = match adapter_runtime {
+            Some(Value::Object(object)) => Value::Object(object),
+            Some(other) => {
+                let mut object = Map::new();
+                object.insert("adapter".to_owned(), other);
+                Value::Object(object)
+            }
+            None => Value::Object(Map::new()),
         };
-        Ok(adapter.runtime_snapshot(&instance))
+        if let Some(object) = runtime.as_object_mut() {
+            object.insert("metrics".to_owned(), json!(metrics));
+        }
+        Ok(Some(runtime))
+    }
+
+    fn build_runtime_metrics(
+        &self,
+        connector_id: &str,
+    ) -> Result<ConnectorRuntimeMetricsSnapshot, ConnectorSupervisorError> {
+        let events = self.store.list_events(connector_id, CONNECTOR_METRICS_EVENT_WINDOW)?;
+        let mut metrics = ConnectorRuntimeMetricsSnapshot {
+            event_window_size: u64::try_from(events.len()).unwrap_or(u64::MAX),
+            ..ConnectorRuntimeMetricsSnapshot::default()
+        };
+        let mut route_latency_total_ms = 0_u128;
+        let mut denial_counts: HashMap<String, u64> = HashMap::new();
+        for event in events {
+            match event.event_type.as_str() {
+                "inbound.received" | "inbound.duplicate" | "inbound.rejected" => {
+                    metrics.inbound_events_processed =
+                        metrics.inbound_events_processed.saturating_add(1);
+                }
+                "outbox.delivered" => {
+                    metrics.outbound_sends_ok = metrics.outbound_sends_ok.saturating_add(1);
+                }
+                "outbox.retry" => {
+                    metrics.outbound_sends_retry = metrics.outbound_sends_retry.saturating_add(1);
+                }
+                "outbox.dead_letter" => {
+                    metrics.outbound_sends_dead_letter =
+                        metrics.outbound_sends_dead_letter.saturating_add(1);
+                }
+                _ => {}
+            }
+            if event.event_type == "inbound.duplicate" {
+                metrics.inbound_dedupe_hits = metrics.inbound_dedupe_hits.saturating_add(1);
+            }
+            if matches!(event.event_type.as_str(), "inbound.routed" | "inbound.not_routed") {
+                if let Some(latency_ms) =
+                    event.details.as_ref().and_then(parse_route_message_latency_ms)
+                {
+                    metrics.route_message_latency_ms.sample_count =
+                        metrics.route_message_latency_ms.sample_count.saturating_add(1);
+                    metrics.route_message_latency_ms.max_ms =
+                        metrics.route_message_latency_ms.max_ms.max(latency_ms);
+                    route_latency_total_ms =
+                        route_latency_total_ms.saturating_add(u128::from(latency_ms));
+                }
+            }
+            if event.event_type == "inbound.not_routed"
+                && !event
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("queued_for_retry"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                && is_policy_denial_reason(event.message.as_str())
+            {
+                let reason = event.message.trim().to_owned();
+                *denial_counts.entry(reason).or_insert(0) += 1;
+            }
+        }
+        if metrics.route_message_latency_ms.sample_count > 0 {
+            metrics.route_message_latency_ms.avg_ms = u64::try_from(
+                route_latency_total_ms
+                    / u128::from(metrics.route_message_latency_ms.sample_count.max(1)),
+            )
+            .unwrap_or(u64::MAX);
+        }
+        let mut denials = denial_counts
+            .into_iter()
+            .map(|(reason, count)| PolicyDenialReasonCount { reason, count })
+            .collect::<Vec<_>>();
+        denials.sort_by(|left, right| {
+            right.count.cmp(&left.count).then_with(|| left.reason.cmp(&right.reason))
+        });
+        denials.truncate(CONNECTOR_POLICY_DENIAL_REASON_LIMIT);
+        metrics.policy_denials = denials;
+        Ok(metrics)
     }
 
     pub fn list_logs(
@@ -410,6 +528,7 @@ impl ConnectorSupervisor {
                     "envelope_id": event.envelope_id,
                     "queued_for_retry": routed.queued_for_retry,
                     "retry_attempt": routed.retry_attempt,
+                    "route_message_latency_ms": routed.route_message_latency_ms,
                 })),
                 now,
             )?;
@@ -423,6 +542,20 @@ impl ConnectorSupervisor {
                 immediate_delivery: 0,
             });
         }
+        self.store.record_event(
+            instance.connector_id.as_str(),
+            "inbound.routed",
+            "info",
+            "inbound event routed to gateway",
+            Some(&json!({
+                "envelope_id": event.envelope_id,
+                "route_key": routed.route_key.clone(),
+                "outputs": routed.outputs.len(),
+                "retry_attempt": routed.retry_attempt,
+                "route_message_latency_ms": routed.route_message_latency_ms,
+            })),
+            now,
+        )?;
 
         let mut enqueued_outbound = 0usize;
         for (index, output) in routed.outputs.iter().enumerate() {
@@ -772,6 +905,19 @@ impl ConnectorSupervisor {
     }
 }
 
+fn parse_route_message_latency_ms(details: &Value) -> Option<u64> {
+    details.get("route_message_latency_ms").and_then(Value::as_u64)
+}
+
+fn is_policy_denial_reason(reason: &str) -> bool {
+    !matches!(
+        reason.trim(),
+        "backpressure_queue_full"
+            | "backpressure_retry_enqueue_failed"
+            | "backpressure_poison_quarantine"
+    )
+}
+
 fn unix_ms_now() -> Result<i64, ConnectorSupervisorError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -802,6 +948,7 @@ mod tests {
         ConnectorSupervisor, ConnectorSupervisorConfig,
     };
     use async_trait::async_trait;
+    use serde_json::Value;
 
     struct RouterStub;
 
@@ -827,6 +974,7 @@ mod tests {
                 }],
                 route_key: Some("channel:echo:conversation:c1".to_owned()),
                 retry_attempt: 0,
+                route_message_latency_ms: Some(1),
             })
         }
     }
@@ -1005,5 +1153,49 @@ mod tests {
         assert_eq!(processed, 1, "one inbound event should be processed");
         let status = supervisor.status("echo:default").expect("status should resolve");
         assert!(status.last_inbound_unix_ms.is_some(), "poll should update last inbound timestamp");
+    }
+
+    #[tokio::test]
+    async fn runtime_snapshot_reports_connector_metrics() {
+        let (_tempdir, supervisor, _adapter) = open_supervisor();
+        supervisor.register_connector(&sample_spec()).expect("register should succeed");
+        supervisor
+            .ingest_inbound(sample_inbound("hello metrics"))
+            .await
+            .expect("first ingest should succeed");
+        supervisor
+            .ingest_inbound(sample_inbound("hello metrics"))
+            .await
+            .expect("duplicate ingest should succeed");
+        let runtime = supervisor
+            .runtime_snapshot("echo:default")
+            .expect("runtime snapshot should resolve")
+            .expect("runtime snapshot should be present");
+        let metrics = runtime
+            .get("metrics")
+            .and_then(Value::as_object)
+            .expect("runtime snapshot should include metrics object");
+        assert_eq!(
+            metrics.get("inbound_events_processed").and_then(Value::as_u64),
+            Some(2),
+            "received + duplicate should count toward inbound processed window"
+        );
+        assert_eq!(
+            metrics.get("inbound_dedupe_hits").and_then(Value::as_u64),
+            Some(1),
+            "duplicate event should increment dedupe hit counter"
+        );
+        assert!(
+            metrics.get("outbound_sends_ok").and_then(Value::as_u64).unwrap_or(0) >= 1,
+            "first routed message should produce at least one delivered outbound in metrics window"
+        );
+        let route_latency = metrics
+            .get("route_message_latency_ms")
+            .and_then(Value::as_object)
+            .expect("metrics should include route latency summary");
+        assert!(
+            route_latency.get("sample_count").and_then(Value::as_u64).unwrap_or(0) >= 1,
+            "route latency summary should include at least one sample"
+        );
     }
 }

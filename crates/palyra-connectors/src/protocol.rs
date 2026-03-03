@@ -256,6 +256,8 @@ pub struct RouteInboundResult {
     pub outputs: Vec<RoutedOutboundMessage>,
     pub route_key: Option<String>,
     pub retry_attempt: u32,
+    #[serde(default)]
+    pub route_message_latency_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

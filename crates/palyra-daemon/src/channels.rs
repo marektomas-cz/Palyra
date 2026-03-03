@@ -1,7 +1,7 @@
 use std::{
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use palyra_common::{validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
@@ -460,11 +460,14 @@ impl ConnectorRouter for GrpcChannelRouter {
             );
         }
 
+        let route_started_at = Instant::now();
         let response = client
             .route_message(request)
             .await
             .map_err(|error| ConnectorRouterError::Message(error.to_string()))?
             .into_inner();
+        let route_message_latency_ms =
+            u64::try_from(route_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let outputs = response
             .outputs
             .into_iter()
@@ -485,6 +488,7 @@ impl ConnectorRouter for GrpcChannelRouter {
             outputs,
             route_key: non_empty(response.route_key),
             retry_attempt: response.retry_attempt,
+            route_message_latency_ms: Some(route_message_latency_ms),
         })
     }
 }

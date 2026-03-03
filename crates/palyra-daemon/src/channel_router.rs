@@ -19,6 +19,8 @@ const DM_PAIRING_CODE_LENGTH: usize = 8;
 const DEFAULT_DM_PAIRING_PENDING_TTL_MS: u64 = 15 * 60_000;
 const DEFAULT_DM_PAIRING_SESSION_TTL_MS: u64 = 8 * 60 * 60_000;
 const MAX_DM_PAIRING_SESSION_TTL_MS: u64 = 30 * 24 * 60 * 60_000;
+const MASS_MENTION_EVERYONE: &str = "@everyone";
+const MASS_MENTION_HERE: &str = "@here";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1229,7 +1231,7 @@ fn has_mention_match(text: &str, mention_patterns: &[String]) -> bool {
     if mention_patterns.is_empty() {
         return false;
     }
-    let normalized_text = text.to_ascii_lowercase();
+    let normalized_text = normalize_text_for_mention_matching(text, mention_patterns);
     mention_patterns.iter().any(|pattern| {
         let normalized_pattern = pattern.trim().to_ascii_lowercase();
         if normalized_pattern.is_empty() {
@@ -1239,6 +1241,23 @@ fn has_mention_match(text: &str, mention_patterns: &[String]) -> bool {
             return !normalized_text.trim().is_empty();
         }
         contains_boundary_delimited_pattern(normalized_text.as_str(), normalized_pattern.as_str())
+    })
+}
+
+fn normalize_text_for_mention_matching(text: &str, mention_patterns: &[String]) -> String {
+    let normalized = text.to_ascii_lowercase();
+    if mention_patterns_allow_mass_mentions(mention_patterns) {
+        return normalized;
+    }
+    normalized.replace(MASS_MENTION_EVERYONE, " ").replace(MASS_MENTION_HERE, " ")
+}
+
+fn mention_patterns_allow_mass_mentions(mention_patterns: &[String]) -> bool {
+    mention_patterns.iter().any(|pattern| {
+        matches!(
+            pattern.trim().to_ascii_lowercase().as_str(),
+            MASS_MENTION_EVERYONE | MASS_MENTION_HERE
+        )
     })
 }
 
@@ -1399,6 +1418,53 @@ mod tests {
             RouteOutcome::Rejected(ref rejection)
                 if rejection.reason == "no_matching_mention_or_dm_policy"
         ));
+    }
+
+    #[test]
+    fn mass_mention_does_not_trigger_wildcard_without_explicit_opt_in() {
+        let mut config = baseline_config();
+        config.channels[0].mention_patterns = vec!["*".to_owned()];
+        let router = ChannelRouter::new(config);
+        let outcome = router.begin_route(&inbound("@everyone"));
+        assert!(matches!(
+            outcome,
+            RouteOutcome::Rejected(ref rejection)
+                if rejection.reason == "no_matching_mention_or_dm_policy"
+        ));
+    }
+
+    #[test]
+    fn mass_mention_triggers_only_with_explicit_pattern() {
+        let mut config = baseline_config();
+        config.channels[0].mention_patterns = vec!["@everyone".to_owned()];
+        let router = ChannelRouter::new(config);
+        let outcome = router.begin_route(&inbound("@everyone please summarize"));
+        assert!(
+            matches!(outcome, RouteOutcome::Routed(_)),
+            "explicit @everyone mention pattern should opt in to mass-mention trigger"
+        );
+    }
+
+    #[test]
+    fn here_mention_requires_explicit_pattern() {
+        let mut wildcard_config = baseline_config();
+        wildcard_config.channels[0].mention_patterns = vec!["*".to_owned()];
+        let wildcard_router = ChannelRouter::new(wildcard_config);
+        let rejected = wildcard_router.begin_route(&inbound("@here"));
+        assert!(matches!(
+            rejected,
+            RouteOutcome::Rejected(ref rejection)
+                if rejection.reason == "no_matching_mention_or_dm_policy"
+        ));
+
+        let mut explicit_config = baseline_config();
+        explicit_config.channels[0].mention_patterns = vec!["@here".to_owned()];
+        let explicit_router = ChannelRouter::new(explicit_config);
+        let accepted = explicit_router.begin_route(&inbound("@here check status"));
+        assert!(
+            matches!(accepted, RouteOutcome::Routed(_)),
+            "explicit @here mention pattern should opt in to mass-mention trigger"
+        );
     }
 
     #[test]

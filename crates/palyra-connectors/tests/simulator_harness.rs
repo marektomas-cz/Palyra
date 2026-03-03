@@ -50,6 +50,7 @@ impl ConnectorRouter for SimulatorRouter {
                 event.connector_id, event.conversation_id
             )),
             retry_attempt: 0,
+            route_message_latency_ms: Some(1),
         })
     }
 }

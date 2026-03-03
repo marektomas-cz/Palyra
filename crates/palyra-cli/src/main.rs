@@ -4448,7 +4448,7 @@ fn emit_channels_status(payload: Value, json_output: bool) -> Result<()> {
         );
         return Ok(());
     }
-    let connector = payload.get("connector").cloned().unwrap_or(payload);
+    let connector = payload.get("connector").unwrap_or(&payload);
     let connector_id = connector.get("connector_id").and_then(Value::as_str).unwrap_or("unknown");
     let enabled = connector.get("enabled").and_then(Value::as_bool).unwrap_or(false);
     let readiness = connector.get("readiness").and_then(Value::as_str).unwrap_or("unknown");
@@ -4469,6 +4469,49 @@ fn emit_channels_status(payload: Value, json_output: bool) -> Result<()> {
         "channels.status id={} enabled={} readiness={} liveness={} pending_outbox={} dead_letters={}",
         connector_id, enabled, readiness, liveness, pending, dead_letters
     );
+    if let Some(metrics) = payload
+        .get("runtime")
+        .and_then(Value::as_object)
+        .and_then(|runtime| runtime.get("metrics"))
+        .and_then(Value::as_object)
+    {
+        let inbound_processed =
+            metrics.get("inbound_events_processed").and_then(Value::as_u64).unwrap_or(0);
+        let dedupe_hits = metrics.get("inbound_dedupe_hits").and_then(Value::as_u64).unwrap_or(0);
+        let outbound_ok = metrics.get("outbound_sends_ok").and_then(Value::as_u64).unwrap_or(0);
+        let outbound_retry =
+            metrics.get("outbound_sends_retry").and_then(Value::as_u64).unwrap_or(0);
+        let outbound_dead_letter =
+            metrics.get("outbound_sends_dead_letter").and_then(Value::as_u64).unwrap_or(0);
+        println!(
+            "channels.metrics id={} inbound_processed={} dedupe_hits={} outbound_ok={} outbound_retry={} outbound_dead_letter={}",
+            connector_id,
+            inbound_processed,
+            dedupe_hits,
+            outbound_ok,
+            outbound_retry,
+            outbound_dead_letter
+        );
+        if let Some(latency) = metrics.get("route_message_latency_ms").and_then(Value::as_object) {
+            let samples = latency.get("sample_count").and_then(Value::as_u64).unwrap_or(0);
+            let avg_ms = latency.get("avg_ms").and_then(Value::as_u64).unwrap_or(0);
+            let max_ms = latency.get("max_ms").and_then(Value::as_u64).unwrap_or(0);
+            println!(
+                "channels.metrics.route_latency id={} samples={} avg_ms={} max_ms={}",
+                connector_id, samples, avg_ms, max_ms
+            );
+        }
+        if let Some(policy_denials) = metrics.get("policy_denials").and_then(Value::as_array) {
+            for entry in policy_denials {
+                let reason = entry.get("reason").and_then(Value::as_str).unwrap_or("unknown");
+                let count = entry.get("count").and_then(Value::as_u64).unwrap_or(0);
+                println!(
+                    "channels.metrics.policy_denial id={} reason={} count={}",
+                    connector_id, reason, count
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -4799,6 +4842,11 @@ fn resolve_onboarding_path(path: Option<String>) -> Result<PathBuf> {
 
 fn onboarding_template() -> &'static str {
     "version = 1\n\
+\n\
+[deployment]\n\
+mode = \"remote_vps\"\n\
+dangerous_remote_bind_ack = false\n\
+\n\
 [daemon]\n\
 bind_addr = \"127.0.0.1\"\n\
 port = 7142\n\
@@ -4809,6 +4857,16 @@ grpc_port = 7443\n\
 quic_bind_addr = \"127.0.0.1\"\n\
 quic_port = 7444\n\
 quic_enabled = true\n\
+bind_profile = \"loopback_only\"\n\
+\n\
+[admin]\n\
+require_auth = true\n\
+\n\
+[tool_call.process_runner]\n\
+enabled = true\n\
+tier = \"b\"\n\
+allow_interpreters = false\n\
+egress_enforcement_mode = \"strict\"\n\
 \n\
 [orchestrator]\n\
 runloop_v1_enabled = true\n"
