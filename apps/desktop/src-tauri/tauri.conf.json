@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Palyra Control Center",
+  "version": "0.1.0",
+  "identifier": "io.palyra.controlcenter",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Palyra Control Center",
+        "width": 1120,
+        "height": 760,
+        "minWidth": 900,
+        "minHeight": 620,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

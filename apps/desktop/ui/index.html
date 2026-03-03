@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Palyra Control Center</title>
+    <link rel="stylesheet" href="./main.css" />
+  </head>
+  <body>
+    <div class="background-shape"></div>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Desktop Control Center</p>
+          <h1>Palyra</h1>
+        </div>
+        <div class="status-block">
+          <span id="overallStatus" class="status-pill status-unknown">Unknown</span>
+          <p id="statusTimestamp" class="hint">No snapshot loaded yet.</p>
+        </div>
+      </header>
+
+      <section class="controls card">
+        <div class="button-row">
+          <button id="startBtn" type="button">Start Palyra</button>
+          <button id="stopBtn" type="button" class="secondary">Stop Palyra</button>
+          <button id="restartBtn" type="button" class="secondary">Restart Palyra</button>
+          <button id="dashboardBtn" type="button" class="accent">Open Dashboard</button>
+          <button id="exportBundleBtn" type="button" class="secondary">Export Support Bundle</button>
+        </div>
+        <div class="setting-row">
+          <label class="toggle">
+            <input id="browserEnabledToggle" type="checkbox" />
+            <span>Start browser sidecar (`palyra-browserd`) with gateway</span>
+          </label>
+          <button id="applySettingsBtn" type="button" class="secondary">Apply Setting</button>
+        </div>
+        <p id="actionMessage" class="hint"></p>
+      </section>
+
+      <section class="facts-grid">
+        <article class="card">
+          <h2>Quick Facts</h2>
+          <dl class="facts-list">
+            <div>
+              <dt>Gateway Version</dt>
+              <dd id="factGatewayVersion">-</dd>
+            </div>
+            <div>
+              <dt>Gateway Git Hash</dt>
+              <dd id="factGatewayHash">-</dd>
+            </div>
+            <div>
+              <dt>Gateway Uptime</dt>
+              <dd id="factGatewayUptime">-</dd>
+            </div>
+            <div>
+              <dt>Dashboard URL</dt>
+              <dd id="factDashboardUrl">-</dd>
+            </div>
+          </dl>
+        </article>
+
+        <article class="card">
+          <h2>Connector Health</h2>
+          <dl class="facts-list compact">
+            <div>
+              <dt>Connector</dt>
+              <dd id="discordConnectorId">-</dd>
+            </div>
+            <div>
+              <dt>Enabled</dt>
+              <dd id="discordEnabled">-</dd>
+            </div>
+            <div>
+              <dt>Authenticated</dt>
+              <dd id="discordAuthenticated">-</dd>
+            </div>
+            <div>
+              <dt>Readiness / Liveness</dt>
+              <dd id="discordReadiness">-</dd>
+            </div>
+            <div>
+              <dt>Last Error</dt>
+              <dd id="discordLastError">None</dd>
+            </div>
+          </dl>
+        </article>
+
+        <article class="card">
+          <h2>Service Processes</h2>
+          <div class="process-section">
+            <h3>Gateway (`palyrad`)</h3>
+            <p id="gatewayProcessSummary">-</p>
+            <p id="gatewayPorts">-</p>
+          </div>
+          <div class="process-section">
+            <h3>Browser (`palyra-browserd`)</h3>
+            <p id="browserProcessSummary">-</p>
+            <p id="browserPorts">-</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="bottom-grid">
+        <article class="card">
+          <div class="card-title-row">
+            <h2>Diagnostics (Redacted)</h2>
+            <button id="refreshBtn" type="button" class="secondary">Refresh</button>
+          </div>
+          <ul id="diagnosticsList" class="diagnostics-list"></ul>
+        </article>
+
+        <article class="card">
+          <h2>Sidecar Logs (Redacted)</h2>
+          <pre id="logOutput" class="logs"></pre>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
