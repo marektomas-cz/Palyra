@@ -7032,26 +7032,19 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 .await?;
                             tape_seq = tape_seq.saturating_add(1);
 
-                            let tool_summary = build_tool_result_memory_text(
+                            let tool_summary = build_and_ingest_tool_result_memory_summary(
+                                &self.state,
+                                ToolRuntimeExecutionContext {
+                                    principal: context.principal.as_str(),
+                                    channel: context.channel.as_deref(),
+                                    session_id: session_id.as_str(),
+                                },
                                 tool_name.as_str(),
-                                execution_outcome.success,
-                                execution_outcome.output_json.as_slice(),
-                                execution_outcome.error.as_str(),
-                            );
-                            if decision.allowed || execution_outcome.success {
-                                ingest_memory_best_effort(
-                                    &self.state,
-                                    context.principal.as_str(),
-                                    context.channel.as_deref(),
-                                    Some(session_id.as_str()),
-                                    MemorySource::TapeToolResult,
-                                    tool_summary.as_str(),
-                                    vec![format!("tool:{tool_name}")],
-                                    Some(if execution_outcome.success { 0.85 } else { 0.55 }),
-                                    "route_message_tool_result",
-                                )
-                                .await;
-                            }
+                                decision.allowed,
+                                &execution_outcome,
+                                "route_message_tool_result",
+                            )
+                            .await;
                             if !reply_text.is_empty() {
                                 reply_text.push('\n');
                             }
@@ -8866,26 +8859,19 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 .tool_attestations_emitted
                                 .fetch_add(1, Ordering::Relaxed);
 
-                            if decision.allowed || execution_outcome.success {
-                                let tool_memory_text = build_tool_result_memory_text(
-                                    tool_name.as_str(),
-                                    execution_outcome.success,
-                                    execution_outcome.output_json.as_slice(),
-                                    execution_outcome.error.as_str(),
-                                );
-                                ingest_memory_best_effort(
-                                    &state_for_stream,
-                                    context_for_stream.principal.as_str(),
-                                    context_for_stream.channel.as_deref(),
-                                    Some(session_id),
-                                    MemorySource::TapeToolResult,
-                                    tool_memory_text.as_str(),
-                                    vec![format!("tool:{tool_name}")],
-                                    Some(if execution_outcome.success { 0.85 } else { 0.55 }),
-                                    "run_stream_tool_result",
-                                )
-                                .await;
-                            }
+                            let _ = build_and_ingest_tool_result_memory_summary(
+                                &state_for_stream,
+                                ToolRuntimeExecutionContext {
+                                    principal: context_for_stream.principal.as_str(),
+                                    channel: context_for_stream.channel.as_deref(),
+                                    session_id,
+                                },
+                                tool_name.as_str(),
+                                decision.allowed,
+                                &execution_outcome,
+                                "run_stream_tool_result",
+                            )
+                            .await;
                         }
                     }
                 }
@@ -13328,6 +13314,37 @@ async fn append_tool_decision_tape_event(
         .await?;
     *tape_seq += 1;
     Ok(())
+}
+
+async fn build_and_ingest_tool_result_memory_summary(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    tool_name: &str,
+    decision_allowed: bool,
+    outcome: &ToolExecutionOutcome,
+    ingest_operation_name: &str,
+) -> String {
+    let summary = build_tool_result_memory_text(
+        tool_name,
+        outcome.success,
+        outcome.output_json.as_slice(),
+        outcome.error.as_str(),
+    );
+    if decision_allowed || outcome.success {
+        ingest_memory_best_effort(
+            runtime_state,
+            context.principal,
+            context.channel,
+            Some(context.session_id),
+            MemorySource::TapeToolResult,
+            summary.as_str(),
+            vec![format!("tool:{tool_name}")],
+            Some(if outcome.success { 0.85 } else { 0.55 }),
+            ingest_operation_name,
+        )
+        .await;
+    }
+    summary
 }
 
 fn extend_patch_string_defaults(defaults: &mut Vec<String>, additions: Vec<String>) {
