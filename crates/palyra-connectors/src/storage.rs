@@ -842,10 +842,14 @@ mod tests {
     }
 
     fn sample_spec() -> ConnectorInstanceSpec {
+        sample_spec_with_connector("echo:default")
+    }
+
+    fn sample_spec_with_connector(connector_id: &str) -> ConnectorInstanceSpec {
         ConnectorInstanceSpec {
-            connector_id: "echo:default".to_owned(),
+            connector_id: connector_id.to_owned(),
             kind: ConnectorKind::Echo,
-            principal: "channel:echo:default".to_owned(),
+            principal: format!("channel:{connector_id}"),
             auth_profile_ref: None,
             token_vault_ref: None,
             egress_allowlist: Vec::new(),
@@ -854,9 +858,16 @@ mod tests {
     }
 
     fn sample_outbound(envelope_id: &str) -> OutboundMessageRequest {
+        sample_outbound_for_connector("echo:default", envelope_id)
+    }
+
+    fn sample_outbound_for_connector(
+        connector_id: &str,
+        envelope_id: &str,
+    ) -> OutboundMessageRequest {
         OutboundMessageRequest {
             envelope_id: envelope_id.to_owned(),
-            connector_id: "echo:default".to_owned(),
+            connector_id: connector_id.to_owned(),
             conversation_id: "conv-1".to_owned(),
             reply_thread_id: None,
             in_reply_to_message_id: None,
@@ -891,6 +902,34 @@ mod tests {
     }
 
     #[test]
+    fn dedupe_is_scoped_per_connector_instance() {
+        let (_tempdir, store) = open_store();
+        store
+            .upsert_instance(&sample_spec_with_connector("echo:default"), 1_000)
+            .expect("default instance should be created");
+        store
+            .upsert_instance(&sample_spec_with_connector("echo:ops"), 1_000)
+            .expect("ops instance should be created");
+
+        let default_first = store
+            .record_inbound_dedupe_if_new("echo:default", "env-1", 1_000, 10_000)
+            .expect("default first dedupe write should succeed");
+        let ops_first = store
+            .record_inbound_dedupe_if_new("echo:ops", "env-1", 1_000, 10_000)
+            .expect("ops first dedupe write should succeed");
+        let default_duplicate = store
+            .record_inbound_dedupe_if_new("echo:default", "env-1", 1_100, 10_000)
+            .expect("default duplicate dedupe write should succeed");
+
+        assert!(default_first, "default connector should accept first envelope");
+        assert!(ops_first, "same envelope id should be accepted for a different connector");
+        assert!(
+            !default_duplicate,
+            "duplicate envelope should still be rejected within dedupe window for the same connector"
+        );
+    }
+
+    #[test]
     fn outbox_enforces_idempotent_unique_envelope_per_connector() {
         let (_tempdir, store) = open_store();
         store.upsert_instance(&sample_spec(), 1_000).expect("instance should be created");
@@ -905,6 +944,33 @@ mod tests {
 
         assert!(created.created, "first enqueue must create a record");
         assert!(!duplicate.created, "duplicate envelope must be ignored");
+    }
+
+    #[test]
+    fn outbox_allows_same_envelope_for_different_connectors() {
+        let (_tempdir, store) = open_store();
+        store
+            .upsert_instance(&sample_spec_with_connector("echo:default"), 1_000)
+            .expect("default instance should be created");
+        store
+            .upsert_instance(&sample_spec_with_connector("echo:ops"), 1_000)
+            .expect("ops instance should be created");
+
+        let default_request = sample_outbound_for_connector("echo:default", "env-1:0");
+        let ops_request = sample_outbound_for_connector("echo:ops", "env-1:0");
+
+        let default_outcome = store
+            .enqueue_outbox_if_absent(&default_request, 5, 1_000)
+            .expect("default outbox enqueue should succeed");
+        let ops_outcome = store
+            .enqueue_outbox_if_absent(&ops_request, 5, 1_000)
+            .expect("ops outbox enqueue should succeed");
+
+        assert!(default_outcome.created, "default connector should enqueue envelope");
+        assert!(
+            ops_outcome.created,
+            "same envelope id should still enqueue for a different connector"
+        );
     }
 
     #[test]

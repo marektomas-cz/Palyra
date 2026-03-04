@@ -169,7 +169,9 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
         instance: &ConnectorInstanceRecord,
         request: &OutboundMessageRequest,
     ) -> Result<DeliveryOutcome, ConnectorAdapterError> {
-        if let Some(native_message_id) = self.cached_delivery(request.envelope_id.as_str())? {
+        if let Some(native_message_id) =
+            self.cached_delivery(instance.connector_id.as_str(), request.envelope_id.as_str())?
+        {
             return Ok(DeliveryOutcome::Delivered { native_message_id });
         }
 
@@ -341,7 +343,11 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
 
         let native_message_id = parse_discord_message_id(response.body.as_str())
             .unwrap_or_else(|| fallback_native_message_id(request));
-        self.remember_delivery(request.envelope_id.as_str(), native_message_id.as_str())?;
+        self.remember_delivery(
+            instance.connector_id.as_str(),
+            request.envelope_id.as_str(),
+            native_message_id.as_str(),
+        )?;
         self.clear_last_error();
 
         if self.config.enable_auto_reactions {
@@ -1156,6 +1162,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_outbound_idempotency_cache_is_scoped_per_connector_instance() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push_get_response(Ok(ok_identity_response()));
+        transport.push_post_response(Ok(DiscordTransportResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "{\"id\":\"native-1\"}".to_owned(),
+        }));
+        transport.push_post_response(Ok(DiscordTransportResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "{\"id\":\"native-2\"}".to_owned(),
+        }));
+        let adapter = adapter_with_fake_transport(Arc::clone(&transport));
+
+        let default_instance = sample_instance();
+        let mut ops_instance = sample_instance();
+        ops_instance.connector_id = "discord:ops".to_owned();
+        ops_instance.principal = "channel:discord:ops".to_owned();
+        ops_instance.auth_profile_ref = Some("discord.ops".to_owned());
+        ops_instance.token_vault_ref = Some("global/discord_bot_token.ops".to_owned());
+
+        let request_default = sample_request("hello");
+        let mut request_ops = request_default.clone();
+        request_ops.connector_id = "discord:ops".to_owned();
+
+        let first = adapter
+            .send_outbound(&default_instance, &request_default)
+            .await
+            .expect("default connector send should return outcome");
+        let second = adapter
+            .send_outbound(&ops_instance, &request_ops)
+            .await
+            .expect("ops connector send should return outcome");
+
+        let DeliveryOutcome::Delivered { native_message_id: first_id } = first else {
+            panic!("default connector outcome should be delivered");
+        };
+        let DeliveryOutcome::Delivered { native_message_id: second_id } = second else {
+            panic!("ops connector outcome should be delivered");
+        };
+        assert_eq!(first_id, "native-1");
+        assert_eq!(second_id, "native-2");
+
+        let posts = transport
+            .captured()
+            .into_iter()
+            .filter(|entry| entry.method == "POST")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            posts.len(),
+            2,
+            "matching envelope ids across connector instances must not share idempotency cache entries"
+        );
+    }
+
+    #[tokio::test]
     async fn send_outbound_sets_thread_reference_and_auto_reaction() {
         let transport = Arc::new(FakeTransport::default());
         transport.push_get_response(Ok(ok_identity_response()));
@@ -1616,8 +1679,8 @@ struct RouteRateLimitWindow {
 
 #[derive(Debug, Clone, Default)]
 struct DiscordRuntimeState {
-    delivered_native_ids: HashMap<String, String>,
-    delivered_order: VecDeque<String>,
+    delivered_native_ids: HashMap<DeliveryCacheKey, String>,
+    delivered_order: VecDeque<DeliveryCacheKey>,
     route_limits: HashMap<String, RouteRateLimitWindow>,
     route_limit_order: VecDeque<String>,
     global_blocked_until_unix_ms: i64,
@@ -1631,6 +1694,18 @@ struct DiscordRuntimeState {
     gateway_last_disconnect_unix_ms: Option<i64>,
     gateway_last_event_type: Option<String>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DeliveryCacheKey {
+    connector_id: String,
+    envelope_id: String,
+}
+
+impl DeliveryCacheKey {
+    fn new(connector_id: &str, envelope_id: &str) -> Self {
+        Self { connector_id: connector_id.to_owned(), envelope_id: envelope_id.to_owned() }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1813,24 +1888,31 @@ impl DiscordConnectorAdapter {
         validate_discord_url_target(guard, url)
     }
 
-    fn cached_delivery(&self, envelope_id: &str) -> Result<Option<String>, ConnectorAdapterError> {
+    fn cached_delivery(
+        &self,
+        connector_id: &str,
+        envelope_id: &str,
+    ) -> Result<Option<String>, ConnectorAdapterError> {
         let state = self.lock_state()?;
-        Ok(state.delivered_native_ids.get(envelope_id).cloned())
+        let key = DeliveryCacheKey::new(connector_id, envelope_id);
+        Ok(state.delivered_native_ids.get(&key).cloned())
     }
 
     fn remember_delivery(
         &self,
+        connector_id: &str,
         envelope_id: &str,
         native_message_id: &str,
     ) -> Result<(), ConnectorAdapterError> {
         let mut state = self.lock_state()?;
-        if !state.delivered_native_ids.contains_key(envelope_id) {
-            state.delivered_order.push_back(envelope_id.to_owned());
+        let key = DeliveryCacheKey::new(connector_id, envelope_id);
+        if !state.delivered_native_ids.contains_key(&key) {
+            state.delivered_order.push_back(key.clone());
         }
-        state.delivered_native_ids.insert(envelope_id.to_owned(), native_message_id.to_owned());
+        state.delivered_native_ids.insert(key, native_message_id.to_owned());
         while state.delivered_order.len() > MAX_DELIVERY_CACHE {
             if let Some(stale) = state.delivered_order.pop_front() {
-                state.delivered_native_ids.remove(stale.as_str());
+                state.delivered_native_ids.remove(&stale);
             }
         }
         Ok(())
