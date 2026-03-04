@@ -6729,11 +6729,13 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             }
             RouteOutcome::Routed(routed) => {
                 let ChannelRoutedMessage { plan, lease: _route_lease } = *routed;
+                let route_request_context =
+                    request_context_with_resolved_route_channel(&context, plan.channel.as_str());
                 let route_action =
                     if plan.is_broadcast { "message.broadcast" } else { "message.reply" };
                 let policy_resource = format!("channel:{}", plan.channel);
                 if let Err(error) = authorize_message_action(
-                    context.principal.as_str(),
+                    route_request_context.principal.as_str(),
                     route_action,
                     policy_resource.as_str(),
                     Some(plan.channel.as_str()),
@@ -6746,7 +6748,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                     let journal_run_id = Ulid::new().to_string();
                     let _ = record_message_router_journal_event(
                         &self.state,
-                        &context,
+                        &route_request_context,
                         journal_session_id.as_str(),
                         journal_run_id.as_str(),
                         "message.rejected",
@@ -6790,8 +6792,8 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         session_label: requested_session_label
                             .clone()
                             .or(plan.session_label.clone()),
-                        principal: context.principal.clone(),
-                        device_id: context.device_id.clone(),
+                        principal: route_request_context.principal.clone(),
+                        device_id: route_request_context.device_id.clone(),
                         channel: Some(plan.channel.clone()),
                         require_existing: false,
                         reset_session: false,
@@ -6818,7 +6820,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 let route_agent = match self
                     .state
                     .resolve_agent_for_context(AgentResolveRequest {
-                        principal: context.principal.clone(),
+                        principal: route_request_context.principal.clone(),
                         channel: Some(plan.channel.clone()),
                         session_id: Some(session_id.clone()),
                         preferred_agent_id: None,
@@ -6831,7 +6833,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         warn!(
                             session_id = %session_id,
                             run_id = %run_id,
-                            principal = %context.principal,
+                            principal = %route_request_context.principal,
                             channel = %plan.channel,
                             status_code = ?error.code(),
                             status_message = %error.message(),
@@ -6848,7 +6850,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
 
                 let _ = record_message_router_journal_event(
                     &self.state,
-                    &context,
+                    &route_request_context,
                     session_id.as_str(),
                     run_id.as_str(),
                     "message.received",
@@ -6925,7 +6927,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
 
                 let prepared_provider_input = prepare_model_provider_input(
                     &self.state,
-                    &context,
+                    &route_request_context,
                     PrepareModelProviderInputRequest {
                         run_id: run_id.as_str(),
                         tape_seq: &mut tape_seq,
@@ -6985,7 +6987,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             .await?;
                         let _ = record_message_router_journal_event(
                             &self.state,
-                            &context,
+                            &route_request_context,
                             session_id.as_str(),
                             run_id.as_str(),
                             "message.rejected",
@@ -7041,14 +7043,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         }
                         ProviderEvent::ToolProposal { proposal_id, tool_name, input_json } => {
                             self.state.counters.tool_proposals.fetch_add(1, Ordering::Relaxed);
-                            let route_tool_request_context = RequestContext {
-                                principal: context.principal.clone(),
-                                device_id: context.device_id.clone(),
-                                channel: context
-                                    .channel
-                                    .clone()
-                                    .or_else(|| Some(plan.channel.clone())),
-                            };
+                            let route_tool_request_context = route_request_context.clone();
                             let ToolProposalSecurityEvaluation {
                                 skill_context,
                                 skill_gate_decision,
@@ -7065,7 +7060,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             .await;
                             let cached_approval_outcome = resolve_cached_tool_approval_for_proposal(
                                 &self.state,
-                                &context,
+                                &route_tool_request_context,
                                 session_id.as_str(),
                                 approval_subject_id.as_str(),
                                 proposal_approval_required,
@@ -7075,7 +7070,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             );
                             let decision = resolve_tool_proposal_decision_for_context(
                                 &self.state,
-                                &context,
+                                &route_tool_request_context,
                                 route_tool_request_context.channel.as_deref(),
                                 session_id.as_str(),
                                 run_id.as_str(),
@@ -7100,7 +7095,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             .await?;
                             record_tool_proposal_decision_audit_trail(
                                 &self.state,
-                                &context,
+                                &route_tool_request_context,
                                 session_id.as_str(),
                                 run_id.as_str(),
                                 proposal_id.as_str(),
@@ -7119,8 +7114,8 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 let outcome = execute_tool_with_runtime_dispatch(
                                     &self.state,
                                     ToolRuntimeExecutionContext {
-                                        principal: context.principal.as_str(),
-                                        channel: context.channel.as_deref(),
+                                        principal: route_tool_request_context.principal.as_str(),
+                                        channel: route_tool_request_context.channel.as_deref(),
                                         session_id: session_id.as_str(),
                                     },
                                     proposal_id.as_str(),
@@ -7176,8 +7171,8 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             let tool_summary = build_and_ingest_tool_result_memory_summary(
                                 &self.state,
                                 ToolRuntimeExecutionContext {
-                                    principal: context.principal.as_str(),
-                                    channel: context.channel.as_deref(),
+                                    principal: route_tool_request_context.principal.as_str(),
+                                    channel: route_tool_request_context.channel.as_deref(),
                                     session_id: session_id.as_str(),
                                 },
                                 tool_name.as_str(),
@@ -7202,7 +7197,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                     reply_text = format!("{prefix}{reply_text}");
                 }
                 if let Err(error) = authorize_message_action(
-                    context.principal.as_str(),
+                    route_request_context.principal.as_str(),
                     "channel.send",
                     policy_resource.as_str(),
                     Some(plan.channel.as_str()),
@@ -7221,7 +7216,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         .await?;
                     let _ = record_message_router_journal_event(
                         &self.state,
-                        &context,
+                        &route_request_context,
                         session_id.as_str(),
                         run_id.as_str(),
                         "message.rejected",
@@ -7267,8 +7262,8 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
 
                 ingest_memory_best_effort(
                     &self.state,
-                    context.principal.as_str(),
-                    context.channel.as_deref(),
+                    route_request_context.principal.as_str(),
+                    route_request_context.channel.as_deref(),
                     Some(session_id.as_str()),
                     MemorySource::Summary,
                     reply_text.as_str(),
@@ -7304,7 +7299,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
 
                 let _ = record_message_router_journal_event(
                     &self.state,
-                    &context,
+                    &route_request_context,
                     session_id.as_str(),
                     run_id.as_str(),
                     "message.routed",
@@ -7332,7 +7327,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 .await;
                 let _ = record_message_router_journal_event(
                     &self.state,
-                    &context,
+                    &route_request_context,
                     session_id.as_str(),
                     run_id.as_str(),
                     "message.replied",
@@ -14704,6 +14699,17 @@ fn build_tool_policy_request_context(
     }
 }
 
+fn request_context_with_resolved_route_channel(
+    request_context: &RequestContext,
+    route_channel: &str,
+) -> RequestContext {
+    RequestContext {
+        principal: request_context.principal.clone(),
+        device_id: request_context.device_id.clone(),
+        channel: Some(route_channel.to_owned()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn record_tool_proposal_decision_audit_trail(
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -16951,6 +16957,39 @@ summarize incident";
         assert!(
             result.is_err(),
             "fail mode must propagate memory auto-inject tape persistence errors"
+        );
+    }
+
+    #[test]
+    fn request_context_with_resolved_route_channel_sets_channel_when_missing() {
+        let context = RequestContext {
+            principal: "channel:discord:default".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: None,
+        };
+
+        let resolved =
+            super::request_context_with_resolved_route_channel(&context, "discord:default");
+        assert_eq!(resolved.principal, context.principal);
+        assert_eq!(resolved.device_id, context.device_id);
+        assert_eq!(resolved.channel.as_deref(), Some("discord:default"));
+    }
+
+    #[test]
+    fn request_context_with_resolved_route_channel_overrides_existing_channel() {
+        let context = RequestContext {
+            principal: "user:ops".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: Some("cli".to_owned()),
+        };
+
+        let resolved = super::request_context_with_resolved_route_channel(&context, "discord:ops");
+        assert_eq!(resolved.principal, context.principal);
+        assert_eq!(resolved.device_id, context.device_id);
+        assert_eq!(
+            resolved.channel.as_deref(),
+            Some("discord:ops"),
+            "route context should use the normalized routed channel for downstream policy/memory scoping"
         );
     }
 
