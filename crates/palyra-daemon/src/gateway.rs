@@ -5219,15 +5219,19 @@ fn split_route_message_reply_text(reply_text: &str, max_chars: usize) -> Vec<Str
     chunks
 }
 
+struct RouteMessageOutputTemplate<'a> {
+    thread_id: &'a str,
+    in_reply_to_message_id: &'a str,
+    broadcast: bool,
+    auto_ack_text: &'a str,
+    auto_reaction: &'a str,
+    attachments: &'a [common_v1::MessageAttachment],
+}
+
 fn build_route_message_outputs(
     reply_text: &str,
     max_payload_bytes: u64,
-    thread_id: Option<&str>,
-    in_reply_to_message_id: Option<&str>,
-    broadcast: bool,
-    auto_ack_text: Option<&str>,
-    auto_reaction: Option<&str>,
-    attachments: &[common_v1::MessageAttachment],
+    template: &RouteMessageOutputTemplate<'_>,
 ) -> Vec<gateway_v1::OutboundMessage> {
     let max_chars = usize::try_from(max_payload_bytes)
         .ok()
@@ -5239,17 +5243,17 @@ fn build_route_message_outputs(
     for (index, chunk) in chunks.into_iter().enumerate() {
         outputs.push(gateway_v1::OutboundMessage {
             text: chunk,
-            attachments: if index == 0 { attachments.to_vec() } else { Vec::new() },
-            thread_id: thread_id.unwrap_or_default().to_owned(),
-            in_reply_to_message_id: in_reply_to_message_id.unwrap_or_default().to_owned(),
-            broadcast,
+            attachments: if index == 0 { template.attachments.to_vec() } else { Vec::new() },
+            thread_id: template.thread_id.to_owned(),
+            in_reply_to_message_id: template.in_reply_to_message_id.to_owned(),
+            broadcast: template.broadcast,
             auto_ack_text: if index == 0 {
-                auto_ack_text.unwrap_or_default().to_owned()
+                template.auto_ack_text.to_owned()
             } else {
                 String::new()
             },
             auto_reaction: if index == 0 {
-                auto_reaction.unwrap_or_default().to_owned()
+                template.auto_reaction.to_owned()
             } else {
                 String::new()
             },
@@ -7086,15 +7090,21 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                     .counters
                     .channel_router_queue_depth
                     .store(self.state.channel_router.queue_depth() as u64, Ordering::Relaxed);
+                let route_output_template = RouteMessageOutputTemplate {
+                    thread_id: plan.reply_thread_id.as_deref().unwrap_or_default(),
+                    in_reply_to_message_id: plan
+                        .in_reply_to_message_id
+                        .as_deref()
+                        .unwrap_or_default(),
+                    broadcast: plan.is_broadcast,
+                    auto_ack_text: plan.auto_ack_text.as_deref().unwrap_or_default(),
+                    auto_reaction: plan.auto_reaction.as_deref().unwrap_or_default(),
+                    attachments: route_output_attachments.as_slice(),
+                };
                 let route_outputs = build_route_message_outputs(
                     reply_text.as_str(),
                     input.max_payload_bytes,
-                    plan.reply_thread_id.as_deref(),
-                    plan.in_reply_to_message_id.as_deref(),
-                    plan.is_broadcast,
-                    plan.auto_ack_text.as_deref(),
-                    plan.auto_reaction.as_deref(),
-                    route_output_attachments.as_slice(),
+                    &route_output_template,
                 );
                 return Ok(Response::new(gateway_v1::RouteMessageResponse {
                     v: CANONICAL_PROTOCOL_MAJOR,
