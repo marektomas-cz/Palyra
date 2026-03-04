@@ -138,6 +138,29 @@ impl FakeChannelAdapter {
         .await
     }
 
+    async fn inject_message_with_security_labels(
+        &self,
+        client: &mut gateway_v1::gateway_service_client::GatewayServiceClient<
+            tonic::transport::Channel,
+        >,
+        text: &str,
+        is_direct_message: bool,
+        request_broadcast: bool,
+        security_labels: Vec<String>,
+    ) -> Result<gateway_v1::RouteMessageResponse> {
+        self.inject_message_with_envelope_id_attachments_payload_limit_and_security_labels(
+            client,
+            text,
+            is_direct_message,
+            request_broadcast,
+            ENVELOPE_ID,
+            Vec::new(),
+            4096,
+            security_labels,
+        )
+        .await
+    }
+
     async fn inject_message_with_payload_limit_and_attachments(
         &self,
         client: &mut gateway_v1::gateway_service_client::GatewayServiceClient<
@@ -239,6 +262,35 @@ impl FakeChannelAdapter {
         attachments: Vec<common_v1::MessageAttachment>,
         max_payload_bytes: u64,
     ) -> Result<gateway_v1::RouteMessageResponse> {
+        self.inject_message_with_envelope_id_attachments_payload_limit_and_security_labels(
+            client,
+            text,
+            is_direct_message,
+            request_broadcast,
+            envelope_id,
+            attachments,
+            max_payload_bytes,
+            Vec::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn inject_message_with_envelope_id_attachments_payload_limit_and_security_labels(
+        &self,
+        client: &mut gateway_v1::gateway_service_client::GatewayServiceClient<
+            tonic::transport::Channel,
+        >,
+        text: &str,
+        is_direct_message: bool,
+        request_broadcast: bool,
+        envelope_id: &str,
+        attachments: Vec<common_v1::MessageAttachment>,
+        max_payload_bytes: u64,
+        security_labels: Vec<String>,
+    ) -> Result<gateway_v1::RouteMessageResponse> {
+        let security = (!security_labels.is_empty())
+            .then(|| common_v1::SecurityContext { labels: security_labels, ..Default::default() });
         let mut request = tonic::Request::new(gateway_v1::RouteMessageRequest {
             v: 1,
             envelope: Some(common_v1::MessageEnvelope {
@@ -253,6 +305,7 @@ impl FakeChannelAdapter {
                     sender_verified: true,
                 }),
                 content: Some(common_v1::MessageContent { text: text.to_owned(), attachments }),
+                security,
                 max_payload_bytes,
                 ..Default::default()
             }),
@@ -401,6 +454,106 @@ async fn grpc_route_message_with_fake_adapter_emits_reply_and_journal_events() -
             .iter()
             .any(|payload| payload.get("event").and_then(Value::as_str) == Some("message.replied")),
         "router flow should persist message.replied journal event"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_route_message_honors_json_mode_security_label_for_provider_request() -> Result<()> {
+    let (openai_base_url, request_bodies, request_count, server_handle) =
+        spawn_scripted_openai_server_with_request_capture(vec![
+            ScriptedOpenAiResponse::immediate(
+                200,
+                r#"{"choices":[{"message":{"content":"plain response"}}]}"#.to_owned(),
+            ),
+            ScriptedOpenAiResponse::immediate(
+                200,
+                r#"{"choices":[{"message":{"content":"{\"ack\":\"json\"}"}}]}"#.to_owned(),
+            ),
+        ])?;
+    let (child, admin_port, grpc_port, _journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_and_channel_router(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+    let mut create_route_agent = tonic::Request::new(gateway_v1::CreateAgentRequest {
+        v: 1,
+        agent_id: "route".to_owned(),
+        display_name: "Route".to_owned(),
+        agent_dir: String::new(),
+        workspace_roots: vec!["workspace".to_owned()],
+        default_model_profile: "gpt-4o-mini".to_owned(),
+        default_tool_allowlist: vec!["palyra.echo".to_owned()],
+        default_skill_allowlist: vec!["acme.route".to_owned()],
+        set_default: true,
+        allow_absolute_paths: false,
+    });
+    authorize_metadata_with_principal(create_route_agent.metadata_mut(), "admin:ops")?;
+    client
+        .create_agent(create_route_agent)
+        .await
+        .context("failed to create route agent before RouteMessage json-mode test")?;
+
+    let adapter = FakeChannelAdapter::default();
+    let plain_response =
+        adapter.inject_message(&mut client, "hey @palyra return plain text", false).await?;
+    assert!(plain_response.accepted, "baseline route message should be accepted");
+
+    let json_mode_response = adapter
+        .inject_message_with_security_labels(
+            &mut client,
+            "hey @palyra return json",
+            false,
+            false,
+            vec!["json_mode".to_owned()],
+        )
+        .await?;
+    assert!(json_mode_response.accepted, "json-mode route message should be accepted");
+    let json_mode_outbound = json_mode_response
+        .outputs
+        .first()
+        .cloned()
+        .context("json-mode route output should be present")?;
+    assert!(
+        json_mode_outbound.text.contains("{\"ack\":\"json\"}"),
+        "json-mode reply should include structured JSON payload"
+    );
+
+    let captured_request_bodies =
+        request_bodies.lock().expect("captured request bodies lock should not poison").clone();
+    assert_eq!(
+        captured_request_bodies.len(),
+        2,
+        "scripted server should capture one baseline request and one json-mode request"
+    );
+    let baseline_request_payload: Value = serde_json::from_str(captured_request_bodies[0].as_str())
+        .context("baseline request payload should be valid JSON")?;
+    assert!(
+        baseline_request_payload.get("response_format").is_none(),
+        "baseline route request should not force OpenAI json response format"
+    );
+    let json_mode_request_payload: Value =
+        serde_json::from_str(captured_request_bodies[1].as_str())
+            .context("json-mode request payload should be valid JSON")?;
+    assert_eq!(
+        json_mode_request_payload.pointer("/response_format/type").and_then(Value::as_str),
+        Some("json_object"),
+        "json-mode route request should enable OpenAI json_object response format"
+    );
+    assert_eq!(
+        request_count.load(Ordering::Relaxed),
+        2,
+        "route json-mode test should perform two provider requests"
     );
 
     server_handle.join().expect("scripted openai server thread should exit");
@@ -7272,7 +7425,7 @@ fn spawn_scripted_openai_server(
             let (mut stream, _) =
                 listener.accept().expect("scripted openai listener should accept connection");
             request_count_for_thread.fetch_add(1, Ordering::Relaxed);
-            if read_http_request_for_scripted_server(&mut stream).is_err() {
+            if read_http_request_body_for_scripted_server(&mut stream).is_err() {
                 continue;
             }
             if !response_spec.delay_before_response.is_zero() {
@@ -7300,7 +7453,56 @@ fn spawn_scripted_openai_server(
     Ok((format!("http://{address}/v1"), request_count, handle))
 }
 
-fn read_http_request_for_scripted_server(stream: &mut TcpStream) -> Result<()> {
+fn spawn_scripted_openai_server_with_request_capture(
+    responses: Vec<ScriptedOpenAiResponse>,
+) -> Result<(String, Arc<Mutex<Vec<String>>>, Arc<AtomicUsize>, thread::JoinHandle<()>)> {
+    let listener =
+        TcpListener::bind("127.0.0.1:0").context("failed to bind scripted openai listener")?;
+    let address = listener.local_addr().context("failed to resolve scripted listener address")?;
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_for_thread = Arc::clone(&request_count);
+    let captured_request_bodies = Arc::new(Mutex::new(Vec::new()));
+    let captured_request_bodies_for_thread = Arc::clone(&captured_request_bodies);
+    let handle = thread::spawn(move || {
+        for response_spec in responses {
+            let (mut stream, _) =
+                listener.accept().expect("scripted openai listener should accept connection");
+            request_count_for_thread.fetch_add(1, Ordering::Relaxed);
+            let request_body = match read_http_request_body_for_scripted_server(&mut stream) {
+                Ok(body) => body,
+                Err(_) => continue,
+            };
+            if let Ok(parsed_body) = String::from_utf8(request_body) {
+                if let Ok(mut guard) = captured_request_bodies_for_thread.lock() {
+                    guard.push(parsed_body);
+                }
+            }
+            if !response_spec.delay_before_response.is_zero() {
+                thread::sleep(response_spec.delay_before_response);
+            }
+            let reason = match response_spec.status_code {
+                200 => "OK",
+                429 => "Too Many Requests",
+                500 => "Internal Server Error",
+                502 => "Bad Gateway",
+                503 => "Service Unavailable",
+                504 => "Gateway Timeout",
+                _ => "Error",
+            };
+            let response = format!(
+                "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_spec.status_code,
+                response_spec.body.len(),
+                response_spec.body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    Ok((format!("http://{address}/v1"), captured_request_bodies, request_count, handle))
+}
+
+fn read_http_request_body_for_scripted_server(stream: &mut TcpStream) -> Result<Vec<u8>> {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .context("failed to configure scripted server read timeout")?;
@@ -7314,9 +7516,11 @@ fn read_http_request_for_scripted_server(stream: &mut TcpStream) -> Result<()> {
             break;
         }
         let line_trimmed = line.trim_end_matches(['\r', '\n']);
-        if let Some(value) = line_trimmed.strip_prefix("Content-Length:") {
-            content_length =
-                value.trim().parse::<usize>().context("invalid Content-Length in request")?;
+        if let Some((name, value)) = line_trimmed.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length =
+                    value.trim().parse::<usize>().context("invalid Content-Length in request")?;
+            }
         }
     }
 
@@ -7326,9 +7530,10 @@ fn read_http_request_for_scripted_server(stream: &mut TcpStream) -> Result<()> {
         if body.is_empty() {
             anyhow::bail!("scripted openai request body should not be empty");
         }
+        return Ok(body);
     }
 
-    Ok(())
+    Ok(Vec::new())
 }
 
 fn unique_temp_journal_db_path() -> PathBuf {

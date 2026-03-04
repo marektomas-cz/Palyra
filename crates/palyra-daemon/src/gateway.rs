@@ -5200,6 +5200,12 @@ fn map_provider_error(error: ProviderError) -> Status {
     }
 }
 
+fn security_requests_json_mode(security: Option<&common_v1::SecurityContext>) -> bool {
+    security
+        .map(|value| value.labels.iter().any(|label| label.eq_ignore_ascii_case("json_mode")))
+        .unwrap_or(false)
+}
+
 fn split_route_message_reply_text(reply_text: &str, max_chars: usize) -> Vec<String> {
     let normalized = reply_text.trim();
     if normalized.is_empty() {
@@ -6156,6 +6162,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 "envelope uses an unsupported protocol major version",
             ));
         }
+        let json_mode_requested = security_requests_json_mode(envelope.security.as_ref());
         let origin = envelope.origin.unwrap_or_default();
         let content = envelope.content.unwrap_or_default();
         let channel = if let Some(value) = non_empty(origin.channel.clone()) {
@@ -6722,6 +6729,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "channel": input.channel.clone(),
                         "session_key": plan.session_key.clone(),
                         "route_key": plan.route_key.clone(),
+                        "json_mode_requested": json_mode_requested,
                         "agent_id": route_agent_id.clone(),
                         "agent_resolution_source": route_agent_resolution_source.clone(),
                         "config_hash": route_config_hash.clone(),
@@ -6775,6 +6783,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             "text": input.text.clone(),
                             "channel": input.channel.clone(),
                             "route_key": plan.route_key.clone(),
+                            "json_mode_requested": json_mode_requested,
                             "attachments": route_attachment_metadata,
                             "agent_id": route_agent_id.clone(),
                             "agent_resolution_source": route_agent_resolution_source.clone(),
@@ -6825,7 +6834,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                     .state
                     .execute_model_provider(ProviderRequest {
                         input_text: provider_input_text,
-                        json_mode: false,
+                        json_mode: json_mode_requested,
                         vision_requested: content.attachments.iter().any(|attachment| {
                             attachment.kind
                                 == common_v1::message_attachment::AttachmentKind::Image as i32
@@ -7168,6 +7177,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         payload_json: json!({
                             "reply_text": reply_text.clone(),
                             "route_key": plan.route_key.clone(),
+                            "json_mode_requested": json_mode_requested,
                             "attachments": route_attachment_metadata.clone(),
                             "agent_id": route_agent_id.clone(),
                             "agent_resolution_source": route_agent_resolution_source.clone(),
@@ -7219,6 +7229,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         "envelope_id": envelope_id,
                         "channel": plan.channel.clone(),
                         "reply_preview": truncate_with_ellipsis(reply_text.clone(), 256),
+                        "json_mode_requested": json_mode_requested,
                         "attachments": route_attachment_metadata.clone(),
                         "agent_id": route_agent_id,
                         "agent_resolution_source": route_agent_resolution_source,
@@ -7751,13 +7762,8 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 let vision_requested = input_content.attachments.iter().any(|attachment| {
                     attachment.kind == common_v1::message_attachment::AttachmentKind::Image as i32
                 });
-                let json_mode_requested = input_envelope
-                    .security
-                    .as_ref()
-                    .map(|security| {
-                        security.labels.iter().any(|label| label.eq_ignore_ascii_case("json_mode"))
-                    })
-                    .unwrap_or(false);
+                let json_mode_requested =
+                    security_requests_json_mode(input_envelope.security.as_ref());
                 let session_id_for_message = if let Some(session_id) = active_session_id.as_deref()
                 {
                     session_id.to_owned()
