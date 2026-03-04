@@ -138,7 +138,12 @@ const DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS: u64 = 1 << 14;
 const DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS_LIMITED: u64 = 1 << 15;
 const DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT: u64 = 1 << 18;
 const DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT_LIMITED: u64 = 1 << 19;
-const DISCORD_MIN_INVITE_PERMISSIONS: u64 = (1 << 10) | (1 << 11) | (1 << 17) | (1 << 18);
+const DISCORD_PERMISSION_VIEW_CHANNEL: u64 = 1 << 10;
+const DISCORD_PERMISSION_SEND_MESSAGES: u64 = 1 << 11;
+const DISCORD_PERMISSION_EMBED_LINKS: u64 = 1 << 14;
+const DISCORD_PERMISSION_ATTACH_FILES: u64 = 1 << 15;
+const DISCORD_PERMISSION_READ_MESSAGE_HISTORY: u64 = 1 << 16;
+const DISCORD_PERMISSION_SEND_MESSAGES_IN_THREADS: u64 = 1 << 38;
 const CONSOLE_SESSION_COOKIE_NAME: &str = "palyra_console_session";
 const CONSOLE_CSRF_HEADER_NAME: &str = "x-palyra-csrf-token";
 const CONSOLE_SESSION_TTL_SECONDS: u64 = 30 * 60;
@@ -5195,7 +5200,8 @@ async fn evaluate_discord_onboarding_request(
         .and_then(|summary| summary.id.clone())
         .unwrap_or_else(|| bot.id.clone());
     let invite_url_template = format!(
-        "https://discord.com/oauth2/authorize?client_id={invite_client_id}&scope=bot&permissions={DISCORD_MIN_INVITE_PERMISSIONS}"
+        "https://discord.com/oauth2/authorize?client_id={invite_client_id}&scope=bot&permissions={}",
+        discord_min_invite_permissions()
     );
     let preflight = DiscordOnboardingPreflightResponse {
         connector_id: plan.connector_id.clone(),
@@ -5205,13 +5211,7 @@ async fn evaluate_discord_onboarding_request(
         bot,
         application,
         invite_url_template,
-        required_permissions: vec![
-            "View Channels".to_owned(),
-            "Send Messages".to_owned(),
-            "Read Message History".to_owned(),
-            "Embed Links".to_owned(),
-            "Attach Files".to_owned(),
-        ],
+        required_permissions: discord_required_permission_labels(),
         egress_allowlist: channels::discord_default_egress_allowlist(),
         security_defaults: build_discord_onboarding_security_defaults(&plan),
         routing_preview: build_discord_routing_preview(&plan),
@@ -5703,6 +5703,25 @@ fn resolve_discord_intents_from_flags(flags: u64) -> DiscordPrivilegedIntentsSum
             DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT_LIMITED,
         ),
     }
+}
+
+fn discord_required_permissions() -> [(&'static str, u64); 6] {
+    [
+        ("View Channels", DISCORD_PERMISSION_VIEW_CHANNEL),
+        ("Send Messages", DISCORD_PERMISSION_SEND_MESSAGES),
+        ("Read Message History", DISCORD_PERMISSION_READ_MESSAGE_HISTORY),
+        ("Embed Links", DISCORD_PERMISSION_EMBED_LINKS),
+        ("Attach Files", DISCORD_PERMISSION_ATTACH_FILES),
+        ("Send Messages in Threads", DISCORD_PERMISSION_SEND_MESSAGES_IN_THREADS),
+    ]
+}
+
+fn discord_required_permission_labels() -> Vec<String> {
+    discord_required_permissions().iter().map(|(name, _)| (*name).to_owned()).collect()
+}
+
+fn discord_min_invite_permissions() -> u64 {
+    discord_required_permissions().iter().fold(0_u64, |mask, (_, bit)| mask | *bit)
 }
 
 #[allow(clippy::result_large_err)]
@@ -7850,6 +7869,45 @@ mod tests {
         assert!(
             matches!(intents.presence, DiscordPrivilegedIntentStatus::Enabled),
             "presence flag should map to enabled"
+        );
+    }
+
+    #[test]
+    fn discord_required_permissions_include_thread_send_permission() {
+        let labels = super::discord_required_permission_labels();
+        assert!(
+            labels.iter().any(|label| label == "Send Messages in Threads"),
+            "required permissions list should include thread reply capability"
+        );
+        let mask = super::discord_min_invite_permissions();
+        assert_ne!(
+            mask & super::DISCORD_PERMISSION_SEND_MESSAGES_IN_THREADS,
+            0,
+            "invite permissions mask should include Send Messages in Threads bit"
+        );
+    }
+
+    #[test]
+    fn discord_invite_permissions_mask_matches_required_baseline() {
+        let mask = super::discord_min_invite_permissions();
+        for (name, bit) in super::discord_required_permissions() {
+            assert_ne!(
+                mask & bit,
+                0,
+                "invite permissions mask should include required permission '{name}'"
+            );
+        }
+        let mention_everyone_bit = 1_u64 << 17;
+        let use_external_emojis_bit = 1_u64 << 18;
+        assert_eq!(
+            mask & mention_everyone_bit,
+            0,
+            "invite permissions mask should not include Mention Everyone by default"
+        );
+        assert_eq!(
+            mask & use_external_emojis_bit,
+            0,
+            "invite permissions mask should not include Use External Emojis by default"
         );
     }
 
