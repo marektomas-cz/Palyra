@@ -7384,6 +7384,9 @@ struct ScriptedOpenAiResponse {
     delay_before_response: Duration,
 }
 
+type ScriptedOpenAiServerWithCapture =
+    (String, Arc<Mutex<Vec<String>>>, Arc<AtomicUsize>, thread::JoinHandle<()>);
+
 impl ScriptedOpenAiResponse {
     fn immediate(status_code: u16, body: String) -> Self {
         Self { status_code, body, delay_before_response: Duration::ZERO }
@@ -7455,7 +7458,7 @@ fn spawn_scripted_openai_server(
 
 fn spawn_scripted_openai_server_with_request_capture(
     responses: Vec<ScriptedOpenAiResponse>,
-) -> Result<(String, Arc<Mutex<Vec<String>>>, Arc<AtomicUsize>, thread::JoinHandle<()>)> {
+) -> Result<ScriptedOpenAiServerWithCapture> {
     let listener =
         TcpListener::bind("127.0.0.1:0").context("failed to bind scripted openai listener")?;
     let address = listener.local_addr().context("failed to resolve scripted listener address")?;
