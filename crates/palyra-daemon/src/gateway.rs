@@ -6930,12 +6930,38 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 run_id: Some(run_id.clone()),
                                 skill_id: None,
                             };
+                            let approval_subject_id =
+                                build_tool_approval_subject_id(tool_name.as_str(), None);
+                            let cached_approval_outcome = self.state.resolve_cached_tool_approval(
+                                &context,
+                                session_id.as_str(),
+                                approval_subject_id.as_str(),
+                            );
+                            if let Some(cached_outcome) = cached_approval_outcome.as_ref() {
+                                info!(
+                                    run_id = %run_id,
+                                    proposal_id = %proposal_id,
+                                    approval_id = %cached_outcome.approval_id,
+                                    subject_id = %approval_subject_id,
+                                    decision = %cached_outcome.decision.as_str(),
+                                    decision_scope = %cached_outcome.decision_scope.as_str(),
+                                    "reusing cached tool approval decision for route message"
+                                );
+                            }
                             let decision = decide_tool_call(
                                 &self.state.config.tool_call,
                                 &mut remaining_tool_budget,
                                 &policy_request_context,
                                 tool_name.as_str(),
-                                false,
+                                cached_approval_outcome
+                                    .as_ref()
+                                    .map(|response| response.approved)
+                                    .unwrap_or(false),
+                            );
+                            let decision = apply_tool_approval_outcome(
+                                decision,
+                                tool_name.as_str(),
+                                cached_approval_outcome.as_ref(),
                             );
                             record_tool_decision_metrics(
                                 &self.state,

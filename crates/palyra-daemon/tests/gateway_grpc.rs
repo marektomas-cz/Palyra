@@ -1038,6 +1038,221 @@ async fn grpc_route_message_executes_allowlisted_memory_search_tool() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_route_message_reuses_cached_tool_approval_from_run_stream() -> Result<()> {
+    let response_body = openai_tool_call_response(
+        "palyra.process.run",
+        &serde_json::json!({
+            "command": "echo",
+            "args": ["route-approval-cache"]
+        }),
+    )?;
+    let (openai_base_url, _request_count, server_handle) = spawn_scripted_openai_server(vec![
+        ScriptedOpenAiResponse::immediate(200, response_body.clone()),
+        ScriptedOpenAiResponse::immediate(200, response_body.clone()),
+        ScriptedOpenAiResponse::immediate(200, response_body),
+    ])?;
+    let (child, admin_port, grpc_port, journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+            "palyra.process.run",
+            4,
+            750,
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+    let adapter = FakeChannelAdapter::default();
+
+    let first_route = adapter
+        .inject_message_with_envelope_id(
+            &mut client,
+            "hey @palyra run process command now",
+            false,
+            false,
+            ENVELOPE_ID,
+        )
+        .await?;
+    assert!(
+        first_route.accepted,
+        "first route call should be accepted for processing (reason={})",
+        first_route.decision_reason
+    );
+    let first_route_run_id = first_route
+        .run_id
+        .as_ref()
+        .map(|id| id.ulid.clone())
+        .context("first route response missing run_id")?;
+    let route_session_id = first_route
+        .session_id
+        .as_ref()
+        .map(|id| id.ulid.clone())
+        .context("first route response missing session_id")?;
+    let first_outbound = first_route
+        .outputs
+        .first()
+        .cloned()
+        .context("first route response should include outbound payload")?;
+    assert!(
+        first_outbound.text.to_ascii_lowercase().contains("approval required"),
+        "first route attempt should fail-closed without cached approval"
+    );
+
+    let (request_sender, request_receiver) = tokio_mpsc::channel(4);
+    request_sender
+        .send(sample_run_stream_request_with_ids(
+            route_session_id.as_str(),
+            RUN_ID,
+            "seed cached tool approval for route".to_owned(),
+        ))
+        .await
+        .context("failed to send run stream request for approval seeding")?;
+    let mut stream_request = tonic::Request::new(ReceiverStream::new(request_receiver));
+    authorize_metadata(stream_request.metadata_mut())?;
+    let mut response_stream = client
+        .run_stream(stream_request)
+        .await
+        .context("failed to call RunStream for approval cache seeding")?
+        .into_inner();
+
+    let mut saw_approval_request = false;
+    let mut saw_tool_result = false;
+    loop {
+        let next_event = tokio::time::timeout(Duration::from_secs(5), response_stream.next())
+            .await
+            .context("approval cache seed stream stalled")?;
+        let Some(event) = next_event else {
+            break;
+        };
+        let event = event.context("failed to read run stream event during approval cache seed")?;
+        if let Some(body) = event.body {
+            match body {
+                common_v1::run_stream_event::Body::ToolApprovalRequest(approval_request) => {
+                    let proposal_id = approval_request
+                        .proposal_id
+                        .as_ref()
+                        .map(|proposal_id| proposal_id.ulid.as_str())
+                        .context("approval cache seed request missing proposal_id")?;
+                    request_sender
+                        .send(sample_tool_approval_response_request_for_session_and_run_with_scope(
+                            route_session_id.as_str(),
+                            RUN_ID,
+                            proposal_id,
+                            true,
+                            "allow_session",
+                            common_v1::ApprovalDecisionScope::Session as i32,
+                            0,
+                        ))
+                        .await
+                        .context("failed to send approval response for cache seeding")?;
+                    saw_approval_request = true;
+                }
+                common_v1::run_stream_event::Body::ToolResult(result) => {
+                    let _ = result;
+                    saw_tool_result = true;
+                }
+                _ => {}
+            }
+        }
+        if saw_approval_request && saw_tool_result {
+            break;
+        }
+    }
+    drop(request_sender);
+    assert!(
+        saw_approval_request,
+        "run stream seed should request approval before cache is populated"
+    );
+    assert!(
+        saw_tool_result,
+        "approval seed run should execute palyra.process.run after approval response"
+    );
+
+    let status_before_second_route =
+        admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;
+    let attempts_before = status_before_second_route
+        .pointer("/counters/tool_execution_attempts")
+        .and_then(Value::as_u64)
+        .context("status snapshot missing tool_execution_attempts before second route")?;
+
+    let second_route = adapter
+        .inject_message_with_envelope_id(
+            &mut client,
+            "hey @palyra run process command again",
+            false,
+            false,
+            ENVELOPE_ID_ALT,
+        )
+        .await?;
+    assert!(
+        second_route.accepted,
+        "second route call should be accepted for processing (reason={})",
+        second_route.decision_reason
+    );
+    let second_route_run_id = second_route
+        .run_id
+        .as_ref()
+        .map(|id| id.ulid.clone())
+        .context("second route response missing run_id")?;
+    let second_outbound = second_route
+        .outputs
+        .first()
+        .cloned()
+        .context("second route response should include outbound payload")?;
+    assert!(
+        second_outbound.text.contains("tool=palyra.process.run"),
+        "second route should execute palyra.process.run after cached approval reuse"
+    );
+    assert!(
+        !second_outbound.text.to_ascii_lowercase().contains("approval required"),
+        "second route should not fail due missing approval when cache is available"
+    );
+
+    let status_after_second_route =
+        admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;
+    let attempts_after = status_after_second_route
+        .pointer("/counters/tool_execution_attempts")
+        .and_then(Value::as_u64)
+        .context("status snapshot missing tool_execution_attempts after second route")?;
+    assert_eq!(
+        attempts_after,
+        attempts_before.saturating_add(1),
+        "second route should increase tool execution attempts when cached approval is reused"
+    );
+
+    let policy_events = load_policy_decision_journal_events(&journal_db_path)?;
+    assert!(
+        policy_events.iter().any(|payload| {
+            payload.get("_run_id").and_then(Value::as_str) == Some(first_route_run_id.as_str())
+                && payload.get("tool_name").and_then(Value::as_str) == Some("palyra.process.run")
+                && payload.get("kind").and_then(Value::as_str) == Some("deny")
+                && payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(|reason| reason.contains("approval required"))
+                    .unwrap_or(false)
+        }),
+        "first route run should persist deny policy decision caused by missing approval"
+    );
+    assert!(
+        policy_events.iter().any(|payload| {
+            payload.get("_run_id").and_then(Value::as_str) == Some(second_route_run_id.as_str())
+                && payload.get("tool_name").and_then(Value::as_str) == Some("palyra.process.run")
+                && payload.get("kind").and_then(Value::as_str) == Some("allow")
+        }),
+        "second route run should persist allow policy decision when cached approval is reused"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_gateway_enforces_auth_and_streams_status() -> Result<()> {
     let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);
@@ -6090,7 +6305,7 @@ fn load_policy_decision_journal_events(journal_db_path: &PathBuf) -> Result<Vec<
     let mut statement = connection
         .prepare(
             r#"
-                SELECT kind, payload_json
+                SELECT kind, payload_json, run_ulid
                 FROM journal_events
                 ORDER BY seq ASC
             "#,
@@ -6105,9 +6320,14 @@ fn load_policy_decision_journal_events(journal_db_path: &PathBuf) -> Result<Vec<
         }
         let payload_json: String =
             row.get(1).context("policy decision journal payload_json should be readable")?;
-        let payload: Value = serde_json::from_str(payload_json.as_str())
+        let run_id: String =
+            row.get(2).context("policy decision journal run_id should be readable")?;
+        let mut payload: Value = serde_json::from_str(payload_json.as_str())
             .context("policy decision journal payload_json must be valid json")?;
         if payload.get("event").and_then(Value::as_str) == Some("policy_decision") {
+            if let Some(map) = payload.as_object_mut() {
+                map.insert("_run_id".to_owned(), Value::String(run_id));
+            }
             events.push(payload);
         }
     }
@@ -6200,6 +6420,27 @@ fn sample_tool_approval_response_request_for_run_with_scope(
             decision_scope_ttl_ms,
         }),
     }
+}
+
+fn sample_tool_approval_response_request_for_session_and_run_with_scope(
+    session_id: &str,
+    run_id: &str,
+    proposal_id: &str,
+    approved: bool,
+    reason: &str,
+    decision_scope: i32,
+    decision_scope_ttl_ms: i64,
+) -> common_v1::RunStreamRequest {
+    let mut request = sample_tool_approval_response_request_for_run_with_scope(
+        run_id,
+        proposal_id,
+        approved,
+        reason,
+        decision_scope,
+        decision_scope_ttl_ms,
+    );
+    request.session_id = Some(common_v1::CanonicalId { ulid: session_id.to_owned() });
+    request
 }
 
 fn admin_get_json(admin_port: u16, path: &str) -> Result<Value> {
