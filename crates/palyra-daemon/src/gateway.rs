@@ -5302,6 +5302,17 @@ enum MemoryPromptFailureMode {
     FallbackToRawInput { warn_message: &'static str },
 }
 
+struct PrepareModelProviderInputRequest<'a> {
+    run_id: &'a str,
+    tape_seq: &'a mut i64,
+    session_id: &'a str,
+    input_text: &'a str,
+    attachments: &'a [common_v1::MessageAttachment],
+    memory_ingest_reason: &'a str,
+    memory_prompt_failure_mode: MemoryPromptFailureMode,
+    channel_for_log: &'a str,
+}
+
 fn build_route_message_outputs(
     reply_text: &str,
     max_payload_bytes: u64,
@@ -6875,17 +6886,19 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 let prepared_provider_input = prepare_model_provider_input(
                     &self.state,
                     &context,
-                    run_id.as_str(),
-                    &mut tape_seq,
-                    session_id.as_str(),
-                    input.text.as_str(),
-                    content.attachments.as_slice(),
-                    "route_message_user_input",
-                    MemoryPromptFailureMode::FallbackToRawInput {
-                        warn_message:
-                            "route message memory auto-inject failed; falling back to raw input",
+                    PrepareModelProviderInputRequest {
+                        run_id: run_id.as_str(),
+                        tape_seq: &mut tape_seq,
+                        session_id: session_id.as_str(),
+                        input_text: input.text.as_str(),
+                        attachments: content.attachments.as_slice(),
+                        memory_ingest_reason: "route_message_user_input",
+                        memory_prompt_failure_mode: MemoryPromptFailureMode::FallbackToRawInput {
+                            warn_message:
+                                "route message memory auto-inject failed; falling back to raw input",
+                        },
+                        channel_for_log: plan.channel.as_str(),
                     },
-                    plan.channel.as_str(),
                 )
                 .await?;
 
@@ -7854,14 +7867,16 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 let prepared_provider_input = match prepare_model_provider_input(
                     &state_for_stream,
                     &context_for_stream,
-                    run_id.as_str(),
-                    &mut tape_seq,
-                    session_id_for_message.as_str(),
-                    input_text.as_str(),
-                    input_content.attachments.as_slice(),
-                    "run_stream_user_input",
-                    MemoryPromptFailureMode::Fail,
-                    context_for_stream.channel.as_deref().unwrap_or("n/a"),
+                    PrepareModelProviderInputRequest {
+                        run_id: run_id.as_str(),
+                        tape_seq: &mut tape_seq,
+                        session_id: session_id_for_message.as_str(),
+                        input_text: input_text.as_str(),
+                        attachments: input_content.attachments.as_slice(),
+                        memory_ingest_reason: "run_stream_user_input",
+                        memory_prompt_failure_mode: MemoryPromptFailureMode::Fail,
+                        channel_for_log: context_for_stream.channel.as_deref().unwrap_or("n/a"),
+                    },
                 )
                 .await
                 {
@@ -10468,15 +10483,18 @@ async fn build_memory_augmented_prompt(
 async fn prepare_model_provider_input(
     runtime_state: &Arc<GatewayRuntimeState>,
     context: &RequestContext,
-    run_id: &str,
-    tape_seq: &mut i64,
-    session_id: &str,
-    input_text: &str,
-    attachments: &[common_v1::MessageAttachment],
-    memory_ingest_reason: &str,
-    memory_prompt_failure_mode: MemoryPromptFailureMode,
-    channel_for_log: &str,
+    request: PrepareModelProviderInputRequest<'_>,
 ) -> Result<PreparedModelProviderInput, Status> {
+    let PrepareModelProviderInputRequest {
+        run_id,
+        tape_seq,
+        session_id,
+        input_text,
+        attachments,
+        memory_ingest_reason,
+        memory_prompt_failure_mode,
+        channel_for_log,
+    } = request;
     ingest_memory_best_effort(
         runtime_state,
         context.principal.as_str(),
@@ -16474,14 +16492,16 @@ summarize incident";
         let prepared = super::prepare_model_provider_input(
             &state,
             &context,
-            "01ARZ3NDEKTSV4RRFFQ69G5FB0",
-            &mut tape_seq,
-            "01ARZ3NDEKTSV4RRFFQ69G5FB1",
-            "summarize screenshot",
-            attachments.as_slice(),
-            "prepare_model_provider_input_test",
-            super::MemoryPromptFailureMode::Fail,
-            "cli",
+            super::PrepareModelProviderInputRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+                tape_seq: &mut tape_seq,
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+                input_text: "summarize screenshot",
+                attachments: attachments.as_slice(),
+                memory_ingest_reason: "prepare_model_provider_input_test",
+                memory_prompt_failure_mode: super::MemoryPromptFailureMode::Fail,
+                channel_for_log: "cli",
+            },
         )
         .await
         .expect("provider input preparation should succeed");
@@ -16542,14 +16562,18 @@ summarize incident";
         let prepared = super::prepare_model_provider_input(
             &state,
             &context,
-            "01ARZ3NDEKTSV4RRFFQ69G5FB4",
-            &mut tape_seq,
-            session_id.as_str(),
-            "rollback checklist",
-            &[],
-            "prepare_model_provider_input_fallback_test",
-            super::MemoryPromptFailureMode::FallbackToRawInput { warn_message: "test fallback" },
-            "cli",
+            super::PrepareModelProviderInputRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB4",
+                tape_seq: &mut tape_seq,
+                session_id: session_id.as_str(),
+                input_text: "rollback checklist",
+                attachments: &[],
+                memory_ingest_reason: "prepare_model_provider_input_fallback_test",
+                memory_prompt_failure_mode: super::MemoryPromptFailureMode::FallbackToRawInput {
+                    warn_message: "test fallback",
+                },
+                channel_for_log: "cli",
+            },
         )
         .await
         .expect("fallback mode should not fail when tape append cannot persist");
@@ -16591,14 +16615,16 @@ summarize incident";
         let result = super::prepare_model_provider_input(
             &state,
             &context,
-            "01ARZ3NDEKTSV4RRFFQ69G5FB7",
-            &mut tape_seq,
-            session_id.as_str(),
-            "rollback checklist",
-            &[],
-            "prepare_model_provider_input_fail_test",
-            super::MemoryPromptFailureMode::Fail,
-            "cli",
+            super::PrepareModelProviderInputRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB7",
+                tape_seq: &mut tape_seq,
+                session_id: session_id.as_str(),
+                input_text: "rollback checklist",
+                attachments: &[],
+                memory_ingest_reason: "prepare_model_provider_input_fail_test",
+                memory_prompt_failure_mode: super::MemoryPromptFailureMode::Fail,
+                channel_for_log: "cli",
+            },
         )
         .await;
         assert!(
