@@ -1581,6 +1581,139 @@ async fn grpc_route_message_reuses_cached_tool_approval_from_run_stream() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_route_message_denies_unknown_skill_before_approval_and_records_event() -> Result<()> {
+    let skill_id = "acme.unknown_skill";
+    let skill_version = "9.9.9";
+    let tool_arguments = serde_json::json!({
+        "skill_id": skill_id,
+        "skill_version": skill_version,
+        "module_wat": "(module (func (export \"run\") (result i32) i32.const 1))",
+        "capabilities": {
+            "http_hosts": ["api.example.com"]
+        }
+    });
+    let response_body = openai_tool_call_response("palyra.plugin.run", &tool_arguments)?;
+    let (openai_base_url, _request_count, server_handle) =
+        spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(200, response_body)])?;
+    let (child, admin_port, grpc_port, journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+            "palyra.plugin.run",
+            2,
+            750,
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+    let mut create_route_agent = tonic::Request::new(gateway_v1::CreateAgentRequest {
+        v: 1,
+        agent_id: "route".to_owned(),
+        display_name: "Route".to_owned(),
+        agent_dir: String::new(),
+        workspace_roots: vec!["workspace".to_owned()],
+        default_model_profile: "gpt-4o-mini".to_owned(),
+        default_tool_allowlist: vec!["palyra.plugin.run".to_owned()],
+        default_skill_allowlist: vec!["acme.route".to_owned()],
+        set_default: true,
+        allow_absolute_paths: false,
+    });
+    authorize_metadata_with_principal(create_route_agent.metadata_mut(), "admin:ops")?;
+    client
+        .create_agent(create_route_agent)
+        .await
+        .context("failed to create route agent before RouteMessage unknown-skill test")?;
+
+    let adapter = FakeChannelAdapter::default();
+    let response =
+        adapter.inject_message(&mut client, "hey @palyra run unknown skill plugin", false).await?;
+    assert!(
+        response.accepted,
+        "route should accept message and return denied tool summary (reason={})",
+        response.decision_reason
+    );
+    let route_run_id = response
+        .run_id
+        .as_ref()
+        .map(|id| id.ulid.clone())
+        .context("route response missing run_id")?;
+    let outbound = response
+        .outputs
+        .first()
+        .cloned()
+        .context("route response should include outbound payload")?;
+    assert!(
+        outbound.text.contains("tool=palyra.plugin.run success=false"),
+        "route output should include denied plugin tool result summary"
+    );
+    assert!(
+        outbound.text.contains("skill execution blocked by security gate"),
+        "route output should include skill gate denial context"
+    );
+    assert!(
+        outbound.text.contains("status=missing"),
+        "route output should explain missing skill status record"
+    );
+    assert!(
+        !outbound.text.to_ascii_lowercase().contains("approval required"),
+        "unknown skills must be denied before approval cache/approval workflow"
+    );
+
+    let status_snapshot = admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;
+    assert_eq!(
+        status_snapshot.pointer("/counters/skill_execution_denied").and_then(Value::as_u64),
+        Some(1),
+        "route skill gate denial should increment skill_execution_denied counter"
+    );
+
+    let policy_events = load_policy_decision_journal_events(&journal_db_path)?;
+    assert!(
+        policy_events.iter().any(|payload| {
+            payload.get("_run_id").and_then(Value::as_str) == Some(route_run_id.as_str())
+                && payload.get("event").and_then(Value::as_str) == Some("policy_decision")
+                && payload.get("tool_name").and_then(Value::as_str) == Some("palyra.plugin.run")
+                && payload.get("kind").and_then(Value::as_str) == Some("deny")
+                && payload.get("approval_required").and_then(Value::as_bool) == Some(false)
+                && payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(|reason| reason.contains("skill execution blocked by security gate"))
+                    .unwrap_or(false)
+                && payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(|reason| reason.contains("status=missing"))
+                    .unwrap_or(false)
+        }),
+        "route unknown-skill denial should persist deny policy decision without approval requirement"
+    );
+    let skill_events = load_skill_execution_denied_journal_events(&journal_db_path)?;
+    assert!(
+        skill_events.iter().any(|payload| {
+            payload.get("_run_id").and_then(Value::as_str) == Some(route_run_id.as_str())
+                && payload.get("event").and_then(Value::as_str) == Some("skill.execution_denied")
+                && payload.get("tool_name").and_then(Value::as_str) == Some("palyra.plugin.run")
+                && payload.get("skill_id").and_then(Value::as_str) == Some(skill_id)
+                && payload.get("skill_version").and_then(Value::as_str) == Some(skill_version)
+                && payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(|reason| reason.contains("skill execution blocked by security gate"))
+                    .unwrap_or(false)
+        }),
+        "route unknown-skill denial should persist skill.execution_denied journal payload"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_gateway_enforces_auth_and_streams_status() -> Result<()> {
     let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);
@@ -6653,6 +6786,46 @@ fn load_policy_decision_journal_events(journal_db_path: &PathBuf) -> Result<Vec<
         let mut payload: Value = serde_json::from_str(payload_json.as_str())
             .context("policy decision journal payload_json must be valid json")?;
         if payload.get("event").and_then(Value::as_str) == Some("policy_decision") {
+            if let Some(map) = payload.as_object_mut() {
+                map.insert("_run_id".to_owned(), Value::String(run_id));
+            }
+            events.push(payload);
+        }
+    }
+    Ok(events)
+}
+
+fn load_skill_execution_denied_journal_events(journal_db_path: &PathBuf) -> Result<Vec<Value>> {
+    let connection = Connection::open(journal_db_path).with_context(|| {
+        format!("failed to open journal sqlite db at {}", journal_db_path.display())
+    })?;
+    let mut statement = connection
+        .prepare(
+            r#"
+                SELECT kind, payload_json, run_ulid
+                FROM journal_events
+                ORDER BY seq ASC
+            "#,
+        )
+        .context("failed to prepare skill execution denied journal query")?;
+    let mut rows =
+        statement.query([]).context("failed to query skill execution denied journal rows")?;
+    let mut events = Vec::new();
+    while let Some(row) =
+        rows.next().context("failed to iterate skill execution denied journal rows")?
+    {
+        let kind: i32 =
+            row.get(0).context("skill execution denied journal kind should be readable")?;
+        if kind != common_v1::journal_event::EventKind::ToolProposed as i32 {
+            continue;
+        }
+        let payload_json: String =
+            row.get(1).context("skill execution denied journal payload_json should be readable")?;
+        let run_id: String =
+            row.get(2).context("skill execution denied journal run_id should be readable")?;
+        let mut payload: Value = serde_json::from_str(payload_json.as_str())
+            .context("skill execution denied journal payload_json must be valid json")?;
+        if payload.get("event").and_then(Value::as_str) == Some("skill.execution_denied") {
             if let Some(map) = payload.as_object_mut() {
                 map.insert("_run_id".to_owned(), Value::String(run_id));
             }
