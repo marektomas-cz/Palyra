@@ -213,6 +213,7 @@ const APPROVAL_PROMPT_TIMEOUT_SECONDS: u32 = 60;
 const APPROVAL_REQUEST_SUMMARY_MAX_BYTES: usize = 1024;
 const TOOL_APPROVAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const SKILL_EXECUTION_DENY_REASON_PREFIX: &str = "skill execution blocked by security gate";
+const MEMORY_SEARCH_TOOL_NAME: &str = "palyra.memory.search";
 const WORKSPACE_PATCH_TOOL_NAME: &str = "palyra.fs.apply_patch";
 const PROCESS_RUNNER_TOOL_NAME: &str = "palyra.process.run";
 const HTTP_FETCH_TOOL_NAME: &str = "palyra.http.fetch";
@@ -6978,83 +6979,30 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                     .tool_execution_attempts
                                     .fetch_add(1, Ordering::Relaxed);
                                 let started_at = Instant::now();
-                                let outcome = if tool_name == "palyra.memory.search" {
-                                    execute_memory_search_tool(
-                                        &self.state,
-                                        context.principal.as_str(),
-                                        context.channel.as_deref(),
-                                        session_id.as_str(),
-                                        proposal_id.as_str(),
-                                        input_json.as_slice(),
-                                    )
-                                    .await
-                                } else if tool_name == HTTP_FETCH_TOOL_NAME {
-                                    execute_http_fetch_tool(
-                                        &self.state,
-                                        proposal_id.as_str(),
-                                        input_json.as_slice(),
-                                    )
-                                    .await
-                                } else if tool_name.starts_with("palyra.browser.") {
-                                    execute_browser_tool(
-                                        &self.state,
-                                        context.principal.as_str(),
-                                        context.channel.as_deref(),
-                                        tool_name.as_str(),
-                                        proposal_id.as_str(),
-                                        input_json.as_slice(),
-                                    )
-                                    .await
-                                } else if tool_name == WORKSPACE_PATCH_TOOL_NAME {
-                                    execute_workspace_patch_tool(
-                                        &self.state,
-                                        context.principal.as_str(),
-                                        context.channel.as_deref(),
-                                        session_id.as_str(),
-                                        proposal_id.as_str(),
-                                        input_json.as_slice(),
-                                    )
-                                    .await
-                                } else {
-                                    execute_tool_call(
-                                        &self.state.config.tool_call,
-                                        proposal_id.as_str(),
-                                        tool_name.as_str(),
-                                        input_json.as_slice(),
-                                    )
-                                    .await
-                                };
-                                if started_at.elapsed().as_millis()
-                                    > TOOL_EXECUTION_LATENCY_BUDGET_MS
-                                {
-                                    warn!(
-                                        run_id = %run_id,
-                                        proposal_id = %proposal_id,
-                                        tool_name = %tool_name,
-                                        execution_duration_ms = started_at.elapsed().as_millis(),
-                                        budget_ms = TOOL_EXECUTION_LATENCY_BUDGET_MS,
-                                        "route message tool execution exceeded latency budget"
-                                    );
-                                }
-                                if !outcome.success {
-                                    self.state
-                                        .counters
-                                        .tool_execution_failures
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                                if outcome.attestation.timed_out {
-                                    self.state
-                                        .counters
-                                        .tool_execution_timeouts
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                                if tool_name == PROCESS_RUNNER_TOOL_NAME {
-                                    record_process_runner_execution_metrics(
-                                        &self.state.counters,
-                                        decision.allowed,
-                                        &outcome,
-                                    );
-                                }
+                                let outcome = execute_tool_with_runtime_dispatch(
+                                    &self.state,
+                                    ToolRuntimeExecutionContext {
+                                        principal: context.principal.as_str(),
+                                        channel: context.channel.as_deref(),
+                                        session_id: session_id.as_str(),
+                                    },
+                                    proposal_id.as_str(),
+                                    tool_name.as_str(),
+                                    input_json.as_slice(),
+                                )
+                                .await;
+                                record_tool_execution_outcome_metrics(
+                                    &self.state,
+                                    ToolExecutionTraceContext {
+                                        run_id: run_id.as_str(),
+                                        proposal_id: proposal_id.as_str(),
+                                        tool_name: tool_name.as_str(),
+                                        execution_surface: "route_message",
+                                    },
+                                    decision.allowed,
+                                    started_at,
+                                    &outcome,
+                                );
                                 outcome
                             } else {
                                 denied_execution_outcome(
@@ -7064,36 +7012,6 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                     decision.reason.as_str(),
                                 )
                             };
-
-                            if tool_name == WORKSPACE_PATCH_TOOL_NAME {
-                                if execution_outcome.success {
-                                    self.state
-                                        .counters
-                                        .patches_applied
-                                        .fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    self.state
-                                        .counters
-                                        .patches_rejected
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                                let (files_touched, rollback_performed) =
-                                    workspace_patch_metrics_from_output(
-                                        execution_outcome.output_json.as_slice(),
-                                    );
-                                if files_touched > 0 {
-                                    self.state
-                                        .counters
-                                        .patch_files_touched
-                                        .fetch_add(files_touched as u64, Ordering::Relaxed);
-                                }
-                                if rollback_performed {
-                                    self.state
-                                        .counters
-                                        .patch_rollbacks
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
                             self.state
                                 .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
                                     run_id: run_id.clone(),
@@ -8799,54 +8717,18 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 let started_at = Instant::now();
                                 let mut cancel_poll = interval(Duration::from_millis(100));
                                 cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
-                                let mut execution_future = Box::pin(async {
-                                    if tool_name == "palyra.memory.search" {
-                                        execute_memory_search_tool(
-                                            &state_for_stream,
-                                            context_for_stream.principal.as_str(),
-                                            context_for_stream.channel.as_deref(),
+                                let mut execution_future =
+                                    Box::pin(execute_tool_with_runtime_dispatch(
+                                        &state_for_stream,
+                                        ToolRuntimeExecutionContext {
+                                            principal: context_for_stream.principal.as_str(),
+                                            channel: context_for_stream.channel.as_deref(),
                                             session_id,
-                                            proposal_id.as_str(),
-                                            input_json.as_slice(),
-                                        )
-                                        .await
-                                    } else if tool_name == HTTP_FETCH_TOOL_NAME {
-                                        execute_http_fetch_tool(
-                                            &state_for_stream,
-                                            proposal_id.as_str(),
-                                            input_json.as_slice(),
-                                        )
-                                        .await
-                                    } else if tool_name.starts_with("palyra.browser.") {
-                                        execute_browser_tool(
-                                            &state_for_stream,
-                                            context_for_stream.principal.as_str(),
-                                            context_for_stream.channel.as_deref(),
-                                            tool_name.as_str(),
-                                            proposal_id.as_str(),
-                                            input_json.as_slice(),
-                                        )
-                                        .await
-                                    } else if tool_name == WORKSPACE_PATCH_TOOL_NAME {
-                                        execute_workspace_patch_tool(
-                                            &state_for_stream,
-                                            context_for_stream.principal.as_str(),
-                                            context_for_stream.channel.as_deref(),
-                                            session_id,
-                                            proposal_id.as_str(),
-                                            input_json.as_slice(),
-                                        )
-                                        .await
-                                    } else {
-                                        execute_tool_call(
-                                            &state_for_stream.config.tool_call,
-                                            proposal_id.as_str(),
-                                            tool_name.as_str(),
-                                            input_json.as_slice(),
-                                        )
-                                        .await
-                                    }
-                                });
+                                        },
+                                        proposal_id.as_str(),
+                                        tool_name.as_str(),
+                                        input_json.as_slice(),
+                                    ));
                                 let outcome = loop {
                                     tokio::select! {
                                         result = &mut execution_future => {
@@ -8921,30 +8803,18 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                         }
                                     }
                                 };
-                                if started_at.elapsed().as_millis()
-                                    > TOOL_EXECUTION_LATENCY_BUDGET_MS
-                                {
-                                    warn!(
-                                        run_id = %run_id,
-                                        proposal_id = %proposal_id,
-                                        tool_name = %tool_name,
-                                        execution_duration_ms = started_at.elapsed().as_millis(),
-                                        budget_ms = TOOL_EXECUTION_LATENCY_BUDGET_MS,
-                                        "tool execution exceeded latency budget"
-                                    );
-                                }
-                                if !outcome.success {
-                                    state_for_stream
-                                        .counters
-                                        .tool_execution_failures
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                                if outcome.attestation.timed_out {
-                                    state_for_stream
-                                        .counters
-                                        .tool_execution_timeouts
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
+                                record_tool_execution_outcome_metrics(
+                                    &state_for_stream,
+                                    ToolExecutionTraceContext {
+                                        run_id: run_id.as_str(),
+                                        proposal_id: proposal_id.as_str(),
+                                        tool_name: tool_name.as_str(),
+                                        execution_surface: "run_stream",
+                                    },
+                                    decision.allowed,
+                                    started_at,
+                                    &outcome,
+                                );
                                 outcome
                             } else {
                                 denied_execution_outcome(
@@ -8954,44 +8824,6 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                     decision.reason.as_str(),
                                 )
                             };
-
-                            if tool_name == WORKSPACE_PATCH_TOOL_NAME {
-                                if execution_outcome.success {
-                                    state_for_stream
-                                        .counters
-                                        .patches_applied
-                                        .fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    state_for_stream
-                                        .counters
-                                        .patches_rejected
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-
-                                let (files_touched, rollback_performed) =
-                                    workspace_patch_metrics_from_output(
-                                        execution_outcome.output_json.as_slice(),
-                                    );
-                                if files_touched > 0 {
-                                    state_for_stream
-                                        .counters
-                                        .patch_files_touched
-                                        .fetch_add(files_touched as u64, Ordering::Relaxed);
-                                }
-                                if rollback_performed {
-                                    state_for_stream
-                                        .counters
-                                        .patch_rollbacks
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                            if tool_name == PROCESS_RUNNER_TOOL_NAME {
-                                record_process_runner_execution_metrics(
-                                    &state_for_stream.counters,
-                                    decision.allowed,
-                                    &execution_outcome,
-                                );
-                            }
 
                             if let Err(error) = send_tool_result_with_tape(
                                 &sender,
@@ -13353,6 +13185,113 @@ async fn execute_workspace_patch_tool(
                 output_json,
                 format!("palyra.fs.apply_patch failed: {error}"),
             )
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ToolRuntimeExecutionContext<'a> {
+    principal: &'a str,
+    channel: Option<&'a str>,
+    session_id: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct ToolExecutionTraceContext<'a> {
+    run_id: &'a str,
+    proposal_id: &'a str,
+    tool_name: &'a str,
+    execution_surface: &'a str,
+}
+
+async fn execute_tool_with_runtime_dispatch(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    proposal_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+) -> ToolExecutionOutcome {
+    if tool_name == MEMORY_SEARCH_TOOL_NAME {
+        execute_memory_search_tool(
+            runtime_state,
+            context.principal,
+            context.channel,
+            context.session_id,
+            proposal_id,
+            input_json,
+        )
+        .await
+    } else if tool_name == HTTP_FETCH_TOOL_NAME {
+        execute_http_fetch_tool(runtime_state, proposal_id, input_json).await
+    } else if tool_name.starts_with("palyra.browser.") {
+        execute_browser_tool(
+            runtime_state,
+            context.principal,
+            context.channel,
+            tool_name,
+            proposal_id,
+            input_json,
+        )
+        .await
+    } else if tool_name == WORKSPACE_PATCH_TOOL_NAME {
+        execute_workspace_patch_tool(
+            runtime_state,
+            context.principal,
+            context.channel,
+            context.session_id,
+            proposal_id,
+            input_json,
+        )
+        .await
+    } else {
+        execute_tool_call(&runtime_state.config.tool_call, proposal_id, tool_name, input_json).await
+    }
+}
+
+fn record_tool_execution_outcome_metrics(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    trace: ToolExecutionTraceContext<'_>,
+    decision_allowed: bool,
+    started_at: Instant,
+    outcome: &ToolExecutionOutcome,
+) {
+    let elapsed_ms = started_at.elapsed().as_millis();
+    if elapsed_ms > TOOL_EXECUTION_LATENCY_BUDGET_MS {
+        warn!(
+            run_id = %trace.run_id,
+            proposal_id = %trace.proposal_id,
+            tool_name = %trace.tool_name,
+            execution_surface = trace.execution_surface,
+            execution_duration_ms = elapsed_ms,
+            budget_ms = TOOL_EXECUTION_LATENCY_BUDGET_MS,
+            "tool execution exceeded latency budget"
+        );
+    }
+    if !outcome.success {
+        runtime_state.counters.tool_execution_failures.fetch_add(1, Ordering::Relaxed);
+    }
+    if outcome.attestation.timed_out {
+        runtime_state.counters.tool_execution_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+    if trace.tool_name == PROCESS_RUNNER_TOOL_NAME {
+        record_process_runner_execution_metrics(&runtime_state.counters, decision_allowed, outcome);
+    }
+    if trace.tool_name == WORKSPACE_PATCH_TOOL_NAME {
+        if outcome.success {
+            runtime_state.counters.patches_applied.fetch_add(1, Ordering::Relaxed);
+        } else {
+            runtime_state.counters.patches_rejected.fetch_add(1, Ordering::Relaxed);
+        }
+        let (files_touched, rollback_performed) =
+            workspace_patch_metrics_from_output(outcome.output_json.as_slice());
+        if files_touched > 0 {
+            runtime_state
+                .counters
+                .patch_files_touched
+                .fetch_add(files_touched as u64, Ordering::Relaxed);
+        }
+        if rollback_performed {
+            runtime_state.counters.patch_rollbacks.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
