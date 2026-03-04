@@ -613,6 +613,7 @@ struct DiscordOnboardingPreflightResponse {
     security_defaults: Vec<String>,
     routing_preview: DiscordRoutingPreview,
     inbound_monitor: DiscordInboundMonitorSummary,
+    inbound_alive: bool,
     warnings: Vec<String>,
     policy_warnings: Vec<String>,
 }
@@ -5139,6 +5140,7 @@ async fn apply_discord_onboarding(
     let inbound_monitor =
         wait_for_discord_inbound_monitor_summary(state, evaluation.plan.connector_id.as_str())
             .await;
+    let inbound_alive = discord_inbound_monitor_is_alive(&inbound_monitor);
     let inbound_monitor_warnings = build_discord_inbound_monitor_warnings(&inbound_monitor);
 
     Ok(json!({
@@ -5155,6 +5157,7 @@ async fn apply_discord_onboarding(
         "status": status,
         "runtime": runtime,
         "inbound_monitor": inbound_monitor,
+        "inbound_alive": inbound_alive,
         "inbound_monitor_warnings": inbound_monitor_warnings,
     }))
 }
@@ -5212,6 +5215,7 @@ async fn evaluate_discord_onboarding_request(
         egress_allowlist: channels::discord_default_egress_allowlist(),
         security_defaults: build_discord_onboarding_security_defaults(&plan),
         routing_preview: build_discord_routing_preview(&plan),
+        inbound_alive: discord_inbound_monitor_is_alive(&inbound_monitor),
         inbound_monitor,
         warnings,
         policy_warnings,
@@ -5432,7 +5436,7 @@ async fn wait_for_discord_inbound_monitor_summary(
     let timeout = Duration::from_millis(DISCORD_ONBOARDING_MONITOR_WAIT_TIMEOUT_MS);
     loop {
         let summary = load_discord_inbound_monitor_summary(state, connector_id);
-        if summary.gateway_connected || summary.recent_inbound || started.elapsed() >= timeout {
+        if discord_inbound_monitor_is_alive(&summary) || started.elapsed() >= timeout {
             return summary;
         }
         tokio::time::sleep(Duration::from_millis(DISCORD_ONBOARDING_MONITOR_WAIT_POLL_MS)).await;
@@ -5505,6 +5509,10 @@ fn build_discord_inbound_monitor_warnings(summary: &DiscordInboundMonitorSummary
         );
     }
     warnings
+}
+
+fn discord_inbound_monitor_is_alive(summary: &DiscordInboundMonitorSummary) -> bool {
+    summary.connector_registered && summary.gateway_connected && summary.recent_inbound
 }
 
 fn evaluate_discord_policy_warnings(state: &AppState, plan: &DiscordOnboardingPlan) -> Vec<String> {
@@ -7964,6 +7972,10 @@ mod tests {
         assert!(summary.connector_registered, "connector registration should be preserved");
         assert!(summary.gateway_connected, "gateway_connected should parse from runtime snapshot");
         assert!(summary.recent_inbound, "fresh inbound event should be marked as recent");
+        assert!(
+            super::discord_inbound_monitor_is_alive(&summary),
+            "connected monitor with recent inbound should be marked alive"
+        );
         assert_eq!(summary.last_event_type.as_deref(), Some("MESSAGE_CREATE"));
     }
 
@@ -7977,8 +7989,35 @@ mod tests {
         let summary = summarize_discord_inbound_monitor(true, Some(&runtime));
         let warnings = build_discord_inbound_monitor_warnings(&summary);
         assert!(
+            !super::discord_inbound_monitor_is_alive(&summary),
+            "disconnected monitor must not be marked alive"
+        );
+        assert!(
             warnings.iter().any(|warning| warning.contains("not connected")),
             "unconnected monitor should emit actionable warning"
+        );
+    }
+
+    #[test]
+    fn inbound_monitor_is_not_alive_when_last_event_is_stale() {
+        let now = super::unix_ms_now().expect("current unix ms should resolve");
+        let runtime = json!({
+            "inbound": {
+                "gateway_connected": true,
+                "last_inbound_unix_ms": now - (super::DISCORD_ONBOARDING_INBOUND_RECENT_WINDOW_MS + 1_000),
+                "last_event_type": "MESSAGE_CREATE"
+            }
+        });
+        let summary = summarize_discord_inbound_monitor(true, Some(&runtime));
+        assert!(!summary.recent_inbound, "stale inbound timestamp should not be recent");
+        assert!(
+            !super::discord_inbound_monitor_is_alive(&summary),
+            "connected monitor with stale inbound should not be marked alive"
+        );
+        let warnings = build_discord_inbound_monitor_warnings(&summary);
+        assert!(
+            warnings.iter().any(|warning| warning.contains("stale")),
+            "stale inbound should surface actionable warning"
         );
     }
 
