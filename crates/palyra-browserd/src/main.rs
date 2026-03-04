@@ -3880,7 +3880,10 @@ fn configure_chromium_tab(
 }
 
 fn chromium_new_tab_error_is_retryable(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("event waited for never came")
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("event waited for never came")
+        || (normalized.contains("websocket protocol error")
+            && normalized.contains("sending after closing is not allowed"))
 }
 
 fn create_configured_chromium_tab_with_retry(
@@ -7482,9 +7485,9 @@ async fn fetch_download_artifact(
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_v1, constant_time_eq_bytes, default_browserd_state_dir_from_env,
-        enforce_non_loopback_bind_auth, navigate_with_guards, parse_daemon_bind_socket,
-        persisted_snapshot_hash, persisted_snapshot_legacy_hash,
+        browser_v1, chromium_new_tab_error_is_retryable, constant_time_eq_bytes,
+        default_browserd_state_dir_from_env, enforce_non_loopback_bind_auth, navigate_with_guards,
+        parse_daemon_bind_socket, persisted_snapshot_hash, persisted_snapshot_legacy_hash,
         record_chromium_remote_ip_incident, reset_dns_validation_tracking_for_tests,
         store_dns_nxdomain_cache, store_dns_resolution_cache, update_profile_state_metadata,
         validate_restored_snapshot_against_profile, validate_target_url_blocking, Args,
@@ -7827,6 +7830,28 @@ mod tests {
         assert!(
             !constant_time_eq_bytes(b"Bearer short", b"Bearer much-longer"),
             "different-length tokens should compare as non-equal"
+        );
+    }
+
+    #[test]
+    fn chromium_new_tab_retryable_error_classifier_matches_transient_protocol_races() {
+        assert!(
+            chromium_new_tab_error_is_retryable(
+                "Event waited for never came: Target.targetCreated"
+            ),
+            "target-created startup race should be retryable"
+        );
+        assert!(
+            chromium_new_tab_error_is_retryable(
+                "WebSocket protocol error: Sending after closing is not allowed"
+            ),
+            "transient websocket close race should be retryable"
+        );
+        assert!(
+            !chromium_new_tab_error_is_retryable(
+                "browser.new_tab denied by policy: disallowed target origin"
+            ),
+            "non-transient policy failures must remain non-retryable"
         );
     }
 
