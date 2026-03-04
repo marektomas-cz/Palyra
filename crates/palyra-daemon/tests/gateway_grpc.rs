@@ -935,7 +935,7 @@ async fn grpc_route_message_executes_allowlisted_memory_search_tool() -> Result<
     )?;
     let (openai_base_url, request_count, server_handle) =
         spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(200, response_body)])?;
-    let (child, admin_port, grpc_port, _journal_db_path, config_path) =
+    let (child, admin_port, grpc_port, journal_db_path, config_path) =
         spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy(
             openai_base_url.as_str(),
             OPENAI_API_KEY,
@@ -1020,6 +1020,17 @@ async fn grpc_route_message_executes_allowlisted_memory_search_tool() -> Result<
         request_count.load(Ordering::Relaxed),
         1,
         "route message tool execution should use exactly one model-provider call"
+    );
+    let policy_events = load_policy_decision_journal_events(&journal_db_path)?;
+    assert!(
+        policy_events.iter().any(|payload| {
+            payload.get("tool_name").and_then(Value::as_str) == Some("palyra.memory.search")
+                && payload.get("kind").and_then(Value::as_str) == Some("allow")
+                && payload.get("event").and_then(Value::as_str) == Some("policy_decision")
+                && payload.get("approval_required").and_then(Value::as_bool) == Some(false)
+                && payload.get("policy_enforced").and_then(Value::as_bool) == Some(true)
+        }),
+        "route tool flow should persist allowed policy decision journal metadata"
     );
 
     server_handle.join().expect("scripted openai server thread should exit");
@@ -6066,6 +6077,37 @@ fn load_message_router_journal_events(journal_db_path: &PathBuf) -> Result<Vec<V
             .and_then(Value::as_str)
             .is_some_and(|event| event.starts_with("message."))
         {
+            events.push(payload);
+        }
+    }
+    Ok(events)
+}
+
+fn load_policy_decision_journal_events(journal_db_path: &PathBuf) -> Result<Vec<Value>> {
+    let connection = Connection::open(journal_db_path).with_context(|| {
+        format!("failed to open journal sqlite db at {}", journal_db_path.display())
+    })?;
+    let mut statement = connection
+        .prepare(
+            r#"
+                SELECT kind, payload_json
+                FROM journal_events
+                ORDER BY seq ASC
+            "#,
+        )
+        .context("failed to prepare policy decision journal query")?;
+    let mut rows = statement.query([]).context("failed to query policy decision journal rows")?;
+    let mut events = Vec::new();
+    while let Some(row) = rows.next().context("failed to iterate policy decision journal rows")? {
+        let kind: i32 = row.get(0).context("policy decision journal kind should be readable")?;
+        if kind != common_v1::journal_event::EventKind::ToolProposed as i32 {
+            continue;
+        }
+        let payload_json: String =
+            row.get(1).context("policy decision journal payload_json should be readable")?;
+        let payload: Value = serde_json::from_str(payload_json.as_str())
+            .context("policy decision journal payload_json must be valid json")?;
+        if payload.get("event").and_then(Value::as_str) == Some("policy_decision") {
             events.push(payload);
         }
     }

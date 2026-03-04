@@ -6937,41 +6937,37 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 tool_name.as_str(),
                                 false,
                             );
-                            if decision.allowed {
-                                self.state
-                                    .counters
-                                    .tool_decisions_allowed
-                                    .fetch_add(1, Ordering::Relaxed);
-                            } else {
-                                self.state
-                                    .counters
-                                    .tool_decisions_denied
-                                    .fetch_add(1, Ordering::Relaxed);
-                                self.state.record_denied();
-                                if tool_name == PROCESS_RUNNER_TOOL_NAME {
-                                    self.state
-                                        .counters
-                                        .sandbox_policy_denies
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                            self.state
-                                .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
-                                    run_id: run_id.clone(),
-                                    seq: tape_seq,
-                                    event_type: "tool.decision".to_owned(),
-                                    payload_json: json!({
-                                        "proposal_id": proposal_id.clone(),
-                                        "tool_name": tool_name.clone(),
-                                        "allowed": decision.allowed,
-                                        "reason": decision.reason.clone(),
-                                        "approval_required": decision.approval_required,
-                                        "policy_enforced": decision.policy_enforced,
-                                    })
-                                    .to_string(),
-                                })
-                                .await?;
-                            tape_seq = tape_seq.saturating_add(1);
+                            record_tool_decision_metrics(
+                                &self.state,
+                                tool_name.as_str(),
+                                decision.allowed,
+                            );
+                            append_tool_decision_tape_event(
+                                &self.state,
+                                run_id.as_str(),
+                                &mut tape_seq,
+                                "tool.decision",
+                                proposal_id.as_str(),
+                                tool_name.as_str(),
+                                decision.allowed,
+                                decision.reason.as_str(),
+                                decision.approval_required,
+                                decision.policy_enforced,
+                            )
+                            .await?;
+                            record_policy_decision_journal_event(
+                                &self.state,
+                                &context,
+                                session_id.as_str(),
+                                run_id.as_str(),
+                                proposal_id.as_str(),
+                                tool_name.as_str(),
+                                decision.allowed,
+                                decision.reason.as_str(),
+                                decision.approval_required,
+                                decision.policy_enforced,
+                            )
+                            .await?;
 
                             let execution_outcome = if decision.allowed {
                                 self.state
@@ -8585,24 +8581,11 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                     approval_outcome.as_ref(),
                                 )
                             };
-                            if decision.allowed {
-                                state_for_stream
-                                    .counters
-                                    .tool_decisions_allowed
-                                    .fetch_add(1, Ordering::Relaxed);
-                            } else {
-                                state_for_stream
-                                    .counters
-                                    .tool_decisions_denied
-                                    .fetch_add(1, Ordering::Relaxed);
-                                state_for_stream.record_denied();
-                                if tool_name == PROCESS_RUNNER_TOOL_NAME {
-                                    state_for_stream
-                                        .counters
-                                        .sandbox_policy_denies
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
+                            record_tool_decision_metrics(
+                                &state_for_stream,
+                                tool_name.as_str(),
+                                decision.allowed,
+                            );
 
                             if let Err(error) = send_tool_decision_with_tape(
                                 &sender,
@@ -8610,6 +8593,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 run_id.as_str(),
                                 &mut tape_seq,
                                 proposal_id.as_str(),
+                                tool_name.as_str(),
                                 decision.allowed,
                                 decision.reason.as_str(),
                                 decision.approval_required,
@@ -13296,6 +13280,56 @@ fn record_tool_execution_outcome_metrics(
     }
 }
 
+fn record_tool_decision_metrics(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    tool_name: &str,
+    decision_allowed: bool,
+) {
+    if decision_allowed {
+        runtime_state.counters.tool_decisions_allowed.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    runtime_state.counters.tool_decisions_denied.fetch_add(1, Ordering::Relaxed);
+    runtime_state.record_denied();
+    if tool_name == PROCESS_RUNNER_TOOL_NAME {
+        runtime_state.counters.sandbox_policy_denies.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn append_tool_decision_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    event_type: &str,
+    proposal_id: &str,
+    tool_name: &str,
+    allowed: bool,
+    reason: &str,
+    approval_required: bool,
+    policy_enforced: bool,
+) -> Result<(), Status> {
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: event_type.to_owned(),
+            payload_json: tool_decision_tape_payload(
+                proposal_id,
+                tool_name,
+                allowed,
+                reason,
+                approval_required,
+                policy_enforced,
+            ),
+        })
+        .await?;
+    *tape_seq += 1;
+    Ok(())
+}
+
 fn extend_patch_string_defaults(defaults: &mut Vec<String>, additions: Vec<String>) {
     for addition in additions {
         if !defaults.iter().any(|existing| existing == &addition) {
@@ -13878,6 +13912,7 @@ async fn send_tool_decision_with_tape(
     run_id: &str,
     tape_seq: &mut i64,
     proposal_id: &str,
+    tool_name: &str,
     allowed: bool,
     reason: &str,
     approval_required: bool,
@@ -13895,22 +13930,19 @@ async fn send_tool_decision_with_tape(
         .send(Ok(event))
         .await
         .map_err(|_| Status::cancelled("run stream response channel closed"))?;
-    runtime_state
-        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
-            run_id: run_id.to_owned(),
-            seq: *tape_seq,
-            event_type: "tool_decision".to_owned(),
-            payload_json: tool_decision_tape_payload(
-                proposal_id,
-                allowed,
-                reason,
-                approval_required,
-                policy_enforced,
-            ),
-        })
-        .await?;
-    *tape_seq += 1;
-    Ok(())
+    append_tool_decision_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        "tool_decision",
+        proposal_id,
+        tool_name,
+        allowed,
+        reason,
+        approval_required,
+        policy_enforced,
+    )
+    .await
 }
 
 #[allow(clippy::result_large_err)]
@@ -14100,6 +14132,7 @@ fn tool_approval_response_tape_payload(
 
 fn tool_decision_tape_payload(
     proposal_id: &str,
+    tool_name: &str,
     allowed: bool,
     reason: &str,
     approval_required: bool,
@@ -14107,6 +14140,7 @@ fn tool_decision_tape_payload(
 ) -> String {
     json!({
         "proposal_id": proposal_id,
+        "tool_name": tool_name,
         "kind": if allowed { "allow" } else { "deny" },
         "reason": reason,
         "approval_required": approval_required,
