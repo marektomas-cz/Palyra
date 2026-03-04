@@ -870,20 +870,25 @@ fn char_len(text: &str) -> usize {
 mod tests {
     use std::{
         collections::VecDeque,
+        convert::Infallible,
+        pin::Pin,
         sync::{Arc, Mutex},
+        task::{Context, Poll},
+        time::Duration,
     };
 
     use super::{
         chunk_discord_text, decode_gateway_binary_payload, deterministic_inbound_envelope_id,
-        normalize_discord_message_create, normalize_gateway_ws_url, parse_fence_line,
-        DiscordAdapterConfig, DiscordConnectorAdapter, DiscordCredential,
-        DiscordCredentialResolver, DiscordGatewayInflater, DiscordTransport,
-        DiscordTransportResponse, OpenFence,
+        handle_gateway_envelope, normalize_discord_message_create, normalize_gateway_ws_url,
+        parse_fence_line, DiscordAdapterConfig, DiscordConnectorAdapter, DiscordCredential,
+        DiscordCredentialResolver, DiscordGatewayEnvelope, DiscordGatewayInflater,
+        DiscordGatewayMonitorContext, DiscordGatewayResumeState, DiscordRuntimeState,
+        DiscordTransport, DiscordTransportResponse, OpenFence,
     };
     use crate::{
         protocol::{
-            AttachmentKind, AttachmentRef, ConnectorKind, DeliveryOutcome, OutboundMessageRequest,
-            RetryClass,
+            AttachmentKind, AttachmentRef, ConnectorKind, DeliveryOutcome, InboundMessageEvent,
+            OutboundMessageRequest, RetryClass,
         },
         storage::ConnectorInstanceRecord,
         supervisor::ConnectorAdapter,
@@ -891,6 +896,9 @@ mod tests {
     use async_trait::async_trait;
     use reqwest::Url;
     use serde_json::{json, Value};
+    use tokio::sync::mpsc;
+    use tokio::time::{interval, MissedTickBehavior};
+    use tokio_tungstenite::tungstenite::Message;
 
     #[derive(Debug, Default)]
     struct StaticCredentialResolver {
@@ -963,6 +971,62 @@ mod tests {
 
         fn captured(&self) -> Vec<CapturedCall> {
             self.captured.lock().expect("captured lock should not be poisoned").clone()
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingMessageSink {
+        sent: Arc<Mutex<Vec<Message>>>,
+    }
+
+    impl RecordingMessageSink {
+        fn sent_payloads(&self) -> Vec<Value> {
+            self.sent
+                .lock()
+                .expect("recording sink lock should not be poisoned")
+                .iter()
+                .filter_map(|message| {
+                    if let Message::Text(payload) = message {
+                        serde_json::from_str::<Value>(payload.as_ref()).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+    }
+
+    impl futures::Sink<Message> for RecordingMessageSink {
+        type Error = Infallible;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.get_mut()
+                .sent
+                .lock()
+                .expect("recording sink lock should not be poisoned")
+                .push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
         }
     }
 
@@ -1103,6 +1167,223 @@ mod tests {
             headers: Default::default(),
             body: "{\"id\":\"bot-1\",\"username\":\"palyra\"}".to_owned(),
         }
+    }
+
+    fn sample_monitor_context(
+        transport: Arc<FakeTransport>,
+        sender: mpsc::Sender<InboundMessageEvent>,
+    ) -> (DiscordGatewayMonitorContext, Arc<Mutex<DiscordRuntimeState>>) {
+        let runtime_state = Arc::new(Mutex::new(DiscordRuntimeState::default()));
+        let context = DiscordGatewayMonitorContext {
+            connector_id: "discord:default".to_owned(),
+            instance: sample_instance(),
+            config: DiscordAdapterConfig::default(),
+            transport,
+            credential_resolver: Arc::new(StaticCredentialResolver {
+                credential: Some(DiscordCredential {
+                    token: "super-secret-token".to_owned(),
+                    source: "test-resolver".to_owned(),
+                }),
+            }),
+            runtime_state: Arc::clone(&runtime_state),
+            sender,
+        };
+        (context, runtime_state)
+    }
+
+    #[tokio::test]
+    async fn gateway_envelope_flow_identifies_then_resumes_after_reconnect() {
+        let transport = Arc::new(FakeTransport::default());
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (context, runtime_state) = sample_monitor_context(transport, sender);
+        let mut resume_state = DiscordGatewayResumeState::default();
+        let mut heartbeat = interval(Duration::from_millis(1_000));
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut hello_received = false;
+        let mut sink = RecordingMessageSink::default();
+
+        handle_gateway_envelope(
+            &mut sink,
+            DiscordGatewayEnvelope {
+                op: 10,
+                data: json!({ "heartbeat_interval": 5000 }),
+                seq: None,
+                event_type: None,
+            },
+            &context,
+            "super-secret-token",
+            &mut resume_state,
+            &mut heartbeat,
+            &mut hello_received,
+        )
+        .await
+        .expect("hello envelope should be handled");
+        assert!(hello_received, "hello should activate heartbeat loop");
+        let sent_payloads = sink.sent_payloads();
+        assert_eq!(sent_payloads.len(), 1, "hello should emit one gateway op");
+        assert_eq!(sent_payloads[0].get("op").and_then(Value::as_i64), Some(2));
+
+        handle_gateway_envelope(
+            &mut sink,
+            DiscordGatewayEnvelope {
+                op: 0,
+                data: json!({
+                    "session_id": "session-1",
+                    "user": { "id": "bot-1" },
+                }),
+                seq: Some(41),
+                event_type: Some("READY".to_owned()),
+            },
+            &context,
+            "super-secret-token",
+            &mut resume_state,
+            &mut heartbeat,
+            &mut hello_received,
+        )
+        .await
+        .expect("ready envelope should be handled");
+        assert_eq!(resume_state.session_id.as_deref(), Some("session-1"));
+        assert_eq!(resume_state.bot_user_id.as_deref(), Some("bot-1"));
+        assert_eq!(resume_state.seq, Some(41));
+
+        handle_gateway_envelope(
+            &mut sink,
+            DiscordGatewayEnvelope {
+                op: 0,
+                data: json!({
+                    "id": "175928847299117063",
+                    "channel_id": "thread-123",
+                    "guild_id": "guild-1",
+                    "content": "deploy status?",
+                    "author": {
+                        "id": "user-7",
+                        "username": "operator",
+                    },
+                    "member": {
+                        "nick": "Ops",
+                    },
+                    "message_reference": {
+                        "channel_id": "parent-1",
+                    },
+                }),
+                seq: Some(42),
+                event_type: Some("MESSAGE_CREATE".to_owned()),
+            },
+            &context,
+            "super-secret-token",
+            &mut resume_state,
+            &mut heartbeat,
+            &mut hello_received,
+        )
+        .await
+        .expect("message create envelope should be handled");
+        let inbound = receiver.try_recv().expect("message create should emit one inbound event");
+        assert_eq!(inbound.connector_id, "discord:default");
+        assert_eq!(inbound.conversation_id, "thread-123");
+        assert_eq!(inbound.adapter_message_id.as_deref(), Some("175928847299117063"));
+        assert_eq!(inbound.adapter_thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(inbound.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(inbound.sender_id, "user-7");
+        assert_eq!(inbound.sender_display.as_deref(), Some("Ops"));
+        assert_eq!(
+            inbound.envelope_id,
+            deterministic_inbound_envelope_id("discord:default", "175928847299117063"),
+            "inbound monitor should keep deterministic dedupe envelope IDs across reconnects"
+        );
+        assert!(
+            runtime_state
+                .lock()
+                .expect("runtime state lock should not be poisoned")
+                .last_inbound_unix_ms
+                .is_some(),
+            "message create should update inbound runtime heartbeat"
+        );
+
+        let reconnect_error = handle_gateway_envelope(
+            &mut sink,
+            DiscordGatewayEnvelope { op: 7, data: Value::Null, seq: None, event_type: None },
+            &context,
+            "super-secret-token",
+            &mut resume_state,
+            &mut heartbeat,
+            &mut hello_received,
+        )
+        .await
+        .expect_err("reconnect opcode should force session restart");
+        assert!(
+            reconnect_error.to_string().contains("requested reconnect"),
+            "reconnect opcode should return explicit reconnect error"
+        );
+
+        handle_gateway_envelope(
+            &mut sink,
+            DiscordGatewayEnvelope {
+                op: 10,
+                data: json!({ "heartbeat_interval": 6000 }),
+                seq: None,
+                event_type: None,
+            },
+            &context,
+            "super-secret-token",
+            &mut resume_state,
+            &mut heartbeat,
+            &mut hello_received,
+        )
+        .await
+        .expect("follow-up hello should trigger resume");
+        let sent_payloads = sink.sent_payloads();
+        assert_eq!(
+            sent_payloads.len(),
+            2,
+            "reconnect flow should emit identify then resume payloads"
+        );
+        let resume_payload =
+            sent_payloads[1].get("d").cloned().expect("resume op should include payload");
+        assert_eq!(sent_payloads[1].get("op").and_then(Value::as_i64), Some(6));
+        assert_eq!(resume_payload.get("session_id").and_then(Value::as_str), Some("session-1"));
+        assert_eq!(resume_payload.get("seq").and_then(Value::as_i64), Some(42));
+    }
+
+    #[tokio::test]
+    async fn gateway_envelope_invalid_non_resumable_session_clears_resume_cursor() {
+        let transport = Arc::new(FakeTransport::default());
+        let (sender, _receiver) = mpsc::channel(1);
+        let (context, _runtime_state) = sample_monitor_context(transport, sender);
+        let mut resume_state = DiscordGatewayResumeState {
+            session_id: Some("session-1".to_owned()),
+            seq: Some(91),
+            bot_user_id: Some("bot-1".to_owned()),
+        };
+        let mut heartbeat = interval(Duration::from_millis(1_000));
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut hello_received = true;
+        let mut sink = RecordingMessageSink::default();
+
+        let invalid_error = handle_gateway_envelope(
+            &mut sink,
+            DiscordGatewayEnvelope {
+                op: 9,
+                data: Value::Bool(false),
+                seq: Some(92),
+                event_type: None,
+            },
+            &context,
+            "super-secret-token",
+            &mut resume_state,
+            &mut heartbeat,
+            &mut hello_received,
+        )
+        .await
+        .expect_err("invalid non-resumable session should fail the current session");
+        assert!(
+            invalid_error.to_string().contains("invalidated session"),
+            "invalid session opcode should surface a stable error message"
+        );
+        assert!(
+            resume_state.session_id.is_none() && resume_state.seq.is_none(),
+            "non-resumable invalid session should clear resume cursor"
+        );
+        assert_eq!(resume_state.bot_user_id.as_deref(), Some("bot-1"));
     }
 
     #[tokio::test]
@@ -2547,133 +2828,160 @@ async fn run_discord_gateway_session(
                 };
 
                 let envelope = parse_gateway_envelope(raw_text.as_str())?;
-                if let Some(seq) = envelope.seq {
-                    resume_state.seq = Some(seq);
-                }
-                if let Some(event_type) = envelope.event_type.as_deref() {
-                    if let Ok(mut state) = context.runtime_state.lock() {
-                        state.gateway_last_event_type = Some(event_type.to_owned());
-                    }
-                }
-
-                match envelope.op {
-                    10 => {
-                        let heartbeat_interval_ms = envelope
-                            .data
-                            .get("heartbeat_interval")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(DISCORD_GATEWAY_HEARTBEAT_FALLBACK_MS)
-                            .max(250);
-                        heartbeat = interval(Duration::from_millis(heartbeat_interval_ms));
-                        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                        hello_received = true;
-
-                        if let (Some(session_id), Some(seq)) =
-                            (resume_state.session_id.clone(), resume_state.seq)
-                        {
-                            send_gateway_op(
-                                &mut sink,
-                                6,
-                                json!({
-                                    "token": credential.token,
-                                    "session_id": session_id,
-                                    "seq": seq,
-                                }),
-                            )
-                            .await?;
-                        } else {
-                            send_gateway_op(
-                                &mut sink,
-                                2,
-                                json!({
-                                    "token": credential.token,
-                                    "intents": DISCORD_GATEWAY_INTENTS,
-                                    "properties": {
-                                        "os": std::env::consts::OS,
-                                        "browser": "palyra",
-                                        "device": "palyra",
-                                    },
-                                }),
-                            )
-                            .await?;
-                        }
-                    }
-                    11 => {}
-                    1 => {
-                        let heartbeat_payload = resume_state.seq.map(Value::from).unwrap_or(Value::Null);
-                        send_gateway_op(&mut sink, 1, heartbeat_payload).await?;
-                    }
-                    7 => {
-                        return Err(ConnectorAdapterError::Backend(
-                            "discord gateway requested reconnect".to_owned(),
-                        ));
-                    }
-                    9 => {
-                        let resumable = envelope.data.as_bool().unwrap_or(false);
-                        if !resumable {
-                            resume_state.session_id = None;
-                            resume_state.seq = None;
-                        }
-                        return Err(ConnectorAdapterError::Backend(
-                            "discord gateway invalidated session".to_owned(),
-                        ));
-                    }
-                    0 => {
-                        let event_type = envelope.event_type.unwrap_or_default();
-                        match event_type.as_str() {
-                            "READY" => {
-                                resume_state.session_id = envelope
-                                    .data
-                                    .get("session_id")
-                                    .and_then(Value::as_str)
-                                    .map(ToOwned::to_owned);
-                                resume_state.bot_user_id = envelope
-                                    .data
-                                    .get("user")
-                                    .and_then(|value| value.get("id"))
-                                    .and_then(Value::as_str)
-                                    .map(ToOwned::to_owned);
-                            }
-                            "MESSAGE_CREATE" => {
-                                let inbound = normalize_discord_message_create(
-                                    context.connector_id.as_str(),
-                                    &envelope.data,
-                                    resume_state.bot_user_id.as_deref(),
-                                );
-                                if let Some(event) = inbound {
-                                    if let Ok(mut state) = context.runtime_state.lock() {
-                                        state.last_inbound_unix_ms = Some(event.received_at_unix_ms);
-                                    }
-                                    match context.sender.try_send(event) {
-                                        Ok(()) => {}
-                                        Err(mpsc::error::TrySendError::Full(_)) => {
-                                            if let Ok(mut state) = context.runtime_state.lock() {
-                                                state.last_error = Some(
-                                                    "discord inbound queue full; dropping event".to_owned(),
-                                                );
-                                            }
-                                        }
-                                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                                            return Err(ConnectorAdapterError::Backend(
-                                                "discord inbound queue closed".to_owned(),
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
+                handle_gateway_envelope(
+                    &mut sink,
+                    envelope,
+                    context,
+                    credential.token.as_str(),
+                    resume_state,
+                    &mut heartbeat,
+                    &mut hello_received,
+                )
+                .await?;
             }
         }
     }
 }
 
+async fn handle_gateway_envelope<S>(
+    sink: &mut S,
+    envelope: DiscordGatewayEnvelope,
+    context: &DiscordGatewayMonitorContext,
+    bot_token: &str,
+    resume_state: &mut DiscordGatewayResumeState,
+    heartbeat: &mut tokio::time::Interval,
+    hello_received: &mut bool,
+) -> Result<(), ConnectorAdapterError>
+where
+    S: futures::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    if let Some(seq) = envelope.seq {
+        resume_state.seq = Some(seq);
+    }
+    if let Some(event_type) = envelope.event_type.as_deref() {
+        if let Ok(mut state) = context.runtime_state.lock() {
+            state.gateway_last_event_type = Some(event_type.to_owned());
+        }
+    }
+
+    match envelope.op {
+        10 => {
+            let heartbeat_interval_ms = envelope
+                .data
+                .get("heartbeat_interval")
+                .and_then(Value::as_u64)
+                .unwrap_or(DISCORD_GATEWAY_HEARTBEAT_FALLBACK_MS)
+                .max(250);
+            *heartbeat = interval(Duration::from_millis(heartbeat_interval_ms));
+            heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            *hello_received = true;
+
+            if let (Some(session_id), Some(seq)) =
+                (resume_state.session_id.clone(), resume_state.seq)
+            {
+                send_gateway_op(
+                    sink,
+                    6,
+                    json!({
+                        "token": bot_token,
+                        "session_id": session_id,
+                        "seq": seq,
+                    }),
+                )
+                .await?;
+            } else {
+                send_gateway_op(
+                    sink,
+                    2,
+                    json!({
+                        "token": bot_token,
+                        "intents": DISCORD_GATEWAY_INTENTS,
+                        "properties": {
+                            "os": std::env::consts::OS,
+                            "browser": "palyra",
+                            "device": "palyra",
+                        },
+                    }),
+                )
+                .await?;
+            }
+        }
+        11 => {}
+        1 => {
+            let heartbeat_payload = resume_state.seq.map(Value::from).unwrap_or(Value::Null);
+            send_gateway_op(sink, 1, heartbeat_payload).await?;
+        }
+        7 => {
+            return Err(ConnectorAdapterError::Backend(
+                "discord gateway requested reconnect".to_owned(),
+            ));
+        }
+        9 => {
+            let resumable = envelope.data.as_bool().unwrap_or(false);
+            if !resumable {
+                resume_state.session_id = None;
+                resume_state.seq = None;
+            }
+            return Err(ConnectorAdapterError::Backend(
+                "discord gateway invalidated session".to_owned(),
+            ));
+        }
+        0 => {
+            let event_type = envelope.event_type.unwrap_or_default();
+            match event_type.as_str() {
+                "READY" => {
+                    resume_state.session_id = envelope
+                        .data
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                    resume_state.bot_user_id = envelope
+                        .data
+                        .get("user")
+                        .and_then(|value| value.get("id"))
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                }
+                "MESSAGE_CREATE" => {
+                    let inbound = normalize_discord_message_create(
+                        context.connector_id.as_str(),
+                        &envelope.data,
+                        resume_state.bot_user_id.as_deref(),
+                    );
+                    if let Some(event) = inbound {
+                        if let Ok(mut state) = context.runtime_state.lock() {
+                            state.last_inbound_unix_ms = Some(event.received_at_unix_ms);
+                        }
+                        match context.sender.try_send(event) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                if let Ok(mut state) = context.runtime_state.lock() {
+                                    state.last_error = Some(
+                                        "discord inbound queue full; dropping event".to_owned(),
+                                    );
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                return Err(ConnectorAdapterError::Backend(
+                                    "discord inbound queue closed".to_owned(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 async fn send_gateway_op<S>(sink: &mut S, op: i64, data: Value) -> Result<(), ConnectorAdapterError>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
 {
     let payload = json!({
         "op": op,
