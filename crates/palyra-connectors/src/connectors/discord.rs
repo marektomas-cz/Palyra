@@ -2708,14 +2708,12 @@ fn decode_gateway_binary_payload(
         return Ok(None);
     }
 
-    let mut decoded = Vec::with_capacity(
-        inflater
-            .compressed_buffer
-            .len()
-            .saturating_mul(2)
-            .min(DISCORD_GATEWAY_MAX_DECOMPRESSED_FRAME_BYTES)
-            .max(1024),
-    );
+    let estimated_capacity = inflater
+        .compressed_buffer
+        .len()
+        .saturating_mul(2)
+        .clamp(1024, DISCORD_GATEWAY_MAX_DECOMPRESSED_FRAME_BYTES);
+    let mut decoded = Vec::with_capacity(estimated_capacity);
     if let Err(error) = inflater.decompressor.decompress_vec(
         inflater.compressed_buffer.as_slice(),
         &mut decoded,
