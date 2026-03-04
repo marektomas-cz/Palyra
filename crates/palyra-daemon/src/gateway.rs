@@ -373,6 +373,12 @@ struct ToolProposalSecurityEvaluation {
     proposal_approval_required: bool,
 }
 
+#[derive(Debug, Clone)]
+struct RunStreamToolProposalPreparation {
+    decision: ToolDecision,
+    resolved_session_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CanvasAssetRecord {
     content_type: String,
@@ -8172,163 +8178,40 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             }
                         }
                         ProviderEvent::ToolProposal { proposal_id, tool_name, input_json } => {
-                            let ToolProposalSecurityEvaluation {
-                                skill_context,
-                                skill_gate_decision,
-                                approval_subject_id,
-                                proposal_approval_required,
-                            } = evaluate_tool_proposal_security(
-                                &state_for_stream,
-                                &context_for_stream,
-                                run_id.as_str(),
-                                proposal_id.as_str(),
-                                tool_name.as_str(),
-                                input_json.as_slice(),
-                            )
-                            .await;
-                            state_for_stream
-                                .counters
-                                .tool_proposals
-                                .fetch_add(1, Ordering::Relaxed);
-                            if let Err(error) = send_tool_proposal_with_tape(
-                                &sender,
-                                &state_for_stream,
-                                run_id.as_str(),
-                                &mut tape_seq,
-                                proposal_id.as_str(),
-                                tool_name.as_str(),
-                                input_json.as_slice(),
-                                proposal_approval_required,
-                            )
-                            .await
-                            {
-                                finalize_run_failure(
+                            let run_stream_preparation =
+                                match prepare_run_stream_tool_proposal_execution(
                                     &sender,
+                                    &mut stream,
                                     &state_for_stream,
-                                    &mut run_state,
-                                    active_run_id.as_deref(),
+                                    &context_for_stream,
+                                    active_session_id.as_deref(),
+                                    session_id.as_str(),
+                                    run_id.as_str(),
+                                    proposal_id.as_str(),
+                                    tool_name.as_str(),
+                                    input_json.as_slice(),
+                                    &mut remaining_tool_budget,
                                     &mut tape_seq,
-                                    error.message(),
                                 )
-                                .await;
-                                let _ = sender.send(Err(error)).await;
-                                return;
-                            }
-                            let approval_outcome = match resolve_run_stream_tool_approval_outcome(
-                                &sender,
-                                &mut stream,
-                                &state_for_stream,
-                                &context_for_stream,
-                                session_id.as_str(),
-                                run_id.as_str(),
-                                proposal_id.as_str(),
-                                tool_name.as_str(),
-                                input_json.as_slice(),
-                                skill_context.as_ref(),
-                                approval_subject_id.as_str(),
-                                proposal_approval_required,
-                                &mut tape_seq,
-                            )
-                            .await
-                            {
-                                Ok(outcome) => outcome,
-                                Err(error) => {
-                                    finalize_run_failure(
-                                        &sender,
-                                        &state_for_stream,
-                                        &mut run_state,
-                                        active_run_id.as_deref(),
-                                        &mut tape_seq,
-                                        error.message(),
-                                    )
-                                    .await;
-                                    let _ = sender.send(Err(error)).await;
-                                    return;
-                                }
-                            };
-
-                            let decision = resolve_tool_proposal_decision_for_context(
-                                &state_for_stream,
-                                &context_for_stream,
-                                context_for_stream.channel.as_deref(),
-                                session_id.as_str(),
-                                run_id.as_str(),
-                                tool_name.as_str(),
-                                skill_context.as_ref(),
-                                &mut remaining_tool_budget,
-                                skill_gate_decision,
-                                approval_outcome.as_ref(),
-                            );
-
-                            if let Err(error) = send_tool_decision_with_tape(
-                                &sender,
-                                &state_for_stream,
-                                run_id.as_str(),
-                                &mut tape_seq,
-                                proposal_id.as_str(),
-                                tool_name.as_str(),
-                                decision.allowed,
-                                decision.reason.as_str(),
-                                decision.approval_required,
-                                decision.policy_enforced,
-                            )
-                            .await
-                            {
-                                finalize_run_failure(
-                                    &sender,
-                                    &state_for_stream,
-                                    &mut run_state,
-                                    active_run_id.as_deref(),
-                                    &mut tape_seq,
-                                    error.message(),
-                                )
-                                .await;
-                                let _ = sender.send(Err(error)).await;
-                                return;
-                            }
-                            let session_id = if let Some(session_id) = active_session_id.as_deref()
-                            {
-                                session_id
-                            } else {
-                                let status = Status::internal(
-                                    "run stream internal invariant violated: missing session_id while recording policy decision",
-                                );
-                                finalize_run_failure(
-                                    &sender,
-                                    &state_for_stream,
-                                    &mut run_state,
-                                    active_run_id.as_deref(),
-                                    &mut tape_seq,
-                                    status.message(),
-                                )
-                                .await;
-                                let _ = sender.send(Err(status)).await;
-                                return;
-                            };
-                            if let Err(error) = record_tool_proposal_decision_audit_trail(
-                                &state_for_stream,
-                                &context_for_stream,
-                                session_id,
-                                run_id.as_str(),
-                                proposal_id.as_str(),
-                                tool_name.as_str(),
-                                skill_context.as_ref(),
-                                &decision,
-                            )
-                            .await
-                            {
-                                finalize_run_failure(
-                                    &sender,
-                                    &state_for_stream,
-                                    &mut run_state,
-                                    active_run_id.as_deref(),
-                                    &mut tape_seq,
-                                    error.message(),
-                                )
-                                .await;
-                                let _ = sender.send(Err(error)).await;
-                                return;
-                            }
+                                .await
+                                {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        finalize_run_failure(
+                                            &sender,
+                                            &state_for_stream,
+                                            &mut run_state,
+                                            active_run_id.as_deref(),
+                                            &mut tape_seq,
+                                            error.message(),
+                                        )
+                                        .await;
+                                        let _ = sender.send(Err(error)).await;
+                                        return;
+                                    }
+                                };
+                            let RunStreamToolProposalPreparation { decision, resolved_session_id } =
+                                run_stream_preparation;
 
                             let execution_outcome = if decision.allowed {
                                 state_for_stream
@@ -8344,7 +8227,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                         ToolRuntimeExecutionContext {
                                             principal: context_for_stream.principal.as_str(),
                                             channel: context_for_stream.channel.as_deref(),
-                                            session_id,
+                                            session_id: resolved_session_id.as_str(),
                                         },
                                         proposal_id.as_str(),
                                         tool_name.as_str(),
@@ -8508,7 +8391,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                 ToolRuntimeExecutionContext {
                                     principal: context_for_stream.principal.as_str(),
                                     channel: context_for_stream.channel.as_deref(),
-                                    session_id,
+                                    session_id: resolved_session_id.as_str(),
                                 },
                                 tool_name.as_str(),
                                 decision.allowed,
@@ -14534,6 +14417,111 @@ async fn process_route_tool_proposal_event(
         "route_message_tool_result",
     )
     .await)
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn prepare_run_stream_tool_proposal_execution(
+    sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    stream: &mut Streaming<common_v1::RunStreamRequest>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    active_session_id: Option<&str>,
+    session_id: &str,
+    run_id: &str,
+    proposal_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+    remaining_tool_budget: &mut u32,
+    tape_seq: &mut i64,
+) -> Result<RunStreamToolProposalPreparation, Status> {
+    let ToolProposalSecurityEvaluation {
+        skill_context,
+        skill_gate_decision,
+        approval_subject_id,
+        proposal_approval_required,
+    } = evaluate_tool_proposal_security(
+        runtime_state,
+        request_context,
+        run_id,
+        proposal_id,
+        tool_name,
+        input_json,
+    )
+    .await;
+    runtime_state.counters.tool_proposals.fetch_add(1, Ordering::Relaxed);
+    send_tool_proposal_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        tool_name,
+        input_json,
+        proposal_approval_required,
+    )
+    .await?;
+    let approval_outcome = resolve_run_stream_tool_approval_outcome(
+        sender,
+        stream,
+        runtime_state,
+        request_context,
+        session_id,
+        run_id,
+        proposal_id,
+        tool_name,
+        input_json,
+        skill_context.as_ref(),
+        approval_subject_id.as_str(),
+        proposal_approval_required,
+        tape_seq,
+    )
+    .await?;
+    let decision = resolve_tool_proposal_decision_for_context(
+        runtime_state,
+        request_context,
+        request_context.channel.as_deref(),
+        session_id,
+        run_id,
+        tool_name,
+        skill_context.as_ref(),
+        remaining_tool_budget,
+        skill_gate_decision,
+        approval_outcome.as_ref(),
+    );
+    send_tool_decision_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        tool_name,
+        decision.allowed,
+        decision.reason.as_str(),
+        decision.approval_required,
+        decision.policy_enforced,
+    )
+    .await?;
+    let resolved_session_id = active_session_id.ok_or_else(|| {
+        Status::internal(
+            "run stream internal invariant violated: missing session_id while recording policy decision",
+        )
+    })?;
+    record_tool_proposal_decision_audit_trail(
+        runtime_state,
+        request_context,
+        resolved_session_id,
+        run_id,
+        proposal_id,
+        tool_name,
+        skill_context.as_ref(),
+        &decision,
+    )
+    .await?;
+    Ok(RunStreamToolProposalPreparation {
+        decision,
+        resolved_session_id: resolved_session_id.to_owned(),
+    })
 }
 
 #[allow(clippy::result_large_err)]
