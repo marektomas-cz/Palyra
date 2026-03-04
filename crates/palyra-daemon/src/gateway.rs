@@ -10391,19 +10391,6 @@ async fn build_memory_augmented_prompt(
 
     let selected_hits =
         search_hits.into_iter().take(memory_config.auto_inject_max_items).collect::<Vec<_>>();
-    let mut context_lines = Vec::new();
-    for (index, hit) in selected_hits.iter().enumerate() {
-        let snippet = hit.snippet.replace(['\r', '\n'], " ").trim().to_owned();
-        context_lines.push(format!(
-            "{}. id={} source={} score={:.4} created_at_unix_ms={} snippet={}",
-            index + 1,
-            hit.item.memory_id,
-            hit.item.source.as_str(),
-            hit.score,
-            hit.item.created_at_unix_ms,
-            truncate_with_ellipsis(snippet, 256),
-        ));
-    }
 
     runtime_state
         .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
@@ -10416,10 +10403,27 @@ async fn build_memory_augmented_prompt(
     *tape_seq = tape_seq.saturating_add(1);
     runtime_state.counters.memory_auto_inject_events.fetch_add(1, Ordering::Relaxed);
 
+    Ok(render_memory_augmented_prompt(selected_hits.as_slice(), input_text))
+}
+
+fn render_memory_augmented_prompt(hits: &[MemorySearchHit], input_text: &str) -> String {
+    let mut context_lines = Vec::with_capacity(hits.len());
+    for (index, hit) in hits.iter().enumerate() {
+        let snippet = hit.snippet.replace(['\r', '\n'], " ").trim().to_owned();
+        context_lines.push(format!(
+            "{}. id={} source={} score={:.4} created_at_unix_ms={} snippet={}",
+            index + 1,
+            hit.item.memory_id,
+            hit.item.source.as_str(),
+            hit.score,
+            hit.item.created_at_unix_ms,
+            truncate_with_ellipsis(snippet, 256),
+        ));
+    }
     let mut block = String::from("<memory_context>\n");
     block.push_str(context_lines.join("\n").as_str());
     block.push_str("\n</memory_context>");
-    Ok(format!("{block}\n\n{input_text}"))
+    format!("{block}\n\n{input_text}")
 }
 
 fn memory_auto_inject_tape_payload(query: &str, hits: &[MemorySearchHit]) -> String {
@@ -16282,6 +16286,53 @@ mod tests {
                 && !payload.contains("access_token=supersecret")
                 && !payload.contains("token=abc123"),
             "secret-like values must be redacted before tape persistence: {payload}"
+        );
+    }
+
+    #[test]
+    fn render_memory_augmented_prompt_formats_context_block_deterministically() {
+        let mut first = test_memory_item(Some("cli"));
+        first.memory_id = "01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned();
+        first.created_at_unix_ms = 1_725_000_001_000;
+        let mut second = test_memory_item(Some("cli"));
+        second.memory_id = "01ARZ3NDEKTSV4RRFFQ69G5FB2".to_owned();
+        second.created_at_unix_ms = 1_725_000_002_000;
+        let hits = vec![
+            MemorySearchHit {
+                item: first,
+                snippet: "rollback checklist\nstep one".to_owned(),
+                score: 0.9876,
+                breakdown: MemoryScoreBreakdown {
+                    lexical_score: 0.6,
+                    vector_score: 0.2,
+                    recency_score: 0.1876,
+                    final_score: 0.9876,
+                },
+            },
+            MemorySearchHit {
+                item: second,
+                snippet: "deployment notes".to_owned(),
+                score: 0.5123,
+                breakdown: MemoryScoreBreakdown {
+                    lexical_score: 0.3,
+                    vector_score: 0.1,
+                    recency_score: 0.1123,
+                    final_score: 0.5123,
+                },
+            },
+        ];
+
+        let prompt = super::render_memory_augmented_prompt(hits.as_slice(), "summarize incident");
+        let expected = "\
+<memory_context>
+1. id=01ARZ3NDEKTSV4RRFFQ69G5FB1 source=manual score=0.9876 created_at_unix_ms=1725000001000 snippet=rollback checklist step one
+2. id=01ARZ3NDEKTSV4RRFFQ69G5FB2 source=manual score=0.5123 created_at_unix_ms=1725000002000 snippet=deployment notes
+</memory_context>
+
+summarize incident";
+        assert_eq!(
+            prompt, expected,
+            "memory-augmented prompt rendering should stay deterministic for ordered hits"
         );
     }
 
