@@ -149,6 +149,7 @@ export function App() {
   const [discordWizardBroadcast, setDiscordWizardBroadcast] = useState<"deny" | "mention_only" | "allow">("deny");
   const [discordWizardConcurrency, setDiscordWizardConcurrency] = useState("2");
   const [discordWizardConfirmOpen, setDiscordWizardConfirmOpen] = useState(false);
+  const [discordWizardVerifyChannelId, setDiscordWizardVerifyChannelId] = useState("");
   const [discordWizardPreflight, setDiscordWizardPreflight] = useState<JsonObject | null>(null);
   const [discordWizardApply, setDiscordWizardApply] = useState<JsonObject | null>(null);
   const [discordWizardVerifyTarget, setDiscordWizardVerifyTarget] = useState("channel:");
@@ -802,7 +803,21 @@ export function App() {
     return Math.min(Math.max(parsed, 1), 32);
   }
 
-  function buildDiscordWizardPayload(): {
+  function parseDiscordWizardVerifyChannelId(): { value?: string; error?: string } {
+    const normalized = discordWizardVerifyChannelId.trim();
+    if (normalized.length === 0) {
+      return {};
+    }
+    if (!/^[0-9]+$/.test(normalized)) {
+      return { error: "Verify channel ID must contain decimal digits only." };
+    }
+    if (normalized.length < 16 || normalized.length > 24) {
+      return { error: "Verify channel ID must be a canonical Discord snowflake (16-24 digits)." };
+    }
+    return { value: normalized };
+  }
+
+  function buildDiscordWizardPayload(verifyChannelId?: string): {
     account_id?: string;
     token: string;
     mode: "local" | "remote_vps";
@@ -813,6 +828,7 @@ export function App() {
     concurrency_limit: number;
     broadcast_strategy: "deny" | "mention_only" | "allow";
     confirm_open_guild_channels: boolean;
+    verify_channel_id?: string;
   } {
     const normalized = discordWizardAccountId.trim().toLowerCase();
     return {
@@ -825,13 +841,19 @@ export function App() {
       require_mention: discordWizardRequireMention,
       concurrency_limit: parsedDiscordWizardConcurrency(),
       broadcast_strategy: discordWizardBroadcast,
-      confirm_open_guild_channels: discordWizardConfirmOpen
+      confirm_open_guild_channels: discordWizardConfirmOpen,
+      verify_channel_id: verifyChannelId
     };
   }
 
   async function runDiscordOnboardingProbe(): Promise<void> {
     if (discordWizardToken.trim().length === 0) {
       setError("Discord onboarding token cannot be empty.");
+      return;
+    }
+    const verifyChannel = parseDiscordWizardVerifyChannelId();
+    if (verifyChannel.error !== undefined) {
+      setError(verifyChannel.error);
       return;
     }
     const connectorId = discordWizardConnectorId();
@@ -842,7 +864,7 @@ export function App() {
     setDiscordWizardBusy(true);
     setError(null);
     try {
-      const response = await api.probeDiscordOnboarding(buildDiscordWizardPayload());
+      const response = await api.probeDiscordOnboarding(buildDiscordWizardPayload(verifyChannel.value));
       setDiscordWizardPreflight(isJsonObject(response) ? response : null);
       const botId = isJsonObject(response.bot) ? readString(response.bot, "id") : null;
       const botUsername = isJsonObject(response.bot) ? readString(response.bot, "username") : null;
@@ -864,6 +886,11 @@ export function App() {
       setError("Discord onboarding token cannot be empty.");
       return;
     }
+    const verifyChannel = parseDiscordWizardVerifyChannelId();
+    if (verifyChannel.error !== undefined) {
+      setError(verifyChannel.error);
+      return;
+    }
     const connectorId = discordWizardConnectorId();
     if (connectorId === null) {
       setError("Discord account ID contains unsupported characters.");
@@ -877,7 +904,7 @@ export function App() {
     setDiscordWizardBusy(true);
     setError(null);
     try {
-      const response = await api.applyDiscordOnboarding(buildDiscordWizardPayload());
+      const response = await api.applyDiscordOnboarding(buildDiscordWizardPayload(verifyChannel.value));
       setDiscordWizardApply(isJsonObject(response) ? response : null);
       const preflight = isJsonObject(response.preflight) ? response.preflight : null;
       const bot = preflight !== null && isJsonObject(preflight.bot) ? preflight.bot : null;
@@ -1699,6 +1726,14 @@ export function App() {
                   placeholder="Paste token (never persisted in config)"
                 />
               </label>
+              <label>
+                3) Optional verify channel ID
+                <input
+                  value={discordWizardVerifyChannelId}
+                  onChange={(event) => setDiscordWizardVerifyChannelId(event.target.value)}
+                  placeholder="123456789012345678"
+                />
+              </label>
             </div>
             <div className="console-inline-actions">
               <button
@@ -1837,6 +1872,13 @@ export function App() {
                 {discordWizardBusy ? "Sending..." : "Run verification"}
               </button>
             </div>
+
+            {discordWizardPreflight !== null && (
+              <DiscordOnboardingHighlights title="Preflight highlights" payload={discordWizardPreflight} />
+            )}
+            {discordWizardApply !== null && (
+              <DiscordOnboardingHighlights title="Apply highlights" payload={discordWizardApply} />
+            )}
 
             {discordWizardPreflight !== null && (
               <section className="console-subpanel">
@@ -2667,6 +2709,84 @@ export function App() {
   );
 }
 
+type DiscordOnboardingHighlightsProps = {
+  title: string;
+  payload: JsonObject;
+};
+
+function DiscordOnboardingHighlights({ title, payload }: DiscordOnboardingHighlightsProps) {
+  const preflight = resolveDiscordOnboardingPreflight(payload);
+  const inviteUrl = readString(preflight, "invite_url_template");
+  const requiredPermissions = readStringList(preflight, "required_permissions");
+  const egressAllowlist = readStringList(preflight, "egress_allowlist");
+  const securityDefaults = readStringList(preflight, "security_defaults");
+  const channelPermissionCheck = isJsonObject(preflight["channel_permission_check"])
+    ? preflight["channel_permission_check"]
+    : null;
+  const permissionFlags: Array<[string, boolean]> = channelPermissionCheck === null
+    ? []
+    : [
+      ["View Channels", readBool(channelPermissionCheck, "can_view_channel")],
+      ["Send Messages", readBool(channelPermissionCheck, "can_send_messages")],
+      ["Read Message History", readBool(channelPermissionCheck, "can_read_message_history")],
+      ["Embed Links", readBool(channelPermissionCheck, "can_embed_links")],
+      ["Attach Files", readBool(channelPermissionCheck, "can_attach_files")],
+      ["Send Messages in Threads", readBool(channelPermissionCheck, "can_send_messages_in_threads")]
+    ];
+
+  return (
+    <section className="console-subpanel">
+      <h4>{title}</h4>
+      {inviteUrl !== null && (
+        <p><strong>Invite URL template:</strong> {inviteUrl}</p>
+      )}
+      <p><strong>Required permissions:</strong> {requiredPermissions.length > 0 ? requiredPermissions.join(", ") : "-"}</p>
+      <p><strong>Egress allowlist:</strong></p>
+      {egressAllowlist.length > 0 ? (
+        <ul>
+          {egressAllowlist.map((entry) => (
+            <li key={entry}>{entry}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>-</p>
+      )}
+      <p><strong>Security defaults:</strong></p>
+      {securityDefaults.length > 0 ? (
+        <ul>
+          {securityDefaults.map((entry) => (
+            <li key={entry}>{entry}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>-</p>
+      )}
+      {channelPermissionCheck !== null && (
+        <>
+          <p>
+            <strong>Channel permission check:</strong>{" "}
+            channel_id={readString(channelPermissionCheck, "channel_id") ?? "unknown"} status=
+            {readString(channelPermissionCheck, "status") ?? "unknown"}
+          </p>
+          <ul>
+            {permissionFlags.map(([label, enabled]) => (
+              <li key={label}>{label}: {enabled ? "yes" : "no"}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+function resolveDiscordOnboardingPreflight(payload: JsonObject): JsonObject {
+  const preflight = payload["preflight"];
+  if (isJsonObject(preflight)) {
+    return preflight;
+  }
+  return payload;
+}
+
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -2696,6 +2816,14 @@ function toStringArray(values: JsonValue[]): string[] {
     }
   }
   return rows;
+}
+
+function readStringList(record: JsonObject, key: string): string[] {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return toStringArray(value);
 }
 
 function readString(record: JsonObject, key: string): string | null {

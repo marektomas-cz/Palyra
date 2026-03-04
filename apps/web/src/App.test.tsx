@@ -327,6 +327,26 @@ describe("M35 web console app", () => {
         mode: "local",
         inbound_scope: "dm_only",
         bot: { id: "123", username: "palyra-bot" },
+        required_permissions: [
+          "View Channels",
+          "Send Messages",
+          "Read Message History",
+          "Embed Links",
+          "Attach Files",
+          "Send Messages in Threads"
+        ],
+        egress_allowlist: ["discord.com", "*.discord.com"],
+        security_defaults: ["Attachments ingestion is metadata only by default."],
+        channel_permission_check: {
+          channel_id: "123456789012345678",
+          status: "ok",
+          can_view_channel: true,
+          can_send_messages: true,
+          can_read_message_history: true,
+          can_embed_links: true,
+          can_attach_files: true,
+          can_send_messages_in_threads: true
+        },
         warnings: [],
         policy_warnings: [],
         routing_preview: { connector_id: "discord:default" },
@@ -381,11 +401,17 @@ describe("M35 web console app", () => {
     fireEvent.change(screen.getByLabelText("2) Discord bot token"), {
       target: { value: "test-token" }
     });
+    fireEvent.change(screen.getByLabelText("3) Optional verify channel ID"), {
+      target: { value: "123456789012345678" }
+    });
     fireEvent.click(screen.getByRole("button", { name: "Run preflight" }));
 
     await waitFor(() => {
       expect(screen.getByText("Discord preflight OK for palyra-bot (123).")).toBeInTheDocument();
     });
+    expect(screen.getByRole("heading", { name: "Preflight highlights" })).toBeInTheDocument();
+    expect(screen.getByText("discord.com")).toBeInTheDocument();
+    expect(screen.getByText("Attachments ingestion is metadata only by default.")).toBeInTheDocument();
 
     expect(requestUrl(fetchMock.mock.calls[8][0])).toBe("/console/v1/channels/discord/onboarding/probe");
     const request = fetchMock.mock.calls[8][1];
@@ -393,6 +419,7 @@ describe("M35 web console app", () => {
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(request?.method).toBe("POST");
     expect(requestBody(request?.body)).toContain("\"token\":\"test-token\"");
+    expect(requestBody(request?.body)).toContain("\"verify_channel_id\":\"123456789012345678\"");
   });
 
   it("issues browser relay token from browser section with CSRF protection", async () => {
