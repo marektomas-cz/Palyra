@@ -3127,6 +3127,18 @@ impl GatewayRuntimeState {
                     self.counters.approvals_tool_resolved_error.fetch_add(1, Ordering::Relaxed);
                 }
             }
+            let cache_context = RequestContext {
+                principal: result.principal.clone(),
+                device_id: result.device_id.clone(),
+                channel: result.channel.clone(),
+            };
+            let cached_outcome = tool_approval_outcome_from_record(&result, decision);
+            self.remember_tool_approval(
+                &cache_context,
+                result.session_id.as_str(),
+                result.subject_id.as_str(),
+                &cached_outcome,
+            );
         }
         Ok(result)
     }
@@ -4054,6 +4066,21 @@ fn tool_approval_cache_key_prefix(context: &RequestContext, session_id: &str) ->
 
 fn tool_approval_cache_key(context: &RequestContext, session_id: &str, subject_id: &str) -> String {
     format!("{}subject={subject_id}", tool_approval_cache_key_prefix(context, session_id))
+}
+
+fn tool_approval_outcome_from_record(
+    record: &ApprovalRecord,
+    fallback_decision: ApprovalDecision,
+) -> ToolApprovalOutcome {
+    let decision = record.decision.unwrap_or(fallback_decision);
+    ToolApprovalOutcome {
+        approval_id: record.approval_id.clone(),
+        approved: matches!(decision, ApprovalDecision::Allow),
+        reason: record.decision_reason.clone().unwrap_or_else(|| "approval resolved".to_owned()),
+        decision,
+        decision_scope: record.decision_scope.unwrap_or(ApprovalDecisionScope::Once),
+        decision_scope_ttl_ms: record.decision_scope_ttl_ms,
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -15969,11 +15996,11 @@ mod tests {
     use crate::agents::AgentCreateRequest;
     use crate::journal::{
         ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
-        ApprovalPromptOption, ApprovalPromptRecord, ApprovalRiskLevel, ApprovalSubjectType,
-        JournalAppendRequest, JournalConfig, JournalStore, MemoryItemCreateRequest,
-        MemoryItemRecord, MemoryScoreBreakdown, MemorySearchHit, MemorySearchRequest, MemorySource,
-        OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
-        OrchestratorTapeAppendRequest,
+        ApprovalPromptOption, ApprovalPromptRecord, ApprovalResolveRequest, ApprovalRiskLevel,
+        ApprovalSubjectType, JournalAppendRequest, JournalConfig, JournalStore,
+        MemoryItemCreateRequest, MemoryItemRecord, MemoryScoreBreakdown, MemorySearchHit,
+        MemorySearchRequest, MemorySource, OrchestratorRunStartRequest,
+        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest,
     };
     use tonic::Code;
     use ulid::Ulid;
@@ -17720,6 +17747,50 @@ summarize incident";
         assert!(
             state.resolve_cached_tool_approval(&context, "session-1", "tool:custom.noop").is_none(),
             "timeboxed approval should expire when ttl elapses"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_approval_record_populates_tool_approval_cache_for_route_reuse() {
+        let state = build_test_runtime_state(false);
+        let mut request = build_test_approval_request(42);
+        request.session_id = "session-route-cache".to_owned();
+        request.subject_id = "tool:custom.noop".to_owned();
+        request.prompt.subject_id = request.subject_id.clone();
+
+        let expected_context = RequestContext {
+            principal: request.principal.clone(),
+            device_id: request.device_id.clone(),
+            channel: request.channel.clone(),
+        };
+
+        let created = state
+            .create_approval_record(request.clone())
+            .await
+            .expect("approval create should succeed");
+        let _resolved = state
+            .resolve_approval_record(ApprovalResolveRequest {
+                approval_id: created.approval_id.clone(),
+                decision: ApprovalDecision::Allow,
+                decision_scope: ApprovalDecisionScope::Session,
+                decision_reason: "allow_session".to_owned(),
+                decision_scope_ttl_ms: None,
+            })
+            .await
+            .expect("approval resolve should succeed");
+
+        let cached = state
+            .resolve_cached_tool_approval(
+                &expected_context,
+                request.session_id.as_str(),
+                request.subject_id.as_str(),
+            )
+            .expect("resolved tool approval should be cached for session reuse");
+        assert!(cached.approved, "cached decision should preserve allow verdict");
+        assert_eq!(cached.decision_scope, ApprovalDecisionScope::Session);
+        assert!(
+            cached.reason.contains("allow_session"),
+            "cached reason should preserve operator decision context"
         );
     }
 
