@@ -1411,7 +1411,7 @@ mod tests {
                 workspace_root: std::env::current_dir().expect("current_dir should resolve"),
                 allowed_executables: vec!["uname".to_owned()],
                 allow_interpreters: false,
-                egress_enforcement_mode: EgressEnforcementMode::Strict,
+                egress_enforcement_mode: EgressEnforcementMode::Preflight,
                 allowed_egress_hosts: Vec::new(),
                 allowed_dns_suffixes: Vec::new(),
                 cpu_time_limit_ms: 2_000,

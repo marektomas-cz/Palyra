@@ -1250,7 +1250,8 @@ mod tests {
             return;
         }
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
-        let policy = sandbox_policy(workspace);
+        let mut policy = sandbox_policy(workspace);
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
         let input = br#"{"command":"uname","args":[]}"#;
 
         let result = run_constrained_process(&policy, input, Duration::from_millis(3_000))
@@ -1455,7 +1456,8 @@ mod tests {
         }
 
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
-        let policy = sandbox_policy_with_allowed_executables(workspace, vec!["env".to_owned()]);
+        let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["env".to_owned()]);
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
         let input = br#"{"command":"env","args":[]}"#;
 
         let result = run_constrained_process(&policy, input, Duration::from_millis(3_000))
@@ -1488,6 +1490,7 @@ mod tests {
 
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
         let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["cat".to_owned()]);
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
         policy.max_output_bytes = 16;
         let input = br#"{"command":"cat","args":["README.md","missing-file-that-does-not-exist"]}"#;
 
@@ -1504,7 +1507,8 @@ mod tests {
         }
 
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
-        let policy = sandbox_policy_with_allowed_executables(workspace, vec!["cat".to_owned()]);
+        let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["cat".to_owned()]);
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
         let secret_marker = "token=abc123";
         let input = serde_json::to_vec(&serde_json::json!({
             "command": "cat",
