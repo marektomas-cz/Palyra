@@ -379,6 +379,12 @@ struct RunStreamToolProposalPreparation {
     resolved_session_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunStreamToolExecutionOutcome {
+    Completed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CanvasAssetRecord {
     content_type: String,
@@ -8213,192 +8219,39 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             let RunStreamToolProposalPreparation { decision, resolved_session_id } =
                                 run_stream_preparation;
 
-                            let execution_outcome = if decision.allowed {
-                                state_for_stream
-                                    .counters
-                                    .tool_execution_attempts
-                                    .fetch_add(1, Ordering::Relaxed);
-                                let started_at = Instant::now();
-                                let mut cancel_poll = interval(Duration::from_millis(100));
-                                cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
-                                let mut execution_future =
-                                    Box::pin(execute_tool_with_runtime_dispatch(
-                                        &state_for_stream,
-                                        ToolRuntimeExecutionContext {
-                                            principal: context_for_stream.principal.as_str(),
-                                            channel: context_for_stream.channel.as_deref(),
-                                            session_id: resolved_session_id.as_str(),
-                                        },
-                                        proposal_id.as_str(),
-                                        tool_name.as_str(),
-                                        input_json.as_slice(),
-                                    ));
-                                let outcome = loop {
-                                    tokio::select! {
-                                        result = &mut execution_future => {
-                                            break result;
-                                        }
-                                        _ = cancel_poll.tick() => {
-                                            match state_for_stream.is_orchestrator_cancel_requested(run_id.clone()).await {
-                                                Ok(true) => {
-                                                    if let Err(error) = run_state.transition(RunTransition::Cancel) {
-                                                        let status = Status::internal(error.to_string());
-                                                        finalize_run_failure(
-                                                            &sender,
-                                                            &state_for_stream,
-                                                            &mut run_state,
-                                                            active_run_id.as_deref(),
-                                                            &mut tape_seq,
-                                                            status.message(),
-                                                        )
-                                                        .await;
-                                                        let _ = sender.send(Err(status)).await;
-                                                        return;
-                                                    }
-                                                    if let Err(error) = state_for_stream
-                                                        .update_orchestrator_run_state(
-                                                            run_id.clone(),
-                                                            RunLifecycleState::Cancelled,
-                                                            Some(CANCELLED_REASON.to_owned()),
-                                                        )
-                                                        .await
-                                                    {
-                                                        finalize_run_failure(
-                                                            &sender,
-                                                            &state_for_stream,
-                                                            &mut run_state,
-                                                            active_run_id.as_deref(),
-                                                            &mut tape_seq,
-                                                            error.message(),
-                                                        )
-                                                        .await;
-                                                        let _ = sender.send(Err(error)).await;
-                                                        return;
-                                                    }
-                                                    if let Err(error) = send_status_with_tape(
-                                                        &sender,
-                                                        &state_for_stream,
-                                                        run_id.as_str(),
-                                                        &mut tape_seq,
-                                                        common_v1::stream_status::StatusKind::Failed,
-                                                        CANCELLED_REASON,
-                                                    )
-                                                    .await
-                                                    {
-                                                        let _ = sender.send(Err(error)).await;
-                                                    }
-                                                    return;
-                                                }
-                                                Ok(false) => {}
-                                                Err(error) => {
-                                                    finalize_run_failure(
-                                                        &sender,
-                                                        &state_for_stream,
-                                                        &mut run_state,
-                                                        active_run_id.as_deref(),
-                                                        &mut tape_seq,
-                                                        error.message(),
-                                                    )
-                                                    .await;
-                                                    let _ = sender.send(Err(error)).await;
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                    }
-                                };
-                                record_tool_execution_outcome_metrics(
-                                    &state_for_stream,
-                                    ToolExecutionTraceContext {
-                                        run_id: run_id.as_str(),
-                                        proposal_id: proposal_id.as_str(),
-                                        tool_name: tool_name.as_str(),
-                                        execution_surface: "run_stream",
-                                    },
-                                    decision.allowed,
-                                    started_at,
-                                    &outcome,
-                                );
-                                outcome
-                            } else {
-                                denied_execution_outcome(
-                                    proposal_id.as_str(),
-                                    tool_name.as_str(),
-                                    input_json.as_slice(),
-                                    decision.reason.as_str(),
-                                )
-                            };
-
-                            if let Err(error) = send_tool_result_with_tape(
+                            match execute_run_stream_tool_proposal(
                                 &sender,
                                 &state_for_stream,
+                                &context_for_stream,
+                                &mut run_state,
                                 run_id.as_str(),
-                                &mut tape_seq,
                                 proposal_id.as_str(),
-                                execution_outcome.success,
-                                execution_outcome.output_json.as_slice(),
-                                execution_outcome.error.as_str(),
-                            )
-                            .await
-                            {
-                                finalize_run_failure(
-                                    &sender,
-                                    &state_for_stream,
-                                    &mut run_state,
-                                    active_run_id.as_deref(),
-                                    &mut tape_seq,
-                                    error.message(),
-                                )
-                                .await;
-                                let _ = sender.send(Err(error)).await;
-                                return;
-                            }
-
-                            if let Err(error) = send_tool_attestation_with_tape(
-                                &sender,
-                                &state_for_stream,
-                                run_id.as_str(),
-                                &mut tape_seq,
-                                proposal_id.as_str(),
-                                execution_outcome.attestation.attestation_id.as_str(),
-                                execution_outcome.attestation.execution_sha256.as_str(),
-                                execution_outcome.attestation.executed_at_unix_ms,
-                                execution_outcome.attestation.timed_out,
-                                execution_outcome.attestation.executor.as_str(),
-                                execution_outcome.attestation.sandbox_enforcement.as_str(),
-                            )
-                            .await
-                            {
-                                finalize_run_failure(
-                                    &sender,
-                                    &state_for_stream,
-                                    &mut run_state,
-                                    active_run_id.as_deref(),
-                                    &mut tape_seq,
-                                    error.message(),
-                                )
-                                .await;
-                                let _ = sender.send(Err(error)).await;
-                                return;
-                            }
-                            state_for_stream
-                                .counters
-                                .tool_attestations_emitted
-                                .fetch_add(1, Ordering::Relaxed);
-
-                            let _ = build_and_ingest_tool_result_memory_summary(
-                                &state_for_stream,
-                                ToolRuntimeExecutionContext {
-                                    principal: context_for_stream.principal.as_str(),
-                                    channel: context_for_stream.channel.as_deref(),
-                                    session_id: resolved_session_id.as_str(),
-                                },
                                 tool_name.as_str(),
-                                decision.allowed,
-                                &execution_outcome,
-                                "run_stream_tool_result",
+                                input_json.as_slice(),
+                                &decision,
+                                resolved_session_id.as_str(),
+                                &mut tape_seq,
                             )
-                            .await;
+                            .await
+                            {
+                                Ok(RunStreamToolExecutionOutcome::Completed) => {}
+                                Ok(RunStreamToolExecutionOutcome::Cancelled) => {
+                                    return;
+                                }
+                                Err(error) => {
+                                    finalize_run_failure(
+                                        &sender,
+                                        &state_for_stream,
+                                        &mut run_state,
+                                        active_run_id.as_deref(),
+                                        &mut tape_seq,
+                                        error.message(),
+                                    )
+                                    .await;
+                                    let _ = sender.send(Err(error)).await;
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
@@ -14731,6 +14584,136 @@ async fn resolve_run_stream_tool_approval_outcome(
         &response,
     );
     Ok(Some(response))
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn execute_run_stream_tool_proposal(
+    sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    run_state: &mut RunStateMachine,
+    run_id: &str,
+    proposal_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+    decision: &ToolDecision,
+    resolved_session_id: &str,
+    tape_seq: &mut i64,
+) -> Result<RunStreamToolExecutionOutcome, Status> {
+    let execution_outcome = if decision.allowed {
+        runtime_state.counters.tool_execution_attempts.fetch_add(1, Ordering::Relaxed);
+        let started_at = Instant::now();
+        let mut cancel_poll = interval(Duration::from_millis(100));
+        cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut execution_future = Box::pin(execute_tool_with_runtime_dispatch(
+            runtime_state,
+            ToolRuntimeExecutionContext {
+                principal: request_context.principal.as_str(),
+                channel: request_context.channel.as_deref(),
+                session_id: resolved_session_id,
+            },
+            proposal_id,
+            tool_name,
+            input_json,
+        ));
+        let outcome = loop {
+            tokio::select! {
+                result = &mut execution_future => {
+                    break result;
+                }
+                _ = cancel_poll.tick() => {
+                    match runtime_state.is_orchestrator_cancel_requested(run_id.to_owned()).await {
+                        Ok(true) => {
+                            if let Err(error) = run_state.transition(RunTransition::Cancel) {
+                                return Err(Status::internal(error.to_string()));
+                            }
+                            runtime_state
+                                .update_orchestrator_run_state(
+                                    run_id.to_owned(),
+                                    RunLifecycleState::Cancelled,
+                                    Some(CANCELLED_REASON.to_owned()),
+                                )
+                                .await?;
+                            if let Err(error) = send_status_with_tape(
+                                sender,
+                                runtime_state,
+                                run_id,
+                                tape_seq,
+                                common_v1::stream_status::StatusKind::Failed,
+                                CANCELLED_REASON,
+                            )
+                            .await
+                            {
+                                let _ = sender.send(Err(error)).await;
+                            }
+                            return Ok(RunStreamToolExecutionOutcome::Cancelled);
+                        }
+                        Ok(false) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        };
+        record_tool_execution_outcome_metrics(
+            runtime_state,
+            ToolExecutionTraceContext {
+                run_id,
+                proposal_id,
+                tool_name,
+                execution_surface: "run_stream",
+            },
+            decision.allowed,
+            started_at,
+            &outcome,
+        );
+        outcome
+    } else {
+        denied_execution_outcome(proposal_id, tool_name, input_json, decision.reason.as_str())
+    };
+
+    send_tool_result_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        execution_outcome.success,
+        execution_outcome.output_json.as_slice(),
+        execution_outcome.error.as_str(),
+    )
+    .await?;
+
+    send_tool_attestation_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        execution_outcome.attestation.attestation_id.as_str(),
+        execution_outcome.attestation.execution_sha256.as_str(),
+        execution_outcome.attestation.executed_at_unix_ms,
+        execution_outcome.attestation.timed_out,
+        execution_outcome.attestation.executor.as_str(),
+        execution_outcome.attestation.sandbox_enforcement.as_str(),
+    )
+    .await?;
+    runtime_state.counters.tool_attestations_emitted.fetch_add(1, Ordering::Relaxed);
+
+    let _ = build_and_ingest_tool_result_memory_summary(
+        runtime_state,
+        ToolRuntimeExecutionContext {
+            principal: request_context.principal.as_str(),
+            channel: request_context.channel.as_deref(),
+            session_id: resolved_session_id,
+        },
+        tool_name,
+        decision.allowed,
+        &execution_outcome,
+        "run_stream_tool_result",
+    )
+    .await;
+    Ok(RunStreamToolExecutionOutcome::Completed)
 }
 
 fn build_pending_tool_approval(
