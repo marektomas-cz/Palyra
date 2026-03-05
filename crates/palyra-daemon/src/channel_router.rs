@@ -847,16 +847,14 @@ impl ChannelRouter {
         }
         if self.enqueue_retry(message, message.channel.as_str(), reason.to_owned()) {
             RetryDisposition::Queued
+        } else if self.quarantine_message(
+            message,
+            format!("retry_enqueue_failed:{reason}").as_str(),
+            message.retry_attempt,
+        ) {
+            RetryDisposition::Quarantined
         } else {
-            if self.quarantine_message(
-                message,
-                format!("retry_enqueue_failed:{reason}").as_str(),
-                message.retry_attempt,
-            ) {
-                RetryDisposition::Quarantined
-            } else {
-                RetryDisposition::Dropped
-            }
+            RetryDisposition::Dropped
         }
     }
 
