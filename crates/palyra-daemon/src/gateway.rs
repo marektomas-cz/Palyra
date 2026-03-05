@@ -5776,10 +5776,23 @@ async fn handle_routed_route_message(
             let error_message = error.message().to_owned();
             let retry_disposition =
                 runtime_state.channel_router.record_processing_failure(input, "provider_error");
-            if matches!(retry_disposition, RetryDisposition::Quarantined) {
-                runtime_state.counters.channel_messages_quarantined.fetch_add(1, Ordering::Relaxed);
-            } else {
-                runtime_state.counters.channel_messages_queued.fetch_add(1, Ordering::Relaxed);
+            match retry_disposition {
+                RetryDisposition::Queued => {
+                    runtime_state.counters.channel_messages_queued.fetch_add(1, Ordering::Relaxed);
+                }
+                RetryDisposition::Quarantined => {
+                    runtime_state
+                        .counters
+                        .channel_messages_quarantined
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                RetryDisposition::Dropped => {
+                    warn!(
+                        envelope_id = %input.envelope_id,
+                        channel = %input.channel,
+                        "channel router dropped failed message after quarantine persistence failure"
+                    );
+                }
             }
             runtime_state.counters.channel_messages_rejected.fetch_add(1, Ordering::Relaxed);
             runtime_state.counters.channel_reply_failures.fetch_add(1, Ordering::Relaxed);
@@ -5805,6 +5818,7 @@ async fn handle_routed_route_message(
                     "retry_disposition": match retry_disposition {
                         RetryDisposition::Queued => "queued",
                         RetryDisposition::Quarantined => "quarantined",
+                        RetryDisposition::Dropped => "dropped",
                     },
                     "queued_for_retry": matches!(retry_disposition, RetryDisposition::Queued),
                     "quarantined": matches!(retry_disposition, RetryDisposition::Quarantined),

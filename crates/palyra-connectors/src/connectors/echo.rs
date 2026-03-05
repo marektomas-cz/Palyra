@@ -1,11 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
-    hash::{Hash, Hasher},
     sync::Mutex,
 };
 
 use async_trait::async_trait;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::{
     protocol::{ConnectorKind, DeliveryOutcome, OutboundMessageRequest, RetryClass},
@@ -63,24 +63,25 @@ impl ConnectorAdapter for EchoConnectorAdapter {
             return Ok(DeliveryOutcome::Delivered { native_message_id: existing_id.clone() });
         }
 
-        let native_message_id = format!(
-            "echo-{:016x}",
-            deterministic_hash(json!({
-                "envelope_id": request.envelope_id,
-                "conversation_id": request.conversation_id,
-                "text": request.text,
-                "thread_id": request.reply_thread_id,
-            }))
-        );
+        let native_message_id = fallback_native_message_id(request);
         delivered.insert(request.envelope_id.clone(), native_message_id.clone());
         Ok(DeliveryOutcome::Delivered { native_message_id })
     }
 }
 
-fn deterministic_hash<T: Hash>(value: T) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
+fn fallback_native_message_id(request: &OutboundMessageRequest) -> String {
+    let fingerprint = json!({
+        "envelope_id": request.envelope_id,
+        "conversation_id": request.conversation_id,
+        "text": request.text,
+        "thread_id": request.reply_thread_id,
+    });
+    format!("echo-{}", stable_fingerprint_hex(fingerprint.to_string().as_bytes()))
+}
+
+fn stable_fingerprint_hex(payload: &[u8]) -> String {
+    let digest = Sha256::digest(payload);
+    digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -172,5 +173,23 @@ mod tests {
         };
         assert_eq!(class, RetryClass::ConnectorRestarting);
         assert!(matches!(second, DeliveryOutcome::Delivered { .. }));
+    }
+
+    #[test]
+    fn fallback_native_message_id_is_stable_and_sensitive_to_input() {
+        let baseline = request("ok");
+        let first = super::fallback_native_message_id(&baseline);
+        let second = super::fallback_native_message_id(&baseline);
+        assert_eq!(first, second, "same payload must produce stable fallback id");
+        assert!(first.starts_with("echo-"));
+        assert_eq!(first.len(), "echo-".len() + 32);
+        assert!(
+            first["echo-".len()..].chars().all(|value| value.is_ascii_hexdigit()),
+            "fallback id suffix should be hex"
+        );
+
+        let changed = request("ok!");
+        let changed_id = super::fallback_native_message_id(&changed);
+        assert_ne!(first, changed_id, "payload changes should alter fallback id");
     }
 }

@@ -304,6 +304,7 @@ pub struct QuarantinedMessage {
 pub enum RetryDisposition {
     Queued,
     Quarantined,
+    Dropped,
 }
 
 #[derive(Debug, Default)]
@@ -834,22 +835,28 @@ impl ChannelRouter {
         reason: &str,
     ) -> RetryDisposition {
         if message.retry_attempt.saturating_add(1) > self.config.max_retry_attempts {
-            let _ = self.quarantine_message(
+            return if self.quarantine_message(
                 message,
                 format!("retry_exhausted:{reason}").as_str(),
                 message.retry_attempt,
-            );
-            return RetryDisposition::Quarantined;
+            ) {
+                RetryDisposition::Quarantined
+            } else {
+                RetryDisposition::Dropped
+            };
         }
         if self.enqueue_retry(message, message.channel.as_str(), reason.to_owned()) {
             RetryDisposition::Queued
         } else {
-            let _ = self.quarantine_message(
+            if self.quarantine_message(
                 message,
                 format!("retry_enqueue_failed:{reason}").as_str(),
                 message.retry_attempt,
-            );
-            RetryDisposition::Quarantined
+            ) {
+                RetryDisposition::Quarantined
+            } else {
+                RetryDisposition::Dropped
+            }
         }
     }
 
@@ -1595,6 +1602,31 @@ mod tests {
             "queue depth should stay capped when additional retry cannot be enqueued"
         );
         assert_eq!(router.quarantine_len("slack"), 1);
+    }
+
+    #[test]
+    fn processing_failure_is_dropped_when_exhausted_retry_cannot_be_quarantined() {
+        let router = ChannelRouter::new(baseline_config());
+        let mut message = inbound("@palyra retry dropped");
+        message.channel = "   ".to_owned();
+        message.retry_attempt = 2;
+
+        let disposition = router.record_processing_failure(&message, "provider_error");
+        assert!(matches!(disposition, RetryDisposition::Dropped));
+        assert_eq!(router.queue_depth(), 0);
+    }
+
+    #[test]
+    fn processing_failure_is_dropped_when_retry_enqueue_and_quarantine_both_fail() {
+        let mut config = baseline_config();
+        config.max_retry_queue_depth_per_channel = 0;
+        let router = ChannelRouter::new(config);
+        let mut message = inbound("@palyra retry dropped");
+        message.channel = "   ".to_owned();
+
+        let disposition = router.record_processing_failure(&message, "provider_error");
+        assert!(matches!(disposition, RetryDisposition::Dropped));
+        assert_eq!(router.queue_depth(), 0);
     }
 
     #[test]

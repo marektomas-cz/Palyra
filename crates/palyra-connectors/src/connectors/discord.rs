@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
     env,
-    hash::{Hash, Hasher},
     net::{IpAddr, ToSocketAddrs},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -500,13 +499,12 @@ fn fallback_native_message_id(request: &OutboundMessageRequest) -> String {
         "text": request.text,
         "thread_id": request.reply_thread_id,
     });
-    format!("discord-{:016x}", deterministic_hash(&fingerprint.to_string()))
+    format!("discord-{}", stable_fingerprint_hex(fingerprint.to_string().as_bytes()))
 }
 
-fn deterministic_hash<T: Hash>(value: &T) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
+fn stable_fingerprint_hex(payload: &[u8]) -> String {
+    let digest = Sha256::digest(payload);
+    digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn parse_rate_limit_snapshot(response: &DiscordTransportResponse) -> RateLimitSnapshot {
@@ -1780,6 +1778,25 @@ mod tests {
             2,
             "matching envelope ids across connector instances must not share idempotency cache entries"
         );
+    }
+
+    #[test]
+    fn fallback_native_message_id_is_stable_and_sensitive_to_input() {
+        let request = sample_request("hello");
+        let first = super::fallback_native_message_id(&request);
+        let second = super::fallback_native_message_id(&request);
+        assert_eq!(first, second, "same payload must produce stable fallback id");
+        assert!(first.starts_with("discord-"));
+        assert_eq!(first.len(), "discord-".len() + 32);
+        assert!(
+            first["discord-".len()..].chars().all(|value| value.is_ascii_hexdigit()),
+            "fallback id suffix should be hex"
+        );
+
+        let mut changed = request.clone();
+        changed.reply_thread_id = Some("thread-2".to_owned());
+        let changed_id = super::fallback_native_message_id(&changed);
+        assert_ne!(first, changed_id, "payload changes should alter fallback id");
     }
 
     #[tokio::test]
