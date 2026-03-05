@@ -1289,9 +1289,7 @@ fn validate_capability_path(path: &str, wildcard_allowed: bool) -> Result<(), Sk
             path
         )));
     }
-    if !path.contains('*') {
-        normalize_artifact_path(path)?;
-    }
+    normalize_artifact_path(path)?;
     Ok(())
 }
 
@@ -1320,12 +1318,15 @@ fn validate_host(host: &str, wildcard_allowed: bool) -> Result<(), SkillPackagin
 }
 
 fn validate_secret_scope(scope: &str) -> Result<(), SkillPackagingError> {
-    if scope == "global"
-        || scope.starts_with("principal:")
-        || scope.starts_with("channel:")
-        || scope.starts_with("skill:")
-    {
+    let normalized = scope.trim();
+    if normalized == "global" {
         return Ok(());
+    }
+    for prefix in ["principal:", "channel:", "skill:"] {
+        if let Some(suffix) = normalized.strip_prefix(prefix) {
+            normalize_identifier(suffix, "capabilities.secrets[].scope")?;
+            return Ok(());
+        }
     }
     Err(SkillPackagingError::ManifestValidation(format!("invalid secret scope '{}'", scope)))
 }
@@ -1792,6 +1793,66 @@ min_palyra_version = "0.1.0"
         let manifest = sample_manifest().replace("api.example.com", "*");
         let error = parse_manifest_toml(manifest.as_str()).expect_err("manifest should fail");
         assert!(matches!(error, SkillPackagingError::ManifestValidation(_)));
+    }
+
+    #[test]
+    fn manifest_accepts_wildcard_capability_path_with_opt_in() {
+        let manifest = sample_manifest()
+            .replace("read_roots = [\"skills/data\"]", "read_roots = [\"skills/*\"]")
+            .replace(
+                "[capabilities]\nhttp_egress_allowlist = [\"api.example.com\"]",
+                "[capabilities]\nwildcard_opt_in = { filesystem = true }\nhttp_egress_allowlist = [\"api.example.com\"]",
+            );
+        parse_manifest_toml(manifest.as_str())
+            .expect("filesystem wildcard path with opt-in should be accepted");
+    }
+
+    #[test]
+    fn manifest_rejects_malformed_wildcard_capability_paths() {
+        for invalid_path in ["../*", "*//foo", "skills//*/data"] {
+            let manifest = sample_manifest()
+                .replace(
+                    "read_roots = [\"skills/data\"]",
+                    format!("read_roots = [\"{invalid_path}\"]").as_str(),
+                )
+                .replace(
+                    "[capabilities]\nhttp_egress_allowlist = [\"api.example.com\"]",
+                    "[capabilities]\nwildcard_opt_in = { filesystem = true }\nhttp_egress_allowlist = [\"api.example.com\"]",
+                );
+            let error = parse_manifest_toml(manifest.as_str()).expect_err("manifest should fail");
+            assert!(
+                matches!(error, SkillPackagingError::InvalidArtifactPath(_)),
+                "expected InvalidArtifactPath for '{invalid_path}', got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_secret_scopes_with_empty_suffix() {
+        for invalid_scope in ["principal:", "channel:", "skill:"] {
+            let manifest = sample_manifest().replace(
+                "scope = \"skill:acme.echo_http\"",
+                format!("scope = \"{invalid_scope}\"").as_str(),
+            );
+            let error = parse_manifest_toml(manifest.as_str()).expect_err("manifest should fail");
+            assert!(
+                matches!(error, SkillPackagingError::ManifestValidation(_)),
+                "expected manifest validation error for '{invalid_scope}', got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_accepts_secret_scopes_with_valid_suffixes() {
+        for valid_scope in ["principal:admin:ops", "channel:discord:acct_1", "skill:acme.echo_http"]
+        {
+            let manifest = sample_manifest().replace(
+                "scope = \"skill:acme.echo_http\"",
+                format!("scope = \"{valid_scope}\"").as_str(),
+            );
+            parse_manifest_toml(manifest.as_str())
+                .unwrap_or_else(|error| panic!("scope '{valid_scope}' should be valid: {error:?}"));
+        }
     }
 
     #[test]
