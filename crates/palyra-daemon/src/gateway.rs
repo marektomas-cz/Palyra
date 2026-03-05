@@ -7917,64 +7917,27 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                     }
                 }
 
-                if !in_progress_emitted {
-                    if let Err(error) = run_state.transition(RunTransition::StartStreaming) {
-                        let status = Status::internal(error.to_string());
-                        finalize_run_failure(
-                            &sender,
-                            &state_for_stream,
-                            &mut run_state,
-                            active_run_id.as_deref(),
-                            &mut tape_seq,
-                            status.message(),
-                        )
-                        .await;
-                        let _ = sender.send(Err(status)).await;
-                        return;
-                    }
-                    if let Err(error) = state_for_stream
-                        .update_orchestrator_run_state(
-                            run_id.clone(),
-                            RunLifecycleState::InProgress,
-                            None,
-                        )
-                        .await
-                    {
-                        finalize_run_failure(
-                            &sender,
-                            &state_for_stream,
-                            &mut run_state,
-                            active_run_id.as_deref(),
-                            &mut tape_seq,
-                            error.message(),
-                        )
-                        .await;
-                        let _ = sender.send(Err(error)).await;
-                        return;
-                    }
-                    if let Err(error) = send_status_with_tape(
+                if let Err(error) = ensure_run_stream_in_progress(
+                    &sender,
+                    &state_for_stream,
+                    &mut run_state,
+                    run_id.as_str(),
+                    &mut in_progress_emitted,
+                    &mut tape_seq,
+                )
+                .await
+                {
+                    finalize_run_failure(
                         &sender,
                         &state_for_stream,
-                        run_id.as_str(),
+                        &mut run_state,
+                        active_run_id.as_deref(),
                         &mut tape_seq,
-                        common_v1::stream_status::StatusKind::InProgress,
-                        "streaming",
+                        error.message(),
                     )
-                    .await
-                    {
-                        finalize_run_failure(
-                            &sender,
-                            &state_for_stream,
-                            &mut run_state,
-                            active_run_id.as_deref(),
-                            &mut tape_seq,
-                            error.message(),
-                        )
-                        .await;
-                        let _ = sender.send(Err(error)).await;
-                        return;
-                    }
-                    in_progress_emitted = true;
+                    .await;
+                    let _ = sender.send(Err(error)).await;
+                    return;
                 }
 
                 let provider_response = match execute_run_stream_provider_request(
@@ -13912,6 +13875,38 @@ async fn execute_run_stream_provider_request(
             }
         }
     }
+}
+
+#[allow(clippy::result_large_err)]
+async fn ensure_run_stream_in_progress(
+    sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_state: &mut RunStateMachine,
+    run_id: &str,
+    in_progress_emitted: &mut bool,
+    tape_seq: &mut i64,
+) -> Result<(), Status> {
+    if *in_progress_emitted {
+        return Ok(());
+    }
+
+    run_state
+        .transition(RunTransition::StartStreaming)
+        .map_err(|error| Status::internal(error.to_string()))?;
+    runtime_state
+        .update_orchestrator_run_state(run_id.to_owned(), RunLifecycleState::InProgress, None)
+        .await?;
+    send_status_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        common_v1::stream_status::StatusKind::InProgress,
+        "streaming",
+    )
+    .await?;
+    *in_progress_emitted = true;
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
