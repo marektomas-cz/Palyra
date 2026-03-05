@@ -428,6 +428,32 @@ enum RunStreamMessageProcessingOutcome {
     Terminate,
 }
 
+struct RunStreamProviderEventSurface<'a> {
+    sender: &'a mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    stream: &'a mut Streaming<common_v1::RunStreamRequest>,
+    request_context: &'a RequestContext,
+    active_session_id: Option<&'a str>,
+    run_state: &'a mut RunStateMachine,
+    model_token_tape_events: &'a mut usize,
+    model_token_compaction_emitted: &'a mut bool,
+}
+
+struct RouteMessageProviderEventSurface<'a> {
+    request_context: &'a RequestContext,
+    reply_text: &'a mut String,
+}
+
+enum ProviderEventSurface<'a> {
+    RunStream(RunStreamProviderEventSurface<'a>),
+    RouteMessage(RouteMessageProviderEventSurface<'a>),
+}
+
+#[derive(Debug, Clone)]
+enum RouteToolApprovalResolution {
+    Resolved(Option<ToolApprovalOutcome>),
+    Pending { approval_id: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CanvasAssetRecord {
     content_type: String,
@@ -5469,33 +5495,33 @@ async fn process_route_provider_response(
     tape_seq: &mut i64,
 ) -> Result<RouteProviderResponseOutcome, Status> {
     let mut reply_text = String::new();
+    let mut summary_tokens = Vec::new();
     for event in provider_response.events {
-        match event {
-            ProviderEvent::ModelToken { token, .. } => {
-                if !reply_text.is_empty() {
-                    reply_text.push(' ');
-                }
-                reply_text.push_str(token.as_str());
-            }
-            ProviderEvent::ToolProposal { proposal_id, tool_name, input_json } => {
-                let tool_summary = process_route_tool_proposal_event(
-                    runtime_state,
-                    route_request_context,
-                    session_id,
-                    run_id,
-                    proposal_id.as_str(),
-                    tool_name.as_str(),
-                    input_json.as_slice(),
-                    remaining_tool_budget,
-                    tape_seq,
-                )
-                .await?;
-                if !reply_text.is_empty() {
-                    reply_text.push('\n');
-                }
-                reply_text.push_str(tool_summary.as_str());
+        match process_provider_event_for_surface(
+            runtime_state,
+            session_id,
+            run_id,
+            event,
+            &mut summary_tokens,
+            remaining_tool_budget,
+            tape_seq,
+            ProviderEventSurface::RouteMessage(RouteMessageProviderEventSurface {
+                request_context: route_request_context,
+                reply_text: &mut reply_text,
+            }),
+        )
+        .await?
+        {
+            RunStreamProviderEventOutcome::Continue => {}
+            RunStreamProviderEventOutcome::Cancelled => {
+                return Err(Status::internal(
+                    "route provider event processing unexpectedly returned cancelled outcome",
+                ));
             }
         }
+    }
+    if reply_text.trim().is_empty() && !summary_tokens.is_empty() {
+        reply_text = summary_tokens.join(" ");
     }
     if reply_text.trim().is_empty() {
         reply_text = "ack".to_owned();
@@ -12631,6 +12657,100 @@ async fn compact_model_token_tape_stub(
 
 #[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
+async fn append_tool_proposal_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    proposal_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+    approval_required: bool,
+) -> Result<(), Status> {
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool_proposal".to_owned(),
+            payload_json: tool_proposal_tape_payload(
+                proposal_id,
+                tool_name,
+                input_json,
+                approval_required,
+            ),
+        })
+        .await?;
+    *tape_seq += 1;
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn append_tool_approval_request_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    proposal_id: &str,
+    approval_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+    approval_required: bool,
+    request_summary: &str,
+    prompt: &ApprovalPromptRecord,
+) -> Result<(), Status> {
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool_approval_request".to_owned(),
+            payload_json: tool_approval_request_tape_payload(
+                proposal_id,
+                approval_id,
+                tool_name,
+                input_json,
+                approval_required,
+                request_summary,
+                prompt,
+            ),
+        })
+        .await?;
+    *tape_seq += 1;
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn append_tool_approval_response_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    proposal_id: &str,
+    approval_id: &str,
+    approved: bool,
+    reason: &str,
+    decision_scope: ApprovalDecisionScope,
+    decision_scope_ttl_ms: Option<i64>,
+) -> Result<(), Status> {
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool_approval_response".to_owned(),
+            payload_json: tool_approval_response_tape_payload(
+                proposal_id,
+                approval_id,
+                approved,
+                reason,
+                decision_scope,
+                decision_scope_ttl_ms,
+            ),
+        })
+        .await?;
+    *tape_seq += 1;
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
 async fn send_tool_proposal_with_tape(
     sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -12652,21 +12772,16 @@ async fn send_tool_proposal_with_tape(
         .send(Ok(event))
         .await
         .map_err(|_| Status::cancelled("run stream response channel closed"))?;
-    runtime_state
-        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
-            run_id: run_id.to_owned(),
-            seq: *tape_seq,
-            event_type: "tool_proposal".to_owned(),
-            payload_json: tool_proposal_tape_payload(
-                proposal_id,
-                tool_name,
-                input_json,
-                approval_required,
-            ),
-        })
-        .await?;
-    *tape_seq += 1;
-    Ok(())
+    append_tool_proposal_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        tool_name,
+        input_json,
+        approval_required,
+    )
+    .await
 }
 
 #[allow(clippy::result_large_err)]
@@ -12698,24 +12813,19 @@ async fn send_tool_approval_request_with_tape(
         .send(Ok(event))
         .await
         .map_err(|_| Status::cancelled("run stream response channel closed"))?;
-    runtime_state
-        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
-            run_id: run_id.to_owned(),
-            seq: *tape_seq,
-            event_type: "tool_approval_request".to_owned(),
-            payload_json: tool_approval_request_tape_payload(
-                proposal_id,
-                approval_id,
-                tool_name,
-                input_json,
-                approval_required,
-                request_summary,
-                prompt,
-            ),
-        })
-        .await?;
-    *tape_seq += 1;
-    Ok(())
+    append_tool_approval_request_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        approval_id,
+        tool_name,
+        input_json,
+        approval_required,
+        request_summary,
+        prompt,
+    )
+    .await
 }
 
 #[allow(clippy::result_large_err)]
@@ -12745,23 +12855,18 @@ async fn send_tool_approval_response_with_tape(
         .send(Ok(event))
         .await
         .map_err(|_| Status::cancelled("run stream response channel closed"))?;
-    runtime_state
-        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
-            run_id: run_id.to_owned(),
-            seq: *tape_seq,
-            event_type: "tool_approval_response".to_owned(),
-            payload_json: tool_approval_response_tape_payload(
-                proposal_id,
-                approval_id,
-                approved,
-                reason,
-                decision_scope,
-                decision_scope_ttl_ms,
-            ),
-        })
-        .await?;
-    *tape_seq += 1;
-    Ok(())
+    append_tool_approval_response_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        approval_id,
+        approved,
+        reason,
+        decision_scope,
+        decision_scope_ttl_ms,
+    )
+    .await
 }
 
 #[allow(clippy::result_large_err)]
@@ -13879,6 +13984,288 @@ async fn process_run_stream_provider_response(
     Ok(RunStreamProviderResponseOutcome::Completed)
 }
 
+#[allow(clippy::result_large_err)]
+async fn find_latest_route_tool_approval_record(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    route_request_context: &RequestContext,
+    session_id: &str,
+    approval_subject_id: &str,
+) -> Result<Option<ApprovalRecord>, Status> {
+    let (records, _) = runtime_state
+        .list_approval_records(
+            None,
+            Some(MAX_APPROVAL_PAGE_LIMIT),
+            None,
+            None,
+            Some(approval_subject_id.to_owned()),
+            Some(route_request_context.principal.clone()),
+            None,
+            Some(ApprovalSubjectType::Tool),
+        )
+        .await?;
+    Ok(records.into_iter().rev().find(|record| {
+        record.session_id == session_id
+            && record.device_id == route_request_context.device_id
+            && record.channel == route_request_context.channel
+    }))
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn resolve_route_tool_approval_outcome(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    route_request_context: &RequestContext,
+    session_id: &str,
+    run_id: &str,
+    proposal_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+    skill_context: Option<&ToolSkillContext>,
+    approval_subject_id: &str,
+    proposal_approval_required: bool,
+    tape_seq: &mut i64,
+) -> Result<RouteToolApprovalResolution, Status> {
+    if let Some(cached_outcome) = resolve_cached_tool_approval_for_proposal(
+        runtime_state,
+        route_request_context,
+        session_id,
+        approval_subject_id,
+        proposal_approval_required,
+        run_id,
+        proposal_id,
+        "route message",
+    ) {
+        append_tool_approval_response_tape_event(
+            runtime_state,
+            run_id,
+            tape_seq,
+            proposal_id,
+            cached_outcome.approval_id.as_str(),
+            cached_outcome.approved,
+            cached_outcome.reason.as_str(),
+            cached_outcome.decision_scope,
+            cached_outcome.decision_scope_ttl_ms,
+        )
+        .await?;
+        return Ok(RouteToolApprovalResolution::Resolved(Some(cached_outcome)));
+    }
+    if !proposal_approval_required {
+        return Ok(RouteToolApprovalResolution::Resolved(None));
+    }
+
+    if let Some(record) = find_latest_route_tool_approval_record(
+        runtime_state,
+        route_request_context,
+        session_id,
+        approval_subject_id,
+    )
+    .await?
+    {
+        if let Some(decision) = record.decision {
+            let resolved_outcome = tool_approval_outcome_from_record(&record, decision);
+            runtime_state.remember_tool_approval(
+                route_request_context,
+                session_id,
+                approval_subject_id,
+                &resolved_outcome,
+            );
+            append_tool_approval_response_tape_event(
+                runtime_state,
+                run_id,
+                tape_seq,
+                proposal_id,
+                resolved_outcome.approval_id.as_str(),
+                resolved_outcome.approved,
+                resolved_outcome.reason.as_str(),
+                resolved_outcome.decision_scope,
+                resolved_outcome.decision_scope_ttl_ms,
+            )
+            .await?;
+            return Ok(RouteToolApprovalResolution::Resolved(Some(resolved_outcome)));
+        }
+
+        append_tool_approval_request_tape_event(
+            runtime_state,
+            run_id,
+            tape_seq,
+            proposal_id,
+            record.approval_id.as_str(),
+            tool_name,
+            input_json,
+            true,
+            record.request_summary.as_str(),
+            &record.prompt,
+        )
+        .await?;
+        return Ok(RouteToolApprovalResolution::Pending { approval_id: record.approval_id });
+    }
+
+    let pending_approval = build_pending_tool_approval(
+        tool_name,
+        skill_context,
+        input_json,
+        &runtime_state.config.tool_call,
+    );
+    runtime_state
+        .create_approval_record(ApprovalCreateRequest {
+            approval_id: pending_approval.approval_id.clone(),
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+            principal: route_request_context.principal.clone(),
+            device_id: route_request_context.device_id.clone(),
+            channel: route_request_context.channel.clone(),
+            subject_type: ApprovalSubjectType::Tool,
+            subject_id: pending_approval.prompt.subject_id.clone(),
+            request_summary: pending_approval.request_summary.clone(),
+            policy_snapshot: pending_approval.policy_snapshot.clone(),
+            prompt: pending_approval.prompt.clone(),
+        })
+        .await?;
+    info!(
+        run_id = run_id,
+        proposal_id = proposal_id,
+        approval_id = %pending_approval.approval_id,
+        subject_id = %pending_approval.prompt.subject_id,
+        "route message approval requested"
+    );
+    if let Err(error) = append_tool_approval_request_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        pending_approval.approval_id.as_str(),
+        tool_name,
+        input_json,
+        true,
+        pending_approval.request_summary.as_str(),
+        &pending_approval.prompt,
+    )
+    .await
+    {
+        best_effort_mark_approval_error(
+            runtime_state,
+            pending_approval.approval_id.as_str(),
+            format!("route_approval_request_tape_error: {}", error.message()),
+        )
+        .await;
+        return Err(error);
+    }
+    if let Err(error) = record_approval_requested_journal_event(
+        runtime_state,
+        route_request_context,
+        session_id,
+        run_id,
+        proposal_id,
+        pending_approval.approval_id.as_str(),
+        tool_name,
+        pending_approval.prompt.subject_id.as_str(),
+        pending_approval.request_summary.as_str(),
+        &pending_approval.policy_snapshot,
+        &pending_approval.prompt,
+    )
+    .await
+    {
+        best_effort_mark_approval_error(
+            runtime_state,
+            pending_approval.approval_id.as_str(),
+            format!("route_approval_request_journal_error: {}", error.message()),
+        )
+        .await;
+        return Err(error);
+    }
+    Ok(RouteToolApprovalResolution::Pending { approval_id: pending_approval.approval_id })
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn process_provider_event_for_surface(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    session_id: &str,
+    run_id: &str,
+    provider_event: ProviderEvent,
+    summary_tokens: &mut Vec<String>,
+    remaining_tool_budget: &mut u32,
+    tape_seq: &mut i64,
+    surface: ProviderEventSurface<'_>,
+) -> Result<RunStreamProviderEventOutcome, Status> {
+    match provider_event {
+        ProviderEvent::ModelToken { token, is_final } => {
+            if !token.trim().is_empty() {
+                summary_tokens.push(token.clone());
+            }
+            match surface {
+                ProviderEventSurface::RunStream(context) => {
+                    send_model_token_with_tape(
+                        context.sender,
+                        runtime_state,
+                        run_id,
+                        tape_seq,
+                        context.model_token_tape_events,
+                        context.model_token_compaction_emitted,
+                        token.as_str(),
+                        is_final,
+                    )
+                    .await?;
+                }
+                ProviderEventSurface::RouteMessage(context) => {
+                    if !context.reply_text.is_empty() {
+                        context.reply_text.push(' ');
+                    }
+                    context.reply_text.push_str(token.as_str());
+                }
+            }
+            Ok(RunStreamProviderEventOutcome::Continue)
+        }
+        ProviderEvent::ToolProposal { proposal_id, tool_name, input_json } => match surface {
+            ProviderEventSurface::RunStream(context) => {
+                match process_run_stream_tool_proposal_event(
+                    context.sender,
+                    context.stream,
+                    runtime_state,
+                    context.request_context,
+                    context.active_session_id,
+                    context.run_state,
+                    session_id,
+                    run_id,
+                    proposal_id.as_str(),
+                    tool_name.as_str(),
+                    input_json.as_slice(),
+                    remaining_tool_budget,
+                    tape_seq,
+                )
+                .await?
+                {
+                    RunStreamToolExecutionOutcome::Completed => {
+                        Ok(RunStreamProviderEventOutcome::Continue)
+                    }
+                    RunStreamToolExecutionOutcome::Cancelled => {
+                        Ok(RunStreamProviderEventOutcome::Cancelled)
+                    }
+                }
+            }
+            ProviderEventSurface::RouteMessage(context) => {
+                let tool_summary = process_route_tool_proposal_event(
+                    runtime_state,
+                    context.request_context,
+                    session_id,
+                    run_id,
+                    proposal_id.as_str(),
+                    tool_name.as_str(),
+                    input_json.as_slice(),
+                    remaining_tool_budget,
+                    tape_seq,
+                )
+                .await?;
+                if !context.reply_text.is_empty() {
+                    context.reply_text.push('\n');
+                }
+                context.reply_text.push_str(tool_summary.as_str());
+                Ok(RunStreamProviderEventOutcome::Continue)
+            }
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_route_tool_proposal_event(
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -13891,7 +14278,6 @@ async fn process_route_tool_proposal_event(
     remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<String, Status> {
-    runtime_state.counters.tool_proposals.fetch_add(1, Ordering::Relaxed);
     let ToolProposalSecurityEvaluation {
         skill_context,
         skill_gate_decision,
@@ -13906,17 +14292,40 @@ async fn process_route_tool_proposal_event(
         input_json,
     )
     .await;
-    let cached_approval_outcome = resolve_cached_tool_approval_for_proposal(
+    runtime_state.counters.tool_proposals.fetch_add(1, Ordering::Relaxed);
+    append_tool_proposal_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        tool_name,
+        input_json,
+        proposal_approval_required,
+    )
+    .await?;
+    let route_approval_resolution = resolve_route_tool_approval_outcome(
         runtime_state,
         route_request_context,
         session_id,
-        approval_subject_id.as_str(),
-        proposal_approval_required,
         run_id,
         proposal_id,
-        "route message",
-    );
-    let decision = resolve_tool_proposal_decision_for_context(
+        tool_name,
+        input_json,
+        skill_context.as_ref(),
+        approval_subject_id.as_str(),
+        proposal_approval_required,
+        tape_seq,
+    )
+    .await?;
+    let mut pending_approval_id: Option<String> = None;
+    let approval_outcome = match route_approval_resolution {
+        RouteToolApprovalResolution::Resolved(outcome) => outcome,
+        RouteToolApprovalResolution::Pending { approval_id } => {
+            pending_approval_id = Some(approval_id);
+            None
+        }
+    };
+    let mut decision = resolve_tool_proposal_decision_for_context(
         runtime_state,
         route_request_context,
         route_request_context.channel.as_deref(),
@@ -13926,8 +14335,13 @@ async fn process_route_tool_proposal_event(
         skill_context.as_ref(),
         remaining_tool_budget,
         skill_gate_decision,
-        cached_approval_outcome.as_ref(),
+        approval_outcome.as_ref(),
     );
+    if let Some(approval_id) = pending_approval_id {
+        if !decision.allowed && decision.approval_required {
+            decision.reason = format!("approval required (pending approval_id={approval_id})");
+        }
+    }
     append_tool_decision_tape_event(
         runtime_state,
         run_id,
@@ -14154,51 +14568,25 @@ async fn process_run_stream_provider_event(
     model_token_tape_events: &mut usize,
     model_token_compaction_emitted: &mut bool,
 ) -> Result<RunStreamProviderEventOutcome, Status> {
-    match provider_event {
-        ProviderEvent::ModelToken { token, is_final } => {
-            if !token.trim().is_empty() {
-                summary_tokens.push(token.clone());
-            }
-            send_model_token_with_tape(
-                sender,
-                runtime_state,
-                run_id,
-                tape_seq,
-                model_token_tape_events,
-                model_token_compaction_emitted,
-                token.as_str(),
-                is_final,
-            )
-            .await?;
-            Ok(RunStreamProviderEventOutcome::Continue)
-        }
-        ProviderEvent::ToolProposal { proposal_id, tool_name, input_json } => {
-            match process_run_stream_tool_proposal_event(
-                sender,
-                stream,
-                runtime_state,
-                request_context,
-                active_session_id,
-                run_state,
-                session_id,
-                run_id,
-                proposal_id.as_str(),
-                tool_name.as_str(),
-                input_json.as_slice(),
-                remaining_tool_budget,
-                tape_seq,
-            )
-            .await?
-            {
-                RunStreamToolExecutionOutcome::Completed => {
-                    Ok(RunStreamProviderEventOutcome::Continue)
-                }
-                RunStreamToolExecutionOutcome::Cancelled => {
-                    Ok(RunStreamProviderEventOutcome::Cancelled)
-                }
-            }
-        }
-    }
+    process_provider_event_for_surface(
+        runtime_state,
+        session_id,
+        run_id,
+        provider_event,
+        summary_tokens,
+        remaining_tool_budget,
+        tape_seq,
+        ProviderEventSurface::RunStream(RunStreamProviderEventSurface {
+            sender,
+            stream,
+            request_context,
+            active_session_id,
+            run_state,
+            model_token_tape_events,
+            model_token_compaction_emitted,
+        }),
+    )
+    .await
 }
 
 #[allow(clippy::result_large_err)]
@@ -15889,10 +16277,11 @@ mod tests {
         extend_patch_string_defaults, parse_patch_string_array_field,
         principal_has_sensitive_service_role, record_auth_refresh_journal_event,
         request_context_from_headers, resolve_cron_job_channel_for_create,
-        resolve_fetch_target_addresses, validate_resolved_fetch_addresses,
-        vault_get_requires_approval, workspace_patch_metrics_from_output, AuthError,
-        GatewayAuthConfig, GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot,
-        GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest, RequestContext,
+        resolve_fetch_target_addresses, resolve_route_tool_approval_outcome,
+        validate_resolved_fetch_addresses, vault_get_requires_approval,
+        workspace_patch_metrics_from_output, AuthError, GatewayAuthConfig,
+        GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
+        MemoryRuntimeConfig, ProviderRequest, RequestContext, RouteToolApprovalResolution,
         SensitiveServiceRole, ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID,
         HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
         VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
@@ -17701,6 +18090,241 @@ summarize incident";
             cached.reason.contains("allow_session"),
             "cached reason should preserve operator decision context"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_route_tool_approval_outcome_reuses_pending_record_across_retries() {
+        let state = build_test_runtime_state(false);
+        let context = RequestContext {
+            principal: "user:ops".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: Some("cli".to_owned()),
+        };
+        let session_id = Ulid::new().to_string();
+        let run_id_first = Ulid::new().to_string();
+        let proposal_id_first = Ulid::new().to_string();
+        let run_id_second = Ulid::new().to_string();
+        let proposal_id_second = Ulid::new().to_string();
+        let approval_subject_id = "tool:palyra.process.run";
+        let input_json = serde_json::to_vec(&json!({
+            "command": "echo",
+            "args": ["route-approval-pending"]
+        }))
+        .expect("route approval input json should encode");
+        state
+            .journal_store
+            .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+                session_id: session_id.clone(),
+                session_key: format!("route:{session_id}"),
+                session_label: Some("Route approval pending test".to_owned()),
+                principal: context.principal.clone(),
+                device_id: context.device_id.clone(),
+                channel: context.channel.clone(),
+            })
+            .expect("orchestrator session should be upserted for route approval test");
+        state
+            .start_orchestrator_run(OrchestratorRunStartRequest {
+                run_id: run_id_first.clone(),
+                session_id: session_id.clone(),
+            })
+            .await
+            .expect("first run should be started for route approval test");
+        state
+            .start_orchestrator_run(OrchestratorRunStartRequest {
+                run_id: run_id_second.clone(),
+                session_id: session_id.clone(),
+            })
+            .await
+            .expect("second run should be started for route approval test");
+
+        let mut tape_seq_first = 1_i64;
+        let first_resolution = resolve_route_tool_approval_outcome(
+            &state,
+            &context,
+            session_id.as_str(),
+            run_id_first.as_str(),
+            proposal_id_first.as_str(),
+            "palyra.process.run",
+            input_json.as_slice(),
+            None,
+            approval_subject_id,
+            true,
+            &mut tape_seq_first,
+        )
+        .await
+        .expect("first route approval resolution should succeed");
+        let first_approval_id = match first_resolution {
+            RouteToolApprovalResolution::Pending { approval_id } => approval_id,
+            other => panic!("expected pending approval resolution, got {other:?}"),
+        };
+
+        let mut tape_seq_second = 1_i64;
+        let second_resolution = resolve_route_tool_approval_outcome(
+            &state,
+            &context,
+            session_id.as_str(),
+            run_id_second.as_str(),
+            proposal_id_second.as_str(),
+            "palyra.process.run",
+            input_json.as_slice(),
+            None,
+            approval_subject_id,
+            true,
+            &mut tape_seq_second,
+        )
+        .await
+        .expect("second route approval resolution should succeed");
+        let second_approval_id = match second_resolution {
+            RouteToolApprovalResolution::Pending { approval_id } => approval_id,
+            other => panic!("expected pending approval reuse, got {other:?}"),
+        };
+        assert_eq!(
+            second_approval_id, first_approval_id,
+            "route retries should deterministically reuse the same pending approval record"
+        );
+
+        let (records, _) = state
+            .list_approval_records(
+                None,
+                Some(MAX_APPROVAL_PAGE_LIMIT),
+                None,
+                None,
+                Some(approval_subject_id.to_owned()),
+                Some(context.principal.clone()),
+                None,
+                Some(ApprovalSubjectType::Tool),
+            )
+            .await
+            .expect("approval listing should succeed");
+        let matching = records
+            .into_iter()
+            .filter(|record| {
+                record.session_id == session_id
+                    && record.device_id == context.device_id
+                    && record.channel == context.channel
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            1,
+            "route retries should not create duplicate pending approval records"
+        );
+        assert!(
+            matching[0].decision.is_none(),
+            "pending approval should remain unresolved until operator decision"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_route_tool_approval_outcome_rehydrates_resolved_record_into_cache() {
+        let state = build_test_runtime_state(false);
+        let context = RequestContext {
+            principal: "user:ops".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: Some("cli".to_owned()),
+        };
+        let session_id = Ulid::new().to_string();
+        let approval_subject_id = "tool:palyra.process.run".to_owned();
+
+        let mut approval_request = build_test_approval_request(901);
+        approval_request.session_id = session_id.clone();
+        approval_request.run_id = Ulid::new().to_string();
+        approval_request.principal = context.principal.clone();
+        approval_request.device_id = context.device_id.clone();
+        approval_request.channel = context.channel.clone();
+        approval_request.subject_id = approval_subject_id.clone();
+        approval_request.prompt.subject_id = approval_subject_id.clone();
+        approval_request.request_summary = "route approval resolution".to_owned();
+
+        let created = state
+            .create_approval_record(approval_request)
+            .await
+            .expect("approval create should succeed");
+        let _resolved = state
+            .resolve_approval_record(ApprovalResolveRequest {
+                approval_id: created.approval_id.clone(),
+                decision: ApprovalDecision::Allow,
+                decision_scope: ApprovalDecisionScope::Session,
+                decision_reason: "allow_session".to_owned(),
+                decision_scope_ttl_ms: None,
+            })
+            .await
+            .expect("approval resolve should succeed");
+        state.clear_tool_approval_cache_for_session(&context, session_id.as_str());
+        assert!(
+            state
+                .resolve_cached_tool_approval(
+                    &context,
+                    session_id.as_str(),
+                    approval_subject_id.as_str()
+                )
+                .is_none(),
+            "test precondition: session cache should be empty before route rehydration"
+        );
+
+        let run_id = Ulid::new().to_string();
+        let proposal_id = Ulid::new().to_string();
+        let input_json = serde_json::to_vec(&json!({
+            "command": "echo",
+            "args": ["route-approval-resolved"]
+        }))
+        .expect("route approval input json should encode");
+        state
+            .journal_store
+            .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+                session_id: session_id.clone(),
+                session_key: format!("route:{session_id}"),
+                session_label: Some("Route approval resolved test".to_owned()),
+                principal: context.principal.clone(),
+                device_id: context.device_id.clone(),
+                channel: context.channel.clone(),
+            })
+            .expect("orchestrator session should be upserted for resolved route approval test");
+        state
+            .start_orchestrator_run(OrchestratorRunStartRequest {
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+            })
+            .await
+            .expect("run should be started for resolved route approval test");
+        let mut tape_seq = 1_i64;
+        let resolution = resolve_route_tool_approval_outcome(
+            &state,
+            &context,
+            session_id.as_str(),
+            run_id.as_str(),
+            proposal_id.as_str(),
+            "palyra.process.run",
+            input_json.as_slice(),
+            None,
+            approval_subject_id.as_str(),
+            true,
+            &mut tape_seq,
+        )
+        .await
+        .expect("route approval resolution should succeed for resolved record");
+        let outcome = match resolution {
+            RouteToolApprovalResolution::Resolved(Some(outcome)) => outcome,
+            other => panic!("expected resolved approval outcome, got {other:?}"),
+        };
+        assert!(outcome.approved, "resolved allow decision should remain approved");
+        assert_eq!(
+            outcome.approval_id, created.approval_id,
+            "route rehydration should use the existing resolved approval record"
+        );
+
+        let cached = state
+            .resolve_cached_tool_approval(
+                &context,
+                session_id.as_str(),
+                approval_subject_id.as_str(),
+            )
+            .expect("resolved route approval should be re-cached for deterministic retries");
+        assert_eq!(
+            cached.approval_id, created.approval_id,
+            "re-cached approval should match resolved approval record id"
+        );
+        assert!(cached.approved, "re-cached route approval should preserve allow verdict");
     }
 
     #[tokio::test(flavor = "multi_thread")]
