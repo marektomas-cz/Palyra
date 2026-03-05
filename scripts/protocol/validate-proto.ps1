@@ -19,20 +19,15 @@ function Resolve-ProtocPath {
         return (Resolve-Path $env:PROTOC).Path
     }
 
-    $candidates = @(
-        (if ($env:ChocolateyInstall) { Join-Path $env:ChocolateyInstall "bin\protoc.exe" } else { $null }),
-        (if ($env:ChocolateyInstall) {
-            Join-Path $env:ChocolateyInstall "lib\protoc\tools\bin\protoc.exe"
-        } else {
-            $null
-        }),
-        (if ($env:ProgramData) { Join-Path $env:ProgramData "chocolatey\bin\protoc.exe" } else { $null }),
-        (if ($env:ProgramData) {
-            Join-Path $env:ProgramData "chocolatey\lib\protoc\tools\bin\protoc.exe"
-        } else {
-            $null
-        })
-    )
+    $candidates = @()
+    if ($env:ChocolateyInstall) {
+        $candidates += Join-Path $env:ChocolateyInstall "bin\protoc.exe"
+        $candidates += Join-Path $env:ChocolateyInstall "lib\protoc\tools\bin\protoc.exe"
+    }
+    if ($env:ProgramData) {
+        $candidates += Join-Path $env:ProgramData "chocolatey\bin\protoc.exe"
+        $candidates += Join-Path $env:ProgramData "chocolatey\lib\protoc\tools\bin\protoc.exe"
+    }
     foreach ($candidate in $candidates) {
         if ([string]::IsNullOrWhiteSpace($candidate)) {
             continue
