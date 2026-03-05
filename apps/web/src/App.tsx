@@ -273,6 +273,128 @@ export function App() {
     }
   }, [section, session]);
 
+  function resetOperatorScopedState(): void {
+    setSection("approvals");
+    setRevealSensitiveValues(false);
+
+    setApprovalsBusy(false);
+    setApprovals([]);
+    setApprovalId("");
+    setApprovalReason("");
+    setApprovalScope("once");
+
+    setCronBusy(false);
+    setCronJobs([]);
+    setCronRuns([]);
+    setCronJobId("");
+    setCronForm(DEFAULT_CRON_FORM);
+
+    setChannelsBusy(false);
+    setChannelsConnectors([]);
+    setChannelsSelectedConnectorId("");
+    setChannelsSelectedStatus(null);
+    setChannelsEvents([]);
+    setChannelsDeadLetters([]);
+    setChannelsLogsLimit("25");
+    setChannelsTestText("hello from web console");
+    setChannelsTestConversationId("test:conversation");
+    setChannelsTestSenderId("test-user");
+    setChannelsTestSenderDisplay("");
+    setChannelsTestCrashOnce(false);
+    setChannelsTestDirectMessage(true);
+    setChannelsTestBroadcast(false);
+    setChannelsDiscordTarget("channel:");
+    setChannelsDiscordText("palyra discord test message");
+    setChannelsDiscordAutoReaction("");
+    setChannelsDiscordThreadId("");
+    setChannelsDiscordConfirm(false);
+    setChannelRouterRules(null);
+    setChannelRouterConfigHash("");
+    setChannelRouterWarnings([]);
+    setChannelRouterPreviewChannel("");
+    setChannelRouterPreviewText("pair 000000");
+    setChannelRouterPreviewConversationId("");
+    setChannelRouterPreviewSenderIdentity("");
+    setChannelRouterPreviewSenderDisplay("");
+    setChannelRouterPreviewSenderVerified(true);
+    setChannelRouterPreviewIsDirectMessage(true);
+    setChannelRouterPreviewRequestedBroadcast(false);
+    setChannelRouterPreviewMaxPayloadBytes("2048");
+    setChannelRouterPreviewResult(null);
+    setChannelRouterPairingsFilterChannel("");
+    setChannelRouterPairings([]);
+    setChannelRouterMintChannel("");
+    setChannelRouterMintIssuedBy("");
+    setChannelRouterMintTtlMs("600000");
+    setChannelRouterMintResult(null);
+    setDiscordWizardBusy(false);
+    setDiscordWizardAccountId("default");
+    setDiscordWizardMode("local");
+    setDiscordWizardToken("");
+    setDiscordWizardScope("dm_only");
+    setDiscordWizardAllowFrom("");
+    setDiscordWizardDenyFrom("");
+    setDiscordWizardRequireMention(true);
+    setDiscordWizardBroadcast("deny");
+    setDiscordWizardConcurrency("2");
+    setDiscordWizardConfirmOpen(false);
+    setDiscordWizardVerifyChannelId("");
+    setDiscordWizardPreflight(null);
+    setDiscordWizardApply(null);
+    setDiscordWizardVerifyTarget("channel:");
+    setDiscordWizardVerifyText("palyra discord test message");
+    setDiscordWizardVerifyConfirm(false);
+
+    setMemoryBusy(false);
+    setMemoryQuery("");
+    setMemoryChannel("");
+    setMemoryPurgeChannel("");
+    setMemoryPurgeSessionId("");
+    setMemoryPurgeAll(false);
+    setMemoryHits([]);
+    setMemoryStatusBusy(false);
+    setMemoryStatus(null);
+
+    setSkillsBusy(false);
+    setSkillsEntries([]);
+    setSkillArtifactPath("");
+    setSkillAllowTofu(true);
+    setSkillAllowUntrusted(false);
+    setSkillReason("");
+
+    setAuditBusy(false);
+    setAuditFilterContains("");
+    setAuditFilterPrincipal("");
+    setAuditEvents([]);
+    setDiagnosticsBusy(false);
+    setDiagnosticsSnapshot(null);
+
+    setBrowserBusy(false);
+    setBrowserPrincipal("");
+    setBrowserProfiles([]);
+    setBrowserActiveProfileId("");
+    setBrowserProfileName("");
+    setBrowserProfileTheme("");
+    setBrowserProfilePersistence(true);
+    setBrowserProfilePrivate(false);
+    setBrowserRenameProfileId("");
+    setBrowserRenameName("");
+    setBrowserRelaySessionId("");
+    setBrowserRelayExtensionId("com.palyra.extension");
+    setBrowserRelayTtlMs("300000");
+    setBrowserRelayToken("");
+    setBrowserRelayTokenExpiry(null);
+    setBrowserRelayAction("capture_selection");
+    setBrowserRelayOpenTabUrl("");
+    setBrowserRelaySelector("body");
+    setBrowserRelayResult(null);
+    setBrowserDownloadsSessionId("");
+    setBrowserDownloadsQuarantinedOnly(false);
+    setBrowserDownloads([]);
+
+    setLoginForm((previous) => ({ ...previous, adminToken: "" }));
+  }
+
   async function signIn(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -285,7 +407,16 @@ export function App() {
         device_id: loginForm.deviceId.trim(),
         channel: emptyToUndefined(loginForm.channel)
       });
+      resetOperatorScopedState();
       setSession(next);
+      setBrowserPrincipal(next.principal);
+      setLoginForm((previous) => ({
+        ...previous,
+        adminToken: "",
+        principal: next.principal,
+        deviceId: next.device_id,
+        channel: next.channel ?? previous.channel
+      }));
       setNotice("Signed in.");
     } catch (failure) {
       setError(toErrorMessage(failure));
@@ -300,6 +431,7 @@ export function App() {
     setLogoutBusy(true);
     try {
       await api.logout();
+      resetOperatorScopedState();
       setSession(null);
       setNotice("Signed out.");
     } catch (failure) {

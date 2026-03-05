@@ -19,6 +19,83 @@ describe("M35 web console app", () => {
     expect(screen.queryByRole("button", { name: "Approvals" })).not.toBeInTheDocument();
   });
 
+  it("clears operator-scoped state on sign-out before next sign-in refresh completes", async () => {
+    const delayedApprovals = createDeferredResponse();
+    let activePrincipal = "admin:user-a";
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestUrl(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (path === "/console/v1/auth/session" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:user-a",
+            device_id: "device-a",
+            channel: "web",
+            csrf_token: "csrf-a",
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 300
+          })
+        );
+      }
+
+      if (path === "/console/v1/approvals" && method === "GET") {
+        if (activePrincipal === "admin:user-a") {
+          return Promise.resolve(
+            jsonResponse({
+              approvals: [{ approval_id: "APPROVAL-A", subject_type: "tool", decision: "pending" }]
+            })
+          );
+        }
+        return delayedApprovals.promise;
+      }
+
+      if (path === "/console/v1/auth/logout" && method === "POST") {
+        return Promise.resolve(jsonResponse({ signed_out: true }));
+      }
+
+      if (path === "/console/v1/auth/login" && method === "POST") {
+        activePrincipal = "admin:user-b";
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:user-b",
+            device_id: "device-b",
+            channel: "web",
+            csrf_token: "csrf-b",
+            issued_at_unix_ms: 200,
+            expires_at_unix_ms: 400
+          })
+        );
+      }
+
+      throw new Error(`Unhandled mocked request: ${method} ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    expect(await screen.findByText("APPROVAL-A")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("heading", { name: "Operator Console" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Admin token"), { target: { value: "token-b" } });
+    fireEvent.change(screen.getByLabelText("Principal"), { target: { value: "admin:user-b" } });
+    fireEvent.change(screen.getByLabelText("Device ID"), { target: { value: "device-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByRole("heading", { name: "Web Console v1" })).toBeInTheDocument();
+    expect(screen.queryByText("APPROVAL-A")).not.toBeInTheDocument();
+    expect(screen.getByText("No approvals found.")).toBeInTheDocument();
+
+    delayedApprovals.resolve(
+      jsonResponse({
+        approvals: [{ approval_id: "APPROVAL-B", subject_type: "tool", decision: "pending" }]
+      })
+    );
+
+    expect(await screen.findByText("APPROVAL-B")).toBeInTheDocument();
+  });
+
   it("executes approval decision flow with CSRF-protected request", async () => {
     let approvalDecision: "pending" | "allow" = "pending";
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -753,4 +830,18 @@ function ndjsonResponse(lines: unknown[]): Response {
       "content-type": "application/x-ndjson"
     }
   });
+}
+
+function createDeferredResponse(): {
+  promise: Promise<Response>;
+  resolve: (response: Response) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve: (response: Response) => void = () => {};
+  let reject: (error: unknown) => void = () => {};
+  const promise = new Promise<Response>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
 }

@@ -113,7 +113,10 @@ interface ErrorEnvelope {
 
 interface RequestOptions {
   csrf?: boolean;
+  timeoutMs?: number;
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 function buildPathWithQuery(path: string, params?: URLSearchParams): string {
   if (params === undefined || params.size === 0) {
@@ -795,11 +798,37 @@ export class ConsoleApiClient {
       headers.set("x-palyra-csrf-token", this.csrfToken);
     }
 
-    const response = await this.fetcher(`${this.basePath}${path}`, {
-      ...init,
-      headers,
-      credentials: "include"
-    });
+    const timeoutMs = normalizeRequestTimeoutMs(options.timeoutMs);
+    const requestController = new AbortController();
+    let timedOut = false;
+    const releaseCallerSignal = forwardAbortSignal(init.signal, requestController);
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      requestController.abort();
+    }, timeoutMs);
+
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.basePath}${path}`, {
+        ...init,
+        headers,
+        credentials: "include",
+        signal: requestController.signal
+      });
+    } catch (error) {
+      if (isAbortError(error)) {
+        if (timedOut) {
+          throw new Error(`Request timed out after ${timeoutMs} ms.`, { cause: error });
+        }
+        if (init.signal?.aborted === true) {
+          throw new Error("Request canceled.", { cause: error });
+        }
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutHandle);
+      releaseCallerSignal();
+    }
 
     const contentType = response.headers.get("content-type") ?? "";
     const isJson = contentType.includes("application/json");
@@ -812,6 +841,40 @@ export class ConsoleApiClient {
     }
     return payload as T;
   }
+}
+
+function normalizeRequestTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+  return Math.floor(timeoutMs);
+}
+
+function forwardAbortSignal(signal: AbortSignal | null | undefined, controller: AbortController): () => void {
+  if (signal === undefined || signal === null) {
+    return () => {};
+  }
+  if (signal.aborted) {
+    controller.abort();
+    return () => {};
+  }
+  const onAbort = () => {
+    controller.abort();
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  return () => {
+    signal.removeEventListener("abort", onAbort);
+  };
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error instanceof Error && error.name === "AbortError") {
+    return true;
+  }
+  if (typeof DOMException !== "undefined" && error instanceof DOMException) {
+    return error.name === "AbortError";
+  }
+  return false;
 }
 
 function extractErrorMessage(payload: JsonValue, status: number): string {

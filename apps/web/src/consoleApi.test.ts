@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { ConsoleApiClient, type ChatStreamLine } from "./consoleApi";
+import { ConsoleApiClient, type ChatStreamLine, type JsonValue } from "./consoleApi";
 
 describe("ConsoleApiClient", () => {
   it("uses CSRF token for mutating requests after login", async () => {
@@ -151,6 +151,88 @@ describe("ConsoleApiClient", () => {
     const client = new ConsoleApiClient("", fetcher);
 
     await expect(client.getSession()).rejects.toThrow("permission denied");
+  });
+
+  it("fails requests that exceed timeout budget", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetcher: typeof fetch = (_input, init) => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal === undefined || signal === null) {
+            reject(new Error("Missing request abort signal."));
+            return;
+          }
+          signal.addEventListener(
+            "abort",
+            () => {
+              const error = new Error("aborted");
+              error.name = "AbortError";
+              reject(error);
+            },
+            { once: true }
+          );
+        });
+      };
+      const client = new ConsoleApiClient("", fetcher);
+      const internalClient = client as unknown as {
+        request<T>(path: string, init?: RequestInit, options?: { csrf?: boolean; timeoutMs?: number }): Promise<T>;
+      };
+
+      const pending = internalClient.request<JsonValue>(
+        "/console/v1/diagnostics",
+        undefined,
+        { timeoutMs: 50, csrf: false }
+      );
+      const settled = pending.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error })
+      );
+      await vi.advanceTimersByTimeAsync(50);
+
+      const outcome = await settled;
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) {
+        expect(String(outcome.error)).toContain("Request timed out after 50 ms.");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves caller abort signal cancellation semantics", async () => {
+    const fetcher: typeof fetch = (_input, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal === undefined || signal === null) {
+          reject(new Error("Missing request abort signal."));
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          },
+          { once: true }
+        );
+      });
+    };
+    const client = new ConsoleApiClient("", fetcher);
+    const internalClient = client as unknown as {
+      request<T>(path: string, init?: RequestInit, options?: { csrf?: boolean; timeoutMs?: number }): Promise<T>;
+    };
+    const controller = new AbortController();
+    const pending = internalClient.request<JsonValue>(
+      "/console/v1/diagnostics",
+      { signal: controller.signal },
+      { timeoutMs: 1_000, csrf: false }
+    );
+
+    controller.abort();
+
+    await expect(pending).rejects.toThrow("Request canceled.");
   });
 
   it("sends relay action with bearer token and no CSRF requirement", async () => {
