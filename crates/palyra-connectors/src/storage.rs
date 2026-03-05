@@ -1,7 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
 };
 
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -44,6 +47,7 @@ pub struct OutboxEntryRecord {
     pub outbox_id: i64,
     pub connector_id: String,
     pub envelope_id: String,
+    pub claim_token: String,
     pub payload: OutboundMessageRequest,
     pub attempts: u32,
     pub max_attempts: u32,
@@ -96,7 +100,12 @@ pub enum ConnectorStoreError {
     ValueOverflow { field: &'static str },
     #[error("connector record not found: {0}")]
     NotFound(String),
+    #[error("outbox entry not found: {0}")]
+    OutboxNotFound(i64),
 }
+
+const OUTBOX_CLAIM_LEASE_MS: i64 = 60_000;
+static OUTBOX_CLAIM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 impl ConnectorStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ConnectorStoreError> {
@@ -425,65 +434,106 @@ impl ConnectorStore {
         limit: usize,
         connector_filter: Option<&str>,
     ) -> Result<Vec<OutboxEntryRecord>, ConnectorStoreError> {
-        let connection = self.connection.lock().map_err(|_| ConnectorStoreError::PoisonedLock)?;
         let limit_i64 = i64::try_from(limit)
             .map_err(|_| ConnectorStoreError::ValueOverflow { field: "limit" })?;
-        let mut records = Vec::new();
-        if let Some(connector_id) = connector_filter {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT outbox_id, connector_id, envelope_id, payload_json, attempts, max_attempts,
-                       next_attempt_unix_ms, created_at_unix_ms, updated_at_unix_ms
-                FROM outbox
-                WHERE status = 'pending'
-                  AND next_attempt_unix_ms <= ?1
-                  AND connector_id = ?2
-                ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
-                LIMIT ?3
-                "#,
-            )?;
-            let mut rows = statement.query(params![now_unix_ms, connector_id, limit_i64])?;
-            while let Some(row) = rows.next()? {
-                records.push(parse_outbox_row(row)?);
-            }
-        } else {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT outbox_id, connector_id, envelope_id, payload_json, attempts, max_attempts,
-                       next_attempt_unix_ms, created_at_unix_ms, updated_at_unix_ms
-                FROM outbox
-                WHERE status = 'pending'
-                  AND next_attempt_unix_ms <= ?1
-                ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
-                LIMIT ?2
-                "#,
-            )?;
-            let mut rows = statement.query(params![now_unix_ms, limit_i64])?;
-            while let Some(row) = rows.next()? {
-                records.push(parse_outbox_row(row)?);
-            }
+        if limit_i64 <= 0 {
+            return Ok(Vec::new());
         }
-        Ok(records)
+        let claim_token = next_outbox_claim_token(now_unix_ms);
+        let claim_expires_unix_ms = now_unix_ms.saturating_add(OUTBOX_CLAIM_LEASE_MS);
+
+        self.with_transaction(|transaction| {
+            if let Some(connector_id) = connector_filter {
+                transaction.execute(
+                    r#"
+                    UPDATE outbox
+                    SET claim_token = ?1,
+                        claim_expires_unix_ms = ?2,
+                        updated_at_unix_ms = ?3
+                    WHERE outbox_id IN (
+                        SELECT outbox_id
+                        FROM outbox
+                        WHERE status = 'pending'
+                          AND next_attempt_unix_ms <= ?3
+                          AND claim_expires_unix_ms <= ?3
+                          AND connector_id = ?4
+                        ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
+                        LIMIT ?5
+                    )
+                    "#,
+                    params![
+                        claim_token.as_str(),
+                        claim_expires_unix_ms,
+                        now_unix_ms,
+                        connector_id,
+                        limit_i64,
+                    ],
+                )?;
+            } else {
+                transaction.execute(
+                    r#"
+                    UPDATE outbox
+                    SET claim_token = ?1,
+                        claim_expires_unix_ms = ?2,
+                        updated_at_unix_ms = ?3
+                    WHERE outbox_id IN (
+                        SELECT outbox_id
+                        FROM outbox
+                        WHERE status = 'pending'
+                          AND next_attempt_unix_ms <= ?3
+                          AND claim_expires_unix_ms <= ?3
+                        ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
+                        LIMIT ?4
+                    )
+                    "#,
+                    params![claim_token.as_str(), claim_expires_unix_ms, now_unix_ms, limit_i64],
+                )?;
+            }
+
+            let mut records = Vec::new();
+            let mut statement = transaction.prepare(
+                r#"
+                SELECT outbox_id, connector_id, envelope_id, payload_json, attempts, max_attempts,
+                       next_attempt_unix_ms, claim_token, created_at_unix_ms, updated_at_unix_ms
+                FROM outbox
+                WHERE claim_token = ?1
+                ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
+                "#,
+            )?;
+            let mut rows = statement.query(params![claim_token.as_str()])?;
+            while let Some(row) = rows.next()? {
+                records.push(parse_outbox_row(row)?);
+            }
+            Ok(records)
+        })
     }
 
     pub fn mark_outbox_delivered(
         &self,
         outbox_id: i64,
+        claim_token: &str,
         native_message_id: &str,
         now_unix_ms: i64,
     ) -> Result<(), ConnectorStoreError> {
         self.with_transaction(|transaction| {
-            transaction.execute(
+            let changed = transaction.execute(
                 r#"
                 UPDATE outbox
                 SET status = 'delivered',
-                    native_message_id = ?2,
+                    native_message_id = ?3,
                     last_error = NULL,
-                    updated_at_unix_ms = ?3
+                    claim_token = NULL,
+                    claim_expires_unix_ms = 0,
+                    updated_at_unix_ms = ?4
                 WHERE outbox_id = ?1
+                  AND status = 'pending'
+                  AND claim_token = ?2
                 "#,
-                params![outbox_id, native_message_id, now_unix_ms],
+                params![outbox_id, claim_token, native_message_id, now_unix_ms],
             )?;
+            if changed == 0 {
+                return Err(ConnectorStoreError::OutboxNotFound(outbox_id));
+            }
             Ok(())
         })?;
         Ok(())
@@ -492,23 +542,31 @@ impl ConnectorStore {
     pub fn schedule_outbox_retry(
         &self,
         outbox_id: i64,
+        claim_token: &str,
         attempts: u32,
         reason: &str,
         next_attempt_unix_ms: i64,
     ) -> Result<(), ConnectorStoreError> {
         self.with_transaction(|transaction| {
-            transaction.execute(
+            let changed = transaction.execute(
                 r#"
                 UPDATE outbox
-                SET attempts = ?2,
-                    next_attempt_unix_ms = ?3,
+                SET attempts = ?3,
+                    next_attempt_unix_ms = ?4,
                     status = 'pending',
-                    last_error = ?4,
-                    updated_at_unix_ms = ?3
+                    last_error = ?5,
+                    claim_token = NULL,
+                    claim_expires_unix_ms = 0,
+                    updated_at_unix_ms = ?4
                 WHERE outbox_id = ?1
+                  AND status = 'pending'
+                  AND claim_token = ?2
                 "#,
-                params![outbox_id, i64::from(attempts), next_attempt_unix_ms, reason],
+                params![outbox_id, claim_token, i64::from(attempts), next_attempt_unix_ms, reason],
             )?;
+            if changed == 0 {
+                return Err(ConnectorStoreError::OutboxNotFound(outbox_id));
+            }
             Ok(())
         })?;
         Ok(())
@@ -517,6 +575,7 @@ impl ConnectorStore {
     pub fn move_outbox_to_dead_letter(
         &self,
         outbox_id: i64,
+        claim_token: &str,
         reason: &str,
         now_unix_ms: i64,
     ) -> Result<(), ConnectorStoreError> {
@@ -527,8 +586,10 @@ impl ConnectorStore {
                     SELECT connector_id, envelope_id, payload_json
                     FROM outbox
                     WHERE outbox_id = ?1
+                      AND status = 'pending'
+                      AND claim_token = ?2
                     "#,
-                    params![outbox_id],
+                    params![outbox_id, claim_token],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
@@ -539,7 +600,7 @@ impl ConnectorStore {
                 )
                 .optional()?;
             let Some((connector_id, envelope_id, payload_json)) = maybe_payload else {
-                return Ok(());
+                return Err(ConnectorStoreError::OutboxNotFound(outbox_id));
             };
             transaction.execute(
                 r#"
@@ -550,16 +611,23 @@ impl ConnectorStore {
                 "#,
                 params![connector_id, envelope_id, reason, payload_json, now_unix_ms],
             )?;
-            transaction.execute(
+            let changed = transaction.execute(
                 r#"
                 UPDATE outbox
                 SET status = 'dead',
                     last_error = ?2,
+                    claim_token = NULL,
+                    claim_expires_unix_ms = 0,
                     updated_at_unix_ms = ?3
                 WHERE outbox_id = ?1
+                  AND status = 'pending'
+                  AND claim_token = ?4
                 "#,
-                params![outbox_id, reason, now_unix_ms],
+                params![outbox_id, reason, now_unix_ms, claim_token],
             )?;
+            if changed == 0 {
+                return Err(ConnectorStoreError::OutboxNotFound(outbox_id));
+            }
             Ok(())
         })
     }
@@ -725,6 +793,8 @@ impl ConnectorStore {
                 status TEXT NOT NULL CHECK(status IN ('pending', 'delivered', 'dead')),
                 native_message_id TEXT,
                 last_error TEXT,
+                claim_token TEXT,
+                claim_expires_unix_ms INTEGER NOT NULL DEFAULT 0,
                 created_at_unix_ms INTEGER NOT NULL,
                 updated_at_unix_ms INTEGER NOT NULL,
                 UNIQUE(connector_id, envelope_id)
@@ -754,6 +824,13 @@ impl ConnectorStore {
             );
             CREATE INDEX IF NOT EXISTS idx_connector_events_connector
                 ON connector_events(connector_id, event_id DESC);
+            "#,
+        )?;
+        ensure_outbox_claim_columns(&connection)?;
+        connection.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_outbox_claim_reclaim
+                ON outbox(status, claim_expires_unix_ms, next_attempt_unix_ms, outbox_id);
             "#,
         )?;
         Ok(())
@@ -811,19 +888,54 @@ fn parse_outbox_row(row: &Row<'_>) -> Result<OutboxEntryRecord, ConnectorStoreEr
     let payload = serde_json::from_str::<OutboundMessageRequest>(payload_json.as_str())?;
     let attempts_i64: i64 = row.get(4)?;
     let max_attempts_i64: i64 = row.get(5)?;
+    let claim_token: String = row.get(7)?;
     Ok(OutboxEntryRecord {
         outbox_id: row.get(0)?,
         connector_id: row.get(1)?,
         envelope_id: row.get(2)?,
+        claim_token,
         payload,
         attempts: u32::try_from(attempts_i64)
             .map_err(|_| ConnectorStoreError::ValueOverflow { field: "attempts" })?,
         max_attempts: u32::try_from(max_attempts_i64)
             .map_err(|_| ConnectorStoreError::ValueOverflow { field: "max_attempts" })?,
         next_attempt_unix_ms: row.get(6)?,
-        created_at_unix_ms: row.get(7)?,
-        updated_at_unix_ms: row.get(8)?,
+        created_at_unix_ms: row.get(8)?,
+        updated_at_unix_ms: row.get(9)?,
     })
+}
+
+fn next_outbox_claim_token(now_unix_ms: i64) -> String {
+    let sequence = OUTBOX_CLAIM_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("claim-{now_unix_ms}-{sequence}")
+}
+
+fn ensure_outbox_claim_columns(connection: &Connection) -> Result<(), ConnectorStoreError> {
+    if !outbox_column_exists(connection, "claim_token")? {
+        connection.execute("ALTER TABLE outbox ADD COLUMN claim_token TEXT", [])?;
+    }
+    if !outbox_column_exists(connection, "claim_expires_unix_ms")? {
+        connection.execute(
+            "ALTER TABLE outbox ADD COLUMN claim_expires_unix_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn outbox_column_exists(
+    connection: &Connection,
+    column_name: &str,
+) -> Result<bool, ConnectorStoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(outbox)")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name.eq_ignore_ascii_case(column_name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -832,7 +944,7 @@ mod tests {
 
     use crate::protocol::{ConnectorInstanceSpec, ConnectorKind, OutboundMessageRequest};
 
-    use super::ConnectorStore;
+    use super::{ConnectorStore, ConnectorStoreError};
 
     fn open_store() -> (TempDir, ConnectorStore) {
         let tempdir = TempDir::new().expect("tempdir should initialize");
@@ -985,19 +1097,81 @@ mod tests {
         let due = store.load_due_outbox(1_000, 10, Some("echo:default")).expect("due outbox query");
         assert_eq!(due.len(), 1);
         let outbox_id = due[0].outbox_id;
+        let claim_token = due[0].claim_token.clone();
         store
-            .schedule_outbox_retry(outbox_id, 1, "transient", 2_000)
+            .schedule_outbox_retry(outbox_id, claim_token.as_str(), 1, "transient", 2_000)
             .expect("retry should be scheduled");
         let due_after_backoff = store
             .load_due_outbox(1_500, 10, Some("echo:default"))
             .expect("outbox due query should succeed");
         assert!(due_after_backoff.is_empty(), "entry should not be due before retry timestamp");
+        let due_for_dead_letter = store
+            .load_due_outbox(2_100, 10, Some("echo:default"))
+            .expect("due outbox query should succeed");
+        assert_eq!(due_for_dead_letter.len(), 1);
+        let dead_letter_claim = due_for_dead_letter[0].claim_token.clone();
         store
-            .move_outbox_to_dead_letter(outbox_id, "permanent", 2_100)
+            .move_outbox_to_dead_letter(outbox_id, dead_letter_claim.as_str(), "permanent", 2_100)
             .expect("dead letter move should succeed");
         let dead_letters =
             store.list_dead_letters("echo:default", 10).expect("dead letters should be queryable");
         assert_eq!(dead_letters.len(), 1);
         assert_eq!(dead_letters[0].reason, "permanent");
+    }
+
+    #[test]
+    fn outbox_due_claims_are_exclusive_between_loads() {
+        let (_tempdir, store) = open_store();
+        store.upsert_instance(&sample_spec(), 1_000).expect("instance should be created");
+        let request = sample_outbound("env-claim-exclusive");
+        store.enqueue_outbox_if_absent(&request, 2, 1_000).expect("outbox enqueue should succeed");
+
+        let first = store
+            .load_due_outbox(1_000, 10, Some("echo:default"))
+            .expect("first load should claim");
+        assert_eq!(first.len(), 1, "first due load should claim the entry");
+        let second = store
+            .load_due_outbox(1_000, 10, Some("echo:default"))
+            .expect("second load should succeed");
+        assert!(
+            second.is_empty(),
+            "second due load should not re-claim entry while lease is active"
+        );
+    }
+
+    #[test]
+    fn mark_outbox_delivered_reports_missing_outbox() {
+        let (_tempdir, store) = open_store();
+        let error = store
+            .mark_outbox_delivered(9_999, "claim-missing", "native-1", 1_000)
+            .expect_err("unknown outbox id should be reported");
+        assert!(
+            matches!(error, ConnectorStoreError::OutboxNotFound(9_999)),
+            "expected OutboxNotFound for missing outbox id"
+        );
+    }
+
+    #[test]
+    fn schedule_outbox_retry_reports_missing_outbox() {
+        let (_tempdir, store) = open_store();
+        let error = store
+            .schedule_outbox_retry(9_998, "claim-missing", 1, "retry", 2_000)
+            .expect_err("unknown outbox id should be reported");
+        assert!(
+            matches!(error, ConnectorStoreError::OutboxNotFound(9_998)),
+            "expected OutboxNotFound for missing outbox id"
+        );
+    }
+
+    #[test]
+    fn move_outbox_to_dead_letter_reports_missing_outbox() {
+        let (_tempdir, store) = open_store();
+        let error = store
+            .move_outbox_to_dead_letter(9_997, "claim-missing", "dead", 1_000)
+            .expect_err("unknown outbox id should be reported");
+        assert!(
+            matches!(error, ConnectorStoreError::OutboxNotFound(9_997)),
+            "expected OutboxNotFound for missing outbox id"
+        );
     }
 }

@@ -709,6 +709,7 @@ impl ConnectorSupervisor {
         let Some(instance) = self.store.get_instance(entry.connector_id.as_str())? else {
             self.store.move_outbox_to_dead_letter(
                 entry.outbox_id,
+                entry.claim_token.as_str(),
                 "connector instance not found",
                 now,
             )?;
@@ -720,6 +721,7 @@ impl ConnectorSupervisor {
             );
             self.store.schedule_outbox_retry(
                 entry.outbox_id,
+                entry.claim_token.as_str(),
                 entry.attempts,
                 "connector disabled",
                 retry_at,
@@ -730,6 +732,7 @@ impl ConnectorSupervisor {
         let Some(adapter) = self.adapters.get(&instance.kind).cloned() else {
             self.store.move_outbox_to_dead_letter(
                 entry.outbox_id,
+                entry.claim_token.as_str(),
                 "connector adapter implementation missing",
                 now,
             )?;
@@ -782,6 +785,7 @@ impl ConnectorSupervisor {
             DeliveryOutcome::Delivered { native_message_id } => {
                 self.store.mark_outbox_delivered(
                     entry.outbox_id,
+                    entry.claim_token.as_str(),
                     native_message_id.as_str(),
                     now_unix_ms,
                 )?;
@@ -805,6 +809,7 @@ impl ConnectorSupervisor {
                 if attempts >= max_attempts {
                     self.store.move_outbox_to_dead_letter(
                         entry.outbox_id,
+                        entry.claim_token.as_str(),
                         reason.as_str(),
                         now_unix_ms,
                     )?;
@@ -829,6 +834,7 @@ impl ConnectorSupervisor {
                     now_unix_ms.saturating_add(i64::try_from(delay_ms).unwrap_or(i64::MAX));
                 self.store.schedule_outbox_retry(
                     entry.outbox_id,
+                    entry.claim_token.as_str(),
                     attempts,
                     reason.as_str(),
                     next_attempt_unix_ms,
@@ -867,6 +873,7 @@ impl ConnectorSupervisor {
             DeliveryOutcome::PermanentFailure { reason } => {
                 self.store.move_outbox_to_dead_letter(
                     entry.outbox_id,
+                    entry.claim_token.as_str(),
                     reason.as_str(),
                     now_unix_ms,
                 )?;
@@ -939,8 +946,8 @@ mod tests {
 
     use crate::{
         protocol::{
-            ConnectorInstanceSpec, ConnectorKind, DeliveryOutcome, RetryClass,
-            RoutedOutboundMessage,
+            ConnectorInstanceSpec, ConnectorKind, DeliveryOutcome, OutboundMessageRequest,
+            RetryClass, RoutedOutboundMessage,
         },
         storage::ConnectorStore,
     };
@@ -1048,6 +1055,45 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SlowCountingAdapter {
+        sends: Mutex<HashMap<String, usize>>,
+    }
+
+    impl SlowCountingAdapter {
+        fn sends_for(&self, envelope_id: &str) -> usize {
+            self.sends
+                .lock()
+                .expect("slow adapter send counter lock should not be poisoned")
+                .get(envelope_id)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    #[async_trait]
+    impl ConnectorAdapter for SlowCountingAdapter {
+        fn kind(&self) -> ConnectorKind {
+            ConnectorKind::Echo
+        }
+
+        async fn send_outbound(
+            &self,
+            _instance: &crate::storage::ConnectorInstanceRecord,
+            request: &crate::protocol::OutboundMessageRequest,
+        ) -> Result<DeliveryOutcome, ConnectorAdapterError> {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let mut sends = self.sends.lock().map_err(|_| {
+                ConnectorAdapterError::Backend("slow adapter send counter lock poisoned".to_owned())
+            })?;
+            let entry = sends.entry(request.envelope_id.clone()).or_insert(0);
+            *entry = entry.saturating_add(1);
+            Ok(DeliveryOutcome::Delivered {
+                native_message_id: format!("native-{}-{}", request.envelope_id, *entry),
+            })
+        }
+    }
+
     fn open_supervisor() -> (TempDir, ConnectorSupervisor, Arc<FlakyAdapter>) {
         let tempdir = TempDir::new().expect("tempdir should initialize");
         let store = std::sync::Arc::new(
@@ -1144,6 +1190,65 @@ mod tests {
         let status = supervisor.status("echo:default").expect("status should resolve");
         assert!(delivered >= 1, "retry drain should eventually deliver");
         assert!(status.restart_count >= 1, "restart counter should increment on restart retry");
+    }
+
+    #[tokio::test]
+    async fn concurrent_drains_do_not_double_send_same_outbox_entry() {
+        let tempdir = TempDir::new().expect("tempdir should initialize");
+        let store = Arc::new(
+            ConnectorStore::open(tempdir.path().join("connectors.sqlite3"))
+                .expect("store should initialize"),
+        );
+        let adapter = Arc::new(SlowCountingAdapter::default());
+        let supervisor = ConnectorSupervisor::new(
+            store,
+            Arc::new(RouterStub),
+            vec![adapter.clone()],
+            ConnectorSupervisorConfig {
+                min_retry_delay_ms: 1,
+                base_retry_delay_ms: 1,
+                max_retry_delay_ms: 8,
+                ..ConnectorSupervisorConfig::default()
+            },
+        );
+        supervisor.register_connector(&sample_spec()).expect("register should succeed");
+
+        let outbound = OutboundMessageRequest {
+            envelope_id: "env-concurrent-drain".to_owned(),
+            connector_id: "echo:default".to_owned(),
+            conversation_id: "c1".to_owned(),
+            reply_thread_id: None,
+            in_reply_to_message_id: None,
+            text: "concurrent drain".to_owned(),
+            broadcast: false,
+            auto_ack_text: None,
+            auto_reaction: None,
+            attachments: Vec::new(),
+            structured_json: None,
+            a2ui_update: None,
+            timeout_ms: 30_000,
+            max_payload_bytes: 16_384,
+        };
+        let enqueue =
+            supervisor.enqueue_outbound(&outbound).expect("outbox enqueue should succeed");
+        assert!(enqueue.created, "first enqueue should create an outbox row");
+
+        let (global_drain, connector_drain) = tokio::join!(
+            supervisor.drain_due_outbox(1),
+            supervisor.drain_due_outbox_for_connector("echo:default", 1),
+        );
+        let global_drain = global_drain.expect("global drain should succeed");
+        let connector_drain = connector_drain.expect("connector-scoped drain should succeed");
+        assert_eq!(
+            global_drain.delivered + connector_drain.delivered,
+            1,
+            "exactly one drain operation should deliver the claimed outbox row"
+        );
+        assert_eq!(
+            adapter.sends_for("env-concurrent-drain"),
+            1,
+            "adapter send should run exactly once across concurrent drains"
+        );
     }
 
     #[tokio::test]
