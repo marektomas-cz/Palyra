@@ -4,7 +4,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -27,6 +30,7 @@ use ulid::Ulid;
 
 const SUPERVISOR_TICK_MS: u64 = 500;
 const MAX_LOG_LINES_PER_SERVICE: usize = 400;
+const LOG_EVENT_CHANNEL_CAPACITY: usize = 2_048;
 const MAX_DIAGNOSTIC_ERRORS: usize = 25;
 const DASHBOARD_SCHEME: &str = "http";
 const LOOPBACK_HOST: &str = "127.0.0.1";
@@ -350,6 +354,7 @@ struct QuickFactsSnapshot {
 struct DiagnosticsSnapshot {
     generated_at_unix_ms: Option<i64>,
     errors: Vec<String>,
+    dropped_log_events_total: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -390,6 +395,7 @@ struct SnapshotBuildInputs {
     browser_service_enabled: bool,
     admin_token: String,
     browser_last_exit: Option<String>,
+    dropped_log_events_total: u64,
     gateway_running: bool,
     browser_running: bool,
     gateway_process: ServiceProcessSnapshot,
@@ -430,8 +436,9 @@ struct ControlCenter {
     gateway: ManagedService,
     browserd: ManagedService,
     http_client: Client,
-    log_tx: mpsc::UnboundedSender<LogEvent>,
-    log_rx: mpsc::UnboundedReceiver<LogEvent>,
+    log_tx: mpsc::Sender<LogEvent>,
+    log_rx: mpsc::Receiver<LogEvent>,
+    dropped_log_events: Arc<AtomicU64>,
 }
 
 impl ControlCenter {
@@ -466,7 +473,8 @@ impl ControlCenter {
             .build()
             .context("failed to build desktop HTTP client")?;
 
-        let (log_tx, log_rx) = mpsc::unbounded_channel();
+        let (log_tx, log_rx) = mpsc::channel(LOG_EVENT_CHANNEL_CAPACITY);
+        let dropped_log_events = Arc::new(AtomicU64::new(0));
 
         Ok(Self {
             runtime_root,
@@ -481,6 +489,7 @@ impl ControlCenter {
             http_client,
             log_tx,
             log_rx,
+            dropped_log_events,
         })
     }
 
@@ -729,6 +738,7 @@ impl ControlCenter {
                 kind,
                 LogStream::Stdout,
                 self.log_tx.clone(),
+                self.dropped_log_events.clone(),
                 kind.display_name(),
             );
         }
@@ -738,6 +748,7 @@ impl ControlCenter {
                 kind,
                 LogStream::Stderr,
                 self.log_tx.clone(),
+                self.dropped_log_events.clone(),
                 kind.display_name(),
             );
         }
@@ -865,6 +876,7 @@ impl ControlCenter {
             browser_service_enabled: self.persisted.browser_service_enabled,
             admin_token: self.admin_token.clone(),
             browser_last_exit: self.browserd.last_exit.clone(),
+            dropped_log_events_total: self.dropped_log_events.load(Ordering::Relaxed),
             gateway_running: self.gateway.running(),
             browser_running: self.browserd.running(),
             gateway_process: self.process_snapshot(ServiceKind::Gateway),
@@ -1023,6 +1035,7 @@ async fn build_snapshot_from_inputs(inputs: SnapshotBuildInputs) -> Result<Contr
         browser_service_enabled,
         admin_token,
         browser_last_exit,
+        dropped_log_events_total,
         gateway_running,
         browser_running,
         gateway_process,
@@ -1077,7 +1090,13 @@ async fn build_snapshot_from_inputs(inputs: SnapshotBuildInputs) -> Result<Contr
             .and_then(|value| value.get("generated_at_unix_ms"))
             .and_then(Value::as_i64),
         errors: diagnostics_errors,
+        dropped_log_events_total,
     };
+    if dropped_log_events_total > 0 {
+        warnings.push(format!(
+            "desktop log queue overflowed; dropped {dropped_log_events_total} log event(s)"
+        ));
+    }
 
     let discord = parse_discord_status(discord_payload.as_ref());
     let browser_status = build_browser_status(
@@ -1607,7 +1626,8 @@ fn spawn_log_reader(
     reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     service: ServiceKind,
     stream: LogStream,
-    sender: mpsc::UnboundedSender<LogEvent>,
+    sender: mpsc::Sender<LogEvent>,
+    dropped_counter: Arc<AtomicU64>,
     process_name: &'static str,
 ) {
     tauri::async_runtime::spawn(async move {
@@ -1615,21 +1635,40 @@ fn spawn_log_reader(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    let _ = sender.send(LogEvent { unix_ms: unix_ms_now(), service, stream, line });
+                    let event = LogEvent { unix_ms: unix_ms_now(), service, stream, line };
+                    if !try_enqueue_log_event(&sender, dropped_counter.as_ref(), event) {
+                        break;
+                    }
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    let _ = sender.send(LogEvent {
+                    let event = LogEvent {
                         unix_ms: unix_ms_now(),
                         service,
                         stream: LogStream::Supervisor,
                         line: format!("{process_name} log stream read failed: {error}"),
-                    });
+                    };
+                    let _ = try_enqueue_log_event(&sender, dropped_counter.as_ref(), event);
                     break;
                 }
             }
         }
     });
+}
+
+fn try_enqueue_log_event(
+    sender: &mpsc::Sender<LogEvent>,
+    dropped_counter: &AtomicU64,
+    event: LogEvent,
+) -> bool {
+    match sender.try_send(event) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            dropped_counter.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
 }
 
 struct DesktopAppState {
@@ -1748,7 +1787,10 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc, Mutex, OnceLock,
+        },
         time::Duration,
     };
 
@@ -1758,8 +1800,9 @@ mod tests {
         build_snapshot_from_inputs, collect_redacted_errors, compute_backoff_ms,
         executable_file_name, load_or_initialize_state_file, mpsc, parse_discord_status,
         parse_remote_dashboard_base_url, resolve_binary_path, resolve_dashboard_access_target,
-        sanitize_log_line, BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode,
-        DesktopSecretStore, DesktopStateFile, ManagedService, RuntimeConfig, Ulid,
+        sanitize_log_line, try_enqueue_log_event, BrowserStatusSnapshot, Client, ControlCenter,
+        DashboardAccessMode, DesktopSecretStore, DesktopStateFile, LogEvent, LogStream,
+        ManagedService, RuntimeConfig, ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1871,7 +1914,7 @@ mod tests {
             .timeout(Duration::from_secs(4))
             .build()
             .expect("HTTP client should initialize for test control center");
-        let (log_tx, log_rx) = mpsc::unbounded_channel();
+        let (log_tx, log_rx) = mpsc::channel(LOG_EVENT_CHANNEL_CAPACITY);
         ControlCenter {
             runtime_root,
             support_bundle_dir,
@@ -1885,6 +1928,7 @@ mod tests {
             http_client,
             log_tx,
             log_rx,
+            dropped_log_events: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -2153,6 +2197,56 @@ port = 9911
         let error = resolve_binary_path(binary_name.as_str(), "PALYRA_TEST_RESOLVE_BIN")
             .expect_err("PATH fallback should be rejected");
         assert!(error.to_string().contains("unable to locate"));
+    }
+
+    #[test]
+    fn try_enqueue_log_event_tracks_drops_when_queue_is_full() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let dropped_counter = AtomicU64::new(0);
+        let first = LogEvent {
+            unix_ms: 1,
+            service: ServiceKind::Gateway,
+            stream: LogStream::Stdout,
+            line: "first".to_owned(),
+        };
+        assert!(try_enqueue_log_event(&sender, &dropped_counter, first));
+        assert_eq!(dropped_counter.load(Ordering::Relaxed), 0);
+
+        let second = LogEvent {
+            unix_ms: 2,
+            service: ServiceKind::Gateway,
+            stream: LogStream::Stdout,
+            line: "second".to_owned(),
+        };
+        assert!(
+            try_enqueue_log_event(&sender, &dropped_counter, second),
+            "enqueue helper should keep producer alive when queue is full"
+        );
+        assert_eq!(dropped_counter.load(Ordering::Relaxed), 1);
+
+        let drained = receiver.try_recv().expect("first event should still be queued");
+        assert_eq!(drained.line, "first");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshot_diagnostics_surface_dropped_log_event_count() {
+        let fixture = TempFixtureDir::new();
+        let mut control_center = build_test_control_center(fixture.path());
+        control_center.persisted.browser_service_enabled = false;
+        control_center.dropped_log_events.store(7, Ordering::Relaxed);
+
+        let inputs = control_center.capture_snapshot_inputs();
+        assert_eq!(inputs.dropped_log_events_total, 7);
+        let snapshot =
+            build_snapshot_from_inputs(inputs).await.expect("snapshot should build with dropped logs");
+        assert_eq!(snapshot.diagnostics.dropped_log_events_total, 7);
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("dropped 7 log event")),
+            "snapshot warnings should surface queue overflow summary"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
