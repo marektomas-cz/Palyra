@@ -92,6 +92,7 @@ export function ChatConsolePanel({
   const [allowSensitiveTools, setAllowSensitiveTools] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const runDetailsRequestSeqRef = useRef(0);
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [runDrawerOpen, setRunDrawerOpen] = useState(false);
@@ -283,10 +284,12 @@ export function ChatConsolePanel({
   }
 
   function clearTranscriptState(): void {
+    runDetailsRequestSeqRef.current += 1;
     assistantEntryByRunRef.current.clear();
     canvasEntrySetRef.current.clear();
     setTranscript([]);
     setActiveRunId(null);
+    setRunDrawerBusy(false);
     setRunDrawerId("");
     setRunStatus(null);
     setRunTape(null);
@@ -691,6 +694,8 @@ export function ChatConsolePanel({
   }
 
   async function loadRunDetails(runId: string): Promise<void> {
+    const requestSeq = runDetailsRequestSeqRef.current + 1;
+    runDetailsRequestSeqRef.current = requestSeq;
     setRunDrawerBusy(true);
     try {
       const params = new URLSearchParams();
@@ -699,12 +704,20 @@ export function ChatConsolePanel({
         api.chatRunStatus(runId),
         api.chatRunEvents(runId, params)
       ]);
+      if (requestSeq !== runDetailsRequestSeqRef.current) {
+        return;
+      }
       setRunStatus(statusResponse.run);
       setRunTape(eventsResponse.tape);
     } catch (error) {
+      if (requestSeq !== runDetailsRequestSeqRef.current) {
+        return;
+      }
       setError(toErrorMessage(error));
     } finally {
-      setRunDrawerBusy(false);
+      if (requestSeq === runDetailsRequestSeqRef.current) {
+        setRunDrawerBusy(false);
+      }
     }
   }
 

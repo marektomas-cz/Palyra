@@ -110,7 +110,7 @@ fn normalize_runtime_host(raw: &str) -> Result<String, ConnectorNetGuardError> {
 
 fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        return host == suffix || host.ends_with(format!(".{suffix}").as_str());
+        return host.ends_with(format!(".{suffix}").as_str());
     }
     host == pattern
 }
@@ -139,6 +139,18 @@ mod tests {
         let public = [IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))];
         assert!(guard.validate_target("discord.com", &public).is_ok());
         assert!(guard.validate_target("gateway.discord.com", &public).is_ok());
+    }
+
+    #[test]
+    fn wildcard_allowlist_does_not_match_apex_host_without_explicit_entry() {
+        let guard =
+            ConnectorNetGuard::new(&["*.discord.com".to_owned()]).expect("guard should build");
+        let public = [IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))];
+        let result = guard.validate_target("discord.com", &public);
+        assert_eq!(
+            result,
+            Err(ConnectorNetGuardError::HostNotAllowlisted("discord.com".to_owned()))
+        );
     }
 
     #[test]

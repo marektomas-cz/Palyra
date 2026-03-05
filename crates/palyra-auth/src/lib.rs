@@ -530,7 +530,11 @@ impl AuthProfileRegistry {
             filtered
                 .iter()
                 .position(|profile| profile.profile_id == after)
-                .map_or(0, |index| index.saturating_add(1))
+                .map(|index| index.saturating_add(1))
+                .ok_or_else(|| AuthProfileError::InvalidField {
+                    field: "after_profile_id",
+                    message: "cursor does not exist in current result set".to_owned(),
+                })?
         } else {
             0
         };
@@ -1723,10 +1727,10 @@ fn unix_ms_now() -> Result<i64, AuthProfileError> {
 mod tests {
     use super::{
         compute_backoff_ms, load_secret_utf8, normalize_optional_text, normalize_token_endpoint,
-        persist_secret_utf8, AuthCredential, AuthProfileError, AuthProfileRegistry,
-        AuthProfileScope, AuthProfileSetRequest, AuthProvider, AuthProviderKind,
-        HttpOAuthRefreshAdapter, OAuthRefreshAdapter, OAuthRefreshError, OAuthRefreshOutcomeKind,
-        OAuthRefreshRequest, OAuthRefreshResponse, OAuthRefreshState,
+        persist_secret_utf8, AuthCredential, AuthProfileError, AuthProfileListFilter,
+        AuthProfileRegistry, AuthProfileScope, AuthProfileSetRequest, AuthProvider,
+        AuthProviderKind, HttpOAuthRefreshAdapter, OAuthRefreshAdapter, OAuthRefreshError,
+        OAuthRefreshOutcomeKind, OAuthRefreshRequest, OAuthRefreshResponse, OAuthRefreshState,
     };
     use palyra_vault::Vault;
     use palyra_vault::{
@@ -1831,6 +1835,20 @@ mod tests {
         }
     }
 
+    fn sample_oauth_profile_request_with_identity(
+        profile_id: &str,
+        profile_name: &str,
+    ) -> AuthProfileSetRequest {
+        let mut request = sample_oauth_profile_request(
+            "https://example.test/token".to_owned(),
+            None,
+            OAuthRefreshState::default(),
+        );
+        request.profile_id = profile_id.to_owned();
+        request.profile_name = profile_name.to_owned();
+        request
+    }
+
     fn spawn_oauth_server(response_body: String) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
         let address = listener.local_addr().expect("test server should resolve local addr");
@@ -1878,6 +1896,133 @@ mod tests {
         assert_eq!(compute_backoff_ms(&provider, 2), 30_000);
         assert_eq!(compute_backoff_ms(&provider, 3), 60_000);
         assert_eq!(compute_backoff_ms(&provider, 20), 300_000);
+    }
+
+    #[test]
+    fn list_profiles_resumes_from_after_profile_id() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let identity_root = tempdir.path().join("identity");
+        let registry =
+            AuthProfileRegistry::open(identity_root.as_path()).expect("registry should initialize");
+
+        for (profile_id, profile_name) in
+            [("openai-alpha", "alpha"), ("openai-beta", "beta"), ("openai-gamma", "gamma")]
+        {
+            registry
+                .set_profile(sample_oauth_profile_request_with_identity(profile_id, profile_name))
+                .expect("profile should persist");
+        }
+
+        let first_page = registry
+            .list_profiles(AuthProfileListFilter {
+                after_profile_id: None,
+                limit: Some(2),
+                provider: None,
+                scope: None,
+            })
+            .expect("first page should load");
+        assert_eq!(
+            first_page
+                .profiles
+                .iter()
+                .map(|profile| profile.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openai-alpha", "openai-beta"]
+        );
+        assert_eq!(first_page.next_after_profile_id.as_deref(), Some("openai-beta"));
+
+        let second_page = registry
+            .list_profiles(AuthProfileListFilter {
+                after_profile_id: first_page.next_after_profile_id.clone(),
+                limit: Some(2),
+                provider: None,
+                scope: None,
+            })
+            .expect("second page should load");
+        assert_eq!(
+            second_page
+                .profiles
+                .iter()
+                .map(|profile| profile.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openai-gamma"]
+        );
+        assert_eq!(second_page.next_after_profile_id, None);
+    }
+
+    #[test]
+    fn list_profiles_rejects_unknown_after_profile_id() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let identity_root = tempdir.path().join("identity");
+        let registry =
+            AuthProfileRegistry::open(identity_root.as_path()).expect("registry should initialize");
+
+        registry
+            .set_profile(sample_oauth_profile_request_with_identity("openai-alpha", "alpha"))
+            .expect("profile should persist");
+
+        let error = registry
+            .list_profiles(AuthProfileListFilter {
+                after_profile_id: Some("missing-profile".to_owned()),
+                limit: Some(10),
+                provider: None,
+                scope: None,
+            })
+            .expect_err("unknown cursor should fail");
+        assert!(matches!(
+            error,
+            AuthProfileError::InvalidField { field, message }
+                if field == "after_profile_id"
+                    && message == "cursor does not exist in current result set"
+        ));
+    }
+
+    #[test]
+    fn list_profiles_rejects_deleted_after_profile_id() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let identity_root = tempdir.path().join("identity");
+        let registry =
+            AuthProfileRegistry::open(identity_root.as_path()).expect("registry should initialize");
+
+        for (profile_id, profile_name) in
+            [("openai-alpha", "alpha"), ("openai-beta", "beta"), ("openai-gamma", "gamma")]
+        {
+            registry
+                .set_profile(sample_oauth_profile_request_with_identity(profile_id, profile_name))
+                .expect("profile should persist");
+        }
+
+        let first_page = registry
+            .list_profiles(AuthProfileListFilter {
+                after_profile_id: None,
+                limit: Some(2),
+                provider: None,
+                scope: None,
+            })
+            .expect("first page should load");
+        let stale_cursor =
+            first_page.next_after_profile_id.expect("first page should return continuation cursor");
+        assert!(
+            registry
+                .delete_profile(stale_cursor.as_str())
+                .expect("cursor profile deletion should succeed"),
+            "stale cursor profile should be deleted"
+        );
+
+        let error = registry
+            .list_profiles(AuthProfileListFilter {
+                after_profile_id: Some(stale_cursor),
+                limit: Some(2),
+                provider: None,
+                scope: None,
+            })
+            .expect_err("deleted cursor should fail");
+        assert!(matches!(
+            error,
+            AuthProfileError::InvalidField { field, message }
+                if field == "after_profile_id"
+                    && message == "cursor does not exist in current result set"
+        ));
     }
 
     #[test]

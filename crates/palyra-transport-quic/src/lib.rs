@@ -313,13 +313,9 @@ fn verify_pinned_server_certificate(
     connection: &Connection,
     expected_fingerprint_sha256: Option<&str>,
 ) -> Result<(), QuicTransportError> {
-    let Some(expected) = expected_fingerprint_sha256 else {
+    let Some(expected) = normalize_pinned_server_fingerprint(expected_fingerprint_sha256)? else {
         return Ok(());
     };
-    let expected = expected.trim().to_ascii_lowercase();
-    if expected.is_empty() {
-        return Ok(());
-    }
     let peer_identity =
         connection.peer_identity().ok_or(QuicTransportError::MissingPeerIdentity)?;
     let peer_certs = downcast_peer_certificates(peer_identity.as_ref())?;
@@ -329,6 +325,21 @@ fn verify_pinned_server_certificate(
         return Ok(());
     }
     Err(QuicTransportError::PinnedCertificateMismatch { expected, actual })
+}
+
+fn normalize_pinned_server_fingerprint(
+    expected_fingerprint_sha256: Option<&str>,
+) -> Result<Option<String>, QuicTransportError> {
+    let Some(expected) = expected_fingerprint_sha256 else {
+        return Ok(None);
+    };
+    let expected = expected.trim().to_ascii_lowercase();
+    if expected.is_empty() {
+        return Err(QuicTransportError::TlsConfigurationFailed {
+            message: "pinned server fingerprint cannot be empty".to_owned(),
+        });
+    }
+    Ok(Some(expected))
 }
 
 fn downcast_peer_certificates(
@@ -348,4 +359,37 @@ fn parse_pem_certs(pem: &str) -> Result<Vec<CertificateDer<'static>>, QuicTransp
 fn parse_private_key(pem: &str) -> Result<PrivateKeyDer<'static>, QuicTransportError> {
     PrivateKeyDer::from_pem_slice(pem.as_bytes())
         .map_err(|_| QuicTransportError::PrivateKeyParsingFailed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_pinned_server_fingerprint, QuicTransportError};
+
+    #[test]
+    fn missing_pinned_server_fingerprint_is_allowed() {
+        assert_eq!(
+            normalize_pinned_server_fingerprint(None).expect("missing pin should be allowed"),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_pinned_server_fingerprint_is_rejected() {
+        let error = normalize_pinned_server_fingerprint(Some("  "))
+            .expect_err("empty pin should fail closed");
+        assert!(matches!(
+            error,
+            QuicTransportError::TlsConfigurationFailed { message }
+                if message == "pinned server fingerprint cannot be empty"
+        ));
+    }
+
+    #[test]
+    fn pinned_server_fingerprint_is_trimmed_and_lowercased() {
+        assert_eq!(
+            normalize_pinned_server_fingerprint(Some("  ABCDEF0123  "))
+                .expect("pin normalization should succeed"),
+            Some("abcdef0123".to_owned())
+        );
+    }
 }
