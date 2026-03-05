@@ -316,16 +316,10 @@ impl Vault {
         let started = SystemTime::now();
         loop {
             match fs::OpenOptions::new().create_new(true).write(true).open(&lock_path) {
-                Ok(file) => {
+                Ok(mut file) => {
                     let marker =
                         format!("pid={} ts_ms={}\n", std::process::id(), current_unix_ms()?);
-                    drop(file);
-                    fs::write(&lock_path, marker.as_bytes()).map_err(|error| {
-                        VaultError::Io(format!(
-                            "failed to initialize metadata lock marker {}: {error}",
-                            lock_path.display()
-                        ))
-                    })?;
+                    initialize_metadata_lock_marker(&lock_path, &mut file, marker.as_str())?;
                     ensure_owner_only_file(&lock_path)?;
                     return Ok(MetadataLockGuard { path: lock_path });
                 }
@@ -459,6 +453,33 @@ impl Drop for MetadataLockGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+fn initialize_metadata_lock_marker(
+    lock_path: &Path,
+    file: &mut fs::File,
+    marker: &str,
+) -> Result<(), VaultError> {
+    initialize_metadata_lock_marker_with_writer(lock_path, marker, |payload| {
+        use std::io::Write as _;
+        file.write_all(payload)?;
+        file.sync_all()
+    })
+}
+
+fn initialize_metadata_lock_marker_with_writer(
+    lock_path: &Path,
+    marker: &str,
+    write_marker: impl FnOnce(&[u8]) -> std::io::Result<()>,
+) -> Result<(), VaultError> {
+    if let Err(error) = write_marker(marker.as_bytes()) {
+        let _ = fs::remove_file(lock_path);
+        return Err(VaultError::Io(format!(
+            "failed to initialize metadata lock marker {}: {error}",
+            lock_path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1327,6 +1348,68 @@ mod tests {
             Duration::ZERO,
         )?;
         assert!(reclaimed, "missing lock should be treated as already released for retry loops");
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_lock_marker_init_failure_removes_lock_file() -> Result<()> {
+        let temp = tempdir()?;
+        let lock_path = temp.path().join(super::METADATA_LOCK_FILE);
+        std::fs::write(&lock_path, b"seed-lock")?;
+
+        let error = super::initialize_metadata_lock_marker_with_writer(
+            &lock_path,
+            "pid=1 ts_ms=0\n",
+            |_payload| Err(std::io::Error::other("injected marker write failure")),
+        )
+        .expect_err("marker initialization should fail when writer returns error");
+        assert!(
+            matches!(error, VaultError::Io(message) if message.contains("failed to initialize metadata lock marker")),
+            "marker initialization error should preserve lock-path context"
+        );
+        assert!(
+            !lock_path.exists(),
+            "lock file should be removed when marker initialization fails"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_lock_reacquire_succeeds_after_marker_init_failure() -> Result<()> {
+        let temp = tempdir()?;
+        let identity_root = temp.path().join("identity");
+        let vault_root = temp.path().join("vault");
+        let lock_path = vault_root.join(super::METADATA_LOCK_FILE);
+        let vault = Vault::open_with_config(VaultConfig {
+            root: Some(vault_root),
+            identity_store_root: Some(identity_root),
+            backend_preference: BackendPreference::EncryptedFile,
+            max_secret_bytes: 1024,
+        })?;
+        std::fs::write(&lock_path, b"seed-lock")?;
+
+        let error = super::initialize_metadata_lock_marker_with_writer(
+            &lock_path,
+            "pid=1 ts_ms=0\n",
+            |_payload| Err(std::io::Error::other("injected marker sync failure")),
+        )
+        .expect_err("marker initialization should fail for injected writer failure");
+        assert!(
+            matches!(error, VaultError::Io(message) if message.contains("failed to initialize metadata lock marker")),
+            "marker initialization failure should be surfaced as vault I/O error"
+        );
+        assert!(
+            !lock_path.exists(),
+            "lock artifact must be removed so next acquisition can proceed immediately"
+        );
+
+        let guard = vault.acquire_metadata_lock()?;
+        assert!(
+            lock_path.exists(),
+            "successful lock acquisition should materialize lock file while guard is held"
+        );
+        drop(guard);
+        assert!(!lock_path.exists(), "dropping guard should release metadata lock file");
         Ok(())
     }
 

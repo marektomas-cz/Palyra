@@ -293,9 +293,11 @@ impl IdentityManager {
                         std::process::id(),
                         unix_ms(SystemTime::now())?
                     );
-                    file.write_all(marker.as_bytes())
-                        .map_err(|error| IdentityError::Internal(error.to_string()))?;
-                    file.sync_all().map_err(|error| IdentityError::Internal(error.to_string()))?;
+                    initialize_filesystem_state_lock_marker(
+                        &lock_path,
+                        &mut file,
+                        marker.as_str(),
+                    )?;
                     return Ok(Some(FilesystemStateLockGuard { path: lock_path }));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -714,6 +716,32 @@ impl IdentityManager {
             .insert(certificate_fingerprint_hex(&paired.current_certificate.certificate_pem)?);
         Ok(())
     }
+}
+
+fn initialize_filesystem_state_lock_marker(
+    lock_path: &Path,
+    file: &mut fs::File,
+    marker: &str,
+) -> IdentityResult<()> {
+    initialize_filesystem_state_lock_marker_with_writer(lock_path, marker, |payload| {
+        file.write_all(payload)?;
+        file.sync_all()
+    })
+}
+
+fn initialize_filesystem_state_lock_marker_with_writer(
+    lock_path: &Path,
+    marker: &str,
+    write_marker: impl FnOnce(&[u8]) -> std::io::Result<()>,
+) -> IdentityResult<()> {
+    if let Err(error) = write_marker(marker.as_bytes()) {
+        let _ = fs::remove_file(lock_path);
+        return Err(IdentityError::Internal(format!(
+            "failed to initialize identity state lock marker {}: {error}",
+            lock_path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1242,6 +1270,63 @@ mod tests {
         let issued = manager.issue_gateway_server_certificate("localhost");
         assert!(issued.is_ok(), "stale dead lock marker should be reclaimed");
         assert!(!lock_path.exists(), "stale lock file should be removed after successful mutation");
+    }
+
+    #[test]
+    fn filesystem_lock_marker_init_failure_removes_lock_file() {
+        let root = TempDir::new().expect("temp directory should be created");
+        let lock_path = root.path().join(IDENTITY_STATE_LOCK_FILENAME);
+        fs::write(&lock_path, b"seed-lock").expect("seed lock file should be written");
+
+        let error = initialize_filesystem_state_lock_marker_with_writer(
+            &lock_path,
+            "pid=1 ts_ms=0\n",
+            |_payload| Err(std::io::Error::other("injected marker write failure")),
+        )
+        .expect_err("marker initialization should fail when writer returns error");
+        assert!(
+            matches!(error, IdentityError::Internal(message) if message.contains("failed to initialize identity state lock marker")),
+            "marker initialization error should include lock-path context"
+        );
+        assert!(
+            !lock_path.exists(),
+            "lock file should be removed when marker initialization fails"
+        );
+    }
+
+    #[test]
+    fn filesystem_lock_reacquire_succeeds_after_marker_init_failure() {
+        let root = TempDir::new().expect("temp directory should be created");
+        let store = Arc::new(
+            FilesystemSecretStore::new(root.path())
+                .expect("filesystem secret store should initialize"),
+        );
+        let mut manager = IdentityManager::with_store(store)
+            .expect("manager with filesystem store should initialize");
+        let lock_path = root.path().join(IDENTITY_STATE_LOCK_FILENAME);
+        fs::write(&lock_path, b"seed-lock").expect("seed lock file should be written");
+
+        let error = initialize_filesystem_state_lock_marker_with_writer(
+            &lock_path,
+            "pid=1 ts_ms=0\n",
+            |_payload| Err(std::io::Error::other("injected marker sync failure")),
+        )
+        .expect_err("marker initialization should fail for injected writer failure");
+        assert!(
+            matches!(error, IdentityError::Internal(message) if message.contains("failed to initialize identity state lock marker")),
+            "marker initialization failure should surface as identity internal error"
+        );
+        assert!(!lock_path.exists(), "failed marker initialization must remove lock artifact");
+
+        let issued = manager.issue_gateway_server_certificate("localhost");
+        assert!(
+            issued.is_ok(),
+            "subsequent lock acquisition should succeed immediately after cleanup"
+        );
+        assert!(
+            !lock_path.exists(),
+            "lock file should be released after successful mutation finishes"
+        );
     }
 
     #[cfg(windows)]
