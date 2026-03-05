@@ -7853,27 +7853,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
 
                 match state_for_stream.is_orchestrator_cancel_requested(run_id.clone()).await {
                     Ok(true) => {
-                        if let Err(error) = run_state.transition(RunTransition::Cancel) {
-                            let status = Status::internal(error.to_string());
-                            finalize_run_failure(
-                                &sender,
-                                &state_for_stream,
-                                &mut run_state,
-                                active_run_id.as_deref(),
-                                &mut tape_seq,
-                                status.message(),
-                            )
-                            .await;
-                            let _ = sender.send(Err(status)).await;
-                            return;
-                        }
-                        if let Err(error) = state_for_stream
-                            .update_orchestrator_run_state(
-                                run_id.clone(),
-                                RunLifecycleState::Cancelled,
-                                Some(CANCELLED_REASON.to_owned()),
-                            )
-                            .await
+                        if let Err(error) = transition_run_stream_to_cancelled(
+                            &sender,
+                            &state_for_stream,
+                            &mut run_state,
+                            run_id.as_str(),
+                            &mut tape_seq,
+                        )
+                        .await
                         {
                             finalize_run_failure(
                                 &sender,
@@ -7886,18 +7873,6 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             .await;
                             let _ = sender.send(Err(error)).await;
                             return;
-                        }
-                        if let Err(error) = send_status_with_tape(
-                            &sender,
-                            &state_for_stream,
-                            run_id.as_str(),
-                            &mut tape_seq,
-                            common_v1::stream_status::StatusKind::Failed,
-                            CANCELLED_REASON,
-                        )
-                        .await
-                        {
-                            let _ = sender.send(Err(error)).await;
                         }
                         return;
                     }
@@ -8009,27 +7984,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                         _ = cancel_poll.tick() => {
                             match state_for_stream.is_orchestrator_cancel_requested(run_id.clone()).await {
                                 Ok(true) => {
-                                    if let Err(error) = run_state.transition(RunTransition::Cancel) {
-                                        let status = Status::internal(error.to_string());
-                                        finalize_run_failure(
-                                            &sender,
-                                            &state_for_stream,
-                                            &mut run_state,
-                                            active_run_id.as_deref(),
-                                            &mut tape_seq,
-                                            status.message(),
-                                        )
-                                        .await;
-                                        let _ = sender.send(Err(status)).await;
-                                        return;
-                                    }
-                                    if let Err(error) = state_for_stream
-                                        .update_orchestrator_run_state(
-                                            run_id.clone(),
-                                            RunLifecycleState::Cancelled,
-                                            Some(CANCELLED_REASON.to_owned()),
-                                        )
-                                        .await
+                                    if let Err(error) = transition_run_stream_to_cancelled(
+                                        &sender,
+                                        &state_for_stream,
+                                        &mut run_state,
+                                        run_id.as_str(),
+                                        &mut tape_seq,
+                                    )
+                                    .await
                                     {
                                         finalize_run_failure(
                                             &sender,
@@ -8042,18 +8004,6 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                                         .await;
                                         let _ = sender.send(Err(error)).await;
                                         return;
-                                    }
-                                    if let Err(error) = send_status_with_tape(
-                                        &sender,
-                                        &state_for_stream,
-                                        run_id.as_str(),
-                                        &mut tape_seq,
-                                        common_v1::stream_status::StatusKind::Failed,
-                                        CANCELLED_REASON,
-                                    )
-                                    .await
-                                    {
-                                        let _ = sender.send(Err(error)).await;
                                     }
                                     return;
                                 }
@@ -8208,27 +8158,14 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             if let Some(run_id) = active_run_id {
                 match state_for_stream.is_orchestrator_cancel_requested(run_id.clone()).await {
                     Ok(true) => {
-                        if let Err(error) = run_state.transition(RunTransition::Cancel) {
-                            let status = Status::internal(error.to_string());
-                            finalize_run_failure(
-                                &sender,
-                                &state_for_stream,
-                                &mut run_state,
-                                Some(run_id.as_str()),
-                                &mut tape_seq,
-                                status.message(),
-                            )
-                            .await;
-                            let _ = sender.send(Err(status)).await;
-                            return;
-                        }
-                        if let Err(error) = state_for_stream
-                            .update_orchestrator_run_state(
-                                run_id.clone(),
-                                RunLifecycleState::Cancelled,
-                                Some(CANCELLED_REASON.to_owned()),
-                            )
-                            .await
+                        if let Err(error) = transition_run_stream_to_cancelled(
+                            &sender,
+                            &state_for_stream,
+                            &mut run_state,
+                            run_id.as_str(),
+                            &mut tape_seq,
+                        )
+                        .await
                         {
                             finalize_run_failure(
                                 &sender,
@@ -8241,18 +8178,6 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                             .await;
                             let _ = sender.send(Err(error)).await;
                             return;
-                        }
-                        if let Err(error) = send_status_with_tape(
-                            &sender,
-                            &state_for_stream,
-                            run_id.as_str(),
-                            &mut tape_seq,
-                            common_v1::stream_status::StatusKind::Failed,
-                            CANCELLED_REASON,
-                        )
-                        .await
-                        {
-                            let _ = sender.send(Err(error)).await;
                         }
                         return;
                     }
@@ -14046,33 +13971,46 @@ async fn gate_run_stream_provider_event_on_cancellation(
 ) -> Result<RunStreamProviderEventGateOutcome, Status> {
     match runtime_state.is_orchestrator_cancel_requested(run_id.to_owned()).await {
         Ok(true) => {
-            run_state
-                .transition(RunTransition::Cancel)
-                .map_err(|error| Status::internal(error.to_string()))?;
-            runtime_state
-                .update_orchestrator_run_state(
-                    run_id.to_owned(),
-                    RunLifecycleState::Cancelled,
-                    Some(CANCELLED_REASON.to_owned()),
-                )
+            transition_run_stream_to_cancelled(sender, runtime_state, run_state, run_id, tape_seq)
                 .await?;
-            if let Err(error) = send_status_with_tape(
-                sender,
-                runtime_state,
-                run_id,
-                tape_seq,
-                common_v1::stream_status::StatusKind::Failed,
-                CANCELLED_REASON,
-            )
-            .await
-            {
-                let _ = sender.send(Err(error)).await;
-            }
             Ok(RunStreamProviderEventGateOutcome::Cancelled)
         }
         Ok(false) => Ok(RunStreamProviderEventGateOutcome::Continue),
         Err(error) => Err(error),
     }
+}
+
+#[allow(clippy::result_large_err)]
+async fn transition_run_stream_to_cancelled(
+    sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_state: &mut RunStateMachine,
+    run_id: &str,
+    tape_seq: &mut i64,
+) -> Result<(), Status> {
+    run_state
+        .transition(RunTransition::Cancel)
+        .map_err(|error| Status::internal(error.to_string()))?;
+    runtime_state
+        .update_orchestrator_run_state(
+            run_id.to_owned(),
+            RunLifecycleState::Cancelled,
+            Some(CANCELLED_REASON.to_owned()),
+        )
+        .await?;
+    if let Err(error) = send_status_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        common_v1::stream_status::StatusKind::Failed,
+        CANCELLED_REASON,
+    )
+    .await
+    {
+        let _ = sender.send(Err(error)).await;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14688,28 +14626,14 @@ async fn execute_run_stream_tool_proposal(
                 _ = cancel_poll.tick() => {
                     match runtime_state.is_orchestrator_cancel_requested(run_id.to_owned()).await {
                         Ok(true) => {
-                            if let Err(error) = run_state.transition(RunTransition::Cancel) {
-                                return Err(Status::internal(error.to_string()));
-                            }
-                            runtime_state
-                                .update_orchestrator_run_state(
-                                    run_id.to_owned(),
-                                    RunLifecycleState::Cancelled,
-                                    Some(CANCELLED_REASON.to_owned()),
-                                )
-                                .await?;
-                            if let Err(error) = send_status_with_tape(
+                            transition_run_stream_to_cancelled(
                                 sender,
                                 runtime_state,
+                                run_state,
                                 run_id,
                                 tape_seq,
-                                common_v1::stream_status::StatusKind::Failed,
-                                CANCELLED_REASON,
                             )
-                            .await
-                            {
-                                let _ = sender.send(Err(error)).await;
-                            }
+                            .await?;
                             return Ok(RunStreamToolExecutionOutcome::Cancelled);
                         }
                         Ok(false) => {}
