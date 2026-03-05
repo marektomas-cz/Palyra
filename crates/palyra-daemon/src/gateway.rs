@@ -403,6 +403,12 @@ enum RunStreamProviderEventsOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunStreamPostProviderOutcome {
+    Completed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CanvasAssetRecord {
     content_type: String,
@@ -8132,92 +8138,18 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             }
 
             if let Some(run_id) = active_run_id {
-                match state_for_stream.is_orchestrator_cancel_requested(run_id.clone()).await {
-                    Ok(true) => {
-                        if let Err(error) = transition_run_stream_to_cancelled(
-                            &sender,
-                            &state_for_stream,
-                            &mut run_state,
-                            run_id.as_str(),
-                            &mut tape_seq,
-                        )
-                        .await
-                        {
-                            finalize_run_failure(
-                                &sender,
-                                &state_for_stream,
-                                &mut run_state,
-                                Some(run_id.as_str()),
-                                &mut tape_seq,
-                                error.message(),
-                            )
-                            .await;
-                            let _ = sender.send(Err(error)).await;
-                            return;
-                        }
-                        return;
-                    }
-                    Ok(false) => {}
+                match finalize_run_stream_after_provider_response(
+                    &sender,
+                    &state_for_stream,
+                    &mut run_state,
+                    run_id.as_str(),
+                    &mut tape_seq,
+                )
+                .await
+                {
+                    Ok(RunStreamPostProviderOutcome::Completed) => {}
+                    Ok(RunStreamPostProviderOutcome::Cancelled) => {}
                     Err(error) => {
-                        finalize_run_failure(
-                            &sender,
-                            &state_for_stream,
-                            &mut run_state,
-                            Some(run_id.as_str()),
-                            &mut tape_seq,
-                            error.message(),
-                        )
-                        .await;
-                        let _ = sender.send(Err(error)).await;
-                        return;
-                    }
-                }
-
-                if run_state.state() == RunLifecycleState::InProgress {
-                    if let Err(error) = run_state.transition(RunTransition::Complete) {
-                        let status = Status::internal(error.to_string());
-                        finalize_run_failure(
-                            &sender,
-                            &state_for_stream,
-                            &mut run_state,
-                            Some(run_id.as_str()),
-                            &mut tape_seq,
-                            status.message(),
-                        )
-                        .await;
-                        let _ = sender.send(Err(status)).await;
-                        return;
-                    }
-                    if let Err(error) = state_for_stream
-                        .update_orchestrator_run_state(
-                            run_id.clone(),
-                            RunLifecycleState::Done,
-                            None,
-                        )
-                        .await
-                    {
-                        finalize_run_failure(
-                            &sender,
-                            &state_for_stream,
-                            &mut run_state,
-                            Some(run_id.as_str()),
-                            &mut tape_seq,
-                            error.message(),
-                        )
-                        .await;
-                        let _ = sender.send(Err(error)).await;
-                        return;
-                    }
-                    if let Err(error) = send_status_with_tape(
-                        &sender,
-                        &state_for_stream,
-                        run_id.as_str(),
-                        &mut tape_seq,
-                        common_v1::stream_status::StatusKind::Done,
-                        "completed",
-                    )
-                    .await
-                    {
                         finalize_run_failure(
                             &sender,
                             &state_for_stream,
@@ -13987,6 +13919,47 @@ async fn transition_run_stream_to_cancelled(
         let _ = sender.send(Err(error)).await;
     }
     Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+async fn finalize_run_stream_after_provider_response(
+    sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_state: &mut RunStateMachine,
+    run_id: &str,
+    tape_seq: &mut i64,
+) -> Result<RunStreamPostProviderOutcome, Status> {
+    match runtime_state.is_orchestrator_cancel_requested(run_id.to_owned()).await {
+        Ok(true) => {
+            transition_run_stream_to_cancelled(sender, runtime_state, run_state, run_id, tape_seq)
+                .await?;
+            return Ok(RunStreamPostProviderOutcome::Cancelled);
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return Err(error);
+        }
+    }
+
+    if run_state.state() == RunLifecycleState::InProgress {
+        run_state
+            .transition(RunTransition::Complete)
+            .map_err(|error| Status::internal(error.to_string()))?;
+        runtime_state
+            .update_orchestrator_run_state(run_id.to_owned(), RunLifecycleState::Done, None)
+            .await?;
+        send_status_with_tape(
+            sender,
+            runtime_state,
+            run_id,
+            tape_seq,
+            common_v1::stream_status::StatusKind::Done,
+            "completed",
+        )
+        .await?;
+    }
+
+    Ok(RunStreamPostProviderOutcome::Completed)
 }
 
 #[allow(clippy::too_many_arguments)]
