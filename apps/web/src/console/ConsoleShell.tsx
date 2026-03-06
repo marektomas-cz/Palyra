@@ -23,6 +23,14 @@ const SECTIONS: Array<{ id: Section; label: string; detail: string; ariaLabel?: 
   { id: "support", label: "Support and Recovery", detail: "Pairing and support bundles" }
 ];
 
+function formatSessionExpiry(unixMs: number): string {
+  return new Intl.DateTimeFormat("sv-SE", {
+    dateStyle: "short",
+    timeStyle: "medium",
+    timeZone: "UTC"
+  }).format(new Date(unixMs)).replace(",", "");
+}
+
 export function ConsoleShell({ app, children }: ConsoleShellProps) {
   const session = app.session;
   if (session === null) {
@@ -43,7 +51,7 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
           <p><strong>Principal:</strong> {session.principal}</p>
           <p><strong>Device:</strong> {session.device_id}</p>
           <p><strong>Channel:</strong> {session.channel ?? "-"}</p>
-          <p><strong>Expires:</strong> {new Date(session.expires_at_unix_ms).toLocaleString()}</p>
+          <p><strong>Expires:</strong> {formatSessionExpiry(session.expires_at_unix_ms)} UTC</p>
           <div className="console-inline-actions">
             <button
               type="button"
