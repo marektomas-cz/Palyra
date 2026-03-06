@@ -4,18 +4,20 @@ use anyhow::Result;
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
 
-use super::{ControlCenter, SUPERVISOR_TICK_MS};
 use super::snapshot::{
-    ActionResult, ControlCenterSnapshot, DesktopSettingsSnapshot, SupportBundleExportResult,
-    build_snapshot_from_inputs, run_support_bundle_export, sanitize_log_line,
+    build_snapshot_from_inputs, run_support_bundle_export, sanitize_log_line, ActionResult,
+    ControlCenterSnapshot, DesktopSettingsSnapshot, SupportBundleExportResult,
 };
+use super::{ControlCenter, SUPERVISOR_TICK_MS};
 
 pub(crate) struct DesktopAppState {
     supervisor: Arc<Mutex<ControlCenter>>,
 }
 
 #[tauri::command]
-pub(crate) async fn get_snapshot(state: State<'_, DesktopAppState>) -> Result<ControlCenterSnapshot, String> {
+pub(crate) async fn get_snapshot(
+    state: State<'_, DesktopAppState>,
+) -> Result<ControlCenterSnapshot, String> {
     let snapshot_inputs = {
         let mut supervisor = state.supervisor.lock().await;
         supervisor.capture_snapshot_inputs()
@@ -42,7 +44,9 @@ pub(crate) async fn set_browser_service_enabled(
     Ok(ActionResult { ok: true, message: message.to_owned() })
 }
 #[tauri::command]
-pub(crate) async fn start_palyra(state: State<'_, DesktopAppState>) -> Result<ActionResult, String> {
+pub(crate) async fn start_palyra(
+    state: State<'_, DesktopAppState>,
+) -> Result<ActionResult, String> {
     let mut supervisor = state.supervisor.lock().await;
     supervisor.start_all();
     Ok(ActionResult { ok: true, message: "start requested".to_owned() })
@@ -56,14 +60,18 @@ pub(crate) async fn stop_palyra(state: State<'_, DesktopAppState>) -> Result<Act
 }
 
 #[tauri::command]
-pub(crate) async fn restart_palyra(state: State<'_, DesktopAppState>) -> Result<ActionResult, String> {
+pub(crate) async fn restart_palyra(
+    state: State<'_, DesktopAppState>,
+) -> Result<ActionResult, String> {
     let mut supervisor = state.supervisor.lock().await;
     supervisor.restart_all();
     Ok(ActionResult { ok: true, message: "restart requested".to_owned() })
 }
 
 #[tauri::command]
-pub(crate) async fn open_dashboard(state: State<'_, DesktopAppState>) -> Result<ActionResult, String> {
+pub(crate) async fn open_dashboard(
+    state: State<'_, DesktopAppState>,
+) -> Result<ActionResult, String> {
     let supervisor = state.supervisor.lock().await;
     let url = supervisor.open_dashboard().map_err(|error| error.to_string())?;
     Ok(ActionResult { ok: true, message: format!("opened {url}") })
@@ -91,10 +99,7 @@ pub(crate) async fn supervisor_loop(supervisor: Arc<Mutex<ControlCenter>>) {
 }
 
 pub(crate) fn format_control_center_init_error(error: &anyhow::Error) -> String {
-    format!(
-        "desktop initialization failed: {}",
-        sanitize_log_line(error.to_string().as_str())
-    )
+    format!("desktop initialization failed: {}", sanitize_log_line(error.to_string().as_str()))
 }
 
 pub(crate) fn initialize_control_center(

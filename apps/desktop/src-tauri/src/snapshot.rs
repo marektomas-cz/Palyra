@@ -20,9 +20,9 @@ use serde_json::Value;
 use tokio::process::Command;
 
 use super::{
-    unix_ms_now, ControlCenter, HealthEndpointPayload, LogLine, RuntimeConfig, ServiceKind,
-    ServiceProcessSnapshot, CONSOLE_DEVICE_ID, CONSOLE_PRINCIPAL, DASHBOARD_SCHEME,
-    LOOPBACK_HOST, MAX_DIAGNOSTIC_ERRORS, normalize_optional_text, resolve_binary_path,
+    normalize_optional_text, resolve_binary_path, unix_ms_now, ControlCenter,
+    HealthEndpointPayload, LogLine, RuntimeConfig, ServiceKind, ServiceProcessSnapshot,
+    CONSOLE_DEVICE_ID, CONSOLE_PRINCIPAL, DASHBOARD_SCHEME, LOOPBACK_HOST, MAX_DIAGNOSTIC_ERRORS,
 };
 
 #[derive(Debug, Serialize)]
@@ -143,14 +143,9 @@ pub(crate) struct DesktopSettingsSnapshot {
     pub(crate) browser_service_enabled: bool,
 }
 
-
 impl ControlCenter {
     pub(crate) fn settings_snapshot(&self) -> DesktopSettingsSnapshot {
         DesktopSettingsSnapshot { browser_service_enabled: self.persisted.browser_service_enabled }
-    }
-
-    pub(crate) fn dashboard_access_target(&self) -> Result<DashboardAccessTarget> {
-        resolve_dashboard_access_target(self.runtime.gateway_admin_port)
     }
 
     pub(crate) fn capture_snapshot_inputs(&mut self) -> SnapshotBuildInputs {
@@ -177,7 +172,6 @@ impl ControlCenter {
             admin_token: self.admin_token.clone(),
         }
     }
-
 }
 
 pub(crate) fn build_browser_status(
@@ -283,7 +277,11 @@ pub(crate) fn collect_redacted_errors(value: &Value, limit: usize) -> Vec<String
     deduped
 }
 
-pub(crate) fn collect_redacted_errors_inner(value: &Value, key_context: Option<&str>, out: &mut Vec<String>) {
+pub(crate) fn collect_redacted_errors_inner(
+    value: &Value,
+    key_context: Option<&str>,
+    out: &mut Vec<String>,
+) {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
@@ -412,7 +410,9 @@ pub(crate) async fn build_snapshot_from_inputs(
 
     let overall_status = if !gateway_running || gateway_health.is_none() {
         OverallStatus::Down
-    } else if (browser_service_enabled && !browser_healthy) || discord_degraded || diagnostics_degraded
+    } else if (browser_service_enabled && !browser_healthy)
+        || discord_degraded
+        || diagnostics_degraded
     {
         OverallStatus::Degraded
     } else {
@@ -437,8 +437,10 @@ async fn fetch_health(http_client: &Client, port: u16) -> Result<Option<HealthEn
     if !response.status().is_success() {
         return Ok(None);
     }
-    let payload =
-        response.json::<HealthEndpointPayload>().await.context("failed to decode health payload")?;
+    let payload = response
+        .json::<HealthEndpointPayload>()
+        .await
+        .context("failed to decode health payload")?;
     if payload.status.trim().eq_ignore_ascii_case("ok") {
         Ok(Some(payload))
     } else {
@@ -487,25 +489,25 @@ async fn fetch_console_payloads(
         }
     };
 
-    let discord = match fetch_console_json(
-        http_client,
-        runtime,
-        "/console/v1/channels/discord%3Adefault",
-    )
-    .await
-    .with_context(|| "failed to fetch Discord connector status".to_owned())
-    {
-        Ok(value) => Some(value),
-        Err(error) => {
-            warnings.push(sanitize_log_line(error.to_string().as_str()));
-            None
-        }
-    };
+    let discord =
+        match fetch_console_json(http_client, runtime, "/console/v1/channels/discord%3Adefault")
+            .await
+            .with_context(|| "failed to fetch Discord connector status".to_owned())
+        {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warnings.push(sanitize_log_line(error.to_string().as_str()));
+                None
+            }
+        };
 
     (diagnostics, discord, warnings)
 }
 
-pub(crate) fn build_control_plane_client(http_client: Client, runtime: &RuntimeConfig) -> Result<ControlPlaneClient> {
+pub(crate) fn build_control_plane_client(
+    http_client: Client,
+    runtime: &RuntimeConfig,
+) -> Result<ControlPlaneClient> {
     let config = ControlPlaneClientConfig::new(format!(
         "{DASHBOARD_SCHEME}://{LOOPBACK_HOST}:{}/",
         runtime.gateway_admin_port
@@ -514,12 +516,13 @@ pub(crate) fn build_control_plane_client(http_client: Client, runtime: &RuntimeC
         .map_err(|error| anyhow!("failed to build control-plane client: {error}"))
 }
 
-async fn ensure_console_session(control_plane: &mut ControlPlaneClient, admin_token: &str) -> Result<()> {
+async fn ensure_console_session(
+    control_plane: &mut ControlPlaneClient,
+    admin_token: &str,
+) -> Result<()> {
     match control_plane.get_session().await {
         Ok(_) => Ok(()),
-        Err(control_plane::ControlPlaneClientError::Http { status, .. })
-            if matches!(status, 401 | 403) =>
-        {
+        Err(control_plane::ControlPlaneClientError::Http { status: 401 | 403, .. }) => {
             control_plane
                 .login(&control_plane::ConsoleLoginRequest {
                     admin_token: admin_token.to_owned(),
@@ -535,7 +538,11 @@ async fn ensure_console_session(control_plane: &mut ControlPlaneClient, admin_to
     }
 }
 
-async fn fetch_console_json(http_client: &Client, runtime: &RuntimeConfig, path: &str) -> Result<Value> {
+async fn fetch_console_json(
+    http_client: &Client,
+    runtime: &RuntimeConfig,
+    path: &str,
+) -> Result<Value> {
     let url = loopback_url(runtime.gateway_admin_port, path)?;
     let response = http_client.get(url).send().await.context("console GET request failed")?;
     if !response.status().is_success() {
@@ -708,7 +715,10 @@ pub(crate) fn resolve_dashboard_access_target(default_port: u16) -> Result<Dashb
     let port = parsed.daemon.as_ref().and_then(|daemon| daemon.port).unwrap_or(default_port);
     let socket = parse_daemon_bind_socket(bind_addr, port)
         .with_context(|| format!("invalid daemon bind config ({bind_addr}:{port})"))?;
-    Ok(DashboardAccessTarget { url: format_dashboard_url(normalize_dashboard_socket(socket)), mode: DashboardAccessMode::Local })
+    Ok(DashboardAccessTarget {
+        url: format_dashboard_url(normalize_dashboard_socket(socket)),
+        mode: DashboardAccessMode::Local,
+    })
 }
 
 pub(crate) fn resolve_dashboard_config_path() -> Result<Option<PathBuf>> {
@@ -735,16 +745,17 @@ pub(crate) fn resolve_dashboard_config_path() -> Result<Option<PathBuf>> {
 pub(crate) fn load_dashboard_root_file_config(path: &Path) -> Result<RootFileConfig> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read desktop dashboard config {}", path.display()))?;
-    let (document, _) = parse_document_with_migration(content.as_str())
-        .with_context(|| format!("failed to migrate desktop dashboard config {}", path.display()))?;
+    let (document, _) = parse_document_with_migration(content.as_str()).with_context(|| {
+        format!("failed to migrate desktop dashboard config {}", path.display())
+    })?;
     let migrated = toml::to_string(&document)
         .context("failed to serialize migrated desktop dashboard config document")?;
     toml::from_str(migrated.as_str()).context("desktop dashboard config does not match schema")
 }
 
 pub(crate) fn parse_remote_dashboard_base_url(raw: &str, source_name: &str) -> Result<String> {
-    let parsed = Url::parse(raw)
-        .with_context(|| format!("{source_name} must be a valid absolute URL"))?;
+    let parsed =
+        Url::parse(raw).with_context(|| format!("{source_name} must be a valid absolute URL"))?;
     if parsed.scheme() != "https" {
         bail!("{source_name} must use https://");
     }
