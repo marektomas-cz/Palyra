@@ -17,3 +17,6 @@ bash scripts/protocol/validate-rust-stubs.sh
 
 echo "Running high-risk pattern scan..."
 bash scripts/check-high-risk-patterns.sh
+
+echo "Running runtime artifact hygiene guard..."
+bash scripts/check-runtime-artifacts.sh

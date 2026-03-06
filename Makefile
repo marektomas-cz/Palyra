@@ -55,6 +55,10 @@ security:
 	cargo audit
 	cargo deny check
 	bash scripts/check-high-risk-patterns.sh
+	bash scripts/check-runtime-artifacts.sh
+
+artifact-hygiene:
+	bash scripts/check-runtime-artifacts.sh
 
 sbom:
 	cargo cyclonedx --format json --override-filename sbom

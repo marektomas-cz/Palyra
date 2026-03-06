@@ -112,6 +112,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Runtime artifact hygiene
+        run: bash scripts/check-runtime-artifacts.sh
+
       - name: High-risk pattern scan
         run: bash scripts/check-high-risk-patterns.sh
 
