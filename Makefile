@@ -60,6 +60,9 @@ security:
 artifact-hygiene:
 	bash scripts/check-runtime-artifacts.sh
 
+artifact-clean:
+	bash scripts/clean-runtime-artifacts.sh
+
 sbom:
 	cargo cyclonedx --format json --override-filename sbom
 
