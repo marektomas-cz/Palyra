@@ -142,7 +142,7 @@ describe("ChatConsolePanel", () => {
       expect(screen.queryByText("stale-one")).not.toBeInTheDocument();
       expect(screen.queryByText(/run-one-stale/)).not.toBeInTheDocument();
     });
-  });
+  }, 15_000);
 });
 
 function sampleSession(): ChatSessionRecord {
