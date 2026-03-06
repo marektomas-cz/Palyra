@@ -11,9 +11,9 @@ use thiserror::Error;
 
 use crate::{
     protocol::{
-        ConnectorInstanceSpec, ConnectorKind, ConnectorLiveness, ConnectorReadiness,
-        ConnectorStatusSnapshot, DeliveryOutcome, InboundMessageEvent, OutboundMessageRequest,
-        RetryClass, RouteInboundResult,
+        ConnectorAvailability, ConnectorInstanceSpec, ConnectorKind, ConnectorLiveness,
+        ConnectorReadiness, ConnectorStatusSnapshot, DeliveryOutcome, InboundMessageEvent,
+        OutboundMessageRequest, RetryClass, RouteInboundResult,
     },
     storage::{ConnectorStore, ConnectorStoreError, OutboxEnqueueOutcome, OutboxEntryRecord},
 };
@@ -128,6 +128,8 @@ pub trait ConnectorRouter: Send + Sync {
 pub trait ConnectorAdapter: Send + Sync {
     fn kind(&self) -> ConnectorKind;
 
+    fn availability(&self) -> ConnectorAvailability;
+
     fn split_outbound(
         &self,
         _instance: &crate::storage::ConnectorInstanceRecord,
@@ -217,6 +219,7 @@ impl ConnectorSupervisor {
             Some(&json!({
                 "connector_id": spec.connector_id,
                 "kind": spec.kind.as_str(),
+                "availability": spec.kind.default_availability().as_str(),
                 "enabled": spec.enabled,
             })),
             now,
@@ -253,6 +256,7 @@ impl ConnectorSupervisor {
         Ok(ConnectorStatusSnapshot {
             connector_id: instance.connector_id,
             kind: instance.kind,
+            availability: self.connector_availability(instance.kind),
             principal: instance.principal,
             enabled: instance.enabled,
             readiness: instance.readiness,
@@ -274,6 +278,7 @@ impl ConnectorSupervisor {
             snapshots.push(ConnectorStatusSnapshot {
                 connector_id: instance.connector_id,
                 kind: instance.kind,
+                availability: self.connector_availability(instance.kind),
                 principal: instance.principal,
                 enabled: instance.enabled,
                 readiness: instance.readiness,
@@ -314,6 +319,13 @@ impl ConnectorSupervisor {
             object.insert("metrics".to_owned(), json!(metrics));
         }
         Ok(Some(runtime))
+    }
+
+    fn connector_availability(&self, kind: ConnectorKind) -> ConnectorAvailability {
+        self.adapters
+            .get(&kind)
+            .map(|adapter| adapter.availability())
+            .unwrap_or_else(|| kind.default_availability())
     }
 
     fn build_runtime_metrics(
@@ -959,8 +971,8 @@ mod tests {
 
     use crate::{
         protocol::{
-            ConnectorInstanceSpec, ConnectorKind, DeliveryOutcome, OutboundMessageRequest,
-            RetryClass, RoutedOutboundMessage,
+            ConnectorAvailability, ConnectorInstanceSpec, ConnectorKind, DeliveryOutcome,
+            OutboundMessageRequest, RetryClass, RoutedOutboundMessage,
         },
         storage::ConnectorStore,
     };
@@ -1024,6 +1036,10 @@ mod tests {
             ConnectorKind::Echo
         }
 
+        fn availability(&self) -> ConnectorAvailability {
+            ConnectorAvailability::InternalTestOnly
+        }
+
         async fn poll_inbound(
             &self,
             _instance: &crate::storage::ConnectorInstanceRecord,
@@ -1077,6 +1093,10 @@ mod tests {
             ConnectorKind::Slack
         }
 
+        fn availability(&self) -> ConnectorAvailability {
+            ConnectorAvailability::Deferred
+        }
+
         async fn poll_inbound(
             &self,
             _instance: &crate::storage::ConnectorInstanceRecord,
@@ -1116,6 +1136,10 @@ mod tests {
     impl ConnectorAdapter for SlowCountingAdapter {
         fn kind(&self) -> ConnectorKind {
             ConnectorKind::Echo
+        }
+
+        fn availability(&self) -> ConnectorAvailability {
+            ConnectorAvailability::InternalTestOnly
         }
 
         async fn send_outbound(
@@ -1434,5 +1458,21 @@ mod tests {
             route_latency.get("sample_count").and_then(Value::as_u64).unwrap_or(0) >= 1,
             "route latency summary should include at least one sample"
         );
+    }
+
+    #[test]
+    fn status_falls_back_to_kind_availability_when_runtime_adapter_is_missing() {
+        let (_tempdir, supervisor, _adapter) = open_supervisor();
+        supervisor
+            .register_connector(&sample_spec_with(
+                "slack:default",
+                ConnectorKind::Slack,
+                "channel:slack:default",
+            ))
+            .expect("register should succeed without a slack runtime adapter");
+
+        let status = supervisor.status("slack:default").expect("status should resolve");
+        assert_eq!(status.kind, ConnectorKind::Slack);
+        assert_eq!(status.availability, ConnectorAvailability::Deferred);
     }
 }

@@ -8,7 +8,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    protocol::{ConnectorKind, DeliveryOutcome, OutboundMessageRequest, RetryClass},
+    protocol::{
+        ConnectorAvailability, ConnectorKind, DeliveryOutcome, OutboundMessageRequest, RetryClass,
+    },
     storage::ConnectorInstanceRecord,
     supervisor::{ConnectorAdapter, ConnectorAdapterError},
 };
@@ -32,6 +34,10 @@ impl EchoConnectorAdapter {
 impl ConnectorAdapter for EchoConnectorAdapter {
     fn kind(&self) -> ConnectorKind {
         ConnectorKind::Echo
+    }
+
+    fn availability(&self) -> ConnectorAvailability {
+        ConnectorAvailability::InternalTestOnly
     }
 
     async fn send_outbound(

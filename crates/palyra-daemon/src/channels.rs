@@ -6,11 +6,12 @@ use std::{
 
 use palyra_common::{validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
 use palyra_connectors::{
-    connectors::default_adapters, AttachmentKind, AttachmentRef, ConnectorInstanceSpec,
-    ConnectorKind, ConnectorRouter, ConnectorRouterError, ConnectorStatusSnapshot,
-    ConnectorSupervisor, ConnectorSupervisorConfig, ConnectorSupervisorError, InboundIngestOutcome,
-    InboundMessageEvent, OutboundA2uiUpdate as ConnectorA2uiUpdate, OutboundAttachment,
-    OutboundMessageRequest, RouteInboundResult, RoutedOutboundMessage,
+    connectors::default_adapters, AttachmentKind, AttachmentRef, ConnectorAvailability,
+    ConnectorInstanceSpec, ConnectorKind, ConnectorRouter, ConnectorRouterError,
+    ConnectorStatusSnapshot, ConnectorSupervisor, ConnectorSupervisorConfig,
+    ConnectorSupervisorError, InboundIngestOutcome, InboundMessageEvent,
+    OutboundA2uiUpdate as ConnectorA2uiUpdate, OutboundAttachment, OutboundMessageRequest,
+    RouteInboundResult, RoutedOutboundMessage,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -104,14 +105,21 @@ impl ChannelPlatform {
     }
 
     pub fn list(&self) -> Result<Vec<ConnectorStatusSnapshot>, ChannelPlatformError> {
-        self.supervisor.list_status().map_err(ChannelPlatformError::from)
+        let visible = self
+            .supervisor
+            .list_status()
+            .map_err(ChannelPlatformError::from)?
+            .into_iter()
+            .filter(|status| status.availability != ConnectorAvailability::Deferred)
+            .collect();
+        Ok(visible)
     }
 
     pub fn status(
         &self,
         connector_id: &str,
     ) -> Result<ConnectorStatusSnapshot, ChannelPlatformError> {
-        self.supervisor.status(connector_id).map_err(ChannelPlatformError::from)
+        self.ensure_operator_visible(connector_id)
     }
 
     pub fn ensure_discord_connector(
@@ -139,6 +147,7 @@ impl ChannelPlatform {
         &self,
         connector_id: &str,
     ) -> Result<Option<Value>, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
         self.supervisor.runtime_snapshot(connector_id).map_err(ChannelPlatformError::from)
     }
 
@@ -147,6 +156,7 @@ impl ChannelPlatform {
         connector_id: &str,
         enabled: bool,
     ) -> Result<ConnectorStatusSnapshot, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
         self.supervisor.set_enabled(connector_id, enabled).map_err(ChannelPlatformError::from)
     }
 
@@ -155,6 +165,7 @@ impl ChannelPlatform {
         connector_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<palyra_connectors::ConnectorEventRecord>, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
         self.supervisor
             .list_logs(connector_id, limit.unwrap_or(DEFAULT_LOG_PAGE_LIMIT))
             .map_err(ChannelPlatformError::from)
@@ -165,6 +176,7 @@ impl ChannelPlatform {
         connector_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<palyra_connectors::DeadLetterRecord>, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
         self.supervisor
             .list_dead_letters(connector_id, limit.unwrap_or(DEFAULT_LOG_PAGE_LIMIT))
             .map_err(ChannelPlatformError::from)
@@ -175,6 +187,7 @@ impl ChannelPlatform {
         connector_id: &str,
         request: ChannelTestMessageRequest,
     ) -> Result<InboundIngestOutcome, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
         if request.text.trim().is_empty() {
             return Err(ChannelPlatformError::InvalidInput("text cannot be empty".to_owned()));
         }
@@ -327,6 +340,20 @@ impl ChannelPlatform {
         ConnectorSupervisorConfig::default()
     }
 
+    fn ensure_operator_visible(
+        &self,
+        connector_id: &str,
+    ) -> Result<ConnectorStatusSnapshot, ChannelPlatformError> {
+        let status = self.supervisor.status(connector_id).map_err(ChannelPlatformError::from)?;
+        if status.availability == ConnectorAvailability::Deferred {
+            return Err(ChannelPlatformError::InvalidInput(format!(
+                "connector '{}' is deferred and unavailable in the Discord-first runtime",
+                connector_id.trim()
+            )));
+        }
+        Ok(status)
+    }
+
     fn ensure_default_connector_inventory(&self) -> Result<(), ChannelPlatformError> {
         for spec in default_connector_specs() {
             let exists =
@@ -351,24 +378,6 @@ fn default_connector_specs() -> Vec<ConnectorInstanceSpec> {
             enabled: true,
         },
         discord::discord_connector_spec("default", false),
-        ConnectorInstanceSpec {
-            connector_id: "slack:default".to_owned(),
-            kind: ConnectorKind::Slack,
-            principal: "channel:slack:default".to_owned(),
-            auth_profile_ref: Some("slack.default".to_owned()),
-            token_vault_ref: None,
-            egress_allowlist: vec!["slack.com".to_owned(), "*.slack.com".to_owned()],
-            enabled: false,
-        },
-        ConnectorInstanceSpec {
-            connector_id: "telegram:default".to_owned(),
-            kind: ConnectorKind::Telegram,
-            principal: "channel:telegram:default".to_owned(),
-            auth_profile_ref: Some("telegram.default".to_owned()),
-            token_vault_ref: None,
-            egress_allowlist: vec!["telegram.org".to_owned(), "*.telegram.org".to_owned()],
-            enabled: false,
-        },
     ]
 }
 
@@ -656,12 +665,17 @@ fn unix_ms_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use palyra_connectors::{AttachmentKind, AttachmentRef, ConnectorSupervisorError};
+    use palyra_connectors::{
+        AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorInstanceSpec, ConnectorKind,
+        ConnectorSupervisorError,
+    };
+    use tempfile::TempDir;
 
     use super::{
-        discord, discord_connector_id, discord_token_vault_ref, from_proto_a2ui_update,
-        normalize_discord_account_id, render_attachment_context, resolve_connector_gateway_auth,
-        to_proto_message_attachments, with_attachment_context, ChannelPlatformError,
+        default_connector_specs, discord, discord_connector_id, discord_token_vault_ref,
+        from_proto_a2ui_update, normalize_discord_account_id, render_attachment_context,
+        resolve_connector_gateway_auth, to_proto_message_attachments, with_attachment_context,
+        ChannelPlatform, ChannelPlatformError,
     };
     use crate::gateway::GatewayAuthConfig;
 
@@ -892,6 +906,74 @@ mod tests {
         assert!(
             matches!(error, ConnectorSupervisorError::Router(_)),
             "missing token should be surfaced as router error for deterministic channel logs"
+        );
+    }
+
+    #[test]
+    fn default_connector_specs_match_discord_first_runtime_scope() {
+        let specs = default_connector_specs();
+        let inventory = specs
+            .iter()
+            .map(|spec| (spec.connector_id.clone(), spec.kind, spec.kind.default_availability()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            inventory,
+            vec![
+                (
+                    "echo:default".to_owned(),
+                    ConnectorKind::Echo,
+                    ConnectorAvailability::InternalTestOnly,
+                ),
+                (
+                    "discord:default".to_owned(),
+                    ConnectorKind::Discord,
+                    ConnectorAvailability::Supported,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn operator_surface_hides_and_rejects_deferred_connectors_from_existing_inventory() {
+        let tempdir = TempDir::new().expect("tempdir should initialize");
+        let platform = ChannelPlatform::initialize(
+            "http://127.0.0.1:7443".to_owned(),
+            GatewayAuthConfig {
+                require_auth: false,
+                admin_token: None,
+                connector_token: None,
+                bound_principal: None,
+            },
+            tempdir.path().join("connectors.sqlite3"),
+        )
+        .expect("platform should initialize");
+
+        platform
+            .supervisor
+            .register_connector(&ConnectorInstanceSpec {
+                connector_id: "slack:default".to_owned(),
+                kind: ConnectorKind::Slack,
+                principal: "channel:slack:default".to_owned(),
+                auth_profile_ref: Some("slack.default".to_owned()),
+                token_vault_ref: None,
+                egress_allowlist: vec!["slack.com".to_owned(), "*.slack.com".to_owned()],
+                enabled: false,
+            })
+            .expect("legacy deferred connector should remain representable in storage");
+
+        let listed = platform.list().expect("list should resolve");
+        assert!(
+            listed.iter().all(|entry| entry.connector_id != "slack:default"),
+            "deferred connectors must stay hidden from operator listings"
+        );
+
+        let error = platform
+            .status("slack:default")
+            .expect_err("direct operator access should reject deferred connectors");
+        assert!(
+            matches!(error, ChannelPlatformError::InvalidInput(message) if message.contains("deferred")),
+            "deferred connectors should fail with an explicit invalid-input message"
         );
     }
 }

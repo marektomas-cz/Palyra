@@ -21,8 +21,8 @@ use ulid::Ulid;
 use crate::{
     net::ConnectorNetGuard,
     protocol::{
-        AttachmentKind, AttachmentRef, ConnectorKind, DeliveryOutcome, InboundMessageEvent,
-        OutboundMessageRequest, RetryClass,
+        AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorKind, DeliveryOutcome,
+        InboundMessageEvent, OutboundMessageRequest, RetryClass,
     },
     storage::ConnectorInstanceRecord,
     supervisor::{ConnectorAdapter, ConnectorAdapterError},
@@ -74,6 +74,10 @@ pub struct DiscordAdapterConfig {
 impl ConnectorAdapter for DiscordConnectorAdapter {
     fn kind(&self) -> ConnectorKind {
         ConnectorKind::Discord
+    }
+
+    fn availability(&self) -> ConnectorAvailability {
+        ConnectorAvailability::Supported
     }
 
     fn split_outbound(

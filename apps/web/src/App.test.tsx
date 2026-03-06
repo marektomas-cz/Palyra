@@ -219,6 +219,7 @@ describe("M35 web console app", () => {
           {
             connector_id: "echo:default",
             kind: "echo",
+            availability: "internal_test_only",
             enabled: true,
             readiness: "ready",
             liveness: "running",
@@ -230,6 +231,7 @@ describe("M35 web console app", () => {
         connector: {
           connector_id: "echo:default",
           kind: "echo",
+          availability: "internal_test_only",
           enabled: true,
           readiness: "ready",
           liveness: "running",
@@ -278,6 +280,7 @@ describe("M35 web console app", () => {
         connector: {
           connector_id: "echo:default",
           kind: "echo",
+          availability: "internal_test_only",
           enabled: false,
           readiness: "ready",
           liveness: "stopped",
@@ -289,6 +292,7 @@ describe("M35 web console app", () => {
           {
             connector_id: "echo:default",
             kind: "echo",
+            availability: "internal_test_only",
             enabled: false,
             readiness: "ready",
             liveness: "stopped",
@@ -300,6 +304,7 @@ describe("M35 web console app", () => {
         connector: {
           connector_id: "echo:default",
           kind: "echo",
+          availability: "internal_test_only",
           enabled: false,
           readiness: "ready",
           liveness: "stopped",
@@ -333,6 +338,7 @@ describe("M35 web console app", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Channels" }));
     expect(await screen.findByRole("heading", { name: "Channel Connectors" })).toBeInTheDocument();
     expect(await screen.findByText("echo:default")).toBeInTheDocument();
+    expect(await screen.findByText("internal_test_only")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Disable" }));
 
@@ -346,6 +352,79 @@ describe("M35 web console app", () => {
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(request?.method).toBe("POST");
     expect(requestBody(request?.body)).toContain("\"enabled\":false");
+  });
+
+  it("hides deferred connectors from channels section and selects the first visible connector", async () => {
+    const fetchMock = createQueuedFetch([
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        channel: "web",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 300
+      }),
+      jsonResponse({ approvals: [] }),
+      jsonResponse({
+        connectors: [
+          {
+            connector_id: "slack:default",
+            kind: "slack",
+            availability: "deferred",
+            enabled: false,
+            readiness: "misconfigured",
+            liveness: "stopped",
+            queue_depth: { pending_outbox: 0, dead_letters: 0 }
+          },
+          {
+            connector_id: "echo:default",
+            kind: "echo",
+            availability: "internal_test_only",
+            enabled: true,
+            readiness: "ready",
+            liveness: "running",
+            queue_depth: { pending_outbox: 0, dead_letters: 0 }
+          }
+        ]
+      }),
+      jsonResponse({
+        connector: {
+          connector_id: "echo:default",
+          kind: "echo",
+          availability: "internal_test_only",
+          enabled: true,
+          readiness: "ready",
+          liveness: "running",
+          queue_depth: { pending_outbox: 0, dead_letters: 0 }
+        }
+      }),
+      jsonResponse({ events: [], dead_letters: [] }),
+      jsonResponse({
+        config: {
+          enabled: true,
+          default_direct_message_policy: "deny",
+          channels: [{ channel: "echo:default", enabled: true }]
+        },
+        config_hash: "router-hash-1"
+      }),
+      jsonResponse({
+        warnings: [],
+        config_hash: "router-hash-1"
+      }),
+      jsonResponse({
+        pairings: [],
+        config_hash: "router-hash-1"
+      })
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Channels" }));
+
+    expect(await screen.findByText("echo:default")).toBeInTheDocument();
+    expect(screen.queryByText("slack:default")).not.toBeInTheDocument();
+    expect(await screen.findByText("internal_test_only")).toBeInTheDocument();
+    expect(requestUrl(fetchMock.mock.calls[3][0])).toBe("/console/v1/channels/echo%3Adefault");
   });
 
   it("runs discord onboarding preflight from channels wizard with CSRF-protected request", async () => {
@@ -364,6 +443,7 @@ describe("M35 web console app", () => {
           {
             connector_id: "discord:default",
             kind: "discord",
+            availability: "supported",
             enabled: false,
             readiness: "missing_credential",
             liveness: "stopped",
@@ -375,6 +455,7 @@ describe("M35 web console app", () => {
         connector: {
           connector_id: "discord:default",
           kind: "discord",
+          availability: "supported",
           enabled: false,
           readiness: "missing_credential",
           liveness: "stopped",
@@ -434,6 +515,7 @@ describe("M35 web console app", () => {
           {
             connector_id: "discord:default",
             kind: "discord",
+            availability: "supported",
             enabled: false,
             readiness: "missing_credential",
             liveness: "stopped",
@@ -445,6 +527,7 @@ describe("M35 web console app", () => {
         connector: {
           connector_id: "discord:default",
           kind: "discord",
+          availability: "supported",
           enabled: false,
           readiness: "missing_credential",
           liveness: "stopped",

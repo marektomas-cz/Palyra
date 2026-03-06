@@ -4461,20 +4461,8 @@ fn emit_channels_list(payload: Value, json_output: bool) -> Result<()> {
         );
         return Ok(());
     }
-    let connectors =
-        payload.get("connectors").and_then(Value::as_array).cloned().unwrap_or_default();
-    println!("channels.count={}", connectors.len());
-    for connector in connectors {
-        let connector_id =
-            connector.get("connector_id").and_then(Value::as_str).unwrap_or("unknown");
-        let kind = connector.get("kind").and_then(Value::as_str).unwrap_or("unknown");
-        let enabled = connector.get("enabled").and_then(Value::as_bool).unwrap_or(false);
-        let readiness = connector.get("readiness").and_then(Value::as_str).unwrap_or("unknown");
-        let liveness = connector.get("liveness").and_then(Value::as_str).unwrap_or("unknown");
-        println!(
-            "channels.connector id={} kind={} enabled={} readiness={} liveness={}",
-            connector_id, kind, enabled, readiness, liveness
-        );
+    for line in render_channels_list_lines(&payload) {
+        println!("{line}");
     }
     Ok(())
 }
@@ -4488,8 +4476,44 @@ fn emit_channels_status(payload: Value, json_output: bool) -> Result<()> {
         );
         return Ok(());
     }
-    let connector = payload.get("connector").unwrap_or(&payload);
+    for line in render_channels_status_lines(&payload) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn render_channels_list_lines(payload: &Value) -> Vec<String> {
+    let connectors = payload
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|connector| connector_availability(connector) != "deferred")
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut lines = vec![format!("channels.count={}", connectors.len())];
+    for connector in connectors {
+        let connector_id =
+            connector.get("connector_id").and_then(Value::as_str).unwrap_or("unknown");
+        let kind = connector.get("kind").and_then(Value::as_str).unwrap_or("unknown");
+        let availability = connector_availability(connector);
+        let enabled = connector.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+        let readiness = connector.get("readiness").and_then(Value::as_str).unwrap_or("unknown");
+        let liveness = connector.get("liveness").and_then(Value::as_str).unwrap_or("unknown");
+        lines.push(format!(
+            "channels.connector id={} kind={} availability={} enabled={} readiness={} liveness={}",
+            connector_id, kind, availability, enabled, readiness, liveness
+        ));
+    }
+    lines
+}
+
+fn render_channels_status_lines(payload: &Value) -> Vec<String> {
+    let connector = payload.get("connector").unwrap_or(payload);
     let connector_id = connector.get("connector_id").and_then(Value::as_str).unwrap_or("unknown");
+    let availability = connector_availability(connector);
     let enabled = connector.get("enabled").and_then(Value::as_bool).unwrap_or(false);
     let readiness = connector.get("readiness").and_then(Value::as_str).unwrap_or("unknown");
     let liveness = connector.get("liveness").and_then(Value::as_str).unwrap_or("unknown");
@@ -4505,10 +4529,10 @@ fn emit_channels_status(payload: Value, json_output: bool) -> Result<()> {
         .and_then(|queue| queue.get("dead_letters"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    println!(
-        "channels.status id={} enabled={} readiness={} liveness={} pending_outbox={} dead_letters={}",
-        connector_id, enabled, readiness, liveness, pending, dead_letters
-    );
+    let mut lines = vec![format!(
+        "channels.status id={} availability={} enabled={} readiness={} liveness={} pending_outbox={} dead_letters={}",
+        connector_id, availability, enabled, readiness, liveness, pending, dead_letters
+    )];
     if let Some(metrics) = payload
         .get("runtime")
         .and_then(Value::as_object)
@@ -4523,7 +4547,7 @@ fn emit_channels_status(payload: Value, json_output: bool) -> Result<()> {
             metrics.get("outbound_sends_retry").and_then(Value::as_u64).unwrap_or(0);
         let outbound_dead_letter =
             metrics.get("outbound_sends_dead_letter").and_then(Value::as_u64).unwrap_or(0);
-        println!(
+        lines.push(format!(
             "channels.metrics id={} inbound_processed={} dedupe_hits={} outbound_ok={} outbound_retry={} outbound_dead_letter={}",
             connector_id,
             inbound_processed,
@@ -4531,28 +4555,91 @@ fn emit_channels_status(payload: Value, json_output: bool) -> Result<()> {
             outbound_ok,
             outbound_retry,
             outbound_dead_letter
-        );
+        ));
         if let Some(latency) = metrics.get("route_message_latency_ms").and_then(Value::as_object) {
             let samples = latency.get("sample_count").and_then(Value::as_u64).unwrap_or(0);
             let avg_ms = latency.get("avg_ms").and_then(Value::as_u64).unwrap_or(0);
             let max_ms = latency.get("max_ms").and_then(Value::as_u64).unwrap_or(0);
-            println!(
+            lines.push(format!(
                 "channels.metrics.route_latency id={} samples={} avg_ms={} max_ms={}",
                 connector_id, samples, avg_ms, max_ms
-            );
+            ));
         }
         if let Some(policy_denials) = metrics.get("policy_denials").and_then(Value::as_array) {
             for entry in policy_denials {
                 let reason = entry.get("reason").and_then(Value::as_str).unwrap_or("unknown");
                 let count = entry.get("count").and_then(Value::as_u64).unwrap_or(0);
-                println!(
+                lines.push(format!(
                     "channels.metrics.policy_denial id={} reason={} count={}",
                     connector_id, reason, count
-                );
+                ));
             }
         }
     }
-    Ok(())
+    lines
+}
+
+fn connector_availability(connector: &Value) -> &str {
+    connector.get("availability").and_then(Value::as_str).unwrap_or("supported")
+}
+
+#[cfg(test)]
+mod channel_output_tests {
+    use serde_json::json;
+
+    use super::{render_channels_list_lines, render_channels_status_lines};
+
+    #[test]
+    fn render_channels_list_hides_deferred_connectors_and_includes_availability() {
+        let lines = render_channels_list_lines(&json!({
+            "connectors": [
+                {
+                    "connector_id": "slack:default",
+                    "kind": "slack",
+                    "availability": "deferred",
+                    "enabled": false,
+                    "readiness": "misconfigured",
+                    "liveness": "stopped"
+                },
+                {
+                    "connector_id": "echo:default",
+                    "kind": "echo",
+                    "availability": "internal_test_only",
+                    "enabled": true,
+                    "readiness": "ready",
+                    "liveness": "running"
+                }
+            ]
+        }));
+
+        assert_eq!(lines, vec![
+            "channels.count=1".to_owned(),
+            "channels.connector id=echo:default kind=echo availability=internal_test_only enabled=true readiness=ready liveness=running"
+                .to_owned(),
+        ]);
+    }
+
+    #[test]
+    fn render_channels_status_includes_availability() {
+        let lines = render_channels_status_lines(&json!({
+            "connector": {
+                "connector_id": "discord:default",
+                "availability": "supported",
+                "enabled": false,
+                "readiness": "missing_credential",
+                "liveness": "stopped",
+                "queue_depth": {
+                    "pending_outbox": 0,
+                    "dead_letters": 0
+                }
+            }
+        }));
+
+        assert_eq!(
+            lines[0],
+            "channels.status id=discord:default availability=supported enabled=false readiness=missing_credential liveness=stopped pending_outbox=0 dead_letters=0"
+        );
+    }
 }
 
 fn run_browser(command: BrowserCommand) -> Result<()> {

@@ -48,9 +48,53 @@ impl ConnectorKind {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub const fn default_availability(self) -> ConnectorAvailability {
+        match self {
+            Self::Discord => ConnectorAvailability::Supported,
+            Self::Echo => ConnectorAvailability::InternalTestOnly,
+            Self::Telegram | Self::Slack => ConnectorAvailability::Deferred,
+        }
+    }
 }
 
 impl Display for ConnectorKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorAvailability {
+    Supported,
+    InternalTestOnly,
+    Deferred,
+}
+
+impl ConnectorAvailability {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::InternalTestOnly => "internal_test_only",
+            Self::Deferred => "deferred",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "supported" => Some(Self::Supported),
+            "internal_test_only" => Some(Self::InternalTestOnly),
+            "deferred" => Some(Self::Deferred),
+            _ => None,
+        }
+    }
+}
+
+impl Display for ConnectorAvailability {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -378,6 +422,7 @@ pub struct ConnectorQueueDepth {
 pub struct ConnectorStatusSnapshot {
     pub connector_id: String,
     pub kind: ConnectorKind,
+    pub availability: ConnectorAvailability,
     pub principal: String,
     pub enabled: bool,
     pub readiness: ConnectorReadiness,
@@ -501,8 +546,8 @@ fn validate_json_bytes(
 #[cfg(test)]
 mod tests {
     use super::{
-        AttachmentKind, AttachmentRef, ConnectorInstanceSpec, ConnectorKind, InboundMessageEvent,
-        OutboundA2uiUpdate, OutboundMessageRequest, ProtocolError,
+        AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorInstanceSpec, ConnectorKind,
+        InboundMessageEvent, OutboundA2uiUpdate, OutboundMessageRequest, ProtocolError,
     };
 
     #[test]
@@ -523,6 +568,17 @@ mod tests {
                 reason: "host pattern contains unsupported characters",
             })
         );
+    }
+
+    #[test]
+    fn connector_kind_default_availability_matches_discord_first_runtime_scope() {
+        assert_eq!(ConnectorKind::Discord.default_availability(), ConnectorAvailability::Supported);
+        assert_eq!(
+            ConnectorKind::Echo.default_availability(),
+            ConnectorAvailability::InternalTestOnly
+        );
+        assert_eq!(ConnectorKind::Slack.default_availability(), ConnectorAvailability::Deferred);
+        assert_eq!(ConnectorKind::Telegram.default_availability(), ConnectorAvailability::Deferred);
     }
 
     #[test]

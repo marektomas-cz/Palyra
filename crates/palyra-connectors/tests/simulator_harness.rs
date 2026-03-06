@@ -6,9 +6,10 @@ use std::{
 
 use async_trait::async_trait;
 use palyra_connectors::{
-    ConnectorAdapter, ConnectorAdapterError, ConnectorInstanceSpec, ConnectorKind, ConnectorRouter,
-    ConnectorRouterError, ConnectorStore, ConnectorSupervisor, ConnectorSupervisorConfig,
-    DeliveryOutcome, InboundMessageEvent, RetryClass, RouteInboundResult, RoutedOutboundMessage,
+    ConnectorAdapter, ConnectorAdapterError, ConnectorAvailability, ConnectorInstanceSpec,
+    ConnectorKind, ConnectorRouter, ConnectorRouterError, ConnectorStore, ConnectorSupervisor,
+    ConnectorSupervisorConfig, DeliveryOutcome, InboundMessageEvent, RetryClass,
+    RouteInboundResult, RoutedOutboundMessage,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -91,6 +92,10 @@ impl MockConnectorServer {
 impl ConnectorAdapter for MockConnectorServer {
     fn kind(&self) -> ConnectorKind {
         ConnectorKind::Echo
+    }
+
+    fn availability(&self) -> ConnectorAvailability {
+        ConnectorAvailability::InternalTestOnly
     }
 
     async fn send_outbound(

@@ -935,6 +935,19 @@ fn console_channels_endpoints_require_session_and_csrf() -> Result<()> {
         }),
         "channels list response should include {connector_id}"
     );
+    assert!(
+        connectors
+            .iter()
+            .all(|entry| { entry.get("availability").and_then(Value::as_str) != Some("deferred") }),
+        "channels list response should not surface deferred connectors"
+    );
+    assert!(
+        connectors.iter().all(|entry| {
+            entry.get("connector_id").and_then(Value::as_str) != Some("slack:default")
+                && entry.get("connector_id").and_then(Value::as_str) != Some("telegram:default")
+        }),
+        "channels list response should hide deferred connector ids from the default operator view"
+    );
 
     let missing_csrf = client
         .post(format!("http://127.0.0.1:{admin_port}/console/v1/channels/{connector_id}/enabled"))
@@ -966,6 +979,14 @@ fn console_channels_endpoints_require_session_and_csrf() -> Result<()> {
             .and_then(Value::as_str),
         Some(connector_id),
         "channels enable response should include connector payload"
+    );
+    assert_eq!(
+        enabled_response
+            .get("connector")
+            .and_then(|connector| connector.get("availability"))
+            .and_then(Value::as_str),
+        Some("internal_test_only"),
+        "echo connector should be labeled as internal_test_only in console responses"
     );
 
     let logs_response = client

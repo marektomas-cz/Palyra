@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    protocol::{ConnectorKind, DeliveryOutcome, OutboundMessageRequest},
+    protocol::{ConnectorAvailability, ConnectorKind, DeliveryOutcome, OutboundMessageRequest},
     storage::ConnectorInstanceRecord,
     supervisor::{ConnectorAdapter, ConnectorAdapterError},
 };
@@ -13,6 +13,10 @@ pub struct TelegramConnectorAdapter;
 impl ConnectorAdapter for TelegramConnectorAdapter {
     fn kind(&self) -> ConnectorKind {
         ConnectorKind::Telegram
+    }
+
+    fn availability(&self) -> ConnectorAvailability {
+        ConnectorAvailability::Deferred
     }
 
     async fn send_outbound(

@@ -592,7 +592,7 @@ export function App() {
     setError(null);
     try {
       const response = await api.listChannels();
-      const connectors = toJsonObjectArray(response.connectors);
+      const connectors = toJsonObjectArray(response.connectors).filter(isVisibleChannelConnector);
       setChannelsConnectors(connectors);
 
       const requested = preferredConnectorId ?? channelsSelectedConnectorId;
@@ -2032,6 +2032,7 @@ export function App() {
                 <tr>
                   <th>Connector ID</th>
                   <th>Kind</th>
+                  <th>Availability</th>
                   <th>Enabled</th>
                   <th>Readiness</th>
                   <th>Liveness</th>
@@ -2042,10 +2043,11 @@ export function App() {
               </thead>
               <tbody>
                 {channelsConnectors.length === 0 && (
-                  <tr><td colSpan={8}>No channel connectors configured.</td></tr>
+                  <tr><td colSpan={9}>No channel connectors configured.</td></tr>
                 )}
                 {channelsConnectors.map((connector) => {
                   const connectorId = readString(connector, "connector_id") ?? "(missing)";
+                  const availability = channelConnectorAvailability(connector);
                   const enabled = readBool(connector, "enabled");
                   const queueDepth = connector["queue_depth"];
                   const pendingOutbox = isJsonObject(queueDepth)
@@ -2059,6 +2061,7 @@ export function App() {
                     <tr key={connectorId}>
                       <td>{connectorId}</td>
                       <td>{readString(connector, "kind") ?? "-"}</td>
+                      <td>{availability}</td>
                       <td>{enabled ? "yes" : "no"}</td>
                       <td>{readString(connector, "readiness") ?? "-"}</td>
                       <td>{readString(connector, "liveness") ?? "-"}</td>
@@ -2938,6 +2941,14 @@ function toJsonObjectArray(values: JsonValue[]): JsonObject[] {
     }
   }
   return rows;
+}
+
+function channelConnectorAvailability(record: JsonObject): string {
+  return readString(record, "availability") ?? "supported";
+}
+
+function isVisibleChannelConnector(record: JsonObject): boolean {
+  return channelConnectorAvailability(record) !== "deferred";
 }
 
 function toStringArray(values: JsonValue[]): string[] {
