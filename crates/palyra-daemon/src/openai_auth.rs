@@ -13,6 +13,8 @@ pub(crate) const OPENAI_OAUTH_AUDIENCE: &str = "https://api.openai.com/v1";
 pub(crate) const OPENAI_OAUTH_CALLBACK_EVENT_TYPE: &str = "palyra-openai-oauth-complete";
 pub(crate) const OPENAI_OAUTH_DEFAULT_SCOPES: &[&str] =
     &["openid", "profile", "email", "offline_access"];
+const OPENAI_VALIDATION_RETRY_ATTEMPTS: usize = 5;
+const OPENAI_VALIDATION_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 const ENV_OPENAI_AUTHORIZATION_ENDPOINT: &str = "PALYRA_OPENAI_OAUTH_AUTHORIZATION_ENDPOINT";
 const ENV_OPENAI_TOKEN_ENDPOINT: &str = "PALYRA_OPENAI_OAUTH_TOKEN_ENDPOINT";
@@ -189,28 +191,41 @@ pub(crate) async fn validate_openai_bearer_token(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| OpenAiCredentialValidationError::Unexpected(error.to_string()))?;
-    let response = client
-        .get(endpoint)
-        .bearer_auth(bearer_token)
-        .send()
-        .await
-        .map_err(|error| OpenAiCredentialValidationError::Unexpected(error.to_string()))?;
-    let status = response.status();
-    if status.is_success() {
-        return Ok(());
+
+    for attempt_index in 0..OPENAI_VALIDATION_RETRY_ATTEMPTS {
+        let response = client.get(endpoint.clone()).bearer_auth(bearer_token).send().await;
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(());
+                }
+                let body = response.text().await.unwrap_or_default();
+                let sanitized = sanitize_remote_error(body.as_str());
+                return match status.as_u16() {
+                    401 | 403 => Err(OpenAiCredentialValidationError::InvalidCredential),
+                    429 => Err(OpenAiCredentialValidationError::RateLimited),
+                    500 | 502 | 503 | 504 => {
+                        Err(OpenAiCredentialValidationError::ProviderUnavailable)
+                    }
+                    _ => Err(OpenAiCredentialValidationError::Unexpected(format!(
+                        "validation endpoint returned status {}: {}",
+                        status.as_u16(),
+                        sanitized
+                    ))),
+                };
+            }
+            Err(_error) => {
+                if attempt_index + 1 < OPENAI_VALIDATION_RETRY_ATTEMPTS {
+                    tokio::time::sleep(OPENAI_VALIDATION_RETRY_DELAY).await;
+                    continue;
+                }
+                return Err(OpenAiCredentialValidationError::ProviderUnavailable);
+            }
+        }
     }
-    let body = response.text().await.unwrap_or_default();
-    let sanitized = sanitize_remote_error(body.as_str());
-    match status.as_u16() {
-        401 | 403 => Err(OpenAiCredentialValidationError::InvalidCredential),
-        429 => Err(OpenAiCredentialValidationError::RateLimited),
-        500 | 502 | 503 | 504 => Err(OpenAiCredentialValidationError::ProviderUnavailable),
-        _ => Err(OpenAiCredentialValidationError::Unexpected(format!(
-            "validation endpoint returned status {}: {}",
-            status.as_u16(),
-            sanitized
-        ))),
-    }
+
+    Err(OpenAiCredentialValidationError::ProviderUnavailable)
 }
 
 pub(crate) async fn revoke_openai_token(

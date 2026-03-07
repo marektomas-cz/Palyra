@@ -31,6 +31,13 @@ const RUN_ID_THIRD: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
 const ENVELOPE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAY";
 const ENVELOPE_ID_ALT: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
 const OPENAI_API_KEY: &str = "sk-openai-integration-test";
+const SAMPLE_PNG_1X1: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R',
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0D, b'I', b'D', b'A', b'T', 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE,
+    0x42, 0x60, 0x82,
+];
 const VAULT_READ_APPROVAL_HEADER: &str = "x-palyra-vault-read-approval";
 const VAULT_READ_APPROVAL_ALLOW_VALUE: &str = "allow";
 const MAX_TEST_CRON_JITTER_MS: u64 = 60_000;
@@ -1077,6 +1084,113 @@ async fn grpc_route_message_rejects_without_mention_and_records_reason() -> Resu
             .iter()
             .any(|payload| payload.get("event").and_then(Value::as_str) == Some("message.routed")),
         "rejected message must not emit message.routed journal event"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_route_message_routes_safe_image_attachment_into_provider_vision_input() -> Result<()>
+{
+    let (openai_base_url, request_bodies, request_count, server_handle) =
+        spawn_scripted_openai_server_with_request_capture(vec![
+            ScriptedOpenAiResponse::immediate(
+                200,
+                r#"{"choices":[{"message":{"content":"vision-backed reply"}}]}"#.to_owned(),
+            ),
+        ])?;
+    let (child, admin_port, grpc_port, _journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_and_channel_router(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+    let mut create_route_agent = tonic::Request::new(gateway_v1::CreateAgentRequest {
+        v: 1,
+        agent_id: "route".to_owned(),
+        display_name: "Route".to_owned(),
+        agent_dir: String::new(),
+        workspace_roots: vec!["workspace".to_owned()],
+        default_model_profile: "gpt-4o-mini".to_owned(),
+        default_tool_allowlist: vec!["palyra.echo".to_owned()],
+        default_skill_allowlist: vec!["acme.route".to_owned()],
+        set_default: true,
+        allow_absolute_paths: false,
+    });
+    authorize_metadata_with_principal(create_route_agent.metadata_mut(), "admin:ops")?;
+    client
+        .create_agent(create_route_agent)
+        .await
+        .context("failed to create route agent before RouteMessage vision test")?;
+
+    let adapter = FakeChannelAdapter::default();
+    let request_attachments = vec![common_v1::MessageAttachment {
+        kind: common_v1::message_attachment::AttachmentKind::Image as i32,
+        attachment_id: "discord-att-vision-1".to_owned(),
+        filename: "status.png".to_owned(),
+        declared_content_type: "image/png".to_owned(),
+        source_url: "https://cdn.discordapp.com/attachments/test/status.png".to_owned(),
+        size_bytes: SAMPLE_PNG_1X1.len() as u64,
+        origin: "discord".to_owned(),
+        policy_context: "attachment.download.allowed".to_owned(),
+        inline_bytes: SAMPLE_PNG_1X1.to_vec(),
+        width_px: 1,
+        height_px: 1,
+        ..Default::default()
+    }];
+    let response = adapter
+        .inject_message_with_attachments(
+            &mut client,
+            "hey @palyra describe the attached image",
+            false,
+            false,
+            request_attachments,
+        )
+        .await?;
+    assert!(
+        response.accepted,
+        "safe image route message should be accepted (reason={})",
+        response.decision_reason
+    );
+    let outbound = response
+        .outputs
+        .first()
+        .cloned()
+        .context("vision route should include an outbound reply")?;
+    assert!(
+        outbound.text.contains("vision-backed reply"),
+        "vision route should return provider response text"
+    );
+
+    let captured_request_bodies =
+        request_bodies.lock().expect("captured request bodies lock should not poison").clone();
+    assert_eq!(
+        captured_request_bodies.len(),
+        1,
+        "vision route should emit exactly one provider request"
+    );
+    assert!(
+        captured_request_bodies[0].contains(r#""type":"image_url""#),
+        "provider request should contain an image_url content part: {}",
+        captured_request_bodies[0]
+    );
+    assert!(
+        captured_request_bodies[0].contains(r#""url":"data:image/png;base64,"#),
+        "provider request should inline the validated image as a data URL: {}",
+        captured_request_bodies[0]
+    );
+    assert_eq!(
+        request_count.load(Ordering::Relaxed),
+        1,
+        "vision route should invoke the provider exactly once"
     );
 
     server_handle.join().expect("scripted openai server thread should exit");

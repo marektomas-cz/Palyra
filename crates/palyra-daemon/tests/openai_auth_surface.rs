@@ -7,7 +7,7 @@ use std::{
     process::{Child, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Mutex, MutexGuard, OnceLock,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -26,8 +26,10 @@ static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn console_openai_api_key_flow_persists_vault_refs_and_default_selection() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
     let mock = OpenAiMockServer::new(None, None)?;
     mock.allow_token("sk-live-openai");
+    wait_for_openai_mock_ready(&mock)?;
 
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
         ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
@@ -144,7 +146,9 @@ fn console_openai_api_key_flow_persists_vault_refs_and_default_selection() -> Re
 
 #[test]
 fn console_openai_api_key_flow_surfaces_invalid_credentials() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
     let mock = OpenAiMockServer::new(None, None)?;
+    wait_for_openai_mock_ready(&mock)?;
 
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
         ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
@@ -168,13 +172,16 @@ fn console_openai_api_key_flow_surfaces_invalid_credentials() -> Result<()> {
         }))
         .send()
         .context("failed to submit invalid OpenAI API key")?;
+    let status = response.status();
+    let error_body =
+        response.text().context("failed to read invalid api-key error response body")?;
     assert_eq!(
-        response.status().as_u16(),
+        status.as_u16(),
         400,
-        "invalid OpenAI API key should fail closed with HTTP 400"
+        "invalid OpenAI API key should fail closed with HTTP 400: {error_body}"
     );
-    let error =
-        response.json::<Value>().context("failed to parse invalid api-key error response json")?;
+    let error = serde_json::from_str::<Value>(&error_body)
+        .context("failed to parse invalid api-key error response json")?;
     assert_eq!(
         error.get("code").and_then(Value::as_str),
         Some("validation_error"),
@@ -209,6 +216,7 @@ fn console_openai_api_key_flow_surfaces_invalid_credentials() -> Result<()> {
 
 #[test]
 fn console_openai_oauth_flow_supports_happy_path_refresh_reconnect_and_revoke() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
     let mock = OpenAiMockServer::new(
         Some(TokenReply {
             access_token: "oauth-access-1".to_owned(),
@@ -221,6 +229,7 @@ fn console_openai_oauth_flow_supports_happy_path_refresh_reconnect_and_revoke() 
             expires_in_seconds: Some(3600),
         }),
     )?;
+    wait_for_openai_mock_ready(&mock)?;
 
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
         ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
@@ -477,7 +486,9 @@ fn console_openai_oauth_flow_supports_happy_path_refresh_reconnect_and_revoke() 
 
 #[test]
 fn console_openai_oauth_callback_denial_persists_failed_attempt_state() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
     let mock = OpenAiMockServer::new(None, None)?;
+    wait_for_openai_mock_ready(&mock)?;
 
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
         ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
@@ -884,6 +895,41 @@ fn find_profile<'a>(profiles: &'a Value, profile_id: &str) -> Result<&'a Value> 
 
 fn console_url(admin_port: u16, path: &str) -> String {
     format!("http://127.0.0.1:{admin_port}{path}")
+}
+
+fn wait_for_openai_mock_ready(mock: &OpenAiMockServer) -> Result<()> {
+    let client = Client::builder()
+        .timeout(Duration::from_millis(300))
+        .build()
+        .context("failed to build OpenAI mock readiness client")?;
+    let url = format!("{}/v1/models", mock.base_url());
+    let timeout_at = Instant::now() + Duration::from_secs(3);
+
+    loop {
+        let response = client.get(&url).bearer_auth("readiness-probe").send();
+        if response.as_ref().ok().is_some_and(|value| value.status().as_u16() == 401) {
+            return Ok(());
+        }
+        if Instant::now() > timeout_at {
+            if let Ok(response) = response {
+                anyhow::bail!(
+                    "timed out waiting for OpenAI mock readiness; last status was {}",
+                    response.status()
+                );
+            }
+            let error = response.err().map(|value| value.to_string()).unwrap_or_default();
+            anyhow::bail!("timed out waiting for OpenAI mock readiness: {error}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn lock_openai_auth_surface_test() -> MutexGuard<'static, ()> {
+    static OPENAI_AUTH_SURFACE_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    OPENAI_AUTH_SURFACE_TEST_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn spawn_palyrad_with_dynamic_ports(extra_env: &[(String, String)]) -> Result<(Child, u16)> {
