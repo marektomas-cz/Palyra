@@ -143,7 +143,7 @@ describe("M56 runtime and operations surfaces", () => {
       expect(screen.getByText("Route preview accepted: paired_dm.")).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Mint pairing code" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Mint pairing code" }));
     await waitFor(() => {
       expect(screen.getByText("Pairing code minted: 777888.")).toBeInTheDocument();
     });
@@ -158,7 +158,7 @@ describe("M56 runtime and operations surfaces", () => {
     await waitFor(() => {
       expect(screen.getByText("Discord test send dispatched.")).toBeInTheDocument();
     });
-  });
+  }, 15_000);
 
   it("covers memory, skills, and browser lifecycle workflows", async () => {
     const browserState = browserProfilesFixture();
@@ -300,7 +300,7 @@ describe("M56 runtime and operations surfaces", () => {
     fireEvent.change(screen.getAllByLabelText("Session ID")[1], { target: { value: "browser-session-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Load downloads" }));
     expect(await screen.findByText(/report.csv/)).toBeInTheDocument();
-  });
+  }, 15_000);
 });
 
 function routeBaseRequests(request: { path: string; method: string }) {

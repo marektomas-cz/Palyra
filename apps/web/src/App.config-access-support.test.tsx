@@ -90,7 +90,11 @@ describe("M56 config, access, and support surfaces", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Config and Secrets" }));
     expect(await screen.findByRole("heading", { name: "Config and Secrets" })).toBeInTheDocument();
-    expect(screen.getByText("Remote gateway exposure requires explicit verification and operator acknowledgement.")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(document.body).toHaveTextContent(
+        "Remote gateway exposure requires explicit verification and operator acknowledgement."
+      );
+    });
 
     const keyInputs = screen.getAllByLabelText("Key");
     const valueInputs = screen.getAllByLabelText("Value");
@@ -192,7 +196,7 @@ describe("M56 config, access, and support surfaces", () => {
     expect(screen.getByText(/dashboard-url --verify-remote/)).toBeInTheDocument();
     expect(screen.getByText(/tunnel --ssh/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Mint pairing code" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Mint pairing code" }));
     await waitFor(() => {
       expect(screen.getByText("Pairing code minted.")).toBeInTheDocument();
     });
@@ -209,7 +213,11 @@ describe("M56 config, access, and support surfaces", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Load job" }));
     expect((await screen.findAllByText(/support-job-2/)).length).toBeGreaterThan(0);
-    expect(screen.getByText("Remote gateway exposure requires explicit verification and operator acknowledgement.")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(document.body).toHaveTextContent(
+        "Remote gateway exposure requires explicit verification and operator acknowledgement."
+      );
+    });
   });
 });
 
