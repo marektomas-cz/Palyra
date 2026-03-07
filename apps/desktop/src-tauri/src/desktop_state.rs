@@ -13,20 +13,184 @@ use super::{
     DESKTOP_SECRET_MAX_BYTES, DESKTOP_STATE_SCHEMA_VERSION,
 };
 
+const DESKTOP_ONBOARDING_EVENT_LIMIT: usize = 40;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopOnboardingStep {
+    Welcome,
+    Environment,
+    StateRoot,
+    GatewayInit,
+    OperatorAuthBootstrap,
+    OpenAiConnect,
+    DiscordConnect,
+    DashboardHandoff,
+    Completion,
+}
+
+impl DesktopOnboardingStep {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Welcome => "welcome",
+            Self::Environment => "environment",
+            Self::StateRoot => "state_root",
+            Self::GatewayInit => "gateway_init",
+            Self::OperatorAuthBootstrap => "operator_auth_bootstrap",
+            Self::OpenAiConnect => "openai_connect",
+            Self::DiscordConnect => "discord_connect",
+            Self::DashboardHandoff => "dashboard_handoff",
+            Self::Completion => "completion",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DesktopOnboardingFailureState {
+    pub(crate) step: DesktopOnboardingStep,
+    pub(crate) message: String,
+    pub(crate) recorded_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DesktopOnboardingEvent {
+    pub(crate) kind: String,
+    pub(crate) detail: Option<String>,
+    pub(crate) recorded_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DesktopOpenAiOnboardingState {
+    pub(crate) preferred_method: Option<String>,
+    pub(crate) last_profile_id: Option<String>,
+    pub(crate) last_connected_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DesktopDiscordOnboardingState {
+    pub(crate) account_id: String,
+    pub(crate) mode: String,
+    pub(crate) inbound_scope: String,
+    pub(crate) allow_from: Vec<String>,
+    pub(crate) deny_from: Vec<String>,
+    pub(crate) require_mention: bool,
+    pub(crate) concurrency_limit: u64,
+    pub(crate) broadcast_strategy: String,
+    pub(crate) confirm_open_guild_channels: bool,
+    pub(crate) verify_channel_id: Option<String>,
+    pub(crate) last_connector_id: Option<String>,
+    pub(crate) last_verified_target: Option<String>,
+    pub(crate) last_verified_at_unix_ms: Option<i64>,
+}
+
+impl Default for DesktopDiscordOnboardingState {
+    fn default() -> Self {
+        Self {
+            account_id: "default".to_owned(),
+            mode: "local".to_owned(),
+            inbound_scope: "dm_only".to_owned(),
+            allow_from: Vec::new(),
+            deny_from: Vec::new(),
+            require_mention: true,
+            concurrency_limit: 2,
+            broadcast_strategy: "deny".to_owned(),
+            confirm_open_guild_channels: false,
+            verify_channel_id: None,
+            last_connector_id: None,
+            last_verified_target: None,
+            last_verified_at_unix_ms: None,
+        }
+    }
+}
+
+impl DesktopDiscordOnboardingState {
+    pub(crate) fn connector_id(&self) -> String {
+        let account_id = normalize_optional_text(self.account_id.as_str()).unwrap_or("default");
+        format!("discord:{account_id}")
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DesktopOnboardingState {
+    pub(crate) welcome_acknowledged_at_unix_ms: Option<i64>,
+    pub(crate) state_root_confirmed_at_unix_ms: Option<i64>,
+    pub(crate) dashboard_handoff_at_unix_ms: Option<i64>,
+    pub(crate) completed_at_unix_ms: Option<i64>,
+    pub(crate) last_failure: Option<DesktopOnboardingFailureState>,
+    pub(crate) recent_events: Vec<DesktopOnboardingEvent>,
+    pub(crate) openai: DesktopOpenAiOnboardingState,
+    pub(crate) discord: DesktopDiscordOnboardingState,
+}
+
+impl DesktopOnboardingState {
+    pub(crate) fn push_event(
+        &mut self,
+        kind: impl Into<String>,
+        detail: Option<String>,
+        recorded_at_unix_ms: i64,
+    ) {
+        self.recent_events.push(DesktopOnboardingEvent {
+            kind: kind.into(),
+            detail: detail.and_then(|value| normalize_optional_text(value.as_str()).map(str::to_owned)),
+            recorded_at_unix_ms,
+        });
+        if self.recent_events.len() > DESKTOP_ONBOARDING_EVENT_LIMIT {
+            let overflow = self.recent_events.len().saturating_sub(DESKTOP_ONBOARDING_EVENT_LIMIT);
+            self.recent_events.drain(0..overflow);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct DesktopStateFile {
     pub(crate) schema_version: u32,
     pub(crate) browser_service_enabled: bool,
+    pub(crate) runtime_state_root: Option<String>,
+    pub(crate) onboarding: DesktopOnboardingState,
 }
 
 impl DesktopStateFile {
     pub(crate) fn new_default() -> Self {
-        Self { schema_version: DESKTOP_STATE_SCHEMA_VERSION, browser_service_enabled: true }
+        Self {
+            schema_version: DESKTOP_STATE_SCHEMA_VERSION,
+            browser_service_enabled: true,
+            runtime_state_root: None,
+            onboarding: DesktopOnboardingState::default(),
+        }
+    }
+
+    pub(crate) fn resolve_runtime_root(&self, default_root: &Path) -> Result<PathBuf> {
+        match normalize_optional_text(self.runtime_state_root.as_deref().unwrap_or_default()) {
+            Some(raw) => {
+                let candidate = PathBuf::from(raw);
+                if !candidate.is_absolute() {
+                    return Err(anyhow!("desktop runtime state root must be an absolute path"));
+                }
+                Ok(candidate)
+            }
+            None => Ok(default_root.to_path_buf()),
+        }
+    }
+
+    pub(crate) fn normalized_runtime_state_root(&self) -> Option<String> {
+        normalize_optional_text(self.runtime_state_root.as_deref().unwrap_or_default())
+            .map(str::to_owned)
+    }
+}
+
+impl Default for DesktopStateFile {
+    fn default() -> Self {
+        Self::new_default()
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct LegacyDesktopStateFile {
+#[serde(default)]
+struct PersistedDesktopStateEnvelope {
     #[serde(default = "default_legacy_schema_version")]
     schema_version: u32,
     #[serde(default)]
@@ -35,14 +199,36 @@ struct LegacyDesktopStateFile {
     browser_auth_token: String,
     #[serde(default = "default_browser_service_enabled")]
     browser_service_enabled: bool,
+    #[serde(default)]
+    runtime_state_root: Option<String>,
+    #[serde(default)]
+    onboarding: DesktopOnboardingState,
 }
 
-impl LegacyDesktopStateFile {
+impl Default for PersistedDesktopStateEnvelope {
+    fn default() -> Self {
+        Self {
+            schema_version: default_legacy_schema_version(),
+            admin_token: String::new(),
+            browser_auth_token: String::new(),
+            browser_service_enabled: default_browser_service_enabled(),
+            runtime_state_root: None,
+            onboarding: DesktopOnboardingState::default(),
+        }
+    }
+}
+
+impl PersistedDesktopStateEnvelope {
     fn into_state(self) -> DesktopStateFile {
         let _ = self.schema_version;
         DesktopStateFile {
             schema_version: DESKTOP_STATE_SCHEMA_VERSION,
             browser_service_enabled: self.browser_service_enabled,
+            runtime_state_root: normalize_optional_text(
+                self.runtime_state_root.as_deref().unwrap_or_default(),
+            )
+            .map(str::to_owned),
+            onboarding: self.onboarding,
         }
     }
 }
@@ -134,17 +320,17 @@ pub(crate) fn load_or_initialize_state_file(
     if path.exists() {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read desktop state file {}", path.display()))?;
-        let legacy_state: LegacyDesktopStateFile = serde_json::from_str(raw.as_str())
+        let persisted_envelope: PersistedDesktopStateEnvelope = serde_json::from_str(raw.as_str())
             .with_context(|| format!("failed to parse desktop state file {}", path.display()))?;
         let admin_token = secret_store.load_or_create_secret(
             DESKTOP_SECRET_KEY_ADMIN_TOKEN,
-            Some(legacy_state.admin_token.as_str()),
+            Some(persisted_envelope.admin_token.as_str()),
         )?;
         let browser_auth_token = secret_store.load_or_create_secret(
             DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN,
-            Some(legacy_state.browser_auth_token.as_str()),
+            Some(persisted_envelope.browser_auth_token.as_str()),
         )?;
-        let persisted = legacy_state.into_state();
+        let persisted = persisted_envelope.into_state();
         persist_desktop_state_file(path, &persisted, "normalized")?;
         return Ok(LoadedDesktopState { persisted, admin_token, browser_auth_token });
     }

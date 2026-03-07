@@ -6,7 +6,7 @@ const DASHBOARD_SCHEME: &str = "http";
 const LOOPBACK_HOST: &str = "127.0.0.1";
 const CONSOLE_PRINCIPAL: &str = "admin:desktop-control-center";
 const CONSOLE_DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-const DESKTOP_STATE_SCHEMA_VERSION: u32 = 2;
+const DESKTOP_STATE_SCHEMA_VERSION: u32 = 3;
 const DESKTOP_SECRET_MAX_BYTES: usize = 4_096;
 const DESKTOP_SECRET_KEY_ADMIN_TOKEN: &str = "desktop_admin_token";
 const DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN: &str = "desktop_browser_auth_token";
@@ -19,6 +19,8 @@ const BROWSER_GRPC_PORT: u16 = 7543;
 
 mod commands;
 mod desktop_state;
+mod discord_onboarding;
+mod onboarding;
 mod openai_auth;
 mod snapshot;
 mod supervisor;
@@ -26,8 +28,11 @@ mod supervisor;
 use snapshot::sanitize_log_line;
 
 pub(crate) use desktop_state::{
-    load_or_initialize_state_file, resolve_desktop_state_root, DesktopSecretStore, DesktopStateFile,
+    load_or_initialize_state_file, resolve_desktop_state_root, DesktopOnboardingStep,
+    DesktopSecretStore, DesktopStateFile,
 };
+pub(crate) use discord_onboarding::DiscordOnboardingRequest;
+pub(crate) use onboarding::build_onboarding_status;
 pub(crate) use supervisor::{
     normalize_optional_text, resolve_binary_path, unix_ms_now, ControlCenter,
     HealthEndpointPayload, LogLine, RuntimeConfig, ServiceKind, ServiceProcessSnapshot,

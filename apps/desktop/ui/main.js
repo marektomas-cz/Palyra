@@ -8,6 +8,25 @@ const ui = {
   overallStatus: byId("overallStatus"),
   statusTimestamp: byId("statusTimestamp"),
   onboardingState: byId("onboardingState"),
+  onboardingPhaseBadge: byId("onboardingPhaseBadge"),
+  onboardingStepTitle: byId("onboardingStepTitle"),
+  onboardingStepDetail: byId("onboardingStepDetail"),
+  onboardingBlockedCount: byId("onboardingBlockedCount"),
+  onboardingWarningCount: byId("onboardingWarningCount"),
+  onboardingPreflightList: byId("onboardingPreflightList"),
+  stateRootStatus: byId("stateRootStatus"),
+  stateRootInput: byId("stateRootInput"),
+  stateRootHint: byId("stateRootHint"),
+  startOnboardingBtn: byId("startOnboardingBtn"),
+  confirmStateRootBtn: byId("confirmStateRootBtn"),
+  useDefaultStateRootBtn: byId("useDefaultStateRootBtn"),
+  onboardingHomePanel: byId("onboardingHomePanel"),
+  onboardingHomeSummary: byId("onboardingHomeSummary"),
+  onboardingRecoveryPanel: byId("onboardingRecoveryPanel"),
+  onboardingRecoveryMessage: byId("onboardingRecoveryMessage"),
+  onboardingRecoveryActions: byId("onboardingRecoveryActions"),
+  recoveryRestartBtn: byId("recoveryRestartBtn"),
+  onboardingEventList: byId("onboardingEventList"),
   runtimeSummaryBadge: byId("runtimeSummaryBadge"),
   gatewayRuntimeBadge: byId("gatewayRuntimeBadge"),
   browserRuntimeBadge: byId("browserRuntimeBadge"),
@@ -66,6 +85,25 @@ const ui = {
   discordAuthenticated: byId("discordAuthenticated"),
   discordReadiness: byId("discordReadiness"),
   discordLastError: byId("discordLastError"),
+  discordActionDetail: byId("discordActionDetail"),
+  discordVerifyStatus: byId("discordVerifyStatus"),
+  discordTokenInput: byId("discordTokenInput"),
+  discordFormAccountId: byId("discordFormAccountId"),
+  discordFormMode: byId("discordFormMode"),
+  discordFormScope: byId("discordFormScope"),
+  discordFormVerifyChannelId: byId("discordFormVerifyChannelId"),
+  discordFormConcurrency: byId("discordFormConcurrency"),
+  discordFormBroadcast: byId("discordFormBroadcast"),
+  discordFormRequireMention: byId("discordFormRequireMention"),
+  discordFormConfirmOpen: byId("discordFormConfirmOpen"),
+  discordFormAllowFrom: byId("discordFormAllowFrom"),
+  discordFormDenyFrom: byId("discordFormDenyFrom"),
+  discordVerifyTarget: byId("discordVerifyTarget"),
+  discordVerifyText: byId("discordVerifyText"),
+  discordPreflightBtn: byId("discordPreflightBtn"),
+  discordApplyBtn: byId("discordApplyBtn"),
+  discordVerifyBtn: byId("discordVerifyBtn"),
+  discordWizardWarnings: byId("discordWizardWarnings"),
   gatewayProcessSummary: byId("gatewayProcessSummary"),
   gatewayPorts: byId("gatewayPorts"),
   browserProcessSummary: byId("browserProcessSummary"),
@@ -89,7 +127,15 @@ const openAiState = {
 };
 
 const desktopState = {
-  lastSnapshot: null
+  lastSnapshot: null,
+  lastOnboarding: null,
+  stateRootDirty: false
+};
+
+const discordWizardState = {
+  preflight: null,
+  apply: null,
+  formDirty: false
 };
 
 let pollHandle = null;
@@ -210,22 +256,158 @@ function renderProcess(serviceSnapshot, summaryNode, portsNode, badgeNode) {
   );
 }
 
-function renderWelcomeChecklist(snapshot) {
-  const facts = snapshot.quick_facts ?? {};
-  const discord = facts.discord ?? {};
-  const dashboardReady = typeof facts.dashboard_url === "string" && facts.dashboard_url.length > 0;
-  const gatewayReady = typeof facts.gateway_version === "string" && facts.gateway_version.length > 0;
-  const discordReady = discord.enabled === true && discord.authenticated === true;
-  const openAiReady = openAiState.status?.available === true && (openAiState.status.summary?.total ?? 0) > 0;
+function toggleHidden(node, hidden) {
+  node.classList.toggle("section-hidden", hidden);
+}
+
+function renderOnboardingProgress(status) {
+  const steps = Array.isArray(status?.steps) ? status.steps : [];
+  ui.welcomeChecklist.innerHTML = "";
+
+  if (steps.length === 0) {
+    renderList(ui.welcomeChecklist, [], "No onboarding steps are currently available.");
+    return;
+  }
+
+  for (const step of steps) {
+    const li = document.createElement("li");
+    const state = String(step.status ?? "pending").toUpperCase();
+    const title = asString(step.title, "Step");
+    const detail = asString(step.detail, "");
+    const strong = document.createElement("strong");
+    strong.textContent = state;
+    li.appendChild(strong);
+    li.append(document.createTextNode(`${title}${detail ? ` - ${detail}` : ""}`));
+    ui.welcomeChecklist.appendChild(li);
+  }
+}
+
+function renderPreflightChecks(status) {
+  const checks = Array.isArray(status?.preflight?.checks) ? status.preflight.checks : [];
+  ui.onboardingBlockedCount.textContent = `${Number(status?.preflight?.blocked_count ?? 0)} blockers`;
+  ui.onboardingWarningCount.textContent = `${Number(status?.preflight?.warning_count ?? 0)} warnings`;
+  ui.onboardingPreflightList.innerHTML = "";
+
+  if (checks.length === 0) {
+    renderList(ui.onboardingPreflightList, [], "Preflight checks will appear after the first refresh.");
+    return;
+  }
+
+  for (const check of checks) {
+    const li = document.createElement("li");
+    li.textContent = `[${String(check.status ?? "unknown").toUpperCase()}] ${asString(check.label, check.key)}: ${asString(check.detail, "No detail")}`;
+    ui.onboardingPreflightList.appendChild(li);
+  }
+}
+
+function renderOnboardingEvents(status) {
+  const events = Array.isArray(status?.recent_events) ? [...status.recent_events].reverse() : [];
+  ui.onboardingEventList.innerHTML = "";
+  if (events.length === 0) {
+    renderList(ui.onboardingEventList, [], "No onboarding events recorded yet.");
+    return;
+  }
+
+  for (const event of events.slice(0, 10)) {
+    const li = document.createElement("li");
+    const time = formatUnixMs(event.recorded_at_unix_ms);
+    const detail = asString(event.detail, "");
+    li.textContent = `${time} | ${asString(event.kind, "event")}${detail ? ` | ${detail}` : ""}`;
+    ui.onboardingEventList.appendChild(li);
+  }
+}
+
+function renderOnboardingRecovery(status) {
+  const recovery = status?.recovery;
+  if (!recovery || typeof recovery !== "object") {
+    toggleHidden(ui.onboardingRecoveryPanel, true);
+    return;
+  }
+
+  toggleHidden(ui.onboardingRecoveryPanel, false);
+  ui.onboardingRecoveryMessage.textContent = asString(
+    recovery.message,
+    "Desktop onboarding detected a failure and is waiting for recovery."
+  );
+  renderList(
+    ui.onboardingRecoveryActions,
+    Array.isArray(recovery.suggested_actions) ? recovery.suggested_actions : [],
+    "No recovery guidance available."
+  );
+}
+
+function renderOnboardingHome(status) {
+  const isHome = status?.phase === "home";
+  toggleHidden(ui.onboardingHomePanel, !isHome);
+  if (!isHome) {
+    return;
+  }
 
   const items = [
-    `${gatewayReady ? "Complete" : "Pending"}: start the local runtime and confirm gateway health.`,
-    `${dashboardReady ? "Complete" : "Pending"}: open the dashboard for full operator setup.`,
-    `${openAiReady ? "Complete" : "Pending"}: connect OpenAI with API key or OAuth from desktop or dashboard.`,
-    `${discordReady ? "Complete" : "Pending"}: finish connector onboarding and verification in the dashboard.`
+    `${status.openai_ready ? "Complete" : "Pending"}: OpenAI default profile ${asString(status.openai_default_profile_id, "is not set")}.`,
+    `${status.discord_verified ? "Complete" : "Pending"}: Discord verification target ${asString(status.discord_last_verified_target, "has not been confirmed yet")}.`,
+    `${status.dashboard_handoff_completed ? "Complete" : "Pending"}: dashboard handoff ${status.dashboard_handoff_completed ? "has been recorded" : "is still waiting"}.`,
+    `${status.dashboard_reachable ? "Complete" : "Pending"}: dashboard URL ${asString(status.dashboard_url, "is unavailable")}.`
   ];
-  renderList(ui.welcomeChecklist, items, "No onboarding steps are currently available.");
-  setStatusPill(ui.onboardingState, gatewayReady && dashboardReady ? "healthy" : "degraded");
+  renderList(ui.onboardingHomeSummary, items, "Home summary will appear here after onboarding completes.");
+}
+
+function primeStateRootInput(status) {
+  if (desktopState.stateRootDirty) {
+    return;
+  }
+  const preferred = asString(status?.state_root_path, "");
+  if (preferred.length > 0) {
+    ui.stateRootInput.value = preferred;
+  }
+}
+
+function renderOnboardingStatus(status) {
+  desktopState.lastOnboarding = status;
+  setLabeledStatus(
+    ui.onboardingState,
+    status?.phase === "home"
+      ? "home"
+      : `${Number(status?.progress_completed ?? 0)}/${Number(status?.progress_total ?? 0)}`,
+    status?.phase === "home" ? "healthy" : status?.recovery ? "degraded" : "unknown"
+  );
+  setLabeledStatus(
+    ui.onboardingPhaseBadge,
+    status?.phase === "home" ? "home" : "onboarding",
+    status?.phase === "home" ? "healthy" : "unknown"
+  );
+  ui.onboardingStepTitle.textContent = asString(status?.current_step_title, "Local onboarding checklist");
+  ui.onboardingStepDetail.textContent = asString(
+    status?.current_step_detail,
+    "Desktop will guide local runtime validation, OpenAI connect, Discord verification, and dashboard handoff."
+  );
+
+  primeStateRootInput(status);
+  setLabeledStatus(
+    ui.stateRootStatus,
+    status?.state_root_confirmed ? "confirmed" : "pending",
+    status?.state_root_confirmed ? "healthy" : "unknown"
+  );
+  ui.stateRootHint.textContent = status?.state_root_overridden
+    ? `Desktop is using a custom runtime root. Default: ${asString(status?.default_state_root_path, "-")}`
+    : `Default runtime root: ${asString(status?.default_state_root_path, "-")}`;
+  ui.startOnboardingBtn.disabled = status?.phase === "home";
+  if (status?.phase !== "home" && !openAiState.targetProfileId && (openAiState.status?.summary?.total ?? 0) === 0) {
+    ui.openAiSetDefaultToggle.checked = true;
+  }
+
+  renderOnboardingProgress(status);
+  renderPreflightChecks(status);
+  renderOnboardingRecovery(status);
+  renderOnboardingHome(status);
+  renderOnboardingEvents(status);
+  applyDiscordDefaultsFromOnboarding(status);
+}
+
+function renderWelcomeChecklist() {
+  if (desktopState.lastOnboarding) {
+    renderOnboardingProgress(desktopState.lastOnboarding);
+  }
 }
 
 function renderDiscordChecklist(discord) {
@@ -243,9 +425,186 @@ function renderDiscordChecklist(discord) {
     items.push(`Connector runtime is ${asString(discord.liveness, "unknown")}.`);
   }
   if (items.length === 0) {
-    items.push("Discord connector looks ready for verification from the dashboard.");
+    items.push("Discord connector looks ready for a desktop verification test send.");
   }
   renderList(ui.discordChecklist, items, "Discord status will appear after the next snapshot.");
+}
+
+function parseCommaSeparatedList(raw) {
+  return String(raw ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function normalizeDiscordConnectorId(accountId) {
+  const normalized = String(accountId ?? "").trim().toLowerCase();
+  return normalized.length > 0 ? `discord:${normalized}` : "discord:default";
+}
+
+function applyDiscordDefaultsFromOnboarding(status) {
+  const defaults = status?.discord_defaults;
+  if (!defaults || typeof defaults !== "object" || discordWizardState.formDirty) {
+    return;
+  }
+  if (ui.discordTokenInput === document.activeElement) {
+    return;
+  }
+  ui.discordFormAccountId.value = asString(defaults.account_id, "default");
+  ui.discordFormMode.value = asString(defaults.mode, "local");
+  ui.discordFormScope.value = asString(defaults.inbound_scope, "dm_only");
+  ui.discordFormVerifyChannelId.value = asString(defaults.verify_channel_id, "");
+  ui.discordFormConcurrency.value = String(Number(defaults.concurrency_limit ?? 2));
+  ui.discordFormBroadcast.value = asString(defaults.broadcast_strategy, "deny");
+  ui.discordFormRequireMention.checked = defaults.require_mention !== false;
+  ui.discordFormConfirmOpen.checked = defaults.confirm_open_guild_channels === true;
+  ui.discordFormAllowFrom.value = Array.isArray(defaults.allow_from) ? defaults.allow_from.join(", ") : "";
+  ui.discordFormDenyFrom.value = Array.isArray(defaults.deny_from) ? defaults.deny_from.join(", ") : "";
+  if (!ui.discordVerifyTarget.value.trim()) {
+    ui.discordVerifyTarget.value = defaults.verify_channel_id
+      ? `channel:${defaults.verify_channel_id}`
+      : asString(defaults.last_verified_target, "");
+  }
+}
+
+function collectDiscordPayload() {
+  return {
+    accountId: normalizeEmptyToNull(ui.discordFormAccountId.value),
+    token: ui.discordTokenInput.value,
+    mode: ui.discordFormMode.value,
+    inboundScope: ui.discordFormScope.value,
+    allowFrom: parseCommaSeparatedList(ui.discordFormAllowFrom.value),
+    denyFrom: parseCommaSeparatedList(ui.discordFormDenyFrom.value),
+    requireMention: ui.discordFormRequireMention.checked,
+    concurrencyLimit: Number.parseInt(ui.discordFormConcurrency.value, 10) || 2,
+    broadcastStrategy: ui.discordFormBroadcast.value,
+    confirmOpenGuildChannels: ui.discordFormConfirmOpen.checked,
+    verifyChannelId: normalizeEmptyToNull(ui.discordFormVerifyChannelId.value)
+  };
+}
+
+function setDiscordWizardState(label, status, detail) {
+  setLabeledStatus(ui.discordVerifyStatus, label, status);
+  ui.discordActionDetail.textContent = detail;
+}
+
+function renderDiscordWizardWarnings(warnings) {
+  renderList(
+    ui.discordWizardWarnings,
+    Array.isArray(warnings) ? warnings : [],
+    "No Discord onboarding warnings yet."
+  );
+}
+
+async function runDiscordPreflight() {
+  const token = ui.discordTokenInput.value.trim();
+  if (token.length === 0) {
+    setActionMessage("Discord bot token is required for preflight.", true);
+    ui.discordTokenInput.focus();
+    return;
+  }
+
+  ui.discordPreflightBtn.disabled = true;
+  setDiscordWizardState("running", "unknown", "Running Discord preflight against the local control plane.");
+  try {
+    const response = await invoke("run_discord_onboarding_preflight_command", {
+      payload: collectDiscordPayload()
+    });
+    discordWizardState.preflight = response;
+    discordWizardState.formDirty = false;
+    const warnings = [
+      ...(Array.isArray(response.warnings) ? response.warnings : []),
+      ...(Array.isArray(response.policy_warnings) ? response.policy_warnings : [])
+    ];
+    renderDiscordWizardWarnings(warnings);
+    setDiscordWizardState(
+      "preflight ok",
+      warnings.length > 0 ? "degraded" : "healthy",
+      `Discord preflight OK for ${asString(response.bot_username, "bot")} (${asString(response.bot_id, "unknown id")}).`
+    );
+    await refreshOnboardingStatus();
+  } catch (error) {
+    setDiscordWizardState("preflight failed", "degraded", `Discord preflight failed: ${String(error)}`);
+    renderDiscordWizardWarnings([`Discord preflight failed: ${String(error)}`]);
+    setActionMessage(`Discord preflight failed: ${String(error)}`, true);
+  } finally {
+    ui.discordPreflightBtn.disabled = false;
+  }
+}
+
+async function applyDiscordOnboardingFlow() {
+  const token = ui.discordTokenInput.value.trim();
+  if (token.length === 0) {
+    setActionMessage("Discord bot token is required to apply onboarding.", true);
+    ui.discordTokenInput.focus();
+    return;
+  }
+
+  ui.discordApplyBtn.disabled = true;
+  setDiscordWizardState("applying", "unknown", "Applying Discord connector config to the local install.");
+  try {
+    const response = await invoke("apply_discord_onboarding_command", {
+      payload: collectDiscordPayload()
+    });
+    discordWizardState.apply = response;
+    discordWizardState.formDirty = false;
+    const warnings = [
+      ...(Array.isArray(response.warnings) ? response.warnings : []),
+      ...(Array.isArray(response.policy_warnings) ? response.policy_warnings : []),
+      ...(Array.isArray(response.inbound_monitor_warnings) ? response.inbound_monitor_warnings : [])
+    ];
+    renderDiscordWizardWarnings(warnings);
+    setDiscordWizardState(
+      "applied",
+      warnings.length > 0 ? "degraded" : "healthy",
+      `Discord connector ${asString(response.connector_id, "discord:default")} applied.`
+    );
+    ui.discordTokenInput.value = "";
+    await refreshAllData({ preserveMessage: true });
+    setActionMessage(`Discord onboarding applied for ${asString(response.connector_id, "discord:default")}.`);
+  } catch (error) {
+    setDiscordWizardState("apply failed", "degraded", `Discord apply failed: ${String(error)}`);
+    renderDiscordWizardWarnings([`Discord apply failed: ${String(error)}`]);
+    setActionMessage(`Discord apply failed: ${String(error)}`, true);
+  } finally {
+    ui.discordApplyBtn.disabled = false;
+  }
+}
+
+async function runDiscordVerification() {
+  const connectorId = normalizeDiscordConnectorId(ui.discordFormAccountId.value);
+  const target = ui.discordVerifyTarget.value.trim();
+  if (target.length === 0) {
+    setActionMessage("Discord verification target is required.", true);
+    ui.discordVerifyTarget.focus();
+    return;
+  }
+
+  ui.discordVerifyBtn.disabled = true;
+  setDiscordWizardState("verifying", "unknown", "Sending Discord verification message.");
+  try {
+    const response = await invoke("verify_discord_connector_command", {
+      payload: {
+        connectorId,
+        target,
+        text: normalizeEmptyToNull(ui.discordVerifyText.value)
+      }
+    });
+    renderDiscordWizardWarnings([]);
+    setDiscordWizardState(
+      "verified",
+      "healthy",
+      asString(response.message, "Discord verification dispatched.")
+    );
+    await refreshAllData({ preserveMessage: true });
+    setActionMessage(asString(response.message, "Discord verification dispatched."));
+  } catch (error) {
+    setDiscordWizardState("verify failed", "degraded", `Discord verification failed: ${String(error)}`);
+    renderDiscordWizardWarnings([`Discord verification failed: ${String(error)}`]);
+    setActionMessage(`Discord verification failed: ${String(error)}`, true);
+  } finally {
+    ui.discordVerifyBtn.disabled = false;
+  }
 }
 
 function renderSnapshot(snapshot, options = {}) {
@@ -304,7 +663,7 @@ function renderSnapshot(snapshot, options = {}) {
     ? String(diagnostics.dropped_log_events_total)
     : "0";
 
-  renderWelcomeChecklist(snapshot);
+  renderWelcomeChecklist();
   renderDiscordChecklist(discord);
   renderList(ui.warningList, warnings, "No warnings reported.");
   renderList(ui.diagnosticsList, diagnostics.errors, "No diagnostics errors reported.");
@@ -804,9 +1163,19 @@ async function refreshOpenAiAuthStatus() {
   }
 }
 
+async function refreshOnboardingStatus() {
+  try {
+    const status = await invoke("get_onboarding_status");
+    renderOnboardingStatus(status);
+  } catch (error) {
+    setActionMessage(`Onboarding status refresh failed: ${String(error)}`, true);
+  }
+}
+
 async function refreshAllData(options = {}) {
   await refreshSnapshot(options);
   await refreshOpenAiAuthStatus();
+  await refreshOnboardingStatus();
 }
 
 async function loadSettings() {
@@ -841,6 +1210,56 @@ function wireEvents() {
   ui.stopBtn.addEventListener("click", () => invokeAction("stop_palyra"));
   ui.restartBtn.addEventListener("click", () => invokeAction("restart_palyra"));
   ui.refreshBtn.addEventListener("click", () => refreshAllData());
+  ui.startOnboardingBtn.addEventListener("click", async () => {
+    try {
+      await invoke("acknowledge_onboarding_welcome");
+      await refreshOnboardingStatus();
+      setActionMessage("Desktop onboarding started.");
+    } catch (error) {
+      setActionMessage(`Failed to start onboarding: ${String(error)}`, true);
+    }
+  });
+  ui.stateRootInput.addEventListener("input", () => {
+    desktopState.stateRootDirty = true;
+  });
+  ui.confirmStateRootBtn.addEventListener("click", async () => {
+    ui.confirmStateRootBtn.disabled = true;
+    try {
+      await invoke("set_onboarding_state_root_command", {
+        payload: {
+          path: normalizeEmptyToNull(ui.stateRootInput.value),
+          confirmSelection: true
+        }
+      });
+      desktopState.stateRootDirty = false;
+      await refreshOnboardingStatus();
+      setActionMessage("Desktop runtime state root confirmed.");
+    } catch (error) {
+      setActionMessage(`Failed to confirm runtime state root: ${String(error)}`, true);
+    } finally {
+      ui.confirmStateRootBtn.disabled = false;
+    }
+  });
+  ui.useDefaultStateRootBtn.addEventListener("click", async () => {
+    ui.useDefaultStateRootBtn.disabled = true;
+    try {
+      await invoke("set_onboarding_state_root_command", {
+        payload: {
+          path: null,
+          confirmSelection: true
+        }
+      });
+      desktopState.stateRootDirty = false;
+      ui.stateRootInput.value = "";
+      await refreshOnboardingStatus();
+      setActionMessage("Desktop runtime state root reset to the default path.");
+    } catch (error) {
+      setActionMessage(`Failed to reset runtime state root: ${String(error)}`, true);
+    } finally {
+      ui.useDefaultStateRootBtn.disabled = false;
+    }
+  });
+  ui.recoveryRestartBtn.addEventListener("click", () => invokeAction("restart_palyra"));
   ui.applySettingsBtn.addEventListener("click", () =>
     invokeAction("set_browser_service_enabled", { enabled: ui.browserEnabledToggle.checked })
   );
@@ -850,6 +1269,34 @@ function wireEvents() {
   ui.openAiEditorResetBtn.addEventListener("click", () => resetOpenAiEditor());
   ui.openAiOauthSubmitBtn.addEventListener("click", submitOpenAiOAuth);
   ui.openAiOpenPendingBrowserBtn.addEventListener("click", reopenPendingBrowser);
+  ui.discordPreflightBtn.addEventListener("click", runDiscordPreflight);
+  ui.discordApplyBtn.addEventListener("click", applyDiscordOnboardingFlow);
+  ui.discordVerifyBtn.addEventListener("click", runDiscordVerification);
+  for (const field of [
+    ui.discordFormAccountId,
+    ui.discordFormMode,
+    ui.discordFormScope,
+    ui.discordFormVerifyChannelId,
+    ui.discordFormConcurrency,
+    ui.discordFormBroadcast,
+    ui.discordFormAllowFrom,
+    ui.discordFormDenyFrom,
+    ui.discordVerifyTarget,
+    ui.discordVerifyText
+  ]) {
+    field.addEventListener("input", () => {
+      discordWizardState.formDirty = true;
+    });
+    field.addEventListener("change", () => {
+      discordWizardState.formDirty = true;
+    });
+  }
+  ui.discordFormRequireMention.addEventListener("change", () => {
+    discordWizardState.formDirty = true;
+  });
+  ui.discordFormConfirmOpen.addEventListener("change", () => {
+    discordWizardState.formDirty = true;
+  });
 
   for (const button of commandButtons.open_dashboard) {
     button.addEventListener("click", () => invokeAction("open_dashboard"));
@@ -878,6 +1325,12 @@ async function bootstrap() {
   applyOpenAiScopeVisibility();
   refreshOpenAiEditorMode();
   ui.openAiOauthScopesInput.value = OPENAI_DEFAULT_SCOPES;
+  ui.openAiSetDefaultToggle.checked = true;
+  setDiscordWizardState(
+    "idle",
+    "unknown",
+    "Run preflight, apply the connector, then send a verification message."
+  );
   await loadSettings();
   await refreshAllData();
   pollHandle = window.setInterval(() => {

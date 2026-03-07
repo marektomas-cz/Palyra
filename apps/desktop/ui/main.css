@@ -147,6 +147,13 @@ h3 {
   gap: 0.6rem;
 }
 
+.metric-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+}
+
 button {
   border: 1px solid color-mix(in oklab, var(--action) 34%, white);
   border-radius: 999px;
@@ -334,6 +341,17 @@ button.accent {
   color: var(--ink);
 }
 
+.textarea-field textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border-radius: 12px;
+  border: 1px solid rgba(114, 123, 134, 0.3);
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--ink);
+  resize: vertical;
+  min-height: 5.5rem;
+}
+
 .field--hidden {
   display: none;
 }
@@ -344,7 +362,22 @@ button.accent {
   gap: 0.75rem;
 }
 
+.wizard-grid,
+.step-form-grid {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 0.9rem;
+}
+
 .form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wizard-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.step-form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -458,8 +491,27 @@ button.accent {
   line-height: 1.45;
 }
 
+.checklist li strong {
+  display: inline-block;
+  margin-right: 0.35rem;
+}
+
 .warning-list li {
   color: #7b5120;
+}
+
+.recovery-panel {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.95rem;
+  padding: 0.95rem;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in oklab, var(--down) 28%, white);
+  background: color-mix(in oklab, var(--down) 8%, white);
+}
+
+.section-hidden {
+  display: none;
 }
 
 .logs {
@@ -483,7 +535,9 @@ button.accent {
   .bottom-grid,
   .status-card-grid,
   .form-grid,
-  .openai-method-grid {
+  .openai-method-grid,
+  .wizard-grid,
+  .step-form-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -18,7 +18,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 use super::{
-    load_or_initialize_state_file, sanitize_log_line, DesktopSecretStore, DesktopStateFile,
+    load_or_initialize_state_file, sanitize_log_line, DesktopOnboardingStep, DesktopSecretStore,
+    DesktopStateFile,
     BROWSER_GRPC_PORT, BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL, GATEWAY_ADMIN_PORT,
     GATEWAY_GRPC_PORT, GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY, LOOPBACK_HOST,
     MAX_LOG_LINES_PER_SERVICE,
@@ -180,6 +181,7 @@ pub(crate) struct HealthEndpointPayload {
 
 #[derive(Debug)]
 pub(crate) struct ControlCenter {
+    pub(crate) default_runtime_root: PathBuf,
     pub(crate) runtime_root: PathBuf,
     pub(crate) support_bundle_dir: PathBuf,
     pub(crate) state_file_path: PathBuf,
@@ -199,11 +201,8 @@ impl ControlCenter {
     pub(crate) fn new() -> Result<Self> {
         let state_root = super::resolve_desktop_state_root()?;
         let state_dir = state_root.join("desktop-control-center");
-        let runtime_root = state_dir.join("runtime");
+        let default_runtime_root = state_dir.join("runtime");
         let support_bundle_dir = state_dir.join("support-bundles");
-        fs::create_dir_all(runtime_root.as_path()).with_context(|| {
-            format!("failed to create desktop runtime dir {}", runtime_root.display())
-        })?;
         fs::create_dir_all(support_bundle_dir.as_path()).with_context(|| {
             format!("failed to create support bundle output dir {}", support_bundle_dir.display())
         })?;
@@ -211,6 +210,10 @@ impl ControlCenter {
         let state_file_path = state_dir.join("state.json");
         let secret_store = DesktopSecretStore::open(state_dir.as_path())?;
         let loaded = load_or_initialize_state_file(state_file_path.as_path(), &secret_store)?;
+        let runtime_root = loaded.persisted.resolve_runtime_root(default_runtime_root.as_path())?;
+        fs::create_dir_all(runtime_root.as_path()).with_context(|| {
+            format!("failed to create desktop runtime dir {}", runtime_root.display())
+        })?;
 
         let runtime = RuntimeConfig::default();
         let gateway = ManagedService::new(vec![
@@ -231,6 +234,7 @@ impl ControlCenter {
         let dropped_log_events = Arc::new(AtomicU64::new(0));
 
         Ok(Self {
+            default_runtime_root,
             runtime_root,
             support_bundle_dir,
             state_file_path,
@@ -253,6 +257,199 @@ impl ControlCenter {
         fs::write(self.state_file_path.as_path(), encoded).with_context(|| {
             format!("failed to persist desktop state file {}", self.state_file_path.display())
         })
+    }
+
+    pub(crate) fn record_onboarding_event(
+        &mut self,
+        kind: impl Into<String>,
+        detail: Option<String>,
+    ) -> Result<()> {
+        self.persisted
+            .onboarding
+            .push_event(kind, detail, unix_ms_now());
+        self.save_state_file()
+    }
+
+    pub(crate) fn clear_onboarding_failure(&mut self) -> Result<()> {
+        if self.persisted.onboarding.last_failure.is_none() {
+            return Ok(());
+        }
+        self.persisted.onboarding.last_failure = None;
+        self.save_state_file()
+    }
+
+    pub(crate) fn record_onboarding_failure(
+        &mut self,
+        step: DesktopOnboardingStep,
+        message: String,
+    ) -> Result<()> {
+        let sanitized = sanitize_log_line(message.as_str());
+        self.persisted.onboarding.last_failure = Some(super::desktop_state::DesktopOnboardingFailureState {
+            step,
+            message: sanitized.clone(),
+            recorded_at_unix_ms: unix_ms_now(),
+        });
+        self.persisted.onboarding.push_event(
+            "failure",
+            Some(format!("{}: {}", step.as_str(), sanitized)),
+            unix_ms_now(),
+        );
+        self.save_state_file()
+    }
+
+    pub(crate) fn mark_onboarding_welcome_acknowledged(&mut self) -> Result<()> {
+        if self.persisted.onboarding.welcome_acknowledged_at_unix_ms.is_none() {
+            self.persisted.onboarding.welcome_acknowledged_at_unix_ms = Some(unix_ms_now());
+        }
+        self.persisted.onboarding.push_event(
+            "welcome_acknowledged",
+            Some("Desktop first-run onboarding started.".to_owned()),
+            unix_ms_now(),
+        );
+        self.persisted.onboarding.last_failure = None;
+        self.save_state_file()
+    }
+
+    pub(crate) fn set_runtime_state_root_override(
+        &mut self,
+        candidate: Option<&str>,
+        confirm_selection: bool,
+    ) -> Result<PathBuf> {
+        let runtime_root = validate_runtime_state_root_override(candidate, self.default_runtime_root.as_path())?;
+        fs::create_dir_all(runtime_root.as_path()).with_context(|| {
+            format!("failed to create desktop runtime root {}", runtime_root.display())
+        })?;
+        self.persisted.runtime_state_root = if runtime_root == self.default_runtime_root {
+            None
+        } else {
+            Some(runtime_root.to_string_lossy().into_owned())
+        };
+        self.runtime_root = runtime_root.clone();
+        if confirm_selection && self.persisted.onboarding.state_root_confirmed_at_unix_ms.is_none() {
+            self.persisted.onboarding.state_root_confirmed_at_unix_ms = Some(unix_ms_now());
+        }
+        self.persisted.onboarding.push_event(
+            "state_root_selected",
+            Some(self.runtime_root.to_string_lossy().into_owned()),
+            unix_ms_now(),
+        );
+        self.persisted.onboarding.last_failure = None;
+        self.save_state_file()?;
+        Ok(runtime_root)
+    }
+
+    pub(crate) fn mark_openai_connected(
+        &mut self,
+        preferred_method: Option<&str>,
+        profile_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(method) = preferred_method.and_then(normalize_optional_text) {
+            self.persisted.onboarding.openai.preferred_method = Some(method.to_ascii_lowercase());
+        }
+        if let Some(profile_id) = profile_id.and_then(normalize_optional_text) {
+            self.persisted.onboarding.openai.last_profile_id = Some(profile_id.to_owned());
+        }
+        self.persisted.onboarding.openai.last_connected_at_unix_ms = Some(unix_ms_now());
+        self.persisted.onboarding.last_failure = None;
+        self.persisted.onboarding.push_event(
+            "openai_connected",
+            profile_id.map(str::to_owned).or_else(|| preferred_method.map(str::to_owned)),
+            unix_ms_now(),
+        );
+        self.save_state_file()
+    }
+
+    pub(crate) fn update_discord_onboarding_metadata(
+        &mut self,
+        request: &super::DiscordOnboardingRequest,
+    ) -> Result<()> {
+        let discord = &mut self.persisted.onboarding.discord;
+        discord.account_id = normalize_optional_text(request.account_id.as_deref().unwrap_or_default())
+            .unwrap_or("default")
+            .to_ascii_lowercase();
+        discord.mode = request.mode.clone().unwrap_or_else(|| "local".to_owned());
+        discord.inbound_scope =
+            request.inbound_scope.clone().unwrap_or_else(|| "dm_only".to_owned());
+        discord.allow_from = request.allow_from.clone();
+        discord.deny_from = request.deny_from.clone();
+        discord.require_mention = request.require_mention.unwrap_or(true);
+        discord.concurrency_limit = request.concurrency_limit.unwrap_or(2).clamp(1, 32);
+        discord.broadcast_strategy =
+            request.broadcast_strategy.clone().unwrap_or_else(|| "deny".to_owned());
+        discord.confirm_open_guild_channels = request.confirm_open_guild_channels.unwrap_or(false);
+        discord.verify_channel_id =
+            request.verify_channel_id.as_deref().and_then(normalize_optional_text).map(str::to_owned);
+        discord.last_connector_id = Some(discord.connector_id());
+        self.save_state_file()
+    }
+
+    pub(crate) fn mark_discord_preflight(
+        &mut self,
+        request: &super::DiscordOnboardingRequest,
+    ) -> Result<()> {
+        self.update_discord_onboarding_metadata(request)?;
+        self.persisted.onboarding.last_failure = None;
+        self.persisted.onboarding.push_event(
+            "discord_preflight",
+            self.persisted.onboarding.discord.verify_channel_id.clone(),
+            unix_ms_now(),
+        );
+        self.save_state_file()
+    }
+
+    pub(crate) fn mark_discord_applied(
+        &mut self,
+        request: &super::DiscordOnboardingRequest,
+    ) -> Result<()> {
+        self.update_discord_onboarding_metadata(request)?;
+        self.persisted.onboarding.last_failure = None;
+        self.persisted.onboarding.push_event(
+            "discord_applied",
+            Some(self.persisted.onboarding.discord.connector_id()),
+            unix_ms_now(),
+        );
+        self.save_state_file()
+    }
+
+    pub(crate) fn mark_discord_verified(&mut self, connector_id: &str, target: &str) -> Result<()> {
+        self.persisted.onboarding.discord.last_connector_id =
+            normalize_optional_text(connector_id).map(str::to_owned);
+        self.persisted.onboarding.discord.last_verified_target =
+            normalize_optional_text(target).map(str::to_owned);
+        self.persisted.onboarding.discord.last_verified_at_unix_ms = Some(unix_ms_now());
+        self.persisted.onboarding.last_failure = None;
+        self.persisted.onboarding.push_event(
+            "discord_verified",
+            Some(format!("{connector_id}:{target}")),
+            unix_ms_now(),
+        );
+        self.save_state_file()
+    }
+
+    pub(crate) fn mark_dashboard_handoff_complete(&mut self) -> Result<()> {
+        if self.persisted.onboarding.dashboard_handoff_at_unix_ms.is_none() {
+            self.persisted.onboarding.dashboard_handoff_at_unix_ms = Some(unix_ms_now());
+        }
+        self.persisted.onboarding.last_failure = None;
+        self.persisted.onboarding.push_event(
+            "dashboard_opened",
+            Some("Dashboard handoff completed from desktop.".to_owned()),
+            unix_ms_now(),
+        );
+        self.save_state_file()
+    }
+
+    pub(crate) fn mark_onboarding_complete(&mut self) -> Result<()> {
+        if self.persisted.onboarding.completed_at_unix_ms.is_none() {
+            self.persisted.onboarding.completed_at_unix_ms = Some(unix_ms_now());
+            self.persisted.onboarding.push_event(
+                "onboarding_completed",
+                Some("Desktop onboarding completed.".to_owned()),
+                unix_ms_now(),
+            );
+        }
+        self.persisted.onboarding.last_failure = None;
+        self.save_state_file()
     }
 
     pub(crate) fn start_all(&mut self) {
@@ -635,6 +832,20 @@ pub(crate) fn compute_backoff_ms(attempt: u32) -> u64 {
     let exponent = attempt.min(5);
     let scaled = 1_000_u64.saturating_mul(1_u64 << exponent);
     scaled.min(30_000)
+}
+
+pub(crate) fn validate_runtime_state_root_override(
+    candidate: Option<&str>,
+    default_root: &Path,
+) -> Result<PathBuf> {
+    let Some(raw) = candidate.and_then(normalize_optional_text) else {
+        return Ok(default_root.to_path_buf());
+    };
+    let parsed = PathBuf::from(raw);
+    if !parsed.is_absolute() {
+        bail!("desktop runtime state root must be an absolute path");
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn resolve_binary_path(binary_name: &str, env_override: &str) -> Result<PathBuf> {

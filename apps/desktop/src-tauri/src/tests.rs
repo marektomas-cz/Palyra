@@ -13,6 +13,10 @@ use std::{
 use serde_json::json;
 
 use super::commands::initialize_control_center;
+use super::discord_onboarding::{
+    apply_discord_onboarding, run_discord_onboarding_preflight, verify_discord_connector,
+    DiscordControlPlaneInputs, DiscordOnboardingRequest, DiscordVerificationRequest,
+};
 use super::openai_auth::{
     connect_openai_api_key, get_openai_oauth_callback_state, load_openai_auth_status,
     open_external_browser, reconnect_openai_oauth, refresh_openai_profile, revoke_openai_profile,
@@ -22,11 +26,12 @@ use super::openai_auth::{
 };
 use super::snapshot::resolve_dashboard_access_target;
 use super::{
-    build_snapshot_from_inputs, collect_redacted_errors, compute_backoff_ms, executable_file_name,
-    load_or_initialize_state_file, mpsc, parse_discord_status, parse_remote_dashboard_base_url,
-    resolve_binary_path, sanitize_log_line, try_enqueue_log_event, BrowserStatusSnapshot, Client,
-    ControlCenter, DashboardAccessMode, DesktopSecretStore, DesktopStateFile, LogEvent, LogStream,
-    ManagedService, RuntimeConfig, ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
+    build_onboarding_status, build_snapshot_from_inputs, collect_redacted_errors,
+    compute_backoff_ms, executable_file_name, load_or_initialize_state_file, mpsc,
+    parse_discord_status, parse_remote_dashboard_base_url, resolve_binary_path,
+    sanitize_log_line, try_enqueue_log_event, BrowserStatusSnapshot, Client, ControlCenter,
+    DashboardAccessMode, DesktopOnboardingStep, DesktopSecretStore, DesktopStateFile, LogEvent,
+    LogStream, ManagedService, RuntimeConfig, ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
 };
 
 fn env_lock() -> &'static Mutex<()> {
@@ -141,6 +146,7 @@ fn build_test_control_center(root: &Path) -> ControlCenter {
         .expect("HTTP client should initialize for test control center");
     let (log_tx, log_rx) = mpsc::channel(LOG_EVENT_CHANNEL_CAPACITY);
     ControlCenter {
+        default_runtime_root: runtime_root.clone(),
         runtime_root,
         support_bundle_dir,
         state_file_path: root.join("state.json"),
@@ -161,6 +167,32 @@ fn build_test_openai_inputs(root: &Path, port: u16) -> OpenAiControlPlaneInputs 
     let mut control_center = build_test_control_center(root);
     control_center.runtime.gateway_admin_port = port;
     OpenAiControlPlaneInputs::capture(&control_center)
+}
+
+fn build_test_discord_inputs(root: &Path, port: u16) -> DiscordControlPlaneInputs {
+    let mut control_center = build_test_control_center(root);
+    control_center.runtime.gateway_admin_port = port;
+    DiscordControlPlaneInputs::capture(&control_center)
+}
+
+fn reserve_unused_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral test port should bind");
+    listener.local_addr().expect("ephemeral port address should resolve").port()
+}
+
+fn assign_test_runtime_ports(control_center: &mut ControlCenter) {
+    let gateway_admin = reserve_unused_port();
+    let gateway_grpc = reserve_unused_port();
+    let gateway_quic = reserve_unused_port();
+    let browser_health = reserve_unused_port();
+    let browser_grpc = reserve_unused_port();
+    control_center.runtime.gateway_admin_port = gateway_admin;
+    control_center.runtime.gateway_grpc_port = gateway_grpc;
+    control_center.runtime.gateway_quic_port = gateway_quic;
+    control_center.runtime.browser_health_port = browser_health;
+    control_center.runtime.browser_grpc_port = browser_grpc;
+    control_center.gateway.bound_ports = vec![gateway_admin, gateway_grpc, gateway_quic];
+    control_center.browserd.bound_ports = vec![browser_health, browser_grpc];
 }
 
 fn write_json_response(
@@ -383,6 +415,65 @@ fn state_file_initialization_never_writes_plaintext_tokens() {
     assert!(!persisted_raw.contains(loaded.browser_auth_token.as_str()));
     assert!(!persisted_raw.contains("admin_token"));
     assert!(!persisted_raw.contains("browser_auth_token"));
+}
+
+#[test]
+fn state_file_initialization_seeds_onboarding_defaults() {
+    let fixture = TempFixtureDir::new();
+    let state_path = fixture.path().join("state.json");
+    let secret_store =
+        DesktopSecretStore::open(fixture.path()).expect("secret store should initialize");
+    let loaded = load_or_initialize_state_file(state_path.as_path(), &secret_store)
+        .expect("desktop state should initialize");
+    assert!(loaded.persisted.runtime_state_root.is_none());
+    assert!(loaded.persisted.onboarding.welcome_acknowledged_at_unix_ms.is_none());
+    assert_eq!(loaded.persisted.onboarding.discord.account_id, "default");
+    assert_eq!(loaded.persisted.onboarding.discord.broadcast_strategy, "deny");
+    assert!(loaded.persisted.onboarding.recent_events.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn onboarding_status_advances_to_gateway_init_after_preflight_and_state_root_confirmation() {
+    let _env_guard = env_lock().lock().expect("env lock should be available");
+    let fixture = TempFixtureDir::new();
+    let gateway_binary = fixture.path().join(executable_file_name("palyrad"));
+    let browser_binary = fixture.path().join(executable_file_name("palyra-browserd"));
+    let cli_binary = fixture.path().join(executable_file_name("palyra"));
+    write_file(gateway_binary.as_path(), "binary");
+    write_file(browser_binary.as_path(), "binary");
+    write_file(cli_binary.as_path(), "binary");
+    let _gateway_override =
+        ScopedEnvVar::set("PALYRA_DESKTOP_PALYRAD_BIN", gateway_binary.to_string_lossy().as_ref());
+    let _browser_override = ScopedEnvVar::set(
+        "PALYRA_DESKTOP_BROWSERD_BIN",
+        browser_binary.to_string_lossy().as_ref(),
+    );
+    let _cli_override =
+        ScopedEnvVar::set("PALYRA_DESKTOP_PALYRA_BIN", cli_binary.to_string_lossy().as_ref());
+
+    let mut control_center = build_test_control_center(fixture.path());
+    assign_test_runtime_ports(&mut control_center);
+    control_center
+        .mark_onboarding_welcome_acknowledged()
+        .expect("welcome acknowledgement should persist");
+    control_center
+        .set_runtime_state_root_override(None, true)
+        .expect("state root confirmation should persist");
+
+    let status = build_onboarding_status(control_center.capture_onboarding_status_inputs())
+        .await
+        .expect("onboarding status should build");
+    assert_eq!(status.current_step, DesktopOnboardingStep::GatewayInit);
+    assert_eq!(status.preflight.blocked_count, 0);
+    assert!(status.state_root_confirmed);
+    assert_eq!(status.phase, "onboarding");
+    assert!(
+        status
+            .steps
+            .iter()
+            .any(|step| step.key == DesktopOnboardingStep::Environment && step.status == "complete"),
+        "environment step should be marked complete once preflight passes"
+    );
 }
 
 #[test]
@@ -1216,6 +1307,128 @@ async fn openai_profile_actions_hit_expected_routes_including_reconnect() {
         reconnect_openai_oauth(inputs, request).await.expect("reconnect action should succeed");
     assert_eq!(reconnect.attempt_id, "attempt-reconnect");
     assert_eq!(reconnect.profile_id.as_deref(), Some("openai-oauth"));
+
+    server.join().expect("test server thread should exit");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn discord_onboarding_preflight_apply_and_verify_use_console_session_and_csrf() {
+    let fixture = TempFixtureDir::new();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+    let port = listener.local_addr().expect("listener address should resolve").port();
+    let server = std::thread::spawn(move || {
+        for _ in 0..9 {
+            let (mut stream, _) = listener.accept().expect("listener should accept request");
+            let mut buffer = [0_u8; 8192];
+            let read = stream.read(&mut buffer).expect("request should be readable");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let request_line = request.lines().next().unwrap_or_default().to_owned();
+            let has_cookie = request.contains("palyra_console_session=session-discord");
+            if request_line.starts_with("GET /console/v1/auth/session ") {
+                if has_cookie {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"principal":"admin:desktop-control-center","device_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","csrf_token":"csrf-discord","issued_at_unix_ms":1,"expires_at_unix_ms":2}"#,
+                        &[],
+                    );
+                } else {
+                    write_json_response(
+                        &mut stream,
+                        "403 Forbidden",
+                        r#"{"error":"console session cookie is missing"}"#,
+                        &[],
+                    );
+                }
+                continue;
+            }
+            if request_line.starts_with("POST /console/v1/auth/login ") {
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"principal":"admin:desktop-control-center","device_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","csrf_token":"csrf-discord","issued_at_unix_ms":1,"expires_at_unix_ms":2}"#,
+                    &["Set-Cookie: palyra_console_session=session-discord; Path=/; HttpOnly; SameSite=Strict"],
+                );
+                continue;
+            }
+            if request_line.starts_with("POST /console/v1/channels/discord/onboarding/probe ") {
+                assert!(request.contains("x-palyra-csrf-token: csrf-discord"));
+                assert!(request.contains("\"token\":\"discord-live-token\""));
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"connector_id":"discord:default","account_id":"default","bot":{"id":"123","username":"palyra-bot"},"invite_url_template":"https://discord.com/oauth2/authorize?client_id=123","required_permissions":["send_messages"],"security_defaults":["require_mention=true"],"warnings":["message content intent is required"],"policy_warnings":[],"inbound_alive":false}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("POST /console/v1/channels/discord/onboarding/apply ") {
+                assert!(request.contains("x-palyra-csrf-token: csrf-discord"));
+                assert!(request.contains("\"verify_channel_id\":\"123456789012345678\""));
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"preflight":{"connector_id":"discord:default","account_id":"default","warnings":[],"policy_warnings":[]},"applied":{"connector_id":"discord:default","config_path":"C:\\palyra\\discord.toml","config_created":true,"connector_enabled":true,"token_vault_ref":"vault://discord/default/token"},"status":{"readiness":"ready","liveness":"running"},"inbound_alive":true,"inbound_monitor_warnings":[]}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("POST /console/v1/channels/discord%3Adefault/test-send ") {
+                assert!(request.contains("x-palyra-csrf-token: csrf-discord"));
+                assert!(request.contains("\"target\":\"channel:123456789012345678\""));
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"dispatch":{"connector_id":"discord:default","target":"channel:123456789012345678","delivered":1},"status":{"readiness":"ready","liveness":"running"}}"#,
+                    &[],
+                );
+                continue;
+            }
+            panic!("unexpected Discord onboarding request: {request_line}");
+        }
+    });
+
+    let request = DiscordOnboardingRequest {
+        account_id: Some("default".to_owned()),
+        token: "discord-live-token".to_owned(),
+        mode: Some("local".to_owned()),
+        inbound_scope: Some("dm_only".to_owned()),
+        allow_from: Vec::new(),
+        deny_from: Vec::new(),
+        require_mention: Some(true),
+        mention_patterns: Vec::new(),
+        concurrency_limit: Some(2),
+        direct_message_policy: None,
+        broadcast_strategy: Some("deny".to_owned()),
+        confirm_open_guild_channels: Some(false),
+        verify_channel_id: Some("123456789012345678".to_owned()),
+    };
+
+    let preflight = run_discord_onboarding_preflight(build_test_discord_inputs(fixture.path(), port), request.clone())
+        .await
+        .expect("Discord preflight should succeed");
+    assert_eq!(preflight.connector_id, "discord:default");
+    assert_eq!(preflight.bot_username.as_deref(), Some("palyra-bot"));
+
+    let applied = apply_discord_onboarding(build_test_discord_inputs(fixture.path(), port), request)
+        .await
+        .expect("Discord apply should succeed");
+    assert!(applied.connector_enabled);
+    assert_eq!(applied.readiness.as_deref(), Some("ready"));
+    assert_eq!(applied.token_vault_ref.as_deref(), Some("vault://discord/default/token"));
+
+    let verify = verify_discord_connector(
+        build_test_discord_inputs(fixture.path(), port),
+        DiscordVerificationRequest {
+            connector_id: "discord:default".to_owned(),
+            target: "channel:123456789012345678".to_owned(),
+            text: Some("hello discord".to_owned()),
+        },
+    )
+    .await
+    .expect("Discord verification should succeed");
+    assert_eq!(verify.connector_id, "discord:default");
+    assert_eq!(verify.delivered, Some(1));
 
     server.join().expect("test server thread should exit");
 }

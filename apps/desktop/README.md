@@ -1,6 +1,6 @@
 # Desktop Control Center
 
-`apps/desktop` now hosts the **Palyra Desktop Control Center v1** implemented with Tauri.
+`apps/desktop` now hosts the **Palyra Desktop Control Center** implemented with Tauri.
 
 ## Platform support (v1)
 
@@ -14,6 +14,14 @@
 
 - Starts/stops/restarts `palyrad` sidecar process.
 - Optionally starts/stops/restarts `palyra-browserd` sidecar process.
+- Guides first-run onboarding from desktop with persistent progress state:
+  - welcome and resumable step progress,
+  - runtime and install preflight,
+  - runtime state-root confirmation,
+  - gateway init and operator auth bootstrap checks,
+  - embedded OpenAI connect,
+  - Discord preflight, apply, and verification,
+  - dashboard handoff and recovery guidance.
 - Shows health and quick facts:
   - gateway version + git hash,
   - uptime,
@@ -31,7 +39,9 @@
 - Console auth uses existing admin token login flow (`/console/v1/auth/login`).
 - Logs are redacted with shared `palyra-common` redaction helpers.
 - No channel secrets are stored by the desktop app.
-- App-local state is stored in `<state_root>/desktop-control-center/state.json`.
+- App-local desktop state is stored in `<state_root>/desktop-control-center/state.json`.
+- Desktop runtime state defaults to `<state_root>/desktop-control-center/runtime` and can be
+  confirmed or overridden during onboarding.
 - Linux `glib` advisory mitigation is documented in:
   - `src-tauri/docs/security/advisories/GHSA-wrw7-89jp-8q8g.md`
   - `src-tauri/docs/security/dependency-graph/glib.md`
