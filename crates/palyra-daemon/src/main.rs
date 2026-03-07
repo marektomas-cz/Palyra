@@ -2679,6 +2679,7 @@ async fn admin_channels_list_handler(
     Ok(Json(json!({ "connectors": connectors })))
 }
 
+#[allow(clippy::result_large_err)]
 fn build_channel_status_payload(state: &AppState, connector_id: &str) -> Result<Value, Response> {
     let connector = state.channels.status(connector_id).map_err(channel_platform_error_response)?;
     let runtime =

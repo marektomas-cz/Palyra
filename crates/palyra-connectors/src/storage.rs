@@ -517,59 +517,47 @@ impl ConnectorStore {
                         ],
                     )?;
                 }
+            } else if ignore_queue_pause {
+                transaction.execute(
+                    r#"
+                    UPDATE outbox
+                    SET claim_token = ?1,
+                        claim_expires_unix_ms = ?2,
+                        updated_at_unix_ms = ?3
+                    WHERE outbox_id IN (
+                        SELECT outbox_id
+                        FROM outbox
+                        WHERE status = 'pending'
+                          AND next_attempt_unix_ms <= ?3
+                          AND claim_expires_unix_ms <= ?3
+                        ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
+                        LIMIT ?4
+                    )
+                    "#,
+                    params![claim_token.as_str(), claim_expires_unix_ms, now_unix_ms, limit_i64],
+                )?;
             } else {
-                if ignore_queue_pause {
-                    transaction.execute(
-                        r#"
-                        UPDATE outbox
-                        SET claim_token = ?1,
-                            claim_expires_unix_ms = ?2,
-                            updated_at_unix_ms = ?3
-                        WHERE outbox_id IN (
-                            SELECT outbox_id
-                            FROM outbox
-                            WHERE status = 'pending'
-                              AND next_attempt_unix_ms <= ?3
-                              AND claim_expires_unix_ms <= ?3
-                            ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
-                            LIMIT ?4
-                        )
-                        "#,
-                        params![
-                            claim_token.as_str(),
-                            claim_expires_unix_ms,
-                            now_unix_ms,
-                            limit_i64
-                        ],
-                    )?;
-                } else {
-                    transaction.execute(
-                        r#"
-                        UPDATE outbox
-                        SET claim_token = ?1,
-                            claim_expires_unix_ms = ?2,
-                            updated_at_unix_ms = ?3
-                        WHERE outbox_id IN (
-                            SELECT outbox_id
-                            FROM outbox
-                            LEFT JOIN connector_queue_state
-                                ON connector_queue_state.connector_id = outbox.connector_id
-                            WHERE outbox.status = 'pending'
-                              AND COALESCE(connector_queue_state.paused, 0) = 0
-                              AND outbox.next_attempt_unix_ms <= ?3
-                              AND outbox.claim_expires_unix_ms <= ?3
-                            ORDER BY outbox.next_attempt_unix_ms ASC, outbox.outbox_id ASC
-                            LIMIT ?4
-                        )
-                        "#,
-                        params![
-                            claim_token.as_str(),
-                            claim_expires_unix_ms,
-                            now_unix_ms,
-                            limit_i64
-                        ],
-                    )?;
-                }
+                transaction.execute(
+                    r#"
+                    UPDATE outbox
+                    SET claim_token = ?1,
+                        claim_expires_unix_ms = ?2,
+                        updated_at_unix_ms = ?3
+                    WHERE outbox_id IN (
+                        SELECT outbox_id
+                        FROM outbox
+                        LEFT JOIN connector_queue_state
+                            ON connector_queue_state.connector_id = outbox.connector_id
+                        WHERE outbox.status = 'pending'
+                          AND COALESCE(connector_queue_state.paused, 0) = 0
+                          AND outbox.next_attempt_unix_ms <= ?3
+                          AND outbox.claim_expires_unix_ms <= ?3
+                        ORDER BY outbox.next_attempt_unix_ms ASC, outbox.outbox_id ASC
+                        LIMIT ?4
+                    )
+                    "#,
+                    params![claim_token.as_str(), claim_expires_unix_ms, now_unix_ms, limit_i64],
+                )?;
             }
 
             let mut records = Vec::new();
