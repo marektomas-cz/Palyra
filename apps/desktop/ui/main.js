@@ -424,6 +424,12 @@ function renderWelcomeChecklist() {
 
 function renderDiscordChecklist(discord) {
   const items = [];
+  const saturation = asString(discord.saturation_state, "unknown");
+  const pendingOutbox = asPositiveNumber(discord.pending_outbox);
+  const dueOutbox = asPositiveNumber(discord.due_outbox);
+  const claimedOutbox = asPositiveNumber(discord.claimed_outbox);
+  const deadLetters = asPositiveNumber(discord.dead_letters);
+
   if (discord.enabled !== true) {
     items.push("Enable the Discord connector from the dashboard before verification.");
   }
@@ -436,10 +442,103 @@ function renderDiscordChecklist(discord) {
   if (asString(discord.liveness, "unknown") !== "running") {
     items.push(`Connector runtime is ${asString(discord.liveness, "unknown")}.`);
   }
+  if (saturation !== "healthy" && saturation !== "unknown") {
+    items.push(`Connector operations are ${saturation}.`);
+  }
+  if (discord.queue_paused === true) {
+    const reason = asString(discord.pause_reason, "");
+    items.push(
+      reason.length > 0
+        ? `Queue is paused: ${reason}. Resume or drain it from the dashboard recovery controls.`
+        : "Queue is paused. Resume or drain it from the dashboard recovery controls."
+    );
+  }
+  if (pendingOutbox !== null || dueOutbox !== null || claimedOutbox !== null) {
+    items.push(
+      `Queue depth: pending=${pendingOutbox ?? 0}, due=${dueOutbox ?? 0}, claimed=${claimedOutbox ?? 0}.`
+    );
+  }
+  if (deadLetters !== null) {
+    items.push(
+      `Dead letters waiting for replay or discard: ${deadLetters}.`
+    );
+  }
+  if (hasText(discord.auth_failure_hint)) {
+    items.push(`Latest auth failure: ${discord.auth_failure_hint}.`);
+  }
+  if (hasText(discord.permission_gap_hint)) {
+    items.push(`Discord permission gap: ${discord.permission_gap_hint}.`);
+  }
+  if (hasText(discord.health_refresh_status) && discord.health_refresh_status !== "unknown") {
+    const warningCount = asPositiveNumber(discord.health_refresh_warning_count) ?? 0;
+    let detail = `Health refresh ${discord.health_refresh_status}`;
+    if (warningCount > 0) {
+      detail += ` (${warningCount} warning${warningCount === 1 ? "" : "s"})`;
+    }
+    if (hasText(discord.health_refresh_detail)) {
+      detail += `: ${discord.health_refresh_detail}`;
+    } else {
+      detail += ".";
+    }
+    items.push(detail);
+  }
   if (items.length === 0) {
     items.push("Discord connector looks ready for a desktop verification test send.");
   }
   renderList(ui.discordChecklist, items, "Discord status will appear after the next snapshot.");
+}
+
+function buildDiscordReadinessSummary(discord) {
+  const parts = [`${asString(discord.readiness, "unknown")} / ${asString(discord.liveness, "unknown")}`];
+  const saturation = asString(discord.saturation_state, "unknown");
+  if (saturation !== "healthy" && saturation !== "unknown") {
+    parts.push(`ops=${saturation}`);
+  }
+  if (discord.queue_paused === true) {
+    parts.push("queue paused");
+  }
+  if (asPositiveNumber(discord.dead_letters) !== null) {
+    parts.push(`dead_letters=${discord.dead_letters}`);
+  }
+  return parts.join(" | ");
+}
+
+function buildDiscordLastErrorSummary(discord) {
+  if (hasText(discord.last_error)) {
+    return discord.last_error;
+  }
+  if (hasText(discord.auth_failure_hint)) {
+    return `Auth hint: ${discord.auth_failure_hint}`;
+  }
+  if (hasText(discord.permission_gap_hint)) {
+    return `Permission hint: ${discord.permission_gap_hint}`;
+  }
+  if (asPositiveNumber(discord.dead_letters) !== null) {
+    return `${discord.dead_letters} dead letter(s) are waiting for operator recovery.`;
+  }
+  return "None";
+}
+
+function resolveDiscordBadgeStatus(discord) {
+  if (discord.enabled !== true) {
+    return "unknown";
+  }
+  if (
+    discord.authenticated !== true ||
+    hasText(discord.auth_failure_hint) ||
+    hasText(discord.permission_gap_hint) ||
+    discord.queue_paused === true
+  ) {
+    return "degraded";
+  }
+  const saturation = asString(discord.saturation_state, "unknown");
+  if (saturation !== "healthy" && saturation !== "unknown") {
+    return "degraded";
+  }
+  if (asPositiveNumber(discord.dead_letters) !== null) {
+    return "degraded";
+  }
+  return "healthy";
 }
 
 function parseCommaSeparatedList(raw) {
@@ -750,8 +849,8 @@ function renderSnapshot(snapshot, options = {}) {
   ui.discordConnectorId.textContent = asString(discord.connector_id, "Unavailable");
   ui.discordEnabled.textContent = String(Boolean(discord.enabled));
   ui.discordAuthenticated.textContent = String(Boolean(discord.authenticated));
-  ui.discordReadiness.textContent = `${asString(discord.readiness, "unknown")} / ${asString(discord.liveness, "unknown")}`;
-  ui.discordLastError.textContent = asString(discord.last_error, "None");
+  ui.discordReadiness.textContent = buildDiscordReadinessSummary(discord);
+  ui.discordLastError.textContent = buildDiscordLastErrorSummary(discord);
 
   renderProcess(snapshot.gateway_process, ui.gatewayProcessSummary, ui.gatewayPorts, ui.gatewayRuntimeBadge);
   renderProcess(snapshot.browserd_process, ui.browserProcessSummary, ui.browserPorts, ui.browserRuntimeBadge);
@@ -763,7 +862,7 @@ function renderSnapshot(snapshot, options = {}) {
   );
   setStatusPill(
     ui.discordStatusBadge,
-    discord.enabled === true && discord.authenticated === true ? "healthy" : discord.enabled === true ? "degraded" : "unknown"
+    resolveDiscordBadgeStatus(discord)
   );
   setStatusPill(
     ui.supportStateBadge,
@@ -1287,6 +1386,14 @@ function asString(value, fallback) {
 
 function asNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function asPositiveNumber(value) {
+  return asNumber(value) && value > 0 ? value : null;
+}
+
+function hasText(value) {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 async function refreshSnapshot(options = {}) {

@@ -65,6 +65,24 @@ describe("M56 runtime and operations surfaces", () => {
         if (request.path === "/console/v1/channels/discord%3Adefault/logs" && request.method === "GET") {
           return jsonResponse(channelLogsFixture());
         }
+        if (request.path === "/console/v1/channels/discord%3Adefault/operations/health-refresh" && request.method === "POST") {
+          return jsonResponse(channelStatusFixture());
+        }
+        if (request.path === "/console/v1/channels/discord%3Adefault/operations/queue/pause" && request.method === "POST") {
+          return jsonResponse(channelStatusFixture());
+        }
+        if (request.path === "/console/v1/channels/discord%3Adefault/operations/queue/resume" && request.method === "POST") {
+          return jsonResponse(channelStatusFixture());
+        }
+        if (request.path === "/console/v1/channels/discord%3Adefault/operations/queue/drain" && request.method === "POST") {
+          return jsonResponse(channelStatusFixture());
+        }
+        if (request.path === "/console/v1/channels/discord%3Adefault/operations/dead-letters/1/replay" && request.method === "POST") {
+          return jsonResponse(channelStatusFixture());
+        }
+        if (request.path === "/console/v1/channels/discord%3Adefault/operations/dead-letters/1/discard" && request.method === "POST") {
+          return jsonResponse(channelStatusFixture());
+        }
         if (request.path === "/console/v1/channels/router/rules" && request.method === "GET") {
           return jsonResponse(routerRulesFixture());
         }
@@ -127,6 +145,23 @@ describe("M56 runtime and operations surfaces", () => {
     expect(await screen.findByText("discord:default")).toBeInTheDocument();
     expect(screen.getByText("Broadcast messages remain denied by default.")).toBeInTheDocument();
     expect(await screen.findByText(/attachment\.upload\.failed/)).toBeInTheDocument();
+    expect(await screen.findByText("Queue paused: yes")).toBeInTheDocument();
+    expect(screen.getByText("Permission gap: missing permissions: send messages")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Run health refresh" }));
+    await waitFor(() => {
+      expect(screen.getByText("Channel health refresh completed.")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Pause queue" }));
+    await waitFor(() => {
+      expect(screen.getByText("Channel queue paused.")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    await waitFor(() => {
+      expect(screen.getByText("Dead letter 1 replayed.")).toBeInTheDocument();
+    });
 
     fireEvent.change(screen.getByLabelText("Bot token"), { target: { value: "discord-bot-token" } });
     fireEvent.change(screen.getByLabelText("Verify channel ID"), {

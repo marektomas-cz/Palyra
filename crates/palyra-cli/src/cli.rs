@@ -643,6 +643,24 @@ pub enum ChannelsDiscordCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    HealthRefresh {
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long)]
+        verify_channel_id: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     #[command(visible_alias = "test-send")]
     Verify {
         #[arg(long, default_value = "default")]
@@ -815,8 +833,102 @@ pub enum ChannelsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    HealthRefresh {
+        connector_id: String,
+        #[arg(long)]
+        verify_channel_id: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Enable {
         connector_id: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    QueuePause {
+        connector_id: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    QueueResume {
+        connector_id: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    QueueDrain {
+        connector_id: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    DeadLetterReplay {
+        connector_id: String,
+        dead_letter_id: i64,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    DeadLetterDiscard {
+        connector_id: String,
+        dead_letter_id: i64,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]
@@ -2360,6 +2472,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_channels_discord_health_refresh() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "channels",
+            "discord",
+            "health-refresh",
+            "--account-id",
+            "ops",
+            "--verify-channel-id",
+            "123456789012345678",
+            "--url",
+            "http://127.0.0.1:7142",
+            "--token",
+            "admin-token",
+            "--json",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Channels {
+                command: ChannelsCommand::Discord {
+                    command: ChannelsDiscordCommand::HealthRefresh {
+                        account_id: "ops".to_owned(),
+                        verify_channel_id: Some("123456789012345678".to_owned()),
+                        url: Some("http://127.0.0.1:7142".to_owned()),
+                        token: Some("admin-token".to_owned()),
+                        principal: "user:local".to_owned(),
+                        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                        channel: None,
+                        json: true,
+                    },
+                }
+            }
+        );
+    }
+
+    #[test]
     fn parse_channels_discord_verify_via_test_send_alias() {
         let parsed = Cli::parse_from([
             "palyra",
@@ -2480,6 +2628,63 @@ mod tests {
                         json: true,
                     },
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_channels_queue_pause() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "channels",
+            "queue-pause",
+            "echo:default",
+            "--url",
+            "http://127.0.0.1:7142",
+            "--token",
+            "admin-token",
+            "--json",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Channels {
+                command: ChannelsCommand::QueuePause {
+                    connector_id: "echo:default".to_owned(),
+                    url: Some("http://127.0.0.1:7142".to_owned()),
+                    token: Some("admin-token".to_owned()),
+                    principal: "user:local".to_owned(),
+                    device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                    channel: None,
+                    json: true,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_channels_dead_letter_replay() {
+        let parsed = Cli::parse_from([
+            "palyra",
+            "channels",
+            "dead-letter-replay",
+            "discord:default",
+            "42",
+            "--token",
+            "admin-token",
+        ]);
+        assert_eq!(
+            parsed.command,
+            Command::Channels {
+                command: ChannelsCommand::DeadLetterReplay {
+                    connector_id: "discord:default".to_owned(),
+                    dead_letter_id: 42,
+                    url: None,
+                    token: Some("admin-token".to_owned()),
+                    principal: "user:local".to_owned(),
+                    device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                    channel: None,
+                    json: false,
+                }
             }
         );
     }

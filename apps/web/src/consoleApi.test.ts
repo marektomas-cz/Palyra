@@ -581,6 +581,12 @@ describe("ConsoleApiClient", () => {
       jsonResponse({ preview: { accepted: true } }),
       jsonResponse({ pairings: [], config_hash: "router-hash-1" }),
       jsonResponse({ code: { code: "777888" }, config_hash: "router-hash-1" }),
+      jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
+      jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
+      jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
+      jsonResponse({ connector: { connector_id: "discord:default" }, operations: {}, health_refresh: {} }),
+      jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
+      jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
       jsonResponse({ report: { verified: true } }),
       jsonResponse({ report: { audited: true }, quarantined: false }),
       jsonResponse({ status: "quarantined" }),
@@ -618,6 +624,12 @@ describe("ConsoleApiClient", () => {
     await client.previewChannelRoute({ channel: "discord:default", text: "pair 123456" });
     await client.listChannelRouterPairings();
     await client.mintChannelRouterPairingCode({ channel: "discord:default" });
+    await client.pauseChannelQueue("discord:default");
+    await client.resumeChannelQueue("discord:default");
+    await client.drainChannelQueue("discord:default");
+    await client.refreshChannelHealth("discord:default", { verify_channel_id: "123456789012345678" });
+    await client.replayChannelDeadLetter("discord:default", 41);
+    await client.discardChannelDeadLetter("discord:default", 41);
     await client.verifySkill("acme.echo_http", { version: "1.2.3" });
     await client.auditSkill("acme.echo_http", { version: "1.2.3", quarantine_on_fail: true });
     await client.quarantineSkill({ skill_id: "acme.echo_http", version: "1.2.3" });
@@ -641,17 +653,37 @@ describe("ConsoleApiClient", () => {
     expect(requestUrl(calls[5]?.input)).toBe("/console/v1/channels/router/pairings");
     expect(requestUrl(calls[6]?.input)).toBe("/console/v1/channels/router/pairing-codes");
 
-    expect(requestUrl(calls[7]?.input)).toBe("/console/v1/skills/acme.echo_http/verify");
-    expect(requestUrl(calls[8]?.input)).toBe("/console/v1/skills/acme.echo_http/audit");
-    expect(requestUrl(calls[9]?.input)).toBe("/console/v1/skills/acme.echo_http/quarantine");
-    expect(requestUrl(calls[10]?.input)).toBe("/console/v1/skills/acme.echo_http/enable");
+    expect(requestUrl(calls[7]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/operations/queue/pause"
+    );
+    expect(requestUrl(calls[8]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/operations/queue/resume"
+    );
+    expect(requestUrl(calls[9]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/operations/queue/drain"
+    );
+    expect(requestUrl(calls[10]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/operations/health-refresh"
+    );
+    expect(new Headers(calls[10]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+    expect(requestUrl(calls[11]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/operations/dead-letters/41/replay"
+    );
+    expect(requestUrl(calls[12]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/operations/dead-letters/41/discard"
+    );
 
-    expect(requestUrl(calls[11]?.input)).toBe("/console/v1/browser/profiles");
-    expect(requestUrl(calls[12]?.input)).toBe("/console/v1/browser/profiles/create");
-    expect(requestUrl(calls[13]?.input)).toBe("/console/v1/browser/profiles/profile-1/rename");
-    expect(requestUrl(calls[14]?.input)).toBe("/console/v1/browser/profiles/profile-1/activate");
-    expect(requestUrl(calls[15]?.input)).toBe("/console/v1/browser/profiles/profile-1/delete");
-    expect(requestUrl(calls[16]?.input)).toBe("/console/v1/browser/downloads");
+    expect(requestUrl(calls[13]?.input)).toBe("/console/v1/skills/acme.echo_http/verify");
+    expect(requestUrl(calls[14]?.input)).toBe("/console/v1/skills/acme.echo_http/audit");
+    expect(requestUrl(calls[15]?.input)).toBe("/console/v1/skills/acme.echo_http/quarantine");
+    expect(requestUrl(calls[16]?.input)).toBe("/console/v1/skills/acme.echo_http/enable");
+
+    expect(requestUrl(calls[17]?.input)).toBe("/console/v1/browser/profiles");
+    expect(requestUrl(calls[18]?.input)).toBe("/console/v1/browser/profiles/create");
+    expect(requestUrl(calls[19]?.input)).toBe("/console/v1/browser/profiles/profile-1/rename");
+    expect(requestUrl(calls[20]?.input)).toBe("/console/v1/browser/profiles/profile-1/activate");
+    expect(requestUrl(calls[21]?.input)).toBe("/console/v1/browser/profiles/profile-1/delete");
+    expect(requestUrl(calls[22]?.input)).toBe("/console/v1/browser/downloads");
   });
 
   it("lists chat sessions and streams NDJSON responses with CSRF", async () => {

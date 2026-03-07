@@ -3,8 +3,10 @@ import {
   DiscordOnboardingHighlights,
   channelConnectorAvailability,
   readBool,
+  readObject,
   readString,
   toPrettyJson,
+  type JsonObject,
 } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
@@ -112,6 +114,12 @@ type ChannelsSectionProps = {
     | "mintChannelRouterPairingCode"
     | "sendChannelTest"
     | "sendDiscordTest"
+    | "refreshChannelHealth"
+    | "pauseChannelQueue"
+    | "resumeChannelQueue"
+    | "drainChannelQueue"
+    | "replayChannelDeadLetter"
+    | "discardChannelDeadLetter"
     | "runDiscordPreflight"
     | "applyDiscordOnboarding"
     | "runDiscordVerification"
@@ -119,7 +127,27 @@ type ChannelsSectionProps = {
   >;
 };
 
+function displayScalar(value: unknown, fallback = "n/a"): string {
+  if (typeof value === "string") {
+    return value.trim().length > 0 ? value : fallback;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return fallback;
+}
+
 export function ChannelsSection({ app }: ChannelsSectionProps) {
+  const selectedStatusPayload: JsonObject = app.channelsSelectedStatus ?? {};
+  const selectedConnector = readObject(selectedStatusPayload, "connector") ?? selectedStatusPayload;
+  const selectedOperations = readObject(selectedStatusPayload, "operations");
+  const selectedQueue = selectedOperations !== null ? readObject(selectedOperations, "queue") : null;
+  const selectedSaturation =
+    selectedOperations !== null ? readObject(selectedOperations, "saturation") : null;
+  const selectedDiscordOps =
+    selectedOperations !== null ? readObject(selectedOperations, "discord") : null;
+  const selectedHealthRefresh = readObject(selectedStatusPayload, "health_refresh");
+
   return (
     <main className="console-card">
       <ConsoleSectionHeader
@@ -256,6 +284,56 @@ export function ChannelsSection({ app }: ChannelsSectionProps) {
         <article className="console-subpanel">
           <div className="console-subpanel__header">
             <div>
+              <h3>Recovery controls</h3>
+              <p className="chat-muted">
+                Queue pause, forced drain, health refresh, and dead-letter replay stay colocated with live connector telemetry.
+              </p>
+            </div>
+          </div>
+          <div className="console-grid-3">
+            <button type="button" className="secondary" onClick={() => void app.pauseChannelQueue()} disabled={app.channelsBusy}>
+              {app.channelsBusy ? "Working..." : "Pause queue"}
+            </button>
+            <button type="button" className="secondary" onClick={() => void app.resumeChannelQueue()} disabled={app.channelsBusy}>
+              {app.channelsBusy ? "Working..." : "Resume queue"}
+            </button>
+            <button type="button" className="secondary" onClick={() => void app.drainChannelQueue()} disabled={app.channelsBusy}>
+              {app.channelsBusy ? "Working..." : "Force drain queue"}
+            </button>
+          </div>
+          <div className="console-grid-2">
+            <label>
+              Health refresh verify channel
+              <input value={app.discordWizardVerifyChannelId} onChange={(event) => app.setDiscordWizardVerifyChannelId(event.target.value)} />
+            </label>
+            <div className="console-inline-actions">
+              <button type="button" onClick={() => void app.refreshChannelHealth()} disabled={app.channelsBusy}>
+                {app.channelsBusy ? "Refreshing..." : "Run health refresh"}
+              </button>
+            </div>
+          </div>
+          {selectedQueue === null && selectedHealthRefresh === null ? (
+            <p>No recovery telemetry loaded yet.</p>
+          ) : (
+            <>
+              {selectedQueue !== null && (
+                <ul className="console-compact-list">
+                  <li>Queue paused: {readBool(selectedQueue, "paused") ? "yes" : "no"}</li>
+                  <li>Pause reason: {readString(selectedQueue, "pause_reason") ?? "n/a"}</li>
+                  <li>Pending / due / claimed: {displayScalar(selectedQueue.pending_outbox, "0")} / {displayScalar(selectedQueue.due_outbox, "0")} / {displayScalar(selectedQueue.claimed_outbox, "0")}</li>
+                  <li>Dead letters: {displayScalar(selectedQueue.dead_letters, "0")}</li>
+                  <li>Saturation: {readString(selectedSaturation ?? {}, "state") ?? "n/a"}</li>
+                  <li>Auth failure: {readString(selectedOperations ?? {}, "last_auth_failure") ?? "none"}</li>
+                  <li>Permission gap: {readString(selectedDiscordOps ?? {}, "last_permission_failure") ?? "none"}</li>
+                </ul>
+              )}
+              {selectedHealthRefresh !== null && <pre>{toPrettyJson(selectedHealthRefresh, app.revealSensitiveValues)}</pre>}
+            </>
+          )}
+        </article>
+        <article className="console-subpanel">
+          <div className="console-subpanel__header">
+            <div>
               <h3>Connector logs and dead letters</h3>
               <p className="chat-muted">
                 Delivery diagnostics stay on the dashboard so operators can inspect failures without switching surfaces.
@@ -275,7 +353,32 @@ export function ChannelsSection({ app }: ChannelsSectionProps) {
           {app.channelsEvents.length === 0 && app.channelsDeadLetters.length === 0 ? (
             <p>No connector logs loaded.</p>
           ) : (
-            <pre>{toPrettyJson({ events: app.channelsEvents, dead_letters: app.channelsDeadLetters }, app.revealSensitiveValues)}</pre>
+            <>
+              {app.channelsDeadLetters.length > 0 && (
+                <div className="console-inline-actions">
+                  {app.channelsDeadLetters.map((deadLetter) => {
+                    const deadLetterId = typeof deadLetter.dead_letter_id === "number"
+                      ? deadLetter.dead_letter_id
+                      : Number(deadLetter.dead_letter_id ?? Number.NaN);
+                    if (!Number.isFinite(deadLetterId)) {
+                      return null;
+                    }
+                    return (
+                      <div key={deadLetterId} className="console-inline-actions">
+                        <span>Dead letter {deadLetterId}</span>
+                        <button type="button" className="secondary" onClick={() => void app.replayChannelDeadLetter(deadLetterId)} disabled={app.channelsBusy}>
+                          Replay
+                        </button>
+                        <button type="button" className="secondary" onClick={() => void app.discardChannelDeadLetter(deadLetterId)} disabled={app.channelsBusy}>
+                          Discard
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <pre>{toPrettyJson({ events: app.channelsEvents, dead_letters: app.channelsDeadLetters }, app.revealSensitiveValues)}</pre>
+            </>
           )}
         </article>
       </section>
@@ -428,7 +531,7 @@ export function ChannelsSection({ app }: ChannelsSectionProps) {
             </div>
           </form>
 
-          {readString(app.channelsSelectedStatus ?? {}, "kind") === "discord" && (
+          {readString(selectedConnector, "kind") === "discord" && (
             <>
               <h4>Discord direct verification</h4>
               <form className="console-form" onSubmit={(event) => void app.sendDiscordTest(event)}>

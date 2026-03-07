@@ -32,6 +32,18 @@ pub(crate) struct DiscordStatusSnapshot {
     pub(crate) authenticated: bool,
     pub(crate) readiness: String,
     pub(crate) liveness: String,
+    pub(crate) saturation_state: String,
+    pub(crate) queue_paused: bool,
+    pub(crate) pending_outbox: u64,
+    pub(crate) due_outbox: u64,
+    pub(crate) claimed_outbox: u64,
+    pub(crate) dead_letters: u64,
+    pub(crate) pause_reason: Option<String>,
+    pub(crate) auth_failure_hint: Option<String>,
+    pub(crate) permission_gap_hint: Option<String>,
+    pub(crate) health_refresh_status: String,
+    pub(crate) health_refresh_detail: Option<String>,
+    pub(crate) health_refresh_warning_count: u64,
     pub(crate) last_error: Option<String>,
 }
 
@@ -217,6 +229,18 @@ pub(crate) fn parse_discord_status(payload: Option<&Value>) -> DiscordStatusSnap
         authenticated: false,
         readiness: "unknown".to_owned(),
         liveness: "unknown".to_owned(),
+        saturation_state: "unknown".to_owned(),
+        queue_paused: false,
+        pending_outbox: 0,
+        due_outbox: 0,
+        claimed_outbox: 0,
+        dead_letters: 0,
+        pause_reason: None,
+        auth_failure_hint: None,
+        permission_gap_hint: None,
+        health_refresh_status: "unknown".to_owned(),
+        health_refresh_detail: None,
+        health_refresh_warning_count: 0,
         last_error: None,
     };
 
@@ -256,8 +280,86 @@ pub(crate) fn parse_discord_status(payload: Option<&Value>) -> DiscordStatusSnap
         }
     }
 
+    if let Some(operations) = root.get("operations").and_then(Value::as_object) {
+        if let Some(queue) = operations.get("queue").and_then(Value::as_object) {
+            snapshot.queue_paused = queue.get("paused").and_then(Value::as_bool).unwrap_or(false);
+            snapshot.pending_outbox =
+                queue.get("pending_outbox").and_then(Value::as_u64).unwrap_or_default();
+            snapshot.due_outbox =
+                queue.get("due_outbox").and_then(Value::as_u64).unwrap_or_default();
+            snapshot.claimed_outbox =
+                queue.get("claimed_outbox").and_then(Value::as_u64).unwrap_or_default();
+            snapshot.dead_letters =
+                queue.get("dead_letters").and_then(Value::as_u64).unwrap_or_default();
+            snapshot.pause_reason = sanitize_json_string(queue.get("pause_reason"));
+        }
+
+        if let Some(saturation) = operations.get("saturation").and_then(Value::as_object) {
+            if let Some(state) = saturation.get("state").and_then(Value::as_str) {
+                snapshot.saturation_state = state.to_owned();
+            }
+        }
+
+        snapshot.auth_failure_hint = sanitize_json_string(operations.get("last_auth_failure"));
+
+        if let Some(discord) = operations.get("discord").and_then(Value::as_object) {
+            snapshot.permission_gap_hint =
+                sanitize_json_string(discord.get("last_permission_failure"));
+            if snapshot.health_refresh_status == "unknown" {
+                if let Some(hint) = sanitize_json_string(discord.get("health_refresh_hint")) {
+                    snapshot.health_refresh_status = "available".to_owned();
+                    snapshot.health_refresh_detail = Some(hint);
+                }
+            }
+        }
+    }
+
+    if let Some(health_refresh) = root.get("health_refresh").and_then(Value::as_object) {
+        let supported = health_refresh.get("supported").and_then(Value::as_bool).unwrap_or(true);
+        let refreshed = health_refresh.get("refreshed").and_then(Value::as_bool);
+        let warning_count = health_refresh
+            .get("warnings")
+            .and_then(Value::as_array)
+            .map(|entries| entries.len() as u64)
+            .unwrap_or_default();
+        let detail = sanitize_json_string(health_refresh.get("message")).or_else(|| {
+            health_refresh
+                .get("warnings")
+                .and_then(Value::as_array)
+                .and_then(|warnings| warnings.first())
+                .and_then(|value| sanitize_json_string(Some(value)))
+        });
+        snapshot.health_refresh_warning_count = warning_count;
+        snapshot.health_refresh_status = if !supported {
+            "unsupported".to_owned()
+        } else if refreshed == Some(true) {
+            if warning_count > 0 {
+                "degraded".to_owned()
+            } else {
+                "healthy".to_owned()
+            }
+        } else if refreshed == Some(false) {
+            "degraded".to_owned()
+        } else {
+            "available".to_owned()
+        };
+        if detail.is_some() {
+            snapshot.health_refresh_detail = detail;
+        }
+    }
+
     snapshot.authenticated = snapshot.enabled && snapshot.readiness.eq_ignore_ascii_case("ready");
     snapshot
+}
+
+fn sanitize_json_string(value: Option<&Value>) -> Option<String> {
+    let raw = value.and_then(Value::as_str)?;
+    let cleaned = sanitize_log_line(raw);
+    if cleaned.trim().is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 pub(crate) fn collect_redacted_errors(value: &Value, limit: usize) -> Vec<String> {

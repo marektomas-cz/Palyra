@@ -132,6 +132,7 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
 
     fn runtime_snapshot(&self, _instance: &ConnectorInstanceRecord) -> Option<Value> {
         let state = self.lock_state().ok()?;
+        let now_unix_ms = unix_ms_now();
         let mut routes = state
             .route_limits
             .iter()
@@ -140,6 +141,19 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
                     "route": route,
                     "bucket_id": window.bucket_id,
                     "blocked_until_unix_ms": window.blocked_until_unix_ms,
+                    "retry_after_ms": if window.blocked_until_unix_ms > now_unix_ms {
+                        Some(window.blocked_until_unix_ms.saturating_sub(now_unix_ms))
+                    } else {
+                        None::<i64>
+                    },
+                    "attempts_total": window.attempts_total,
+                    "delivered_total": window.delivered_total,
+                    "local_deferrals_total": window.local_deferrals_total,
+                    "upstream_rate_limits_total": window.upstream_rate_limits_total,
+                    "transient_failures_total": window.transient_failures_total,
+                    "last_retry_after_ms": window.last_retry_after_ms,
+                    "last_status": window.last_status,
+                    "last_error": window.last_error,
                 })
             })
             .collect::<Vec<_>>();
@@ -162,6 +176,11 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
             }),
             "last_error": state.last_error,
             "global_rate_limit_until_unix_ms": state.global_blocked_until_unix_ms,
+            "global_retry_after_ms": if state.global_blocked_until_unix_ms > now_unix_ms {
+                Some(state.global_blocked_until_unix_ms.saturating_sub(now_unix_ms))
+            } else {
+                None::<i64>
+            },
             "route_rate_limits": routes,
             "idempotency_cache_size": state.delivered_native_ids.len(),
             "inbound": {
@@ -229,6 +248,7 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
         {
             let reason =
                 "discord outbound deferred due to local route/global rate-limit budget".to_owned();
+            self.record_route_local_deferral(route_key.as_str(), retry_after_ms, reason.as_str())?;
             self.record_last_error(reason.as_str());
             return Ok(DeliveryOutcome::Retry {
                 class: RetryClass::RateLimit,
@@ -236,6 +256,7 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
                 retry_after_ms: Some(retry_after_ms),
             });
         }
+        self.record_route_attempt(route_key.as_str())?;
 
         let credential = match self.credential_resolver.resolve_credential(instance).await {
             Ok(credential) => {
@@ -311,6 +332,7 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
             Err(error) => {
                 let reason = redact_auth_error(error.to_string().as_str());
                 self.record_last_error(reason.as_str());
+                self.record_route_transient_failure(route_key.as_str(), reason.as_str())?;
                 return Ok(DeliveryOutcome::Retry {
                     class: RetryClass::TransientNetwork,
                     reason,
@@ -335,6 +357,11 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
                     .unwrap_or_else(|| "retry later".to_owned())
             );
             self.record_last_error(reason.as_str());
+            self.record_route_upstream_rate_limit(
+                route_key.as_str(),
+                retry_after_ms,
+                reason.as_str(),
+            )?;
             return Ok(DeliveryOutcome::Retry {
                 class: RetryClass::RateLimit,
                 reason,
@@ -350,6 +377,7 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
                     .unwrap_or_else(|| "unauthorized".to_owned())
             );
             self.record_last_error(reason.as_str());
+            self.record_route_failure_status(route_key.as_str(), response.status, reason.as_str())?;
             return Ok(DeliveryOutcome::PermanentFailure {
                 reason: redact_auth_error(reason.as_str()),
             });
@@ -361,6 +389,8 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
                 response.status
             );
             self.record_last_error(reason.as_str());
+            self.record_route_transient_failure(route_key.as_str(), reason.as_str())?;
+            self.record_route_failure_status(route_key.as_str(), response.status, reason.as_str())?;
             return Ok(DeliveryOutcome::Retry {
                 class: RetryClass::TransientNetwork,
                 reason,
@@ -376,6 +406,7 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
                     .unwrap_or_else(|| "unexpected response".to_owned())
             );
             self.record_last_error(reason.as_str());
+            self.record_route_failure_status(route_key.as_str(), response.status, reason.as_str())?;
             return Ok(DeliveryOutcome::PermanentFailure {
                 reason: redact_auth_error(reason.as_str()),
             });
@@ -389,6 +420,7 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
             native_message_id.as_str(),
         )?;
         self.clear_last_error();
+        self.record_route_delivery(route_key.as_str(), response.status)?;
 
         if self.config.enable_auto_reactions {
             if let Some(auto_reaction) = request.auto_reaction.as_deref() {
@@ -1581,6 +1613,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_envelope_reconnect_resume_cycles_remain_stable_under_soak() {
+        let transport = Arc::new(FakeTransport::default());
+        let (sender, mut receiver) = mpsc::channel(64);
+        let (context, runtime_state) = sample_monitor_context(transport, sender);
+        let mut resume_state = DiscordGatewayResumeState::default();
+        let mut heartbeat = interval(Duration::from_millis(1_000));
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut hello_received = false;
+        let mut sink = RecordingMessageSink::default();
+
+        handle_gateway_envelope(
+            &mut sink,
+            DiscordGatewayEnvelope {
+                op: 10,
+                data: json!({ "heartbeat_interval": 5_000 }),
+                seq: None,
+                event_type: None,
+            },
+            &context,
+            "super-secret-token",
+            &mut resume_state,
+            &mut heartbeat,
+            &mut hello_received,
+        )
+        .await
+        .expect("initial hello should identify");
+        handle_gateway_envelope(
+            &mut sink,
+            DiscordGatewayEnvelope {
+                op: 0,
+                data: json!({
+                    "session_id": "session-1",
+                    "user": { "id": "bot-1" },
+                }),
+                seq: Some(41),
+                event_type: Some("READY".to_owned()),
+            },
+            &context,
+            "super-secret-token",
+            &mut resume_state,
+            &mut heartbeat,
+            &mut hello_received,
+        )
+        .await
+        .expect("ready envelope should establish resume state");
+
+        const CYCLES: usize = 16;
+        for cycle in 0..CYCLES {
+            let seq = 42_i64 + cycle as i64;
+            let message_id = format!("1759288472991170{cycle:02}");
+            handle_gateway_envelope(
+                &mut sink,
+                DiscordGatewayEnvelope {
+                    op: 0,
+                    data: json!({
+                        "id": message_id,
+                        "channel_id": "thread-123",
+                        "guild_id": "guild-1",
+                        "content": format!("deploy status cycle {cycle}?"),
+                        "author": {
+                            "id": "user-7",
+                            "username": "operator",
+                        },
+                        "member": {
+                            "nick": "Ops",
+                        },
+                        "message_reference": {
+                            "channel_id": "parent-1",
+                        },
+                    }),
+                    seq: Some(seq),
+                    event_type: Some("MESSAGE_CREATE".to_owned()),
+                },
+                &context,
+                "super-secret-token",
+                &mut resume_state,
+                &mut heartbeat,
+                &mut hello_received,
+            )
+            .await
+            .expect("message create should remain routable under reconnect churn");
+            let reconnect_error = handle_gateway_envelope(
+                &mut sink,
+                DiscordGatewayEnvelope { op: 7, data: Value::Null, seq: None, event_type: None },
+                &context,
+                "super-secret-token",
+                &mut resume_state,
+                &mut heartbeat,
+                &mut hello_received,
+            )
+            .await
+            .expect_err("reconnect opcode should request a resumed session");
+            assert!(
+                reconnect_error.to_string().contains("requested reconnect"),
+                "reconnect cycle should surface stable reconnect error"
+            );
+            handle_gateway_envelope(
+                &mut sink,
+                DiscordGatewayEnvelope {
+                    op: 10,
+                    data: json!({ "heartbeat_interval": 6_000 + cycle as i64 }),
+                    seq: None,
+                    event_type: None,
+                },
+                &context,
+                "super-secret-token",
+                &mut resume_state,
+                &mut heartbeat,
+                &mut hello_received,
+            )
+            .await
+            .expect("follow-up hello should continue to resume");
+        }
+
+        let sent_payloads = sink.sent_payloads();
+        let identify_count = sent_payloads
+            .iter()
+            .filter(|payload| payload.get("op").and_then(Value::as_i64) == Some(2))
+            .count();
+        let resume_count = sent_payloads
+            .iter()
+            .filter(|payload| payload.get("op").and_then(Value::as_i64) == Some(6))
+            .count();
+        assert_eq!(identify_count, 1, "soak should identify exactly once");
+        assert_eq!(resume_count, CYCLES, "every reconnect cycle should resume exactly once");
+        assert_eq!(resume_state.session_id.as_deref(), Some("session-1"));
+        assert_eq!(resume_state.bot_user_id.as_deref(), Some("bot-1"));
+        assert_eq!(resume_state.seq, Some(41 + CYCLES as i64));
+
+        let mut inbound_count = 0_usize;
+        while let Ok(inbound) = receiver.try_recv() {
+            inbound_count = inbound_count.saturating_add(1);
+            assert_eq!(inbound.connector_id, "discord:default");
+            assert_eq!(inbound.conversation_id, "thread-123");
+            assert_eq!(inbound.sender_id, "user-7");
+        }
+        assert_eq!(inbound_count, CYCLES, "each cycle should still surface one inbound message");
+        let runtime = runtime_state.lock().expect("runtime state lock should not be poisoned");
+        assert_eq!(runtime.gateway_last_event_type.as_deref(), Some("MESSAGE_CREATE"));
+        assert!(runtime.last_inbound_unix_ms.is_some(), "soak should keep inbound heartbeat fresh");
+    }
+
+    #[tokio::test]
     async fn gateway_envelope_invalid_non_resumable_session_clears_resume_cursor() {
         let transport = Arc::new(FakeTransport::default());
         let (sender, _receiver) = mpsc::channel(1);
@@ -2764,6 +2939,14 @@ struct DiscordBotIdentity {
 struct RouteRateLimitWindow {
     bucket_id: Option<String>,
     blocked_until_unix_ms: i64,
+    attempts_total: u64,
+    delivered_total: u64,
+    local_deferrals_total: u64,
+    upstream_rate_limits_total: u64,
+    transient_failures_total: u64,
+    last_retry_after_ms: Option<u64>,
+    last_status: Option<u16>,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3019,6 +3202,103 @@ impl DiscordConnectorAdapter {
         Ok(())
     }
 
+    fn with_route_window_mut<F>(
+        &self,
+        route_key: &str,
+        callback: F,
+    ) -> Result<(), ConnectorAdapterError>
+    where
+        F: FnOnce(&mut RouteRateLimitWindow),
+    {
+        let mut state = self.lock_state()?;
+        let entry = state
+            .route_limits
+            .entry(route_key.to_owned())
+            .or_insert_with(RouteRateLimitWindow::default);
+        callback(entry);
+        if !state.route_limit_order.iter().any(|item| item == route_key) {
+            state.route_limit_order.push_back(route_key.to_owned());
+        }
+        while state.route_limit_order.len() > MAX_ROUTE_LIMIT_CACHE {
+            if let Some(stale) = state.route_limit_order.pop_front() {
+                state.route_limits.remove(stale.as_str());
+            }
+        }
+        Ok(())
+    }
+
+    fn record_route_attempt(&self, route_key: &str) -> Result<(), ConnectorAdapterError> {
+        self.with_route_window_mut(route_key, |window| {
+            window.attempts_total = window.attempts_total.saturating_add(1);
+        })
+    }
+
+    fn record_route_delivery(
+        &self,
+        route_key: &str,
+        status: u16,
+    ) -> Result<(), ConnectorAdapterError> {
+        self.with_route_window_mut(route_key, |window| {
+            window.delivered_total = window.delivered_total.saturating_add(1);
+            window.last_status = Some(status);
+            window.last_error = None;
+        })
+    }
+
+    fn record_route_local_deferral(
+        &self,
+        route_key: &str,
+        retry_after_ms: u64,
+        reason: &str,
+    ) -> Result<(), ConnectorAdapterError> {
+        let sanitized = redact_auth_error(reason);
+        self.with_route_window_mut(route_key, |window| {
+            window.local_deferrals_total = window.local_deferrals_total.saturating_add(1);
+            window.last_retry_after_ms = Some(retry_after_ms);
+            window.last_error = Some(sanitized);
+        })
+    }
+
+    fn record_route_transient_failure(
+        &self,
+        route_key: &str,
+        reason: &str,
+    ) -> Result<(), ConnectorAdapterError> {
+        let sanitized = redact_auth_error(reason);
+        self.with_route_window_mut(route_key, |window| {
+            window.transient_failures_total = window.transient_failures_total.saturating_add(1);
+            window.last_error = Some(sanitized);
+        })
+    }
+
+    fn record_route_upstream_rate_limit(
+        &self,
+        route_key: &str,
+        retry_after_ms: u64,
+        reason: &str,
+    ) -> Result<(), ConnectorAdapterError> {
+        let sanitized = redact_auth_error(reason);
+        self.with_route_window_mut(route_key, |window| {
+            window.upstream_rate_limits_total = window.upstream_rate_limits_total.saturating_add(1);
+            window.last_retry_after_ms = Some(retry_after_ms);
+            window.last_status = Some(429);
+            window.last_error = Some(sanitized);
+        })
+    }
+
+    fn record_route_failure_status(
+        &self,
+        route_key: &str,
+        status: u16,
+        reason: &str,
+    ) -> Result<(), ConnectorAdapterError> {
+        let sanitized = redact_auth_error(reason);
+        self.with_route_window_mut(route_key, |window| {
+            window.last_status = Some(status);
+            window.last_error = Some(sanitized);
+        })
+    }
+
     fn record_last_error(&self, message: &str) {
         let sanitized = redact_auth_error(message);
         if let Ok(mut state) = self.lock_state() {
@@ -3047,12 +3327,51 @@ impl DiscordConnectorAdapter {
         let mut state = self.lock_state()?;
         if state.global_blocked_until_unix_ms > now_unix_ms {
             let wait = state.global_blocked_until_unix_ms.saturating_sub(now_unix_ms);
-            return Ok(Some(wait.max(1).try_into().unwrap_or(u64::MAX)));
+            let wait_ms = wait.max(1).try_into().unwrap_or(u64::MAX);
+            let entry = state
+                .route_limits
+                .entry(route_key.to_owned())
+                .or_insert_with(RouteRateLimitWindow::default);
+            entry.local_deferrals_total = entry.local_deferrals_total.saturating_add(1);
+            entry.last_retry_after_ms = Some(wait_ms);
+            entry.last_error = Some(
+                "discord outbound deferred due to local route/global rate-limit budget".to_owned(),
+            );
+            if !state.route_limit_order.iter().any(|item| item == route_key) {
+                state.route_limit_order.push_back(route_key.to_owned());
+            }
+            while state.route_limit_order.len() > MAX_ROUTE_LIMIT_CACHE {
+                if let Some(stale) = state.route_limit_order.pop_front() {
+                    state.route_limits.remove(stale.as_str());
+                }
+            }
+            return Ok(Some(wait_ms));
         }
-        if let Some(window) = state.route_limits.get(route_key) {
-            if window.blocked_until_unix_ms > now_unix_ms {
-                let wait = window.blocked_until_unix_ms.saturating_sub(now_unix_ms);
-                return Ok(Some(wait.max(1).try_into().unwrap_or(u64::MAX)));
+        let route_blocked_until =
+            state.route_limits.get(route_key).map(|window| window.blocked_until_unix_ms);
+        if let Some(blocked_until_unix_ms) = route_blocked_until {
+            if blocked_until_unix_ms > now_unix_ms {
+                let wait = blocked_until_unix_ms.saturating_sub(now_unix_ms);
+                let wait_ms = wait.max(1).try_into().unwrap_or(u64::MAX);
+                let entry = state
+                    .route_limits
+                    .entry(route_key.to_owned())
+                    .or_insert_with(RouteRateLimitWindow::default);
+                entry.local_deferrals_total = entry.local_deferrals_total.saturating_add(1);
+                entry.last_retry_after_ms = Some(wait_ms);
+                entry.last_error = Some(
+                    "discord outbound deferred due to local route/global rate-limit budget"
+                        .to_owned(),
+                );
+                if !state.route_limit_order.iter().any(|item| item == route_key) {
+                    state.route_limit_order.push_back(route_key.to_owned());
+                }
+                while state.route_limit_order.len() > MAX_ROUTE_LIMIT_CACHE {
+                    if let Some(stale) = state.route_limit_order.pop_front() {
+                        state.route_limits.remove(stale.as_str());
+                    }
+                }
+                return Ok(Some(wait_ms));
             }
             state.route_limits.remove(route_key);
             state.route_limit_order.retain(|entry| entry != route_key);
@@ -3106,6 +3425,14 @@ impl DiscordConnectorAdapter {
             entry.bucket_id = Some(bucket_id);
         }
         entry.blocked_until_unix_ms = entry.blocked_until_unix_ms.max(blocked_until);
+        entry.last_retry_after_ms =
+            snapshot.retry_after_ms.or(snapshot.reset_after_ms).or_else(|| {
+                if blocked_until > now_unix_ms {
+                    Some(blocked_until.saturating_sub(now_unix_ms).try_into().unwrap_or(u64::MAX))
+                } else {
+                    None
+                }
+            });
 
         if !state.route_limit_order.iter().any(|item| item == route_key) {
             state.route_limit_order.push_back(route_key.to_owned());
@@ -3138,12 +3465,18 @@ impl DiscordConnectorAdapter {
 
         let route_key = "discord:get:/users/@me";
         if let Some(retry_after_ms) = self.preflight_retry_after_ms(route_key, now_unix_ms)? {
+            self.record_route_local_deferral(
+                route_key,
+                retry_after_ms,
+                "discord identity lookup deferred by local rate-limit budget",
+            )?;
             return Ok(Some(DeliveryOutcome::Retry {
                 class: RetryClass::RateLimit,
                 reason: "discord identity lookup deferred by local rate-limit budget".to_owned(),
                 retry_after_ms: Some(retry_after_ms),
             }));
         }
+        self.record_route_attempt(route_key)?;
 
         let url = build_users_me_url(&self.config.api_base_url)?;
         self.validate_url_target(guard, &url)?;
@@ -3156,6 +3489,7 @@ impl DiscordConnectorAdapter {
             Err(error) => {
                 let reason = redact_auth_error(error.to_string().as_str());
                 self.record_last_error(reason.as_str());
+                self.record_route_transient_failure(route_key, reason.as_str())?;
                 return Ok(Some(DeliveryOutcome::Retry {
                     class: RetryClass::TransientNetwork,
                     reason,
@@ -3179,6 +3513,7 @@ impl DiscordConnectorAdapter {
                     .unwrap_or_else(|| "retry later".to_owned())
             );
             self.record_last_error(reason.as_str());
+            self.record_route_upstream_rate_limit(route_key, retry_after_ms, reason.as_str())?;
             return Ok(Some(DeliveryOutcome::Retry {
                 class: RetryClass::RateLimit,
                 reason,
@@ -3194,6 +3529,7 @@ impl DiscordConnectorAdapter {
                     .unwrap_or_else(|| "unauthorized".to_owned())
             );
             self.record_last_error(reason.as_str());
+            self.record_route_failure_status(route_key, response.status, reason.as_str())?;
             return Ok(Some(DeliveryOutcome::PermanentFailure {
                 reason: redact_auth_error(reason.as_str()),
             }));
@@ -3203,6 +3539,8 @@ impl DiscordConnectorAdapter {
             let reason =
                 format!("discord identity lookup failed with upstream status {}", response.status);
             self.record_last_error(reason.as_str());
+            self.record_route_transient_failure(route_key, reason.as_str())?;
+            self.record_route_failure_status(route_key, response.status, reason.as_str())?;
             return Ok(Some(DeliveryOutcome::Retry {
                 class: RetryClass::TransientNetwork,
                 reason,
@@ -3218,6 +3556,7 @@ impl DiscordConnectorAdapter {
                     .unwrap_or_else(|| "unexpected response".to_owned())
             );
             self.record_last_error(reason.as_str());
+            self.record_route_failure_status(route_key, response.status, reason.as_str())?;
             return Ok(Some(DeliveryOutcome::PermanentFailure {
                 reason: redact_auth_error(reason.as_str()),
             }));
@@ -3240,6 +3579,8 @@ impl DiscordConnectorAdapter {
         let mut state = self.lock_state()?;
         state.bot_identity = Some(DiscordBotIdentity { id, username });
         state.bot_identity_checked_at_unix_ms = Some(now_unix_ms);
+        drop(state);
+        self.record_route_delivery(route_key, response.status)?;
         Ok(None)
     }
 
@@ -3267,7 +3608,17 @@ impl DiscordConnectorAdapter {
 
         let route_key = format!("discord:put:/channels/{channel_id}/messages/reactions");
         let now_unix_ms = unix_ms_now();
-        if self.preflight_retry_after_ms(route_key.as_str(), now_unix_ms).ok().flatten().is_some() {
+        if let Some(retry_after_ms) =
+            self.preflight_retry_after_ms(route_key.as_str(), now_unix_ms).ok().flatten()
+        {
+            let _ = self.record_route_local_deferral(
+                route_key.as_str(),
+                retry_after_ms,
+                "discord reaction deferred by local route/global rate-limit budget",
+            );
+            return;
+        }
+        if self.record_route_attempt(route_key.as_str()).is_err() {
             return;
         }
 
@@ -3279,6 +3630,8 @@ impl DiscordConnectorAdapter {
             Ok(response) => response,
             Err(error) => {
                 self.record_last_error(error.to_string().as_str());
+                let _ = self
+                    .record_route_transient_failure(route_key.as_str(), error.to_string().as_str());
                 return;
             }
         };
@@ -3299,6 +3652,13 @@ impl DiscordConnectorAdapter {
                     .unwrap_or_else(|| "reaction rejected".to_owned())
             );
             self.record_last_error(reason.as_str());
+            let _ = self.record_route_failure_status(
+                route_key.as_str(),
+                response.status,
+                reason.as_str(),
+            );
+        } else {
+            let _ = self.record_route_delivery(route_key.as_str(), response.status);
         }
     }
 }

@@ -15,7 +15,10 @@ use crate::{
         ConnectorReadiness, ConnectorStatusSnapshot, DeliveryOutcome, InboundMessageEvent,
         OutboundMessageRequest, RetryClass, RouteInboundResult,
     },
-    storage::{ConnectorStore, ConnectorStoreError, OutboxEnqueueOutcome, OutboxEntryRecord},
+    storage::{
+        ConnectorQueueSnapshot, ConnectorStore, ConnectorStoreError, DeadLetterRecord,
+        OutboxEnqueueOutcome, OutboxEntryRecord,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -101,6 +104,12 @@ struct ConnectorRuntimeMetricsSnapshot {
     outbound_sends_dead_letter: u64,
     route_message_latency_ms: RouteMessageLatencySnapshot,
     policy_denials: Vec<PolicyDenialReasonCount>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConnectorSaturationSnapshot {
+    state: &'static str,
+    reasons: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -301,6 +310,7 @@ impl ConnectorSupervisor {
         let Some(instance) = self.store.get_instance(connector_id)? else {
             return Err(ConnectorSupervisorError::NotFound(connector_id.to_owned()));
         };
+        let queue = self.queue_snapshot(instance.connector_id.as_str())?;
         let adapter_runtime = self
             .adapters
             .get(&instance.kind)
@@ -317,6 +327,8 @@ impl ConnectorSupervisor {
         };
         if let Some(object) = runtime.as_object_mut() {
             object.insert("metrics".to_owned(), json!(metrics));
+            object.insert("queue".to_owned(), json!(queue));
+            object.insert("saturation".to_owned(), json!(build_saturation_snapshot(&queue)));
         }
         Ok(Some(runtime))
     }
@@ -416,8 +428,85 @@ impl ConnectorSupervisor {
         &self,
         connector_id: &str,
         limit: usize,
-    ) -> Result<Vec<crate::storage::DeadLetterRecord>, ConnectorSupervisorError> {
+    ) -> Result<Vec<DeadLetterRecord>, ConnectorSupervisorError> {
         self.store.list_dead_letters(connector_id, limit).map_err(ConnectorSupervisorError::from)
+    }
+
+    pub fn queue_snapshot(
+        &self,
+        connector_id: &str,
+    ) -> Result<ConnectorQueueSnapshot, ConnectorSupervisorError> {
+        let now = unix_ms_now()?;
+        self.store.queue_snapshot(connector_id, now).map_err(ConnectorSupervisorError::from)
+    }
+
+    pub fn set_queue_paused(
+        &self,
+        connector_id: &str,
+        paused: bool,
+        reason: Option<&str>,
+    ) -> Result<ConnectorQueueSnapshot, ConnectorSupervisorError> {
+        let now = unix_ms_now()?;
+        self.store.set_queue_paused(connector_id, paused, reason, now)?;
+        self.store.record_event(
+            connector_id,
+            if paused { "queue.paused" } else { "queue.resumed" },
+            "info",
+            if paused { "connector outbox queue paused" } else { "connector outbox queue resumed" },
+            Some(&json!({
+                "paused": paused,
+                "reason": reason,
+            })),
+            now,
+        )?;
+        self.queue_snapshot(connector_id)
+    }
+
+    pub fn replay_dead_letter(
+        &self,
+        connector_id: &str,
+        dead_letter_id: i64,
+    ) -> Result<DeadLetterRecord, ConnectorSupervisorError> {
+        let now = unix_ms_now()?;
+        let replayed = self.store.replay_dead_letter(
+            connector_id,
+            dead_letter_id,
+            self.config.max_retry_attempts,
+            now,
+        )?;
+        self.store.record_event(
+            connector_id,
+            "dead_letter.replayed",
+            "info",
+            "dead-letter entry replayed into outbox",
+            Some(&json!({
+                "dead_letter_id": dead_letter_id,
+                "envelope_id": replayed.envelope_id,
+            })),
+            now,
+        )?;
+        Ok(replayed)
+    }
+
+    pub fn discard_dead_letter(
+        &self,
+        connector_id: &str,
+        dead_letter_id: i64,
+    ) -> Result<DeadLetterRecord, ConnectorSupervisorError> {
+        let now = unix_ms_now()?;
+        let discarded = self.store.discard_dead_letter(connector_id, dead_letter_id)?;
+        self.store.record_event(
+            connector_id,
+            "dead_letter.discarded",
+            "info",
+            "dead-letter entry discarded by operator",
+            Some(&json!({
+                "dead_letter_id": dead_letter_id,
+                "envelope_id": discarded.envelope_id,
+            })),
+            now,
+        )?;
+        Ok(discarded)
     }
 
     pub fn enqueue_outbound(
@@ -690,7 +779,7 @@ impl ConnectorSupervisor {
         limit: usize,
     ) -> Result<DrainOutcome, ConnectorSupervisorError> {
         let now = unix_ms_now()?;
-        let entries = self.store.load_due_outbox(now, limit, None)?;
+        let entries = self.store.load_due_outbox(now, limit, None, false)?;
         self.process_due_entries(entries).await
     }
 
@@ -700,7 +789,17 @@ impl ConnectorSupervisor {
         limit: usize,
     ) -> Result<DrainOutcome, ConnectorSupervisorError> {
         let now = unix_ms_now()?;
-        let entries = self.store.load_due_outbox(now, limit, Some(connector_id))?;
+        let entries = self.store.load_due_outbox(now, limit, Some(connector_id), false)?;
+        self.process_due_entries(entries).await
+    }
+
+    pub async fn drain_due_outbox_for_connector_force(
+        &self,
+        connector_id: &str,
+        limit: usize,
+    ) -> Result<DrainOutcome, ConnectorSupervisorError> {
+        let now = unix_ms_now()?;
+        let entries = self.store.load_due_outbox(now, limit, Some(connector_id), true)?;
         self.process_due_entries(entries).await
     }
 
@@ -902,9 +1001,10 @@ impl ConnectorSupervisor {
                     reason.as_str(),
                     now_unix_ms,
                 )?;
+                let readiness = classify_permanent_failure(reason.as_str());
                 self.store.set_instance_runtime_state(
                     instance.connector_id.as_str(),
-                    ConnectorReadiness::Misconfigured,
+                    readiness,
                     ConnectorLiveness::Running,
                     Some(reason.as_str()),
                     now_unix_ms,
@@ -939,6 +1039,21 @@ impl ConnectorSupervisor {
     }
 }
 
+fn classify_permanent_failure(reason: &str) -> ConnectorReadiness {
+    let normalized = reason.trim().to_ascii_lowercase();
+    if normalized.contains("credential missing") || normalized.contains("missing credential") {
+        return ConnectorReadiness::MissingCredential;
+    }
+    if normalized.contains("auth")
+        || normalized.contains("token")
+        || normalized.contains("unauthorized")
+        || normalized.contains("forbidden")
+    {
+        return ConnectorReadiness::AuthFailed;
+    }
+    ConnectorReadiness::Misconfigured
+}
+
 fn parse_route_message_latency_ms(details: &Value) -> Option<u64> {
     details.get("route_message_latency_ms").and_then(Value::as_u64)
 }
@@ -950,6 +1065,35 @@ fn is_policy_denial_reason(reason: &str) -> bool {
             | "backpressure_retry_enqueue_failed"
             | "backpressure_poison_quarantine"
     )
+}
+
+fn build_saturation_snapshot(queue: &ConnectorQueueSnapshot) -> ConnectorSaturationSnapshot {
+    let mut reasons = Vec::new();
+    if queue.paused {
+        reasons.push("queue_paused".to_owned());
+    }
+    if queue.due_outbox > 0 {
+        reasons.push(format!("due_outbox={}", queue.due_outbox));
+    }
+    if queue.claimed_outbox > 0 {
+        reasons.push(format!("claimed_outbox={}", queue.claimed_outbox));
+    }
+    if queue.dead_letters > 0 {
+        reasons.push(format!("dead_letters={}", queue.dead_letters));
+    }
+    if queue.pending_outbox > queue.due_outbox && queue.pending_outbox > 0 {
+        reasons.push(format!("pending_outbox={}", queue.pending_outbox));
+    }
+    let state = if queue.paused {
+        "paused"
+    } else if queue.dead_letters > 0 || queue.claimed_outbox > 0 || queue.due_outbox >= 8 {
+        "saturated"
+    } else if queue.pending_outbox > 0 || queue.due_outbox > 0 {
+        "backlogged"
+    } else {
+        "nominal"
+    };
+    ConnectorSaturationSnapshot { state, reasons }
 }
 
 fn unix_ms_now() -> Result<i64, ConnectorSupervisorError> {
@@ -971,8 +1115,8 @@ mod tests {
 
     use crate::{
         protocol::{
-            ConnectorAvailability, ConnectorInstanceSpec, ConnectorKind, DeliveryOutcome,
-            OutboundMessageRequest, RetryClass, RoutedOutboundMessage,
+            ConnectorAvailability, ConnectorInstanceSpec, ConnectorKind, ConnectorReadiness,
+            DeliveryOutcome, OutboundMessageRequest, RetryClass, RoutedOutboundMessage,
         },
         storage::ConnectorStore,
     };
@@ -1159,6 +1303,29 @@ mod tests {
         }
     }
 
+    struct PermanentFailureAdapter {
+        reason: &'static str,
+    }
+
+    #[async_trait]
+    impl ConnectorAdapter for PermanentFailureAdapter {
+        fn kind(&self) -> ConnectorKind {
+            ConnectorKind::Echo
+        }
+
+        fn availability(&self) -> ConnectorAvailability {
+            ConnectorAvailability::InternalTestOnly
+        }
+
+        async fn send_outbound(
+            &self,
+            _instance: &crate::storage::ConnectorInstanceRecord,
+            _request: &crate::protocol::OutboundMessageRequest,
+        ) -> Result<DeliveryOutcome, ConnectorAdapterError> {
+            Ok(DeliveryOutcome::PermanentFailure { reason: self.reason.to_owned() })
+        }
+    }
+
     fn open_supervisor() -> (TempDir, ConnectorSupervisor, Arc<FlakyAdapter>) {
         let tempdir = TempDir::new().expect("tempdir should initialize");
         let store = std::sync::Arc::new(
@@ -1223,6 +1390,25 @@ mod tests {
             is_direct_message: true,
             requested_broadcast: false,
             attachments: Vec::new(),
+        }
+    }
+
+    fn sample_outbound_request(envelope_id: &str, text: &str) -> OutboundMessageRequest {
+        OutboundMessageRequest {
+            envelope_id: envelope_id.to_owned(),
+            connector_id: "echo:default".to_owned(),
+            conversation_id: "c1".to_owned(),
+            reply_thread_id: None,
+            in_reply_to_message_id: None,
+            text: text.to_owned(),
+            broadcast: false,
+            auto_ack_text: None,
+            auto_reaction: None,
+            attachments: Vec::new(),
+            structured_json: None,
+            a2ui_update: None,
+            timeout_ms: 30_000,
+            max_payload_bytes: 16_384,
         }
     }
 
@@ -1417,6 +1603,223 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_and_discard_dead_letter_update_queue_state() {
+        let (_tempdir, supervisor, _adapter) = open_supervisor();
+        supervisor.register_connector(&sample_spec()).expect("register should succeed");
+
+        let outbound = sample_outbound_request("env-dead-letter", "hello [connector-crash-once]");
+        supervisor
+            .store()
+            .enqueue_outbox_if_absent(&outbound, 5, 1_000)
+            .expect("enqueue should succeed");
+        let due = supervisor
+            .store()
+            .load_due_outbox(1_000, 1, Some("echo:default"), false)
+            .expect("due outbox query should succeed");
+        let entry = due.first().expect("entry should be claimed");
+        supervisor
+            .store()
+            .move_outbox_to_dead_letter(
+                entry.outbox_id,
+                entry.claim_token.as_str(),
+                "manual dead",
+                1_100,
+            )
+            .expect("dead letter move should succeed");
+
+        let dead_letter = supervisor
+            .list_dead_letters("echo:default", 10)
+            .expect("dead letter list should succeed")
+            .into_iter()
+            .next()
+            .expect("dead letter should exist");
+        supervisor
+            .replay_dead_letter("echo:default", dead_letter.dead_letter_id)
+            .expect("replay should succeed");
+        let queue_after_replay = supervisor
+            .queue_snapshot("echo:default")
+            .expect("queue snapshot after replay should succeed");
+        assert_eq!(queue_after_replay.pending_outbox, 1);
+        assert_eq!(queue_after_replay.dead_letters, 0);
+
+        let replayed_dead = supervisor
+            .store()
+            .load_due_outbox(
+                super::unix_ms_now().expect("clock should be available").saturating_add(1),
+                1,
+                Some("echo:default"),
+                false,
+            )
+            .expect("replayed outbox should be due")
+            .into_iter()
+            .next()
+            .expect("replayed row should exist");
+        supervisor
+            .store()
+            .move_outbox_to_dead_letter(
+                replayed_dead.outbox_id,
+                replayed_dead.claim_token.as_str(),
+                "dead again",
+                1_300,
+            )
+            .expect("dead letter move after replay should succeed");
+        let redied = supervisor
+            .list_dead_letters("echo:default", 10)
+            .expect("dead letter list should remain readable")
+            .into_iter()
+            .next()
+            .expect("dead letter should exist after replay");
+        supervisor
+            .discard_dead_letter("echo:default", redied.dead_letter_id)
+            .expect("discard should succeed");
+        let queue_after_discard = supervisor
+            .queue_snapshot("echo:default")
+            .expect("queue snapshot after discard should succeed");
+        assert_eq!(queue_after_discard.dead_letters, 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_dead_letter_recovery_cycles_keep_queue_accounting_stable() {
+        let (_tempdir, supervisor, _adapter) = open_supervisor();
+        supervisor.register_connector(&sample_spec()).expect("register should succeed");
+
+        const CYCLES: usize = 8;
+        for cycle in 0..CYCLES {
+            let enqueue_time = 2_000_i64 + (cycle as i64 * 100);
+            let envelope_id = format!("env-dead-letter-soak-{cycle}");
+            let outbound = sample_outbound_request(
+                envelope_id.as_str(),
+                format!("dead letter cycle {cycle}").as_str(),
+            );
+            supervisor
+                .store()
+                .enqueue_outbox_if_absent(&outbound, 5, enqueue_time)
+                .expect("enqueue should succeed");
+            let claimed = supervisor
+                .store()
+                .load_due_outbox(enqueue_time, 1, Some("echo:default"), false)
+                .expect("due outbox query should succeed")
+                .into_iter()
+                .find(|entry| entry.envelope_id == envelope_id)
+                .expect("cycle outbox row should be claimed");
+            supervisor
+                .store()
+                .move_outbox_to_dead_letter(
+                    claimed.outbox_id,
+                    claimed.claim_token.as_str(),
+                    format!("manual dead {cycle}").as_str(),
+                    enqueue_time + 1,
+                )
+                .expect("dead letter move should succeed");
+
+            let dead_letter = supervisor
+                .list_dead_letters("echo:default", 16)
+                .expect("dead letter list should succeed")
+                .into_iter()
+                .find(|entry| entry.envelope_id == envelope_id)
+                .expect("cycle dead letter should exist");
+            let replayed = supervisor
+                .replay_dead_letter("echo:default", dead_letter.dead_letter_id)
+                .expect("replay should succeed");
+            assert_eq!(replayed.envelope_id, envelope_id);
+
+            let queue_after_replay = supervisor
+                .queue_snapshot("echo:default")
+                .expect("queue snapshot after replay should succeed");
+            assert_eq!(queue_after_replay.pending_outbox, 1);
+            assert_eq!(queue_after_replay.dead_letters, 0);
+
+            let replayed_entry = supervisor
+                .store()
+                .load_due_outbox(
+                    super::unix_ms_now().expect("clock should be available").saturating_add(1),
+                    1,
+                    Some("echo:default"),
+                    false,
+                )
+                .expect("replayed outbox should be due")
+                .into_iter()
+                .find(|entry| entry.envelope_id == envelope_id)
+                .expect("replayed cycle row should be claimed");
+            supervisor
+                .store()
+                .move_outbox_to_dead_letter(
+                    replayed_entry.outbox_id,
+                    replayed_entry.claim_token.as_str(),
+                    format!("dead again {cycle}").as_str(),
+                    enqueue_time + 3,
+                )
+                .expect("replayed outbox should move back to dead letters");
+            let redied = supervisor
+                .list_dead_letters("echo:default", 16)
+                .expect("redied dead letter list should succeed")
+                .into_iter()
+                .find(|entry| entry.envelope_id == envelope_id)
+                .expect("redied dead letter should exist");
+            let discarded = supervisor
+                .discard_dead_letter("echo:default", redied.dead_letter_id)
+                .expect("discard should succeed");
+            assert_eq!(discarded.envelope_id, envelope_id);
+
+            let queue_after_discard = supervisor
+                .queue_snapshot("echo:default")
+                .expect("queue snapshot after discard should succeed");
+            assert_eq!(queue_after_discard.pending_outbox, 0);
+            assert_eq!(queue_after_discard.due_outbox, 0);
+            assert_eq!(queue_after_discard.claimed_outbox, 0);
+            assert_eq!(queue_after_discard.dead_letters, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_auth_failure_sets_auth_failed_readiness() {
+        let tempdir = TempDir::new().expect("tempdir should initialize");
+        let store = Arc::new(
+            ConnectorStore::open(tempdir.path().join("connectors.sqlite3"))
+                .expect("store should initialize"),
+        );
+        let adapter = Arc::new(PermanentFailureAdapter {
+            reason: "discord authentication failed during outbound send (status=401): unauthorized",
+        });
+        let supervisor = ConnectorSupervisor::new(
+            store,
+            Arc::new(RouterStub),
+            vec![adapter],
+            ConnectorSupervisorConfig {
+                min_retry_delay_ms: 1,
+                base_retry_delay_ms: 1,
+                max_retry_delay_ms: 8,
+                ..ConnectorSupervisorConfig::default()
+            },
+        );
+        supervisor.register_connector(&sample_spec()).expect("register should succeed");
+        let outbound = OutboundMessageRequest {
+            envelope_id: "env-auth-failure".to_owned(),
+            connector_id: "echo:default".to_owned(),
+            conversation_id: "c1".to_owned(),
+            reply_thread_id: None,
+            in_reply_to_message_id: None,
+            text: "auth failure".to_owned(),
+            broadcast: false,
+            auto_ack_text: None,
+            auto_reaction: None,
+            attachments: Vec::new(),
+            structured_json: None,
+            a2ui_update: None,
+            timeout_ms: 30_000,
+            max_payload_bytes: 16_384,
+        };
+        supervisor.enqueue_outbound(&outbound).expect("enqueue should succeed");
+        let drain = supervisor
+            .drain_due_outbox_for_connector("echo:default", 1)
+            .await
+            .expect("drain should succeed");
+        assert_eq!(drain.dead_lettered, 1, "permanent auth failure should dead-letter the entry");
+        let status = supervisor.status("echo:default").expect("status should resolve");
+        assert_eq!(status.readiness, ConnectorReadiness::AuthFailed);
+    }
+
+    #[tokio::test]
     async fn runtime_snapshot_reports_connector_metrics() {
         let (_tempdir, supervisor, _adapter) = open_supervisor();
         supervisor.register_connector(&sample_spec()).expect("register should succeed");
@@ -1458,6 +1861,64 @@ mod tests {
             route_latency.get("sample_count").and_then(Value::as_u64).unwrap_or(0) >= 1,
             "route latency summary should include at least one sample"
         );
+        let queue = runtime
+            .get("queue")
+            .and_then(Value::as_object)
+            .expect("runtime snapshot should include queue object");
+        assert_eq!(
+            queue.get("pending_outbox").and_then(Value::as_u64),
+            Some(0),
+            "successful immediate drain should leave no pending outbox entries"
+        );
+        assert_eq!(
+            runtime
+                .get("saturation")
+                .and_then(Value::as_object)
+                .and_then(|value| value.get("state"))
+                .and_then(Value::as_str),
+            Some("nominal"),
+            "empty queue should report nominal saturation"
+        );
+    }
+
+    #[tokio::test]
+    async fn pausing_queue_blocks_background_drain_until_force_drained() {
+        let (_tempdir, supervisor, _adapter) = open_supervisor();
+        supervisor.register_connector(&sample_spec()).expect("register should succeed");
+        supervisor
+            .enqueue_outbound(&OutboundMessageRequest {
+                envelope_id: "env-pause".to_owned(),
+                connector_id: "echo:default".to_owned(),
+                conversation_id: "c1".to_owned(),
+                reply_thread_id: None,
+                in_reply_to_message_id: None,
+                text: "pause me".to_owned(),
+                broadcast: false,
+                auto_ack_text: None,
+                auto_reaction: None,
+                attachments: Vec::new(),
+                structured_json: None,
+                a2ui_update: None,
+                timeout_ms: 30_000,
+                max_payload_bytes: 16_384,
+            })
+            .expect("enqueue should succeed");
+        let paused = supervisor
+            .set_queue_paused("echo:default", true, Some("operator_pause"))
+            .expect("queue pause should succeed");
+        assert!(paused.paused, "queue snapshot should report paused state");
+
+        let background = supervisor
+            .drain_due_outbox_for_connector("echo:default", 10)
+            .await
+            .expect("background drain should succeed");
+        assert_eq!(background.processed, 0, "paused queue should not drain in background mode");
+
+        let force = supervisor
+            .drain_due_outbox_for_connector_force("echo:default", 10)
+            .await
+            .expect("force drain should succeed");
+        assert_eq!(force.delivered, 1, "force drain should still dispatch queued work");
     }
 
     #[test]

@@ -6,6 +6,14 @@ export type JsonValue =
   | { [key: string]: JsonValue }
   | JsonValue[];
 
+type ChannelStatusEnvelope = {
+  connector: JsonValue;
+  runtime?: JsonValue;
+  operations?: JsonValue;
+  health_refresh?: JsonValue;
+  action?: JsonValue;
+};
+
 export interface ChatSessionRecord {
   session_id: string;
   session_key: string;
@@ -1043,7 +1051,9 @@ export class ConsoleApiClient {
     return this.request("/console/v1/channels");
   }
 
-  async getChannelStatus(connectorId: string): Promise<{ connector: JsonValue }> {
+  async getChannelStatus(
+    connectorId: string
+  ): Promise<ChannelStatusEnvelope> {
     return this.request(`/console/v1/channels/${encodeURIComponent(connectorId)}`);
   }
 
@@ -1108,6 +1118,66 @@ export class ConsoleApiClient {
         method: "POST",
         body: JSON.stringify(payload)
       },
+      { csrf: true }
+    );
+  }
+
+  async refreshChannelHealth(
+    connectorId: string,
+    payload: { verify_channel_id?: string }
+  ): Promise<ChannelStatusEnvelope> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/health-refresh`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      { csrf: true }
+    );
+  }
+
+  async pauseChannelQueue(connectorId: string): Promise<ChannelStatusEnvelope> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/queue/pause`,
+      { method: "POST" },
+      { csrf: true }
+    );
+  }
+
+  async resumeChannelQueue(connectorId: string): Promise<ChannelStatusEnvelope> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/queue/resume`,
+      { method: "POST" },
+      { csrf: true }
+    );
+  }
+
+  async drainChannelQueue(connectorId: string): Promise<ChannelStatusEnvelope> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/queue/drain`,
+      { method: "POST" },
+      { csrf: true }
+    );
+  }
+
+  async replayChannelDeadLetter(
+    connectorId: string,
+    deadLetterId: number
+  ): Promise<ChannelStatusEnvelope> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/dead-letters/${deadLetterId}/replay`,
+      { method: "POST" },
+      { csrf: true }
+    );
+  }
+
+  async discardChannelDeadLetter(
+    connectorId: string,
+    deadLetterId: number
+  ): Promise<ChannelStatusEnvelope> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/dead-letters/${deadLetterId}/discard`,
+      { method: "POST" },
       { csrf: true }
     );
   }

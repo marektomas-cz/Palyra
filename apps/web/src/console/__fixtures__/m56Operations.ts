@@ -147,6 +147,34 @@ export function channelStatusFixture() {
         },
       },
     },
+    operations: {
+      queue: {
+        pending_outbox: 2,
+        due_outbox: 1,
+        claimed_outbox: 0,
+        dead_letters: 1,
+        paused: true,
+        pause_reason: "operator requested queue pause via console",
+      },
+      saturation: {
+        state: "paused",
+        reasons: ["queue_paused", "pause_reason=operator requested queue pause via console"],
+      },
+      last_auth_failure: "discord token validation failed",
+      rate_limits: {
+        global_retry_after_ms: 500,
+        active_route_limits: 1,
+      },
+      discord: {
+        last_permission_failure: "missing permissions: send messages",
+      },
+    },
+    health_refresh: {
+      supported: true,
+      refreshed: false,
+      message: "discord token missing",
+      required_permissions: ["ViewChannel", "SendMessages"],
+    },
   };
 }
 

@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import { ConsoleApiClient, type ConsoleSession, type JsonValue } from "../consoleApi";
+import { createChannelDomain } from "./channelDomain";
 import { useAuthDomain } from "./hooks/useAuthDomain";
 import { useConfigDomain } from "./hooks/useConfigDomain";
 import { useOverviewDomain } from "./hooks/useOverviewDomain";
@@ -18,13 +19,11 @@ import { DEFAULT_CRON_FORM, type CronForm, type LoginForm } from "./stateTypes";
 import {
   emptyToUndefined,
   isJsonObject,
-  isVisibleChannelConnector,
   parseInteger,
   readString,
   skillMetadata,
   toErrorMessage,
   toJsonObjectArray,
-  toStringArray,
   type JsonObject
 } from "./shared";
 
@@ -134,6 +133,62 @@ export function useConsoleAppState() {
   const [discordWizardVerifyTarget, setDiscordWizardVerifyTarget] = useState("channel:");
   const [discordWizardVerifyText, setDiscordWizardVerifyText] = useState("palyra discord test message");
   const [discordWizardVerifyConfirm, setDiscordWizardVerifyConfirm] = useState(false);
+
+  function setSelectedChannelStatusPayload(payload: JsonValue): void {
+    setChannelsSelectedStatus(isJsonObject(payload) ? payload : null);
+  }
+
+  const {
+    refreshChannelLogs,
+    refreshChannelRouter,
+    refreshChannels,
+    loadChannel,
+    setChannelEnabled,
+    submitChannelTestMessage,
+    submitChannelDiscordTestSend,
+    refreshChannelRouterPairings,
+    refreshChannelHealth,
+    pauseChannelQueue,
+    resumeChannelQueue,
+    drainChannelQueue,
+    replayChannelDeadLetter,
+    discardChannelDeadLetter
+  } = createChannelDomain({
+    api,
+    channelsLogsLimit,
+    channelsSelectedConnectorId,
+    channelRouterPairingsFilterChannel,
+    channelsTestText,
+    channelsTestConversationId,
+    channelsTestSenderId,
+    channelsTestSenderDisplay,
+    channelsTestCrashOnce,
+    channelsTestDirectMessage,
+    channelsTestBroadcast,
+    channelsDiscordTarget,
+    channelsDiscordText,
+    channelsDiscordAutoReaction,
+    channelsDiscordThreadId,
+    channelsDiscordConfirm,
+    discordWizardVerifyChannelId,
+    setChannelsBusy,
+    setError,
+    setNotice,
+    setChannelsConnectors,
+    setChannelsSelectedConnectorId,
+    setChannelsEvents,
+    setChannelsDeadLetters,
+    setChannelsTestCrashOnce,
+    setChannelsDiscordConfirm,
+    setChannelRouterRules,
+    setChannelRouterConfigHash,
+    setChannelRouterWarnings,
+    setChannelRouterPairings,
+    setChannelRouterPreviewChannel,
+    setChannelRouterMintChannel,
+    setChannelRouterPairingsFilterChannel,
+    setSelectedChannelStatusPayload
+  });
 
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [memoryQuery, setMemoryQuery] = useState("");
@@ -642,251 +697,6 @@ export function useConsoleAppState() {
       setError(toErrorMessage(failure));
     } finally {
       setCronBusy(false);
-    }
-  }
-
-  async function refreshChannelLogs(connectorId: string): Promise<void> {
-    const params = new URLSearchParams();
-    const parsedLimit = parseInteger(channelsLogsLimit);
-    if (parsedLimit !== null && parsedLimit > 0) {
-      params.set("limit", String(parsedLimit));
-    }
-    const response = await api.listChannelLogs(connectorId, params.size > 0 ? params : undefined);
-    setChannelsEvents(toJsonObjectArray(response.events));
-    setChannelsDeadLetters(toJsonObjectArray(response.dead_letters));
-  }
-
-  async function refreshChannelRouter(pairingsFilterOverride?: string): Promise<void> {
-    const pairingsChannel = (pairingsFilterOverride ?? channelRouterPairingsFilterChannel).trim();
-    const pairingsParams = new URLSearchParams();
-    if (pairingsChannel.length > 0) {
-      pairingsParams.set("channel", pairingsChannel);
-    }
-
-    const [rulesResponse, warningsResponse, pairingsResponse] = await Promise.all([
-      api.getChannelRouterRules(),
-      api.getChannelRouterWarnings(),
-      api.listChannelRouterPairings(pairingsParams.size > 0 ? pairingsParams : undefined)
-    ]);
-
-    setChannelRouterRules(isJsonObject(rulesResponse.config) ? rulesResponse.config : null);
-    setChannelRouterConfigHash(
-      typeof rulesResponse.config_hash === "string" && rulesResponse.config_hash.trim().length > 0
-        ? rulesResponse.config_hash
-        : (typeof warningsResponse.config_hash === "string" ? warningsResponse.config_hash : "")
-    );
-    setChannelRouterWarnings(toStringArray(warningsResponse.warnings));
-    setChannelRouterPairings(toJsonObjectArray(pairingsResponse.pairings));
-  }
-
-  async function refreshChannels(preferredConnectorId?: string): Promise<void> {
-    setChannelsBusy(true);
-    setError(null);
-    try {
-      const response = await api.listChannels();
-      const connectors = toJsonObjectArray(response.connectors).filter(isVisibleChannelConnector);
-      setChannelsConnectors(connectors);
-
-      const requested = preferredConnectorId ?? channelsSelectedConnectorId;
-      const requestedTrimmed = requested.trim();
-      const connectorIds = connectors
-        .map((entry) => readString(entry, "connector_id"))
-        .filter((value): value is string => value !== null);
-      const nextConnectorId = requestedTrimmed.length > 0 && connectorIds.includes(requestedTrimmed)
-        ? requestedTrimmed
-        : (connectorIds[0] ?? "");
-
-      setChannelsSelectedConnectorId(nextConnectorId);
-      if (nextConnectorId.length === 0) {
-        setChannelsSelectedStatus(null);
-        setChannelsEvents([]);
-        setChannelsDeadLetters([]);
-        setChannelRouterRules(null);
-        setChannelRouterConfigHash("");
-        setChannelRouterWarnings([]);
-        setChannelRouterPairings([]);
-        return;
-      }
-
-      const statusResponse = await api.getChannelStatus(nextConnectorId);
-      setChannelsSelectedStatus(isJsonObject(statusResponse.connector) ? statusResponse.connector : null);
-      setChannelRouterPreviewChannel((previous) =>
-        previous.trim().length > 0 ? previous : nextConnectorId
-      );
-      setChannelRouterMintChannel((previous) =>
-        previous.trim().length > 0 ? previous : nextConnectorId
-      );
-      const pairingsFilter =
-        channelRouterPairingsFilterChannel.trim().length > 0
-          ? channelRouterPairingsFilterChannel.trim()
-          : nextConnectorId;
-      if (channelRouterPairingsFilterChannel.trim().length === 0) {
-        setChannelRouterPairingsFilterChannel(nextConnectorId);
-      }
-      await refreshChannelLogs(nextConnectorId);
-      await refreshChannelRouter(pairingsFilter);
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setChannelsBusy(false);
-    }
-  }
-
-  async function loadChannel(connectorId: string): Promise<void> {
-    if (connectorId.trim().length === 0) {
-      setError("Select a connector first.");
-      return;
-    }
-    setChannelsBusy(true);
-    setError(null);
-    try {
-      const normalizedConnectorId = connectorId.trim();
-      setChannelsSelectedConnectorId(normalizedConnectorId);
-      const statusResponse = await api.getChannelStatus(normalizedConnectorId);
-      setChannelsSelectedStatus(isJsonObject(statusResponse.connector) ? statusResponse.connector : null);
-      setChannelRouterPreviewChannel(normalizedConnectorId);
-      setChannelRouterMintChannel(normalizedConnectorId);
-      const pairingsFilter =
-        channelRouterPairingsFilterChannel.trim().length > 0
-          ? channelRouterPairingsFilterChannel.trim()
-          : normalizedConnectorId;
-      if (channelRouterPairingsFilterChannel.trim().length === 0) {
-        setChannelRouterPairingsFilterChannel(normalizedConnectorId);
-      }
-      await refreshChannelLogs(normalizedConnectorId);
-      await refreshChannelRouter(pairingsFilter);
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setChannelsBusy(false);
-    }
-  }
-
-  async function setChannelEnabled(entry: JsonObject, enabled: boolean): Promise<void> {
-    const connectorId = readString(entry, "connector_id");
-    if (connectorId === null) {
-      setError("Connector payload missing connector_id.");
-      return;
-    }
-    setChannelsBusy(true);
-    setError(null);
-    try {
-      const response = await api.setChannelEnabled(connectorId, enabled);
-      if (isJsonObject(response.connector)) {
-        setChannelsSelectedStatus(response.connector);
-      }
-      setNotice(`Connector ${enabled ? "enabled" : "disabled"}.`);
-      await refreshChannels(connectorId);
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setChannelsBusy(false);
-    }
-  }
-
-  async function submitChannelTestMessage(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    if (channelsSelectedConnectorId.trim().length === 0) {
-      setError("Select a connector before sending a test message.");
-      return;
-    }
-    if (channelsTestText.trim().length === 0) {
-      setError("Test message text cannot be empty.");
-      return;
-    }
-    setChannelsBusy(true);
-    setError(null);
-    try {
-      const response = await api.sendChannelTestMessage(channelsSelectedConnectorId.trim(), {
-        text: channelsTestText.trim(),
-        conversation_id: emptyToUndefined(channelsTestConversationId),
-        sender_id: emptyToUndefined(channelsTestSenderId),
-        sender_display: emptyToUndefined(channelsTestSenderDisplay),
-        simulate_crash_once: channelsTestCrashOnce,
-        is_direct_message: channelsTestDirectMessage,
-        requested_broadcast: channelsTestBroadcast
-      });
-      if (isJsonObject(response.status)) {
-        setChannelsSelectedStatus(response.status);
-      }
-      if (isJsonObject(response.ingest)) {
-        const accepted = response.ingest.accepted === true ? "true" : "false";
-        const immediateDeliveryValue = response.ingest.immediate_delivery;
-        const immediateDelivery =
-          typeof immediateDeliveryValue === "number" || typeof immediateDeliveryValue === "string"
-            ? String(immediateDeliveryValue)
-            : "0";
-        setNotice(
-          `Channel test dispatched (accepted=${accepted}, immediate_delivery=${immediateDelivery}).`
-        );
-      } else {
-        setNotice("Channel test dispatched.");
-      }
-      setChannelsTestCrashOnce(false);
-      await refreshChannelLogs(channelsSelectedConnectorId.trim());
-      await refreshChannels(channelsSelectedConnectorId.trim());
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setChannelsBusy(false);
-    }
-  }
-
-  async function submitChannelDiscordTestSend(
-    event: React.FormEvent<HTMLFormElement>
-  ): Promise<void> {
-    event.preventDefault();
-    if (channelsSelectedConnectorId.trim().length === 0) {
-      setError("Select a connector before dispatching Discord test send.");
-      return;
-    }
-    if (!channelsSelectedConnectorId.trim().startsWith("discord:")) {
-      setError("Discord test send is available only for Discord connectors.");
-      return;
-    }
-    if (channelsDiscordTarget.trim().length === 0) {
-      setError("Discord test target cannot be empty.");
-      return;
-    }
-    if (!channelsDiscordConfirm) {
-      setError("Discord test send requires explicit confirmation.");
-      return;
-    }
-
-    setChannelsBusy(true);
-    setError(null);
-    try {
-      const response = await api.sendChannelDiscordTestSend(channelsSelectedConnectorId.trim(), {
-        target: channelsDiscordTarget.trim(),
-        text: emptyToUndefined(channelsDiscordText),
-        confirm: true,
-        auto_reaction: emptyToUndefined(channelsDiscordAutoReaction),
-        thread_id: emptyToUndefined(channelsDiscordThreadId)
-      });
-      if (isJsonObject(response.status)) {
-        setChannelsSelectedStatus(response.status);
-      }
-      setNotice("Discord test send dispatched.");
-      setChannelsDiscordConfirm(false);
-      await refreshChannelLogs(channelsSelectedConnectorId.trim());
-      await refreshChannels(channelsSelectedConnectorId.trim());
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setChannelsBusy(false);
-    }
-  }
-
-  async function refreshChannelRouterPairings(): Promise<void> {
-    setChannelsBusy(true);
-    setError(null);
-    try {
-      const filterChannel = channelRouterPairingsFilterChannel.trim();
-      await refreshChannelRouter(filterChannel.length > 0 ? filterChannel : undefined);
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setChannelsBusy(false);
     }
   }
 
@@ -1742,6 +1552,12 @@ export function useConsoleAppState() {
     mintChannelRouterPairingCode,
     sendChannelTest: submitChannelTestMessage,
     sendDiscordTest: submitChannelDiscordTestSend,
+    refreshChannelHealth,
+    pauseChannelQueue,
+    resumeChannelQueue,
+    drainChannelQueue,
+    replayChannelDeadLetter,
+    discardChannelDeadLetter,
     runDiscordPreflight: runDiscordOnboardingProbe,
     applyDiscordOnboarding,
     runDiscordVerification: verifyDiscordOnboardingTarget,
@@ -1897,3 +1713,4 @@ export function useConsoleAppState() {
 }
 
 export type ConsoleAppState = ReturnType<typeof useConsoleAppState>;
+

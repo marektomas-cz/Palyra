@@ -529,6 +529,18 @@ struct ChannelTestSendRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ChannelHealthRefreshRequest {
+    #[serde(default)]
+    verify_channel_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeadLetterActionPath {
+    connector_id: String,
+    dead_letter_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChannelRouterPreviewRequest {
     channel: String,
     text: String,
@@ -1665,6 +1677,30 @@ async fn main() -> Result<()> {
         .route("/admin/v1/channels/{connector_id}", get(admin_channel_status_handler))
         .route("/admin/v1/channels/{connector_id}/enabled", post(admin_channel_set_enabled_handler))
         .route("/admin/v1/channels/{connector_id}/logs", get(admin_channel_logs_handler))
+        .route(
+            "/admin/v1/channels/{connector_id}/operations/health-refresh",
+            post(admin_channel_health_refresh_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/operations/queue/pause",
+            post(admin_channel_queue_pause_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/operations/queue/resume",
+            post(admin_channel_queue_resume_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/operations/queue/drain",
+            post(admin_channel_queue_drain_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/operations/dead-letters/{dead_letter_id}/replay",
+            post(admin_channel_dead_letter_replay_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/operations/dead-letters/{dead_letter_id}/discard",
+            post(admin_channel_dead_letter_discard_handler),
+        )
         .route("/admin/v1/channels/{connector_id}/test", post(admin_channel_test_handler))
         .route("/admin/v1/channels/{connector_id}/test-send", post(admin_channel_test_send_handler))
         .route("/admin/v1/channels/router/rules", get(admin_channel_router_rules_handler))
@@ -1791,6 +1827,30 @@ async fn main() -> Result<()> {
             post(console_channel_set_enabled_handler),
         )
         .route("/console/v1/channels/{connector_id}/logs", get(console_channel_logs_handler))
+        .route(
+            "/console/v1/channels/{connector_id}/operations/health-refresh",
+            post(console_channel_health_refresh_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/operations/queue/pause",
+            post(console_channel_queue_pause_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/operations/queue/resume",
+            post(console_channel_queue_resume_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/operations/queue/drain",
+            post(console_channel_queue_drain_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/operations/dead-letters/{dead_letter_id}/replay",
+            post(console_channel_dead_letter_replay_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/operations/dead-letters/{dead_letter_id}/discard",
+            post(console_channel_dead_letter_discard_handler),
+        )
         .route("/console/v1/channels/{connector_id}/test", post(console_channel_test_handler))
         .route(
             "/console/v1/channels/{connector_id}/test-send",
@@ -2619,6 +2679,290 @@ async fn admin_channels_list_handler(
     Ok(Json(json!({ "connectors": connectors })))
 }
 
+fn build_channel_status_payload(state: &AppState, connector_id: &str) -> Result<Value, Response> {
+    let connector = state.channels.status(connector_id).map_err(channel_platform_error_response)?;
+    let runtime =
+        state.channels.runtime_snapshot(connector_id).map_err(channel_platform_error_response)?;
+    let queue =
+        state.channels.queue_snapshot(connector_id).map_err(channel_platform_error_response)?;
+    let recent_dead_letters = state
+        .channels
+        .dead_letters(connector_id, Some(5))
+        .map_err(channel_platform_error_response)?;
+    Ok(json!({
+        "connector": connector,
+        "runtime": runtime,
+        "operations": build_channel_operations_snapshot(
+            connector_id,
+            &connector,
+            runtime.as_ref(),
+            &queue,
+            recent_dead_letters.as_slice(),
+        ),
+    }))
+}
+
+fn build_channel_operations_snapshot(
+    connector_id: &str,
+    connector: &palyra_connectors::ConnectorStatusSnapshot,
+    runtime: Option<&Value>,
+    queue: &palyra_connectors::ConnectorQueueSnapshot,
+    recent_dead_letters: &[palyra_connectors::DeadLetterRecord],
+) -> Value {
+    let last_runtime_error = runtime
+        .and_then(|payload| payload.get("last_error"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let runtime_global_retry_after_ms = runtime
+        .and_then(|payload| payload.get("global_retry_after_ms"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0);
+    let active_route_limits = runtime
+        .and_then(|payload| payload.get("route_rate_limits"))
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .get("retry_after_ms")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|value| value > 0)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let last_permission_failure = find_matching_message(
+        [
+            connector.last_error.as_deref(),
+            last_runtime_error.as_deref(),
+            recent_dead_letters.first().map(|entry| entry.reason.as_str()),
+        ],
+        &[
+            "missing permissions",
+            "permission",
+            "forbidden",
+            "view channels",
+            "send messages",
+            "read message history",
+            "embed links",
+            "attach files",
+            "send messages in threads",
+        ],
+    );
+    let last_auth_failure = find_matching_message(
+        [
+            connector.last_error.as_deref(),
+            last_runtime_error.as_deref(),
+            recent_dead_letters.first().map(|entry| entry.reason.as_str()),
+        ],
+        &["auth", "token", "unauthorized", "credential missing", "missing credential"],
+    );
+    let mut saturation_reasons = Vec::new();
+    let saturation_state = if !connector.enabled {
+        saturation_reasons.push("connector_disabled".to_owned());
+        "paused"
+    } else if queue.paused {
+        saturation_reasons.push("queue_paused".to_owned());
+        if let Some(reason) = queue.pause_reason.as_deref() {
+            saturation_reasons.push(format!("pause_reason={reason}"));
+        }
+        "paused"
+    } else if queue.dead_letters > 0 {
+        saturation_reasons.push(format!("dead_letters={}", queue.dead_letters));
+        "dead_lettered"
+    } else if runtime_global_retry_after_ms.is_some() || active_route_limits > 0 {
+        if let Some(wait_ms) = runtime_global_retry_after_ms {
+            saturation_reasons.push(format!("global_retry_after_ms={wait_ms}"));
+        }
+        if active_route_limits > 0 {
+            saturation_reasons.push(format!("active_route_limits={active_route_limits}"));
+        }
+        "rate_limited"
+    } else if queue.claimed_outbox > 0 || queue.due_outbox > 0 {
+        if queue.claimed_outbox > 0 {
+            saturation_reasons.push(format!("claimed_outbox={}", queue.claimed_outbox));
+        }
+        if queue.due_outbox > 0 {
+            saturation_reasons.push(format!("due_outbox={}", queue.due_outbox));
+        }
+        "backpressure"
+    } else if queue.pending_outbox > 0 {
+        saturation_reasons.push(format!("pending_outbox={}", queue.pending_outbox));
+        "retrying"
+    } else {
+        "healthy"
+    };
+    if let Some(error) = &connector.last_error {
+        saturation_reasons.push(format!("last_error={error}"));
+    } else if let Some(error) = &last_runtime_error {
+        saturation_reasons.push(format!("runtime_error={error}"));
+    }
+    let discord = if connector.kind == palyra_connectors::ConnectorKind::Discord {
+        json!({
+            "required_permissions": discord_required_permission_labels(),
+            "last_permission_failure": last_permission_failure,
+            "exact_gap_check_available": true,
+            "health_refresh_hint": format!(
+                "Run channel health refresh for '{}' with verify_channel_id to confirm channel-specific Discord permission gaps.",
+                connector_id
+            ),
+        })
+    } else {
+        Value::Null
+    };
+    json!({
+        "queue": {
+            "pending_outbox": queue.pending_outbox,
+            "due_outbox": queue.due_outbox,
+            "claimed_outbox": queue.claimed_outbox,
+            "dead_letters": queue.dead_letters,
+            "paused": queue.paused,
+            "pause_reason": queue.pause_reason,
+            "pause_updated_at_unix_ms": queue.pause_updated_at_unix_ms,
+            "next_attempt_unix_ms": queue.next_attempt_unix_ms,
+            "oldest_pending_created_at_unix_ms": queue.oldest_pending_created_at_unix_ms,
+            "latest_dead_letter_unix_ms": queue.latest_dead_letter_unix_ms,
+        },
+        "saturation": {
+            "state": saturation_state,
+            "reasons": saturation_reasons,
+        },
+        "last_auth_failure": last_auth_failure,
+        "rate_limits": {
+            "global_retry_after_ms": runtime_global_retry_after_ms,
+            "active_route_limits": active_route_limits,
+            "routes": runtime.and_then(|payload| payload.get("route_rate_limits")).cloned(),
+        },
+        "discord": discord,
+    })
+}
+
+fn find_matching_message<'a, I>(messages: I, needles: &[&str]) -> Option<String>
+where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    messages.into_iter().flatten().find_map(|message| {
+        let normalized = message.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return None;
+        }
+        if needles.iter().any(|needle| normalized.contains(needle)) {
+            Some(message.trim().to_owned())
+        } else {
+            None
+        }
+    })
+}
+
+fn discord_account_id_from_connector_id(connector_id: &str) -> Option<&str> {
+    connector_id.trim().strip_prefix("discord:").map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn resolve_discord_connector_token(state: &AppState, connector_id: &str) -> Result<String, String> {
+    let instance = state.channels.connector_instance(connector_id).map_err(|error| {
+        format!(
+            "failed to load connector instance '{}' for Discord token lookup: {error}",
+            connector_id.trim()
+        )
+    })?;
+    let vault_ref_raw = if let Some(vault_ref) =
+        instance.token_vault_ref.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    {
+        vault_ref.to_owned()
+    } else {
+        let Some(account_id) = discord_account_id_from_connector_id(connector_id) else {
+            return Err(format!("connector '{}' is not a Discord connector", connector_id.trim()));
+        };
+        channels::discord_token_vault_ref(account_id)
+    };
+    let vault_ref = VaultRef::parse(vault_ref_raw.as_str()).map_err(|error| {
+        format!("failed to parse Discord token vault ref '{}': {error}", vault_ref_raw)
+    })?;
+    let value =
+        state.vault.get_secret(&vault_ref.scope, vault_ref.key.as_str()).map_err(|error| {
+            format!("failed to load Discord token from vault ref '{}': {error}", vault_ref_raw)
+        })?;
+    let decoded = String::from_utf8(value).map_err(|error| {
+        format!("Discord token from vault ref '{}' was not valid UTF-8: {error}", vault_ref_raw)
+    })?;
+    let token = decoded.trim().to_owned();
+    if token.is_empty() {
+        return Err(format!(
+            "Discord token vault ref '{}' resolved to an empty secret",
+            vault_ref_raw
+        ));
+    }
+    Ok(token)
+}
+
+async fn build_channel_health_refresh_payload(
+    state: &AppState,
+    connector_id: &str,
+    verify_channel_id: Option<String>,
+) -> Result<Value, Response> {
+    let mut payload = build_channel_status_payload(state, connector_id)?;
+    if !connector_id.trim().starts_with("discord:") {
+        payload["health_refresh"] = json!({
+            "supported": false,
+            "message": "health refresh is currently implemented for Discord connectors only",
+        });
+        return Ok(payload);
+    }
+
+    let token = match resolve_discord_connector_token(state, connector_id) {
+        Ok(token) => token,
+        Err(message) => {
+            payload["health_refresh"] = json!({
+                "supported": true,
+                "refreshed": false,
+                "message": message,
+                "required_permissions": discord_required_permission_labels(),
+            });
+            return Ok(payload);
+        }
+    };
+
+    let verify_channel_id = normalize_optional_discord_channel_id(verify_channel_id.as_deref())?;
+    let inbound_monitor = load_discord_inbound_monitor_summary(state, connector_id);
+    let inbound_alive = discord_inbound_monitor_is_alive(&inbound_monitor);
+    let mut warnings = build_discord_inbound_monitor_warnings(&inbound_monitor);
+    match probe_discord_bot_identity(token.as_str(), verify_channel_id.as_deref()).await {
+        Ok((bot, application, channel_permission_check)) => {
+            let permission_warnings =
+                build_discord_channel_permission_warnings(channel_permission_check.as_ref());
+            warnings.extend(permission_warnings.clone());
+            payload["health_refresh"] = json!({
+                "supported": true,
+                "refreshed": true,
+                "bot": bot,
+                "application": application,
+                "required_permissions": discord_required_permission_labels(),
+                "channel_permission_check": channel_permission_check,
+                "permission_warnings": permission_warnings,
+                "inbound_monitor": inbound_monitor,
+                "inbound_alive": inbound_alive,
+                "warnings": warnings,
+            });
+        }
+        Err(error) => {
+            let message = sanitize_http_error_message(error.message());
+            payload["health_refresh"] = json!({
+                "supported": true,
+                "refreshed": false,
+                "message": message,
+                "required_permissions": discord_required_permission_labels(),
+                "inbound_monitor": inbound_monitor,
+                "inbound_alive": inbound_alive,
+                "warnings": warnings,
+            });
+        }
+    }
+    Ok(payload)
+}
+
 async fn admin_channel_status_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2634,16 +2978,7 @@ async fn admin_channel_status_handler(
     })?;
     state.runtime.record_admin_status_request();
     let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
-    let connector =
-        state.channels.status(connector_id.as_str()).map_err(channel_platform_error_response)?;
-    let runtime = state
-        .channels
-        .runtime_snapshot(connector_id.as_str())
-        .map_err(channel_platform_error_response)?;
-    Ok(Json(json!({
-        "connector": connector,
-        "runtime": runtime,
-    })))
+    Ok(Json(build_channel_status_payload(&state, connector_id.as_str())?))
 }
 
 async fn admin_channel_set_enabled_handler(
@@ -2697,6 +3032,182 @@ async fn admin_channel_logs_handler(
         "events": events,
         "dead_letters": dead_letters,
     })))
+}
+
+async fn admin_channel_health_refresh_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelHealthRefreshRequest>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let payload = build_channel_health_refresh_payload(
+        &state,
+        connector_id.as_str(),
+        payload.verify_channel_id,
+    )
+    .await?;
+    Ok(Json(payload))
+}
+
+async fn admin_channel_queue_pause_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let queue = state
+        .channels
+        .set_queue_paused(
+            connector_id.as_str(),
+            true,
+            Some("operator requested queue pause via admin API"),
+        )
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "queue_pause",
+        "message": format!("queue paused for connector '{}'", connector_id),
+        "queue": queue,
+    });
+    Ok(Json(payload))
+}
+
+async fn admin_channel_queue_resume_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let queue = state
+        .channels
+        .set_queue_paused(connector_id.as_str(), false, None)
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "queue_resume",
+        "message": format!("queue resumed for connector '{}'", connector_id),
+        "queue": queue,
+    });
+    Ok(Json(payload))
+}
+
+async fn admin_channel_queue_drain_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let drain = state
+        .channels
+        .drain_due_for_connector(connector_id.as_str())
+        .await
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "queue_drain",
+        "message": format!("queue drain completed for connector '{}'", connector_id),
+        "drain": drain,
+    });
+    Ok(Json(payload))
+}
+
+async fn admin_channel_dead_letter_replay_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(path): Path<DeadLetterActionPath>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let connector_id = normalize_non_empty_field(path.connector_id, "connector_id")?;
+    let replayed = state
+        .channels
+        .replay_dead_letter(connector_id.as_str(), path.dead_letter_id)
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "dead_letter_replay",
+        "message": format!(
+            "dead-letter {} replayed for connector '{}'",
+            path.dead_letter_id, connector_id
+        ),
+        "dead_letter": replayed,
+    });
+    Ok(Json(payload))
+}
+
+async fn admin_channel_dead_letter_discard_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(path): Path<DeadLetterActionPath>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    let connector_id = normalize_non_empty_field(path.connector_id, "connector_id")?;
+    let discarded = state
+        .channels
+        .discard_dead_letter(connector_id.as_str(), path.dead_letter_id)
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "dead_letter_discard",
+        "message": format!(
+            "dead-letter {} discarded for connector '{}'",
+            path.dead_letter_id, connector_id
+        ),
+        "dead_letter": discarded,
+    });
+    Ok(Json(payload))
 }
 
 async fn admin_channel_test_handler(
@@ -7293,16 +7804,7 @@ async fn console_channel_status_handler(
 ) -> Result<Json<Value>, Response> {
     let _session = authorize_console_session(&state, &headers, false)?;
     let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
-    let connector =
-        state.channels.status(connector_id.as_str()).map_err(channel_platform_error_response)?;
-    let runtime = state
-        .channels
-        .runtime_snapshot(connector_id.as_str())
-        .map_err(channel_platform_error_response)?;
-    Ok(Json(json!({
-        "connector": connector,
-        "runtime": runtime,
-    })))
+    Ok(Json(build_channel_status_payload(&state, connector_id.as_str())?))
 }
 
 async fn console_channel_set_enabled_handler(
@@ -7346,6 +7848,134 @@ async fn console_channel_logs_handler(
             None
         ),
     })))
+}
+
+async fn console_channel_health_refresh_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelHealthRefreshRequest>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let payload = build_channel_health_refresh_payload(
+        &state,
+        connector_id.as_str(),
+        payload.verify_channel_id,
+    )
+    .await?;
+    Ok(Json(payload))
+}
+
+async fn console_channel_queue_pause_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let queue = state
+        .channels
+        .set_queue_paused(
+            connector_id.as_str(),
+            true,
+            Some("operator requested queue pause via console"),
+        )
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "queue_pause",
+        "message": format!("queue paused for connector '{}'", connector_id),
+        "queue": queue,
+    });
+    Ok(Json(payload))
+}
+
+async fn console_channel_queue_resume_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let queue = state
+        .channels
+        .set_queue_paused(connector_id.as_str(), false, None)
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "queue_resume",
+        "message": format!("queue resumed for connector '{}'", connector_id),
+        "queue": queue,
+    });
+    Ok(Json(payload))
+}
+
+async fn console_channel_queue_drain_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let drain = state
+        .channels
+        .drain_due_for_connector(connector_id.as_str())
+        .await
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "queue_drain",
+        "message": format!("queue drain completed for connector '{}'", connector_id),
+        "drain": drain,
+    });
+    Ok(Json(payload))
+}
+
+async fn console_channel_dead_letter_replay_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(path): Path<DeadLetterActionPath>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let connector_id = normalize_non_empty_field(path.connector_id, "connector_id")?;
+    let replayed = state
+        .channels
+        .replay_dead_letter(connector_id.as_str(), path.dead_letter_id)
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "dead_letter_replay",
+        "message": format!(
+            "dead-letter {} replayed for connector '{}'",
+            path.dead_letter_id, connector_id
+        ),
+        "dead_letter": replayed,
+    });
+    Ok(Json(payload))
+}
+
+async fn console_channel_dead_letter_discard_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(path): Path<DeadLetterActionPath>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let connector_id = normalize_non_empty_field(path.connector_id, "connector_id")?;
+    let discarded = state
+        .channels
+        .discard_dead_letter(connector_id.as_str(), path.dead_letter_id)
+        .map_err(channel_platform_error_response)?;
+    let mut payload = build_channel_status_payload(&state, connector_id.as_str())?;
+    payload["action"] = json!({
+        "type": "dead_letter_discard",
+        "message": format!(
+            "dead-letter {} discarded for connector '{}'",
+            path.dead_letter_id, connector_id
+        ),
+        "dead_letter": discarded,
+    });
+    Ok(Json(payload))
 }
 
 async fn console_channel_test_handler(
@@ -7667,7 +8297,9 @@ async fn evaluate_discord_onboarding_request(
     let verify_channel_id =
         normalize_optional_discord_channel_id(payload.verify_channel_id.as_deref())?;
     let (bot, application, channel_permission_check) =
-        probe_discord_bot_identity(token.as_str(), verify_channel_id.as_deref()).await?;
+        probe_discord_bot_identity(token.as_str(), verify_channel_id.as_deref())
+            .await
+            .map_err(runtime_status_response)?;
     plan = finalize_discord_onboarding_plan(plan, &bot);
     let inbound_monitor = load_discord_inbound_monitor_summary(state, plan.connector_id.as_str());
     let mut warnings = build_discord_onboarding_warnings(
@@ -8173,17 +8805,19 @@ async fn probe_discord_bot_identity(
         Option<DiscordApplicationSummary>,
         Option<DiscordChannelPermissionCheck>,
     ),
-    Response,
+    tonic::Status,
 > {
     let client = ReqwestClient::builder()
         .timeout(Duration::from_millis(DISCORD_ONBOARDING_HTTP_TIMEOUT_MS))
         .build()
         .map_err(|error| {
-            runtime_status_response(tonic::Status::internal(format!(
+            tonic::Status::internal(format!(
                 "failed to initialize discord preflight HTTP client: {error}"
-            )))
+            ))
         })?;
-    let me_url = build_discord_api_url("/users/@me")?;
+    let me_url = Url::parse(format!("{DISCORD_API_BASE}/users/@me").as_str()).map_err(|error| {
+        tonic::Status::internal(format!("failed to construct discord API URL: {error}"))
+    })?;
     let me_response = client
         .get(me_url)
         .header("Authorization", format!("Bot {token}"))
@@ -8191,45 +8825,41 @@ async fn probe_discord_bot_identity(
         .send()
         .await
         .map_err(|error| {
-            runtime_status_response(tonic::Status::unavailable(format!(
+            tonic::Status::unavailable(format!(
                 "failed to reach discord identity endpoint: {error}"
-            )))
+            ))
         })?;
     let me_status = me_response.status();
     let me_body = me_response.text().await.unwrap_or_default();
     if me_status.as_u16() == 401 || me_status.as_u16() == 403 {
         let summary = parse_discord_error_summary(me_body.as_str())
             .unwrap_or_else(|| "unauthorized".to_owned());
-        return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+        return Err(tonic::Status::invalid_argument(format!(
             "discord token validation failed (status={}): {}",
             me_status.as_u16(),
             summary
-        ))));
+        )));
     }
     if !me_status.is_success() {
         let summary = parse_discord_error_summary(me_body.as_str())
             .unwrap_or_else(|| "unexpected response".to_owned());
-        return Err(runtime_status_response(tonic::Status::unavailable(format!(
+        return Err(tonic::Status::unavailable(format!(
             "discord identity lookup failed (status={}): {}",
             me_status.as_u16(),
             summary
-        ))));
+        )));
     }
     let me_json = serde_json::from_str::<Value>(me_body.as_str()).map_err(|error| {
-        runtime_status_response(tonic::Status::unavailable(format!(
+        tonic::Status::unavailable(format!(
             "discord identity endpoint returned invalid JSON: {error}"
-        )))
+        ))
     })?;
     let bot_id = me_json
         .get("id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            runtime_status_response(tonic::Status::unavailable(
-                "discord identity response is missing bot id",
-            ))
-        })?
+        .ok_or_else(|| tonic::Status::unavailable("discord identity response is missing bot id"))?
         .to_owned();
     let bot_username = me_json
         .get("username")

@@ -155,6 +155,28 @@ const TRUST_STORE_INTEGRITY_VAULT_SCOPE: VaultScope = VaultScope::Global;
 const TRUST_STORE_INTEGRITY_VAULT_KEY_PREFIX: &str = "skills.trust_store.integrity.";
 
 fn main() -> Result<()> {
+    run_cli_entrypoint()
+}
+
+#[cfg(windows)]
+fn run_cli_entrypoint() -> Result<()> {
+    const CLI_MAIN_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+    thread::Builder::new()
+        .name("palyra-cli-main".to_owned())
+        .stack_size(CLI_MAIN_STACK_SIZE_BYTES)
+        .spawn(run_cli)
+        .context("failed to spawn CLI main thread")?
+        .join()
+        .map_err(|_| anyhow!("CLI main thread panicked"))?
+}
+
+#[cfg(not(windows))]
+fn run_cli_entrypoint() -> Result<()> {
+    run_cli()
+}
+
+fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         CliCommand::Version => print_version(),
@@ -3770,6 +3792,35 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                 )?;
                 emit_channels_status(response, json)?;
             }
+            ChannelsDiscordCommand::HealthRefresh {
+                account_id,
+                verify_channel_id,
+                url,
+                token,
+                principal,
+                device_id,
+                channel,
+                json,
+            } => {
+                let connector_id = discord_connector_id(account_id.as_str())?;
+                let base_url = resolve_channels_base_url(url);
+                let token = resolve_channels_token(token);
+                let endpoint = format!(
+                    "{}/admin/v1/channels/{}/operations/health-refresh",
+                    base_url.trim_end_matches('/'),
+                    connector_id
+                );
+                let client = build_channels_client()?;
+                let response = send_channels_request(
+                    client.post(endpoint).json(&json!({ "verify_channel_id": verify_channel_id })),
+                    token,
+                    principal,
+                    device_id,
+                    channel,
+                    "failed to call discord channels health-refresh endpoint",
+                )?;
+                emit_channels_status(response, json)?;
+            }
             ChannelsDiscordCommand::Verify {
                 account_id,
                 to,
@@ -3886,6 +3937,34 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
             )?;
             emit_channels_status(response, json)?;
         }
+        ChannelsCommand::HealthRefresh {
+            connector_id,
+            verify_channel_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint = format!(
+                "{}/admin/v1/channels/{}/operations/health-refresh",
+                base_url.trim_end_matches('/'),
+                connector_id
+            );
+            let client = build_channels_client()?;
+            let response = send_channels_request(
+                client.post(endpoint).json(&json!({ "verify_channel_id": verify_channel_id })),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channels health-refresh endpoint",
+            )?;
+            emit_channels_status(response, json)?;
+        }
         ChannelsCommand::Enable {
             connector_id,
             url,
@@ -3910,6 +3989,145 @@ fn run_channels(command: ChannelsCommand) -> Result<()> {
                 device_id,
                 channel,
                 "failed to call channels enable endpoint",
+            )?;
+            emit_channels_status(response, json)?;
+        }
+        ChannelsCommand::QueuePause {
+            connector_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint = format!(
+                "{}/admin/v1/channels/{}/operations/queue/pause",
+                base_url.trim_end_matches('/'),
+                connector_id
+            );
+            let client = build_channels_client()?;
+            let response = send_channels_request(
+                client.post(endpoint),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channels queue pause endpoint",
+            )?;
+            emit_channels_status(response, json)?;
+        }
+        ChannelsCommand::QueueResume {
+            connector_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint = format!(
+                "{}/admin/v1/channels/{}/operations/queue/resume",
+                base_url.trim_end_matches('/'),
+                connector_id
+            );
+            let client = build_channels_client()?;
+            let response = send_channels_request(
+                client.post(endpoint),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channels queue resume endpoint",
+            )?;
+            emit_channels_status(response, json)?;
+        }
+        ChannelsCommand::QueueDrain {
+            connector_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint = format!(
+                "{}/admin/v1/channels/{}/operations/queue/drain",
+                base_url.trim_end_matches('/'),
+                connector_id
+            );
+            let client = build_channels_client()?;
+            let response = send_channels_request(
+                client.post(endpoint),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channels queue drain endpoint",
+            )?;
+            emit_channels_status(response, json)?;
+        }
+        ChannelsCommand::DeadLetterReplay {
+            connector_id,
+            dead_letter_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint = format!(
+                "{}/admin/v1/channels/{}/operations/dead-letters/{}/replay",
+                base_url.trim_end_matches('/'),
+                connector_id,
+                dead_letter_id
+            );
+            let client = build_channels_client()?;
+            let response = send_channels_request(
+                client.post(endpoint),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channels dead-letter replay endpoint",
+            )?;
+            emit_channels_status(response, json)?;
+        }
+        ChannelsCommand::DeadLetterDiscard {
+            connector_id,
+            dead_letter_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let base_url = resolve_channels_base_url(url);
+            let token = resolve_channels_token(token);
+            let endpoint = format!(
+                "{}/admin/v1/channels/{}/operations/dead-letters/{}/discard",
+                base_url.trim_end_matches('/'),
+                connector_id,
+                dead_letter_id
+            );
+            let client = build_channels_client()?;
+            let response = send_channels_request(
+                client.post(endpoint),
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call channels dead-letter discard endpoint",
             )?;
             emit_channels_status(response, json)?;
         }
@@ -4533,6 +4751,96 @@ fn render_channels_status_lines(payload: &Value) -> Vec<String> {
         "channels.status id={} availability={} enabled={} readiness={} liveness={} pending_outbox={} dead_letters={}",
         connector_id, availability, enabled, readiness, liveness, pending, dead_letters
     )];
+    if let Some(queue) =
+        payload.get("operations").and_then(|value| value.get("queue")).and_then(Value::as_object)
+    {
+        let paused = queue.get("paused").and_then(Value::as_bool).unwrap_or(false);
+        let pause_reason = queue.get("pause_reason").and_then(Value::as_str).unwrap_or("-");
+        let pending_outbox = queue.get("pending_outbox").and_then(Value::as_u64).unwrap_or(0);
+        let due_outbox = queue.get("due_outbox").and_then(Value::as_u64).unwrap_or(0);
+        let claimed_outbox = queue.get("claimed_outbox").and_then(Value::as_u64).unwrap_or(0);
+        let dead_letters = queue.get("dead_letters").and_then(Value::as_u64).unwrap_or(0);
+        lines.push(format!(
+            "channels.operations.queue id={} paused={} pause_reason={} pending_outbox={} due_outbox={} claimed_outbox={} dead_letters={}",
+            connector_id,
+            paused,
+            pause_reason,
+            pending_outbox,
+            due_outbox,
+            claimed_outbox,
+            dead_letters
+        ));
+    }
+    if let Some(saturation) = payload
+        .get("operations")
+        .and_then(|value| value.get("saturation"))
+        .and_then(Value::as_object)
+    {
+        let state = saturation.get("state").and_then(Value::as_str).unwrap_or("unknown");
+        let reasons = saturation
+            .get("reasons")
+            .and_then(Value::as_array)
+            .map(|entries| entries.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "-".to_owned());
+        lines.push(format!(
+            "channels.operations.saturation id={} state={} reasons={}",
+            connector_id, state, reasons
+        ));
+    }
+    if let Some(auth_failure) = payload
+        .get("operations")
+        .and_then(|value| value.get("last_auth_failure"))
+        .and_then(Value::as_str)
+    {
+        lines.push(format!(
+            "channels.operations.auth_failure id={} message={}",
+            connector_id, auth_failure
+        ));
+    }
+    if let Some(rate_limits) = payload
+        .get("operations")
+        .and_then(|value| value.get("rate_limits"))
+        .and_then(Value::as_object)
+    {
+        let global_retry_after_ms =
+            rate_limits.get("global_retry_after_ms").and_then(Value::as_i64).unwrap_or(0);
+        let active_route_limits =
+            rate_limits.get("active_route_limits").and_then(Value::as_u64).unwrap_or(0);
+        lines.push(format!(
+            "channels.operations.rate_limits id={} global_retry_after_ms={} active_route_limits={}",
+            connector_id, global_retry_after_ms, active_route_limits
+        ));
+    }
+    if let Some(discord) =
+        payload.get("operations").and_then(|value| value.get("discord")).and_then(Value::as_object)
+    {
+        if let Some(permission_failure) =
+            discord.get("last_permission_failure").and_then(Value::as_str)
+        {
+            lines.push(format!(
+                "channels.operations.permission_gap id={} message={}",
+                connector_id, permission_failure
+            ));
+        }
+    }
+    if let Some(health_refresh) = payload.get("health_refresh").and_then(Value::as_object) {
+        let supported = health_refresh.get("supported").and_then(Value::as_bool).unwrap_or(false);
+        let refreshed = health_refresh.get("refreshed").and_then(Value::as_bool).unwrap_or(false);
+        let message = health_refresh.get("message").and_then(Value::as_str).unwrap_or("-");
+        lines.push(format!(
+            "channels.health_refresh id={} supported={} refreshed={} message={}",
+            connector_id, supported, refreshed, message
+        ));
+    }
+    if let Some(action) = payload.get("action").and_then(Value::as_object) {
+        let action_type = action.get("type").and_then(Value::as_str).unwrap_or("unknown");
+        let message = action.get("message").and_then(Value::as_str).unwrap_or("-");
+        lines.push(format!(
+            "channels.action id={} type={} message={}",
+            connector_id, action_type, message
+        ));
+    }
     if let Some(metrics) = payload
         .get("runtime")
         .and_then(Value::as_object)
@@ -4620,7 +4928,7 @@ mod channel_output_tests {
     }
 
     #[test]
-    fn render_channels_status_includes_availability() {
+    fn render_channels_status_includes_m58_operations_snapshot() {
         let lines = render_channels_status_lines(&json!({
             "connector": {
                 "connector_id": "discord:default",
@@ -4632,6 +4940,37 @@ mod channel_output_tests {
                     "pending_outbox": 0,
                     "dead_letters": 0
                 }
+            },
+            "operations": {
+                "queue": {
+                    "paused": true,
+                    "pause_reason": "operator requested queue pause via admin API",
+                    "pending_outbox": 4,
+                    "due_outbox": 2,
+                    "claimed_outbox": 1,
+                    "dead_letters": 3
+                },
+                "saturation": {
+                    "state": "paused",
+                    "reasons": ["queue_paused", "pause_reason=operator requested queue pause via admin API"]
+                },
+                "last_auth_failure": "discord token validation failed",
+                "rate_limits": {
+                    "global_retry_after_ms": 1200,
+                    "active_route_limits": 2
+                },
+                "discord": {
+                    "last_permission_failure": "missing permissions: send messages"
+                }
+            },
+            "health_refresh": {
+                "supported": true,
+                "refreshed": false,
+                "message": "discord token missing"
+            },
+            "action": {
+                "type": "queue_pause",
+                "message": "queue paused for connector 'discord:default'"
             }
         }));
 
@@ -4639,6 +4978,24 @@ mod channel_output_tests {
             lines[0],
             "channels.status id=discord:default availability=supported enabled=false readiness=missing_credential liveness=stopped pending_outbox=0 dead_letters=0"
         );
+        assert!(lines.iter().any(|line| {
+            line == "channels.operations.queue id=discord:default paused=true pause_reason=operator requested queue pause via admin API pending_outbox=4 due_outbox=2 claimed_outbox=1 dead_letters=3"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "channels.operations.saturation id=discord:default state=paused reasons=queue_paused,pause_reason=operator requested queue pause via admin API"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "channels.operations.auth_failure id=discord:default message=discord token validation failed"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "channels.operations.permission_gap id=discord:default message=missing permissions: send messages"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "channels.health_refresh id=discord:default supported=true refreshed=false message=discord token missing"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "channels.action id=discord:default type=queue_pause message=queue paused for connector 'discord:default'"
+        }));
     }
 }
 

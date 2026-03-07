@@ -72,6 +72,20 @@ pub struct DeadLetterRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorQueueSnapshot {
+    pub pending_outbox: u64,
+    pub due_outbox: u64,
+    pub claimed_outbox: u64,
+    pub dead_letters: u64,
+    pub next_attempt_unix_ms: Option<i64>,
+    pub oldest_pending_created_at_unix_ms: Option<i64>,
+    pub latest_dead_letter_unix_ms: Option<i64>,
+    pub paused: bool,
+    pub pause_reason: Option<String>,
+    pub pause_updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorEventRecord {
     pub event_id: i64,
     pub connector_id: String,
@@ -102,6 +116,8 @@ pub enum ConnectorStoreError {
     NotFound(String),
     #[error("outbox entry not found: {0}")]
     OutboxNotFound(i64),
+    #[error("dead-letter entry not found: {0}")]
+    DeadLetterNotFound(i64),
 }
 
 const OUTBOX_CLAIM_LEASE_MS: i64 = 60_000;
@@ -433,6 +449,7 @@ impl ConnectorStore {
         now_unix_ms: i64,
         limit: usize,
         connector_filter: Option<&str>,
+        ignore_queue_pause: bool,
     ) -> Result<Vec<OutboxEntryRecord>, ConnectorStoreError> {
         let limit_i64 = i64::try_from(limit)
             .map_err(|_| ConnectorStoreError::ValueOverflow { field: "limit" })?;
@@ -444,50 +461,115 @@ impl ConnectorStore {
 
         self.with_transaction(|transaction| {
             if let Some(connector_id) = connector_filter {
-                transaction.execute(
-                    r#"
-                    UPDATE outbox
-                    SET claim_token = ?1,
-                        claim_expires_unix_ms = ?2,
-                        updated_at_unix_ms = ?3
-                    WHERE outbox_id IN (
-                        SELECT outbox_id
-                        FROM outbox
-                        WHERE status = 'pending'
-                          AND next_attempt_unix_ms <= ?3
-                          AND claim_expires_unix_ms <= ?3
-                          AND connector_id = ?4
-                        ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
-                        LIMIT ?5
-                    )
-                    "#,
-                    params![
-                        claim_token.as_str(),
-                        claim_expires_unix_ms,
-                        now_unix_ms,
-                        connector_id,
-                        limit_i64,
-                    ],
-                )?;
+                if ignore_queue_pause {
+                    transaction.execute(
+                        r#"
+                        UPDATE outbox
+                        SET claim_token = ?1,
+                            claim_expires_unix_ms = ?2,
+                            updated_at_unix_ms = ?3
+                        WHERE outbox_id IN (
+                            SELECT outbox_id
+                            FROM outbox
+                            WHERE status = 'pending'
+                              AND next_attempt_unix_ms <= ?3
+                              AND claim_expires_unix_ms <= ?3
+                              AND connector_id = ?4
+                            ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
+                            LIMIT ?5
+                        )
+                        "#,
+                        params![
+                            claim_token.as_str(),
+                            claim_expires_unix_ms,
+                            now_unix_ms,
+                            connector_id,
+                            limit_i64,
+                        ],
+                    )?;
+                } else {
+                    transaction.execute(
+                        r#"
+                        UPDATE outbox
+                        SET claim_token = ?1,
+                            claim_expires_unix_ms = ?2,
+                            updated_at_unix_ms = ?3
+                        WHERE outbox_id IN (
+                            SELECT outbox_id
+                            FROM outbox
+                            LEFT JOIN connector_queue_state
+                                ON connector_queue_state.connector_id = outbox.connector_id
+                            WHERE outbox.status = 'pending'
+                              AND COALESCE(connector_queue_state.paused, 0) = 0
+                              AND outbox.next_attempt_unix_ms <= ?3
+                              AND outbox.claim_expires_unix_ms <= ?3
+                              AND outbox.connector_id = ?4
+                            ORDER BY outbox.next_attempt_unix_ms ASC, outbox.outbox_id ASC
+                            LIMIT ?5
+                        )
+                        "#,
+                        params![
+                            claim_token.as_str(),
+                            claim_expires_unix_ms,
+                            now_unix_ms,
+                            connector_id,
+                            limit_i64,
+                        ],
+                    )?;
+                }
             } else {
-                transaction.execute(
-                    r#"
-                    UPDATE outbox
-                    SET claim_token = ?1,
-                        claim_expires_unix_ms = ?2,
-                        updated_at_unix_ms = ?3
-                    WHERE outbox_id IN (
-                        SELECT outbox_id
-                        FROM outbox
-                        WHERE status = 'pending'
-                          AND next_attempt_unix_ms <= ?3
-                          AND claim_expires_unix_ms <= ?3
-                        ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
-                        LIMIT ?4
-                    )
-                    "#,
-                    params![claim_token.as_str(), claim_expires_unix_ms, now_unix_ms, limit_i64],
-                )?;
+                if ignore_queue_pause {
+                    transaction.execute(
+                        r#"
+                        UPDATE outbox
+                        SET claim_token = ?1,
+                            claim_expires_unix_ms = ?2,
+                            updated_at_unix_ms = ?3
+                        WHERE outbox_id IN (
+                            SELECT outbox_id
+                            FROM outbox
+                            WHERE status = 'pending'
+                              AND next_attempt_unix_ms <= ?3
+                              AND claim_expires_unix_ms <= ?3
+                            ORDER BY next_attempt_unix_ms ASC, outbox_id ASC
+                            LIMIT ?4
+                        )
+                        "#,
+                        params![
+                            claim_token.as_str(),
+                            claim_expires_unix_ms,
+                            now_unix_ms,
+                            limit_i64
+                        ],
+                    )?;
+                } else {
+                    transaction.execute(
+                        r#"
+                        UPDATE outbox
+                        SET claim_token = ?1,
+                            claim_expires_unix_ms = ?2,
+                            updated_at_unix_ms = ?3
+                        WHERE outbox_id IN (
+                            SELECT outbox_id
+                            FROM outbox
+                            LEFT JOIN connector_queue_state
+                                ON connector_queue_state.connector_id = outbox.connector_id
+                            WHERE outbox.status = 'pending'
+                              AND COALESCE(connector_queue_state.paused, 0) = 0
+                              AND outbox.next_attempt_unix_ms <= ?3
+                              AND outbox.claim_expires_unix_ms <= ?3
+                            ORDER BY outbox.next_attempt_unix_ms ASC, outbox.outbox_id ASC
+                            LIMIT ?4
+                        )
+                        "#,
+                        params![
+                            claim_token.as_str(),
+                            claim_expires_unix_ms,
+                            now_unix_ms,
+                            limit_i64
+                        ],
+                    )?;
+                }
             }
 
             let mut records = Vec::new();
@@ -636,10 +718,45 @@ impl ConnectorStore {
         &self,
         connector_id: &str,
     ) -> Result<ConnectorQueueDepth, ConnectorStoreError> {
+        let snapshot = self.queue_snapshot(connector_id, 0)?;
+        Ok(ConnectorQueueDepth {
+            pending_outbox: snapshot.pending_outbox,
+            dead_letters: snapshot.dead_letters,
+        })
+    }
+
+    pub fn queue_snapshot(
+        &self,
+        connector_id: &str,
+        now_unix_ms: i64,
+    ) -> Result<ConnectorQueueSnapshot, ConnectorStoreError> {
         let connection = self.connection.lock().map_err(|_| ConnectorStoreError::PoisonedLock)?;
         let pending_outbox: i64 = connection.query_row(
             "SELECT COUNT(*) FROM outbox WHERE connector_id = ?1 AND status = 'pending'",
             params![connector_id],
+            |row| row.get(0),
+        )?;
+        let due_outbox: i64 = connection.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM outbox
+            WHERE connector_id = ?1
+              AND status = 'pending'
+              AND next_attempt_unix_ms <= ?2
+              AND claim_expires_unix_ms <= ?2
+            "#,
+            params![connector_id, now_unix_ms],
+            |row| row.get(0),
+        )?;
+        let claimed_outbox: i64 = connection.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM outbox
+            WHERE connector_id = ?1
+              AND status = 'pending'
+              AND claim_expires_unix_ms > ?2
+            "#,
+            params![connector_id, now_unix_ms],
             |row| row.get(0),
         )?;
         let dead_letters: i64 = connection.query_row(
@@ -647,9 +764,243 @@ impl ConnectorStore {
             params![connector_id],
             |row| row.get(0),
         )?;
-        Ok(ConnectorQueueDepth {
+        let next_attempt_unix_ms = connection.query_row(
+            r#"
+                SELECT MIN(next_attempt_unix_ms)
+                FROM outbox
+                WHERE connector_id = ?1
+                  AND status = 'pending'
+                "#,
+            params![connector_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        let oldest_pending_created_at_unix_ms = connection.query_row(
+            r#"
+                SELECT MIN(created_at_unix_ms)
+                FROM outbox
+                WHERE connector_id = ?1
+                  AND status = 'pending'
+                "#,
+            params![connector_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        let latest_dead_letter_unix_ms = connection.query_row(
+            r#"
+                SELECT MAX(created_at_unix_ms)
+                FROM dead_letters
+                WHERE connector_id = ?1
+                "#,
+            params![connector_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        let queue_state = connection
+            .query_row(
+                r#"
+                SELECT paused, pause_reason, updated_at_unix_ms
+                FROM connector_queue_state
+                WHERE connector_id = ?1
+                "#,
+                params![connector_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? != 0,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(ConnectorQueueSnapshot {
             pending_outbox: u64::try_from(pending_outbox).unwrap_or(0),
+            due_outbox: u64::try_from(due_outbox).unwrap_or(0),
+            claimed_outbox: u64::try_from(claimed_outbox).unwrap_or(0),
             dead_letters: u64::try_from(dead_letters).unwrap_or(0),
+            next_attempt_unix_ms,
+            oldest_pending_created_at_unix_ms,
+            latest_dead_letter_unix_ms,
+            paused: queue_state.as_ref().is_some_and(|(paused, _, _)| *paused),
+            pause_reason: queue_state.as_ref().and_then(|(_, reason, _)| reason.clone()),
+            pause_updated_at_unix_ms: queue_state.as_ref().map(|(_, _, updated_at)| *updated_at),
+        })
+    }
+
+    pub fn set_queue_paused(
+        &self,
+        connector_id: &str,
+        paused: bool,
+        reason: Option<&str>,
+        now_unix_ms: i64,
+    ) -> Result<(), ConnectorStoreError> {
+        self.with_transaction(|transaction| {
+            let connector_exists: Option<i64> = transaction
+                .query_row(
+                    "SELECT 1 FROM connector_instances WHERE connector_id = ?1",
+                    params![connector_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if connector_exists.is_none() {
+                return Err(ConnectorStoreError::NotFound(connector_id.to_owned()));
+            }
+
+            transaction.execute(
+                r#"
+                INSERT INTO connector_queue_state (
+                    connector_id, paused, pause_reason, updated_at_unix_ms
+                )
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(connector_id) DO UPDATE SET
+                    paused = excluded.paused,
+                    pause_reason = excluded.pause_reason,
+                    updated_at_unix_ms = excluded.updated_at_unix_ms
+                "#,
+                params![connector_id, if paused { 1_i64 } else { 0_i64 }, reason, now_unix_ms,],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn replay_dead_letter(
+        &self,
+        connector_id: &str,
+        dead_letter_id: i64,
+        max_attempts: u32,
+        now_unix_ms: i64,
+    ) -> Result<DeadLetterRecord, ConnectorStoreError> {
+        let (dead_letter_id_value, connector_id_value, envelope_id, reason, payload_json, created_at_unix_ms) =
+            self.with_transaction(|transaction| {
+                let dead_letter = transaction
+                .query_row(
+                    r#"
+                    SELECT dead_letter_id, connector_id, envelope_id, reason, payload_json, created_at_unix_ms
+                    FROM dead_letters
+                    WHERE dead_letter_id = ?1
+                      AND connector_id = ?2
+                    "#,
+                    params![dead_letter_id, connector_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or(ConnectorStoreError::DeadLetterNotFound(dead_letter_id))?;
+                let payload_json = dead_letter.4.clone();
+            let updated = transaction.execute(
+                r#"
+                UPDATE outbox
+                SET payload_json = ?3,
+                    attempts = 0,
+                    max_attempts = ?4,
+                    next_attempt_unix_ms = ?5,
+                    status = 'pending',
+                    native_message_id = NULL,
+                    last_error = NULL,
+                    claim_token = NULL,
+                    claim_expires_unix_ms = 0,
+                    updated_at_unix_ms = ?5
+                WHERE connector_id = ?1
+                  AND envelope_id = ?2
+                  AND status = 'dead'
+                "#,
+                params![
+                    dead_letter.1,
+                    dead_letter.2,
+                    payload_json,
+                    i64::from(max_attempts.max(1)),
+                    now_unix_ms,
+                ],
+            )?;
+            if updated == 0 {
+                transaction.execute(
+                    r#"
+                    INSERT INTO outbox (
+                        connector_id, envelope_id, payload_json, attempts, max_attempts,
+                        next_attempt_unix_ms, status, native_message_id, last_error,
+                        claim_token, claim_expires_unix_ms, created_at_unix_ms, updated_at_unix_ms
+                    )
+                    VALUES (?1, ?2, ?3, 0, ?4, ?5, 'pending', NULL, NULL, NULL, 0, ?5, ?5)
+                    "#,
+                    params![
+                        dead_letter.1,
+                        dead_letter.2,
+                        payload_json,
+                        i64::from(max_attempts.max(1)),
+                        now_unix_ms,
+                    ],
+                )?;
+            }
+            let deleted = transaction.execute(
+                "DELETE FROM dead_letters WHERE dead_letter_id = ?1 AND connector_id = ?2",
+                params![dead_letter_id, connector_id],
+            )?;
+            if deleted == 0 {
+                return Err(ConnectorStoreError::DeadLetterNotFound(dead_letter_id));
+            }
+                Ok(dead_letter)
+            })?;
+        Ok(DeadLetterRecord {
+            dead_letter_id: dead_letter_id_value,
+            connector_id: connector_id_value,
+            envelope_id,
+            reason,
+            payload: serde_json::from_str(payload_json.as_str())?,
+            created_at_unix_ms,
+        })
+    }
+
+    pub fn discard_dead_letter(
+        &self,
+        connector_id: &str,
+        dead_letter_id: i64,
+    ) -> Result<DeadLetterRecord, ConnectorStoreError> {
+        let (dead_letter_id_value, connector_id_value, envelope_id, reason, payload_json, created_at_unix_ms) =
+            self.with_transaction(|transaction| {
+                let dead_letter = transaction
+                .query_row(
+                    r#"
+                    SELECT dead_letter_id, connector_id, envelope_id, reason, payload_json, created_at_unix_ms
+                    FROM dead_letters
+                    WHERE dead_letter_id = ?1
+                      AND connector_id = ?2
+                    "#,
+                    params![dead_letter_id, connector_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or(ConnectorStoreError::DeadLetterNotFound(dead_letter_id))?;
+            let deleted = transaction.execute(
+                "DELETE FROM dead_letters WHERE dead_letter_id = ?1 AND connector_id = ?2",
+                params![dead_letter_id, connector_id],
+            )?;
+            if deleted == 0 {
+                return Err(ConnectorStoreError::DeadLetterNotFound(dead_letter_id));
+            }
+                Ok(dead_letter)
+            })?;
+        Ok(DeadLetterRecord {
+            dead_letter_id: dead_letter_id_value,
+            connector_id: connector_id_value,
+            envelope_id,
+            reason,
+            payload: serde_json::from_str(payload_json.as_str())?,
+            created_at_unix_ms,
         })
     }
 
@@ -812,6 +1163,14 @@ impl ConnectorStore {
             );
             CREATE INDEX IF NOT EXISTS idx_dead_letters_connector
                 ON dead_letters(connector_id, dead_letter_id DESC);
+
+            CREATE TABLE IF NOT EXISTS connector_queue_state (
+                connector_id TEXT PRIMARY KEY,
+                paused INTEGER NOT NULL CHECK(paused IN (0, 1)),
+                pause_reason TEXT,
+                updated_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(connector_id) REFERENCES connector_instances(connector_id) ON DELETE CASCADE
+            );
 
             CREATE TABLE IF NOT EXISTS connector_events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1094,7 +1453,9 @@ mod tests {
         let request = sample_outbound("env-2:0");
         store.enqueue_outbox_if_absent(&request, 2, 1_000).expect("outbox enqueue should succeed");
 
-        let due = store.load_due_outbox(1_000, 10, Some("echo:default")).expect("due outbox query");
+        let due = store
+            .load_due_outbox(1_000, 10, Some("echo:default"), false)
+            .expect("due outbox query");
         assert_eq!(due.len(), 1);
         let outbox_id = due[0].outbox_id;
         let claim_token = due[0].claim_token.clone();
@@ -1102,11 +1463,11 @@ mod tests {
             .schedule_outbox_retry(outbox_id, claim_token.as_str(), 1, "transient", 2_000)
             .expect("retry should be scheduled");
         let due_after_backoff = store
-            .load_due_outbox(1_500, 10, Some("echo:default"))
+            .load_due_outbox(1_500, 10, Some("echo:default"), false)
             .expect("outbox due query should succeed");
         assert!(due_after_backoff.is_empty(), "entry should not be due before retry timestamp");
         let due_for_dead_letter = store
-            .load_due_outbox(2_100, 10, Some("echo:default"))
+            .load_due_outbox(2_100, 10, Some("echo:default"), false)
             .expect("due outbox query should succeed");
         assert_eq!(due_for_dead_letter.len(), 1);
         let dead_letter_claim = due_for_dead_letter[0].claim_token.clone();
@@ -1120,6 +1481,136 @@ mod tests {
     }
 
     #[test]
+    fn dead_letter_can_be_replayed_back_into_pending_outbox() {
+        let (_tempdir, store) = open_store();
+        store.upsert_instance(&sample_spec(), 1_000).expect("instance should be created");
+        let request = sample_outbound("env-replay:0");
+        store.enqueue_outbox_if_absent(&request, 2, 1_000).expect("outbox enqueue should succeed");
+
+        let due = store
+            .load_due_outbox(1_000, 10, Some("echo:default"), false)
+            .expect("due outbox query should succeed");
+        let claimed = due.first().expect("entry should be claimed");
+        store
+            .move_outbox_to_dead_letter(
+                claimed.outbox_id,
+                claimed.claim_token.as_str(),
+                "permanent",
+                1_100,
+            )
+            .expect("dead letter move should succeed");
+        let dead_letter = store
+            .list_dead_letters("echo:default", 10)
+            .expect("dead letters should be queryable")
+            .into_iter()
+            .next()
+            .expect("dead letter should exist");
+
+        let replayed = store
+            .replay_dead_letter("echo:default", dead_letter.dead_letter_id, 5, 2_000)
+            .expect("dead letter replay should succeed");
+        assert_eq!(replayed.envelope_id, "env-replay:0");
+
+        let dead_letters_after = store
+            .list_dead_letters("echo:default", 10)
+            .expect("dead letters after replay should be queryable");
+        assert!(dead_letters_after.is_empty(), "replayed dead letter should be removed");
+
+        let replay_due = store
+            .load_due_outbox(2_000, 10, Some("echo:default"), false)
+            .expect("replayed outbox entry should be pending");
+        assert_eq!(replay_due.len(), 1, "replayed entry should be ready for immediate retry");
+        assert_eq!(replay_due[0].attempts, 0, "replayed outbox should reset attempts");
+        assert_eq!(replay_due[0].envelope_id, "env-replay:0");
+    }
+
+    #[test]
+    fn dead_letter_can_be_discarded_without_requeueing() {
+        let (_tempdir, store) = open_store();
+        store.upsert_instance(&sample_spec(), 1_000).expect("instance should be created");
+        let request = sample_outbound("env-discard:0");
+        store.enqueue_outbox_if_absent(&request, 2, 1_000).expect("outbox enqueue should succeed");
+
+        let due = store
+            .load_due_outbox(1_000, 10, Some("echo:default"), false)
+            .expect("due outbox query should succeed");
+        let claimed = due.first().expect("entry should be claimed");
+        store
+            .move_outbox_to_dead_letter(
+                claimed.outbox_id,
+                claimed.claim_token.as_str(),
+                "permanent",
+                1_100,
+            )
+            .expect("dead letter move should succeed");
+        let dead_letter = store
+            .list_dead_letters("echo:default", 10)
+            .expect("dead letters should be queryable")
+            .into_iter()
+            .next()
+            .expect("dead letter should exist");
+
+        let discarded = store
+            .discard_dead_letter("echo:default", dead_letter.dead_letter_id)
+            .expect("dead letter discard should succeed");
+        assert_eq!(discarded.envelope_id, "env-discard:0");
+        assert!(
+            store
+                .list_dead_letters("echo:default", 10)
+                .expect("dead letters should remain queryable")
+                .is_empty(),
+            "discarded dead letter should be removed from listing"
+        );
+        assert!(
+            store
+                .load_due_outbox(2_000, 10, Some("echo:default"), false)
+                .expect("outbox query should remain valid")
+                .is_empty(),
+            "discard should not recreate a pending outbox entry"
+        );
+    }
+
+    #[test]
+    fn queue_snapshot_reports_pending_due_claimed_and_dead_letter_counts() {
+        let (_tempdir, store) = open_store();
+        store.upsert_instance(&sample_spec(), 1_000).expect("instance should be created");
+        store
+            .enqueue_outbox_if_absent(&sample_outbound("env-a:0"), 2, 1_000)
+            .expect("first outbox enqueue should succeed");
+        store
+            .enqueue_outbox_if_absent(&sample_outbound("env-b:0"), 2, 2_000)
+            .expect("second outbox enqueue should succeed");
+
+        let claimed = store
+            .load_due_outbox(2_000, 1, Some("echo:default"), false)
+            .expect("due outbox query should succeed");
+        assert_eq!(claimed.len(), 1, "one entry should be claimed for in-flight delivery");
+        let snapshot =
+            store.queue_snapshot("echo:default", 2_000).expect("queue snapshot should succeed");
+        assert_eq!(snapshot.pending_outbox, 2);
+        assert_eq!(snapshot.claimed_outbox, 1);
+        assert_eq!(snapshot.due_outbox, 1);
+        assert_eq!(snapshot.dead_letters, 0);
+        assert_eq!(snapshot.next_attempt_unix_ms, Some(1_000));
+        assert_eq!(snapshot.oldest_pending_created_at_unix_ms, Some(1_000));
+
+        store
+            .move_outbox_to_dead_letter(
+                claimed[0].outbox_id,
+                claimed[0].claim_token.as_str(),
+                "permanent",
+                2_100,
+            )
+            .expect("dead letter move should succeed");
+        let after_dead_letter = store
+            .queue_snapshot("echo:default", 2_100)
+            .expect("queue snapshot after dead letter should succeed");
+        assert_eq!(after_dead_letter.pending_outbox, 1);
+        assert_eq!(after_dead_letter.dead_letters, 1);
+        assert_eq!(after_dead_letter.latest_dead_letter_unix_ms, Some(2_100));
+    }
+
+    #[test]
     fn outbox_due_claims_are_exclusive_between_loads() {
         let (_tempdir, store) = open_store();
         store.upsert_instance(&sample_spec(), 1_000).expect("instance should be created");
@@ -1127,11 +1618,11 @@ mod tests {
         store.enqueue_outbox_if_absent(&request, 2, 1_000).expect("outbox enqueue should succeed");
 
         let first = store
-            .load_due_outbox(1_000, 10, Some("echo:default"))
+            .load_due_outbox(1_000, 10, Some("echo:default"), false)
             .expect("first load should claim");
         assert_eq!(first.len(), 1, "first due load should claim the entry");
         let second = store
-            .load_due_outbox(1_000, 10, Some("echo:default"))
+            .load_due_outbox(1_000, 10, Some("echo:default"), false)
             .expect("second load should succeed");
         assert!(
             second.is_empty(),
@@ -1172,6 +1663,95 @@ mod tests {
         assert!(
             matches!(error, ConnectorStoreError::OutboxNotFound(9_997)),
             "expected OutboxNotFound for missing outbox id"
+        );
+    }
+
+    #[test]
+    fn queue_snapshot_reports_pause_state_and_due_counts() {
+        let (_tempdir, store) = open_store();
+        store.upsert_instance(&sample_spec(), 1_000).expect("instance should be created");
+        store
+            .enqueue_outbox_if_absent(&sample_outbound("env-1"), 3, 1_000)
+            .expect("outbox insert should succeed");
+        let claimed = store
+            .load_due_outbox(1_000, 1, Some("echo:default"), false)
+            .expect("claim should succeed");
+        let claim_token = claimed[0].claim_token.clone();
+        store
+            .schedule_outbox_retry(claimed[0].outbox_id, claim_token.as_str(), 1, "retry", 5_000)
+            .expect("retry scheduling should succeed");
+        store
+            .set_queue_paused("echo:default", true, Some("operator_pause"), 2_000)
+            .expect("queue pause should persist");
+
+        let snapshot =
+            store.queue_snapshot("echo:default", 2_000).expect("queue snapshot should resolve");
+
+        assert_eq!(snapshot.pending_outbox, 1);
+        assert_eq!(snapshot.due_outbox, 0);
+        assert_eq!(snapshot.claimed_outbox, 0);
+        assert!(snapshot.paused, "queue snapshot should reflect paused state");
+        assert_eq!(snapshot.pause_reason.as_deref(), Some("operator_pause"));
+        assert_eq!(snapshot.pause_updated_at_unix_ms, Some(2_000));
+        assert_eq!(snapshot.next_attempt_unix_ms, Some(5_000));
+    }
+
+    #[test]
+    fn replay_and_discard_dead_letter_update_queue_state() {
+        let (_tempdir, store) = open_store();
+        store.upsert_instance(&sample_spec(), 1_000).expect("instance should be created");
+        store
+            .enqueue_outbox_if_absent(&sample_outbound("env-1"), 3, 1_000)
+            .expect("outbox insert should succeed");
+        let due = store
+            .load_due_outbox(1_000, 1, Some("echo:default"), false)
+            .expect("outbox should be claimable");
+        let claim_token = due[0].claim_token.clone();
+        store
+            .move_outbox_to_dead_letter(due[0].outbox_id, claim_token.as_str(), "permanent", 1_500)
+            .expect("dead-letter move should succeed");
+
+        let dead_letters =
+            store.list_dead_letters("echo:default", 10).expect("dead letters should be listed");
+        assert_eq!(dead_letters.len(), 1);
+
+        let replayed = store
+            .replay_dead_letter("echo:default", dead_letters[0].dead_letter_id, 5, 2_000)
+            .expect("dead letter should replay");
+        assert_eq!(replayed.envelope_id, "env-1");
+        let snapshot = store
+            .queue_snapshot("echo:default", 2_000)
+            .expect("queue snapshot should resolve after replay");
+        assert_eq!(snapshot.pending_outbox, 1);
+        assert_eq!(snapshot.dead_letters, 0);
+        assert_eq!(snapshot.due_outbox, 1);
+
+        let due_again = store
+            .load_due_outbox(2_000, 1, Some("echo:default"), false)
+            .expect("replayed outbox should be claimable");
+        let claim_token = due_again[0].claim_token.clone();
+        store
+            .move_outbox_to_dead_letter(
+                due_again[0].outbox_id,
+                claim_token.as_str(),
+                "retry_exhausted",
+                2_100,
+            )
+            .expect("dead-letter move should succeed");
+        let dead_letter_id = store
+            .list_dead_letters("echo:default", 10)
+            .expect("dead letters should be listed after second failure")[0]
+            .dead_letter_id;
+        let discarded = store
+            .discard_dead_letter("echo:default", dead_letter_id)
+            .expect("dead letter should discard");
+        assert_eq!(discarded.reason, "retry_exhausted");
+        assert!(
+            store
+                .list_dead_letters("echo:default", 10)
+                .expect("dead letters should reload")
+                .is_empty(),
+            "discard should remove dead letter from operator queue"
         );
     }
 }

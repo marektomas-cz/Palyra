@@ -1149,6 +1149,427 @@ fn console_memory_purge_requires_session_and_csrf() -> Result<()> {
 }
 
 #[test]
+fn admin_channel_queue_pause_resume_preserves_enabled_connector_state() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .context("failed to build HTTP client")?;
+    let connector_id = "echo:default";
+
+    let paused = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{connector_id}/operations/queue/pause"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin queue pause endpoint")?
+        .error_for_status()
+        .context("admin queue pause endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse admin queue pause response json")?;
+    assert_eq!(
+        paused.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
+        Some("queue_pause"),
+        "queue pause action should be labeled"
+    );
+    assert_eq!(
+        paused.get("connector").and_then(|value| value.get("enabled")).and_then(Value::as_bool),
+        Some(true),
+        "queue pause must not disable the connector"
+    );
+    assert_eq!(
+        paused
+            .get("operations")
+            .and_then(|value| value.get("queue"))
+            .and_then(|value| value.get("paused"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "queue pause should expose paused=true in operations snapshot"
+    );
+    assert_eq!(
+        paused
+            .get("operations")
+            .and_then(|value| value.get("queue"))
+            .and_then(|value| value.get("pause_reason"))
+            .and_then(Value::as_str),
+        Some("operator requested queue pause via admin API"),
+        "queue pause should expose the operator reason"
+    );
+
+    let resumed = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{connector_id}/operations/queue/resume"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin queue resume endpoint")?
+        .error_for_status()
+        .context("admin queue resume endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse admin queue resume response json")?;
+    assert_eq!(
+        resumed.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
+        Some("queue_resume"),
+        "queue resume action should be labeled"
+    );
+    assert_eq!(
+        resumed.get("connector").and_then(|value| value.get("enabled")).and_then(Value::as_bool),
+        Some(true),
+        "queue resume must leave the connector enabled"
+    );
+    assert_eq!(
+        resumed
+            .get("operations")
+            .and_then(|value| value.get("queue"))
+            .and_then(|value| value.get("paused"))
+            .and_then(Value::as_bool),
+        Some(false),
+        "queue resume should expose paused=false in operations snapshot"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn admin_channel_health_refresh_and_dead_letter_recovery_publish_operator_state() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .context("failed to build HTTP client")?;
+    let discord_connector_id = "discord:default";
+
+    let enabled = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/enabled"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .json(&serde_json::json!({ "enabled": true }))
+        .send()
+        .context("failed to enable discord connector for recovery test")?
+        .error_for_status()
+        .context("enabling discord connector for recovery test returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse discord connector enable response json")?;
+    assert_eq!(
+        enabled.get("connector").and_then(|value| value.get("enabled")).and_then(Value::as_bool),
+        Some(true),
+        "discord connector should be enabled before running recovery actions"
+    );
+
+    let health_refresh = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/health-refresh"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .json(&serde_json::json!({}))
+        .send()
+        .context("failed to call admin channel health-refresh endpoint")?
+        .error_for_status()
+        .context("admin channel health-refresh endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse admin channel health-refresh response json")?;
+    assert_eq!(
+        health_refresh
+            .get("health_refresh")
+            .and_then(|value| value.get("supported"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "discord health refresh should be supported"
+    );
+    assert_eq!(
+        health_refresh
+            .get("health_refresh")
+            .and_then(|value| value.get("refreshed"))
+            .and_then(Value::as_bool),
+        Some(false),
+        "health refresh should report refreshed=false when the bot token is unavailable"
+    );
+    assert!(
+        health_refresh
+            .get("health_refresh")
+            .and_then(|value| value.get("required_permissions"))
+            .and_then(Value::as_array)
+            .is_some(),
+        "health refresh should still publish required Discord permissions"
+    );
+
+    let test_send = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/test-send"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .json(&serde_json::json!({
+            "target": "channel:1234567890",
+            "text": "trigger dead letter",
+            "confirm": true,
+        }))
+        .send()
+        .context("failed to call admin discord test-send endpoint")?
+        .error_for_status()
+        .context("admin discord test-send endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse admin discord test-send response json")?;
+    assert!(
+        test_send.get("dispatch").is_some() && test_send.get("status").is_some(),
+        "discord test-send should still return dispatch and status payloads"
+    );
+
+    let logs_after_send = client
+        .get(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/logs?limit=5"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin channel logs endpoint after dead-lettering")?
+        .error_for_status()
+        .context("admin channel logs endpoint returned non-success status after dead-lettering")?
+        .json::<Value>()
+        .context("failed to parse admin channel logs response json after dead-lettering")?;
+    let dead_letter_id = logs_after_send
+        .get("dead_letters")
+        .and_then(Value::as_array)
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("dead_letter_id"))
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow::anyhow!("expected admin channel logs to expose a dead-letter id"))?;
+
+    let replayed = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/dead-letters/{dead_letter_id}/replay"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin dead-letter replay endpoint")?
+        .error_for_status()
+        .context("admin dead-letter replay endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse admin dead-letter replay response json")?;
+    assert_eq!(
+        replayed.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
+        Some("dead_letter_replay"),
+        "dead-letter replay action should be labeled"
+    );
+    assert_eq!(
+        replayed
+            .get("operations")
+            .and_then(|value| value.get("queue"))
+            .and_then(|value| value.get("dead_letters"))
+            .and_then(Value::as_u64),
+        Some(0),
+        "replay should remove the item from dead letters"
+    );
+
+    let drained = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/queue/drain"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin queue drain endpoint")?
+        .error_for_status()
+        .context("admin queue drain endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse admin queue drain response json")?;
+    assert_eq!(
+        drained.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
+        Some("queue_drain"),
+        "queue drain action should be labeled"
+    );
+    assert_eq!(
+        drained
+            .get("action")
+            .and_then(|value| value.get("drain"))
+            .and_then(|value| value.get("dead_lettered"))
+            .and_then(Value::as_u64),
+        Some(1),
+        "forced drain should process the replayed item back into dead letters when the token is still missing"
+    );
+
+    let logs_after_drain = client
+        .get(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/logs?limit=5"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin channel logs endpoint after forced drain")?
+        .error_for_status()
+        .context("admin channel logs endpoint returned non-success status after forced drain")?
+        .json::<Value>()
+        .context("failed to parse admin channel logs response json after forced drain")?;
+    let dead_letter_id = logs_after_drain
+        .get("dead_letters")
+        .and_then(Value::as_array)
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("dead_letter_id"))
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow::anyhow!("expected forced drain to recreate a dead-letter entry"))?;
+
+    let discarded = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/dead-letters/{dead_letter_id}/discard"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin dead-letter discard endpoint")?
+        .error_for_status()
+        .context("admin dead-letter discard endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse admin dead-letter discard response json")?;
+    assert_eq!(
+        discarded.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
+        Some("dead_letter_discard"),
+        "dead-letter discard action should be labeled"
+    );
+    assert_eq!(
+        discarded
+            .get("operations")
+            .and_then(|value| value.get("queue"))
+            .and_then(|value| value.get("dead_letters"))
+            .and_then(Value::as_u64),
+        Some(0),
+        "discard should clear the recreated dead-letter entry"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn console_channel_operations_return_recovery_payloads() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .context("failed to build HTTP client")?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+    let connector_id = "echo:default";
+
+    let queue_pause = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/channels/{connector_id}/operations/queue/pause"
+        ))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .send()
+        .context("failed to call console queue pause endpoint")?
+        .error_for_status()
+        .context("console queue pause endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse console queue pause response json")?;
+    assert_eq!(
+        queue_pause
+            .get("operations")
+            .and_then(|value| value.get("queue"))
+            .and_then(|value| value.get("paused"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "console queue pause should expose paused queue state"
+    );
+    assert_eq!(
+        queue_pause
+            .get("connector")
+            .and_then(|value| value.get("enabled"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "console queue pause must not disable the connector"
+    );
+
+    let queue_resume = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/channels/{connector_id}/operations/queue/resume"
+        ))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .send()
+        .context("failed to call console queue resume endpoint")?
+        .error_for_status()
+        .context("console queue resume endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse console queue resume response json")?;
+    assert_eq!(
+        queue_resume
+            .get("operations")
+            .and_then(|value| value.get("queue"))
+            .and_then(|value| value.get("paused"))
+            .and_then(Value::as_bool),
+        Some(false),
+        "console queue resume should expose resumed queue state"
+    );
+
+    let health_refresh = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/channels/discord:default/operations/health-refresh"
+        ))
+        .header("Cookie", cookie)
+        .header("x-palyra-csrf-token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .context("failed to call console discord health-refresh endpoint")?
+        .error_for_status()
+        .context("console discord health-refresh endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse console discord health-refresh response json")?;
+    assert_eq!(
+        health_refresh
+            .get("health_refresh")
+            .and_then(|value| value.get("supported"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "console health refresh should surface Discord support"
+    );
+    assert!(
+        health_refresh
+            .get("health_refresh")
+            .and_then(|value| value.get("required_permissions"))
+            .and_then(Value::as_array)
+            .is_some(),
+        "console health refresh should expose Discord permission guidance"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_m52_control_plane_domains_publish_contract_metadata() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
     let mut daemon = ChildGuard::new(child);

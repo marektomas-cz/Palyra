@@ -8,11 +8,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palyra_common::{validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
 use palyra_connectors::{
     connectors::default_adapters, AttachmentKind, AttachmentRef, ConnectorAvailability,
-    ConnectorInstanceSpec, ConnectorKind, ConnectorRouter, ConnectorRouterError,
-    ConnectorStatusSnapshot, ConnectorSupervisor, ConnectorSupervisorConfig,
-    ConnectorSupervisorError, InboundIngestOutcome, InboundMessageEvent,
-    OutboundA2uiUpdate as ConnectorA2uiUpdate, OutboundAttachment, OutboundMessageRequest,
-    RouteInboundResult, RoutedOutboundMessage,
+    ConnectorInstanceSpec, ConnectorKind, ConnectorQueueSnapshot, ConnectorRouter,
+    ConnectorRouterError, ConnectorStatusSnapshot, ConnectorSupervisor, ConnectorSupervisorConfig,
+    ConnectorSupervisorError, DeadLetterRecord, DrainOutcome, InboundIngestOutcome,
+    InboundMessageEvent, OutboundA2uiUpdate as ConnectorA2uiUpdate, OutboundAttachment,
+    OutboundMessageRequest, RouteInboundResult, RoutedOutboundMessage,
 };
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -214,11 +214,69 @@ impl ChannelPlatform {
         &self,
         connector_id: &str,
         limit: Option<usize>,
-    ) -> Result<Vec<palyra_connectors::DeadLetterRecord>, ChannelPlatformError> {
+    ) -> Result<Vec<DeadLetterRecord>, ChannelPlatformError> {
         self.ensure_operator_visible(connector_id)?;
         self.supervisor
             .list_dead_letters(connector_id, limit.unwrap_or(DEFAULT_LOG_PAGE_LIMIT))
             .map_err(ChannelPlatformError::from)
+    }
+
+    pub fn queue_snapshot(
+        &self,
+        connector_id: &str,
+    ) -> Result<ConnectorQueueSnapshot, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        self.supervisor.queue_snapshot(connector_id).map_err(ChannelPlatformError::from)
+    }
+
+    pub fn set_queue_paused(
+        &self,
+        connector_id: &str,
+        paused: bool,
+        reason: Option<&str>,
+    ) -> Result<ConnectorQueueSnapshot, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        self.supervisor
+            .set_queue_paused(connector_id, paused, reason)
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub fn replay_dead_letter(
+        &self,
+        connector_id: &str,
+        dead_letter_id: i64,
+    ) -> Result<DeadLetterRecord, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        self.supervisor
+            .replay_dead_letter(connector_id, dead_letter_id)
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub fn discard_dead_letter(
+        &self,
+        connector_id: &str,
+        dead_letter_id: i64,
+    ) -> Result<DeadLetterRecord, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        self.supervisor
+            .discard_dead_letter(connector_id, dead_letter_id)
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub fn connector_instance(
+        &self,
+        connector_id: &str,
+    ) -> Result<palyra_connectors::ConnectorInstanceRecord, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        self.supervisor
+            .store()
+            .get_instance(connector_id)
+            .map_err(ChannelPlatformError::from)?
+            .ok_or_else(|| {
+                ChannelPlatformError::Supervisor(ConnectorSupervisorError::NotFound(
+                    connector_id.to_owned(),
+                ))
+            })
     }
 
     pub async fn submit_test_message(
@@ -343,6 +401,20 @@ impl ChannelPlatform {
     pub async fn drain_due(&self) -> Result<palyra_connectors::DrainOutcome, ChannelPlatformError> {
         self.supervisor
             .drain_due_outbox(self.supervisor_config().background_drain_batch_size)
+            .await
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub async fn drain_due_for_connector(
+        &self,
+        connector_id: &str,
+    ) -> Result<DrainOutcome, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        self.supervisor
+            .drain_due_outbox_for_connector_force(
+                connector_id,
+                self.supervisor_config().background_drain_batch_size,
+            )
             .await
             .map_err(ChannelPlatformError::from)
     }

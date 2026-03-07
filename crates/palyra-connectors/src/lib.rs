@@ -11,8 +11,8 @@ pub use protocol::{
     OutboundMessageRequest, RetryClass, RouteInboundResult, RoutedOutboundMessage,
 };
 pub use storage::{
-    ConnectorEventRecord, ConnectorInstanceRecord, ConnectorStore, ConnectorStoreError,
-    DeadLetterRecord, OutboxEnqueueOutcome, OutboxEntryRecord,
+    ConnectorEventRecord, ConnectorInstanceRecord, ConnectorQueueSnapshot, ConnectorStore,
+    ConnectorStoreError, DeadLetterRecord, OutboxEnqueueOutcome, OutboxEntryRecord,
 };
 pub use supervisor::{
     ConnectorAdapter, ConnectorAdapterError, ConnectorRouter, ConnectorRouterError,

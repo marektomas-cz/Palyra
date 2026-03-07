@@ -28,10 +28,10 @@ use super::snapshot::resolve_dashboard_access_target;
 use super::{
     build_onboarding_status, build_snapshot_from_inputs, collect_redacted_errors,
     compute_backoff_ms, executable_file_name, load_or_initialize_state_file, mpsc,
-    parse_discord_status, parse_remote_dashboard_base_url, resolve_binary_path,
-    sanitize_log_line, try_enqueue_log_event, BrowserStatusSnapshot, Client, ControlCenter,
-    DashboardAccessMode, DesktopOnboardingStep, DesktopSecretStore, DesktopStateFile, LogEvent,
-    LogStream, ManagedService, RuntimeConfig, ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
+    parse_discord_status, parse_remote_dashboard_base_url, resolve_binary_path, sanitize_log_line,
+    try_enqueue_log_event, BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode,
+    DesktopOnboardingStep, DesktopSecretStore, DesktopStateFile, LogEvent, LogStream,
+    ManagedService, RuntimeConfig, ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
 };
 
 fn env_lock() -> &'static Mutex<()> {
@@ -255,6 +255,66 @@ fn discord_snapshot_uses_runtime_error_fallback() {
 }
 
 #[test]
+fn discord_snapshot_surfaces_recovery_diagnostics_from_operations_payload() {
+    let payload = json!({
+        "connector": {
+            "connector_id": "discord:default",
+            "enabled": true,
+            "readiness": "ready",
+            "liveness": "running"
+        },
+        "operations": {
+            "queue": {
+                "pending_outbox": 4,
+                "due_outbox": 2,
+                "claimed_outbox": 1,
+                "dead_letters": 3,
+                "paused": true,
+                "pause_reason": "operator token rotation"
+            },
+            "saturation": {
+                "state": "paused"
+            },
+            "last_auth_failure": "authorization=super-secret",
+            "discord": {
+                "last_permission_failure": "Missing Send Messages in #ops",
+                "health_refresh_hint": "Run health refresh with verify_channel_id"
+            }
+        },
+        "health_refresh": {
+            "supported": true,
+            "refreshed": false,
+            "message": "token=discord-secret",
+            "warnings": ["Missing View Channels"]
+        }
+    });
+
+    let snapshot = parse_discord_status(Some(&payload));
+
+    assert!(snapshot.authenticated);
+    assert_eq!(snapshot.saturation_state, "paused");
+    assert!(snapshot.queue_paused);
+    assert_eq!(snapshot.pending_outbox, 4);
+    assert_eq!(snapshot.due_outbox, 2);
+    assert_eq!(snapshot.claimed_outbox, 1);
+    assert_eq!(snapshot.dead_letters, 3);
+    assert_eq!(snapshot.pause_reason.as_deref(), Some("operator token rotation"));
+    assert_eq!(snapshot.permission_gap_hint.as_deref(), Some("Missing Send Messages in #ops"));
+    assert_eq!(snapshot.health_refresh_status, "degraded");
+    assert_eq!(snapshot.health_refresh_warning_count, 1);
+    let auth_hint = snapshot.auth_failure_hint.unwrap_or_default();
+    assert!(
+        auth_hint.contains("authorization=<redacted>") && !auth_hint.contains("super-secret"),
+        "auth hint should be redacted: {auth_hint}"
+    );
+    let health_detail = snapshot.health_refresh_detail.unwrap_or_default();
+    assert!(
+        health_detail.contains("token=<redacted>") && !health_detail.contains("discord-secret"),
+        "health refresh detail should be redacted: {health_detail}"
+    );
+}
+
+#[test]
 fn browser_disabled_status_is_treated_as_healthy_for_overall_checks() {
     let snapshot = BrowserStatusSnapshot {
         enabled: false,
@@ -432,13 +492,12 @@ version = 1
     write_file(gateway_binary.as_path(), "binary");
     write_file(browser_binary.as_path(), "binary");
     write_file(cli_binary.as_path(), "binary");
-    let _config_override = ScopedEnvVar::set("PALYRA_CONFIG", config_path.to_string_lossy().as_ref());
+    let _config_override =
+        ScopedEnvVar::set("PALYRA_CONFIG", config_path.to_string_lossy().as_ref());
     let _gateway_override =
         ScopedEnvVar::set("PALYRA_DESKTOP_PALYRAD_BIN", gateway_binary.to_string_lossy().as_ref());
-    let _browser_override = ScopedEnvVar::set(
-        "PALYRA_DESKTOP_BROWSERD_BIN",
-        browser_binary.to_string_lossy().as_ref(),
-    );
+    let _browser_override =
+        ScopedEnvVar::set("PALYRA_DESKTOP_BROWSERD_BIN", browser_binary.to_string_lossy().as_ref());
     let _cli_override =
         ScopedEnvVar::set("PALYRA_DESKTOP_PALYRA_BIN", cli_binary.to_string_lossy().as_ref());
 
@@ -789,7 +848,29 @@ async fn snapshot_build_redacts_console_and_connector_diagnostics() {
                     "200 OK",
                     r#"{
                             "connector":{"connector_id":"discord:default","enabled":true,"readiness":"degraded","liveness":"running"},
-                            "runtime":{"last_error":"discord send failed authorization=discord-secret url=https://discord.test/api/webhooks/1?token=hook-secret&mode=ok"}
+                            "runtime":{"last_error":"discord send failed authorization=discord-secret url=https://discord.test/api/webhooks/1?token=hook-secret&mode=ok"},
+                            "operations":{
+                                "queue":{
+                                    "pending_outbox":5,
+                                    "due_outbox":2,
+                                    "claimed_outbox":1,
+                                    "dead_letters":3,
+                                    "paused":true,
+                                    "pause_reason":"operator token rotation"
+                                },
+                                "saturation":{"state":"paused"},
+                                "last_auth_failure":"authorization=queue-secret",
+                                "discord":{
+                                    "last_permission_failure":"Missing Send Messages",
+                                    "health_refresh_hint":"Run health refresh with verify_channel_id"
+                                }
+                            },
+                            "health_refresh":{
+                                "supported":true,
+                                "refreshed":false,
+                                "message":"token=refresh-secret",
+                                "warnings":["Missing View Channels"]
+                            }
                         }"#,
                     &[],
                 );
@@ -824,6 +905,27 @@ async fn snapshot_build_redacts_console_and_connector_diagnostics() {
             && !discord_error.contains("discord-secret")
             && !discord_error.contains("hook-secret"),
         "desktop connector snapshot must sanitize connector diagnostics: {discord_error}"
+    );
+    assert!(snapshot.quick_facts.discord.queue_paused);
+    assert_eq!(snapshot.quick_facts.discord.pending_outbox, 5);
+    assert_eq!(snapshot.quick_facts.discord.dead_letters, 3);
+    assert_eq!(snapshot.quick_facts.discord.saturation_state, "paused");
+    assert_eq!(
+        snapshot.quick_facts.discord.permission_gap_hint.as_deref(),
+        Some("Missing Send Messages")
+    );
+    let auth_hint = snapshot.quick_facts.discord.auth_failure_hint.clone().unwrap_or_default();
+    assert!(
+        auth_hint.contains("authorization=<redacted>") && !auth_hint.contains("queue-secret"),
+        "desktop snapshot should redact auth failure hints: {auth_hint}"
+    );
+    let health_detail =
+        snapshot.quick_facts.discord.health_refresh_detail.clone().unwrap_or_default();
+    assert_eq!(snapshot.quick_facts.discord.health_refresh_status, "degraded");
+    assert_eq!(snapshot.quick_facts.discord.health_refresh_warning_count, 1);
+    assert!(
+        health_detail.contains("token=<redacted>") && !health_detail.contains("refresh-secret"),
+        "desktop snapshot should redact health refresh detail: {health_detail}"
     );
     server.join().expect("test server thread should exit");
 }
@@ -1401,15 +1503,19 @@ async fn discord_onboarding_preflight_apply_and_verify_use_console_session_and_c
         verify_channel_id: Some("123456789012345678".to_owned()),
     };
 
-    let preflight = run_discord_onboarding_preflight(build_test_discord_inputs(fixture.path(), port), request.clone())
-        .await
-        .expect("Discord preflight should succeed");
+    let preflight = run_discord_onboarding_preflight(
+        build_test_discord_inputs(fixture.path(), port),
+        request.clone(),
+    )
+    .await
+    .expect("Discord preflight should succeed");
     assert_eq!(preflight.connector_id, "discord:default");
     assert_eq!(preflight.bot_username.as_deref(), Some("palyra-bot"));
 
-    let applied = apply_discord_onboarding(build_test_discord_inputs(fixture.path(), port), request)
-        .await
-        .expect("Discord apply should succeed");
+    let applied =
+        apply_discord_onboarding(build_test_discord_inputs(fixture.path(), port), request)
+            .await
+            .expect("Discord apply should succeed");
     assert!(applied.connector_enabled);
     assert_eq!(applied.readiness.as_deref(), Some("ready"));
     assert_eq!(applied.token_vault_ref.as_deref(), Some("vault://discord/default/token"));
