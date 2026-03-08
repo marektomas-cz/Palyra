@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -218,6 +218,32 @@ describe("M56 config, access, and support surfaces", () => {
         "Remote gateway exposure requires explicit verification and operator acknowledgement."
       );
     });
+  });
+
+  it("renders every published CLI handoff from the capability catalog without fake direct actions", async () => {
+    const fetchMock = createFetchRouter((request) => routeOverviewRequests(request));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
+    const cliHandoffPanel = screen.getByRole("heading", { name: "CLI handoff surface" }).closest("article");
+    expect(cliHandoffPanel).not.toBeNull();
+    const cliHandoffScope = within(cliHandoffPanel as HTMLElement);
+
+    const cliHandoffs = capabilityCatalogFixture().capabilities.filter(
+      (entry) => entry.dashboard_exposure === "cli_handoff"
+    );
+    await waitFor(() => {
+      expect(cliHandoffScope.getByText(cliHandoffs[0].cli_handoff_commands[0])).toBeInTheDocument();
+    });
+    for (const capability of cliHandoffs) {
+      for (const command of capability.cli_handoff_commands) {
+        expect(cliHandoffScope.getByText(command)).toBeInTheDocument();
+      }
+    }
+
+    expect(cliHandoffScope.queryByText("Chat sessions and run status")).not.toBeInTheDocument();
   });
 });
 

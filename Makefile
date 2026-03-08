@@ -87,6 +87,18 @@ web-check:
 web-cleanroom:
 	npm --prefix apps/web run cleanroom:check
 
+deterministic-core:
+	bash scripts/test/run-deterministic-core.sh
+
+deterministic-soak:
+	bash scripts/test/run-deterministic-soak.sh
+
+deterministic-fixtures-update:
+	bash scripts/test/update-deterministic-fixtures.sh
+
+deterministic-fixtures-check:
+	bash scripts/test/check-deterministic-fixtures.sh
+
 fuzz-build:
 	@if cargo fuzz --help >/dev/null 2>&1; then \
 		cd fuzz && \

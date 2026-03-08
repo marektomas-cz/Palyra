@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -328,6 +328,199 @@ describe("M54 web auth surface", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "OpenAI OAuth attempt expired before the callback completed."
     );
+  });
+
+  it("supports default selection plus refresh reconnect and revoke for stored profiles", async () => {
+    const popupClose = vi.fn();
+    vi.spyOn(window, "open").mockReturnValue({
+      close: popupClose,
+      focus: vi.fn(),
+      closed: false
+    } as unknown as Window);
+
+    const state = createAuthSurfaceState();
+    state.defaultProfileId = "openai-api";
+    state.profiles = [
+      createApiKeyProfile({
+        profile_id: "openai-api",
+        profile_name: "api-primary"
+      }),
+      createOauthProfile({
+        profile_id: "openai-oauth",
+        profile_name: "oauth-primary"
+      })
+    ];
+    state.healthProfiles = [
+      createHealthProfile({
+        profile_id: "openai-api",
+        profile_name: "api-primary",
+        credential_type: "api_key",
+        state: "static",
+        reason: "API key profile validated."
+      }),
+      createHealthProfile({
+        profile_id: "openai-oauth",
+        profile_name: "oauth-primary",
+        credential_type: "oauth",
+        state: "ok",
+        reason: "OAuth token valid."
+      })
+    ];
+
+    let defaultProfileBody = "";
+    let refreshBody = "";
+    let reconnectBody = "";
+    let revokeBody = "";
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = requestDescriptor(input, init);
+      if (request.path === "/console/v1/auth/session" && request.method === "GET") {
+        return Promise.resolve(sessionResponse());
+      }
+      if (request.path === "/console/v1/approvals" && request.method === "GET") {
+        return Promise.resolve(jsonResponse({ approvals: [] }));
+      }
+      if (request.path === "/console/v1/auth/profiles" && request.method === "GET") {
+        return Promise.resolve(jsonResponse(authProfilesEnvelope(state.profiles)));
+      }
+      if (request.path === "/console/v1/auth/health" && request.method === "GET") {
+        expect(request.url.searchParams.get("include_profiles")).toBe("true");
+        return Promise.resolve(jsonResponse(authHealthEnvelope(state.healthProfiles)));
+      }
+      if (request.path === "/console/v1/auth/providers/openai" && request.method === "GET") {
+        return Promise.resolve(jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId)));
+      }
+      if (request.path === "/console/v1/auth/providers/openai/default-profile" && request.method === "POST") {
+        defaultProfileBody = request.body;
+        state.defaultProfileId = "openai-oauth";
+        return Promise.resolve(
+          jsonResponse({
+            contract: controlPlaneContract(),
+            provider: "openai",
+            action: "default_profile",
+            state: "selected",
+            message: "OpenAI default profile updated.",
+            profile_id: "openai-oauth"
+          })
+        );
+      }
+      if (request.path === "/console/v1/auth/providers/openai/refresh" && request.method === "POST") {
+        refreshBody = request.body;
+        state.healthProfiles = [
+          createHealthProfile({
+            profile_id: "openai-api",
+            profile_name: "api-primary",
+            credential_type: "api_key",
+            state: "static",
+            reason: "API key profile validated."
+          }),
+          createHealthProfile({
+            profile_id: "openai-oauth",
+            profile_name: "oauth-primary",
+            credential_type: "oauth",
+            state: "ok",
+            reason: "OAuth token refreshed."
+          })
+        ];
+        return Promise.resolve(
+          jsonResponse({
+            contract: controlPlaneContract(),
+            provider: "openai",
+            action: "refresh",
+            state: "refreshed",
+            message: "OpenAI OAuth token refreshed.",
+            profile_id: "openai-oauth"
+          })
+        );
+      }
+      if (request.path === "/console/v1/auth/providers/openai/reconnect" && request.method === "POST") {
+        reconnectBody = request.body;
+        return Promise.resolve(
+          jsonResponse({
+            contract: controlPlaneContract(),
+            provider: "openai",
+            attempt_id: "attempt-2",
+            authorization_url: "https://auth.openai.test/authorize?state=attempt-2",
+            expires_at_unix_ms: 260_000,
+            profile_id: "openai-oauth",
+            message: "OpenAI OAuth reconnect ready."
+          })
+        );
+      }
+      if (request.path === "/console/v1/auth/providers/openai/revoke" && request.method === "POST") {
+        revokeBody = request.body;
+        state.defaultProfileId = undefined;
+        state.profiles = [
+          createApiKeyProfile({
+            profile_id: "openai-api",
+            profile_name: "api-primary"
+          })
+        ];
+        state.healthProfiles = [
+          createHealthProfile({
+            profile_id: "openai-api",
+            profile_name: "api-primary",
+            credential_type: "api_key",
+            state: "static",
+            reason: "API key profile validated."
+          })
+        ];
+        return Promise.resolve(
+          jsonResponse({
+            contract: controlPlaneContract(),
+            provider: "openai",
+            action: "revoke",
+            state: "revoked",
+            message: "OpenAI auth profile revoked.",
+            profile_id: "openai-oauth"
+          })
+        );
+      }
+      throw new Error(`Unhandled mocked request: ${request.method} ${request.path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OpenAI and Auth Profiles" }));
+
+    expect((await screen.findAllByText("api-primary")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("oauth-primary")).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Set as default" }));
+    await waitFor(() => {
+      expect(screen.getByText("OpenAI default profile updated.")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh token" }));
+    await waitFor(() => {
+      expect(screen.getByText("OpenAI OAuth token refreshed.")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    await waitFor(() => {
+      expect(window.open).toHaveBeenCalledWith(
+        "https://auth.openai.test/authorize?state=attempt-2",
+        "palyra-openai-auth",
+        "popup=yes,width=720,height=860,resizable=yes,scrollbars=yes"
+      );
+    });
+    expect(
+      await screen.findByText("OpenAI OAuth window opened. Finish the authorization to complete the profile.")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Poll callback state" })).toBeInTheDocument();
+
+    const oauthCard = screen.getAllByText("oauth-primary")[0]?.closest("article");
+    expect(oauthCard).not.toBeNull();
+    fireEvent.click(within(oauthCard!).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => {
+      expect(screen.getByText("OpenAI auth profile revoked.")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("oauth-primary")).not.toBeInTheDocument();
+    expect(popupClose).not.toHaveBeenCalled();
+
+    expect(defaultProfileBody).toContain("\"profile_id\":\"openai-oauth\"");
+    expect(refreshBody).toContain("\"profile_id\":\"openai-oauth\"");
+    expect(reconnectBody).toContain("\"profile_id\":\"openai-oauth\"");
+    expect(revokeBody).toContain("\"profile_id\":\"openai-oauth\"");
   });
 });
 

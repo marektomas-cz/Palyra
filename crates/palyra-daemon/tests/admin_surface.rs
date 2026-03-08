@@ -1892,6 +1892,153 @@ fn admin_run_cancel_rejects_oversized_request_body() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn console_support_bundle_job_lifecycle_publishes_deterministic_completion_state() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .context("failed to build HTTP client")?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let created = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/support-bundle/jobs"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token)
+        .json(&serde_json::json!({ "retain_jobs": 4 }))
+        .send()
+        .context("failed to create support bundle job")?
+        .error_for_status()
+        .context("support bundle job create returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse support bundle create response json")?;
+    let created_job = created
+        .get("job")
+        .ok_or_else(|| anyhow::anyhow!("support bundle create response missing job"))?;
+    let job_id = created_job
+        .get("job_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("support bundle create response missing job_id"))?
+        .to_owned();
+    assert_eq!(
+        created_job.get("state").and_then(Value::as_str),
+        Some("queued"),
+        "support bundle job creation should start in queued state"
+    );
+
+    let timeout_at = Instant::now() + Duration::from_secs(30);
+    let mut seen_states = vec!["queued".to_owned()];
+    let completed_job = loop {
+        let current = client
+            .get(format!("http://127.0.0.1:{admin_port}/console/v1/support-bundle/jobs/{job_id}"))
+            .header("Cookie", cookie.clone())
+            .send()
+            .with_context(|| format!("failed to load support bundle job {job_id}"))?
+            .error_for_status()
+            .with_context(|| format!("support bundle job {job_id} returned non-success status"))?
+            .json::<Value>()
+            .with_context(|| {
+                format!("failed to parse support bundle job {job_id} response json")
+            })?;
+        let job = current
+            .get("job")
+            .ok_or_else(|| anyhow::anyhow!("support bundle job envelope missing job payload"))?;
+        let state = job
+            .get("state")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("support bundle job payload missing state"))?
+            .to_owned();
+        if seen_states.last() != Some(&state) {
+            seen_states.push(state.clone());
+        }
+        match state.as_str() {
+            "queued" | "running" => {
+                if Instant::now() > timeout_at {
+                    anyhow::bail!(
+                        "timed out waiting for support bundle job {job_id} to complete; seen states: {:?}",
+                        seen_states
+                    );
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            "succeeded" => break job.clone(),
+            "failed" => {
+                anyhow::bail!("support bundle job {job_id} failed unexpectedly: {job}");
+            }
+            other => anyhow::bail!("support bundle job {job_id} returned unexpected state {other}"),
+        }
+    };
+
+    let output_path = completed_job
+        .get("output_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("completed support bundle job missing output_path"))?;
+    assert!(
+        completed_job.get("started_at_unix_ms").and_then(Value::as_i64).is_some(),
+        "completed support bundle job should record started_at_unix_ms"
+    );
+    assert!(
+        completed_job.get("completed_at_unix_ms").and_then(Value::as_i64).is_some(),
+        "completed support bundle job should record completed_at_unix_ms"
+    );
+    assert!(
+        PathBuf::from(output_path).is_file(),
+        "support bundle output path should exist on disk: {output_path}"
+    );
+    let bundle_contents = fs::read_to_string(output_path)
+        .with_context(|| format!("failed to read support bundle output {output_path}"))?;
+    assert!(
+        bundle_contents.contains("\"generated_at_unix_ms\""),
+        "support bundle export should persist a structured json report"
+    );
+    assert!(
+        !bundle_contents.contains(ADMIN_TOKEN),
+        "support bundle contents must not leak the admin token"
+    );
+    assert!(
+        completed_job
+            .get("command_output")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.contains(ADMIN_TOKEN)),
+        "support bundle command output must remain redacted"
+    );
+    assert!(
+        seen_states.iter().any(|state| state == "succeeded"),
+        "support bundle lifecycle should converge to succeeded: {:?}",
+        seen_states
+    );
+
+    let listed = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/support-bundle/jobs"))
+        .header("Cookie", cookie)
+        .send()
+        .context("failed to list support bundle jobs")?
+        .error_for_status()
+        .context("support bundle jobs list returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse support bundle jobs list response json")?;
+    let listed_job = listed
+        .get("jobs")
+        .and_then(Value::as_array)
+        .and_then(|jobs| {
+            jobs.iter()
+                .find(|job| job.get("job_id").and_then(Value::as_str) == Some(job_id.as_str()))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("support bundle jobs list did not include created job {job_id}")
+        })?;
+    assert_eq!(
+        listed_job.get("state").and_then(Value::as_str),
+        Some("succeeded"),
+        "support bundle jobs list should publish the terminal job state"
+    );
+
+    Ok(())
+}
+
 fn spawn_palyrad_with_dynamic_ports() -> Result<(Child, u16)> {
     spawn_palyrad_with_dynamic_ports_with_env(&[])
 }

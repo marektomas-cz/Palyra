@@ -163,6 +163,11 @@ describe("M56 runtime and operations surfaces", () => {
       expect(screen.getByText("Dead letter 1 replayed.")).toBeInTheDocument();
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await waitFor(() => {
+      expect(screen.getByText("Dead letter 1 discarded.")).toBeInTheDocument();
+    });
+
     fireEvent.change(screen.getByLabelText("Bot token"), { target: { value: "discord-bot-token" } });
     fireEvent.change(screen.getByLabelText("Verify channel ID"), {
       target: { value: "123456789012345678" },

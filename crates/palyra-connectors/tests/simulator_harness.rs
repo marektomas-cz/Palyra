@@ -1,5 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    fs,
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -13,6 +15,10 @@ use palyra_connectors::{
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
+
+const REFRESH_FIXTURES_ENV: &str = "PALYRA_REFRESH_DETERMINISTIC_FIXTURES";
+const EXPECTED_FIXTURE_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/channel_simulator_expected.json");
 
 #[derive(Debug, Deserialize)]
 struct InboundFixture {
@@ -247,8 +253,23 @@ async fn simulator_harness_replay_matches_golden_snapshot() {
         queue_dead_letters: status.queue_depth.dead_letters,
     };
     let actual = serde_json::to_value(summary).expect("simulation summary should serialize");
+    assert_or_refresh_expected_fixture(Path::new(EXPECTED_FIXTURE_PATH), &actual);
+}
+
+fn assert_or_refresh_expected_fixture(path: &Path, actual: &serde_json::Value) {
+    if std::env::var_os(REFRESH_FIXTURES_ENV).is_some() {
+        let rendered = serde_json::to_string_pretty(actual)
+            .expect("fixture JSON should serialize to a stable pretty form");
+        fs::write(path, format!("{rendered}\n"))
+            .unwrap_or_else(|error| panic!("failed to write fixture {}: {error}", path.display()));
+        return;
+    }
+
+    let expected_text = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     let expected: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/channel_simulator_expected.json"))
-            .expect("golden JSON should parse");
-    assert_eq!(actual, expected, "simulator summary should stay deterministic");
+        serde_json::from_str(expected_text.as_str()).unwrap_or_else(|error| {
+            panic!("fixture {} must contain valid json: {error}", path.display())
+        });
+    assert_eq!(actual, &expected, "simulator summary should stay deterministic");
 }
