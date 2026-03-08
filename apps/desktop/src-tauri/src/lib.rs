@@ -32,7 +32,7 @@ pub(crate) use desktop_state::{
     DesktopSecretStore, DesktopStateFile,
 };
 pub(crate) use discord_onboarding::DiscordOnboardingRequest;
-pub(crate) use onboarding::build_onboarding_status;
+pub(crate) use onboarding::{build_desktop_refresh_payload, build_onboarding_status};
 pub(crate) use supervisor::{
     normalize_optional_text, resolve_binary_path, unix_ms_now, ControlCenter,
     HealthEndpointPayload, LogLine, RuntimeConfig, ServiceKind, ServiceProcessSnapshot,

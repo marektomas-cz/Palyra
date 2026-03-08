@@ -50,6 +50,9 @@ push-gate-full:
 deterministic-soak:
     bash scripts/test/run-deterministic-soak.sh
 
+performance-smoke:
+    bash scripts/test/run-performance-smoke.sh
+
 deterministic-fixtures-update:
     bash scripts/test/update-deterministic-fixtures.sh
 

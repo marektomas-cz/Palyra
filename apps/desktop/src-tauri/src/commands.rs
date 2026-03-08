@@ -9,7 +9,7 @@ use super::discord_onboarding::{
     DiscordControlPlaneInputs, DiscordOnboardingApplySnapshot, DiscordOnboardingPreflightSnapshot,
     DiscordVerificationRequest, DiscordVerificationResult,
 };
-use super::onboarding::OnboardingStatusSnapshot;
+use super::onboarding::{DesktopRefreshPayload, OnboardingStatusSnapshot};
 use super::openai_auth::{
     connect_openai_api_key, get_openai_oauth_callback_state, load_openai_auth_status,
     open_external_browser, reconnect_openai_oauth, refresh_openai_profile, revoke_openai_profile,
@@ -63,26 +63,27 @@ pub(crate) async fn get_settings(
 pub(crate) async fn get_onboarding_status(
     state: State<'_, DesktopAppState>,
 ) -> Result<OnboardingStatusSnapshot, String> {
-    let status = {
+    let inputs = {
         let mut supervisor = state.supervisor.lock().await;
-        let inputs = supervisor.capture_onboarding_status_inputs();
-        build_onboarding_status(inputs).await
+        supervisor.capture_onboarding_status_inputs()
     };
-    let mut status = status.map_err(command_error)?;
+    let status = build_onboarding_status(inputs).await;
+    finalize_onboarding_status(state, status.map_err(command_error)?).await
+}
 
-    if status.current_step == DesktopOnboardingStep::Completion
-        && status.completion_unix_ms.is_none()
-    {
-        let completion_unix_ms = {
-            let mut supervisor = state.supervisor.lock().await;
-            supervisor.mark_onboarding_complete().map_err(command_error)?;
-            supervisor.persisted.onboarding.completed_at_unix_ms
-        };
-        status.phase = "home".to_owned();
-        status.completion_unix_ms = completion_unix_ms;
-    }
-
-    Ok(status)
+#[tauri::command]
+pub(crate) async fn get_desktop_refresh_payload(
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopRefreshPayload, String> {
+    let inputs = {
+        let mut supervisor = state.supervisor.lock().await;
+        supervisor.capture_onboarding_status_inputs()
+    };
+    let payload = super::build_desktop_refresh_payload(inputs)
+        .await
+        .map_err(command_error)?;
+    let onboarding_status = finalize_onboarding_status(state, payload.onboarding_status).await?;
+    Ok(DesktopRefreshPayload { onboarding_status, ..payload })
 }
 
 #[tauri::command]
@@ -473,6 +474,25 @@ pub(crate) fn command_error(error: impl ToString) -> String {
     sanitize_log_line(error.to_string().as_str())
 }
 
+async fn finalize_onboarding_status(
+    state: State<'_, DesktopAppState>,
+    mut status: OnboardingStatusSnapshot,
+) -> Result<OnboardingStatusSnapshot, String> {
+    if status.current_step == DesktopOnboardingStep::Completion
+        && status.completion_unix_ms.is_none()
+    {
+        let completion_unix_ms = {
+            let mut supervisor = state.supervisor.lock().await;
+            supervisor.mark_onboarding_complete().map_err(command_error)?;
+            supervisor.persisted.onboarding.completed_at_unix_ms
+        };
+        status.phase = "home".to_owned();
+        status.completion_unix_ms = completion_unix_ms;
+    }
+
+    Ok(status)
+}
+
 async fn capture_openai_inputs(state: &State<'_, DesktopAppState>) -> OpenAiControlPlaneInputs {
     let supervisor = state.supervisor.lock().await;
     OpenAiControlPlaneInputs::capture(&supervisor)
@@ -518,6 +538,7 @@ pub(crate) fn run() {
             get_snapshot,
             get_settings,
             get_onboarding_status,
+            get_desktop_refresh_payload,
             acknowledge_onboarding_welcome,
             set_onboarding_state_root_command,
             set_browser_service_enabled,

@@ -1,9 +1,9 @@
 import { ConsoleSectionHeader } from "../components/ConsoleSectionHeader";
 import {
   formatUnixMs,
+  PrettyJsonBlock,
   readNumber,
   readString,
-  toPrettyJson,
   toStringArray,
   type JsonObject,
 } from "../shared";
@@ -237,7 +237,10 @@ export function ConfigSection({ app }: ConfigSectionProps) {
           {app.configSecretReveal !== null && (
             <>
               <p><strong>Reveal result</strong></p>
-              <pre>{toPrettyJson(app.configSecretReveal, app.revealSensitiveValues)}</pre>
+              <PrettyJsonBlock
+                value={app.configSecretReveal}
+                revealSensitiveValues={app.revealSensitiveValues}
+              />
             </>
           )}
         </article>
@@ -249,7 +252,10 @@ export function ConfigSection({ app }: ConfigSectionProps) {
           {app.configInspectSnapshot === null ? (
             <p>No config snapshot loaded.</p>
           ) : (
-            <pre>{toPrettyJson(app.configInspectSnapshot, app.revealSensitiveValues)}</pre>
+            <PrettyJsonBlock
+              value={app.configInspectSnapshot}
+              revealSensitiveValues={app.revealSensitiveValues}
+            />
           )}
         </article>
         <article className="console-subpanel">
@@ -296,7 +302,10 @@ export function ConfigSection({ app }: ConfigSectionProps) {
       {app.configValidation !== null && (
         <section className="console-subpanel">
           <h3>Validation payload</h3>
-          <pre>{toPrettyJson(app.configValidation, app.revealSensitiveValues)}</pre>
+          <PrettyJsonBlock
+            value={app.configValidation}
+            revealSensitiveValues={app.revealSensitiveValues}
+          />
         </section>
       )}
     </main>

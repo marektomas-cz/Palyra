@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   applyPatchDocument,
@@ -29,6 +29,7 @@ import {
   normalizePatchValue,
   parseInteger,
   prettifyEventType,
+  applyAssistantTokenBatch,
   retainTranscriptWindow,
   toErrorMessage,
   type ApprovalDraft,
@@ -94,9 +95,15 @@ export function useChatRunStream({
   const [runTape, setRunTape] = useState<ChatRunTapeSnapshot | null>(null);
 
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const transcriptRef = useRef<TranscriptEntry[]>([]);
   const transcriptBoxRef = useRef<HTMLDivElement | null>(null);
   const assistantEntryByRunRef = useRef<Map<string, string>>(new Map());
   const canvasEntrySetRef = useRef<Set<string>>(new Set());
+  const pendingAssistantTokensRef = useRef<Map<string, { token: string; isFinal: boolean }>>(
+    new Map()
+  );
+  const pendingA2uiPatchesRef = useRef<Array<{ surface: string; patchValue: JsonValue }>>([]);
+  const streamFlushHandleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [approvalDrafts, setApprovalDrafts] = useState<Record<string, ApprovalDraft>>({});
   const [a2uiDocuments, setA2uiDocuments] = useState<Record<string, A2uiDocument>>({});
@@ -124,6 +131,7 @@ export function useChatRunStream({
     return () => {
       streamAbortRef.current?.abort();
       streamAbortRef.current = null;
+      cancelScheduledStreamFlush();
     };
   }, []);
 
@@ -144,12 +152,17 @@ export function useChatRunStream({
   function dispose(): void {
     streamAbortRef.current?.abort();
     streamAbortRef.current = null;
+    cancelScheduledStreamFlush();
   }
 
   function clearTranscriptState(): void {
     runDetailsRequestSeqRef.current += 1;
+    cancelScheduledStreamFlush();
     assistantEntryByRunRef.current.clear();
     canvasEntrySetRef.current.clear();
+    pendingAssistantTokensRef.current.clear();
+    pendingA2uiPatchesRef.current = [];
+    transcriptRef.current = [];
     setTranscript([]);
     setActiveRunId(null);
     setRunDrawerBusy(false);
@@ -204,8 +217,10 @@ export function useChatRunStream({
           onLine: handleStreamLine
         }
       );
+      flushPendingStreamUpdates();
       await onStreamComplete();
     } catch (error) {
+      flushPendingStreamUpdates();
       if (isAbortError(error)) {
         setNotice("Streaming canceled.");
       } else {
@@ -224,6 +239,7 @@ export function useChatRunStream({
       streamAbortRef.current.abort();
       streamAbortRef.current = null;
     }
+    flushPendingStreamUpdates();
   }
 
   function handleStreamLine(line: ChatStreamLine): void {
@@ -286,7 +302,7 @@ export function useChatRunStream({
       const token = asString(modelToken?.token) ?? "";
       const isFinal = asBoolean(modelToken?.is_final) ?? false;
       if (token.length > 0 || isFinal) {
-        appendAssistantToken(runId, token, isFinal);
+        queueAssistantToken(runId, token, isFinal);
       }
       return;
     }
@@ -349,7 +365,7 @@ export function useChatRunStream({
       const surface = asString(update?.surface) ?? "chat";
       const patchValue = normalizePatchValue(update?.patch_json);
       if (patchValue !== null) {
-        applyA2uiPatch(surface, patchValue);
+        queueA2uiPatch(surface, patchValue);
       }
       appendTranscriptEntry({
         id: `a2ui-${Date.now()}`,
@@ -425,31 +441,6 @@ export function useChatRunStream({
     });
   }
 
-  function applyA2uiPatch(surface: string, patchValue: unknown): void {
-    const currentDocument =
-      a2uiDocumentsRef.current[surface] ??
-      normalizeA2uiDocument({
-        v: 1,
-        surface,
-        components: []
-      });
-    let nextDocument: A2uiDocument;
-    try {
-      const patch = parsePatchDocument(patchValue);
-      const patchedValue = applyPatchDocument(documentToJsonValue(currentDocument), patch);
-      nextDocument = normalizeA2uiDocument(patchedValue);
-    } catch (error) {
-      setError(`A2UI patch rejected for surface '${surface}': ${toErrorMessage(error)}`);
-      return;
-    }
-    const nextDocuments = {
-      ...a2uiDocumentsRef.current,
-      [surface]: nextDocument
-    };
-    a2uiDocumentsRef.current = nextDocuments;
-    setA2uiDocuments(nextDocuments);
-  }
-
   function appendCanvasEntry(runId: string, canvasUrl: string): void {
     const key = `${runId}:${canvasUrl}`;
     if (canvasEntrySetRef.current.has(key)) {
@@ -467,41 +458,113 @@ export function useChatRunStream({
     });
   }
 
-  function appendAssistantToken(runId: string, token: string, isFinal: boolean): void {
-    setTranscript((previous) => {
-      const mappedEntryId = assistantEntryByRunRef.current.get(runId);
-      if (mappedEntryId !== undefined) {
-        const index = previous.findIndex((entry) => entry.id === mappedEntryId);
-        if (index >= 0) {
-          const existing = previous[index];
-          const nextEntry: TranscriptEntry = {
-            ...existing,
-            text: `${existing.text ?? ""}${token}`,
-            is_final: Boolean(existing.is_final) || isFinal
-          };
-          const next = [...previous];
-          next[index] = nextEntry;
-          return retainTranscriptWindow(next);
-        }
-      }
+  function queueAssistantToken(runId: string, token: string, isFinal: boolean): void {
+    const current = pendingAssistantTokensRef.current.get(runId);
+    pendingAssistantTokensRef.current.set(runId, {
+      token: `${current?.token ?? ""}${token}`,
+      isFinal: Boolean(current?.isFinal) || isFinal
+    });
+    scheduleStreamFlush();
+  }
 
-      const entryId = `assistant-${runId}-${Date.now()}`;
-      assistantEntryByRunRef.current.set(runId, entryId);
-      const appended: TranscriptEntry = {
-        id: entryId,
-        kind: "assistant",
-        created_at_unix_ms: Date.now(),
-        run_id: runId,
-        title: "Assistant",
-        text: token,
-        is_final: isFinal
+  function queueA2uiPatch(surface: string, patchValue: JsonValue): void {
+    pendingA2uiPatchesRef.current.push({ surface, patchValue });
+    scheduleStreamFlush();
+  }
+
+  function scheduleStreamFlush(): void {
+    if (streamFlushHandleRef.current !== null) {
+      return;
+    }
+    streamFlushHandleRef.current = globalThis.setTimeout(() => {
+      streamFlushHandleRef.current = null;
+      flushPendingStreamUpdates();
+    }, 16);
+  }
+
+  function cancelScheduledStreamFlush(): void {
+    if (streamFlushHandleRef.current !== null) {
+      globalThis.clearTimeout(streamFlushHandleRef.current);
+      streamFlushHandleRef.current = null;
+    }
+  }
+
+  function flushPendingStreamUpdates(): void {
+    cancelScheduledStreamFlush();
+    const queuedTokens = Array.from(pendingAssistantTokensRef.current.entries());
+    const queuedPatches = pendingA2uiPatchesRef.current;
+    if (queuedTokens.length === 0 && queuedPatches.length === 0) {
+      return;
+    }
+
+    pendingAssistantTokensRef.current.clear();
+    pendingA2uiPatchesRef.current = [];
+
+    let nextTranscript = transcriptRef.current;
+    let transcriptChanged = false;
+    if (queuedTokens.length > 0) {
+      nextTranscript = applyAssistantTokenBatch(
+        nextTranscript,
+        assistantEntryByRunRef.current,
+        queuedTokens,
+        Date.now()
+      );
+      transcriptChanged = nextTranscript !== transcriptRef.current;
+      if (transcriptChanged) {
+        transcriptRef.current = nextTranscript;
+      }
+    }
+
+    let nextDocuments = a2uiDocumentsRef.current;
+    let documentsChanged = false;
+    for (const { surface, patchValue } of queuedPatches) {
+      const currentDocument =
+        nextDocuments[surface] ??
+        normalizeA2uiDocument({
+          v: 1,
+          surface,
+          components: []
+        });
+      let nextDocument: A2uiDocument;
+      try {
+        const patch = parsePatchDocument(patchValue);
+        const patchedValue = applyPatchDocument(documentToJsonValue(currentDocument), patch);
+        nextDocument = normalizeA2uiDocument(patchedValue);
+      } catch (error) {
+        setError(`A2UI patch rejected for surface '${surface}': ${toErrorMessage(error)}`);
+        continue;
+      }
+      if (nextDocuments[surface] === nextDocument) {
+        continue;
+      }
+      nextDocuments = {
+        ...nextDocuments,
+        [surface]: nextDocument
       };
-      return retainTranscriptWindow([...previous, appended]);
+      documentsChanged = true;
+    }
+    if (documentsChanged) {
+      a2uiDocumentsRef.current = nextDocuments;
+    }
+
+    if (!transcriptChanged && !documentsChanged) {
+      return;
+    }
+
+    startTransition(() => {
+      if (transcriptChanged) {
+        setTranscript(nextTranscript);
+      }
+      if (documentsChanged) {
+        setA2uiDocuments(nextDocuments);
+      }
     });
   }
 
   function appendTranscriptEntry(entry: TranscriptEntry): void {
-    setTranscript((previous) => retainTranscriptWindow([...previous, entry]));
+    const nextTranscript = retainTranscriptWindow([...transcriptRef.current, entry]);
+    transcriptRef.current = nextTranscript;
+    setTranscript(nextTranscript);
   }
 
   function updateApprovalDraft(

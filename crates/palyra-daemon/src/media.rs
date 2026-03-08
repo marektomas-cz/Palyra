@@ -7,7 +7,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use reqwest::{redirect::Policy, Url};
+use reqwest::{redirect::Policy, Client as HttpClient, Url};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -36,6 +36,8 @@ const DEFAULT_VISION_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_VISION_MAX_DIMENSION_PX: u32 = 2_048;
 const DEFAULT_OUTBOUND_MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const RECENT_EVENT_LIMIT: usize = 10;
+const RETENTION_PRUNE_MIN_INTERVAL_MS: i64 = 30_000;
+const RETENTION_PRUNE_MAX_DEFERRED_INGESTS: u32 = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MediaRuntimeConfig {
@@ -225,7 +227,9 @@ struct SniffedContent {
 pub struct MediaArtifactStore {
     content_root: PathBuf,
     config: MediaRuntimeConfig,
+    http_client: HttpClient,
     connection: Mutex<Connection>,
+    maintenance: Mutex<MediaMaintenanceState>,
 }
 
 impl MediaArtifactStore {
@@ -249,7 +253,17 @@ impl MediaArtifactStore {
             ))
         })?;
         let connection = Connection::open(&db_path)?;
-        let store = Self { content_root, config, connection: Mutex::new(connection) };
+        let store = Self {
+            content_root,
+            config,
+            http_client: build_media_http_client()?,
+            connection: Mutex::new(connection),
+            maintenance: Mutex::new(MediaMaintenanceState {
+                last_retention_prune_unix_ms: current_unix_ms()
+                    .saturating_sub(RETENTION_PRUNE_MIN_INTERVAL_MS),
+                deferred_ingests: 0,
+            }),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -684,20 +698,16 @@ impl MediaArtifactStore {
             &self.config.allowed_source_hosts,
             self.config.allow_http_fixture_urls,
         )?;
-        let client = reqwest::Client::builder()
-            .redirect(Policy::none())
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|error| {
-                MediaStoreError::Download(format!("failed to build media client: {error}"))
-            })?;
         let mut redirects_followed = 0usize;
         let body = loop {
             let resolved = resolve_target_addresses(&current_url).await?;
             validate_resolved_addresses(resolved.as_slice())?;
-            let response = client.get(current_url.clone()).send().await.map_err(|error| {
-                MediaStoreError::Download(format!("attachment download request failed: {error}"))
-            })?;
+            let response =
+                self.http_client.get(current_url.clone()).send().await.map_err(|error| {
+                    MediaStoreError::Download(format!(
+                        "attachment download request failed: {error}"
+                    ))
+                })?;
             if response.status().is_redirection() {
                 if redirects_followed >= self.config.max_redirects {
                     return Err(MediaStoreError::NetworkPolicy(format!(
@@ -878,8 +888,31 @@ impl MediaArtifactStore {
                 }),
             },
         )?;
-        self.prune_retention()?;
+        self.run_retention_housekeeping_if_due(now)?;
         Ok(record)
+    }
+
+    fn run_retention_housekeeping_if_due(&self, now_unix_ms: i64) -> Result<(), MediaStoreError> {
+        let should_prune = {
+            let mut maintenance = self.maintenance.lock().map_err(|_| {
+                MediaStoreError::Io(
+                    "media artifact maintenance lock poisoned while scheduling retention prune"
+                        .to_owned(),
+                )
+            })?;
+            if should_prune_retention_after_ingest(&maintenance, now_unix_ms) {
+                maintenance.last_retention_prune_unix_ms = now_unix_ms;
+                maintenance.deferred_ingests = 0;
+                true
+            } else {
+                maintenance.deferred_ingests = maintenance.deferred_ingests.saturating_add(1);
+                false
+            }
+        };
+        if should_prune {
+            self.prune_retention()?;
+        }
+        Ok(())
     }
 
     fn prune_retention(&self) -> Result<(), MediaStoreError> {
@@ -1450,13 +1483,36 @@ fn current_unix_ms() -> i64 {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MediaMaintenanceState {
+    last_retention_prune_unix_ms: i64,
+    deferred_ingests: u32,
+}
+
+fn build_media_http_client() -> Result<HttpClient, MediaStoreError> {
+    HttpClient::builder().redirect(Policy::none()).timeout(Duration::from_secs(15)).build().map_err(
+        |error| MediaStoreError::Download(format!("failed to build media client: {error}")),
+    )
+}
+
+fn should_prune_retention_after_ingest(state: &MediaMaintenanceState, now_unix_ms: i64) -> bool {
+    if now_unix_ms.saturating_sub(state.last_retention_prune_unix_ms)
+        >= RETENTION_PRUNE_MIN_INTERVAL_MS
+    {
+        return true;
+    }
+    state.deferred_ingests.saturating_add(1) >= RETENTION_PRUNE_MAX_DEFERRED_INGESTS
+}
+
 #[cfg(test)]
 mod tests {
     use palyra_connectors::{AttachmentKind, AttachmentRef};
     use tempfile::TempDir;
 
     use super::{
-        sniff_content, InboundAttachmentIngestRequest, MediaArtifactStore, MediaRuntimeConfig,
+        should_prune_retention_after_ingest, sniff_content, InboundAttachmentIngestRequest,
+        MediaArtifactStore, MediaMaintenanceState, MediaRuntimeConfig,
+        RETENTION_PRUNE_MAX_DEFERRED_INGESTS, RETENTION_PRUNE_MIN_INTERVAL_MS,
     };
 
     #[test]
@@ -1473,6 +1529,49 @@ mod tests {
         assert!(!config.outbound_upload_enabled);
         assert_eq!(config.max_attachments_per_message, 4);
         assert_eq!(config.max_redirects, 3);
+    }
+
+    #[test]
+    fn retention_housekeeping_waits_for_interval_or_deferred_budget() {
+        let state =
+            MediaMaintenanceState { last_retention_prune_unix_ms: 1_000_000, deferred_ingests: 0 };
+
+        assert!(
+            !should_prune_retention_after_ingest(
+                &state,
+                1_000_000 + RETENTION_PRUNE_MIN_INTERVAL_MS - 1,
+            ),
+            "recent ingests should not trigger full retention pruning"
+        );
+    }
+
+    #[test]
+    fn retention_housekeeping_runs_after_interval_or_many_deferred_ingests() {
+        let startup_state =
+            MediaMaintenanceState { last_retention_prune_unix_ms: 0, deferred_ingests: 0 };
+        assert!(
+            should_prune_retention_after_ingest(&startup_state, RETENTION_PRUNE_MIN_INTERVAL_MS),
+            "the first ingest after startup should be able to prune stale retained artifacts"
+        );
+
+        let interval_state =
+            MediaMaintenanceState { last_retention_prune_unix_ms: 1_000_000, deferred_ingests: 0 };
+        assert!(
+            should_prune_retention_after_ingest(
+                &interval_state,
+                1_000_000 + RETENTION_PRUNE_MIN_INTERVAL_MS,
+            ),
+            "retention pruning should resume after the minimum interval"
+        );
+
+        let deferred_state = MediaMaintenanceState {
+            last_retention_prune_unix_ms: 1_000_000,
+            deferred_ingests: RETENTION_PRUNE_MAX_DEFERRED_INGESTS - 1,
+        };
+        assert!(
+            should_prune_retention_after_ingest(&deferred_state, 1_000_001),
+            "retention pruning should still run after enough deferred ingests"
+        );
     }
 
     #[test]

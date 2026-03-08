@@ -3,8 +3,10 @@ import {
   type Dispatch,
   type FormEvent,
   type SetStateAction,
+  startTransition,
   useEffect,
   useMemo,
+  useRef,
   useState
 } from "react";
 
@@ -30,12 +32,38 @@ import {
 export type { Section } from "./sectionMetadata";
 export type ThemeMode = "light" | "dark";
 
+export const AUTO_REFRESH_SECTION_TTL_MS: Partial<Record<Section, number>> = {
+  overview: 10_000,
+  auth: 10_000,
+  channels: 8_000,
+  browser: 10_000,
+  memory: 10_000,
+  skills: 10_000,
+  config: 15_000,
+  access: 10_000,
+  operations: 10_000,
+  support: 10_000
+};
+
+export function shouldAutoRefreshSection(
+  section: Section,
+  lastRefreshedAt: number | null,
+  now: number = Date.now()
+): boolean {
+  const ttlMs = AUTO_REFRESH_SECTION_TTL_MS[section];
+  if (ttlMs === undefined || lastRefreshedAt === null) {
+    return true;
+  }
+  return now - lastRefreshedAt >= ttlMs;
+}
+
 export function useConsoleAppState() {
   const api = useMemo(() => new ConsoleApiClient(""), []);
 
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<ConsoleSession | null>(null);
-  const [section, setSection] = useState<Section>("overview");
+  const [section, setSectionState] = useState<Section>("overview");
+  const lastSectionAutoRefreshRef = useRef<Partial<Record<Section, number>>>({});
   const [theme, setTheme] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") {
       return "light";
@@ -356,6 +384,7 @@ export function useConsoleAppState() {
     if (session === null) {
       return;
     }
+    lastSectionAutoRefreshRef.current.overview = Date.now();
     void refreshOverview();
   }, [session]);
 
@@ -363,6 +392,11 @@ export function useConsoleAppState() {
     if (session === null) {
       return;
     }
+    const lastRefreshedAt = lastSectionAutoRefreshRef.current[section] ?? null;
+    if (!shouldAutoRefreshSection(section, lastRefreshedAt)) {
+      return;
+    }
+    lastSectionAutoRefreshRef.current[section] = Date.now();
     if (section === "overview") {
       void refreshOverview();
     }
@@ -398,8 +432,16 @@ export function useConsoleAppState() {
       void refreshSupport();
     }
   }, [section, session]);
+
+  function setSection(nextSection: Section): void {
+    startTransition(() => {
+      setSectionState(nextSection);
+    });
+  }
+
   function resetOperatorScopedState(): void {
-    setSection("overview");
+    setSectionState("overview");
+    lastSectionAutoRefreshRef.current = {};
     setRevealSensitiveValues(false);
     resetOverviewDomain();
     authDomain.resetAuthDomain();

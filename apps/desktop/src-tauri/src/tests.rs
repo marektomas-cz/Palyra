@@ -26,7 +26,8 @@ use super::openai_auth::{
 };
 use super::snapshot::resolve_dashboard_access_target;
 use super::{
-    build_onboarding_status, build_snapshot_from_inputs, collect_redacted_errors,
+    build_desktop_refresh_payload, build_onboarding_status, build_snapshot_from_inputs,
+    collect_redacted_errors,
     compute_backoff_ms, executable_file_name, load_or_initialize_state_file, mpsc,
     parse_discord_status, parse_remote_dashboard_base_url, resolve_binary_path, sanitize_log_line,
     try_enqueue_log_event, BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode,
@@ -623,6 +624,58 @@ version = 1
     assert_eq!(status.support_bundle_exports.successes, 1);
     assert_eq!(status.support_bundle_exports.failures, 1);
     assert_eq!(status.support_bundle_exports.success_rate_bps, 5_000);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn desktop_refresh_payload_reuses_single_snapshot_build_for_home_and_onboarding_views() {
+    let _env_guard = lock_env();
+    let fixture = TempFixtureDir::new();
+    let config_path = write_config_file(
+        fixture.path(),
+        r#"
+version = 1
+"#,
+    );
+    let gateway_binary = fixture.path().join(executable_file_name("palyrad"));
+    let browser_binary = fixture.path().join(executable_file_name("palyra-browserd"));
+    let cli_binary = fixture.path().join(executable_file_name("palyra"));
+    write_file(gateway_binary.as_path(), "binary");
+    write_file(browser_binary.as_path(), "binary");
+    write_file(cli_binary.as_path(), "binary");
+    let _config_override =
+        ScopedEnvVar::set("PALYRA_CONFIG", config_path.to_string_lossy().as_ref());
+    let _gateway_override =
+        ScopedEnvVar::set("PALYRA_DESKTOP_PALYRAD_BIN", gateway_binary.to_string_lossy().as_ref());
+    let _browser_override =
+        ScopedEnvVar::set("PALYRA_DESKTOP_BROWSERD_BIN", browser_binary.to_string_lossy().as_ref());
+    let _cli_override =
+        ScopedEnvVar::set("PALYRA_DESKTOP_PALYRA_BIN", cli_binary.to_string_lossy().as_ref());
+
+    let mut control_center = build_test_control_center(fixture.path());
+    control_center.runtime.gateway_admin_port = 0;
+    control_center.runtime.gateway_grpc_port = 0;
+    control_center.runtime.gateway_quic_port = 0;
+    control_center.runtime.browser_health_port = 0;
+    control_center.runtime.browser_grpc_port = 0;
+    control_center.gateway.bound_ports = vec![0, 0, 0];
+    control_center.browserd.bound_ports = vec![0, 0];
+
+    let payload = build_desktop_refresh_payload(control_center.capture_onboarding_status_inputs())
+        .await
+        .expect("desktop refresh payload should build");
+
+    assert_eq!(
+        payload.snapshot.quick_facts.dashboard_url,
+        payload.onboarding_status.dashboard_url
+    );
+    assert_eq!(
+        payload.snapshot.quick_facts.dashboard_access_mode,
+        payload.onboarding_status.dashboard_access_mode
+    );
+    assert_eq!(
+        payload.openai_status.default_profile_id,
+        payload.onboarding_status.openai_default_profile_id
+    );
 }
 
 #[test]

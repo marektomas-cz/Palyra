@@ -3,10 +3,10 @@ import { capabilitiesByMode, capabilitiesForSection } from "../capabilityCatalog
 import { CapabilityCardList } from "../components/CapabilityCards";
 import { ConsoleSectionHeader } from "../components/ConsoleSectionHeader";
 import {
+  PrettyJsonBlock,
   readNumber,
   readObject,
   readString,
-  toPrettyJson,
   toStringArray,
   type JsonObject,
 } from "../shared";
@@ -213,7 +213,10 @@ export function OperationsSection({ app }: OperationsSectionProps) {
         {app.auditEvents.length === 0 ? (
           <p>No audit events loaded.</p>
         ) : (
-          <pre>{toPrettyJson(app.auditEvents, app.revealSensitiveValues)}</pre>
+          <PrettyJsonBlock
+            value={app.auditEvents}
+            revealSensitiveValues={app.revealSensitiveValues}
+          />
         )}
       </section>
 
@@ -287,7 +290,10 @@ export function OperationsSection({ app }: OperationsSectionProps) {
         {diagnostics === null ? (
           <p>No diagnostics loaded.</p>
         ) : (
-          <pre>{toPrettyJson(diagnostics, app.revealSensitiveValues)}</pre>
+          <PrettyJsonBlock
+            value={diagnostics}
+            revealSensitiveValues={app.revealSensitiveValues}
+          />
         )}
       </section>
     </main>

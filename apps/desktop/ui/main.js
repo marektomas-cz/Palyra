@@ -154,6 +154,8 @@ const discordWizardState = {
 };
 
 let pollHandle = null;
+const ACTIVE_REFRESH_INTERVAL_MS = 4000;
+const IDLE_REFRESH_INTERVAL_MS = 12000;
 
 function byId(id) {
   const element = document.getElementById(id);
@@ -1498,9 +1500,53 @@ async function refreshOnboardingStatus() {
 }
 
 async function refreshAllData(options = {}) {
-  await refreshSnapshot(options);
-  await refreshOpenAiAuthStatus();
-  await refreshOnboardingStatus();
+  try {
+    const payload = await invoke("get_desktop_refresh_payload");
+    renderDesktopRefreshPayload(payload, options);
+    return payload;
+  } catch (error) {
+    setActionMessage(`Desktop refresh failed: ${String(error)}`, true);
+    return null;
+  }
+}
+
+function renderDesktopRefreshPayload(payload, options = {}) {
+  renderSnapshot(payload?.snapshot, options);
+  renderOpenAiStatus(payload?.openai_status);
+  renderOnboardingStatus(payload?.onboarding_status);
+}
+
+function resolveRefreshIntervalMs(snapshot = desktopState.lastSnapshot, onboarding = desktopState.lastOnboarding) {
+  if (
+    snapshot?.overall_status === "healthy" &&
+    onboarding?.phase === "home" &&
+    onboarding?.recovery == null
+  ) {
+    return IDLE_REFRESH_INTERVAL_MS;
+  }
+  return ACTIVE_REFRESH_INTERVAL_MS;
+}
+
+function clearRefreshLoop() {
+  if (pollHandle !== null) {
+    window.clearTimeout(pollHandle);
+    pollHandle = null;
+  }
+}
+
+function scheduleNextRefresh(payload = null) {
+  clearRefreshLoop();
+  pollHandle = window.setTimeout(() => {
+    runRefreshLoopOnce({ preserveMessage: true }).catch((error) => {
+      setActionMessage(`Desktop refresh loop failed: ${String(error)}`, true);
+    });
+  }, resolveRefreshIntervalMs(payload?.snapshot, payload?.onboarding_status));
+}
+
+async function runRefreshLoopOnce(options = {}) {
+  const payload = await refreshAllData(options);
+  scheduleNextRefresh(payload);
+  return payload;
 }
 
 async function loadSettings() {
@@ -1526,7 +1572,7 @@ async function invokeAction(commandName, payload = undefined) {
     setActionMessage(`${commandName} failed: ${String(error)}`, true);
     return;
   }
-  await refreshAllData({ preserveMessage: true });
+  await runRefreshLoopOnce({ preserveMessage: true });
   setActionMessage(successMessage);
 }
 
@@ -1534,11 +1580,11 @@ function wireEvents() {
   ui.startBtn.addEventListener("click", () => invokeAction("start_palyra"));
   ui.stopBtn.addEventListener("click", () => invokeAction("stop_palyra"));
   ui.restartBtn.addEventListener("click", () => invokeAction("restart_palyra"));
-  ui.refreshBtn.addEventListener("click", () => refreshAllData());
+  ui.refreshBtn.addEventListener("click", () => runRefreshLoopOnce());
   ui.startOnboardingBtn.addEventListener("click", async () => {
     try {
       await invoke("acknowledge_onboarding_welcome");
-      await refreshOnboardingStatus();
+      await runRefreshLoopOnce({ preserveMessage: true });
       setActionMessage("Desktop onboarding started.");
     } catch (error) {
       setActionMessage(`Failed to start onboarding: ${String(error)}`, true);
@@ -1557,7 +1603,7 @@ function wireEvents() {
         }
       });
       desktopState.stateRootDirty = false;
-      await refreshOnboardingStatus();
+      await runRefreshLoopOnce({ preserveMessage: true });
       setActionMessage("Desktop runtime state root confirmed.");
     } catch (error) {
       setActionMessage(`Failed to confirm runtime state root: ${String(error)}`, true);
@@ -1576,7 +1622,7 @@ function wireEvents() {
       });
       desktopState.stateRootDirty = false;
       ui.stateRootInput.value = "";
-      await refreshOnboardingStatus();
+      await runRefreshLoopOnce({ preserveMessage: true });
       setActionMessage("Desktop runtime state root reset to the default path.");
     } catch (error) {
       setActionMessage(`Failed to reset runtime state root: ${String(error)}`, true);
@@ -1628,7 +1674,7 @@ function wireEvents() {
   }
 
   for (const button of commandButtons.refresh_snapshot) {
-    button.addEventListener("click", () => refreshAllData());
+    button.addEventListener("click", () => runRefreshLoopOnce());
   }
 
   for (const button of commandButtons.export_support_bundle) {
@@ -1659,12 +1705,7 @@ async function bootstrap() {
   );
   renderDiscordResultCards();
   await loadSettings();
-  await refreshAllData();
-  pollHandle = window.setInterval(() => {
-    refreshAllData({ preserveMessage: true }).catch((error) => {
-      setActionMessage(`Desktop refresh loop failed: ${String(error)}`, true);
-    });
-  }, 4000);
+  await runRefreshLoopOnce();
 }
 
 bootstrap().catch((error) => {
@@ -1672,8 +1713,6 @@ bootstrap().catch((error) => {
 });
 
 window.addEventListener("beforeunload", () => {
-  if (pollHandle !== null) {
-    window.clearInterval(pollHandle);
-  }
+  clearRefreshLoop();
   clearOpenAiAttemptPolling();
 });

@@ -730,12 +730,17 @@ impl AuthProfileRegistry {
                     });
                     continue;
                 }
-                outcomes.push(self.refresh_oauth_profile_with_clock(
-                    profile_id.as_str(),
-                    vault,
-                    adapter,
-                    now_unix_ms,
-                )?);
+                match prepare_oauth_refresh_snapshot(&profile, now_unix_ms) {
+                    PreparedOAuthRefresh::Snapshot(snapshot) => {
+                        outcomes.push(self.refresh_oauth_profile_snapshot_with_clock(
+                            snapshot,
+                            vault,
+                            adapter,
+                            now_unix_ms,
+                        )?)
+                    }
+                    PreparedOAuthRefresh::Outcome(outcome) => outcomes.push(outcome),
+                }
             }
         }
         Ok(outcomes)
@@ -759,62 +764,29 @@ impl AuthProfileRegistry {
     ) -> Result<OAuthRefreshOutcome, AuthProfileError> {
         let profile_id = normalize_profile_id(profile_id)?;
 
-        let snapshot = {
+        let prepared = {
             let guard = self.state.lock().map_err(|_| AuthProfileError::LockPoisoned)?;
             let profile = guard
                 .profiles
                 .iter()
                 .find(|profile| profile.profile_id == profile_id)
                 .ok_or_else(|| AuthProfileError::ProfileNotFound(profile_id.clone()))?;
-            let AuthCredential::Oauth {
-                access_token_vault_ref,
-                refresh_token_vault_ref,
-                token_endpoint,
-                client_id,
-                client_secret_vault_ref,
-                scopes,
-                expires_at_unix_ms,
-                refresh_state,
-            } = &profile.credential
-            else {
-                return Ok(OAuthRefreshOutcome {
-                    profile_id: profile.profile_id.clone(),
-                    provider: profile.provider.label(),
-                    kind: OAuthRefreshOutcomeKind::SkippedNotOauth,
-                    reason: "refresh skipped because profile uses api_key credentials".to_owned(),
-                    next_allowed_refresh_unix_ms: None,
-                    expires_at_unix_ms: None,
-                });
-            };
-            if let Some(next_allowed) = refresh_state.next_allowed_refresh_unix_ms {
-                if now_unix_ms < next_allowed {
-                    return Ok(OAuthRefreshOutcome {
-                        profile_id: profile.profile_id.clone(),
-                        provider: profile.provider.label(),
-                        kind: OAuthRefreshOutcomeKind::SkippedCooldown,
-                        reason: "refresh skipped due to cooldown after previous failures"
-                            .to_owned(),
-                        next_allowed_refresh_unix_ms: Some(next_allowed),
-                        expires_at_unix_ms: *expires_at_unix_ms,
-                    });
-                }
-            }
-
-            OAuthRefreshSnapshot {
-                profile_id: profile.profile_id.clone(),
-                provider: profile.provider.clone(),
-                access_token_vault_ref: access_token_vault_ref.clone(),
-                refresh_token_vault_ref: refresh_token_vault_ref.clone(),
-                token_endpoint: token_endpoint.clone(),
-                client_id: client_id.clone(),
-                client_secret_vault_ref: client_secret_vault_ref.clone(),
-                scopes: scopes.clone(),
-                expires_at_unix_ms: *expires_at_unix_ms,
-                failure_count: refresh_state.failure_count,
-                observed_updated_at_unix_ms: profile.updated_at_unix_ms,
-            }
+            prepare_oauth_refresh_snapshot(profile, now_unix_ms)
         };
+        match prepared {
+            PreparedOAuthRefresh::Snapshot(snapshot) => self
+                .refresh_oauth_profile_snapshot_with_clock(snapshot, vault, adapter, now_unix_ms),
+            PreparedOAuthRefresh::Outcome(outcome) => Ok(outcome),
+        }
+    }
 
+    fn refresh_oauth_profile_snapshot_with_clock(
+        &self,
+        snapshot: OAuthRefreshSnapshot,
+        vault: &Vault,
+        adapter: &dyn OAuthRefreshAdapter,
+        now_unix_ms: i64,
+    ) -> Result<OAuthRefreshOutcome, AuthProfileError> {
         let refresh_token = match load_secret_utf8(vault, snapshot.refresh_token_vault_ref.as_str())
         {
             Ok(token) => token,
@@ -1019,6 +991,63 @@ struct OAuthRefreshSnapshot {
     expires_at_unix_ms: Option<i64>,
     failure_count: u32,
     observed_updated_at_unix_ms: i64,
+}
+
+enum PreparedOAuthRefresh {
+    Snapshot(OAuthRefreshSnapshot),
+    Outcome(OAuthRefreshOutcome),
+}
+
+fn prepare_oauth_refresh_snapshot(
+    profile: &AuthProfileRecord,
+    now_unix_ms: i64,
+) -> PreparedOAuthRefresh {
+    let AuthCredential::Oauth {
+        access_token_vault_ref,
+        refresh_token_vault_ref,
+        token_endpoint,
+        client_id,
+        client_secret_vault_ref,
+        scopes,
+        expires_at_unix_ms,
+        refresh_state,
+    } = &profile.credential
+    else {
+        return PreparedOAuthRefresh::Outcome(OAuthRefreshOutcome {
+            profile_id: profile.profile_id.clone(),
+            provider: profile.provider.label(),
+            kind: OAuthRefreshOutcomeKind::SkippedNotOauth,
+            reason: "refresh skipped because profile uses api_key credentials".to_owned(),
+            next_allowed_refresh_unix_ms: None,
+            expires_at_unix_ms: None,
+        });
+    };
+    if let Some(next_allowed) = refresh_state.next_allowed_refresh_unix_ms {
+        if now_unix_ms < next_allowed {
+            return PreparedOAuthRefresh::Outcome(OAuthRefreshOutcome {
+                profile_id: profile.profile_id.clone(),
+                provider: profile.provider.label(),
+                kind: OAuthRefreshOutcomeKind::SkippedCooldown,
+                reason: "refresh skipped due to cooldown after previous failures".to_owned(),
+                next_allowed_refresh_unix_ms: Some(next_allowed),
+                expires_at_unix_ms: *expires_at_unix_ms,
+            });
+        }
+    }
+
+    PreparedOAuthRefresh::Snapshot(OAuthRefreshSnapshot {
+        profile_id: profile.profile_id.clone(),
+        provider: profile.provider.clone(),
+        access_token_vault_ref: access_token_vault_ref.clone(),
+        refresh_token_vault_ref: refresh_token_vault_ref.clone(),
+        token_endpoint: token_endpoint.clone(),
+        client_id: client_id.clone(),
+        client_secret_vault_ref: client_secret_vault_ref.clone(),
+        scopes: scopes.clone(),
+        expires_at_unix_ms: *expires_at_unix_ms,
+        failure_count: refresh_state.failure_count,
+        observed_updated_at_unix_ms: profile.updated_at_unix_ms,
+    })
 }
 
 fn sanitize_refresh_error(error: &OAuthRefreshError) -> String {

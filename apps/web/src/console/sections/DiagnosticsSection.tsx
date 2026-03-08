@@ -1,5 +1,5 @@
 import { ConsoleSectionHeader } from "../components/ConsoleSectionHeader";
-import { toPrettyJson, type JsonObject } from "../shared";
+import { PrettyJsonBlock, type JsonObject } from "../shared";
 
 type DiagnosticsSectionProps = {
   app: {
@@ -27,22 +27,34 @@ export function DiagnosticsSection({ app }: DiagnosticsSectionProps) {
         <>
           <section className="console-subpanel">
             <h3>Model Provider + Rate Limits</h3>
-            <pre>{toPrettyJson({
-              model_provider: app.diagnosticsSnapshot["model_provider"] ?? null,
-              rate_limits: app.diagnosticsSnapshot["rate_limits"] ?? null
-            }, app.revealSensitiveValues)}</pre>
+            <PrettyJsonBlock
+              value={{
+                model_provider: app.diagnosticsSnapshot["model_provider"] ?? null,
+                rate_limits: app.diagnosticsSnapshot["rate_limits"] ?? null
+              }}
+              revealSensitiveValues={app.revealSensitiveValues}
+            />
           </section>
           <section className="console-subpanel">
             <h3>Auth Profile Health</h3>
-            <pre>{toPrettyJson(app.diagnosticsSnapshot["auth_profiles"] ?? null, app.revealSensitiveValues)}</pre>
+            <PrettyJsonBlock
+              value={app.diagnosticsSnapshot["auth_profiles"] ?? null}
+              revealSensitiveValues={app.revealSensitiveValues}
+            />
           </section>
           <section className="console-subpanel">
             <h3>Browserd Status</h3>
-            <pre>{toPrettyJson(app.diagnosticsSnapshot["browserd"] ?? null, app.revealSensitiveValues)}</pre>
+            <PrettyJsonBlock
+              value={app.diagnosticsSnapshot["browserd"] ?? null}
+              revealSensitiveValues={app.revealSensitiveValues}
+            />
           </section>
           <section className="console-subpanel">
             <h3>Media Pipeline</h3>
-            <pre>{toPrettyJson(app.diagnosticsSnapshot["media"] ?? null, app.revealSensitiveValues)}</pre>
+            <PrettyJsonBlock
+              value={app.diagnosticsSnapshot["media"] ?? null}
+              revealSensitiveValues={app.revealSensitiveValues}
+            />
           </section>
         </>
       )}

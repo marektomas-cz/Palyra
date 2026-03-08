@@ -15,6 +15,7 @@
     "cleanroom:check": "node ./scripts/devex.mjs cleanroom-check",
     "dev": "vite",
     "lint": "eslint \"**/*.{ts,tsx}\" --max-warnings=0 --no-error-on-unmatched-pattern && node ./scripts/check-file-budgets.mjs",
+    "perf:smoke": "vitest run src/performance.smoke.test.tsx",
     "test": "vitest",
     "test:run": "vitest run",
     "typecheck": "tsc --noEmit",

@@ -1,3 +1,5 @@
+import { memo, useMemo } from "react";
+
 import type { JsonValue } from "../consoleApi";
 
 export type JsonObject = { [key: string]: JsonValue };
@@ -10,6 +12,12 @@ const SENSITIVE_VALUE_PATTERN =
 type DiscordOnboardingHighlightsProps = {
   title: string;
   payload: JsonObject;
+};
+
+type PrettyJsonBlockProps = {
+  value: JsonValue;
+  revealSensitiveValues: boolean;
+  className?: string;
 };
 
 export function DiscordOnboardingHighlights({ title, payload }: DiscordOnboardingHighlightsProps) {
@@ -219,6 +227,18 @@ function redactValue(value: JsonValue, revealSensitive: boolean): JsonValue {
 export function toPrettyJson(value: JsonValue, revealSensitive: boolean): string {
   return JSON.stringify(redactValue(value, revealSensitive), null, 2);
 }
+
+export const PrettyJsonBlock = memo(function PrettyJsonBlock({
+  value,
+  revealSensitiveValues,
+  className
+}: PrettyJsonBlockProps) {
+  const formatted = useMemo(
+    () => toPrettyJson(value, revealSensitiveValues),
+    [value, revealSensitiveValues]
+  );
+  return <pre className={className}>{formatted}</pre>;
+});
 
 export function formatUnixMs(value: number | null | undefined): string {
   if (value === undefined || value === null || !Number.isFinite(value) || value <= 0) {

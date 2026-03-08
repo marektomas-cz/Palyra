@@ -1,6 +1,11 @@
 import { A2uiRenderer, type A2uiDocument } from "../a2ui";
 
-import { ApprovalRequestControls, toPrettyJson, type ApprovalDraft, type TranscriptEntry } from "./chatShared";
+import {
+  ApprovalRequestControls,
+  PrettyJsonBlock,
+  type ApprovalDraft,
+  type TranscriptEntry
+} from "./chatShared";
 
 type ChatTranscriptProps = {
   visibleTranscript: TranscriptEntry[];
@@ -72,7 +77,10 @@ export function ChatTranscript({
               )}
 
               {entry.payload !== undefined && entry.kind !== "assistant" && entry.kind !== "user" && (
-                <pre>{toPrettyJson(entry.payload, revealSensitiveValues)}</pre>
+                <PrettyJsonBlock
+                  value={entry.payload}
+                  revealSensitiveValues={revealSensitiveValues}
+                />
               )}
 
               {entry.run_id !== undefined && (

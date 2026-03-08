@@ -1,10 +1,10 @@
 import { ConsoleSectionHeader } from "../components/ConsoleSectionHeader";
 import {
   formatUnixMs,
+  PrettyJsonBlock,
   readNumber,
   readObject,
   readString,
-  toPrettyJson,
   toStringArray,
   type JsonObject,
 } from "../shared";
@@ -160,7 +160,10 @@ export function SupportSection({ app }: SupportSectionProps) {
           {app.supportSelectedBundleJob === null ? (
             <p>No support bundle job selected.</p>
           ) : (
-            <pre>{toPrettyJson(app.supportSelectedBundleJob, app.revealSensitiveValues)}</pre>
+            <PrettyJsonBlock
+              value={app.supportSelectedBundleJob}
+              revealSensitiveValues={app.revealSensitiveValues}
+            />
           )}
         </article>
       </section>
@@ -248,7 +251,10 @@ export function SupportSection({ app }: SupportSectionProps) {
           {latestFailure === null ? (
             <p>No failures recorded.</p>
           ) : (
-            <pre>{toPrettyJson(latestFailure, app.revealSensitiveValues)}</pre>
+            <PrettyJsonBlock
+              value={latestFailure}
+              revealSensitiveValues={app.revealSensitiveValues}
+            />
           )}
         </article>
       </section>
@@ -258,7 +264,10 @@ export function SupportSection({ app }: SupportSectionProps) {
         {app.supportDeployment === null ? (
           <p>No deployment posture loaded.</p>
         ) : (
-          <pre>{toPrettyJson(app.supportDeployment, app.revealSensitiveValues)}</pre>
+          <PrettyJsonBlock
+            value={app.supportDeployment}
+            revealSensitiveValues={app.revealSensitiveValues}
+          />
         )}
       </section>
     </main>

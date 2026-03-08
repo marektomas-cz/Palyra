@@ -108,6 +108,13 @@ pub(crate) struct OnboardingStatusSnapshot {
     pub(crate) steps: Vec<OnboardingStepSnapshot>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct DesktopRefreshPayload {
+    pub(crate) snapshot: ControlCenterSnapshot,
+    pub(crate) onboarding_status: OnboardingStatusSnapshot,
+    pub(crate) openai_status: OpenAiAuthStatusSnapshot,
+}
+
 #[derive(Debug)]
 pub(crate) struct OnboardingStatusInputs {
     pub(crate) snapshot_inputs: SnapshotBuildInputs,
@@ -148,6 +155,12 @@ impl ControlCenter {
 pub(crate) async fn build_onboarding_status(
     inputs: OnboardingStatusInputs,
 ) -> Result<OnboardingStatusSnapshot> {
+    Ok(build_desktop_refresh_payload(inputs).await?.onboarding_status)
+}
+
+pub(crate) async fn build_desktop_refresh_payload(
+    inputs: OnboardingStatusInputs,
+) -> Result<DesktopRefreshPayload> {
     let OnboardingStatusInputs {
         snapshot_inputs,
         openai_inputs,
@@ -164,8 +177,12 @@ pub(crate) async fn build_onboarding_status(
         browser_service_enabled,
     } = inputs;
 
-    let snapshot = build_snapshot_from_inputs(snapshot_inputs).await?;
-    let openai_status = match load_openai_auth_status(openai_inputs).await {
+    let (snapshot, openai_status) = tokio::join!(
+        build_snapshot_from_inputs(snapshot_inputs),
+        load_openai_auth_status(openai_inputs)
+    );
+    let snapshot = snapshot?;
+    let openai_status = match openai_status {
         Ok(status) => status,
         Err(error) => OpenAiAuthStatusSnapshot::unavailable(sanitize_log_line(error.to_string().as_str())),
     };
@@ -272,7 +289,7 @@ pub(crate) async fn build_onboarding_status(
     }
     .to_owned();
 
-    Ok(OnboardingStatusSnapshot {
+    let onboarding_status = OnboardingStatusSnapshot {
         flow_id: persisted.onboarding.flow_id.clone(),
         phase,
         current_step,
@@ -304,7 +321,9 @@ pub(crate) async fn build_onboarding_status(
         support_bundle_exports,
         recent_events: persisted.onboarding.recent_events,
         steps,
-    })
+    };
+
+    Ok(DesktopRefreshPayload { snapshot, onboarding_status, openai_status })
 }
 
 fn success_rate_bps(successes: u64, attempts: u64) -> u32 {

@@ -1,3 +1,5 @@
+import { memo, useMemo } from "react";
+
 import type { JsonValue } from "../consoleApi";
 
 const SENSITIVE_KEY_PATTERN =
@@ -50,6 +52,14 @@ export interface ApprovalDraft {
   readonly ttl_ms: string;
   readonly busy: boolean;
 }
+
+type AssistantTokenBatchEntry = readonly [runId: string, update: { token: string; isFinal: boolean }];
+
+type PrettyJsonBlockProps = {
+  value: JsonValue;
+  revealSensitiveValues: boolean;
+  className?: string;
+};
 
 type ApprovalRequestControlsProps = {
   approvalId: string;
@@ -137,6 +147,54 @@ export function retainTranscriptWindow(values: TranscriptEntry[]): TranscriptEnt
     return values;
   }
   return values.slice(values.length - MAX_TRANSCRIPT_RETENTION);
+}
+
+export function applyAssistantTokenBatch(
+  previous: TranscriptEntry[],
+  assistantEntryByRun: Map<string, string>,
+  queuedTokens: readonly AssistantTokenBatchEntry[],
+  createdAtUnixMs: number
+): TranscriptEntry[] {
+  if (queuedTokens.length === 0) {
+    return previous;
+  }
+
+  let next = previous;
+  for (const [runId, update] of queuedTokens) {
+    const mappedEntryId = assistantEntryByRun.get(runId);
+    if (mappedEntryId !== undefined) {
+      const index = next.findIndex((entry) => entry.id === mappedEntryId);
+      if (index >= 0) {
+        const existing = next[index];
+        const nextEntry: TranscriptEntry = {
+          ...existing,
+          text: `${existing.text ?? ""}${update.token}`,
+          is_final: Boolean(existing.is_final) || update.isFinal
+        };
+        const updated = [...next];
+        updated[index] = nextEntry;
+        next = updated;
+        continue;
+      }
+    }
+
+    const entryId = `assistant-${runId}-${createdAtUnixMs}`;
+    assistantEntryByRun.set(runId, entryId);
+    next = [
+      ...next,
+      {
+        id: entryId,
+        kind: "assistant",
+        created_at_unix_ms: createdAtUnixMs,
+        run_id: runId,
+        title: "Assistant",
+        text: update.token,
+        is_final: update.isFinal
+      }
+    ];
+  }
+
+  return retainTranscriptWindow(next);
 }
 
 export function collectCanvasFrameUrls(value: JsonValue): string[] {
@@ -301,3 +359,15 @@ function redactValue(value: JsonValue, revealSensitive: boolean): JsonValue {
 export function toPrettyJson(value: JsonValue, revealSensitive: boolean): string {
   return JSON.stringify(redactValue(value, revealSensitive), null, 2);
 }
+
+export const PrettyJsonBlock = memo(function PrettyJsonBlock({
+  value,
+  revealSensitiveValues,
+  className
+}: PrettyJsonBlockProps) {
+  const formatted = useMemo(
+    () => toPrettyJson(value, revealSensitiveValues),
+    [value, revealSensitiveValues]
+  );
+  return <pre className={className}>{formatted}</pre>;
+});
