@@ -13,6 +13,8 @@ if (-not (Test-Path (Join-Path $rootDir "apps\web\node_modules"))) {
 
 & (Join-Path $PSScriptRoot "check-deterministic-fixtures.ps1")
 
+cargo build -p palyra-cli --locked
+
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked state_file_initialization_seeds_onboarding_defaults
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked openai_api_key_connect_bootstraps_console_session_and_posts_payload
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked openai_oauth_bootstrap_and_callback_state_reuse_console_session
