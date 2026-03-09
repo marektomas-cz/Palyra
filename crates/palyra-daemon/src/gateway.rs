@@ -15018,6 +15018,8 @@ async fn execute_run_stream_tool_proposal(
         let started_at = Instant::now();
         let mut cancel_poll = interval(Duration::from_millis(100));
         cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let must_drain_execution_after_cancel =
+            tool_cancellation_requires_execution_drain(tool_name);
         let mut execution_future = Box::pin(execute_tool_with_runtime_dispatch(
             runtime_state,
             ToolRuntimeExecutionContext {
@@ -15029,6 +15031,7 @@ async fn execute_run_stream_tool_proposal(
             tool_name,
             input_json,
         ));
+        let mut cancel_requested_during_execution = false;
         let outcome = loop {
             tokio::select! {
                 result = &mut execution_future => {
@@ -15037,6 +15040,10 @@ async fn execute_run_stream_tool_proposal(
                 _ = cancel_poll.tick() => {
                     match runtime_state.is_orchestrator_cancel_requested(run_id.to_owned()).await {
                         Ok(true) => {
+                            if must_drain_execution_after_cancel {
+                                cancel_requested_during_execution = true;
+                                break execution_future.await;
+                            }
                             transition_run_stream_to_cancelled(
                                 sender,
                                 runtime_state,
@@ -15065,6 +15072,11 @@ async fn execute_run_stream_tool_proposal(
             started_at,
             &outcome,
         );
+        if cancel_requested_during_execution {
+            transition_run_stream_to_cancelled(sender, runtime_state, run_state, run_id, tape_seq)
+                .await?;
+            return Ok(RunStreamToolExecutionOutcome::Cancelled);
+        }
         outcome
     } else {
         denied_execution_outcome(proposal_id, tool_name, input_json, decision.reason.as_str())
@@ -15112,6 +15124,10 @@ async fn execute_run_stream_tool_proposal(
     )
     .await;
     Ok(RunStreamToolExecutionOutcome::Completed)
+}
+
+fn tool_cancellation_requires_execution_drain(tool_name: &str) -> bool {
+    matches!(tool_name, "palyra.process.run" | "palyra.plugin.run")
 }
 
 fn build_pending_tool_approval(

@@ -6877,6 +6877,192 @@ async fn grpc_run_stream_admin_cancel_preempts_inflight_tool_execution() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(unix)]
+async fn grpc_run_stream_admin_cancel_waits_for_inflight_process_runner_completion() -> Result<()> {
+    let response_body = openai_tool_call_response(
+        "palyra.process.run",
+        &serde_json::json!({ "command": "sleep", "args": ["2"] }),
+    )?;
+    let (openai_base_url, _request_count, server_handle) =
+        spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(200, response_body)])?;
+    let workspace_root =
+        std::env::current_dir().context("failed to resolve workspace root for process runner")?;
+    let (child, admin_port, grpc_port, _journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_tool_policy_and_process_runner(
+            ProcessRunnerSpawnConfig {
+                openai_base_url: openai_base_url.as_str(),
+                openai_api_key: OPENAI_API_KEY,
+                allowed_tools: "palyra.process.run",
+                max_calls_per_run: 2,
+                execution_timeout_ms: 4_000,
+                workspace_root: workspace_root.as_path(),
+                allowed_executables: "sleep",
+                allowed_egress_hosts: "",
+                allowed_dns_suffixes: "",
+            },
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let (request_sender, request_receiver) = tokio_mpsc::channel(4);
+    request_sender
+        .send(sample_run_stream_request_with_text(
+            "cancel should wait for uncancellable process runner completion".to_owned(),
+        ))
+        .await
+        .context("failed to send initial process runner cancellation request")?;
+    let mut stream_request = tonic::Request::new(ReceiverStream::new(request_receiver));
+    stream_request.metadata_mut().insert("authorization", format!("Bearer {ADMIN_TOKEN}").parse()?);
+    stream_request.metadata_mut().insert("x-palyra-principal", "user:ops".parse()?);
+    stream_request.metadata_mut().insert("x-palyra-device-id", DEVICE_ID.parse()?);
+    stream_request.metadata_mut().insert("x-palyra-channel", "cli".parse()?);
+
+    let mut response_stream =
+        client.run_stream(stream_request).await.context("failed to call RunStream")?.into_inner();
+
+    let mut saw_approval_request = false;
+    let mut saw_allow_decision = false;
+    loop {
+        let next_event = tokio::time::timeout(Duration::from_secs(5), response_stream.next())
+            .await
+            .context("process runner cancellation stream stalled before allow decision")?;
+        let Some(event) = next_event else {
+            anyhow::bail!("run stream ended before approval and allow decision were emitted");
+        };
+        let event =
+            event.context("failed to read RunStream event before process runner cancellation")?;
+        if let Some(body) = event.body {
+            match body {
+                common_v1::run_stream_event::Body::ToolApprovalRequest(approval_request) => {
+                    let proposal_id = approval_request
+                        .proposal_id
+                        .as_ref()
+                        .map(|proposal_id| proposal_id.ulid.as_str())
+                        .context("tool approval request missing proposal_id")?;
+                    request_sender
+                        .send(sample_tool_approval_response_request(
+                            proposal_id,
+                            true,
+                            "allow_once",
+                        ))
+                        .await
+                        .context("failed to send process runner approval response")?;
+                    saw_approval_request = true;
+                }
+                common_v1::run_stream_event::Body::ToolDecision(decision) => {
+                    if decision.kind == common_v1::tool_decision::DecisionKind::Allow as i32 {
+                        saw_allow_decision = true;
+                        break;
+                    }
+                }
+                common_v1::run_stream_event::Body::ToolResult(result) => {
+                    if result.success {
+                        anyhow::bail!(
+                            "process runner emitted a successful tool result before cancellation"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        saw_approval_request,
+        "sensitive process runner tool call should request explicit approval"
+    );
+    assert!(
+        saw_allow_decision,
+        "process runner tool call should emit allow decision before cancellation"
+    );
+
+    let cancel_started_at = Instant::now();
+    let cancel_snapshot = admin_post_json_async(
+        admin_port,
+        format!("/admin/v1/runs/{RUN_ID}/cancel"),
+        serde_json::json!({ "reason": "integration_cancel_during_process_runner_execution" }),
+    )
+    .await?;
+    assert_eq!(
+        cancel_snapshot.get("cancel_requested").and_then(Value::as_bool),
+        Some(true),
+        "admin cancel endpoint should persist cancel flag during process runner execution"
+    );
+
+    let mut saw_failed = false;
+    let mut saw_done = false;
+    let mut saw_success_result = false;
+    let failed_kind = common_v1::stream_status::StatusKind::Failed as i32;
+    let done_kind = common_v1::stream_status::StatusKind::Done as i32;
+    loop {
+        let next_event = tokio::time::timeout(Duration::from_secs(5), response_stream.next())
+            .await
+            .context("run stream did not terminate after process runner cancellation")?;
+        let Some(event) = next_event else {
+            break;
+        };
+        let event =
+            event.context("failed to read RunStream event after process runner cancellation")?;
+        if let Some(body) = event.body {
+            match body {
+                common_v1::run_stream_event::Body::Status(status) => {
+                    if status.kind == failed_kind {
+                        saw_failed = true;
+                        break;
+                    }
+                    if status.kind == done_kind {
+                        saw_done = true;
+                        break;
+                    }
+                }
+                common_v1::run_stream_event::Body::ToolResult(result) => {
+                    if result.success {
+                        saw_success_result = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let cancellation_elapsed = cancel_started_at.elapsed();
+    assert!(
+        cancellation_elapsed >= Duration::from_secs(1),
+        "process runner cancellation should wait for uncancellable execution to finish; elapsed={cancellation_elapsed:?}"
+    );
+    assert!(
+        cancellation_elapsed < Duration::from_secs(5),
+        "process runner cancellation should still finish within the tool timeout; elapsed={cancellation_elapsed:?}"
+    );
+    assert!(saw_failed, "cancelled process runner run should emit failed status");
+    assert!(!saw_done, "cancelled process runner run must not emit done status");
+    assert!(
+        !saw_success_result,
+        "cancelled process runner run must not emit successful tool result after cancellation"
+    );
+
+    let run_snapshot = admin_get_json_async(admin_port, format!("/admin/v1/runs/{RUN_ID}")).await?;
+    assert_eq!(
+        run_snapshot.get("state").and_then(Value::as_str).context("run snapshot missing state")?,
+        "cancelled"
+    );
+    assert_eq!(
+        run_snapshot.get("cancel_requested").and_then(Value::as_bool),
+        Some(true),
+        "cancelled process runner run should persist cancel_requested=true"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_append_event_persists_redacted_payload_and_hash_chain() -> Result<()> {
     let (child, admin_port, grpc_port, journal_db_path) =
         spawn_palyrad_with_dynamic_ports_and_hash_chain(true)?;
