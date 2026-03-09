@@ -5,6 +5,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use palyra_a2ui::{apply_patch_document, parse_patch_document};
 use rusqlite::{params, params_from_iter, Connection, ErrorCode, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -1063,6 +1066,13 @@ pub enum JournalError {
         #[source]
         source: rusqlite::Error,
     },
+    #[cfg_attr(not(unix), allow(dead_code))]
+    #[error("failed to set secure permissions for journal storage at {path}: {source}")]
+    SetPermissions {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("journal lock poisoned")]
     LockPoisoned,
     #[error("journal event already exists: {event_id}")]
@@ -1544,16 +1554,21 @@ impl JournalStore {
         validate_db_path(&config.db_path)?;
         if let Some(parent) = config.db_path.parent() {
             if !parent.as_os_str().is_empty() {
+                let parent_existed = parent.exists();
                 fs::create_dir_all(parent).map_err(|source| JournalError::CreateDirectory {
                     path: parent.to_path_buf(),
                     source,
                 })?;
+                if !parent_existed {
+                    enforce_owner_only_permissions(parent, 0o700)?;
+                }
             }
         }
 
         let mut connection = Connection::open(&config.db_path).map_err(|source| {
             JournalError::OpenConnection { path: config.db_path.clone(), source }
         })?;
+        enforce_owner_only_permissions(&config.db_path, 0o600)?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;
@@ -3933,6 +3948,17 @@ impl JournalStore {
     }
 }
 
+#[cfg(unix)]
+fn enforce_owner_only_permissions(path: &Path, mode: u32) -> Result<(), JournalError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|source| JournalError::SetPermissions { path: path.to_path_buf(), source })
+}
+
+#[cfg(not(unix))]
+fn enforce_owner_only_permissions(_path: &Path, _mode: u32) -> Result<(), JournalError> {
+    Ok(())
+}
+
 #[cfg(test)]
 fn load_orchestrator_tape(
     connection: &Connection,
@@ -5744,6 +5770,31 @@ mod tests {
                 max_bytes
             } if payload_kind == "journal" && actual_bytes == 64 && max_bytes == 32
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_store_open_sets_owner_only_permissions_for_new_storage() {
+        let tempdir = tempfile::TempDir::new().expect("failed to create tempdir");
+        let db_path = tempdir.path().join("journal").join("events.sqlite3");
+        let store = JournalStore::open(JournalConfig {
+            db_path: db_path.clone(),
+            hash_chain_enabled: false,
+            max_payload_bytes: 4 * 1024,
+        })
+        .expect("journal store should open");
+        drop(store);
+
+        let parent = db_path.parent().expect("db path should have parent");
+        let parent_mode =
+            fs::metadata(parent).expect("journal parent metadata should load").permissions().mode()
+                & 0o777;
+        let db_mode =
+            fs::metadata(&db_path).expect("journal db metadata should load").permissions().mode()
+                & 0o777;
+
+        assert_eq!(parent_mode, 0o700, "new journal directory must be owner-only");
+        assert_eq!(db_mode, 0o600, "new journal db file must be owner-only");
     }
 
     #[test]
