@@ -8938,21 +8938,11 @@ fn finalize_discord_onboarding_plan(
     mut plan: DiscordOnboardingPlan,
     bot: &DiscordBotIdentitySummary,
 ) -> DiscordOnboardingPlan {
-    if plan.require_mention {
-        merge_discord_mention_patterns(
-            &mut plan.mention_patterns,
-            default_discord_mention_patterns(bot.id.as_str(), bot.username.as_str()),
-        );
+    if plan.require_mention && plan.mention_patterns.is_empty() {
+        plan.mention_patterns =
+            default_discord_mention_patterns(bot.id.as_str(), bot.username.as_str());
     }
     plan
-}
-
-fn merge_discord_mention_patterns(target: &mut Vec<String>, additions: Vec<String>) {
-    for candidate in additions {
-        if !target.iter().any(|existing| existing == &candidate) {
-            target.push(candidate);
-        }
-    }
 }
 
 fn build_discord_routing_preview(plan: &DiscordOnboardingPlan) -> DiscordRoutingPreview {
@@ -11997,7 +11987,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_discord_onboarding_plan_merges_required_bot_mentions() {
+    fn finalize_discord_onboarding_plan_preserves_custom_mentions() {
         let payload = DiscordOnboardingRequest {
             account_id: Some("default".to_owned()),
             token: "token".to_owned(),
@@ -12007,6 +11997,38 @@ mod tests {
             deny_from: None,
             require_mention: Some(true),
             mention_patterns: Some(vec!["@ops".to_owned()]),
+            concurrency_limit: None,
+            direct_message_policy: None,
+            broadcast_strategy: None,
+            confirm_open_guild_channels: None,
+            verify_channel_id: None,
+        };
+        let plan = build_discord_onboarding_plan(&payload).expect("plan should parse");
+        let finalized = finalize_discord_onboarding_plan(
+            plan,
+            &DiscordBotIdentitySummary {
+                id: "123456".to_owned(),
+                username: "Palyra-Bot".to_owned(),
+            },
+        );
+        assert_eq!(
+            finalized.mention_patterns,
+            vec!["@ops".to_owned()],
+            "custom mention patterns should be preserved without appending default bot aliases"
+        );
+    }
+
+    #[test]
+    fn finalize_discord_onboarding_plan_adds_required_bot_mentions_when_missing() {
+        let payload = DiscordOnboardingRequest {
+            account_id: Some("default".to_owned()),
+            token: "token".to_owned(),
+            mode: None,
+            inbound_scope: None,
+            allow_from: None,
+            deny_from: None,
+            require_mention: Some(true),
+            mention_patterns: None,
             concurrency_limit: None,
             direct_message_policy: None,
             broadcast_strategy: None,
@@ -12032,10 +12054,6 @@ mod tests {
         assert!(
             finalized.mention_patterns.iter().any(|value| value == "@palyra-bot"),
             "bot username alias should be present"
-        );
-        assert!(
-            finalized.mention_patterns.iter().any(|value| value == "@ops"),
-            "existing custom mention patterns should be preserved"
         );
     }
 
