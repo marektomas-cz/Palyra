@@ -6871,6 +6871,17 @@ async fn consume_action_budget_and_snapshot(
     session_id: &str,
     require_page_body: bool,
 ) -> Result<ActionSessionSnapshot, String> {
+    if matches!(runtime.engine_mode, BrowserEngineMode::Chromium) {
+        let active_tab_id = {
+            let sessions = runtime.sessions.lock().await;
+            let Some(session) = sessions.get(session_id) else {
+                return Err("session_not_found".to_owned());
+            };
+            session.active_tab_id.clone()
+        };
+        chromium_refresh_tab_snapshot(runtime, session_id, active_tab_id.as_str()).await?;
+    }
+
     let mut sessions = runtime.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
         return Err("session_not_found".to_owned());
@@ -7458,11 +7469,12 @@ async fn fetch_download_artifact(
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_v1, chromium_new_tab_error_is_retryable, constant_time_eq_bytes,
-        default_browserd_state_dir_from_env, enforce_non_loopback_bind_auth, navigate_with_guards,
-        parse_daemon_bind_socket, persisted_snapshot_hash, persisted_snapshot_legacy_hash,
+        browser_v1, chromium_active_tab_for_session, chromium_new_tab_error_is_retryable,
+        constant_time_eq_bytes, default_browserd_state_dir_from_env,
+        enforce_non_loopback_bind_auth, navigate_with_guards, parse_daemon_bind_socket,
+        persisted_snapshot_hash, persisted_snapshot_legacy_hash,
         record_chromium_remote_ip_incident, reset_dns_validation_tracking_for_tests,
-        store_dns_nxdomain_cache, update_profile_state_metadata,
+        run_chromium_blocking, store_dns_nxdomain_cache, update_profile_state_metadata,
         validate_restored_snapshot_against_profile, validate_target_url_blocking, Args,
         BrowserEngineMode, BrowserProfileRecord, BrowserRuntimeState, BrowserServiceImpl,
         BrowserTabRecord, ChromiumSessionProxy, DnsValidationCache, PersistedSessionSnapshot,
@@ -8420,6 +8432,110 @@ mod tests {
         assert_eq!(waited.matched_selector, "#submit");
 
         handle.join().expect("test server thread should exit");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_service_chromium_refreshes_snapshot_before_allowlisted_actions() {
+        let Some(chromium_path) = resolve_chromium_path_for_tests() else {
+            return;
+        };
+        let runtime = std::sync::Arc::new(
+            BrowserRuntimeState::new(&Args {
+                bind: "127.0.0.1".to_owned(),
+                port: 7143,
+                grpc_bind: "127.0.0.1".to_owned(),
+                grpc_port: 7543,
+                auth_token: None,
+                session_idle_ttl_ms: 60_000,
+                max_sessions: 16,
+                max_navigation_timeout_ms: 10_000,
+                max_session_lifetime_ms: 60_000,
+                max_screenshot_bytes: 256 * 1024,
+                max_response_bytes: 256 * 1024,
+                max_title_bytes: 4 * 1024,
+                engine_mode: BrowserEngineMode::Chromium,
+                chromium_path: Some(chromium_path),
+                chromium_startup_timeout_ms: DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
+            })
+            .expect("chromium runtime should initialize"),
+        );
+        let service = BrowserServiceImpl { runtime: std::sync::Arc::clone(&runtime) };
+        let created = create_session_with_retry_for_chromium_test(
+            &service,
+            browser_v1::CreateSessionRequest {
+                v: 1,
+                principal: "user:ops".to_owned(),
+                idle_ttl_ms: 10_000,
+                budget: None,
+                allow_private_targets: true,
+                allow_downloads: false,
+                action_allowed_domains: vec!["127.0.0.1".to_owned()],
+                persistence_enabled: false,
+                persistence_id: String::new(),
+                profile_id: None,
+                private_profile: false,
+                channel: String::new(),
+            },
+            3,
+        )
+        .await
+        .expect("create_session should succeed for chromium allowlist test");
+        let session_id = created.session_id.expect("session id should exist");
+        {
+            let mut sessions = runtime.sessions.lock().await;
+            let session = sessions
+                .get_mut(session_id.ulid.as_str())
+                .expect("created chromium test session should exist");
+            let active_tab = session
+                .tabs
+                .get_mut(session.active_tab_id.as_str())
+                .expect("created chromium test session should have an active tab record");
+            active_tab.last_url = Some("http://127.0.0.1/allowed".to_owned());
+            active_tab.last_page_body = "<html><body>ok</body></html>".to_owned();
+            active_tab.last_title = "Allowed Fixture".to_owned();
+        }
+
+        let (_tab_id, tab) =
+            chromium_active_tab_for_session(runtime.as_ref(), session_id.ulid.as_str())
+                .await
+                .expect("active chromium tab should exist");
+        run_chromium_blocking("chromium stale allowlist test navigate", move || {
+            tab.navigate_to(
+                "data:text/html,<html><body><button id='blocked'>Blocked</button></body></html>",
+            )
+            .map_err(|error| format!("failed to navigate Chromium tab to blocked page: {error}"))?;
+            tab.wait_until_navigated()
+                .map_err(|error| format!("Chromium blocked-page navigation failed: {error}"))?;
+            Ok(())
+        })
+        .await
+        .expect(
+            "direct Chromium navigation should succeed without refreshing the session snapshot",
+        );
+
+        let click = service
+            .click(Request::new(browser_v1::ClickRequest {
+                v: 1,
+                session_id: Some(session_id),
+                selector: "#blocked".to_owned(),
+                max_retries: 0,
+                timeout_ms: 3_000,
+                capture_failure_screenshot: true,
+                max_failure_screenshot_bytes: 16 * 1024,
+            }))
+            .await
+            .expect("click should execute")
+            .into_inner();
+        assert!(
+            !click.success,
+            "stale Chromium snapshots must not let action allowlists authorize the redirected page"
+        );
+        assert!(
+            click.error.contains("action domain allowlist")
+                || click.error.contains("failed to resolve host"),
+            "allowlist refresh should reject stale Chromium redirects: {}",
+            click.error
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
