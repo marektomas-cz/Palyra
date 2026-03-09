@@ -7,6 +7,7 @@ use std::{
 };
 
 use palyra_common::{default_state_root, validate_canonical_id};
+use palyra_vault::{ensure_owner_only_dir, ensure_owner_only_file};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -585,6 +586,9 @@ fn persist_registry(path: &Path, document: &RegistryDocument) -> Result<(), Agen
             path: parent.to_path_buf(),
             source,
         })?;
+        harden_registry_dir_permissions(parent).map_err(|source| {
+            AgentRegistryError::WriteRegistry { path: parent.to_path_buf(), source }
+        })?;
     }
     let _lock = acquire_registry_lock(path)
         .map_err(|source| AgentRegistryError::WriteRegistry { path: path.to_path_buf(), source })?;
@@ -659,6 +663,7 @@ fn write_registry_atomically(path: &Path, payload: &str) -> Result<(), std::io::
     let temporary_path = PathBuf::from(temporary_name);
 
     fs::write(&temporary_path, payload)?;
+    harden_registry_file_permissions(temporary_path.as_path())?;
     if let Err(rename_error) = fs::rename(&temporary_path, path) {
         if !path.exists() || !path.is_file() {
             let _ = fs::remove_file(&temporary_path);
@@ -675,7 +680,26 @@ fn write_registry_atomically(path: &Path, payload: &str) -> Result<(), std::io::
         }
         let _ = fs::remove_file(&rollback_path);
     }
+    harden_registry_file_permissions(path)?;
     Ok(())
+}
+
+fn harden_registry_dir_permissions(path: &Path) -> Result<(), std::io::Error> {
+    ensure_owner_only_dir(path).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to enforce owner-only directory permissions on {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn harden_registry_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+    ensure_owner_only_file(path).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to enforce owner-only file permissions on {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn resolve_agent_dir(
@@ -775,6 +799,8 @@ fn parse_path_literal(raw: &str, field: &'static str) -> Result<PathBuf, AgentRe
 
 fn ensure_canonical_dir(path: &Path, field: &'static str) -> Result<PathBuf, AgentRegistryError> {
     fs::create_dir_all(path)
+        .map_err(|source| AgentRegistryError::WriteRegistry { path: path.to_path_buf(), source })?;
+    harden_registry_dir_permissions(path)
         .map_err(|source| AgentRegistryError::WriteRegistry { path: path.to_path_buf(), source })?;
     fs::canonicalize(path).map_err(|source| AgentRegistryError::InvalidPath {
         field,
@@ -878,6 +904,33 @@ mod tests {
     fn agent_registry_lock_path(identity_root: &Path) -> PathBuf {
         let state_root = identity_root.parent().unwrap_or(identity_root);
         state_root.join("agents.toml.lock")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_hardens_registry_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir should be created");
+        let identity_root = temp.path().join("state").join("identity");
+        let _registry =
+            AgentRegistry::open(identity_root.as_path()).expect("registry should initialize");
+
+        let state_root = temp.path().join("state");
+        let registry_path = state_root.join("agents.toml");
+        let state_mode = fs::metadata(&state_root)
+            .expect("state root metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        let registry_mode = fs::metadata(&registry_path)
+            .expect("registry metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(state_mode, 0o700, "state root must be owner-only");
+        assert_eq!(registry_mode, 0o600, "agent registry file must be owner-only");
     }
 
     #[test]
