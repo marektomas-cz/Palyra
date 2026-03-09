@@ -5379,6 +5379,10 @@ fn validate_db_path(path: &Path) -> Result<(), JournalError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
