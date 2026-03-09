@@ -134,7 +134,6 @@ const MAX_RELAY_SELECTION_BYTES: usize = 8 * 1024;
 const MAX_RELAY_PAYLOAD_BYTES: u64 = 32 * 1024;
 const CHROMIUM_REMOTE_IP_GUARD_HANDLER_NAME: &str = "palyra.security.remote_ip_guard";
 const DNS_VALIDATION_CACHE_MAX_ENTRIES: usize = 512;
-const DNS_VALIDATION_CACHE_TTL: Duration = Duration::from_secs(30);
 const DNS_VALIDATION_NEGATIVE_TTL: Duration = Duration::from_secs(10);
 const DNS_VALIDATION_METRICS_LOG_INTERVAL: u64 = 256;
 #[cfg(windows)]
@@ -663,14 +662,7 @@ impl ResolvedHostAddresses {
 }
 
 #[derive(Debug, Clone)]
-enum DnsCacheResolution {
-    Resolved(ResolvedHostAddresses),
-    NxDomain,
-}
-
-#[derive(Debug, Clone)]
 struct DnsValidationCacheEntry {
-    resolution: DnsCacheResolution,
     expires_at: Instant,
     last_access_tick: u64,
 }
@@ -679,17 +671,15 @@ struct DnsValidationCacheEntry {
 struct DnsValidationCache {
     entries: HashMap<String, DnsValidationCacheEntry>,
     max_entries: usize,
-    ttl: Duration,
     negative_ttl: Duration,
     next_access_tick: u64,
 }
 
 impl DnsValidationCache {
-    fn new(max_entries: usize, ttl: Duration, negative_ttl: Duration) -> Self {
+    fn new(max_entries: usize, negative_ttl: Duration) -> Self {
         Self {
             entries: HashMap::new(),
             max_entries: max_entries.max(1),
-            ttl: ttl.max(Duration::from_secs(1)),
             negative_ttl: negative_ttl.max(Duration::from_secs(1)),
             next_access_tick: 0,
         }
@@ -699,36 +689,22 @@ impl DnsValidationCache {
         self.entries.len()
     }
 
-    fn lookup(&mut self, key: &str, now: Instant) -> Option<DnsCacheResolution> {
+    fn contains(&mut self, key: &str, now: Instant) -> bool {
         let mut should_remove = false;
-        let mut output = None;
+        let mut found = false;
         let access_tick = self.next_access_tick();
         if let Some(entry) = self.entries.get_mut(key) {
             if now > entry.expires_at {
                 should_remove = true;
             } else {
                 entry.last_access_tick = access_tick;
-                output = Some(entry.resolution.clone());
+                found = true;
             }
         }
         if should_remove {
             self.entries.remove(key);
         }
-        output
-    }
-
-    fn insert_resolved(&mut self, key: String, resolved: ResolvedHostAddresses, now: Instant) {
-        self.remove_expired(now);
-        let last_access_tick = self.next_access_tick();
-        self.entries.insert(
-            key,
-            DnsValidationCacheEntry {
-                resolution: DnsCacheResolution::Resolved(resolved),
-                expires_at: now + self.ttl,
-                last_access_tick,
-            },
-        );
-        self.prune_lru();
+        found
     }
 
     fn insert_nxdomain(&mut self, key: String, now: Instant) {
@@ -736,11 +712,7 @@ impl DnsValidationCache {
         let last_access_tick = self.next_access_tick();
         self.entries.insert(
             key,
-            DnsValidationCacheEntry {
-                resolution: DnsCacheResolution::NxDomain,
-                expires_at: now + self.negative_ttl,
-                last_access_tick,
-            },
+            DnsValidationCacheEntry { expires_at: now + self.negative_ttl, last_access_tick },
         );
         self.prune_lru();
     }
@@ -840,7 +812,6 @@ impl DnsValidationMetrics {
 static DNS_VALIDATION_CACHE: LazyLock<std::sync::Mutex<DnsValidationCache>> = LazyLock::new(|| {
     std::sync::Mutex::new(DnsValidationCache::new(
         DNS_VALIDATION_CACHE_MAX_ENTRIES,
-        DNS_VALIDATION_CACHE_TTL,
         DNS_VALIDATION_NEGATIVE_TTL,
     ))
 });
@@ -4687,24 +4658,17 @@ fn dns_cached_nxdomain_error_for_host(host: &str) -> String {
     format!("DNS resolution failed for host '{host}': cached NXDOMAIN")
 }
 
-fn lookup_dns_resolution_cache(host: &str) -> Option<DnsCacheResolution> {
+fn lookup_cached_nxdomain(host: &str) -> bool {
     let key = normalize_dns_host_cache_key(host);
     let now = Instant::now();
     let mut cache = lock_dns_validation_cache();
-    let cached = cache.lookup(key.as_str(), now);
-    if cached.is_some() {
+    let cached = cache.contains(key.as_str(), now);
+    if cached {
         DNS_VALIDATION_METRICS.cache_hits.fetch_add(1, Ordering::Relaxed);
     } else {
         DNS_VALIDATION_METRICS.cache_misses.fetch_add(1, Ordering::Relaxed);
     }
     cached
-}
-
-fn store_dns_resolution_cache(host: &str, resolved: ResolvedHostAddresses) {
-    let key = normalize_dns_host_cache_key(host);
-    let now = Instant::now();
-    let mut cache = lock_dns_validation_cache();
-    cache.insert_resolved(key, resolved, now);
 }
 
 fn store_dns_nxdomain_cache(host: &str) {
@@ -4740,15 +4704,10 @@ fn resolve_host_addresses_blocking(host: &str, port: u16) -> Result<ResolvedHost
         return ResolvedHostAddresses::from_addresses(vec![address]);
     }
 
-    if let Some(cached) = lookup_dns_resolution_cache(host) {
-        return match cached {
-            DnsCacheResolution::Resolved(resolved) => Ok(resolved),
-            DnsCacheResolution::NxDomain => {
-                DNS_VALIDATION_METRICS.blocked_total.fetch_add(1, Ordering::Relaxed);
-                DNS_VALIDATION_METRICS.blocked_dns_failures.fetch_add(1, Ordering::Relaxed);
-                Err(dns_cached_nxdomain_error_for_host(host))
-            }
-        };
+    if lookup_cached_nxdomain(host) {
+        DNS_VALIDATION_METRICS.blocked_total.fetch_add(1, Ordering::Relaxed);
+        DNS_VALIDATION_METRICS.blocked_dns_failures.fetch_add(1, Ordering::Relaxed);
+        return Err(dns_cached_nxdomain_error_for_host(host));
     }
 
     let lookup_started = Instant::now();
@@ -4771,7 +4730,6 @@ fn resolve_host_addresses_blocking(host: &str, port: u16) -> Result<ResolvedHost
         DNS_VALIDATION_METRICS.blocked_dns_failures.fetch_add(1, Ordering::Relaxed);
         format!("{error} for host '{host}'")
     })?;
-    store_dns_resolution_cache(host, resolved.clone());
     Ok(resolved)
 }
 
@@ -4783,15 +4741,10 @@ async fn resolve_host_addresses_async(
         return ResolvedHostAddresses::from_addresses(vec![address]);
     }
 
-    if let Some(cached) = lookup_dns_resolution_cache(host) {
-        return match cached {
-            DnsCacheResolution::Resolved(resolved) => Ok(resolved),
-            DnsCacheResolution::NxDomain => {
-                DNS_VALIDATION_METRICS.blocked_total.fetch_add(1, Ordering::Relaxed);
-                DNS_VALIDATION_METRICS.blocked_dns_failures.fetch_add(1, Ordering::Relaxed);
-                Err(dns_cached_nxdomain_error_for_host(host))
-            }
-        };
+    if lookup_cached_nxdomain(host) {
+        DNS_VALIDATION_METRICS.blocked_total.fetch_add(1, Ordering::Relaxed);
+        DNS_VALIDATION_METRICS.blocked_dns_failures.fetch_add(1, Ordering::Relaxed);
+        return Err(dns_cached_nxdomain_error_for_host(host));
     }
 
     let lookup_started = Instant::now();
@@ -4814,7 +4767,6 @@ async fn resolve_host_addresses_async(
         DNS_VALIDATION_METRICS.blocked_dns_failures.fetch_add(1, Ordering::Relaxed);
         format!("{error} for host '{host}'")
     })?;
-    store_dns_resolution_cache(host, resolved.clone());
     Ok(resolved)
 }
 
@@ -7510,22 +7462,21 @@ mod tests {
         default_browserd_state_dir_from_env, enforce_non_loopback_bind_auth, navigate_with_guards,
         parse_daemon_bind_socket, persisted_snapshot_hash, persisted_snapshot_legacy_hash,
         record_chromium_remote_ip_incident, reset_dns_validation_tracking_for_tests,
-        store_dns_nxdomain_cache, store_dns_resolution_cache, update_profile_state_metadata,
+        store_dns_nxdomain_cache, update_profile_state_metadata,
         validate_restored_snapshot_against_profile, validate_target_url_blocking, Args,
         BrowserEngineMode, BrowserProfileRecord, BrowserRuntimeState, BrowserServiceImpl,
-        BrowserTabRecord, ChromiumSessionProxy, DnsCacheResolution, DnsValidationCache,
-        PersistedSessionSnapshot, PersistedStateStore, ResolvedHostAddresses,
-        SessionPermissionsInternal, AUTHORIZATION_HEADER, CANONICAL_PROTOCOL_MAJOR,
-        CHROMIUM_NEW_TAB_RETRY_DELAY_MS, CHROMIUM_PATH_ENV, DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
-        DEFAULT_GRPC_PORT, MAX_RELAY_PAYLOAD_BYTES, ONE_BY_ONE_PNG, PROFILE_RECORD_SCHEMA_VERSION,
-        STATE_KEY_LEN,
+        BrowserTabRecord, ChromiumSessionProxy, DnsValidationCache, PersistedSessionSnapshot,
+        PersistedStateStore, SessionPermissionsInternal, AUTHORIZATION_HEADER,
+        CANONICAL_PROTOCOL_MAJOR, CHROMIUM_NEW_TAB_RETRY_DELAY_MS, CHROMIUM_PATH_ENV,
+        DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS, DEFAULT_GRPC_PORT, MAX_RELAY_PAYLOAD_BYTES,
+        ONE_BY_ONE_PNG, PROFILE_RECORD_SCHEMA_VERSION, STATE_KEY_LEN,
     };
     use crate::proto;
     use crate::proto::palyra::browser::v1::browser_service_server::BrowserService;
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::io::{Read, Write};
-    use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::thread;
@@ -7798,30 +7749,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn navigate_with_guards_blocks_remote_private_ip_after_cached_dns_mismatch() {
         reset_dns_validation_tracking_for_tests();
-        let (url, handle) = spawn_static_http_server(
-            200,
-            "<html><head><title>Mismatch</title></head><body>ok</body></html>",
-        );
-        let host = "localhost";
-        let target = url.replacen("127.0.0.1", host, 1);
-        store_dns_resolution_cache(
-            host,
-            ResolvedHostAddresses::from_addresses(vec![IpAddr::V4(Ipv4Addr::new(
-                93, 184, 216, 34,
-            ))])
-            .expect("cached public DNS answer should be valid"),
-        );
+        let target = "http://localhost:8080/";
 
-        let outcome =
-            navigate_with_guards(target.as_str(), 2_000, true, 3, false, 8 * 1024, None).await;
-        assert!(!outcome.success, "remote private response IP must be blocked");
+        let outcome = navigate_with_guards(target, 2_000, true, 3, false, 8 * 1024, None).await;
+        assert!(!outcome.success, "private DNS target must be blocked before request dispatch");
         assert!(
-            outcome.error.contains("remote response IP") && outcome.error.contains("private/local"),
-            "error should explain remote response policy guard: {}",
+            outcome.error.contains("private/local"),
+            "error should explain private target policy guard: {}",
             outcome.error
         );
 
-        handle.join().expect("test server thread should exit");
         reset_dns_validation_tracking_for_tests();
     }
 
@@ -7842,36 +7779,25 @@ mod tests {
     #[test]
     fn dns_validation_cache_prunes_lru_entries() {
         let now = Instant::now();
-        let mut cache =
-            DnsValidationCache::new(2, Duration::from_secs(60), Duration::from_secs(10));
-        let public_a = ResolvedHostAddresses::from_addresses(vec![IpAddr::V4(Ipv4Addr::new(
-            93, 184, 216, 34,
-        ))])
-        .expect("first public DNS answer should be valid");
-        let public_b =
-            ResolvedHostAddresses::from_addresses(vec![IpAddr::V4(Ipv4Addr::new(151, 101, 1, 69))])
-                .expect("second public DNS answer should be valid");
-        let public_c =
-            ResolvedHostAddresses::from_addresses(vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))])
-                .expect("third public DNS answer should be valid");
+        let mut cache = DnsValidationCache::new(2, Duration::from_secs(10));
 
-        cache.insert_resolved("alpha.example".to_owned(), public_a, now);
-        cache.insert_resolved("beta.example".to_owned(), public_b, now);
-        let _ = cache.lookup("alpha.example", now);
-        cache.insert_resolved("gamma.example".to_owned(), public_c, now);
+        cache.insert_nxdomain("alpha.example".to_owned(), now);
+        cache.insert_nxdomain("beta.example".to_owned(), now);
+        assert!(
+            cache.contains("alpha.example", now),
+            "most recently touched key should remain in LRU cache"
+        );
+        cache.insert_nxdomain("gamma.example".to_owned(), now);
 
         assert!(
-            matches!(cache.lookup("alpha.example", now), Some(DnsCacheResolution::Resolved(_))),
+            cache.contains("alpha.example", now),
             "most recently touched key should remain in LRU cache"
         );
         assert!(
-            cache.lookup("beta.example", now).is_none(),
+            !cache.contains("beta.example", now),
             "least recently used key should be evicted when capacity is exceeded"
         );
-        assert!(
-            matches!(cache.lookup("gamma.example", now), Some(DnsCacheResolution::Resolved(_))),
-            "newly inserted key should be retained"
-        );
+        assert!(cache.contains("gamma.example", now), "newly inserted key should be retained");
     }
 
     #[test]
