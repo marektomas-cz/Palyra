@@ -824,8 +824,21 @@ fn load_openai_validation_base_url(document: Option<&toml::Value>) -> String {
 #[allow(clippy::result_large_err)]
 fn load_openai_console_config_snapshot(
 ) -> Result<(toml::Value, ConfigMigrationInfo, String), Response> {
-    let configured_path = env::var("PALYRA_CONFIG").ok();
+    let configured_path = configured_openai_console_config_path(None);
     load_console_config_snapshot(configured_path.as_deref(), true)
+}
+
+fn configured_openai_console_config_path(path: Option<&str>) -> Option<String> {
+    path.map(str::to_owned).or_else(|| env::var("PALYRA_CONFIG").ok())
+}
+
+#[allow(clippy::result_large_err)]
+fn resolve_openai_console_config_path(
+    path: Option<&str>,
+    require_existing: bool,
+) -> Result<Option<String>, Response> {
+    let configured_path = configured_openai_console_config_path(path);
+    resolve_console_config_path(configured_path.as_deref(), require_existing)
 }
 
 fn openai_validation_base_url_from_document(document: &toml::Value) -> Option<String> {
@@ -848,7 +861,7 @@ fn openai_callback_base_url_from_document(document: &toml::Value) -> Option<Stri
 
 #[allow(clippy::result_large_err)]
 fn resolve_console_config_mutation_path(path: Option<&str>) -> Result<String, Response> {
-    if let Some(resolved) = resolve_console_config_path(path, false)? {
+    if let Some(resolved) = resolve_openai_console_config_path(path, false)? {
         return Ok(resolved);
     }
     default_config_search_paths()
@@ -1070,7 +1083,7 @@ pub(crate) async fn clear_model_provider_auth_profile_selection_if_matches(
     context: &RequestContext,
     profile_id: &str,
 ) -> Result<bool, Response> {
-    let Some(path) = resolve_console_config_path(None, false)? else {
+    let Some(path) = resolve_openai_console_config_path(None, false)? else {
         return Ok(false);
     };
     let selected = read_console_config_profile_id(path.as_str())?;

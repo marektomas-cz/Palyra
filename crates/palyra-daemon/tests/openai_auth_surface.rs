@@ -146,6 +146,85 @@ fn console_openai_api_key_flow_persists_vault_refs_and_default_selection() -> Re
 }
 
 #[test]
+fn console_openai_default_selection_and_revoke_use_palyra_config_override() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
+    let mock = OpenAiMockServer::new(None, None)?;
+    mock.allow_token("sk-config-openai");
+    wait_for_openai_mock_ready(&mock)?;
+
+    let config_path = unique_temp_path("palyra-openai-config-override", "toml");
+    prepare_test_config(&config_path)?;
+    let mut extra_env = vec![
+        ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
+        ("PALYRA_CONFIG".to_owned(), config_path.to_string_lossy().to_string()),
+        ("PALYRA_MODEL_PROVIDER_OPENAI_BASE_URL".to_owned(), format!("{}/v1", mock.base_url())),
+    ];
+    extra_env.extend(isolated_default_config_env());
+
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports_once(&extra_env)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = http_client()?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+    let profile_id = "openai-config-override";
+
+    let connected = post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/auth/providers/openai/api-key",
+        &cookie,
+        &csrf_token,
+        &json!({
+            "profile_id": profile_id,
+            "profile_name": "OpenAI Config Override",
+            "scope": { "kind": "global" },
+            "api_key": "sk-config-openai",
+            "set_default": true
+        }),
+    )?;
+    assert_eq!(
+        connected.get("state").and_then(Value::as_str),
+        Some("selected"),
+        "api-key connect should report the profile as selected when set_default=true"
+    );
+    assert_eq!(
+        read_config_profile_id(config_path.as_path())?,
+        Some(profile_id.to_owned()),
+        "default profile selection must be written into the PALYRA_CONFIG override file"
+    );
+
+    let provider_state =
+        get_console_json(&client, admin_port, "/console/v1/auth/providers/openai", &cookie)?;
+    assert_eq!(
+        provider_state.get("default_profile_id").and_then(Value::as_str),
+        Some(profile_id),
+        "provider state must read default_profile_id from the PALYRA_CONFIG override file"
+    );
+
+    let revoked = post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/auth/providers/openai/revoke",
+        &cookie,
+        &csrf_token,
+        &json!({ "profile_id": profile_id }),
+    )?;
+    assert_eq!(
+        revoked.get("state").and_then(Value::as_str),
+        Some("revoked"),
+        "revoking the selected API-key profile should succeed"
+    );
+    assert_eq!(
+        read_config_profile_id(config_path.as_path())?,
+        None,
+        "revoking the selected profile must clear model_provider.auth_profile_id in PALYRA_CONFIG"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_openai_api_key_flow_surfaces_invalid_credentials() -> Result<()> {
     let _test_guard = lock_openai_auth_surface_test();
     let mock = OpenAiMockServer::new(None, None)?;
@@ -1223,6 +1302,47 @@ fn find_profile<'a>(profiles: &'a Value, profile_id: &str) -> Result<&'a Value> 
 
 fn console_url(admin_port: u16, path: &str) -> String {
     format!("http://127.0.0.1:{admin_port}{path}")
+}
+
+fn read_config_profile_id(path: &std::path::Path) -> Result<Option<String>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config {}", path.display()))?;
+    let document: toml::Value = toml::from_str(content.as_str())
+        .with_context(|| format!("failed to parse config {}", path.display()))?;
+    Ok(document
+        .get("model_provider")
+        .and_then(|value| value.get("auth_profile_id"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned))
+}
+
+fn isolated_default_config_env() -> Vec<(String, String)> {
+    #[cfg(windows)]
+    {
+        vec![
+            (
+                "APPDATA".to_owned(),
+                unique_temp_dir("palyra-openai-auth-appdata").to_string_lossy().to_string(),
+            ),
+            (
+                "PROGRAMDATA".to_owned(),
+                unique_temp_dir("palyra-openai-auth-programdata").to_string_lossy().to_string(),
+            ),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![
+            (
+                "XDG_CONFIG_HOME".to_owned(),
+                unique_temp_dir("palyra-openai-auth-xdg-config").to_string_lossy().to_string(),
+            ),
+            (
+                "HOME".to_owned(),
+                unique_temp_dir("palyra-openai-auth-home").to_string_lossy().to_string(),
+            ),
+        ]
+    }
 }
 
 fn wait_for_openai_mock_ready(mock: &OpenAiMockServer) -> Result<()> {

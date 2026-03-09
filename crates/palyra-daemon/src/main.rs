@@ -3993,7 +3993,8 @@ async fn console_openai_provider_state_handler(
         gateway::proto::palyra::auth::v1::AuthProviderKind::Openai,
     )
     .await?;
-    let (document, _, _) = load_console_config_snapshot(None, true)?;
+    let configured_path = std::env::var("PALYRA_CONFIG").ok();
+    let (document, _, _) = load_console_config_snapshot(configured_path.as_deref(), true)?;
     Ok(Json(build_openai_provider_state(&document, profiles)))
 }
 
@@ -5627,10 +5628,21 @@ fn resolve_console_config_path(
             })?;
             Some(parsed.to_string_lossy().into_owned())
         }
-        None => default_config_search_paths()
-            .into_iter()
-            .find(|candidate| candidate.exists())
-            .map(|candidate| candidate.to_string_lossy().into_owned()),
+        None => {
+            if let Ok(path_raw) = std::env::var("PALYRA_CONFIG") {
+                let parsed = parse_config_path(path_raw.as_str()).map_err(|error| {
+                    runtime_status_response(tonic::Status::invalid_argument(format!(
+                        "PALYRA_CONFIG contains an invalid config path: {error}"
+                    )))
+                })?;
+                Some(parsed.to_string_lossy().into_owned())
+            } else {
+                default_config_search_paths()
+                    .into_iter()
+                    .find(|candidate| candidate.exists())
+                    .map(|candidate| candidate.to_string_lossy().into_owned())
+            }
+        }
     };
 
     if require_existing {
