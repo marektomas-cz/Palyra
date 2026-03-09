@@ -13,6 +13,8 @@ import { isJsonObject, isJsonValue } from "./types";
 
 type MutableContainer = JsonObject | JsonValue[];
 
+const FORBIDDEN_POINTER_TOKENS = new Set(["__proto__", "prototype", "constructor"]);
+
 export function parsePatchDocument(
   input: unknown,
   budget: PatchProcessingBudget = DEFAULT_PATCH_BUDGET
@@ -296,7 +298,16 @@ function parsePointerTokens(path: string, opIndex: number, maxPathLength: number
   }
 
   const segments = path.slice(1).split("/");
-  return segments.map((segment) => decodePointerSegment(segment, opIndex, path));
+  return segments.map((segment) => {
+    const decoded = decodePointerSegment(segment, opIndex, path);
+    if (FORBIDDEN_POINTER_TOKENS.has(decoded)) {
+      throw new A2uiError(
+        "invalid_patch",
+        `Patch path '${path}' at index ${opIndex} contains forbidden token '${decoded}'.`
+      );
+    }
+    return decoded;
+  });
 }
 
 function decodePointerSegment(segment: string, opIndex: number, originalPath: string): string {
