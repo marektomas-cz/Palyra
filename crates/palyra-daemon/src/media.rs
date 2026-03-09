@@ -745,16 +745,7 @@ impl MediaArtifactStore {
                     status.as_u16()
                 )));
             }
-            let bytes = response.bytes().await.map_err(|error| {
-                MediaStoreError::Download(format!("attachment body read failed: {error}"))
-            })?;
-            if bytes.len() > self.config.max_download_bytes {
-                return Err(MediaStoreError::NetworkPolicy(format!(
-                    "attachment body exceeds max_download_bytes ({})",
-                    self.config.max_download_bytes
-                )));
-            }
-            break bytes.to_vec();
+            break read_response_body_with_limit(response, self.config.max_download_bytes).await?;
         };
 
         let sniffed = sniff_content(body.as_slice())?;
@@ -1238,6 +1229,40 @@ fn validate_resolved_addresses(addrs: &[SocketAddr]) -> Result<(), MediaStoreErr
         .map_err(MediaStoreError::NetworkPolicy)
 }
 
+async fn read_response_body_with_limit(
+    mut response: reqwest::Response,
+    max_download_bytes: usize,
+) -> Result<Vec<u8>, MediaStoreError> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_download_bytes as u64 {
+            return Err(MediaStoreError::NetworkPolicy(format!(
+                "attachment body exceeds max_download_bytes ({})",
+                max_download_bytes
+            )));
+        }
+    }
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        MediaStoreError::Download(format!("attachment body read failed: {error}"))
+    })? {
+        let next_len = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
+            MediaStoreError::NetworkPolicy(format!(
+                "attachment body exceeds max_download_bytes ({})",
+                max_download_bytes
+            ))
+        })?;
+        if next_len > max_download_bytes {
+            return Err(MediaStoreError::NetworkPolicy(format!(
+                "attachment body exceeds max_download_bytes ({})",
+                max_download_bytes
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 fn sniff_content(bytes: &[u8]) -> Result<SniffedContent, MediaStoreError> {
     if is_png(bytes) {
         let (width_px, height_px) = png_dimensions(bytes).ok_or_else(|| {
@@ -1506,13 +1531,19 @@ fn should_prune_retention_after_ingest(state: &MediaMaintenanceState, now_unix_m
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use palyra_connectors::{AttachmentKind, AttachmentRef};
     use tempfile::TempDir;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     use super::{
-        should_prune_retention_after_ingest, sniff_content, InboundAttachmentIngestRequest,
-        MediaArtifactStore, MediaMaintenanceState, MediaRuntimeConfig,
-        RETENTION_PRUNE_MAX_DEFERRED_INGESTS, RETENTION_PRUNE_MIN_INTERVAL_MS,
+        read_response_body_with_limit, should_prune_retention_after_ingest, sniff_content,
+        InboundAttachmentIngestRequest, MediaArtifactStore, MediaMaintenanceState,
+        MediaRuntimeConfig, RETENTION_PRUNE_MAX_DEFERRED_INGESTS, RETENTION_PRUNE_MIN_INTERVAL_MS,
     };
 
     #[test]
@@ -1721,5 +1752,79 @@ mod tests {
         assert!(ingested.artifact_ref.is_none());
         let snapshot = store.build_global_snapshot().expect("global snapshot should succeed");
         assert_eq!(snapshot.recent_blocked_reasons.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_response_body_with_limit_rejects_oversized_content_length_before_buffering() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test listener should bind");
+        let address = listener.local_addr().expect("listener should expose address");
+        let payload = Arc::new(vec![b'a'; 64]);
+        let payload_for_server = Arc::clone(&payload);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept connection");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.expect("server should read request");
+            let response_head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload_for_server.len()
+            );
+            stream
+                .write_all(response_head.as_bytes())
+                .await
+                .expect("server should write response headers");
+            stream
+                .write_all(payload_for_server.as_slice())
+                .await
+                .expect("server should write payload");
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect("client request should succeed");
+        let error = read_response_body_with_limit(response, 16)
+            .await
+            .expect_err("oversized content-length should be denied");
+        assert!(
+            error.to_string().contains("attachment body exceeds max_download_bytes (16)"),
+            "oversized content-length denial should explain configured limit"
+        );
+        server.await.expect("server task should complete");
+    }
+
+    #[tokio::test]
+    async fn read_response_body_with_limit_rejects_oversized_chunked_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test listener should bind");
+        let address = listener.local_addr().expect("listener should expose address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept connection");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.expect("server should read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("server should write response headers");
+            stream
+                .write_all(b"10\r\n0123456789ABCDEF\r\n10\r\nfedcba9876543210\r\n0\r\n\r\n")
+                .await
+                .expect("server should write chunked payload");
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect("client request should succeed");
+        let error = read_response_body_with_limit(response, 16)
+            .await
+            .expect_err("oversized chunked response should be denied");
+        assert!(
+            error.to_string().contains("attachment body exceeds max_download_bytes (16)"),
+            "oversized chunked denial should explain configured limit"
+        );
+        server.await.expect("server task should complete");
     }
 }

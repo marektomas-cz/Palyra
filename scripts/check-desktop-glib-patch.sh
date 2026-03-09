@@ -85,15 +85,19 @@ sha256_file() {
 }
 
 select_python_interpreter() {
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v py >/dev/null 2>&1 && py -3 -c "import sys" >/dev/null 2>&1; then
+    printf '%s\n' 'py -3'
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1 && python3 -c "import sys" >/dev/null 2>&1; then
     printf '%s\n' python3
     return 0
   fi
-  if command -v python >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1 && python -c "import sys" >/dev/null 2>&1; then
     printf '%s\n' python
     return 0
   fi
-  echo "python3 or python is required for desktop glib metadata validation." >&2
+  echo "A working Python 3 interpreter is required for desktop glib metadata validation." >&2
   exit 1
 }
 
@@ -102,8 +106,10 @@ assert_resolved_vendored_glib() {
   local expected_crate_name="$2"
   local expected_crate_version="$3"
   local expected_patch_dir="$4"
-  local python_bin
-  python_bin="$(select_python_interpreter)"
+  local python_selector
+  python_selector="$(select_python_interpreter)"
+  local -a python_cmd=()
+  IFS=' ' read -r -a python_cmd <<< "$python_selector"
 
   local metadata_json
   if ! metadata_json="$(cargo metadata --format-version 1 --locked --manifest-path "$manifest_path")"; then
@@ -149,7 +155,7 @@ for pkg in matches:
 PY
 )"
 
-  if ! "$python_bin" -c "$metadata_validator" \
+  if ! "${python_cmd[@]}" -c "$metadata_validator" \
       "$expected_crate_name" \
       "$expected_crate_version" \
       "$expected_patch_dir" \
