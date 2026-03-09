@@ -51,6 +51,7 @@ async fn quic_transport_roundtrip_stream_and_reconnect_resume() {
         cert_pem: pki.server_cert_pem.clone(),
         key_pem: pki.server_key_pem.clone(),
         require_client_auth: true,
+        client_cert_verifier: None,
     };
     let server_endpoint = build_server_endpoint(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -149,6 +150,7 @@ async fn quic_transport_rejects_invalid_server_certificate() {
             cert_pem: pki.untrusted_server_cert_pem.clone(),
             key_pem: pki.untrusted_server_key_pem.clone(),
             require_client_auth: false,
+            client_cert_verifier: None,
         },
         &limits,
     )
@@ -184,6 +186,7 @@ async fn quic_transport_rejects_expired_server_certificate() {
             cert_pem: pki.expired_server_cert_pem.clone(),
             key_pem: pki.expired_server_key_pem.clone(),
             require_client_auth: false,
+            client_cert_verifier: None,
         },
         &limits,
     )
@@ -219,6 +222,7 @@ async fn quic_transport_protocol_mismatch_returns_structured_error_response() {
             cert_pem: pki.server_cert_pem.clone(),
             key_pem: pki.server_key_pem.clone(),
             require_client_auth: true,
+            client_cert_verifier: None,
         },
         &limits,
     )

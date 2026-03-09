@@ -103,8 +103,10 @@ use palyra_common::{
     validate_canonical_id, HealthResponse,
 };
 use palyra_control_plane as control_plane;
-use palyra_identity::IdentityManager;
-use palyra_identity::{FilesystemSecretStore, SecretStore};
+use palyra_identity::{
+    build_revocation_aware_client_verifier, FilesystemSecretStore, IdentityManager,
+    MemoryRevocationIndex, SecretStore,
+};
 use palyra_policy::{
     evaluate_with_config, evaluate_with_context, PolicyDecision, PolicyEvaluationConfig,
     PolicyRequest, PolicyRequestContext,
@@ -2027,6 +2029,18 @@ async fn main() -> Result<()> {
         .tls_config(build_node_rpc_tls_config(&identity_runtime, node_rpc_mtls_required))
         .context("failed to apply node RPC TLS configuration")?;
 
+    let quic_client_cert_verifier = node_rpc_mtls_required
+        .then(|| {
+            build_revocation_aware_client_verifier(
+                &identity_runtime.gateway_ca_certificate_pem,
+                Arc::new(MemoryRevocationIndex::from_fingerprints(
+                    identity_runtime.revoked_certificate_fingerprints.clone(),
+                )),
+            )
+        })
+        .transpose()
+        .context("failed to build QUIC client certificate verifier")?;
+
     let quic_endpoint = if let Some(quic_address) = quic_address {
         let endpoint = quic_runtime::bind_endpoint(
             quic_address,
@@ -2035,6 +2049,7 @@ async fn main() -> Result<()> {
                 cert_pem: identity_runtime.node_server_certificate.certificate_pem.clone(),
                 key_pem: identity_runtime.node_server_certificate.private_key_pem.clone(),
                 require_client_auth: node_rpc_mtls_required,
+                client_cert_verifier: quic_client_cert_verifier.clone(),
             },
             &QuicTransportLimits::default(),
         )

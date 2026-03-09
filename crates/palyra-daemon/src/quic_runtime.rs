@@ -5,6 +5,7 @@ use palyra_transport_quic::{
     build_server_endpoint, read_frame, write_frame, QuicServerTlsConfig, QuicTransportLimits,
     DEFAULT_MAX_FRAME_BYTES, PROTOCOL_VERSION,
 };
+use rustls::server::danger::ClientCertVerifier;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
@@ -14,12 +15,26 @@ const METHOD_STREAM_EVENTS: &str = "node.stream_events";
 const MAX_STREAM_SEQUENCE: u64 = 5;
 const MAX_CONCURRENT_CONNECTIONS: usize = 256;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QuicRuntimeTlsMaterial {
     pub ca_cert_pem: String,
     pub cert_pem: String,
     pub key_pem: String,
     pub require_client_auth: bool,
+    pub client_cert_verifier: Option<Arc<dyn ClientCertVerifier>>,
+}
+
+impl std::fmt::Debug for QuicRuntimeTlsMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QuicRuntimeTlsMaterial")
+            .field("ca_cert_pem", &"<redacted>")
+            .field("cert_pem", &"<redacted>")
+            .field("key_pem", &"<redacted>")
+            .field("require_client_auth", &self.require_client_auth)
+            .field("has_client_cert_verifier", &self.client_cert_verifier.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +71,7 @@ pub fn bind_endpoint(
             cert_pem: tls_material.cert_pem.clone(),
             key_pem: tls_material.key_pem.clone(),
             require_client_auth: tls_material.require_client_auth,
+            client_cert_verifier: tls_material.client_cert_verifier.clone(),
         },
         limits,
     )
@@ -213,15 +229,21 @@ async fn send_response(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
         time::Duration,
     };
 
-    use palyra_identity::CertificateAuthority;
+    use palyra_identity::{
+        build_revocation_aware_client_verifier, CertificateAuthority, MemoryRevocationIndex,
+    };
     use palyra_transport_quic::{
         build_client_endpoint, connect_quic, read_frame, write_frame, QuicClientTlsConfig,
         QuicTransportLimits, DEFAULT_MAX_FRAME_BYTES, PROTOCOL_VERSION,
     };
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    use sha2::{Digest, Sha256};
 
     use super::{
         bind_endpoint, serve, serve_with_connection_limit, QuicRuntimeRequest, QuicRuntimeResponse,
@@ -247,6 +269,7 @@ mod tests {
                 cert_pem: pki.server_cert_pem.clone(),
                 key_pem: pki.server_key_pem.clone(),
                 require_client_auth: true,
+                client_cert_verifier: None,
             },
             &limits,
         )
@@ -341,6 +364,7 @@ mod tests {
                 cert_pem: pki.server_cert_pem.clone(),
                 key_pem: pki.server_key_pem.clone(),
                 require_client_auth: true,
+                client_cert_verifier: None,
             },
             &limits,
         )
@@ -409,6 +433,7 @@ mod tests {
                 cert_pem: pki.server_cert_pem.clone(),
                 key_pem: pki.server_key_pem.clone(),
                 require_client_auth: true,
+                client_cert_verifier: None,
             },
             &limits,
         )
@@ -460,11 +485,93 @@ mod tests {
         let _ = server_task.await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quic_runtime_rejects_revoked_client_certificate() {
+        let pki = build_test_pki();
+        let limits = QuicTransportLimits::default();
+        let revoked_client_fingerprint = certificate_fingerprint_hex(&pki.client_cert_pem);
+        let client_cert_verifier = build_revocation_aware_client_verifier(
+            &pki.ca_cert_pem,
+            Arc::new(MemoryRevocationIndex::from_fingerprints(HashSet::from([
+                revoked_client_fingerprint,
+            ]))),
+        )
+        .expect("revocation-aware verifier should build");
+        let server_endpoint = bind_endpoint(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            &QuicRuntimeTlsMaterial {
+                ca_cert_pem: pki.ca_cert_pem.clone(),
+                cert_pem: pki.server_cert_pem.clone(),
+                key_pem: pki.server_key_pem.clone(),
+                require_client_auth: true,
+                client_cert_verifier: Some(client_cert_verifier),
+            },
+            &limits,
+        )
+        .expect("QUIC endpoint should bind");
+        let server_addr =
+            server_endpoint.local_addr().expect("bound QUIC endpoint should expose listen address");
+        let server_task = tokio::spawn(serve(server_endpoint, true));
+
+        let client_tls = QuicClientTlsConfig {
+            ca_cert_pem: pki.ca_cert_pem.clone(),
+            client_cert_pem: Some(pki.client_cert_pem.clone()),
+            client_key_pem: Some(pki.client_key_pem.clone()),
+            server_name: "localhost".to_owned(),
+            pinned_server_fingerprint_sha256: None,
+        };
+        let client_endpoint = build_client_endpoint(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            &client_tls,
+            &limits,
+        )
+        .expect("client endpoint should bind");
+        let connection = connect_quic(&client_endpoint, server_addr, &client_tls, &limits)
+            .await
+            .expect("QUIC transport may report the close only after connect");
+        match connection.open_bi().await {
+            Err(error) => assert!(
+                error.to_string().contains("closed"),
+                "revoked QUIC connection should be closed before any runtime method access: {error}"
+            ),
+            Ok((mut send_stream, mut recv_stream)) => {
+                send_request(
+                    &mut send_stream,
+                    QuicRuntimeRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        method: METHOD_HEALTH.to_owned(),
+                        resume_from: None,
+                    },
+                )
+                .await;
+                send_stream.finish().expect("request stream should finish");
+                let response = read_frame(&mut recv_stream, DEFAULT_MAX_FRAME_BYTES).await;
+                assert!(
+                    response
+                        .as_ref()
+                        .err()
+                        .map(|error| error.to_string().contains("connection lost"))
+                        .unwrap_or(false),
+                    "revoked client certificate must not receive a QUIC runtime response: {response:?}"
+                );
+            }
+        }
+
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
     async fn send_request(send_stream: &mut quinn::SendStream, request: QuicRuntimeRequest) {
         let payload = serde_json::to_vec(&request).expect("request should serialize");
         write_frame(send_stream, payload.as_slice(), DEFAULT_MAX_FRAME_BYTES)
             .await
             .expect("request frame should write");
+    }
+
+    fn certificate_fingerprint_hex(certificate_pem: &str) -> String {
+        let certificate = CertificateDer::from_pem_slice(certificate_pem.as_bytes())
+            .expect("certificate PEM should parse");
+        hex::encode(Sha256::digest(certificate.as_ref()))
     }
 
     fn build_test_pki() -> TestPki {

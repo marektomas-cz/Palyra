@@ -37,6 +37,7 @@ serde_json.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 rand.workspace = true
+rustls.workspace = true
 sha2.workspace = true
 hex.workspace = true
 thiserror.workspace = true

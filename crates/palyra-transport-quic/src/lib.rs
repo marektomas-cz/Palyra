@@ -3,6 +3,7 @@ use std::{any::Any, net::SocketAddr, sync::Arc, time::Duration};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+    server::danger::ClientCertVerifier,
     RootCertStore,
 };
 use sha2::{Digest, Sha256};
@@ -33,12 +34,26 @@ impl Default for QuicTransportLimits {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QuicServerTlsConfig {
     pub ca_cert_pem: String,
     pub cert_pem: String,
     pub key_pem: String,
     pub require_client_auth: bool,
+    pub client_cert_verifier: Option<Arc<dyn ClientCertVerifier>>,
+}
+
+impl std::fmt::Debug for QuicServerTlsConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QuicServerTlsConfig")
+            .field("ca_cert_pem", &"<redacted>")
+            .field("cert_pem", &"<redacted>")
+            .field("key_pem", &"<redacted>")
+            .field("require_client_auth", &self.require_client_auth)
+            .field("has_client_cert_verifier", &self.client_cert_verifier.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,11 +133,16 @@ pub fn build_server_endpoint(
     }
 
     let mut tls_server = if tls.require_client_auth {
-        let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|error| QuicTransportError::TlsConfigurationFailed {
-                message: format!("failed to build mTLS client verifier: {error}"),
-            })?;
+        let client_verifier: Arc<dyn ClientCertVerifier> =
+            if let Some(verifier) = tls.client_cert_verifier.as_ref() {
+                verifier.clone()
+            } else {
+                rustls::server::WebPkiClientVerifier::builder(Arc::new(roots)).build().map_err(
+                    |error| QuicTransportError::TlsConfigurationFailed {
+                        message: format!("failed to build mTLS client verifier: {error}"),
+                    },
+                )?
+            };
         rustls::ServerConfig::builder()
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(cert_chain, private_key)

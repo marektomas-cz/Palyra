@@ -131,11 +131,10 @@ impl ClientCertVerifier for RevocationAwareClientVerifier {
     }
 }
 
-pub fn build_node_rpc_server_mtls_config(
+pub fn build_revocation_aware_client_verifier(
     gateway_ca_certificate_pem: &str,
-    server_certificate: &IssuedCertificate,
     revocation_index: Arc<dyn RevocationIndex>,
-) -> IdentityResult<ServerConfig> {
+) -> IdentityResult<Arc<dyn ClientCertVerifier>> {
     let mut roots = RootCertStore::empty();
     for cert in parse_pem_certs(gateway_ca_certificate_pem)? {
         roots.add(cert).map_err(|_| IdentityError::CertificateParsingFailed)?;
@@ -144,8 +143,16 @@ pub fn build_node_rpc_server_mtls_config(
     let base_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
         .map_err(|error| IdentityError::Internal(error.to_string()))?;
-    let verifier: Arc<dyn ClientCertVerifier> =
-        Arc::new(RevocationAwareClientVerifier::new(base_verifier, revocation_index));
+    Ok(Arc::new(RevocationAwareClientVerifier::new(base_verifier, revocation_index)))
+}
+
+pub fn build_node_rpc_server_mtls_config(
+    gateway_ca_certificate_pem: &str,
+    server_certificate: &IssuedCertificate,
+    revocation_index: Arc<dyn RevocationIndex>,
+) -> IdentityResult<ServerConfig> {
+    let verifier =
+        build_revocation_aware_client_verifier(gateway_ca_certificate_pem, revocation_index)?;
 
     let cert_chain = parse_pem_certs(&server_certificate.certificate_pem)?;
     let private_key = parse_private_key(&server_certificate.private_key_pem)?;
