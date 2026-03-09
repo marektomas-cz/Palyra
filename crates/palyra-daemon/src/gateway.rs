@@ -9802,9 +9802,8 @@ async fn execute_http_fetch_tool(
         .map(|value| value as usize)
         .unwrap_or(runtime_state.config.http_fetch.max_redirects)
         .clamp(1, MAX_HTTP_FETCH_REDIRECTS);
-    let allow_private_targets =
-        payload.get("allow_private_targets").and_then(Value::as_bool).unwrap_or(false)
-            || runtime_state.config.http_fetch.allow_private_targets;
+    let allow_private_targets = runtime_state.config.http_fetch.allow_private_targets
+        && payload.get("allow_private_targets").and_then(Value::as_bool).unwrap_or(true);
     let max_response_bytes = payload
         .get("max_response_bytes")
         .and_then(Value::as_u64)
@@ -16563,7 +16562,10 @@ mod tests {
         (format!("http://{address}/"), handle)
     }
 
-    fn build_test_runtime_state(hash_chain_enabled: bool) -> std::sync::Arc<GatewayRuntimeState> {
+    fn build_test_runtime_state_with_http_fetch_private_targets(
+        hash_chain_enabled: bool,
+        allow_private_targets: bool,
+    ) -> std::sync::Arc<GatewayRuntimeState> {
         let db_path = unique_temp_journal_path();
         let state_root = std::env::temp_dir().join(format!(
             "palyra-gateway-unit-state-{}-{}",
@@ -16627,7 +16629,7 @@ mod tests {
                     },
                 },
                 http_fetch: super::HttpFetchRuntimeConfig {
-                    allow_private_targets: false,
+                    allow_private_targets,
                     connect_timeout_ms: 1_500,
                     request_timeout_ms: 10_000,
                     max_response_bytes: 512 * 1024,
@@ -16674,6 +16676,10 @@ mod tests {
             agent_registry,
         )
         .expect("runtime state should initialize")
+    }
+
+    fn build_test_runtime_state(hash_chain_enabled: bool) -> std::sync::Arc<GatewayRuntimeState> {
+        build_test_runtime_state_with_http_fetch_private_targets(hash_chain_enabled, false)
     }
 
     fn build_test_approval_request(subject_suffix: usize) -> ApprovalCreateRequest {
@@ -16776,11 +16782,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn http_fetch_rejects_redirect_hop_with_url_credentials() {
-        let state = build_test_runtime_state(false);
+        let state = build_test_runtime_state_with_http_fetch_private_targets(false, true);
         let (url, handle) = spawn_redirect_http_server(PARITY_REDIRECT_CREDENTIALS_URL.trim());
         let input = serde_json::to_vec(&json!({
             "url": url,
-            "allow_private_targets": true,
             "allow_redirects": true
         }))
         .expect("input should serialize");
@@ -16801,13 +16806,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn http_fetch_parity_fixture_exposes_deterministic_body_text() {
-        let state = build_test_runtime_state(false);
+        let state = build_test_runtime_state_with_http_fetch_private_targets(false, true);
         let (url, handle) = spawn_static_http_server(PARITY_TRICKY_DOM_HTML);
-        let input = serde_json::to_vec(&json!({
-            "url": url,
-            "allow_private_targets": true
-        }))
-        .expect("input should serialize");
+        let input = serde_json::to_vec(&json!({ "url": url })).expect("input should serialize");
         let outcome =
             execute_http_fetch_tool(&state, "proposal-http-fetch-parity-fixture", input.as_slice())
                 .await;
@@ -16831,11 +16832,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn http_fetch_detects_redirect_loop_limit() {
-        let state = build_test_runtime_state(false);
+        let state = build_test_runtime_state_with_http_fetch_private_targets(false, true);
         let (url, handle) = spawn_redirect_loop_http_server(3);
         let input = serde_json::to_vec(&json!({
             "url": url,
-            "allow_private_targets": true,
             "allow_redirects": true,
             "max_redirects": 2
         }))
@@ -16853,11 +16853,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn http_fetch_enforces_response_size_cutoff() {
-        let state = build_test_runtime_state(false);
+        let state = build_test_runtime_state_with_http_fetch_private_targets(false, true);
         let (url, handle) = spawn_static_http_server(&"X".repeat(256));
         let input = serde_json::to_vec(&json!({
             "url": url,
-            "allow_private_targets": true,
             "max_response_bytes": 64
         }))
         .expect("input should serialize");
@@ -16930,9 +16929,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn http_fetch_strict_request_cannot_reuse_cache_warmed_under_permissive_policy() {
+    async fn http_fetch_private_target_policy_cannot_be_relaxed_by_request_payload() {
         let state = build_test_runtime_state(false);
-        let (url, handle) = spawn_static_http_server("cached-response");
+        let url = "http://127.0.0.1:65535/";
 
         let permissive_input = serde_json::to_vec(&json!({
             "url": url,
@@ -16946,7 +16945,15 @@ mod tests {
             permissive_input.as_slice(),
         )
         .await;
-        assert!(first.success, "permissive request should populate cache");
+        assert!(
+            !first.success,
+            "request payload must not bypass private-target policy enforced by config"
+        );
+        assert!(
+            first.error.contains("target blocked") && first.error.contains("private/local"),
+            "error should reflect private-target policy enforcement: {}",
+            first.error
+        );
 
         let strict_input = serde_json::to_vec(&json!({
             "url": url,
@@ -16960,14 +16967,12 @@ mod tests {
             strict_input.as_slice(),
         )
         .await;
-        assert!(!second.success, "strict request must not replay permissive cached response");
+        assert!(!second.success, "strict request should remain blocked");
         assert!(
             second.error.contains("target blocked") && second.error.contains("private/local"),
             "strict request should fail with private-target policy error: {}",
             second.error
         );
-
-        handle.join().expect("static server should complete after initial permissive request");
     }
 
     #[test]
