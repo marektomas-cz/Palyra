@@ -855,7 +855,8 @@ describe("M35 web console app", () => {
               success: true,
               output_json: {
                 payload: "<script>alert(1)</script>",
-                frame_url: "/canvas/v1/frame/01ARZ3NDEKTSV4RRFFQ69G5FB1?token=test-token"
+                frame_url: "/canvas/v1/frame/01ARZ3NDEKTSV4RRFFQ69G5FB1?token=test-token",
+                malicious_frame_url: "/canvas/v1/frame/../../console/v1/diagnostics?token=evil"
               }
             }
           }
@@ -902,6 +903,8 @@ describe("M35 web console app", () => {
 
     const frame = await screen.findByTitle("Canvas 01ARZ3NDEKTSV4RRFFQ69G5FAX");
     expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-same-origin");
+    expect(frame).toHaveAttribute("src", "/canvas/v1/frame/01ARZ3NDEKTSV4RRFFQ69G5FB1?token=test-token");
+    expect(rendered.container.querySelector("iframe[src='/console/v1/diagnostics?token=evil']")).toBeNull();
   });
 });
 

@@ -11,6 +11,7 @@ export const MAX_TRANSCRIPT_RETENTION = 800;
 export const MAX_RENDERED_TRANSCRIPT = 120;
 export const DEFAULT_APPROVAL_SCOPE = "once" as const;
 export const DEFAULT_APPROVAL_TTL_MS = "300000";
+const CANVAS_FRAME_PATH_SEGMENTS = ["canvas", "v1", "frame"] as const;
 
 export type ApprovalScope = "once" | "session" | "timeboxed";
 export type TranscriptEntryKind =
@@ -220,10 +221,37 @@ export function collectCanvasFrameUrls(value: JsonValue): string[] {
 }
 
 export function normalizeCanvasFrameUrl(raw: string): string | null {
-  if (!raw.startsWith("/canvas/v1/frame/")) {
+  if (typeof window === "undefined" || window.location.origin === "null") {
     return null;
   }
-  return raw;
+
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    if (parsed.origin !== window.location.origin || parsed.hash.length > 0) {
+      return null;
+    }
+
+    const segments = parsed.pathname.split("/").filter((segment) => segment.length > 0);
+    if (
+      segments.length !== CANVAS_FRAME_PATH_SEGMENTS.length + 1 ||
+      !CANVAS_FRAME_PATH_SEGMENTS.every((segment, index) => segments[index] === segment)
+    ) {
+      return null;
+    }
+
+    const frameId = segments[CANVAS_FRAME_PATH_SEGMENTS.length];
+    const tokens = parsed.searchParams.getAll("token").map((value) => value.trim());
+    if (frameId.length === 0 || tokens.length !== 1 || tokens[0].length === 0) {
+      return null;
+    }
+    if (Array.from(parsed.searchParams.keys()).some((key) => key !== "token")) {
+      return null;
+    }
+
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return null;
+  }
 }
 
 export function parseTapePayload(payload: string): JsonValue {
