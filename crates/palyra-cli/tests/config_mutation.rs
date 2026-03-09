@@ -102,6 +102,49 @@ fn config_set_get_unset_roundtrip_and_rotates_backups() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn config_set_preserves_existing_secure_permissions() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(&config_path, "version = 1\n[admin]\nauth_token = \"super-secret-token\"\n")
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to set permissions on {}", config_path.display()))?;
+
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let set_output = run_cli(
+        &workdir,
+        &[
+            "config",
+            "set",
+            "--path",
+            &config_path_string,
+            "--key",
+            "admin.auth_token",
+            "--value",
+            "\"changed-token\"",
+            "--backups",
+            "2",
+        ],
+    )?;
+    assert!(
+        set_output.status.success(),
+        "config set should succeed: {}",
+        String::from_utf8_lossy(&set_output.stderr)
+    );
+
+    let mode = fs::metadata(&config_path)
+        .with_context(|| format!("failed to read metadata for {}", config_path.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "config set must preserve owner-only permissions");
+    Ok(())
+}
+
 #[test]
 fn config_get_redacts_secret_values_by_default() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;

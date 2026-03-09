@@ -5,6 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use thiserror::Error;
 use toml::{map::Entry, Value};
 
@@ -235,10 +238,11 @@ pub fn write_content_with_backups(
     content: &str,
     max_backups: usize,
 ) -> Result<(), ConfigSystemError> {
+    let target_permissions = resolve_target_permissions(path)?;
     if path.exists() {
         rotate_backups(path, max_backups)?;
     }
-    write_atomically(path, content)
+    write_atomically(path, content, target_permissions)
 }
 
 pub fn rotate_backups(path: &Path, max_backups: usize) -> Result<(), ConfigSystemError> {
@@ -341,7 +345,11 @@ fn validate_segment(segment: &str) -> Result<(), ConfigSystemError> {
     Ok(())
 }
 
-fn write_atomically(path: &Path, content: &str) -> Result<(), ConfigSystemError> {
+fn write_atomically(
+    path: &Path,
+    content: &str,
+    target_permissions: Option<fs::Permissions>,
+) -> Result<(), ConfigSystemError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|source| ConfigSystemError::CreateDirectory {
@@ -358,6 +366,11 @@ fn write_atomically(path: &Path, content: &str) -> Result<(), ConfigSystemError>
 
     fs::write(&temporary_path, content)
         .map_err(|source| ConfigSystemError::WriteFile { path: temporary_path.clone(), source })?;
+    if let Some(permissions) = target_permissions {
+        fs::set_permissions(&temporary_path, permissions).map_err(|source| {
+            ConfigSystemError::WriteFile { path: temporary_path.clone(), source }
+        })?;
+    }
 
     if let Err(source) = fs::rename(&temporary_path, path) {
         if !path.exists() || !path.is_file() {
@@ -378,6 +391,24 @@ fn write_atomically(path: &Path, content: &str) -> Result<(), ConfigSystemError>
         let _ = remove_file_if_exists(&rollback_path);
     }
     Ok(())
+}
+
+fn resolve_target_permissions(path: &Path) -> Result<Option<fs::Permissions>, ConfigSystemError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.permissions())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => default_secure_permissions(),
+        Err(source) => Err(ConfigSystemError::ReadFile { path: path.to_path_buf(), source }),
+    }
+}
+
+#[cfg(unix)]
+fn default_secure_permissions() -> Result<Option<fs::Permissions>, ConfigSystemError> {
+    Ok(Some(fs::Permissions::from_mode(0o600)))
+}
+
+#[cfg(not(unix))]
+fn default_secure_permissions() -> Result<Option<fs::Permissions>, ConfigSystemError> {
+    Ok(None)
 }
 
 fn swap_path(path: &Path, timestamp_ns: u128) -> PathBuf {
@@ -527,6 +558,37 @@ mod tests {
                 "rollback artifact should be removed: {file_name}"
             );
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_document_with_backups_preserves_existing_file_permissions() -> Result<()> {
+        let tempdir = TempDir::new().expect("failed to create tempdir");
+        let config_path = tempdir.path().join("palyra.toml");
+        fs::write(&config_path, "version = 1\n[daemon]\nport = 7000\n")?;
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))?;
+
+        let (mut document, _) = parse_document_with_migration(&fs::read_to_string(&config_path)?)?;
+        set_value_at_path(&mut document, "daemon.port", Value::Integer(7443))?;
+        write_document_with_backups(&config_path, &document, 2)?;
+
+        let mode = fs::metadata(&config_path)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config rewrites must preserve locked-down file permissions");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_document_with_backups_uses_secure_default_permissions_for_new_file() -> Result<()> {
+        let tempdir = TempDir::new().expect("failed to create tempdir");
+        let config_path = tempdir.path().join("palyra.toml");
+        let mut document = Value::Table(Default::default());
+        set_value_at_path(&mut document, "daemon.port", Value::Integer(7142))?;
+        write_document_with_backups(&config_path, &document, 0)?;
+
+        let mode = fs::metadata(&config_path)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "new config writes must default to owner-only permissions");
         Ok(())
     }
 
