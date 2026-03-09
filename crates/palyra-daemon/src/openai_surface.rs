@@ -5,6 +5,7 @@ use super::*;
 const OPENAI_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENAI_DEFAULT_CONFIG_BACKUPS: usize = 5;
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const OPENAI_OAUTH_CALLBACK_PATH: &str = "console/v1/auth/providers/openai/callback";
 
 #[allow(clippy::result_large_err)]
 pub(crate) async fn connect_openai_api_key(
@@ -21,7 +22,7 @@ pub(crate) async fn connect_openai_api_key(
         .unwrap_or_else(|| generate_openai_profile_id(profile_name.as_str()));
     let scope = normalize_openai_profile_scope(Some(payload.scope))?;
     let api_key = normalize_required_openai_text(payload.api_key.as_str(), "api_key")?;
-    let (document, _, _) = load_console_config_snapshot(None, true)?;
+    let (document, _, _) = load_openai_console_config_snapshot()?;
     let validation_base_url = load_openai_validation_base_url(Some(&document));
     validate_openai_bearer_token(
         validation_base_url.as_str(),
@@ -216,7 +217,7 @@ pub(crate) async fn complete_openai_oauth_callback(
         }
     };
 
-    let (document, _, _) = load_console_config_snapshot(None, true)?;
+    let (document, _, _) = load_openai_console_config_snapshot()?;
     let validation_base_url = load_openai_validation_base_url(Some(&document));
     if let Err(error) = validate_openai_bearer_token(
         validation_base_url.as_str(),
@@ -572,7 +573,8 @@ fn start_openai_oauth_attempt(
             "failed to load OpenAI OAuth endpoint config: {error}"
         )))
     })?;
-    let redirect_uri = build_openai_oauth_callback_url(headers)?;
+    let (document, _, _) = load_openai_console_config_snapshot()?;
+    let redirect_uri = build_openai_oauth_callback_url(Some(&document), headers)?;
     let code_verifier = generate_pkce_verifier();
     let code_challenge = pkce_challenge(code_verifier.as_str());
     let authorization_url = build_authorization_url(
@@ -819,8 +821,24 @@ fn load_openai_validation_base_url(document: Option<&toml::Value>) -> String {
         .unwrap_or_else(|| OPENAI_DEFAULT_BASE_URL.to_owned())
 }
 
+#[allow(clippy::result_large_err)]
+fn load_openai_console_config_snapshot(
+) -> Result<(toml::Value, ConfigMigrationInfo, String), Response> {
+    let configured_path = env::var("PALYRA_CONFIG").ok();
+    load_console_config_snapshot(configured_path.as_deref(), true)
+}
+
 fn openai_validation_base_url_from_document(document: &toml::Value) -> Option<String> {
     get_value_at_path(document, "model_provider.openai_base_url")
+        .ok()
+        .and_then(|value| value.and_then(toml::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn openai_callback_base_url_from_document(document: &toml::Value) -> Option<String> {
+    get_value_at_path(document, "gateway_access.remote_base_url")
         .ok()
         .and_then(|value| value.and_then(toml::Value::as_str))
         .map(str::trim)
@@ -1108,25 +1126,113 @@ fn map_openai_validation_error(field: &str, error: OpenAiCredentialValidationErr
 }
 
 #[allow(clippy::result_large_err)]
-fn openai_callback_origin(headers: &HeaderMap) -> Result<String, Response> {
+fn normalize_openai_callback_base_url(raw: &str, source_name: &str) -> Result<Url, Response> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(format!(
+            "{source_name} cannot be empty"
+        ))));
+    }
+    let mut parsed = Url::parse(trimmed).map_err(|error| {
+        runtime_status_response(tonic::Status::failed_precondition(format!(
+            "{source_name} must be a valid absolute URL: {error}"
+        )))
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(format!(
+            "{source_name} must use https://"
+        ))));
+    }
+    if parsed.host_str().is_none() {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(format!(
+            "{source_name} must include a host"
+        ))));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(format!(
+            "{source_name} must not include embedded credentials"
+        ))));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(format!(
+            "{source_name} must not include query or fragment"
+        ))));
+    }
+    if !parsed.path().ends_with('/') {
+        parsed.set_path(format!("{}/", parsed.path()).as_str());
+    }
+    Ok(parsed)
+}
+
+#[allow(clippy::result_large_err)]
+fn openai_loopback_callback_base_url(headers: &HeaderMap) -> Result<Url, Response> {
+    if headers.contains_key("x-forwarded-host")
+        || headers.contains_key("x-forwarded-proto")
+        || headers.contains_key("x-forwarded-port")
+    {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "gateway_access.remote_base_url is required when forwarded host headers are present",
+        )));
+    }
     let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get("host"))
+        .get("host")
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             runtime_status_response(tonic::Status::failed_precondition(
-                "request host is required for OpenAI OAuth callback URLs",
+                "host header is required for OpenAI OAuth callback URLs",
             ))
         })?;
-    let scheme = if request_uses_tls(headers) { "https" } else { "http" };
-    Ok(format!("{scheme}://{host}"))
+    let parsed = Url::parse(format!("http://{host}").as_str()).map_err(|error| {
+        runtime_status_response(tonic::Status::failed_precondition(format!(
+            "host header is not a valid loopback origin: {error}"
+        )))
+    })?;
+    let Some(host_name) = parsed.host_str() else {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "host header must include a loopback host",
+        )));
+    };
+    let loopback_host = host_name.eq_ignore_ascii_case("localhost")
+        || host_name.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !loopback_host {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "gateway_access.remote_base_url is required for non-loopback OpenAI OAuth callback hosts",
+        )));
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "host header must describe a bare loopback origin",
+        )));
+    }
+    Ok(parsed)
 }
 
 #[allow(clippy::result_large_err)]
-fn build_openai_oauth_callback_url(headers: &HeaderMap) -> Result<String, Response> {
-    Ok(format!("{}/console/v1/auth/providers/openai/callback", openai_callback_origin(headers)?))
+fn build_openai_oauth_callback_url(
+    document: Option<&toml::Value>,
+    headers: &HeaderMap,
+) -> Result<String, Response> {
+    let base_url =
+        if let Some(remote_base_url) = document.and_then(openai_callback_base_url_from_document) {
+            normalize_openai_callback_base_url(
+                remote_base_url.as_str(),
+                "gateway_access.remote_base_url",
+            )?
+        } else {
+            openai_loopback_callback_base_url(headers)?
+        };
+    base_url.join(OPENAI_OAUTH_CALLBACK_PATH).map(|url| url.to_string()).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to build OpenAI OAuth callback URL: {error}"
+        )))
+    })
 }
 
 #[allow(clippy::result_large_err)]
@@ -1273,7 +1379,7 @@ fn fail_openai_oauth_attempt(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::http::{header::HOST, HeaderMap, HeaderValue, StatusCode};
 
     use super::*;
 
@@ -1300,6 +1406,42 @@ mod tests {
         assert!(profile_id.chars().all(|ch| {
             ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_' || ch == '.'
         }));
+    }
+
+    #[test]
+    fn build_openai_oauth_callback_url_prefers_configured_remote_base_url() {
+        let document = toml::from_str::<toml::Value>(
+            r#"
+            [gateway_access]
+            remote_base_url = "https://console.example.test/palyra"
+            "#,
+        )
+        .expect("gateway_access config should parse");
+        let callback_url = build_openai_oauth_callback_url(Some(&document), &HeaderMap::new())
+            .expect("configured remote base URL should build callback URL");
+        assert_eq!(
+            callback_url,
+            "https://console.example.test/palyra/console/v1/auth/providers/openai/callback"
+        );
+    }
+
+    #[test]
+    fn build_openai_oauth_callback_url_accepts_loopback_host_without_forwarding() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("127.0.0.1:7142"));
+        let callback_url = build_openai_oauth_callback_url(None, &headers)
+            .expect("loopback host should remain valid for local OAuth flows");
+        assert_eq!(callback_url, "http://127.0.0.1:7142/console/v1/auth/providers/openai/callback");
+    }
+
+    #[test]
+    fn build_openai_oauth_callback_url_rejects_forwarded_host_without_trusted_base_url() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("127.0.0.1:7142"));
+        headers.insert("x-forwarded-host", HeaderValue::from_static("evil.example"));
+        let response = build_openai_oauth_callback_url(None, &headers)
+            .expect_err("forwarded host should require configured remote base URL");
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
     }
 
     #[test]

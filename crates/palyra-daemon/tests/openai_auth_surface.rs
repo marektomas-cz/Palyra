@@ -15,6 +15,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
+use reqwest::Url;
 use serde_json::{json, Value};
 
 const ADMIN_TOKEN: &str = "test-admin-token";
@@ -562,6 +563,122 @@ fn console_openai_oauth_flow_supports_happy_path_refresh_reconnect_and_revoke() 
         mock_snapshot.model_request_paths.iter().all(|path| path == "/v1/models"),
         "OAuth credential validation should consistently target /v1/models: {:?}",
         mock_snapshot.model_request_paths
+    );
+
+    Ok(())
+}
+
+#[test]
+fn console_openai_oauth_bootstrap_uses_configured_remote_base_url_for_redirect_uri() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
+    let mock = OpenAiMockServer::new(
+        Some(TokenReply {
+            access_token: "oauth-access-1".to_owned(),
+            refresh_token: "oauth-refresh-1".to_owned(),
+            expires_in_seconds: Some(3600),
+        }),
+        None,
+    )?;
+    wait_for_openai_mock_ready(&mock)?;
+
+    let config_path = unique_temp_path("palyra-openai-oauth-remote-base", "toml");
+    prepare_test_config(&config_path)?;
+    fs::write(
+        &config_path,
+        b"version = 1\n[gateway_access]\nremote_base_url = \"https://console.example.test/palyra\"\n",
+    )
+    .with_context(|| format!("failed to write test config file {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().to_string();
+    let validation_base_url = format!("{}/v1", mock.base_url());
+    let authorization_endpoint = mock.authorization_endpoint();
+    let token_endpoint = mock.token_endpoint();
+    let revocation_endpoint = mock.revocation_endpoint();
+
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports_once(&[
+        ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
+        ("PALYRA_CONFIG".to_owned(), config_path_string),
+        ("PALYRA_MODEL_PROVIDER_OPENAI_BASE_URL".to_owned(), validation_base_url),
+        ("PALYRA_OPENAI_OAUTH_AUTHORIZATION_ENDPOINT".to_owned(), authorization_endpoint),
+        ("PALYRA_OPENAI_OAUTH_TOKEN_ENDPOINT".to_owned(), token_endpoint),
+        ("PALYRA_OPENAI_OAUTH_REVOCATION_ENDPOINT".to_owned(), revocation_endpoint),
+    ])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = http_client()?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+    let bootstrap = post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/auth/providers/openai/bootstrap",
+        &cookie,
+        &csrf_token,
+        &json!({
+            "profile_name": "OpenAI OAuth",
+            "scope": { "kind": "global" },
+            "client_id": "client-live-123",
+            "client_secret": "client-secret-live",
+            "scopes": ["openid", "offline_access"],
+            "set_default": false
+        }),
+    )?;
+    let authorization_url = bootstrap
+        .get("authorization_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("oauth bootstrap response missing authorization_url"))?;
+    let redirect_uri = Url::parse(authorization_url)
+        .context("authorization_url should parse")?
+        .query_pairs()
+        .find_map(|(key, value)| (key == "redirect_uri").then(|| value.into_owned()))
+        .ok_or_else(|| anyhow::anyhow!("authorization_url missing redirect_uri query parameter"))?;
+    assert_eq!(
+        redirect_uri,
+        "https://console.example.test/palyra/console/v1/auth/providers/openai/callback",
+        "oauth bootstrap must derive redirect_uri from configured gateway_access.remote_base_url"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn console_openai_oauth_bootstrap_rejects_forwarded_host_without_trusted_remote_base_url(
+) -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
+    let mock = OpenAiMockServer::new(None, None)?;
+    wait_for_openai_mock_ready(&mock)?;
+
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
+        ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
+        ("PALYRA_MODEL_PROVIDER_OPENAI_BASE_URL".to_owned(), format!("{}/v1", mock.base_url())),
+        ("PALYRA_OPENAI_OAUTH_AUTHORIZATION_ENDPOINT".to_owned(), mock.authorization_endpoint()),
+        ("PALYRA_OPENAI_OAUTH_TOKEN_ENDPOINT".to_owned(), mock.token_endpoint()),
+        ("PALYRA_OPENAI_OAUTH_REVOCATION_ENDPOINT".to_owned(), mock.revocation_endpoint()),
+    ])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = http_client()?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+    let response = client
+        .post(console_url(admin_port, "/console/v1/auth/providers/openai/bootstrap"))
+        .header("Cookie", cookie)
+        .header("x-palyra-csrf-token", csrf_token)
+        .header("x-forwarded-host", "evil.example")
+        .header("x-forwarded-proto", "https")
+        .json(&json!({
+            "profile_name": "OpenAI OAuth",
+            "scope": { "kind": "global" },
+            "client_id": "client-live-123",
+            "client_secret": "client-secret-live",
+            "scopes": ["openid", "offline_access"],
+            "set_default": false
+        }))
+        .send()
+        .context("failed to submit OpenAI OAuth bootstrap with spoofed forwarded host")?;
+    assert_eq!(
+        response.status().as_u16(),
+        412,
+        "spoofed forwarded host should be rejected unless gateway_access.remote_base_url is configured"
     );
 
     Ok(())
