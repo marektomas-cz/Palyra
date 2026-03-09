@@ -73,7 +73,9 @@ use palyra_common::{
     },
     daemon_config_schema::{is_secret_config_path, redact_secret_config_values, RootFileConfig},
     default_config_search_paths, parse_config_path, parse_daemon_bind_socket,
-    redaction::{is_sensitive_key, redact_auth_error, redact_url, REDACTED},
+    redaction::{
+        is_sensitive_key, redact_auth_error, redact_url, redact_url_segments_in_text, REDACTED,
+    },
     validate_canonical_id,
     workspace_patch::{
         apply_workspace_patch, compute_patch_sha256, redact_patch_preview, WorkspacePatchLimits,
@@ -1100,21 +1102,6 @@ fn sanitize_diagnostic_error(raw: &str) -> String {
     let mut sanitized = redact_auth_error(raw);
     sanitized = redact_url_segments_in_text(sanitized.as_str());
     truncate_utf8_chars(sanitized.as_str(), 1_024)
-}
-
-fn redact_url_segments_in_text(raw: &str) -> String {
-    let mut output = String::with_capacity(raw.len());
-    for (index, token) in raw.split_whitespace().enumerate() {
-        if index > 0 {
-            output.push(' ');
-        }
-        if token.contains("://") {
-            output.push_str(redact_url(token).as_str());
-        } else {
-            output.push_str(token);
-        }
-    }
-    output
 }
 
 fn redact_json_value_tree(value: &mut Value, key_context: Option<&str>) {
@@ -12290,6 +12277,24 @@ mod diagnostics_bundle_tests {
                 && !extracted.contains("abc123")
                 && !extracted.contains("qwerty"),
             "extracted error message must not leak raw secret values: {extracted}"
+        );
+    }
+
+    #[test]
+    fn support_bundle_error_extraction_redacts_url_query_tokens() {
+        let payload = r#"{
+            "event":"auth.refresh.failed",
+            "error":"callback failed https://example.test/callback?state=ok&access_token=alpha"
+        }"#;
+        let extracted = extract_support_bundle_error_message(payload)
+            .expect("error payload should produce a support bundle error message");
+        assert!(
+            extracted.contains("state=ok") && extracted.contains("access_token=<redacted>"),
+            "embedded URL query tokens should be redacted: {extracted}"
+        );
+        assert!(
+            !extracted.contains("access_token=alpha"),
+            "embedded URL query token must not leak: {extracted}"
         );
     }
 

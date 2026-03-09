@@ -110,6 +110,25 @@ pub fn redact_auth_error(message: &str) -> String {
     output
 }
 
+#[must_use]
+pub fn redact_url_segments_in_text(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut token = String::new();
+
+    for ch in raw.chars() {
+        if ch.is_whitespace() {
+            flush_redacted_url_token(token.as_str(), &mut output);
+            token.clear();
+            output.push(ch);
+            continue;
+        }
+        token.push(ch);
+    }
+
+    flush_redacted_url_token(token.as_str(), &mut output);
+    output
+}
+
 fn flush_redacted_token(
     token: &str,
     redact_next_bearer: bool,
@@ -136,6 +155,17 @@ fn flush_redacted_token(
     output.push_str(suffix);
 
     *next_bearer_state = core.eq_ignore_ascii_case("bearer");
+}
+
+fn flush_redacted_url_token(token: &str, output: &mut String) {
+    if token.is_empty() {
+        return;
+    }
+    if token.contains("://") || token.contains('?') || token.contains('#') {
+        output.push_str(redact_url(token).as_str());
+    } else {
+        output.push_str(token);
+    }
 }
 
 fn redact_assignment_token(token: &str) -> Cow<'_, str> {
@@ -234,7 +264,10 @@ fn normalize_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sensitive_key, redact_auth_error, redact_header, redact_url, REDACTED};
+    use super::{
+        is_sensitive_key, redact_auth_error, redact_header, redact_url,
+        redact_url_segments_in_text, REDACTED,
+    };
 
     #[test]
     fn sensitive_key_detection_matches_common_markers() {
@@ -297,5 +330,26 @@ mod tests {
             redacted.contains("code=429"),
             "non-sensitive diagnostic values should remain visible: {redacted}"
         );
+    }
+
+    #[test]
+    fn url_segments_in_text_redact_sensitive_query_params_in_embedded_urls() {
+        let redacted = redact_url_segments_in_text(
+            "callback failed: https://example.test/callback?state=ok&access_token=secret",
+        );
+        assert!(redacted.contains("state=ok"));
+        assert!(redacted.contains("access_token=<redacted>"));
+        assert!(!redacted.contains("access_token=secret"));
+    }
+
+    #[test]
+    fn url_segments_in_text_redacts_sensitive_fragment_params() {
+        let redacted = redact_url_segments_in_text(
+            "callback failed: https://example.test/callback?state=ok#refresh_token=secret&mode=ok",
+        );
+        assert!(redacted.contains("state=ok"));
+        assert!(redacted.contains("refresh_token=<redacted>"));
+        assert!(redacted.contains("mode=ok"));
+        assert!(!redacted.contains("refresh_token=secret"));
     }
 }

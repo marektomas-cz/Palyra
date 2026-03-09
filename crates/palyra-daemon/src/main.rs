@@ -97,7 +97,8 @@ use palyra_common::{
     daemon_config_schema::{redact_secret_config_values, RootFileConfig},
     default_config_search_paths, health_response, parse_config_path, parse_daemon_bind_socket,
     redaction::{
-        is_sensitive_key as redaction_key_is_sensitive, redact_auth_error, redact_url, REDACTED,
+        is_sensitive_key as redaction_key_is_sensitive, redact_auth_error, redact_url,
+        redact_url_segments_in_text, REDACTED,
     },
     validate_canonical_id, HealthResponse,
 };
@@ -6673,6 +6674,7 @@ fn redact_console_diagnostics_value(value: &mut Value, key_context: Option<&str>
                 .unwrap_or(false)
             {
                 *raw = redact_auth_error(raw.as_str());
+                *raw = redact_url_segments_in_text(raw.as_str());
             }
         }
         _ => {}
@@ -12554,7 +12556,8 @@ mod tests {
         let mut payload = serde_json::json!({
             "authorization": "Bearer topsecret",
             "endpoint": "https://example.test/callback?access_token=alpha&mode=ok",
-            "error_message": "provider failure token=abc123",
+            "error_message": "provider failure https://example.test/callback?state=ok&access_token=abc123",
+            "error_detail": "provider detail https://example.test/callback?state=ok#refresh_token=refresh-secret&mode=ok",
             "browserd": {
                 "relay_token": "relay-secret",
                 "downloads_endpoint": "https://example.test/downloads?token=browser-secret&mode=ok",
@@ -12605,8 +12608,21 @@ mod tests {
             .unwrap_or_default()
             .to_owned();
         assert!(
-            !redacted_error.contains("abc123"),
+            redacted_error.contains("state=ok")
+                && redacted_error.contains("access_token=<redacted>")
+                && !redacted_error.contains("abc123"),
             "error message should hide secret token values: {redacted_error}"
+        );
+        let redacted_detail = payload
+            .get("error_detail")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            redacted_detail.contains("refresh_token=<redacted>")
+                && redacted_detail.contains("mode=ok")
+                && !redacted_detail.contains("refresh-secret"),
+            "error detail should hide fragment token values: {redacted_detail}"
         );
         let browser_error = payload
             .pointer("/browserd/last_error")
