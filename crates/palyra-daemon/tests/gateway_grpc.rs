@@ -5085,6 +5085,197 @@ async fn grpc_run_stream_reuses_timeboxed_approval_until_ttl_expiry() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_resolve_session_reset_clears_cached_tool_approval() -> Result<()> {
+    let response_body = openai_tool_call_response(
+        "custom.noop",
+        &serde_json::json!({
+            "payload": "approval-cache-reset"
+        }),
+    )?;
+    let (openai_base_url, _request_count, server_handle) = spawn_scripted_openai_server(vec![
+        ScriptedOpenAiResponse::immediate(200, response_body.clone()),
+        ScriptedOpenAiResponse::immediate(200, response_body),
+    ])?;
+    let (child, admin_port, grpc_port, _journal_db_path) =
+        spawn_palyrad_with_openai_provider_and_tool_policy(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+            "custom.noop",
+            4,
+            250,
+        )?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let (first_sender, first_receiver) = tokio_mpsc::channel(4);
+    first_sender
+        .send(sample_run_stream_request_with_ids(
+            SESSION_ID,
+            RUN_ID,
+            "approval-reset-seed".to_owned(),
+        ))
+        .await
+        .context("failed to send first run stream request for cache seeding")?;
+    let mut first_stream_request = tonic::Request::new(ReceiverStream::new(first_receiver));
+    authorize_metadata(first_stream_request.metadata_mut())?;
+    let mut first_response_stream = client
+        .run_stream(first_stream_request)
+        .await
+        .context("failed to call first RunStream for approval reset test")?
+        .into_inner();
+
+    let mut saw_first_approval_request = false;
+    let mut saw_first_failed_result = false;
+    loop {
+        let next_event = tokio::time::timeout(Duration::from_secs(5), first_response_stream.next())
+            .await
+            .context("first approval reset stream stalled")?;
+        let Some(event) = next_event else {
+            break;
+        };
+        let event = event.context("failed to read first approval reset stream event")?;
+        if let Some(body) = event.body {
+            match body {
+                common_v1::run_stream_event::Body::ToolApprovalRequest(approval_request) => {
+                    let proposal_id = approval_request
+                        .proposal_id
+                        .as_ref()
+                        .map(|proposal_id| proposal_id.ulid.as_str())
+                        .context("first approval reset request missing proposal_id")?;
+                    first_sender
+                        .send(sample_tool_approval_response_request_for_run_with_scope(
+                            RUN_ID,
+                            proposal_id,
+                            true,
+                            "allow_session",
+                            common_v1::ApprovalDecisionScope::Session as i32,
+                            0,
+                        ))
+                        .await
+                        .context("failed to send first approval reset response")?;
+                    saw_first_approval_request = true;
+                }
+                common_v1::run_stream_event::Body::ToolResult(result) => {
+                    if !result.success {
+                        saw_first_failed_result = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if saw_first_approval_request && saw_first_failed_result {
+            break;
+        }
+    }
+    assert!(saw_first_approval_request, "first run should request approval before cache seeding");
+    assert!(
+        saw_first_failed_result,
+        "first run should complete after approval with the unsupported-tool failure"
+    );
+
+    let mut reset_request = tonic::Request::new(gateway_v1::ResolveSessionRequest {
+        v: 1,
+        session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
+        session_key: String::new(),
+        session_label: String::new(),
+        require_existing: true,
+        reset_session: true,
+    });
+    authorize_metadata(reset_request.metadata_mut())?;
+    let reset_response = client
+        .resolve_session(reset_request)
+        .await
+        .context("failed to call ResolveSession with reset_session=true")?
+        .into_inner();
+    assert!(reset_response.reset_applied, "ResolveSession should report reset_applied=true");
+
+    let (second_sender, second_receiver) = tokio_mpsc::channel(4);
+    second_sender
+        .send(sample_run_stream_request_with_ids(
+            SESSION_ID,
+            RUN_ID_ALT,
+            "approval-reset-should-reprompt".to_owned(),
+        ))
+        .await
+        .context("failed to send second run stream request after reset")?;
+    let mut second_stream_request = tonic::Request::new(ReceiverStream::new(second_receiver));
+    authorize_metadata(second_stream_request.metadata_mut())?;
+    let mut second_response_stream = client
+        .run_stream(second_stream_request)
+        .await
+        .context("failed to call second RunStream after session reset")?
+        .into_inner();
+
+    let mut saw_second_approval_request = false;
+    let mut saw_second_failed_result = false;
+    loop {
+        let next_event =
+            tokio::time::timeout(Duration::from_secs(5), second_response_stream.next())
+                .await
+                .context("second approval reset stream stalled")?;
+        let Some(event) = next_event else {
+            break;
+        };
+        let event = event.context("failed to read second approval reset stream event")?;
+        if let Some(body) = event.body {
+            match body {
+                common_v1::run_stream_event::Body::ToolApprovalRequest(approval_request) => {
+                    let proposal_id = approval_request
+                        .proposal_id
+                        .as_ref()
+                        .map(|proposal_id| proposal_id.ulid.as_str())
+                        .context("second approval reset request missing proposal_id")?;
+                    second_sender
+                        .send(sample_tool_approval_response_request_for_run_with_scope(
+                            RUN_ID_ALT,
+                            proposal_id,
+                            true,
+                            "allow_once_after_reset",
+                            common_v1::ApprovalDecisionScope::Once as i32,
+                            0,
+                        ))
+                        .await
+                        .context("failed to send second approval reset response")?;
+                    saw_second_approval_request = true;
+                }
+                common_v1::run_stream_event::Body::ToolResult(result) => {
+                    if !result.success {
+                        saw_second_failed_result = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if saw_second_approval_request && saw_second_failed_result {
+            break;
+        }
+    }
+    assert!(
+        saw_second_approval_request,
+        "session reset must force a fresh approval request instead of reusing cached approval"
+    );
+    assert!(
+        saw_second_failed_result,
+        "second run should still complete after the fresh approval response"
+    );
+
+    let status_snapshot = admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;
+    assert_eq!(
+        status_snapshot.pointer("/counters/approvals_tool_requested").and_then(Value::as_u64),
+        Some(2),
+        "approval should be requested once before reset and once again after reset clears cache"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_approvals_service_persists_and_exports_denied_tool_approval() -> Result<()> {
     let (openai_base_url, _request_count, server_handle) =
         spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(

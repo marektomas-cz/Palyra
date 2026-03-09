@@ -7041,13 +7041,19 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 session_id,
                 session_key,
                 session_label,
-                principal: context.principal,
-                device_id: context.device_id,
-                channel: context.channel,
+                principal: context.principal.clone(),
+                device_id: context.device_id.clone(),
+                channel: context.channel.clone(),
                 require_existing: payload.require_existing,
                 reset_session: payload.reset_session,
             })
             .await?;
+        if outcome.reset_applied {
+            self.state.clear_tool_approval_cache_for_session(
+                &context,
+                outcome.session.session_id.as_str(),
+            );
+        }
         Ok(Response::new(gateway_v1::ResolveSessionResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
             session: Some(session_summary_message(&outcome.session)),
