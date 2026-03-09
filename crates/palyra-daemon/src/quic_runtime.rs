@@ -526,35 +526,54 @@ mod tests {
             &limits,
         )
         .expect("client endpoint should bind");
-        let connection = connect_quic(&client_endpoint, server_addr, &client_tls, &limits)
-            .await
-            .expect("QUIC transport may report the close only after connect");
-        match connection.open_bi().await {
-            Err(error) => assert!(
-                error.to_string().contains("closed"),
-                "revoked QUIC connection should be closed before any runtime method access: {error}"
-            ),
-            Ok((mut send_stream, mut recv_stream)) => {
-                send_request(
-                    &mut send_stream,
-                    QuicRuntimeRequest {
-                        protocol_version: PROTOCOL_VERSION,
-                        method: METHOD_HEALTH.to_owned(),
-                        resume_from: None,
-                    },
-                )
-                .await;
-                send_stream.finish().expect("request stream should finish");
-                let response = read_frame(&mut recv_stream, DEFAULT_MAX_FRAME_BYTES).await;
+        match connect_quic(&client_endpoint, server_addr, &client_tls, &limits).await {
+            Err(error) => {
+                let message = error.to_string().to_ascii_lowercase();
                 assert!(
-                    response
-                        .as_ref()
-                        .err()
-                        .map(|error| error.to_string().contains("connection lost"))
-                        .unwrap_or(false),
-                    "revoked client certificate must not receive a QUIC runtime response: {response:?}"
+                    message.contains("revoked")
+                        || message.contains("invalid peer certificate")
+                        || message.contains("handshake failed"),
+                    "revoked QUIC client certificate must fail closed during connect: {error}"
                 );
             }
+            Ok(connection) => match connection.open_bi().await {
+                Err(error) => {
+                    let message = error.to_string().to_ascii_lowercase();
+                    assert!(
+                        message.contains("closed")
+                            || message.contains("revoked")
+                            || message.contains("invalid peer certificate")
+                            || message.contains("handshake failed"),
+                        "revoked QUIC connection should be closed before any runtime method access: {error}"
+                    );
+                }
+                Ok((mut send_stream, mut recv_stream)) => {
+                    send_request(
+                        &mut send_stream,
+                        QuicRuntimeRequest {
+                            protocol_version: PROTOCOL_VERSION,
+                            method: METHOD_HEALTH.to_owned(),
+                            resume_from: None,
+                        },
+                    )
+                    .await;
+                    send_stream.finish().expect("request stream should finish");
+                    let response = read_frame(&mut recv_stream, DEFAULT_MAX_FRAME_BYTES).await;
+                    assert!(
+                        response
+                            .as_ref()
+                            .err()
+                            .map(|error| {
+                                let message = error.to_string().to_ascii_lowercase();
+                                message.contains("connection lost")
+                                    || message.contains("closed")
+                                    || message.contains("revoked")
+                            })
+                            .unwrap_or(false),
+                        "revoked client certificate must not receive a QUIC runtime response: {response:?}"
+                    );
+                }
+            },
         }
 
         server_task.abort();

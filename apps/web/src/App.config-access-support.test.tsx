@@ -193,8 +193,10 @@ describe("M56 config, access, and support surfaces", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Pairing and Gateway Access" }));
     expect(await screen.findByRole("heading", { name: "Pairing and Gateway Access" })).toBeInTheDocument();
-    expect(screen.getByText(/dashboard-url --verify-remote/)).toBeInTheDocument();
-    expect(screen.getByText(/tunnel --ssh/)).toBeInTheDocument();
+    const cliHandoffPanel = screen.getByRole("heading", { name: "Published CLI handoffs" }).closest("article");
+    expect(cliHandoffPanel).not.toBeNull();
+    expect(cliHandoffPanel).toHaveTextContent("dashboard-url --verify-remote");
+    expect(cliHandoffPanel).toHaveTextContent("tunnel --ssh");
 
     fireEvent.click(await screen.findByRole("button", { name: "Mint pairing code" }));
     await waitFor(() => {
