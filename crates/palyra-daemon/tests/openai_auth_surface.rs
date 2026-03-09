@@ -469,9 +469,10 @@ fn console_openai_oauth_flow_supports_happy_path_refresh_reconnect_and_revoke() 
         .context("OpenAI OAuth callback returned non-success status")?
         .text()
         .context("failed to read OpenAI OAuth callback HTML body")?;
+    let callback_mock_snapshot = mock.snapshot();
     assert!(
         callback_html.contains("OpenAI Connected"),
-        "oauth callback should render a success page after a valid callback"
+        "oauth callback should render a success page after a valid callback: {callback_html}; mock={callback_mock_snapshot:?}"
     );
 
     let callback_state = get_console_json(
@@ -552,7 +553,7 @@ fn console_openai_oauth_flow_supports_happy_path_refresh_reconnect_and_revoke() 
     assert_eq!(
         refresh.get("state").and_then(Value::as_str),
         Some("refreshed"),
-        "expired OAuth credentials should refresh immediately through the M54 refresh action"
+        "expired OAuth credentials should refresh immediately through the M54 refresh action: {refresh}"
     );
 
     let reconnect = post_console_json(
@@ -612,6 +613,11 @@ fn console_openai_oauth_flow_supports_happy_path_refresh_reconnect_and_revoke() 
     );
 
     let mock_snapshot = mock.snapshot();
+    assert!(
+        mock_snapshot.request_errors.is_empty(),
+        "oauth mock should not report request parsing/transport errors: {:?}",
+        mock_snapshot.request_errors
+    );
     assert!(
         mock_snapshot
             .token_request_bodies
@@ -981,6 +987,7 @@ struct OpenAiMockSnapshot {
     model_request_paths: Vec<String>,
     token_request_bodies: Vec<String>,
     revoke_request_bodies: Vec<String>,
+    request_errors: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -989,6 +996,7 @@ struct OpenAiMockState {
     model_request_paths: Vec<String>,
     token_request_bodies: Vec<String>,
     revoke_request_bodies: Vec<String>,
+    request_errors: Vec<String>,
     authorization_code_reply: Option<TokenReply>,
     refresh_reply: Option<TokenReply>,
     authorization_code_raw_response: Option<MockHttpResponse>,
@@ -1030,12 +1038,28 @@ impl OpenAiMockServer {
             while !stop_for_worker.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let _ = handle_openai_mock_request(&mut stream, &state_for_worker);
+                        if let Err(error) =
+                            handle_openai_mock_request(&mut stream, &state_for_worker)
+                        {
+                            let mut guard = state_for_worker
+                                .lock()
+                                .expect("OpenAI mock state lock should be available");
+                            guard.request_errors.push(error.to_string());
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25));
                     }
-                    Err(_) => break,
+                    Err(error) => {
+                        let mut guard = state_for_worker
+                            .lock()
+                            .expect("OpenAI mock state lock should be available");
+                        guard
+                            .request_errors
+                            .push(format!("listener accept error ({}): {error}", error.kind()));
+                        drop(guard);
+                        thread::sleep(Duration::from_millis(25));
+                    }
                 }
             }
         });
@@ -1083,6 +1107,7 @@ impl OpenAiMockServer {
             model_request_paths: state.model_request_paths.clone(),
             token_request_bodies: state.token_request_bodies.clone(),
             revoke_request_bodies: state.revoke_request_bodies.clone(),
+            request_errors: state.request_errors.clone(),
         }
     }
 }
@@ -1180,31 +1205,16 @@ fn handle_openai_mock_request(
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .context("failed to set OpenAI mock stream read timeout")?;
-    let mut buffer = Vec::new();
-    let mut header_end = None;
-    while header_end.is_none() {
-        let mut chunk = [0_u8; 1024];
-        let read = stream.read(&mut chunk).context("failed to read OpenAI mock request bytes")?;
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-        header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    let request_line_bytes =
+        reader.read_line(&mut request_line).context("failed to read OpenAI mock request line")?;
+    if request_line_bytes == 0 {
+        anyhow::bail!("OpenAI mock request is missing request-line");
     }
-    let Some(header_end) = header_end else {
-        anyhow::bail!("OpenAI mock request did not include HTTP headers");
-    };
-    let header_bytes = &buffer[..header_end];
-    let mut body_bytes = buffer[(header_end + 4)..].to_vec();
-    let header_text = String::from_utf8(header_bytes.to_vec())
-        .context("OpenAI mock request headers were not valid UTF-8")?;
-    let mut lines = header_text.lines();
-    let request_line = lines
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("OpenAI mock request is missing request-line"))?
-        .to_owned();
+    let request_line = request_line.trim_end_matches(&['\r', '\n'][..]).to_owned();
     let path = request_line
         .split_whitespace()
         .nth(1)
@@ -1213,7 +1223,18 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
 
     let mut headers = HashMap::new();
     let mut content_length = 0usize;
-    for line in lines {
+    loop {
+        let mut line = String::new();
+        let bytes = reader
+            .read_line(&mut line)
+            .context("failed to read OpenAI mock request header line")?;
+        if bytes == 0 {
+            anyhow::bail!("OpenAI mock request ended before the header block completed");
+        }
+        let line = line.trim_end_matches(&['\r', '\n'][..]);
+        if line.is_empty() {
+            break;
+        }
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
@@ -1225,17 +1246,10 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         headers.insert(normalized_name, normalized_value);
     }
 
-    while body_bytes.len() < content_length {
-        let mut chunk = vec![0_u8; content_length.saturating_sub(body_bytes.len())];
-        let read = stream
-            .read(chunk.as_mut_slice())
-            .context("failed to read OpenAI mock request body bytes")?;
-        if read == 0 {
-            break;
-        }
-        body_bytes.extend_from_slice(&chunk[..read]);
-    }
-    body_bytes.truncate(content_length);
+    let mut body_bytes = vec![0_u8; content_length];
+    reader
+        .read_exact(body_bytes.as_mut_slice())
+        .context("failed to read OpenAI mock request body bytes")?;
     let body =
         String::from_utf8(body_bytes).context("OpenAI mock request body was not valid UTF-8")?;
 
