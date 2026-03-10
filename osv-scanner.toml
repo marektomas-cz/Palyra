@@ -1,3 +1,1 @@
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0134"
-reason = "Transitive rustls-pemfile advisory tracked in deny.toml until upstream dependency graph migrates."
+# No ignored vulnerabilities are currently allowlisted.
