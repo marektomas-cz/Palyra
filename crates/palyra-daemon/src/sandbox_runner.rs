@@ -947,8 +947,12 @@ fn attach_resource_limits_unix(command: &mut Command, policy: &SandboxProcessRun
     let memory_limit_bytes = policy.memory_limit_bytes;
     unsafe {
         command.pre_exec(move || {
-            set_cpu_rlimit(cpu_time_limit_ms)?;
-            set_memory_rlimit(memory_limit_bytes)?;
+            set_cpu_rlimit(cpu_time_limit_ms).map_err(|error| {
+                std::io::Error::new(error.kind(), format!("failed to set CPU rlimit: {error}"))
+            })?;
+            set_memory_rlimit(memory_limit_bytes).map_err(|error| {
+                std::io::Error::new(error.kind(), format!("failed to set memory rlimit: {error}"))
+            })?;
             Ok(())
         });
     }
@@ -970,39 +974,18 @@ fn set_rlimit(resource: libc::c_int, limit: libc::rlim_t) -> std::io::Result<()>
 
 #[cfg(unix)]
 fn set_cpu_rlimit(cpu_time_limit_ms: u64) -> std::io::Result<()> {
-    map_macos_einval_to_ok(set_rlimit(
-        libc::RLIMIT_CPU as libc::c_int,
-        cpu_ms_to_rlimit_seconds(cpu_time_limit_ms),
-    ))
+    set_rlimit(libc::RLIMIT_CPU as libc::c_int, cpu_ms_to_rlimit_seconds(cpu_time_limit_ms))
 }
 
 #[cfg(unix)]
 fn set_memory_rlimit(memory_limit_bytes: u64) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return map_macos_einval_to_ok(set_rlimit(
-            libc::RLIMIT_DATA as libc::c_int,
-            memory_limit_bytes as libc::rlim_t,
-        ));
+        return set_rlimit(libc::RLIMIT_DATA as libc::c_int, memory_limit_bytes as libc::rlim_t);
     }
     #[cfg(not(target_os = "macos"))]
     {
         set_rlimit(libc::RLIMIT_AS as libc::c_int, memory_limit_bytes as libc::rlim_t)
-    }
-}
-
-#[cfg(unix)]
-fn map_macos_einval_to_ok(result: std::io::Result<()>) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        match result {
-            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
-            other => other,
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        result
     }
 }
 
