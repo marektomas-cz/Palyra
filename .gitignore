@@ -56,5 +56,6 @@ apps/desktop/src-tauri/gen/
 TechStack_Architecture.md
 /docs/
 /code-review/
+/current-docs/
 AGENTS.md
 .agents/
