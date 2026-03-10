@@ -3579,7 +3579,7 @@ async fn grpc_cron_jobs_survive_daemon_restart() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grpc_memory_ingest_search_list_and_purge_roundtrip() -> Result<()> {
+async fn grpc_memory_ingest_search_list_and_purge_requires_explicit_approval() -> Result<()> {
     let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);
     wait_for_health(admin_port, daemon.child_mut())?;
@@ -3667,14 +3667,29 @@ async fn grpc_memory_ingest_search_list_and_purge_roundtrip() -> Result<()> {
         purge_all_principal: false,
     });
     authorize_metadata(purge_request.metadata_mut())?;
-    let purged = memory_client
+    let purge_error = memory_client
         .purge_memory(purge_request)
         .await
-        .context("failed to call memory PurgeMemory")?
+        .expect_err("memory purge should require explicit approval by default");
+    assert_eq!(purge_error.code(), Code::PermissionDenied);
+    assert!(
+        purge_error.message().contains("explicit user approval required"),
+        "permission denied response should explain approval requirement"
+    );
+
+    let mut get_request = tonic::Request::new(memory_v1::GetMemoryItemRequest {
+        v: 1,
+        memory_id: Some(common_v1::CanonicalId { ulid: memory_id }),
+    });
+    authorize_metadata(get_request.metadata_mut())?;
+    let preserved = memory_client
+        .get_memory_item(get_request)
+        .await
+        .context("memory item should remain after denied purge")?
         .into_inner();
     assert!(
-        purged.deleted_count >= 1,
-        "session purge should delete at least the memory created in this test"
+        preserved.item.is_some(),
+        "denied purge must not delete the session-scoped memory item"
     );
 
     Ok(())
@@ -3752,7 +3767,7 @@ async fn grpc_memory_scope_isolation_blocks_cross_principal_get() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grpc_memory_purge_all_respects_authenticated_channel_scope() -> Result<()> {
+async fn grpc_memory_purge_all_requires_explicit_approval_before_scope_evaluation() -> Result<()> {
     let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);
     wait_for_health(admin_port, daemon.child_mut())?;
@@ -3820,30 +3835,34 @@ async fn grpc_memory_purge_all_respects_authenticated_channel_scope() -> Result<
         purge_all_principal: true,
     });
     authorize_metadata_with_principal_and_channel(purge_request.metadata_mut(), "user:ops", "cli")?;
-    let purge_response = memory_client
+    let purge_error = memory_client
         .purge_memory(purge_request)
         .await
-        .context("failed to purge memory with purge_all_principal=true")?
-        .into_inner();
-    assert_eq!(
-        purge_response.deleted_count, 1,
-        "channel-authenticated purge-all must only remove channel-scoped memories"
+        .expect_err("purge_all_principal should require explicit approval by default");
+    assert_eq!(purge_error.code(), Code::PermissionDenied);
+    assert!(
+        purge_error.message().contains("explicit user approval required"),
+        "permission denied response should explain approval requirement"
     );
 
-    let mut deleted_cli_get = tonic::Request::new(memory_v1::GetMemoryItemRequest {
+    let mut preserved_cli_get = tonic::Request::new(memory_v1::GetMemoryItemRequest {
         v: 1,
         memory_id: Some(common_v1::CanonicalId { ulid: cli_memory_id }),
     });
     authorize_metadata_with_principal_and_channel(
-        deleted_cli_get.metadata_mut(),
+        preserved_cli_get.metadata_mut(),
         "user:ops",
         "cli",
     )?;
-    let deleted_cli_error = memory_client
-        .get_memory_item(deleted_cli_get)
+    let preserved_cli = memory_client
+        .get_memory_item(preserved_cli_get)
         .await
-        .expect_err("purged cli memory should not be retrievable");
-    assert_eq!(deleted_cli_error.code(), Code::NotFound);
+        .context("cli memory should remain after denied purge-all")?
+        .into_inner();
+    assert!(
+        preserved_cli.item.is_some(),
+        "denied purge-all must preserve the cli-scoped memory item"
+    );
 
     let mut surviving_slack_get = tonic::Request::new(memory_v1::GetMemoryItemRequest {
         v: 1,
@@ -3854,14 +3873,14 @@ async fn grpc_memory_purge_all_respects_authenticated_channel_scope() -> Result<
         "user:ops",
         "slack",
     )?;
-    let surviving = memory_client
+    let surviving_slack = memory_client
         .get_memory_item(surviving_slack_get)
         .await
-        .context("slack memory should survive cli-scoped purge-all")?
+        .context("slack memory should remain after denied purge-all")?
         .into_inner();
     assert!(
-        surviving.item.is_some(),
-        "slack-scoped memory should remain accessible after cli purge-all"
+        surviving_slack.item.is_some(),
+        "denied purge-all must preserve unrelated channel-scoped memory items"
     );
     Ok(())
 }
@@ -6927,8 +6946,7 @@ async fn grpc_run_stream_admin_cancel_waits_for_inflight_process_runner_completi
         client.run_stream(stream_request).await.context("failed to call RunStream")?.into_inner();
 
     let mut saw_approval_request = false;
-    let mut saw_allow_decision = false;
-    loop {
+    let saw_allow_decision = loop {
         let next_event = tokio::time::timeout(Duration::from_secs(5), response_stream.next())
             .await
             .context("process runner cancellation stream stalled before allow decision")?;
@@ -6957,8 +6975,7 @@ async fn grpc_run_stream_admin_cancel_waits_for_inflight_process_runner_completi
                 }
                 common_v1::run_stream_event::Body::ToolDecision(decision) => {
                     if decision.kind == common_v1::tool_decision::DecisionKind::Allow as i32 {
-                        saw_allow_decision = true;
-                        break;
+                        break true;
                     }
                 }
                 common_v1::run_stream_event::Body::ToolResult(result) => {
@@ -6971,7 +6988,7 @@ async fn grpc_run_stream_admin_cancel_waits_for_inflight_process_runner_completi
                 _ => {}
             }
         }
-    }
+    };
 
     assert!(
         saw_approval_request,
