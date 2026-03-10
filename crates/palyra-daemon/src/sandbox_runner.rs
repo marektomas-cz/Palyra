@@ -1133,6 +1133,19 @@ mod tests {
         SandboxProcessRunErrorKind, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
     };
 
+    fn portable_test_memory_limit_bytes() -> u64 {
+        #[cfg(target_os = "macos")]
+        {
+            // The child inherits the test binary's resident footprint before pre_exec applies
+            // RLIMIT_DATA, so tiny test-only quotas can fail before the behavior under test runs.
+            return 512 * 1024 * 1024;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            128 * 1024 * 1024
+        }
+    }
+
     fn sandbox_policy_with_allowed_executables(
         workspace_root: PathBuf,
         allowed_executables: Vec<String>,
@@ -1147,7 +1160,7 @@ mod tests {
             allowed_egress_hosts: Vec::new(),
             allowed_dns_suffixes: Vec::new(),
             cpu_time_limit_ms: 2_000,
-            memory_limit_bytes: 128 * 1024 * 1024,
+            memory_limit_bytes: portable_test_memory_limit_bytes(),
             max_output_bytes: 64 * 1024,
         }
     }

@@ -921,6 +921,19 @@ mod tests {
     };
     use crate::wasm_plugin_runner::WasmPluginRunnerPolicy;
 
+    fn portable_test_process_runner_memory_limit_bytes() -> u64 {
+        #[cfg(target_os = "macos")]
+        {
+            // Keep macOS test fixtures above the inherited harness footprint so fail-closed
+            // RLIMIT_DATA setup does not short-circuit the behavior being exercised.
+            return 512 * 1024 * 1024;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            256 * 1024 * 1024
+        }
+    }
+
     fn default_process_runner_policy() -> SandboxProcessRunnerPolicy {
         SandboxProcessRunnerPolicy {
             enabled: false,
@@ -932,7 +945,7 @@ mod tests {
             allowed_egress_hosts: Vec::new(),
             allowed_dns_suffixes: Vec::new(),
             cpu_time_limit_ms: 2_000,
-            memory_limit_bytes: 256 * 1024 * 1024,
+            memory_limit_bytes: portable_test_process_runner_memory_limit_bytes(),
             max_output_bytes: 64 * 1024,
         }
     }
@@ -1415,7 +1428,7 @@ mod tests {
                 allowed_egress_hosts: Vec::new(),
                 allowed_dns_suffixes: Vec::new(),
                 cpu_time_limit_ms: 2_000,
-                memory_limit_bytes: 128 * 1024 * 1024,
+                memory_limit_bytes: portable_test_process_runner_memory_limit_bytes(),
                 max_output_bytes: 64 * 1024,
             },
             wasm_runtime: default_wasm_runtime_policy(),
