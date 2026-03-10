@@ -25,7 +25,7 @@ pub struct PolicyRequestContext {
     pub capabilities: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyEvaluationConfig {
     pub allowlisted_tools: Vec<String>,
     pub allowlisted_skills: Vec<String>,
@@ -35,6 +35,26 @@ pub struct PolicyEvaluationConfig {
     pub sensitive_capability_names: Vec<String>,
     pub tool_execute_principal_allowlist: Vec<String>,
     pub tool_execute_channel_allowlist: Vec<String>,
+}
+
+const DEFAULT_SENSITIVE_ACTIONS: &[&str] = &["cron.delete", "memory.delete", "memory.purge"];
+
+impl Default for PolicyEvaluationConfig {
+    fn default() -> Self {
+        Self {
+            allowlisted_tools: Vec::new(),
+            allowlisted_skills: Vec::new(),
+            allow_sensitive_tools: false,
+            sensitive_tool_names: Vec::new(),
+            sensitive_actions: DEFAULT_SENSITIVE_ACTIONS
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            sensitive_capability_names: Vec::new(),
+            tool_execute_principal_allowlist: Vec::new(),
+            tool_execute_channel_allowlist: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -780,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn cron_delete_action_is_not_implicitly_sensitive() {
+    fn cron_delete_action_requires_explicit_approval_by_default() {
         let request = PolicyRequest {
             principal: "user:ops".to_owned(),
             action: "cron.delete".to_owned(),
@@ -790,10 +810,13 @@ mod tests {
         let evaluation =
             evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
 
-        assert_eq!(evaluation.decision, PolicyDecision::Allow);
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::DenyByDefault { reason: SENSITIVE_DENY_REASON.to_owned() }
+        );
         assert!(
-            !evaluation.explanation.is_sensitive_action,
-            "cron delete should not be marked sensitive without explicit configuration"
+            evaluation.explanation.is_sensitive_action,
+            "cron delete should be marked sensitive by the default policy configuration"
         );
     }
 
@@ -812,6 +835,27 @@ mod tests {
         assert!(
             evaluation.explanation.reason.contains("memory action allowed"),
             "memory allow reason should reflect dedicated memory policy"
+        );
+    }
+
+    #[test]
+    fn memory_purge_requires_explicit_approval_by_default() {
+        let request = PolicyRequest {
+            principal: "user:ops".to_owned(),
+            action: "memory.purge".to_owned(),
+            resource: "memory:session".to_owned(),
+        };
+
+        let evaluation =
+            evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
+
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::DenyByDefault { reason: SENSITIVE_DENY_REASON.to_owned() }
+        );
+        assert!(
+            evaluation.explanation.is_sensitive_action,
+            "memory purge should be marked sensitive by the default policy configuration"
         );
     }
 
