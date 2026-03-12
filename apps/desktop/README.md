@@ -40,6 +40,10 @@
 - Sidecar resolution already prefers colocated binaries next to the desktop executable, so the
   portable archive layout matches the runtime contract.
 - The canonical packaging smoke is `pwsh -NoLogo -File ../../scripts/test/run-release-smoke.ps1`.
+- Windows clean-install manual testing can use:
+  - `pwsh -NoLogo -File ../../scripts/test/install-clean-desktop.ps1 -Launch`
+  - `pwsh -NoLogo -File ../../scripts/test/uninstall-clean-desktop.ps1`
+  - default harness root: `%LOCALAPPDATA%\Palyra-TestHarness`
 
 ## Security behavior
 
@@ -89,6 +93,10 @@ $env:PALYRA_DESKTOP_PALYRAD_BIN = "C:\path\to\palyrad.exe"
 $env:PALYRA_DESKTOP_BROWSERD_BIN = "C:\path\to\palyra-browserd.exe"
 $env:PALYRA_DESKTOP_PALYRA_BIN = "C:\path\to\palyra.exe"
 ```
+
+For a release-like clean install loop on Windows, use the test harness scripts above instead of
+`cargo run`; they package the portable bundle, install it outside the repo, and launch it with an
+isolated `PALYRA_STATE_ROOT`.
 
 ## File layout
 

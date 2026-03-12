@@ -29,10 +29,10 @@ use super::{
     build_desktop_refresh_payload, build_onboarding_status, build_snapshot_from_inputs,
     collect_redacted_errors, compute_backoff_ms, executable_file_name,
     load_or_initialize_state_file, mpsc, parse_discord_status, parse_remote_dashboard_base_url,
-    resolve_binary_path, sanitize_log_line, try_enqueue_log_event, BrowserStatusSnapshot, Client,
-    ControlCenter, DashboardAccessMode, DesktopOnboardingStep, DesktopSecretStore,
-    DesktopStateFile, LogEvent, LogStream, ManagedService, RuntimeConfig, ServiceKind, Ulid,
-    LOG_EVENT_CHANNEL_CAPACITY,
+    resolve_binary_path, resolve_desktop_state_root, sanitize_log_line, try_enqueue_log_event,
+    BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode, DesktopOnboardingStep,
+    DesktopSecretStore, DesktopStateFile, LogEvent, LogStream, ManagedService, RuntimeConfig,
+    ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
 };
 
 fn env_lock() -> &'static Mutex<()> {
@@ -492,6 +492,27 @@ fn state_file_initialization_seeds_onboarding_defaults() {
     assert!(loaded.persisted.onboarding.recent_events.is_empty());
     assert!(loaded.persisted.onboarding.failure_step_counts.is_empty());
     assert_eq!(loaded.persisted.onboarding.support_bundle_export_attempts, 0);
+}
+
+#[test]
+fn desktop_state_root_uses_absolute_palyra_state_root_override() {
+    let _env_guard = lock_env();
+    let fixture = TempFixtureDir::new();
+    let _state_root_override =
+        ScopedEnvVar::set("PALYRA_STATE_ROOT", fixture.path().to_string_lossy().as_ref());
+
+    let resolved = resolve_desktop_state_root().expect("desktop state root should resolve");
+    assert_eq!(resolved, fixture.path().to_path_buf());
+}
+
+#[test]
+fn desktop_state_root_rejects_relative_palyra_state_root_override() {
+    let _env_guard = lock_env();
+    let _state_root_override = ScopedEnvVar::set("PALYRA_STATE_ROOT", "relative-state-root");
+
+    let error = resolve_desktop_state_root()
+        .expect_err("relative PALYRA_STATE_ROOT should be rejected");
+    assert!(error.to_string().contains("must be an absolute path"));
 }
 
 #[tokio::test(flavor = "current_thread")]

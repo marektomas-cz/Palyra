@@ -49,6 +49,7 @@ fuzz/corpus/
 fuzz/coverage/
 security-artifacts/
 .palyra/
+.palyra-test-harness/
 data/
 apps/desktop/src-tauri/gen/
 /roadmap/

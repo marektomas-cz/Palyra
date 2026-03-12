@@ -309,6 +309,18 @@ const fn default_browser_service_enabled() -> bool {
 }
 
 pub(crate) fn resolve_desktop_state_root() -> Result<PathBuf> {
+    if let Ok(raw) = std::env::var("PALYRA_STATE_ROOT") {
+        if let Some(value) = normalize_optional_text(raw.as_str()) {
+            let candidate = PathBuf::from(value);
+            if !candidate.is_absolute() {
+                return Err(anyhow!(
+                    "desktop state root from PALYRA_STATE_ROOT must be an absolute path"
+                ));
+            }
+            return Ok(candidate);
+        }
+    }
+
     palyra_common::default_state_root().map_err(|error| {
         anyhow!("failed to resolve default state root for desktop control center: {}", error)
     })
