@@ -105,6 +105,9 @@ deterministic-soak:
 performance-smoke:
 	bash scripts/test/run-performance-smoke.sh
 
+module-budgets:
+	bash scripts/dev/report-module-budgets.sh
+
 deterministic-fixtures-update:
 	bash scripts/test/update-deterministic-fixtures.sh
 

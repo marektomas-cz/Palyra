@@ -11,7 +11,10 @@ import {
 } from "react";
 
 import { ConsoleApiClient, type ConsoleSession, type JsonValue } from "../consoleApi";
-import { createChannelDomain } from "./channelDomain";
+import { createChannelCoreDomain } from "../features/channels/core/domain";
+import { useChannelCoreState } from "../features/channels/core/useChannelCoreState";
+import { createDiscordChannelDomain } from "../features/channels/connectors/discord/domain";
+import { useDiscordChannelState } from "../features/channels/connectors/discord/useDiscordChannelState";
 import { useAuthDomain } from "./hooks/useAuthDomain";
 import { useConfigDomain } from "./hooks/useConfigDomain";
 import { useOverviewDomain } from "./hooks/useOverviewDomain";
@@ -20,7 +23,6 @@ import type { Section } from "./sectionMetadata";
 import { DEFAULT_CRON_FORM, type CronForm, type LoginForm } from "./stateTypes";
 import {
   emptyToUndefined,
-  isJsonObject,
   parseInteger,
   readString,
   skillMetadata,
@@ -104,84 +106,138 @@ export function useConsoleAppState() {
   const [cronJobId, setCronJobId] = useState("");
   const [cronForm, setCronForm] = useState<CronForm>(DEFAULT_CRON_FORM);
 
-  const [channelsBusy, setChannelsBusy] = useState(false);
-  const [channelsConnectors, setChannelsConnectors] = useState<JsonObject[]>([]);
-  const [channelsSelectedConnectorId, setChannelsSelectedConnectorId] = useState("");
-  const [channelsSelectedStatus, setChannelsSelectedStatus] = useState<JsonObject | null>(null);
-  const [channelsEvents, setChannelsEvents] = useState<JsonObject[]>([]);
-  const [channelsDeadLetters, setChannelsDeadLetters] = useState<JsonObject[]>([]);
-  const [channelsLogsLimit, setChannelsLogsLimit] = useState("25");
-  const [channelsTestText, setChannelsTestText] = useState("hello from web console");
-  const [channelsTestConversationId, setChannelsTestConversationId] = useState("test:conversation");
-  const [channelsTestSenderId, setChannelsTestSenderId] = useState("test-user");
-  const [channelsTestSenderDisplay, setChannelsTestSenderDisplay] = useState("");
-  const [channelsTestCrashOnce, setChannelsTestCrashOnce] = useState(false);
-  const [channelsTestDirectMessage, setChannelsTestDirectMessage] = useState(true);
-  const [channelsTestBroadcast, setChannelsTestBroadcast] = useState(false);
-  const [channelsDiscordTarget, setChannelsDiscordTarget] = useState("channel:");
-  const [channelsDiscordText, setChannelsDiscordText] = useState("palyra discord test message");
-  const [channelsDiscordAutoReaction, setChannelsDiscordAutoReaction] = useState("");
-  const [channelsDiscordThreadId, setChannelsDiscordThreadId] = useState("");
-  const [channelsDiscordConfirm, setChannelsDiscordConfirm] = useState(false);
-  const [channelRouterRules, setChannelRouterRules] = useState<JsonObject | null>(null);
-  const [channelRouterConfigHash, setChannelRouterConfigHash] = useState("");
-  const [channelRouterWarnings, setChannelRouterWarnings] = useState<string[]>([]);
-  const [channelRouterPreviewChannel, setChannelRouterPreviewChannel] = useState("");
-  const [channelRouterPreviewText, setChannelRouterPreviewText] = useState("pair 000000");
-  const [channelRouterPreviewConversationId, setChannelRouterPreviewConversationId] = useState("");
-  const [channelRouterPreviewSenderIdentity, setChannelRouterPreviewSenderIdentity] = useState("");
-  const [channelRouterPreviewSenderDisplay, setChannelRouterPreviewSenderDisplay] = useState("");
-  const [channelRouterPreviewSenderVerified, setChannelRouterPreviewSenderVerified] = useState(true);
-  const [channelRouterPreviewIsDirectMessage, setChannelRouterPreviewIsDirectMessage] = useState(true);
-  const [channelRouterPreviewRequestedBroadcast, setChannelRouterPreviewRequestedBroadcast] = useState(false);
-  const [channelRouterPreviewMaxPayloadBytes, setChannelRouterPreviewMaxPayloadBytes] = useState("2048");
-  const [channelRouterPreviewResult, setChannelRouterPreviewResult] = useState<JsonObject | null>(null);
-  const [channelRouterPairingsFilterChannel, setChannelRouterPairingsFilterChannel] = useState("");
-  const [channelRouterPairings, setChannelRouterPairings] = useState<JsonObject[]>([]);
-  const [channelRouterMintChannel, setChannelRouterMintChannel] = useState("");
-  const [channelRouterMintIssuedBy, setChannelRouterMintIssuedBy] = useState("");
-  const [channelRouterMintTtlMs, setChannelRouterMintTtlMs] = useState("600000");
-  const [channelRouterMintResult, setChannelRouterMintResult] = useState<JsonObject | null>(null);
-  const [discordWizardBusy, setDiscordWizardBusy] = useState(false);
-  const [discordWizardAccountId, setDiscordWizardAccountId] = useState("default");
-  const [discordWizardMode, setDiscordWizardMode] = useState<"local" | "remote_vps">("local");
-  const [discordWizardToken, setDiscordWizardToken] = useState("");
-  const [discordWizardScope, setDiscordWizardScope] = useState<
-    "dm_only" | "allowlisted_guild_channels" | "open_guild_channels"
-  >("dm_only");
-  const [discordWizardAllowFrom, setDiscordWizardAllowFrom] = useState("");
-  const [discordWizardDenyFrom, setDiscordWizardDenyFrom] = useState("");
-  const [discordWizardRequireMention, setDiscordWizardRequireMention] = useState(true);
-  const [discordWizardBroadcast, setDiscordWizardBroadcast] = useState<"deny" | "mention_only" | "allow">("deny");
-  const [discordWizardConcurrency, setDiscordWizardConcurrency] = useState("2");
-  const [discordWizardConfirmOpen, setDiscordWizardConfirmOpen] = useState(false);
-  const [discordWizardVerifyChannelId, setDiscordWizardVerifyChannelId] = useState("");
-  const [discordWizardPreflight, setDiscordWizardPreflight] = useState<JsonObject | null>(null);
-  const [discordWizardApply, setDiscordWizardApply] = useState<JsonObject | null>(null);
-  const [discordWizardVerifyTarget, setDiscordWizardVerifyTarget] = useState("channel:");
-  const [discordWizardVerifyText, setDiscordWizardVerifyText] = useState("palyra discord test message");
-  const [discordWizardVerifyConfirm, setDiscordWizardVerifyConfirm] = useState(false);
-
-  function setSelectedChannelStatusPayload(payload: JsonValue): void {
-    setChannelsSelectedStatus(isJsonObject(payload) ? payload : null);
-  }
+  const channelCoreState = useChannelCoreState();
+  const {
+    channelsBusy,
+    setChannelsBusy,
+    channelsConnectors,
+    setChannelsConnectors,
+    channelsSelectedConnectorId,
+    setChannelsSelectedConnectorId,
+    channelsSelectedStatus,
+    setSelectedChannelStatusPayload,
+    channelsEvents,
+    setChannelsEvents,
+    channelsDeadLetters,
+    setChannelsDeadLetters,
+    channelsLogsLimit,
+    setChannelsLogsLimit,
+    channelsTestText,
+    setChannelsTestText,
+    channelsTestConversationId,
+    setChannelsTestConversationId,
+    channelsTestSenderId,
+    setChannelsTestSenderId,
+    channelsTestSenderDisplay,
+    setChannelsTestSenderDisplay,
+    channelsTestCrashOnce,
+    setChannelsTestCrashOnce,
+    channelsTestDirectMessage,
+    setChannelsTestDirectMessage,
+    channelsTestBroadcast,
+    setChannelsTestBroadcast,
+    channelRouterRules,
+    setChannelRouterRules,
+    channelRouterConfigHash,
+    setChannelRouterConfigHash,
+    channelRouterWarnings,
+    setChannelRouterWarnings,
+    channelRouterPreviewChannel,
+    setChannelRouterPreviewChannel,
+    channelRouterPreviewText,
+    setChannelRouterPreviewText,
+    channelRouterPreviewConversationId,
+    setChannelRouterPreviewConversationId,
+    channelRouterPreviewSenderIdentity,
+    setChannelRouterPreviewSenderIdentity,
+    channelRouterPreviewSenderDisplay,
+    setChannelRouterPreviewSenderDisplay,
+    channelRouterPreviewSenderVerified,
+    setChannelRouterPreviewSenderVerified,
+    channelRouterPreviewIsDirectMessage,
+    setChannelRouterPreviewIsDirectMessage,
+    channelRouterPreviewRequestedBroadcast,
+    setChannelRouterPreviewRequestedBroadcast,
+    channelRouterPreviewMaxPayloadBytes,
+    setChannelRouterPreviewMaxPayloadBytes,
+    channelRouterPreviewResult,
+    setChannelRouterPreviewResult,
+    channelRouterPairingsFilterChannel,
+    setChannelRouterPairingsFilterChannel,
+    channelRouterPairings,
+    setChannelRouterPairings,
+    channelRouterMintChannel,
+    setChannelRouterMintChannel,
+    channelRouterMintIssuedBy,
+    setChannelRouterMintIssuedBy,
+    channelRouterMintTtlMs,
+    setChannelRouterMintTtlMs,
+    channelRouterMintResult,
+    setChannelRouterMintResult,
+  } = channelCoreState;
+  const discordChannelState = useDiscordChannelState();
+  const {
+    channelsDiscordTarget,
+    setChannelsDiscordTarget,
+    channelsDiscordText,
+    setChannelsDiscordText,
+    channelsDiscordAutoReaction,
+    setChannelsDiscordAutoReaction,
+    channelsDiscordThreadId,
+    setChannelsDiscordThreadId,
+    channelsDiscordConfirm,
+    setChannelsDiscordConfirm,
+    discordWizardBusy,
+    setDiscordWizardBusy,
+    discordWizardAccountId,
+    setDiscordWizardAccountId,
+    discordWizardMode,
+    setDiscordWizardMode,
+    discordWizardToken,
+    setDiscordWizardToken,
+    discordWizardScope,
+    setDiscordWizardScope,
+    discordWizardAllowFrom,
+    setDiscordWizardAllowFrom,
+    discordWizardDenyFrom,
+    setDiscordWizardDenyFrom,
+    discordWizardRequireMention,
+    setDiscordWizardRequireMention,
+    discordWizardBroadcast,
+    setDiscordWizardBroadcast,
+    discordWizardConcurrency,
+    setDiscordWizardConcurrency,
+    discordWizardConfirmOpen,
+    setDiscordWizardConfirmOpen,
+    discordWizardVerifyChannelId,
+    setDiscordWizardVerifyChannelId,
+    discordWizardPreflight,
+    setDiscordWizardPreflight,
+    discordWizardApply,
+    setDiscordWizardApply,
+    discordWizardVerifyTarget,
+    setDiscordWizardVerifyTarget,
+    discordWizardVerifyText,
+    setDiscordWizardVerifyText,
+    discordWizardVerifyConfirm,
+    setDiscordWizardVerifyConfirm,
+  } = discordChannelState;
 
   const {
     refreshChannelLogs,
-    refreshChannelRouter,
     refreshChannels,
     loadChannel,
     setChannelEnabled,
     submitChannelTestMessage,
-    submitChannelDiscordTestSend,
     refreshChannelRouterPairings,
-    refreshChannelHealth,
+    submitChannelRouterPreview,
+    mintChannelRouterPairingCode,
     pauseChannelQueue,
     resumeChannelQueue,
     drainChannelQueue,
     replayChannelDeadLetter,
-    discardChannelDeadLetter
-  } = createChannelDomain({
+    discardChannelDeadLetter,
+  } = createChannelCoreDomain({
     api,
     channelsLogsLimit,
     channelsSelectedConnectorId,
@@ -193,12 +249,18 @@ export function useConsoleAppState() {
     channelsTestCrashOnce,
     channelsTestDirectMessage,
     channelsTestBroadcast,
-    channelsDiscordTarget,
-    channelsDiscordText,
-    channelsDiscordAutoReaction,
-    channelsDiscordThreadId,
-    channelsDiscordConfirm,
-    discordWizardVerifyChannelId,
+    channelRouterPreviewChannel,
+    channelRouterPreviewText,
+    channelRouterPreviewConversationId,
+    channelRouterPreviewSenderIdentity,
+    channelRouterPreviewSenderDisplay,
+    channelRouterPreviewSenderVerified,
+    channelRouterPreviewIsDirectMessage,
+    channelRouterPreviewRequestedBroadcast,
+    channelRouterPreviewMaxPayloadBytes,
+    channelRouterMintChannel,
+    channelRouterMintIssuedBy,
+    channelRouterMintTtlMs,
     setChannelsBusy,
     setError,
     setNotice,
@@ -207,15 +269,58 @@ export function useConsoleAppState() {
     setChannelsEvents,
     setChannelsDeadLetters,
     setChannelsTestCrashOnce,
-    setChannelsDiscordConfirm,
     setChannelRouterRules,
     setChannelRouterConfigHash,
     setChannelRouterWarnings,
+    setChannelRouterPreviewResult,
     setChannelRouterPairings,
     setChannelRouterPreviewChannel,
     setChannelRouterMintChannel,
     setChannelRouterPairingsFilterChannel,
-    setSelectedChannelStatusPayload
+    setChannelRouterMintResult,
+    setSelectedChannelStatusPayload,
+  });
+  const {
+    submitChannelDiscordTestSend,
+    refreshChannelHealth,
+    runDiscordOnboardingProbe,
+    applyDiscordOnboarding,
+    verifyDiscordOnboardingTarget,
+  } = createDiscordChannelDomain({
+    api,
+    channelsSelectedConnectorId,
+    channelsDiscordTarget,
+    channelsDiscordText,
+    channelsDiscordAutoReaction,
+    channelsDiscordThreadId,
+    channelsDiscordConfirm,
+    discordWizardAccountId,
+    discordWizardMode,
+    discordWizardToken,
+    discordWizardScope,
+    discordWizardAllowFrom,
+    discordWizardDenyFrom,
+    discordWizardRequireMention,
+    discordWizardBroadcast,
+    discordWizardConcurrency,
+    discordWizardConfirmOpen,
+    discordWizardVerifyChannelId,
+    discordWizardVerifyTarget,
+    discordWizardVerifyText,
+    discordWizardVerifyConfirm,
+    setChannelsBusy,
+    setError,
+    setNotice,
+    setChannelsDiscordConfirm,
+    setDiscordWizardBusy,
+    setDiscordWizardToken,
+    setDiscordWizardPreflight,
+    setDiscordWizardApply,
+    setDiscordWizardVerifyConfirm,
+    refreshChannels,
+    refreshChannelLogs,
+    loadChannel,
+    setSelectedChannelStatusPayload,
   });
 
   const [memoryBusy, setMemoryBusy] = useState(false);
@@ -458,61 +563,8 @@ export function useConsoleAppState() {
     setCronJobId("");
     setCronForm(DEFAULT_CRON_FORM);
 
-    setChannelsBusy(false);
-    setChannelsConnectors([]);
-    setChannelsSelectedConnectorId("");
-    setChannelsSelectedStatus(null);
-    setChannelsEvents([]);
-    setChannelsDeadLetters([]);
-    setChannelsLogsLimit("25");
-    setChannelsTestText("hello from web console");
-    setChannelsTestConversationId("test:conversation");
-    setChannelsTestSenderId("test-user");
-    setChannelsTestSenderDisplay("");
-    setChannelsTestCrashOnce(false);
-    setChannelsTestDirectMessage(true);
-    setChannelsTestBroadcast(false);
-    setChannelsDiscordTarget("channel:");
-    setChannelsDiscordText("palyra discord test message");
-    setChannelsDiscordAutoReaction("");
-    setChannelsDiscordThreadId("");
-    setChannelsDiscordConfirm(false);
-    setChannelRouterRules(null);
-    setChannelRouterConfigHash("");
-    setChannelRouterWarnings([]);
-    setChannelRouterPreviewChannel("");
-    setChannelRouterPreviewText("pair 000000");
-    setChannelRouterPreviewConversationId("");
-    setChannelRouterPreviewSenderIdentity("");
-    setChannelRouterPreviewSenderDisplay("");
-    setChannelRouterPreviewSenderVerified(true);
-    setChannelRouterPreviewIsDirectMessage(true);
-    setChannelRouterPreviewRequestedBroadcast(false);
-    setChannelRouterPreviewMaxPayloadBytes("2048");
-    setChannelRouterPreviewResult(null);
-    setChannelRouterPairingsFilterChannel("");
-    setChannelRouterPairings([]);
-    setChannelRouterMintChannel("");
-    setChannelRouterMintIssuedBy("");
-    setChannelRouterMintTtlMs("600000");
-    setChannelRouterMintResult(null);
-    setDiscordWizardBusy(false);
-    setDiscordWizardAccountId("default");
-    setDiscordWizardMode("local");
-    setDiscordWizardToken("");
-    setDiscordWizardScope("dm_only");
-    setDiscordWizardAllowFrom("");
-    setDiscordWizardDenyFrom("");
-    setDiscordWizardRequireMention(true);
-    setDiscordWizardBroadcast("deny");
-    setDiscordWizardConcurrency("2");
-    setDiscordWizardConfirmOpen(false);
-    setDiscordWizardVerifyChannelId("");
-    setDiscordWizardPreflight(null);
-    setDiscordWizardApply(null);
-    setDiscordWizardVerifyTarget("channel:");
-    setDiscordWizardVerifyText("palyra discord test message");
-    setDiscordWizardVerifyConfirm(false);
+    channelCoreState.resetChannelCoreState();
+    discordChannelState.resetDiscordChannelState();
 
     setMemoryBusy(false);
     setMemoryQuery("");
@@ -739,288 +791,6 @@ export function useConsoleAppState() {
       setError(toErrorMessage(failure));
     } finally {
       setCronBusy(false);
-    }
-  }
-
-  async function submitChannelRouterPreview(
-    event: React.FormEvent<HTMLFormElement>
-  ): Promise<void> {
-    event.preventDefault();
-    const routeChannel = channelRouterPreviewChannel.trim();
-    const text = channelRouterPreviewText.trim();
-    if (routeChannel.length === 0) {
-      setError("Router preview channel cannot be empty.");
-      return;
-    }
-    if (text.length === 0) {
-      setError("Router preview text cannot be empty.");
-      return;
-    }
-
-    setChannelsBusy(true);
-    setError(null);
-    try {
-      const maxPayloadBytes = parseInteger(channelRouterPreviewMaxPayloadBytes);
-      const response = await api.previewChannelRoute({
-        channel: routeChannel,
-        text,
-        conversation_id: emptyToUndefined(channelRouterPreviewConversationId),
-        sender_identity: emptyToUndefined(channelRouterPreviewSenderIdentity),
-        sender_display: emptyToUndefined(channelRouterPreviewSenderDisplay),
-        sender_verified: channelRouterPreviewSenderVerified,
-        is_direct_message: channelRouterPreviewIsDirectMessage,
-        requested_broadcast: channelRouterPreviewRequestedBroadcast,
-        max_payload_bytes: maxPayloadBytes !== null && maxPayloadBytes > 0 ? maxPayloadBytes : undefined
-      });
-      setChannelRouterPreviewResult(isJsonObject(response.preview) ? response.preview : null);
-      if (isJsonObject(response.preview)) {
-        const accepted = response.preview.accepted === true ? "accepted" : "rejected";
-        const reason = readString(response.preview, "reason") ?? "unknown";
-        setNotice(`Route preview ${accepted}: ${reason}.`);
-      } else {
-        setNotice("Route preview completed.");
-      }
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setChannelsBusy(false);
-    }
-  }
-
-  async function mintChannelRouterPairingCode(
-    event: React.FormEvent<HTMLFormElement>
-  ): Promise<void> {
-    event.preventDefault();
-    const routeChannel = channelRouterMintChannel.trim();
-    if (routeChannel.length === 0) {
-      setError("Pairing code channel cannot be empty.");
-      return;
-    }
-
-    const parsedTtl = parseInteger(channelRouterMintTtlMs);
-    if (parsedTtl !== null && parsedTtl <= 0) {
-      setError("Pairing code TTL must be a positive integer.");
-      return;
-    }
-
-    setChannelsBusy(true);
-    setError(null);
-    try {
-      const response = await api.mintChannelRouterPairingCode({
-        channel: routeChannel,
-        issued_by: emptyToUndefined(channelRouterMintIssuedBy),
-        ttl_ms: parsedTtl !== null ? parsedTtl : undefined
-      });
-      setChannelRouterMintResult(isJsonObject(response.code) ? response.code : null);
-      await refreshChannelRouter(
-        channelRouterPairingsFilterChannel.trim().length > 0
-          ? channelRouterPairingsFilterChannel.trim()
-          : routeChannel
-      );
-      if (isJsonObject(response.code)) {
-        const code = readString(response.code, "code") ?? "(missing)";
-        setNotice(`Pairing code minted: ${code}.`);
-      } else {
-        setNotice("Pairing code minted.");
-      }
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setChannelsBusy(false);
-    }
-  }
-
-  function discordWizardConnectorId(): string | null {
-    const normalized = discordWizardAccountId.trim().toLowerCase();
-    if (normalized.length === 0) {
-      return "discord:default";
-    }
-    if (!/^[a-z0-9._-]+$/.test(normalized)) {
-      return null;
-    }
-    return `discord:${normalized}`;
-  }
-
-  function parseDiscordWizardSenderList(raw: string): string[] {
-    const entries: string[] = [];
-    for (const candidate of raw.split(",")) {
-      const normalized = candidate.trim().toLowerCase();
-      if (normalized.length === 0) {
-        continue;
-      }
-      if (!entries.includes(normalized)) {
-        entries.push(normalized);
-      }
-    }
-    return entries;
-  }
-
-  function parsedDiscordWizardConcurrency(): number {
-    const parsed = parseInteger(discordWizardConcurrency);
-    if (parsed === null || parsed <= 0) {
-      return 2;
-    }
-    return Math.min(Math.max(parsed, 1), 32);
-  }
-
-  function parseDiscordWizardVerifyChannelId(): { value?: string; error?: string } {
-    const normalized = discordWizardVerifyChannelId.trim();
-    if (normalized.length === 0) {
-      return {};
-    }
-    if (!/^[0-9]+$/.test(normalized)) {
-      return { error: "Verify channel ID must contain decimal digits only." };
-    }
-    if (normalized.length < 16 || normalized.length > 24) {
-      return { error: "Verify channel ID must be a canonical Discord snowflake (16-24 digits)." };
-    }
-    return { value: normalized };
-  }
-
-  function buildDiscordWizardPayload(verifyChannelId?: string): {
-    account_id?: string;
-    token: string;
-    mode: "local" | "remote_vps";
-    inbound_scope: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
-    allow_from: string[];
-    deny_from: string[];
-    require_mention: boolean;
-    concurrency_limit: number;
-    broadcast_strategy: "deny" | "mention_only" | "allow";
-    confirm_open_guild_channels: boolean;
-    verify_channel_id?: string;
-  } {
-    const normalized = discordWizardAccountId.trim().toLowerCase();
-    return {
-      account_id: normalized.length > 0 ? normalized : undefined,
-      token: discordWizardToken.trim(),
-      mode: discordWizardMode,
-      inbound_scope: discordWizardScope,
-      allow_from: parseDiscordWizardSenderList(discordWizardAllowFrom),
-      deny_from: parseDiscordWizardSenderList(discordWizardDenyFrom),
-      require_mention: discordWizardRequireMention,
-      concurrency_limit: parsedDiscordWizardConcurrency(),
-      broadcast_strategy: discordWizardBroadcast,
-      confirm_open_guild_channels: discordWizardConfirmOpen,
-      verify_channel_id: verifyChannelId
-    };
-  }
-
-  async function runDiscordOnboardingProbe(): Promise<void> {
-    if (discordWizardToken.trim().length === 0) {
-      setError("Discord onboarding token cannot be empty.");
-      return;
-    }
-    const verifyChannel = parseDiscordWizardVerifyChannelId();
-    if (verifyChannel.error !== undefined) {
-      setError(verifyChannel.error);
-      return;
-    }
-    const connectorId = discordWizardConnectorId();
-    if (connectorId === null) {
-      setError("Discord account ID contains unsupported characters.");
-      return;
-    }
-    setDiscordWizardBusy(true);
-    setError(null);
-    try {
-      const response = await api.probeDiscordOnboarding(buildDiscordWizardPayload(verifyChannel.value));
-      setDiscordWizardPreflight(isJsonObject(response) ? response : null);
-      const botId = isJsonObject(response.bot) ? readString(response.bot, "id") : null;
-      const botUsername = isJsonObject(response.bot) ? readString(response.bot, "username") : null;
-      setNotice(
-        botId !== null && botUsername !== null
-          ? `Discord preflight OK for ${botUsername} (${botId}).`
-          : "Discord preflight completed."
-      );
-      await refreshChannels(connectorId);
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setDiscordWizardBusy(false);
-    }
-  }
-
-  async function applyDiscordOnboarding(): Promise<void> {
-    if (discordWizardToken.trim().length === 0) {
-      setError("Discord onboarding token cannot be empty.");
-      return;
-    }
-    const verifyChannel = parseDiscordWizardVerifyChannelId();
-    if (verifyChannel.error !== undefined) {
-      setError(verifyChannel.error);
-      return;
-    }
-    const connectorId = discordWizardConnectorId();
-    if (connectorId === null) {
-      setError("Discord account ID contains unsupported characters.");
-      return;
-    }
-    if (discordWizardScope === "open_guild_channels" && !discordWizardConfirmOpen) {
-      setError("Open guild channels require explicit confirmation.");
-      return;
-    }
-
-    setDiscordWizardBusy(true);
-    setError(null);
-    try {
-      const response = await api.applyDiscordOnboarding(buildDiscordWizardPayload(verifyChannel.value));
-      setDiscordWizardApply(isJsonObject(response) ? response : null);
-      const preflight = isJsonObject(response.preflight) ? response.preflight : null;
-      const bot = preflight !== null && isJsonObject(preflight.bot) ? preflight.bot : null;
-      const botId = bot !== null ? readString(bot, "id") : null;
-      const botUsername = bot !== null ? readString(bot, "username") : null;
-      setNotice(
-        botId !== null && botUsername !== null
-          ? `Discord onboarding applied for ${botUsername} (${botId}).`
-          : "Discord onboarding applied."
-      );
-      setDiscordWizardToken("");
-      await refreshChannels(connectorId);
-      await loadChannel(connectorId);
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setDiscordWizardBusy(false);
-    }
-  }
-
-  async function verifyDiscordOnboardingTarget(): Promise<void> {
-    const connectorId = discordWizardConnectorId();
-    if (connectorId === null) {
-      setError("Discord account ID contains unsupported characters.");
-      return;
-    }
-    if (discordWizardVerifyTarget.trim().length === 0) {
-      setError("Verification target cannot be empty.");
-      return;
-    }
-    if (!discordWizardVerifyConfirm) {
-      setError("Verification send requires explicit confirmation.");
-      return;
-    }
-    setDiscordWizardBusy(true);
-    setError(null);
-    try {
-      const response = await api.sendChannelDiscordTestSend(connectorId, {
-        target: discordWizardVerifyTarget.trim(),
-        text: emptyToUndefined(discordWizardVerifyText),
-        confirm: true
-      });
-      const dispatch = isJsonObject(response.dispatch) ? response.dispatch : null;
-      const delivered = dispatch !== null ? readString(dispatch, "delivered") : null;
-      setNotice(
-        delivered !== null
-          ? `Discord verification dispatched (delivered=${delivered}).`
-          : "Discord verification dispatched."
-      );
-      setDiscordWizardVerifyConfirm(false);
-      await refreshChannels(connectorId);
-      await refreshChannelLogs(connectorId);
-    } catch (failure) {
-      setError(toErrorMessage(failure));
-    } finally {
-      setDiscordWizardBusy(false);
     }
   }
 

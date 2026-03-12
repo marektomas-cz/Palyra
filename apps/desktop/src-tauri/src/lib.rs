@@ -19,7 +19,7 @@ const BROWSER_GRPC_PORT: u16 = 7543;
 
 mod commands;
 mod desktop_state;
-mod discord_onboarding;
+mod features;
 mod onboarding;
 mod openai_auth;
 mod snapshot;
@@ -31,7 +31,7 @@ pub(crate) use desktop_state::{
     load_or_initialize_state_file, resolve_desktop_state_root, DesktopOnboardingStep,
     DesktopSecretStore, DesktopStateFile,
 };
-pub(crate) use discord_onboarding::DiscordOnboardingRequest;
+pub(crate) use features::onboarding::connectors::discord::DiscordOnboardingRequest;
 pub(crate) use onboarding::{build_desktop_refresh_payload, build_onboarding_status};
 pub(crate) use supervisor::{
     normalize_optional_text, resolve_binary_path, unix_ms_now, ControlCenter,

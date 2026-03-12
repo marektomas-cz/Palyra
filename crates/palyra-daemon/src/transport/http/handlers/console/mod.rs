@@ -1,0 +1,14 @@
+pub(crate) mod approvals;
+pub(crate) mod audit;
+pub(crate) mod auth;
+pub(crate) mod browser;
+pub(crate) mod channels;
+pub(crate) mod chat;
+pub(crate) mod config;
+pub(crate) mod cron;
+pub(crate) mod diagnostics;
+pub(crate) mod memory;
+pub(crate) mod pairing;
+pub(crate) mod secrets;
+pub(crate) mod skills;
+pub(crate) mod support_bundle;

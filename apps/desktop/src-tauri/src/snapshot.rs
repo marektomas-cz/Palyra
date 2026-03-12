@@ -427,26 +427,19 @@ fn build_desktop_observability_snapshot(
     let observability = diagnostics_payload
         .and_then(|payload| payload.get("observability"))
         .and_then(Value::as_object);
-    let provider_auth = observability
-        .and_then(|root| root.get("provider_auth"))
-        .and_then(Value::as_object);
-    let dashboard = observability
-        .and_then(|root| root.get("dashboard"))
-        .and_then(Value::as_object);
-    let connector = observability
-        .and_then(|root| root.get("connector"))
-        .and_then(Value::as_object);
+    let provider_auth =
+        observability.and_then(|root| root.get("provider_auth")).and_then(Value::as_object);
+    let dashboard = observability.and_then(|root| root.get("dashboard")).and_then(Value::as_object);
+    let connector = observability.and_then(|root| root.get("connector")).and_then(Value::as_object);
     let browser_relay = observability
         .and_then(|root| root.get("browser"))
         .and_then(Value::as_object)
         .and_then(|root| root.get("relay_actions"))
         .and_then(Value::as_object);
-    let support_bundle = observability
-        .and_then(|root| root.get("support_bundle"))
-        .and_then(Value::as_object);
-    let failure_classes = observability
-        .and_then(|root| root.get("failure_classes"))
-        .and_then(Value::as_object);
+    let support_bundle =
+        observability.and_then(|root| root.get("support_bundle")).and_then(Value::as_object);
+    let failure_classes =
+        observability.and_then(|root| root.get("failure_classes")).and_then(Value::as_object);
     let recent_failure_count = observability
         .and_then(|root| root.get("recent_failures"))
         .and_then(Value::as_array)
@@ -490,10 +483,7 @@ fn build_desktop_observability_snapshot(
         },
         failure_classes: DesktopFailureClassSummary {
             config_failure: read_json_u64(failure_classes, "config_failure"),
-            upstream_provider_failure: read_json_u64(
-                failure_classes,
-                "upstream_provider_failure",
-            ),
+            upstream_provider_failure: read_json_u64(failure_classes, "upstream_provider_failure"),
             product_failure: read_json_u64(failure_classes, "product_failure"),
         },
         recent_failure_count,
@@ -501,10 +491,7 @@ fn build_desktop_observability_snapshot(
 }
 
 fn read_json_u64(record: Option<&serde_json::Map<String, Value>>, key: &str) -> u64 {
-    record
-        .and_then(|entry| entry.get(key))
-        .and_then(Value::as_u64)
-        .unwrap_or_default()
+    record.and_then(|entry| entry.get(key)).and_then(Value::as_u64).unwrap_or_default()
 }
 
 fn read_json_u32(record: Option<&serde_json::Map<String, Value>>, key: &str) -> u32 {

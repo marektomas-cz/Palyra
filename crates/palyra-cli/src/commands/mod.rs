@@ -1,0 +1,24 @@
+pub mod agent;
+pub mod agents;
+pub mod approvals;
+pub mod auth;
+pub mod browser;
+pub mod channels;
+pub mod completion;
+pub mod config;
+pub mod cron;
+pub mod daemon;
+pub mod doctor;
+pub mod init;
+pub mod memory;
+pub mod onboarding;
+#[cfg(not(windows))]
+pub mod pairing;
+pub mod patch;
+pub mod policy;
+pub mod protocol;
+pub mod secrets;
+pub mod skills;
+pub mod status;
+pub mod support_bundle;
+pub mod tunnel;

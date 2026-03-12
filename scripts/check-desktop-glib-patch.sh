@@ -66,6 +66,35 @@ if [[ ! -f "$desktop_regression_test" ]]; then
   exit 1
 fi
 
+resolve_cargo() {
+  if command -v cargo >/dev/null 2>&1; then
+    command -v cargo
+    return 0
+  fi
+  if command -v cargo.exe >/dev/null 2>&1; then
+    command -v cargo.exe
+    return 0
+  fi
+
+  local candidates=(
+    "${HOME:-}/.cargo/bin/cargo"
+    "${HOME:-}/.cargo/bin/cargo.exe"
+    "${USERPROFILE:-}/.cargo/bin/cargo.exe"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  echo "cargo is required for desktop glib governance checks." >&2
+  exit 1
+}
+
+CARGO_BIN="$(resolve_cargo)"
+
 sha256_file() {
   local target="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -106,13 +135,18 @@ assert_resolved_vendored_glib() {
   local expected_crate_name="$2"
   local expected_crate_version="$3"
   local expected_patch_dir="$4"
+  local cargo_manifest_path="$manifest_path"
   local python_selector
   python_selector="$(select_python_interpreter)"
   local -a python_cmd=()
   IFS=' ' read -r -a python_cmd <<< "$python_selector"
 
+  if [[ "$CARGO_BIN" == *.exe ]] && command -v wslpath >/dev/null 2>&1; then
+    cargo_manifest_path="$(wslpath -w "$manifest_path")"
+  fi
+
   local metadata_json
-  if ! metadata_json="$(cargo metadata --format-version 1 --locked --manifest-path "$manifest_path")"; then
+  if ! metadata_json="$("$CARGO_BIN" metadata --format-version 1 --locked --manifest-path "$cargo_manifest_path")"; then
     echo "Failed to load Cargo metadata for desktop app." >&2
     exit 1
   fi
@@ -121,11 +155,20 @@ assert_resolved_vendored_glib() {
   metadata_validator="$(cat <<'PY'
 import json
 import os
+import re
 import sys
 
 crate_name = sys.argv[1]
 crate_version = sys.argv[2]
-expected_patch_dir = os.path.realpath(sys.argv[3])
+def normalize_manifest_path(raw: str) -> str:
+    candidate = raw.strip()
+    if re.match(r"^[A-Za-z]:[\\\\/]", candidate):
+        drive = candidate[0].lower()
+        tail = candidate[2:].replace("\\", "/")
+        candidate = f"/mnt/{drive}{tail}"
+    return os.path.realpath(candidate)
+
+expected_patch_dir = normalize_manifest_path(sys.argv[3])
 expected_manifest = os.path.join(expected_patch_dir, "Cargo.toml")
 
 packages = json.load(sys.stdin).get("packages", [])
@@ -144,7 +187,7 @@ for pkg in matches:
         print(f"Desktop dependency graph resolves glib from unexpected source: {pkg_source}", file=sys.stderr)
         sys.exit(1)
 
-    manifest_path = os.path.realpath(pkg.get("manifest_path", ""))
+    manifest_path = normalize_manifest_path(pkg.get("manifest_path", ""))
     if manifest_path != expected_manifest:
         print(
             "Desktop dependency graph resolves glib from an unexpected path "

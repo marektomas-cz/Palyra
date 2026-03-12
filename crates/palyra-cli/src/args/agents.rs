@@ -1,0 +1,46 @@
+use clap::Subcommand;
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum AgentsCommand {
+    List {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, default_value_t = false, conflicts_with = "ndjson")]
+        json: bool,
+        #[arg(long, default_value_t = false, conflicts_with = "json")]
+        ndjson: bool,
+    },
+    Show {
+        agent_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    SetDefault {
+        agent_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Create {
+        agent_id: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        agent_dir: Option<String>,
+        #[arg(long = "workspace-root")]
+        workspace_root: Vec<String>,
+        #[arg(long = "model-profile")]
+        model_profile: Option<String>,
+        #[arg(long = "tool-allow")]
+        tool_allow: Vec<String>,
+        #[arg(long = "skill-allow")]
+        skill_allow: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        set_default: bool,
+        #[arg(long, default_value_t = false)]
+        allow_absolute_paths: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}

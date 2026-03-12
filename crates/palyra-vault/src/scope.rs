@@ -1,7 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::{VaultError, MAX_SCOPE_SEGMENT_BYTES};
+use crate::VaultError;
+
+pub const MAX_SCOPE_SEGMENT_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

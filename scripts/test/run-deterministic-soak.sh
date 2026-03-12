@@ -34,5 +34,5 @@ cd "$ROOT_DIR"
 
 CARGO_BIN="$(resolve_cargo)"
 
-"$CARGO_BIN" test -p palyra-connectors --lib --locked gateway_envelope_reconnect_resume_cycles_remain_stable_under_soak
-"$CARGO_BIN" test -p palyra-connectors --lib --locked repeated_dead_letter_recovery_cycles_keep_queue_accounting_stable
+"$CARGO_BIN" test -p palyra-connector-discord --lib --locked gateway_envelope_reconnect_resume_cycles_remain_stable_under_soak
+"$CARGO_BIN" test -p palyra-connector-core --lib --locked repeated_dead_letter_recovery_cycles_keep_queue_accounting_stable

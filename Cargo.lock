@@ -2481,6 +2481,7 @@ dependencies = [
  "futures",
  "palyra-auth",
  "palyra-common",
+ "palyra-connector-discord",
  "palyra-identity",
  "palyra-policy",
  "palyra-skills",
@@ -2517,6 +2518,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "palyra-connector-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "palyra-common",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "palyra-connector-discord"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "flate2",
+ "futures",
+ "palyra-common",
+ "palyra-connector-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "palyra-connectors"
 version = "0.1.0"
 dependencies = [
@@ -2526,6 +2562,8 @@ dependencies = [
  "flate2",
  "futures",
  "palyra-common",
+ "palyra-connector-core",
+ "palyra-connector-discord",
  "reqwest",
  "rusqlite",
  "serde",
@@ -2565,6 +2603,7 @@ dependencies = [
  "palyra-a2ui",
  "palyra-auth",
  "palyra-common",
+ "palyra-connector-discord",
  "palyra-connectors",
  "palyra-control-plane",
  "palyra-identity",

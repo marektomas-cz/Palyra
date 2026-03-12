@@ -21,11 +21,11 @@ use tonic::metadata::MetadataValue;
 use tracing::warn;
 use ulid::Ulid;
 
-use crate::gateway::{
-    proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
-    GatewayAuthConfig, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
-};
 use crate::media::{InboundAttachmentIngestRequest, MediaArtifactStore, MediaRuntimeConfig};
+use crate::transport::grpc::{
+    auth::{GatewayAuthConfig, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL},
+    proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
+};
 
 mod discord;
 

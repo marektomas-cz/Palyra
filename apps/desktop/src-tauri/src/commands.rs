@@ -4,7 +4,7 @@ use anyhow::Result;
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
 
-use super::discord_onboarding::{
+use super::features::onboarding::connectors::discord::{
     apply_discord_onboarding, run_discord_onboarding_preflight, verify_discord_connector,
     DiscordControlPlaneInputs, DiscordOnboardingApplySnapshot, DiscordOnboardingPreflightSnapshot,
     DiscordVerificationRequest, DiscordVerificationResult,
@@ -23,7 +23,7 @@ use super::snapshot::{
     ControlCenterSnapshot, DesktopSettingsSnapshot, SupportBundleExportResult,
 };
 use super::{
-    build_onboarding_status, ControlCenter, DiscordOnboardingRequest, DesktopOnboardingStep,
+    build_onboarding_status, ControlCenter, DesktopOnboardingStep, DiscordOnboardingRequest,
     SUPERVISOR_TICK_MS,
 };
 
@@ -79,9 +79,7 @@ pub(crate) async fn get_desktop_refresh_payload(
         let mut supervisor = state.supervisor.lock().await;
         supervisor.capture_onboarding_status_inputs()
     };
-    let payload = super::build_desktop_refresh_payload(inputs)
-        .await
-        .map_err(command_error)?;
+    let payload = super::build_desktop_refresh_payload(inputs).await.map_err(command_error)?;
     let onboarding_status = finalize_onboarding_status(state, payload.onboarding_status).await?;
     Ok(DesktopRefreshPayload { onboarding_status, ..payload })
 }
@@ -92,10 +90,7 @@ pub(crate) async fn acknowledge_onboarding_welcome(
 ) -> Result<ActionResult, String> {
     let mut supervisor = state.supervisor.lock().await;
     supervisor.mark_onboarding_welcome_acknowledged().map_err(command_error)?;
-    Ok(ActionResult {
-        ok: true,
-        message: "desktop onboarding welcome acknowledged".to_owned(),
-    })
+    Ok(ActionResult { ok: true, message: "desktop onboarding welcome acknowledged".to_owned() })
 }
 
 #[tauri::command]
@@ -107,10 +102,8 @@ pub(crate) async fn set_onboarding_state_root_command(
     let runtime_root = supervisor
         .set_runtime_state_root_override(payload.path.as_deref(), payload.confirm_selection)
         .map_err(|error| {
-            let _ = supervisor.record_onboarding_failure(
-                DesktopOnboardingStep::StateRoot,
-                error.to_string(),
-            );
+            let _ = supervisor
+                .record_onboarding_failure(DesktopOnboardingStep::StateRoot, error.to_string());
             command_error(error)
         })?;
     Ok(ActionResult {
@@ -173,10 +166,8 @@ pub(crate) async fn open_dashboard(
 ) -> Result<ActionResult, String> {
     let mut supervisor = state.supervisor.lock().await;
     let url = supervisor.open_dashboard().map_err(|error| {
-        let _ = supervisor.record_onboarding_failure(
-            DesktopOnboardingStep::DashboardHandoff,
-            error.to_string(),
-        );
+        let _ = supervisor
+            .record_onboarding_failure(DesktopOnboardingStep::DashboardHandoff, error.to_string());
         command_error(error)
     })?;
     let _ = supervisor.mark_dashboard_handoff_complete();
@@ -198,10 +189,8 @@ pub(crate) async fn export_support_bundle(
     match run_support_bundle_export(export_plan).await {
         Ok(result) => {
             let mut supervisor = state.supervisor.lock().await;
-            let _ = supervisor.record_support_bundle_export_result(
-                true,
-                Some(result.output_path.clone()),
-            );
+            let _ = supervisor
+                .record_support_bundle_export_result(true, Some(result.output_path.clone()));
             Ok(result)
         }
         Err(error) => {
@@ -235,10 +224,8 @@ pub(crate) async fn connect_openai_api_key_command(
         Err(error) => {
             let message = command_error(error);
             let mut supervisor = state.supervisor.lock().await;
-            let _ = supervisor.record_onboarding_failure(
-                DesktopOnboardingStep::OpenAiConnect,
-                message.clone(),
-            );
+            let _ = supervisor
+                .record_onboarding_failure(DesktopOnboardingStep::OpenAiConnect, message.clone());
             return Err(message);
         }
     };
@@ -260,19 +247,15 @@ pub(crate) async fn start_openai_oauth_bootstrap_command(
         Err(error) => {
             let message = command_error(error);
             let mut supervisor = state.supervisor.lock().await;
-            let _ = supervisor.record_onboarding_failure(
-                DesktopOnboardingStep::OpenAiConnect,
-                message.clone(),
-            );
+            let _ = supervisor
+                .record_onboarding_failure(DesktopOnboardingStep::OpenAiConnect, message.clone());
             return Err(message);
         }
     };
     {
         let mut supervisor = state.supervisor.lock().await;
-        let _ = supervisor.record_onboarding_event(
-            "openai_oauth_started",
-            Some(result.attempt_id.clone()),
-        );
+        let _ = supervisor
+            .record_onboarding_event("openai_oauth_started", Some(result.attempt_id.clone()));
         let _ = supervisor.clear_onboarding_failure();
     }
     open_browser_result(result)
@@ -289,10 +272,8 @@ pub(crate) async fn get_openai_oauth_callback_state_command(
         Err(error) => {
             let message = command_error(error);
             let mut supervisor = state.supervisor.lock().await;
-            let _ = supervisor.record_onboarding_failure(
-                DesktopOnboardingStep::OpenAiConnect,
-                message.clone(),
-            );
+            let _ = supervisor
+                .record_onboarding_failure(DesktopOnboardingStep::OpenAiConnect, message.clone());
             return Err(message);
         }
     };
@@ -321,10 +302,8 @@ pub(crate) async fn reconnect_openai_oauth_command(
         Err(error) => {
             let message = command_error(error);
             let mut supervisor = state.supervisor.lock().await;
-            let _ = supervisor.record_onboarding_failure(
-                DesktopOnboardingStep::OpenAiConnect,
-                message.clone(),
-            );
+            let _ = supervisor
+                .record_onboarding_failure(DesktopOnboardingStep::OpenAiConnect, message.clone());
             return Err(message);
         }
     };
@@ -377,10 +356,8 @@ pub(crate) async fn run_discord_onboarding_preflight_command(
         Err(error) => {
             let message = command_error(error);
             let mut supervisor = state.supervisor.lock().await;
-            let _ = supervisor.record_onboarding_failure(
-                DesktopOnboardingStep::DiscordConnect,
-                message.clone(),
-            );
+            let _ = supervisor
+                .record_onboarding_failure(DesktopOnboardingStep::DiscordConnect, message.clone());
             return Err(message);
         }
     };
@@ -402,10 +379,8 @@ pub(crate) async fn apply_discord_onboarding_command(
         Err(error) => {
             let message = command_error(error);
             let mut supervisor = state.supervisor.lock().await;
-            let _ = supervisor.record_onboarding_failure(
-                DesktopOnboardingStep::DiscordConnect,
-                message.clone(),
-            );
+            let _ = supervisor
+                .record_onboarding_failure(DesktopOnboardingStep::DiscordConnect, message.clone());
             return Err(message);
         }
     };
@@ -427,19 +402,15 @@ pub(crate) async fn verify_discord_connector_command(
         Err(error) => {
             let message = command_error(error);
             let mut supervisor = state.supervisor.lock().await;
-            let _ = supervisor.record_onboarding_failure(
-                DesktopOnboardingStep::DiscordConnect,
-                message.clone(),
-            );
+            let _ = supervisor
+                .record_onboarding_failure(DesktopOnboardingStep::DiscordConnect, message.clone());
             return Err(message);
         }
     };
     {
         let mut supervisor = state.supervisor.lock().await;
-        let _ = supervisor.mark_discord_verified(
-            response.connector_id.as_str(),
-            response.target.as_str(),
-        );
+        let _ = supervisor
+            .mark_discord_verified(response.connector_id.as_str(), response.target.as_str());
     }
     Ok(response)
 }
@@ -498,9 +469,7 @@ async fn capture_openai_inputs(state: &State<'_, DesktopAppState>) -> OpenAiCont
     OpenAiControlPlaneInputs::capture(&supervisor)
 }
 
-async fn capture_discord_inputs(
-    state: &State<'_, DesktopAppState>,
-) -> DiscordControlPlaneInputs {
+async fn capture_discord_inputs(state: &State<'_, DesktopAppState>) -> DiscordControlPlaneInputs {
     let supervisor = state.supervisor.lock().await;
     DiscordControlPlaneInputs::capture(&supervisor)
 }

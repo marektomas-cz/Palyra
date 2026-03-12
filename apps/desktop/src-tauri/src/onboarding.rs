@@ -12,7 +12,9 @@ use serde::Serialize;
 use super::desktop_state::{
     DesktopDiscordOnboardingState, DesktopOnboardingEvent, DesktopOnboardingFailureState,
 };
-use super::openai_auth::{load_openai_auth_status, OpenAiAuthStatusSnapshot, OpenAiControlPlaneInputs};
+use super::openai_auth::{
+    load_openai_auth_status, OpenAiAuthStatusSnapshot, OpenAiControlPlaneInputs,
+};
 use super::snapshot::{
     build_control_plane_client, build_snapshot_from_inputs, ensure_console_session,
     sanitize_log_line, ControlCenterSnapshot, SnapshotBuildInputs,
@@ -184,7 +186,9 @@ pub(crate) async fn build_desktop_refresh_payload(
     let snapshot = snapshot?;
     let openai_status = match openai_status {
         Ok(status) => status,
-        Err(error) => OpenAiAuthStatusSnapshot::unavailable(sanitize_log_line(error.to_string().as_str())),
+        Err(error) => {
+            OpenAiAuthStatusSnapshot::unavailable(sanitize_log_line(error.to_string().as_str()))
+        }
     };
 
     let dashboard_reachable = probe_dashboard_reachability(
@@ -204,13 +208,8 @@ pub(crate) async fn build_desktop_refresh_payload(
         &snapshot,
         dashboard_reachable,
     );
-    let operator_auth = probe_operator_auth(
-        &http_client,
-        &runtime,
-        admin_token.as_str(),
-        &snapshot,
-    )
-    .await;
+    let operator_auth =
+        probe_operator_auth(&http_client, &runtime, admin_token.as_str(), &snapshot).await;
     let openai_ready = is_openai_ready(&openai_status);
     let discord_ready = is_discord_ready(&snapshot);
     let discord_verified = discord_ready
@@ -249,10 +248,7 @@ pub(crate) async fn build_desktop_refresh_payload(
         runtime_root.to_string_lossy().as_ref(),
         current_step,
     );
-    let progress_completed = steps
-        .iter()
-        .filter(|step| step.status == "complete")
-        .count();
+    let progress_completed = steps.iter().filter(|step| step.status == "complete").count();
     let progress_total = steps.len();
     let current_step_title = step_title(current_step).to_owned();
     let current_step_detail = steps
@@ -279,10 +275,9 @@ pub(crate) async fn build_desktop_refresh_payload(
         ),
     };
 
-    let phase =
-        if persisted.onboarding.completed_at_unix_ms.is_some()
-            || current_step == DesktopOnboardingStep::Completion
-        {
+    let phase = if persisted.onboarding.completed_at_unix_ms.is_some()
+        || current_step == DesktopOnboardingStep::Completion
+    {
         "home"
     } else {
         "onboarding"
@@ -334,6 +329,7 @@ fn success_rate_bps(successes: u64, attempts: u64) -> u32 {
     u32::try_from(scaled).unwrap_or(u32::MAX)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_preflight_snapshot(
     runtime_root: &Path,
     gateway_bound_ports: &[u16],
@@ -371,11 +367,7 @@ fn build_preflight_snapshot(
     checks.push(state_root_check(runtime_root));
     checks.push(config_check());
     checks.push(gateway_port_check(gateway_bound_ports, gateway_running));
-    checks.push(browser_port_check(
-        browser_bound_ports,
-        browser_running,
-        browser_service_enabled,
-    ));
+    checks.push(browser_port_check(browser_bound_ports, browser_running, browser_service_enabled));
     checks.push(admin_token_check(admin_token));
     checks.push(OnboardingPreflightCheck {
         key: "dashboard_mode".to_owned(),
@@ -386,7 +378,8 @@ fn build_preflight_snapshot(
         } else if dashboard_reachable {
             "Dashboard resolves to a local address and responds to HTTP checks.".to_owned()
         } else {
-            "Dashboard resolves locally but did not answer yet; start or refresh the runtime.".to_owned()
+            "Dashboard resolves locally but did not answer yet; start or refresh the runtime."
+                .to_owned()
         },
     });
 
@@ -421,8 +414,9 @@ fn binary_check(
 
 fn state_root_check(path: &Path) -> OnboardingPreflightCheck {
     let result = (|| -> Result<String> {
-        fs::create_dir_all(path)
-            .map_err(|error| anyhow::anyhow!("failed to create runtime root {}: {error}", path.display()))?;
+        fs::create_dir_all(path).map_err(|error| {
+            anyhow::anyhow!("failed to create runtime root {}: {error}", path.display())
+        })?;
         let probe = path.join(format!("desktop-write-probe-{}.tmp", unix_ms_now()));
         let mut file = fs::File::create(probe.as_path()).map_err(|error| {
             anyhow::anyhow!("failed to create runtime probe file {}: {error}", probe.display())
@@ -525,11 +519,7 @@ fn browser_port_check(
                 1 => "gRPC",
                 _ => return None,
             };
-            Some(PortProbe {
-                port: *port,
-                protocol: PortProtocol::Tcp,
-                label,
-            })
+            Some(PortProbe { port: *port, protocol: PortProtocol::Tcp, label })
         })
         .collect::<Vec<_>>();
     port_check(
@@ -584,10 +574,7 @@ fn port_check(
         key: key.to_owned(),
         label: label.to_owned(),
         status: if required { "blocked" } else { "warning" }.to_owned(),
-        detail: format!(
-            "{} are already in use on loopback.",
-            format_probe_list(busy.as_slice())
-        ),
+        detail: format!("{} are already in use on loopback.", format_probe_list(busy.as_slice())),
     }
 }
 
@@ -595,12 +582,8 @@ fn admin_token_check(admin_token: &str) -> OnboardingPreflightCheck {
     OnboardingPreflightCheck {
         key: "operator_auth".to_owned(),
         label: "Operator auth bootstrap".to_owned(),
-        status: if normalize_optional_text(admin_token).is_some() {
-            "ok"
-        } else {
-            "blocked"
-        }
-        .to_owned(),
+        status: if normalize_optional_text(admin_token).is_some() { "ok" } else { "blocked" }
+            .to_owned(),
         detail: if normalize_optional_text(admin_token).is_some() {
             "Desktop admin token is initialized in the local secret store.".to_owned()
         } else {
@@ -632,7 +615,8 @@ async fn probe_operator_auth(
     if snapshot.quick_facts.gateway_version.is_none() {
         return OnboardingOperatorAuthSnapshot {
             ready: false,
-            note: "Start the local runtime before desktop can verify operator auth bootstrap.".to_owned(),
+            note: "Start the local runtime before desktop can verify operator auth bootstrap."
+                .to_owned(),
         };
     }
 
@@ -649,7 +633,8 @@ async fn probe_operator_auth(
     match ensure_console_session(&mut control_plane, admin_token).await {
         Ok(()) => OnboardingOperatorAuthSnapshot {
             ready: true,
-            note: "Desktop console session bootstrap succeeded against the local gateway.".to_owned(),
+            note: "Desktop console session bootstrap succeeded against the local gateway."
+                .to_owned(),
         },
         Err(error) => OnboardingOperatorAuthSnapshot {
             ready: false,
@@ -690,7 +675,9 @@ fn derive_current_step(
     if persisted.onboarding.state_root_confirmed_at_unix_ms.is_none() {
         return DesktopOnboardingStep::StateRoot;
     }
-    if snapshot.quick_facts.gateway_version.is_none() || matches!(snapshot.overall_status, super::snapshot::OverallStatus::Down) {
+    if snapshot.quick_facts.gateway_version.is_none()
+        || matches!(snapshot.overall_status, super::snapshot::OverallStatus::Down)
+    {
         return DesktopOnboardingStep::GatewayInit;
     }
     if !operator_auth.ready {
@@ -746,41 +733,49 @@ fn derive_recovery(
 
 fn suggested_actions(step: DesktopOnboardingStep) -> Vec<String> {
     match step {
-        DesktopOnboardingStep::Welcome => vec![
-            "Start the guided flow from the desktop welcome step.".to_owned(),
-        ],
+        DesktopOnboardingStep::Welcome => {
+            vec!["Start the guided flow from the desktop welcome step.".to_owned()]
+        }
         DesktopOnboardingStep::Environment => vec![
-            "Resolve missing binaries, invalid config, state-root access, or port conflicts.".to_owned(),
+            "Resolve missing binaries, invalid config, state-root access, or port conflicts."
+                .to_owned(),
             "Refresh desktop preflight after each fix.".to_owned(),
             "Export a support bundle if the environment keeps failing.".to_owned(),
         ],
-        DesktopOnboardingStep::StateRoot => vec![
-            "Confirm the default runtime root or choose another absolute path.".to_owned(),
-        ],
+        DesktopOnboardingStep::StateRoot => {
+            vec!["Confirm the default runtime root or choose another absolute path.".to_owned()]
+        }
         DesktopOnboardingStep::GatewayInit => vec![
             "Start or restart the local runtime from the desktop action bar.".to_owned(),
             "Check recent sidecar logs and diagnostics for startup failures.".to_owned(),
         ],
         DesktopOnboardingStep::OperatorAuthBootstrap => vec![
-            "Refresh after the gateway is healthy so desktop can bootstrap its console session.".to_owned(),
-            "If the session still fails, restart the runtime and export a support bundle.".to_owned(),
+            "Refresh after the gateway is healthy so desktop can bootstrap its console session."
+                .to_owned(),
+            "If the session still fails, restart the runtime and export a support bundle."
+                .to_owned(),
         ],
-        DesktopOnboardingStep::OpenAiConnect => vec![
-            "Connect OpenAI with API key or OAuth and set a default profile.".to_owned(),
-        ],
+        DesktopOnboardingStep::OpenAiConnect => {
+            vec!["Connect OpenAI with API key or OAuth and set a default profile.".to_owned()]
+        }
         DesktopOnboardingStep::DiscordConnect => vec![
-            "Run Discord preflight, apply the connector, then send a verification message.".to_owned(),
-            "Re-enter the token if the previous attempt failed; desktop never stores it locally.".to_owned(),
+            "Run Discord preflight, apply the connector, then send a verification message."
+                .to_owned(),
+            "Re-enter the token if the previous attempt failed; desktop never stores it locally."
+                .to_owned(),
         ],
-        DesktopOnboardingStep::DashboardHandoff => vec![
-            "Open the dashboard from desktop once runtime, OpenAI, and Discord are ready.".to_owned(),
-        ],
+        DesktopOnboardingStep::DashboardHandoff => {
+            vec!["Open the dashboard from desktop once runtime, OpenAI, and Discord are ready."
+                .to_owned()]
+        }
         DesktopOnboardingStep::Completion => vec![
-            "Desktop home is ready. Use diagnostics or support bundle export if health degrades.".to_owned(),
+            "Desktop home is ready. Use diagnostics or support bundle export if health degrades."
+                .to_owned(),
         ],
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_step_snapshots(
     persisted: &super::DesktopStateFile,
     snapshot: &ControlCenterSnapshot,

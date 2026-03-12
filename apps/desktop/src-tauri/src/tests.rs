@@ -13,7 +13,7 @@ use std::{
 use serde_json::json;
 
 use super::commands::initialize_control_center;
-use super::discord_onboarding::{
+use super::features::onboarding::connectors::discord::{
     apply_discord_onboarding, run_discord_onboarding_preflight, verify_discord_connector,
     DiscordControlPlaneInputs, DiscordOnboardingRequest, DiscordVerificationRequest,
 };
@@ -27,12 +27,12 @@ use super::openai_auth::{
 use super::snapshot::resolve_dashboard_access_target;
 use super::{
     build_desktop_refresh_payload, build_onboarding_status, build_snapshot_from_inputs,
-    collect_redacted_errors,
-    compute_backoff_ms, executable_file_name, load_or_initialize_state_file, mpsc,
-    parse_discord_status, parse_remote_dashboard_base_url, resolve_binary_path, sanitize_log_line,
-    try_enqueue_log_event, BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode,
-    DesktopOnboardingStep, DesktopSecretStore, DesktopStateFile, LogEvent, LogStream,
-    ManagedService, RuntimeConfig, ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
+    collect_redacted_errors, compute_backoff_ms, executable_file_name,
+    load_or_initialize_state_file, mpsc, parse_discord_status, parse_remote_dashboard_base_url,
+    resolve_binary_path, sanitize_log_line, try_enqueue_log_event, BrowserStatusSnapshot, Client,
+    ControlCenter, DashboardAccessMode, DesktopOnboardingStep, DesktopSecretStore,
+    DesktopStateFile, LogEvent, LogStream, ManagedService, RuntimeConfig, ServiceKind, Ulid,
+    LOG_EVENT_CHANNEL_CAPACITY,
 };
 
 fn env_lock() -> &'static Mutex<()> {
@@ -495,6 +495,7 @@ fn state_file_initialization_seeds_onboarding_defaults() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn onboarding_status_advances_to_gateway_init_after_preflight_and_state_root_confirmation() {
     let _env_guard = lock_env();
     let fixture = TempFixtureDir::new();
@@ -551,6 +552,7 @@ version = 1
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn onboarding_status_surfaces_flow_id_failure_counts_and_bundle_metrics() {
     let _env_guard = lock_env();
     let fixture = TempFixtureDir::new();
@@ -627,6 +629,7 @@ version = 1
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn desktop_refresh_payload_reuses_single_snapshot_build_for_home_and_onboarding_views() {
     let _env_guard = lock_env();
     let fixture = TempFixtureDir::new();
@@ -664,10 +667,7 @@ version = 1
         .await
         .expect("desktop refresh payload should build");
 
-    assert_eq!(
-        payload.snapshot.quick_facts.dashboard_url,
-        payload.onboarding_status.dashboard_url
-    );
+    assert_eq!(payload.snapshot.quick_facts.dashboard_url, payload.onboarding_status.dashboard_url);
     assert_eq!(
         payload.snapshot.quick_facts.dashboard_access_mode,
         payload.onboarding_status.dashboard_access_mode
@@ -1102,25 +1102,12 @@ async fn snapshot_build_redacts_console_and_connector_diagnostics() {
     assert_eq!(snapshot.quick_facts.discord.pending_outbox, 5);
     assert_eq!(snapshot.quick_facts.discord.dead_letters, 3);
     assert_eq!(snapshot.diagnostics.observability.provider_auth.failures, 2);
-    assert_eq!(
-        snapshot.diagnostics.observability.provider_auth.failure_rate_bps,
-        2_500
-    );
+    assert_eq!(snapshot.diagnostics.observability.provider_auth.failure_rate_bps, 2_500);
     assert_eq!(snapshot.diagnostics.observability.dashboard.failures, 2);
     assert_eq!(snapshot.diagnostics.observability.connector.queue_depth, 6);
     assert_eq!(snapshot.diagnostics.observability.browser.relay_failures, 1);
-    assert_eq!(
-        snapshot.diagnostics.observability.support_bundle.success_rate_bps,
-        7_500
-    );
-    assert_eq!(
-        snapshot
-            .diagnostics
-            .observability
-            .failure_classes
-            .upstream_provider_failure,
-        2
-    );
+    assert_eq!(snapshot.diagnostics.observability.support_bundle.success_rate_bps, 7_500);
+    assert_eq!(snapshot.diagnostics.observability.failure_classes.upstream_provider_failure, 2);
     assert_eq!(snapshot.diagnostics.observability.recent_failure_count, 1);
     assert_eq!(snapshot.quick_facts.discord.saturation_state, "paused");
     assert_eq!(

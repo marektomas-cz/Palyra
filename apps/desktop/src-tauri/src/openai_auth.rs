@@ -626,8 +626,10 @@ fn build_orphan_profile_snapshot(
 }
 
 fn summarize_profiles(profiles: &[OpenAiProfileSnapshot]) -> OpenAiProfileHealthSummary {
-    let mut summary = OpenAiProfileHealthSummary::default();
-    summary.total = profiles.len() as u64;
+    let mut summary = OpenAiProfileHealthSummary {
+        total: profiles.len() as u64,
+        ..OpenAiProfileHealthSummary::default()
+    };
     for profile in profiles {
         match profile.health_state.as_str() {
             "ok" => summary.ok += 1,

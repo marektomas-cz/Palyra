@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [[bin]]
 name = "palyra"
-path = "src/main.rs"
+path = "src/bin/palyra.rs"
 
 [dependencies]
 agent-client-protocol.workspace = true
@@ -20,6 +20,7 @@ ed25519-dalek.workspace = true
 futures.workspace = true
 palyra-auth = { version = "0.1.0", path = "../palyra-auth" }
 palyra-common = { version = "0.1.0", path = "../palyra-common" }
+palyra-connector-discord = { version = "0.1.0", path = "../palyra-connector-discord" }
 palyra-identity = { version = "0.1.0", path = "../palyra-identity" }
 palyra-policy = { version = "0.1.0", path = "../palyra-policy" }
 palyra-skills = { version = "0.1.0", path = "../palyra-skills" }

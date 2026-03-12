@@ -1,0 +1,110 @@
+mod emit;
+mod prompt;
+mod request;
+mod setup;
+mod verify;
+
+use anyhow::Result;
+
+use crate::{
+    args::ChannelsDiscordCommand,
+    commands::channels::{get_connector_status, post_connector_action},
+    output::channels as channels_output,
+};
+
+pub(crate) fn run(command: ChannelsDiscordCommand) -> Result<()> {
+    match command {
+        ChannelsDiscordCommand::Setup {
+            account_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            verify_channel_id,
+            json,
+        } => setup::run(
+            account_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            verify_channel_id,
+            json,
+        )?,
+        ChannelsDiscordCommand::Status {
+            account_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let connector_id = request::connector_id(account_id.as_str())?;
+            let response = get_connector_status(
+                connector_id.as_str(),
+                url,
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call discord channels status endpoint",
+            )?;
+            channels_output::emit_status(response, json)?;
+        }
+        ChannelsDiscordCommand::HealthRefresh {
+            account_id,
+            verify_channel_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let connector_id = request::connector_id(account_id.as_str())?;
+            let response = post_connector_action(
+                connector_id.as_str(),
+                "/operations/health-refresh",
+                Some(serde_json::json!({ "verify_channel_id": verify_channel_id })),
+                url,
+                token,
+                principal,
+                device_id,
+                channel,
+                "failed to call discord channels health-refresh endpoint",
+            )?;
+            channels_output::emit_status(response, json)?;
+        }
+        ChannelsDiscordCommand::Verify {
+            account_id,
+            to,
+            text,
+            confirm,
+            auto_reaction,
+            thread_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => verify::run(
+            account_id,
+            to,
+            text,
+            confirm,
+            auto_reaction,
+            thread_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        )?,
+    }
+    Ok(())
+}

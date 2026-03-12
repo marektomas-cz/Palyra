@@ -57,6 +57,101 @@ fn status_reports_http_grpc_and_admin_health() -> Result<()> {
 }
 
 #[test]
+fn channels_discord_status_and_health_refresh_preserve_text_and_json_contracts() -> Result<()> {
+    let (child, admin_port, _grpc_port) = spawn_palyrad_with_dynamic_ports()?;
+    let _daemon = ChildGuard::new(child);
+    let base_url = format!("http://127.0.0.1:{admin_port}");
+
+    let status_output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .args([
+            "channels",
+            "discord",
+            "status",
+            "--url",
+            base_url.as_str(),
+            "--token",
+            ADMIN_TOKEN,
+            "--principal",
+            "user:ops",
+            "--device-id",
+            DEVICE_ID,
+            "--channel",
+            "cli",
+        ])
+        .output()
+        .context("failed to execute palyra channels discord status")?;
+
+    assert!(
+        status_output.status.success(),
+        "channels discord status should succeed: {}",
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let status_stdout =
+        String::from_utf8(status_output.stdout).context("status stdout was not valid UTF-8")?;
+    assert!(
+        status_stdout.contains("channels.status id=discord:default availability=supported"),
+        "status output should preserve the connector status line: {status_stdout}"
+    );
+    assert!(
+        status_stdout.contains("channels.operations.queue id=discord:default"),
+        "status output should preserve the queue operations line: {status_stdout}"
+    );
+
+    let refresh_output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .args([
+            "channels",
+            "discord",
+            "health-refresh",
+            "--url",
+            base_url.as_str(),
+            "--token",
+            ADMIN_TOKEN,
+            "--principal",
+            "user:ops",
+            "--device-id",
+            DEVICE_ID,
+            "--channel",
+            "cli",
+            "--json",
+        ])
+        .output()
+        .context("failed to execute palyra channels discord health-refresh")?;
+
+    assert!(
+        refresh_output.status.success(),
+        "channels discord health-refresh should succeed: {}",
+        String::from_utf8_lossy(&refresh_output.stderr)
+    );
+    let refresh_payload: Value = serde_json::from_slice(&refresh_output.stdout)
+        .context("health-refresh stdout should remain valid JSON")?;
+    assert_eq!(
+        refresh_payload
+            .get("connector")
+            .and_then(|value| value.get("connector_id"))
+            .and_then(Value::as_str),
+        Some("discord:default"),
+        "health-refresh JSON should preserve the connector identity"
+    );
+    assert_eq!(
+        refresh_payload
+            .get("health_refresh")
+            .and_then(|value| value.get("supported"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "health-refresh JSON should preserve Discord support metadata"
+    );
+    assert!(
+        refresh_payload
+            .get("health_refresh")
+            .and_then(|value| value.get("required_permissions"))
+            .and_then(Value::as_array)
+            .is_some(),
+        "health-refresh JSON should keep required permission guidance"
+    );
+    Ok(())
+}
+
+#[test]
 fn agent_run_streams_status_events() -> Result<()> {
     let (child, _admin_port, grpc_port) = spawn_palyrad_with_dynamic_ports()?;
     let _daemon = ChildGuard::new(child);

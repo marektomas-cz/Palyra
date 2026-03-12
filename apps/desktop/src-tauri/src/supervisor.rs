@@ -19,10 +19,9 @@ use tokio::sync::mpsc;
 
 use super::{
     load_or_initialize_state_file, sanitize_log_line, DesktopOnboardingStep, DesktopSecretStore,
-    DesktopStateFile,
-    BROWSER_GRPC_PORT, BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL, GATEWAY_ADMIN_PORT,
-    GATEWAY_GRPC_PORT, GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY, LOOPBACK_HOST,
-    MAX_LOG_LINES_PER_SERVICE,
+    DesktopStateFile, BROWSER_GRPC_PORT, BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL,
+    GATEWAY_ADMIN_PORT, GATEWAY_GRPC_PORT, GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY,
+    LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,9 +264,7 @@ impl ControlCenter {
         detail: Option<String>,
     ) -> Result<()> {
         self.persisted.onboarding.ensure_flow_id();
-        self.persisted
-            .onboarding
-            .push_event(kind, detail, unix_ms_now());
+        self.persisted.onboarding.push_event(kind, detail, unix_ms_now());
         self.save_state_file()
     }
 
@@ -287,11 +284,12 @@ impl ControlCenter {
         let sanitized = sanitize_log_line(message.as_str());
         self.persisted.onboarding.ensure_flow_id();
         self.persisted.onboarding.record_failure_step(step);
-        self.persisted.onboarding.last_failure = Some(super::desktop_state::DesktopOnboardingFailureState {
-            step,
-            message: sanitized.clone(),
-            recorded_at_unix_ms: unix_ms_now(),
-        });
+        self.persisted.onboarding.last_failure =
+            Some(super::desktop_state::DesktopOnboardingFailureState {
+                step,
+                message: sanitized.clone(),
+                recorded_at_unix_ms: unix_ms_now(),
+            });
         self.persisted.onboarding.push_event(
             "failure",
             Some(format!("{}: {}", step.as_str(), sanitized)),
@@ -337,7 +335,8 @@ impl ControlCenter {
         candidate: Option<&str>,
         confirm_selection: bool,
     ) -> Result<PathBuf> {
-        let runtime_root = validate_runtime_state_root_override(candidate, self.default_runtime_root.as_path())?;
+        let runtime_root =
+            validate_runtime_state_root_override(candidate, self.default_runtime_root.as_path())?;
         fs::create_dir_all(runtime_root.as_path()).with_context(|| {
             format!("failed to create desktop runtime root {}", runtime_root.display())
         })?;
@@ -347,7 +346,8 @@ impl ControlCenter {
             Some(runtime_root.to_string_lossy().into_owned())
         };
         self.runtime_root = runtime_root.clone();
-        if confirm_selection && self.persisted.onboarding.state_root_confirmed_at_unix_ms.is_none() {
+        if confirm_selection && self.persisted.onboarding.state_root_confirmed_at_unix_ms.is_none()
+        {
             self.persisted.onboarding.state_root_confirmed_at_unix_ms = Some(unix_ms_now());
         }
         self.persisted.onboarding.push_event(
@@ -386,9 +386,10 @@ impl ControlCenter {
         request: &super::DiscordOnboardingRequest,
     ) -> Result<()> {
         let discord = &mut self.persisted.onboarding.discord;
-        discord.account_id = normalize_optional_text(request.account_id.as_deref().unwrap_or_default())
-            .unwrap_or("default")
-            .to_ascii_lowercase();
+        discord.account_id =
+            normalize_optional_text(request.account_id.as_deref().unwrap_or_default())
+                .unwrap_or("default")
+                .to_ascii_lowercase();
         discord.mode = request.mode.clone().unwrap_or_else(|| "local".to_owned());
         discord.inbound_scope =
             request.inbound_scope.clone().unwrap_or_else(|| "dm_only".to_owned());
@@ -399,8 +400,11 @@ impl ControlCenter {
         discord.broadcast_strategy =
             request.broadcast_strategy.clone().unwrap_or_else(|| "deny".to_owned());
         discord.confirm_open_guild_channels = request.confirm_open_guild_channels.unwrap_or(false);
-        discord.verify_channel_id =
-            request.verify_channel_id.as_deref().and_then(normalize_optional_text).map(str::to_owned);
+        discord.verify_channel_id = request
+            .verify_channel_id
+            .as_deref()
+            .and_then(normalize_optional_text)
+            .map(str::to_owned);
         discord.last_connector_id = Some(discord.connector_id());
         self.save_state_file()
     }
@@ -834,7 +838,8 @@ impl ControlCenter {
     }
 
     pub(crate) fn open_dashboard(&self) -> Result<String> {
-        let url = super::snapshot::resolve_dashboard_access_target(self.runtime.gateway_admin_port)?.url;
+        let url =
+            super::snapshot::resolve_dashboard_access_target(self.runtime.gateway_admin_port)?.url;
         webbrowser::open(url.as_str())
             .context("failed to open dashboard URL in default browser")?;
         Ok(url)
