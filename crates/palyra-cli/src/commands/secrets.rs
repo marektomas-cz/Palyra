@@ -53,22 +53,35 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
         }
         SecretsCommand::List { scope } => {
             let scope = parse_vault_scope(scope.as_str())?;
-            let secrets = vault
+            let listed_entries = vault
                 .list_secrets(&scope)
-                .with_context(|| format!("failed to list secrets for scope={scope}"))?;
+                .with_context(|| format!("failed to list secrets for scope={scope}"))?
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry.key,
+                        entry.created_at_unix_ms,
+                        entry.updated_at_unix_ms,
+                        entry.value_bytes,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let entry_count = listed_entries.len();
             println!(
                 "secrets.list scope={} count={} backend={}",
                 scope,
-                secrets.len(),
+                entry_count,
                 vault.backend_kind().as_str()
             );
-            for metadata in secrets {
+            for (entry_key, created_at_unix_ms, updated_at_unix_ms, value_byte_count) in
+                listed_entries
+            {
                 println!(
                     "secrets.entry key={} created_at_unix_ms={} updated_at_unix_ms={} value_bytes={}",
-                    metadata.key,
-                    metadata.created_at_unix_ms,
-                    metadata.updated_at_unix_ms,
-                    metadata.value_bytes
+                    entry_key,
+                    created_at_unix_ms,
+                    updated_at_unix_ms,
+                    value_byte_count
                 );
             }
             std::io::stdout().flush().context("stdout flush failed")

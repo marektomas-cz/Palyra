@@ -1,5 +1,9 @@
 use crate::*;
 
+fn interactive_session_started_message() -> &'static str {
+    "agent.interactive=session_started exit_hint=/exit"
+}
+
 pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
     match command {
         AgentCommand::Run {
@@ -45,17 +49,12 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
                 channel,
             };
             let session_id = resolve_or_generate_canonical_id(session_id)?;
+            let started_message = interactive_session_started_message();
             if ndjson {
-                eprintln!(
-                    "agent.interactive=session_started session_id={} exit_hint=/exit",
-                    session_id
-                );
+                eprintln!("{started_message}");
                 std::io::stderr().flush().context("stderr flush failed")?;
             } else {
-                println!(
-                    "agent.interactive=session_started session_id={} exit_hint=/exit",
-                    session_id
-                );
+                println!("{started_message}");
                 std::io::stdout().flush().context("stdout flush failed")?;
             }
 
@@ -125,5 +124,18 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
             };
             acp_bridge::run_agent_acp_bridge(connection, allow_sensitive_tools)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interactive_session_started_message;
+
+    #[test]
+    fn interactive_session_started_message_omits_session_identifier() {
+        let banner = interactive_session_started_message();
+        assert!(banner.contains("agent.interactive=session_started"));
+        assert!(banner.contains("exit_hint=/exit"));
+        assert!(!banner.contains("session_id="));
     }
 }

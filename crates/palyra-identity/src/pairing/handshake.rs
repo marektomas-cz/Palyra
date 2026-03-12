@@ -49,6 +49,10 @@ impl IdentityManager {
         }
     }
 
+    fn record_pairing_start(&mut self, started_at_ms: u64) {
+        self.recent_pairing_starts.push_back(started_at_ms);
+    }
+
     pub fn start_pairing(
         &mut self,
         client_kind: PairingClientKind,
@@ -92,7 +96,7 @@ impl IdentityManager {
             session_id,
             ActivePairingSession { public: session.clone(), gateway_ephemeral_secret },
         );
-        self.recent_pairing_starts.push_back(now_ms);
+        self.record_pairing_start(now_ms);
         Ok(session)
     }
 

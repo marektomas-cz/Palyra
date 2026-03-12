@@ -1817,12 +1817,21 @@ fn cron_job_to_json(job: &cron_v1::Job) -> serde_json::Value {
     })
 }
 
+fn optional_ulid_json_value(value: &Option<common_v1::CanonicalId>) -> Value {
+    match value {
+        Some(identifier) => Value::String(identifier.ulid.clone()),
+        None => Value::Null,
+    }
+}
+
 fn cron_run_to_json(run: &cron_v1::JobRun) -> serde_json::Value {
+    let session_reference = optional_ulid_json_value(&run.session_id);
+    let orchestrator_reference = optional_ulid_json_value(&run.orchestrator_run_id);
     json!({
         "run_id": run.run_id.as_ref().map(|value| value.ulid.clone()),
         "job_id": run.job_id.as_ref().map(|value| value.ulid.clone()),
-        "session_id": run.session_id.as_ref().map(|value| value.ulid.clone()),
-        "orchestrator_run_id": run.orchestrator_run_id.as_ref().map(|value| value.ulid.clone()),
+        "session_id": session_reference,
+        "orchestrator_run_id": orchestrator_reference,
         "attempt": run.attempt,
         "started_at_unix_ms": run.started_at_unix_ms,
         "finished_at_unix_ms": run.finished_at_unix_ms,
@@ -1894,11 +1903,12 @@ fn memory_source_to_text(value: i32) -> &'static str {
 }
 
 fn memory_item_to_json(item: &memory_v1::MemoryItem) -> serde_json::Value {
+    let session_reference = optional_ulid_json_value(&item.session_id);
     json!({
         "memory_id": item.memory_id.as_ref().map(|value| value.ulid.clone()),
         "principal": item.principal,
         "channel": item.channel,
-        "session_id": item.session_id.as_ref().map(|value| value.ulid.clone()),
+        "session_id": session_reference,
         "source": memory_source_to_text(item.source),
         "content_text": item.content_text,
         "content_hash": item.content_hash,
@@ -1928,6 +1938,7 @@ fn memory_search_hit_to_json(hit: &memory_v1::MemorySearchHit) -> serde_json::Va
 }
 
 fn approval_record_to_json(approval: &gateway_v1::ApprovalRecord) -> serde_json::Value {
+    let session_reference = optional_ulid_json_value(&approval.session_id);
     let prompt = approval.prompt.as_ref().map(|prompt| {
         let details_json = if prompt.details_json.is_empty() {
             json!({})
@@ -1955,7 +1966,7 @@ fn approval_record_to_json(approval: &gateway_v1::ApprovalRecord) -> serde_json:
     });
     json!({
         "approval_id": approval.approval_id.as_ref().map(|value| value.ulid.clone()),
-        "session_id": approval.session_id.as_ref().map(|value| value.ulid.clone()),
+        "session_id": session_reference,
         "run_id": approval.run_id.as_ref().map(|value| value.ulid.clone()),
         "principal": approval.principal,
         "device_id": approval.device_id,
@@ -5697,6 +5708,7 @@ mod cli_v1_tests {
     use palyra_identity::DeviceIdentity;
     use palyra_skills::SkillTrustStore;
     use reqwest::Url;
+    use serde_json::Value;
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::io::{Read, Write};
@@ -5705,6 +5717,8 @@ mod cli_v1_tests {
     use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
+
+    use crate::common_v1;
 
     fn spawn_one_shot_http_server(body: Vec<u8>) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test TCP listener should bind");
@@ -5839,6 +5853,17 @@ mod cli_v1_tests {
         );
         let error = result.expect_err("whitespace-only prompt must be rejected");
         assert!(error.to_string().contains("non-empty text"), "unexpected error message: {error}");
+    }
+
+    #[test]
+    fn optional_ulid_json_value_preserves_present_and_absent_values() {
+        let present = super::optional_ulid_json_value(&Some(common_v1::CanonicalId {
+            ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+        }));
+        assert_eq!(present, Value::String("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned()));
+
+        let absent = super::optional_ulid_json_value(&None);
+        assert_eq!(absent, Value::Null);
     }
 
     #[test]

@@ -173,6 +173,10 @@ pub(crate) fn cron_retry_from_proto(
     Ok(crate::journal::CronRetryPolicy { max_attempts, backoff_ms })
 }
 
+fn optional_canonical_id(value: &Option<String>) -> Option<common_v1::CanonicalId> {
+    value.as_deref().map(|ulid| common_v1::CanonicalId { ulid: ulid.to_owned() })
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) fn cron_job_message(job: &CronJobRecord) -> Result<cron_v1::Job, Status> {
     let schedule = schedule_to_proto(job.schedule_type, job.schedule_payload_json.as_str())?;
@@ -202,18 +206,14 @@ pub(crate) fn cron_job_message(job: &CronJobRecord) -> Result<cron_v1::Job, Stat
 }
 
 pub(crate) fn cron_run_message(run: &CronRunRecord) -> cron_v1::JobRun {
+    let session_reference = optional_canonical_id(&run.session_id);
+    let orchestrator_reference = optional_canonical_id(&run.orchestrator_run_id);
     cron_v1::JobRun {
         v: CANONICAL_PROTOCOL_MAJOR,
         run_id: Some(common_v1::CanonicalId { ulid: run.run_id.clone() }),
         job_id: Some(common_v1::CanonicalId { ulid: run.job_id.clone() }),
-        session_id: run
-            .session_id
-            .as_ref()
-            .map(|value| common_v1::CanonicalId { ulid: value.clone() }),
-        orchestrator_run_id: run
-            .orchestrator_run_id
-            .as_ref()
-            .map(|value| common_v1::CanonicalId { ulid: value.clone() }),
+        session_id: session_reference,
+        orchestrator_run_id: orchestrator_reference,
         attempt: run.attempt,
         started_at_unix_ms: run.started_at_unix_ms,
         finished_at_unix_ms: run.finished_at_unix_ms.unwrap_or_default(),

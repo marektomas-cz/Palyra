@@ -49,6 +49,10 @@ fn memory_source_to_proto(source: MemorySource) -> i32 {
     }
 }
 
+fn optional_canonical_id(value: &Option<String>) -> Option<common_v1::CanonicalId> {
+    value.as_deref().map(|ulid| common_v1::CanonicalId { ulid: ulid.to_owned() })
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) fn enforce_memory_item_scope(
     item: &MemoryItemRecord,
@@ -98,15 +102,13 @@ pub(crate) fn redact_memory_text_for_output(raw: &str) -> String {
 }
 
 pub(crate) fn memory_item_message(item: &MemoryItemRecord) -> memory_v1::MemoryItem {
+    let session_reference = optional_canonical_id(&item.session_id);
     memory_v1::MemoryItem {
         v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
         memory_id: Some(common_v1::CanonicalId { ulid: item.memory_id.clone() }),
         principal: item.principal.clone(),
         channel: item.channel.clone().unwrap_or_default(),
-        session_id: item
-            .session_id
-            .as_ref()
-            .map(|value| common_v1::CanonicalId { ulid: value.clone() }),
+        session_id: session_reference,
         source: memory_source_to_proto(item.source),
         content_text: redact_memory_text_for_output(item.content_text.as_str()),
         content_hash: item.content_hash.clone(),

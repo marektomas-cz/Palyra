@@ -56,6 +56,8 @@ pub(crate) fn run_pairing(command: PairingCommand) -> Result<()> {
                 );
             }
 
+            let certificate_revision = result.device.current_certificate.sequence;
+            let certificate_expiration = result.device.current_certificate.expires_at_unix_ms;
             println!(
                 "pairing.status=paired device_id={} client_kind={} method={} identity_fingerprint={} signing_public_key_hex={} transcript_hash={} cert_sequence={} cert_expires_at_unix_ms={} store_root={}",
                 result.device.device_id,
@@ -64,8 +66,8 @@ pub(crate) fn run_pairing(command: PairingCommand) -> Result<()> {
                 result.device.identity_fingerprint,
                 result.device.signing_public_key_hex,
                 result.device.transcript_hash_hex,
-                result.device.current_certificate.sequence,
-                result.device.current_certificate.expires_at_unix_ms,
+                certificate_revision,
+                certificate_expiration,
                 store_root.display(),
             );
 
@@ -76,9 +78,11 @@ pub(crate) fn run_pairing(command: PairingCommand) -> Result<()> {
                         SystemTime::now() + DEFAULT_CERT_VALIDITY,
                     )
                     .context("failed to rotate certificate in simulation mode")?;
+                let previous_certificate_revision = certificate_revision;
+                let current_certificate_revision = rotated.sequence;
                 println!(
                     "pairing.rotation=simulated rotated=true previous_sequence={} current_sequence={}",
-                    result.device.current_certificate.sequence, rotated.sequence
+                    previous_certificate_revision, current_certificate_revision
                 );
             }
 
