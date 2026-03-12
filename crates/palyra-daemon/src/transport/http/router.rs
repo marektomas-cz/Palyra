@@ -410,6 +410,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         ))
         .route_layer(middleware::from_fn(http_middleware::canvas_security_headers_middleware));
     Router::new()
+        .route("/", get(health::dashboard_handoff_handler))
         .route("/healthz", get(health::health_handler))
         .merge(canvas_routes)
         .merge(admin_routes)

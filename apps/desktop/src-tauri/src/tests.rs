@@ -845,7 +845,7 @@ async fn snapshot_build_reuses_console_session_until_expiry() {
             let request_line = request.lines().next().unwrap_or_default().to_owned();
             let has_cookie = request.contains("palyra_console_session=session-1");
 
-            if request_line.starts_with("GET /health ") {
+            if request_line.starts_with("GET /healthz ") {
                 write_http_response(
                     &mut stream,
                     "200 OK",
@@ -937,6 +937,135 @@ async fn snapshot_build_reuses_console_session_until_expiry() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn onboarding_preflight_accepts_healthy_runtime_already_bound_to_expected_ports() {
+    fn write_http_response(
+        stream: &mut std::net::TcpStream,
+        status_line: &str,
+        body: &str,
+        extra_headers: &[&str],
+    ) {
+        let mut response = format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        for header in extra_headers {
+            response.push_str(header);
+            response.push_str("\r\n");
+        }
+        response.push_str("\r\n");
+        response.push_str(body);
+        stream.write_all(response.as_bytes()).expect("response should be written");
+        stream.flush().expect("response should be flushed");
+    }
+
+    let _env_guard = lock_env();
+    let fixture = TempFixtureDir::new();
+    let config_path = write_config_file(
+        fixture.path(),
+        r#"
+version = 1
+"#,
+    );
+    let gateway_binary = fixture.path().join(executable_file_name("palyrad"));
+    let cli_binary = fixture.path().join(executable_file_name("palyra"));
+    write_file(gateway_binary.as_path(), "binary");
+    write_file(cli_binary.as_path(), "binary");
+    let _config_override =
+        ScopedEnvVar::set("PALYRA_CONFIG", config_path.to_string_lossy().as_ref());
+    let _gateway_override =
+        ScopedEnvVar::set("PALYRA_DESKTOP_PALYRAD_BIN", gateway_binary.to_string_lossy().as_ref());
+    let _cli_override =
+        ScopedEnvVar::set("PALYRA_DESKTOP_PALYRA_BIN", cli_binary.to_string_lossy().as_ref());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+    let port = listener.local_addr().expect("listener address should resolve").port();
+    let server = std::thread::spawn(move || {
+        for _ in 0..5 {
+            let (mut stream, _) = listener.accept().expect("listener should accept request");
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).expect("request should be readable");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let request_line = request.lines().next().unwrap_or_default().to_owned();
+            if request_line.starts_with("GET /healthz ") {
+                write_http_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"status":"ok","version":"test","git_hash":"hash","uptime_seconds":1}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/auth/session ") {
+                write_http_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    r#"{"error":"console session cookie is missing"}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("POST /console/v1/auth/login ") {
+                write_http_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"principal":"admin:desktop-control-center","device_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","csrf_token":"csrf","issued_at_unix_ms":1,"expires_at_unix_ms":2}"#,
+                    &["Set-Cookie: palyra_console_session=session-healthy; Path=/; HttpOnly; SameSite=Strict"],
+                );
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/diagnostics ") {
+                write_http_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"generated_at_unix_ms":123,"errors":[]}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/channels/discord%3Adefault ") {
+                write_http_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"connector":{"connector_id":"discord:default","enabled":false,"readiness":"unknown","liveness":"unknown"}}"#,
+                    &[],
+                );
+                continue;
+            }
+            panic!("unexpected desktop snapshot request: {request_line}");
+        }
+    });
+
+    let mut control_center = build_test_control_center(fixture.path());
+    control_center.runtime.gateway_admin_port = port;
+    control_center.gateway.bound_ports = vec![port];
+    control_center.persisted.browser_service_enabled = false;
+    control_center
+        .mark_onboarding_welcome_acknowledged()
+        .expect("welcome acknowledgement should persist");
+
+    let payload = build_desktop_refresh_payload(control_center.capture_onboarding_status_inputs())
+        .await
+        .expect("desktop refresh payload should build");
+    let gateway_ports = payload
+        .onboarding_status
+        .preflight
+        .checks
+        .iter()
+        .find(|check| check.key == "gateway_ports")
+        .expect("gateway port preflight should exist");
+
+    assert_eq!(gateway_ports.status, "ok");
+    assert!(
+        gateway_ports.detail.contains("already responding"),
+        "healthy runtime detail should explain the port reuse case: {}",
+        gateway_ports.detail
+    );
+    assert_eq!(payload.snapshot.overall_status, super::snapshot::OverallStatus::Healthy);
+
+    server.join().expect("test server thread should exit");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn snapshot_build_redacts_console_and_connector_diagnostics() {
     fn write_http_response(
         stream: &mut std::net::TcpStream,
@@ -968,7 +1097,7 @@ async fn snapshot_build_redacts_console_and_connector_diagnostics() {
             let read = stream.read(&mut buffer).expect("request should be readable");
             let request = String::from_utf8_lossy(&buffer[..read]);
             let request_line = request.lines().next().unwrap_or_default().to_owned();
-            if request_line.starts_with("GET /health ") {
+            if request_line.starts_with("GET /healthz ") {
                 write_http_response(
                     &mut stream,
                     "200 OK",

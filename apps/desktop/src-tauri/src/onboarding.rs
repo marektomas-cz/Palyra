@@ -6,7 +6,6 @@ use std::{
 };
 
 use anyhow::Result;
-use reqwest::Url;
 use serde::Serialize;
 
 use super::desktop_state::{
@@ -366,8 +365,17 @@ fn build_preflight_snapshot(
     ));
     checks.push(state_root_check(runtime_root));
     checks.push(config_check());
-    checks.push(gateway_port_check(gateway_bound_ports, gateway_running));
-    checks.push(browser_port_check(browser_bound_ports, browser_running, browser_service_enabled));
+    checks.push(gateway_port_check(
+        gateway_bound_ports,
+        gateway_running,
+        snapshot.quick_facts.gateway_version.is_some(),
+    ));
+    checks.push(browser_port_check(
+        browser_bound_ports,
+        browser_running,
+        browser_service_enabled,
+        snapshot.quick_facts.browser_service.healthy,
+    ));
     checks.push(admin_token_check(admin_token));
     checks.push(OnboardingPreflightCheck {
         key: "dashboard_mode".to_owned(),
@@ -488,7 +496,11 @@ struct PortProbe {
     label: &'static str,
 }
 
-fn gateway_port_check(ports: &[u16], service_running: bool) -> OnboardingPreflightCheck {
+fn gateway_port_check(
+    ports: &[u16],
+    service_running: bool,
+    service_healthy: bool,
+) -> OnboardingPreflightCheck {
     let probes = ports
         .iter()
         .enumerate()
@@ -502,13 +514,21 @@ fn gateway_port_check(ports: &[u16], service_running: bool) -> OnboardingPreflig
             Some(PortProbe { port: *port, protocol, label })
         })
         .collect::<Vec<_>>();
-    port_check("gateway_ports", "Gateway ports", probes.as_slice(), service_running, true)
+    port_check(
+        "gateway_ports",
+        "Gateway ports",
+        probes.as_slice(),
+        service_running,
+        service_healthy,
+        true,
+    )
 }
 
 fn browser_port_check(
     ports: &[u16],
     service_running: bool,
     required: bool,
+    service_healthy: bool,
 ) -> OnboardingPreflightCheck {
     let probes = ports
         .iter()
@@ -527,6 +547,7 @@ fn browser_port_check(
         "Browser sidecar ports",
         probes.as_slice(),
         service_running,
+        service_healthy,
         required,
     )
 }
@@ -536,6 +557,7 @@ fn port_check(
     label: &str,
     probes: &[PortProbe],
     service_running: bool,
+    service_healthy: bool,
     required: bool,
 ) -> OnboardingPreflightCheck {
     if service_running {
@@ -545,6 +567,17 @@ fn port_check(
             status: "ok".to_owned(),
             detail: format!(
                 "Desktop-managed service is already using {}.",
+                format_probe_list(probes)
+            ),
+        };
+    }
+    if service_healthy {
+        return OnboardingPreflightCheck {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            status: "ok".to_owned(),
+            detail: format!(
+                "A Palyra runtime is already responding on {}.",
                 format_probe_list(probes)
             ),
         };
@@ -953,15 +986,5 @@ async fn probe_dashboard_reachability(
     raw_url: &str,
     access_mode: &str,
 ) -> bool {
-    if access_mode != "local" {
-        return true;
-    }
-
-    let Ok(url) = Url::parse(raw_url) else {
-        return false;
-    };
-    match http_client.get(url).send().await {
-        Ok(response) => response.status().is_success(),
-        Err(_) => false,
-    }
+    super::snapshot::probe_dashboard_reachability(http_client, raw_url, access_mode).await
 }

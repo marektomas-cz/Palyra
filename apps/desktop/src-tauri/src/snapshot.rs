@@ -155,7 +155,7 @@ pub(crate) struct DesktopFailureClassSummary {
     pub(crate) product_failure: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OverallStatus {
     Healthy,
@@ -194,7 +194,6 @@ pub(crate) struct SnapshotBuildInputs {
     pub(crate) admin_token: String,
     pub(crate) browser_last_exit: Option<String>,
     pub(crate) dropped_log_events_total: u64,
-    pub(crate) gateway_running: bool,
     pub(crate) browser_running: bool,
     pub(crate) gateway_process: ServiceProcessSnapshot,
     pub(crate) browserd_process: ServiceProcessSnapshot,
@@ -227,7 +226,6 @@ impl ControlCenter {
             admin_token: self.admin_token.clone(),
             browser_last_exit: self.browserd.last_exit.clone(),
             dropped_log_events_total: self.dropped_log_events.load(Ordering::Relaxed),
-            gateway_running: self.gateway.running(),
             browser_running: self.browserd.running(),
             gateway_process: self.process_snapshot(ServiceKind::Gateway),
             browserd_process: self.process_snapshot(ServiceKind::Browserd),
@@ -262,7 +260,7 @@ pub(crate) fn build_browser_status(
     }
 
     let health_ok = health.is_some();
-    let healthy = running && health_ok;
+    let healthy = health_ok;
     let status = if healthy {
         "ok"
     } else if running {
@@ -556,7 +554,6 @@ pub(crate) async fn build_snapshot_from_inputs(
         admin_token,
         browser_last_exit,
         dropped_log_events_total,
-        gateway_running,
         browser_running,
         gateway_process,
         browserd_process,
@@ -651,7 +648,7 @@ pub(crate) async fn build_snapshot_from_inputs(
     let discord_degraded = quick_facts.discord.enabled && !quick_facts.discord.authenticated;
     let diagnostics_degraded = !diagnostics.errors.is_empty();
 
-    let overall_status = if !gateway_running || gateway_health.is_none() {
+    let overall_status = if gateway_health.is_none() {
         OverallStatus::Down
     } else if (browser_service_enabled && !browser_healthy)
         || discord_degraded
@@ -675,7 +672,7 @@ pub(crate) async fn build_snapshot_from_inputs(
 }
 
 async fn fetch_health(http_client: &Client, port: u16) -> Result<Option<HealthEndpointPayload>> {
-    let url = loopback_url(port, "/health")?;
+    let url = loopback_url(port, "/healthz")?;
     let response = http_client.get(url).send().await.context("health request failed")?;
     if !response.status().is_success() {
         return Ok(None);
@@ -819,9 +816,7 @@ pub(crate) async fn run_support_bundle_export(
     let mut command = Command::new(cli_path.as_path());
     super::configure_background_command(&mut command);
     command.env_clear();
-    if let Ok(path) = env::var("PATH") {
-        command.env("PATH", path);
-    }
+    apply_support_bundle_inherited_env(&mut command);
     command.env("LANG", "C").env("LC_ALL", "C");
     command
         .stdin(Stdio::null())
@@ -858,6 +853,37 @@ pub(crate) async fn run_support_bundle_export(
         output_path: output_path.to_string_lossy().into_owned(),
         command_output,
     })
+}
+
+fn apply_support_bundle_inherited_env(command: &mut Command) {
+    for key in support_bundle_inherited_env_keys() {
+        if let Ok(value) = env::var(key) {
+            command.env(key, value);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn support_bundle_inherited_env_keys() -> &'static [&'static str] {
+    &[
+        "PATH",
+        "PALYRA_CONFIG",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "USERPROFILE",
+        "HOME",
+        "TEMP",
+        "TMP",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "COMSPEC",
+    ]
+}
+
+#[cfg(not(windows))]
+fn support_bundle_inherited_env_keys() -> &'static [&'static str] {
+    &["PATH", "PALYRA_CONFIG", "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "TMPDIR"]
 }
 
 pub(crate) fn is_error_like_key(key: &str) -> bool {
@@ -927,6 +953,24 @@ pub(crate) fn sanitize_token_with_url(token: &str) -> String {
     }
 
     trimmed.to_owned()
+}
+
+pub(crate) async fn probe_dashboard_reachability(
+    http_client: &Client,
+    raw_url: &str,
+    access_mode: &str,
+) -> bool {
+    if access_mode != DashboardAccessMode::Local.as_str() {
+        return true;
+    }
+
+    let Ok(url) = Url::parse(raw_url) else {
+        return false;
+    };
+    match http_client.get(url).send().await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
 }
 
 pub(crate) fn loopback_url(port: u16, path: &str) -> Result<Url> {

@@ -129,6 +129,7 @@ pub(crate) async fn start_palyra(
 ) -> Result<ActionResult, String> {
     let mut supervisor = state.supervisor.lock().await;
     supervisor.start_all();
+    supervisor.refresh_runtime_state();
     let _ = supervisor.record_onboarding_event(
         "runtime_start_requested",
         Some("Desktop requested a local runtime start.".to_owned()),
@@ -153,6 +154,7 @@ pub(crate) async fn restart_palyra(
 ) -> Result<ActionResult, String> {
     let mut supervisor = state.supervisor.lock().await;
     supervisor.restart_all();
+    supervisor.refresh_runtime_state();
     let _ = supervisor.record_onboarding_event(
         "runtime_restart_requested",
         Some("Desktop requested a local runtime restart.".to_owned()),
@@ -164,6 +166,23 @@ pub(crate) async fn restart_palyra(
 pub(crate) async fn open_dashboard(
     state: State<'_, DesktopAppState>,
 ) -> Result<ActionResult, String> {
+    let snapshot_inputs = {
+        let mut supervisor = state.supervisor.lock().await;
+        supervisor.capture_snapshot_inputs()
+    };
+    let snapshot = build_snapshot_from_inputs(snapshot_inputs).await.map_err(command_error)?;
+    if snapshot.quick_facts.dashboard_access_mode == "local"
+        && snapshot.quick_facts.gateway_version.is_none()
+    {
+        let message =
+            "local runtime is not healthy yet; start or refresh Palyra before opening the dashboard"
+                .to_owned();
+        let mut supervisor = state.supervisor.lock().await;
+        let _ = supervisor
+            .record_onboarding_failure(DesktopOnboardingStep::DashboardHandoff, message.clone());
+        return Err(message);
+    }
+
     let mut supervisor = state.supervisor.lock().await;
     let url = supervisor.open_dashboard().map_err(|error| {
         let _ = supervisor

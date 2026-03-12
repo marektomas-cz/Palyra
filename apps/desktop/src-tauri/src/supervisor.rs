@@ -662,6 +662,7 @@ impl ControlCenter {
         let binary_path = resolve_binary_path(kind.binary_name(), kind.env_override())?;
         let mut command = Command::new(binary_path.as_path());
         super::configure_background_command(&mut command);
+        command.kill_on_drop(true);
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         match kind {
@@ -844,6 +845,12 @@ impl ControlCenter {
         webbrowser::open(url.as_str())
             .context("failed to open dashboard URL in default browser")?;
         Ok(url)
+    }
+}
+
+impl Drop for ControlCenter {
+    fn drop(&mut self) {
+        self.stop_all();
     }
 }
 
