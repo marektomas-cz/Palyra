@@ -4,6 +4,12 @@ import { createDiscordOnboardingState } from "./features/onboarding/connectors/d
 const invoke = window.__TAURI__?.core?.invoke;
 
 if (typeof invoke !== "function") {
+  const actionMessage = document.getElementById("actionMessage");
+  if (actionMessage) {
+    actionMessage.textContent =
+      "Desktop control center failed to connect to the Tauri invoke bridge.";
+    actionMessage.style.color = "#8f3024";
+  }
   throw new Error("Tauri invoke API is unavailable. Run this UI inside the desktop host.");
 }
 

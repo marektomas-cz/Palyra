@@ -93,6 +93,10 @@ $archivePath = $packageMetadata["archive_path"]
 if ([string]::IsNullOrWhiteSpace($archivePath)) {
     $archivePath = Join-Path $desktopPackageOutput "palyra-desktop-$version-$platform.zip"
 }
+$stagingRoot = Join-Path $desktopPackageOutput "palyra-desktop-$version-$platform"
+if (Test-Path -LiteralPath $stagingRoot) {
+    Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+}
 
 if (Test-Path -LiteralPath $stateRoot) {
     Remove-Item -LiteralPath $stateRoot -Recurse -Force

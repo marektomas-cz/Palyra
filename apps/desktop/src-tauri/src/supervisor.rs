@@ -661,6 +661,7 @@ impl ControlCenter {
     fn spawn_service(&mut self, kind: ServiceKind) -> Result<()> {
         let binary_path = resolve_binary_path(kind.binary_name(), kind.env_override())?;
         let mut command = Command::new(binary_path.as_path());
+        super::configure_background_command(&mut command);
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         match kind {

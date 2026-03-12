@@ -817,6 +817,7 @@ pub(crate) async fn run_support_bundle_export(
     let output_path = plan.support_bundle_dir.join(output_name);
 
     let mut command = Command::new(cli_path.as_path());
+    super::configure_background_command(&mut command);
     command.env_clear();
     if let Ok(path) = env::var("PATH") {
         command.env("PATH", path);

@@ -11,11 +11,15 @@ const DESKTOP_SECRET_MAX_BYTES: usize = 4_096;
 const DESKTOP_SECRET_KEY_ADMIN_TOKEN: &str = "desktop_admin_token";
 const DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN: &str = "desktop_browser_auth_token";
 
+use tokio::process::Command;
+
 const GATEWAY_ADMIN_PORT: u16 = 7142;
 const GATEWAY_GRPC_PORT: u16 = 7443;
 const GATEWAY_QUIC_PORT: u16 = 7444;
 const BROWSER_HEALTH_PORT: u16 = 7143;
 const BROWSER_GRPC_PORT: u16 = 7543;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 mod commands;
 mod desktop_state;
@@ -50,6 +54,18 @@ pub(crate) use supervisor::{
     compute_backoff_ms, executable_file_name, try_enqueue_log_event, LogEvent, LogStream,
     ManagedService,
 };
+
+pub(crate) fn configure_background_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
 #[cfg(test)]
 pub(crate) use tokio::sync::mpsc;
 #[cfg(test)]
