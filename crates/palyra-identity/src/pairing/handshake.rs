@@ -24,6 +24,37 @@ use super::{
     PairingResult, PairingSession,
 };
 
+fn build_pending_pairing_session(
+    client_kind: PairingClientKind,
+    method: PairingMethod,
+    started_at: SystemTime,
+    pairing_window: std::time::Duration,
+) -> IdentityResult<(String, PairingSession, ActivePairingSession)> {
+    validate_pairing_method(&method)?;
+
+    let session_id = ulid::Ulid::new().to_string();
+    let gateway_secret_bytes = random::<[u8; 32]>();
+    let gateway_ephemeral_secret = StaticSecret::from(gateway_secret_bytes);
+    let gateway_ephemeral_public = X25519PublicKey::from(&gateway_ephemeral_secret).to_bytes();
+    let challenge = random::<[u8; 32]>();
+    let expires_at = started_at + pairing_window;
+    let session = PairingSession {
+        session_id: session_id.clone(),
+        protocol_version: PAIRING_PROTOCOL_VERSION,
+        client_kind,
+        method,
+        gateway_ephemeral_public,
+        challenge,
+        expires_at_unix_ms: unix_ms(expires_at)?,
+    };
+    let active_session = ActivePairingSession { public: session.clone(), gateway_ephemeral_secret };
+    Ok((session_id, session, active_session))
+}
+
+fn record_pairing_start(history: &mut std::collections::VecDeque<u64>, started_at_ms: u64) {
+    history.push_back(started_at_ms);
+}
+
 impl IdentityManager {
     fn prune_expired_sessions(
         &mut self,
@@ -49,10 +80,6 @@ impl IdentityManager {
         }
     }
 
-    fn record_pairing_start(&mut self, started_at_ms: u64) {
-        self.recent_pairing_starts.push_back(started_at_ms);
-    }
-
     pub fn start_pairing(
         &mut self,
         client_kind: PairingClientKind,
@@ -74,29 +101,10 @@ impl IdentityManager {
             });
         }
 
-        validate_pairing_method(&method)?;
-
-        let session_id = ulid::Ulid::new().to_string();
-        let gateway_secret_bytes = random::<[u8; 32]>();
-        let gateway_ephemeral_secret = StaticSecret::from(gateway_secret_bytes);
-        let gateway_ephemeral_public = X25519PublicKey::from(&gateway_ephemeral_secret).to_bytes();
-        let challenge = random::<[u8; 32]>();
-        let expires_at = now + self.pairing_window;
-        let session = PairingSession {
-            session_id: session_id.clone(),
-            protocol_version: PAIRING_PROTOCOL_VERSION,
-            client_kind,
-            method,
-            gateway_ephemeral_public,
-            challenge,
-            expires_at_unix_ms: unix_ms(expires_at)?,
-        };
-
-        self.active_sessions.insert(
-            session_id,
-            ActivePairingSession { public: session.clone(), gateway_ephemeral_secret },
-        );
-        self.record_pairing_start(now_ms);
+        let (session_id, session, active_session) =
+            build_pending_pairing_session(client_kind, method, now, self.pairing_window)?;
+        self.active_sessions.insert(session_id, active_session);
+        record_pairing_start(&mut self.recent_pairing_starts, now_ms);
         Ok(session)
     }
 

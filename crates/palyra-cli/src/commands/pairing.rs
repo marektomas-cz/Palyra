@@ -56,34 +56,25 @@ pub(crate) fn run_pairing(command: PairingCommand) -> Result<()> {
                 );
             }
 
-            let certificate_revision = result.device.current_certificate.sequence;
-            let certificate_expiration = result.device.current_certificate.expires_at_unix_ms;
             println!(
-                "pairing.status=paired device_id={} client_kind={} method={} identity_fingerprint={} signing_public_key_hex={} transcript_hash={} cert_sequence={} cert_expires_at_unix_ms={} store_root={}",
+                "pairing.status=paired device_id={} client_kind={} method={} identity_fingerprint={} signing_public_key_hex={} transcript_hash={} store_root={}",
                 result.device.device_id,
                 result.device.client_kind.as_str(),
                 method.as_str(),
                 result.device.identity_fingerprint,
                 result.device.signing_public_key_hex,
                 result.device.transcript_hash_hex,
-                certificate_revision,
-                certificate_expiration,
                 store_root.display(),
             );
 
             if simulate_rotation {
-                let rotated = manager
+                manager
                     .rotate_device_certificate_if_due(
                         &device_id,
                         SystemTime::now() + DEFAULT_CERT_VALIDITY,
                     )
                     .context("failed to rotate certificate in simulation mode")?;
-                let previous_certificate_revision = certificate_revision;
-                let current_certificate_revision = rotated.sequence;
-                println!(
-                    "pairing.rotation=simulated rotated=true previous_sequence={} current_sequence={}",
-                    previous_certificate_revision, current_certificate_revision
-                );
+                println!("pairing.rotation=simulated rotated=true");
             }
 
             std::io::stdout().flush().context("stdout flush failed")
