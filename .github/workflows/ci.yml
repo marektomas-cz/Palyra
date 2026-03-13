@@ -30,6 +30,17 @@ jobs:
           toolchain: 1.91.0
           components: rustfmt, clippy
 
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/ui/package-lock.json
+
+      - name: Build desktop UI
+        shell: pwsh
+        run: ./scripts/test/ensure-desktop-ui.ps1
+
       - name: Cargo build
         run: cargo build --workspace --locked
 
@@ -48,6 +59,13 @@ jobs:
         with:
           toolchain: 1.91.0
 
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/ui/package-lock.json
+
       - name: Install desktop Linux system dependencies
         run: |
           sudo apt-get update
@@ -59,6 +77,10 @@ jobs:
             libxdo-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
+
+      - name: Build desktop UI
+        shell: pwsh
+        run: ./scripts/test/ensure-desktop-ui.ps1
 
       - name: Cargo test (desktop, release)
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --release --locked
@@ -78,6 +100,13 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           toolchain: 1.91.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/ui/package-lock.json
 
       - name: Install desktop Linux system dependencies
         if: ${{ matrix.os == 'ubuntu-latest' }}
@@ -113,7 +142,9 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            apps/desktop/ui/package-lock.json
 
       - name: Install desktop Linux system dependencies
         run: |
@@ -150,7 +181,9 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            apps/desktop/ui/package-lock.json
 
       - name: Install desktop Linux system dependencies
         run: |

@@ -126,6 +126,13 @@ jobs:
         with:
           toolchain: 1.91.0
 
+      - name: Setup Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/ui/package-lock.json
+
       - name: Install desktop Linux system dependencies
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
@@ -138,6 +145,10 @@ jobs:
             libxdo-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
+
+      - name: Build desktop UI
+        shell: pwsh
+        run: ./scripts/test/ensure-desktop-ui.ps1
 
       - name: Build release binaries
         shell: pwsh

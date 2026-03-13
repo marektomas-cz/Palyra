@@ -12,6 +12,8 @@ if (-not (Test-Path (Join-Path $rootDir "apps\web\node_modules"))) {
     npm --prefix apps/web run verify-install
 }
 
+& (Join-Path $PSScriptRoot "ensure-desktop-ui.ps1")
+
 cargo test -p palyra-daemon --locked retention_housekeeping
 cargo test -p palyra-auth --locked refresh_due_profiles_marks_transport_failure_without_retry_spam
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked desktop_refresh_payload_reuses_single_snapshot_build_for_home_and_onboarding_views

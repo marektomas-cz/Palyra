@@ -15,6 +15,7 @@ validate-env:
 
 dev:
     just doctor
+    just desktop-ui-ready
     cargo build --workspace --locked
     @echo "Bootstrap complete. Run 'just web-bootstrap' for the apps/web clean-room bootstrap."
     @echo "Run 'just test' to verify workspace tests."
@@ -37,6 +38,9 @@ web-check:
 
 web-cleanroom:
     npm --prefix apps/web run cleanroom:check
+
+desktop-ui-ready:
+    bash scripts/test/ensure-desktop-ui.sh
 
 deterministic-core:
     bash scripts/test/run-deterministic-core.sh
@@ -77,9 +81,11 @@ protocol:
     bash scripts/protocol/validate-rust-stubs.sh
 
 test:
+    just desktop-ui-ready
     cargo test --workspace --locked
 
 build:
+    just desktop-ui-ready
     cargo build --workspace --locked
 
 audit:

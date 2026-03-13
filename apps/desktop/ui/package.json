@@ -1,0 +1,33 @@
+{
+  "name": "@palyra/desktop-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20 <25",
+    "npm": ">=10 <12"
+  },
+  "scripts": {
+    "bootstrap": "npm ci",
+    "build": "vite build",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "verify-install": "npm ls --depth=0"
+  },
+  "dependencies": {
+    "@heroui/react": "3.0.0-beta.8",
+    "@heroui/styles": "3.0.0-beta.8",
+    "@tailwindcss/vite": "4.2.1",
+    "@tauri-apps/api": "2.10.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tailwindcss": "4.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.4",
+    "typescript": "5.8.2",
+    "vite": "7.3.1"
+  }
+}

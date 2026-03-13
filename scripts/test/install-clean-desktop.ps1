@@ -60,6 +60,7 @@ New-Item -ItemType Directory -Path $workspaceRoot -Force | Out-Null
 if (-not $SkipBuild) {
     Push-Location $repoRoot
     try {
+        & (Join-Path $repoRoot "scripts/test/ensure-desktop-ui.ps1")
         cargo build -p palyra-daemon -p palyra-browserd -p palyra-cli --release --locked
         cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --release --locked
     }

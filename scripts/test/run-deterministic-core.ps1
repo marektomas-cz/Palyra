@@ -12,6 +12,8 @@ if (-not (Test-Path (Join-Path $rootDir "apps\web\node_modules"))) {
     npm --prefix apps/web run verify-install
 }
 
+& (Join-Path $PSScriptRoot "ensure-desktop-ui.ps1")
+
 & (Join-Path $PSScriptRoot "check-deterministic-fixtures.ps1")
 
 cargo build -p palyra-cli --locked

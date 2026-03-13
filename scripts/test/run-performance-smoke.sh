@@ -40,6 +40,8 @@ else
   npm --prefix apps/web run verify-install
 fi
 
+bash "$ROOT_DIR/scripts/test/ensure-desktop-ui.sh"
+
 "$CARGO_BIN" test -p palyra-daemon --locked retention_housekeeping
 "$CARGO_BIN" test -p palyra-auth --locked refresh_due_profiles_marks_transport_failure_without_retry_spam
 "$CARGO_BIN" test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked desktop_refresh_payload_reuses_single_snapshot_build_for_home_and_onboarding_views

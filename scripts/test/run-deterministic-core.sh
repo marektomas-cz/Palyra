@@ -40,6 +40,8 @@ else
   npm --prefix apps/web run verify-install
 fi
 
+bash "$ROOT_DIR/scripts/test/ensure-desktop-ui.sh"
+
 bash "$ROOT_DIR/scripts/test/check-deterministic-fixtures.sh"
 
 "$CARGO_BIN" build -p palyra-cli --locked

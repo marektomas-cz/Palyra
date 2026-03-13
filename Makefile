@@ -32,9 +32,11 @@ protocol:
 	bash scripts/protocol/validate-rust-stubs.sh
 
 test:
+	$(MAKE) desktop-ui-ready
 	cargo test --workspace --locked
 
 build:
+	$(MAKE) desktop-ui-ready
 	cargo build --workspace --locked
 
 audit:
@@ -86,6 +88,9 @@ web-check:
 
 web-cleanroom:
 	npm --prefix apps/web run cleanroom:check
+
+desktop-ui-ready:
+	bash scripts/test/ensure-desktop-ui.sh
 
 deterministic-core:
 	bash scripts/test/run-deterministic-core.sh
