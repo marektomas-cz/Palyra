@@ -2653,6 +2653,7 @@ dependencies = [
  "palyra-common",
  "proptest",
  "rcgen",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

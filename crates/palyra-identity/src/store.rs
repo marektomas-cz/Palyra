@@ -12,7 +12,15 @@ use std::{
     sync::Mutex,
 };
 
+use getrandom::fill as fill_random_bytes;
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+
 use crate::error::{IdentityError, IdentityResult};
+
+const SECRET_STORE_ENCRYPTION_MAGIC: &[u8; 4] = b"IDS1";
+const SECRET_STORE_ENCRYPTION_KEY_BYTES: usize = 32;
+const SECRET_STORE_ENCRYPTION_NONCE_BYTES: usize = 12;
+const SECRET_STORE_KEY_FILE: &str = ".store-key.v1";
 
 pub trait SecretStore: Send + Sync {
     fn write_secret(&self, key: &str, value: &[u8]) -> IdentityResult<()>;
@@ -67,6 +75,7 @@ impl SecretStore for InMemorySecretStore {
 
 pub struct FilesystemSecretStore {
     root: PathBuf,
+    encryption_key: [u8; SECRET_STORE_ENCRYPTION_KEY_BYTES],
     #[cfg(windows)]
     owner_sid: String,
 }
@@ -79,7 +88,9 @@ impl FilesystemSecretStore {
         {
             let owner_sid = current_user_sid()?;
             harden_windows_path_permissions(&root, owner_sid.as_str(), true)?;
-            Ok(Self { root, owner_sid })
+            let encryption_key =
+                load_or_create_store_encryption_key(root.as_path(), Some(owner_sid.as_str()))?;
+            Ok(Self { root, encryption_key, owner_sid })
         }
         #[cfg(not(windows))]
         {
@@ -87,7 +98,8 @@ impl FilesystemSecretStore {
 
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
                 .map_err(|error| IdentityError::Internal(error.to_string()))?;
-            Ok(Self { root })
+            let encryption_key = load_or_create_store_encryption_key(root.as_path(), None)?;
+            Ok(Self { root, encryption_key })
         }
     }
 
@@ -111,6 +123,7 @@ impl FilesystemSecretStore {
 
 impl SecretStore for FilesystemSecretStore {
     fn write_secret(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
+        let encrypted = encrypt_secret_payload(&self.encryption_key, value)?;
         #[cfg(windows)]
         {
             use std::io::Write;
@@ -130,7 +143,7 @@ impl SecretStore for FilesystemSecretStore {
                     .open(&tmp_path)
                     .map_err(|error| IdentityError::Internal(error.to_string()))?;
                 harden_windows_path_permissions(&tmp_path, self.owner_sid.as_str(), false)?;
-                file.write_all(value)
+                file.write_all(encrypted.as_slice())
                     .map_err(|error| IdentityError::Internal(error.to_string()))?;
                 file.sync_all().map_err(|error| IdentityError::Internal(error.to_string()))?;
                 fs::rename(&tmp_path, &path)
@@ -168,7 +181,7 @@ impl SecretStore for FilesystemSecretStore {
                     .map_err(|error| IdentityError::Internal(error.to_string()))?;
                 file.set_permissions(fs::Permissions::from_mode(0o600))
                     .map_err(|error| IdentityError::Internal(error.to_string()))?;
-                file.write_all(value)
+                file.write_all(encrypted.as_slice())
                     .map_err(|error| IdentityError::Internal(error.to_string()))?;
                 file.sync_all().map_err(|error| IdentityError::Internal(error.to_string()))?;
                 fs::rename(&tmp_path, &path)
@@ -191,13 +204,14 @@ impl SecretStore for FilesystemSecretStore {
 
     fn read_secret(&self, key: &str) -> IdentityResult<Vec<u8>> {
         let path = self.key_path(key)?;
-        fs::read(path).map_err(|error| {
+        let bytes = fs::read(path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 IdentityError::SecretNotFound
             } else {
                 IdentityError::Internal(error.to_string())
             }
-        })
+        })?;
+        decrypt_secret_payload(&self.encryption_key, bytes.as_slice())
     }
 
     fn delete_secret(&self, key: &str) -> IdentityResult<()> {
@@ -211,6 +225,210 @@ impl SecretStore for FilesystemSecretStore {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn encrypt_secret_payload(
+    encryption_key: &[u8; SECRET_STORE_ENCRYPTION_KEY_BYTES],
+    plaintext: &[u8],
+) -> IdentityResult<Vec<u8>> {
+    let mut nonce_bytes = [0_u8; SECRET_STORE_ENCRYPTION_NONCE_BYTES];
+    fill_random_bytes(&mut nonce_bytes).map_err(|error| {
+        IdentityError::Cryptographic(format!("failed to generate identity store nonce: {error}"))
+    })?;
+    let cipher = build_store_cipher(encryption_key)?;
+    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+    let mut ciphertext = plaintext.to_vec();
+    cipher.seal_in_place_append_tag(nonce, Aad::empty(), &mut ciphertext).map_err(|_| {
+        IdentityError::Cryptographic("failed to encrypt identity store payload at rest".to_owned())
+    })?;
+    let mut encoded = Vec::with_capacity(
+        SECRET_STORE_ENCRYPTION_MAGIC.len()
+            + SECRET_STORE_ENCRYPTION_NONCE_BYTES
+            + ciphertext.len(),
+    );
+    encoded.extend_from_slice(SECRET_STORE_ENCRYPTION_MAGIC);
+    encoded.extend_from_slice(&nonce_bytes);
+    encoded.extend_from_slice(ciphertext.as_slice());
+    Ok(encoded)
+}
+
+fn decrypt_secret_payload(
+    encryption_key: &[u8; SECRET_STORE_ENCRYPTION_KEY_BYTES],
+    encoded: &[u8],
+) -> IdentityResult<Vec<u8>> {
+    if !encoded.starts_with(SECRET_STORE_ENCRYPTION_MAGIC) {
+        return Ok(encoded.to_vec());
+    }
+    if encoded.len() < SECRET_STORE_ENCRYPTION_MAGIC.len() + SECRET_STORE_ENCRYPTION_NONCE_BYTES {
+        return Err(IdentityError::Cryptographic(
+            "identity store payload header is truncated".to_owned(),
+        ));
+    }
+
+    let mut nonce_bytes = [0_u8; SECRET_STORE_ENCRYPTION_NONCE_BYTES];
+    nonce_bytes.copy_from_slice(
+        &encoded[SECRET_STORE_ENCRYPTION_MAGIC.len()
+            ..SECRET_STORE_ENCRYPTION_MAGIC.len() + SECRET_STORE_ENCRYPTION_NONCE_BYTES],
+    );
+    let mut ciphertext = encoded
+        [SECRET_STORE_ENCRYPTION_MAGIC.len() + SECRET_STORE_ENCRYPTION_NONCE_BYTES..]
+        .to_vec();
+    let cipher = build_store_cipher(encryption_key)?;
+    let plaintext = cipher
+        .open_in_place(
+            Nonce::assume_unique_for_key(nonce_bytes),
+            Aad::empty(),
+            ciphertext.as_mut_slice(),
+        )
+        .map_err(|_| {
+            IdentityError::Cryptographic(
+                "failed to decrypt identity store payload at rest".to_owned(),
+            )
+        })?;
+    Ok(plaintext.to_vec())
+}
+
+fn build_store_cipher(
+    encryption_key: &[u8; SECRET_STORE_ENCRYPTION_KEY_BYTES],
+) -> IdentityResult<LessSafeKey> {
+    let unbound = UnboundKey::new(&CHACHA20_POLY1305, encryption_key).map_err(|_| {
+        IdentityError::Cryptographic("failed to initialize identity store cipher".to_owned())
+    })?;
+    Ok(LessSafeKey::new(unbound))
+}
+
+fn load_or_create_store_encryption_key(
+    root: &Path,
+    #[cfg(windows)] owner_sid: Option<&str>,
+    #[cfg(not(windows))] _owner_sid: Option<&str>,
+) -> IdentityResult<[u8; SECRET_STORE_ENCRYPTION_KEY_BYTES]> {
+    let key_path = root.join(SECRET_STORE_KEY_FILE);
+    if key_path.exists() {
+        return read_store_encryption_key(key_path.as_path());
+    }
+
+    let mut raw_key = [0_u8; SECRET_STORE_ENCRYPTION_KEY_BYTES];
+    fill_random_bytes(&mut raw_key).map_err(|error| {
+        IdentityError::Cryptographic(format!(
+            "failed to generate identity store encryption key: {error}"
+        ))
+    })?;
+    write_store_encryption_key(
+        key_path.as_path(),
+        &raw_key,
+        #[cfg(windows)]
+        owner_sid,
+    )?;
+    Ok(raw_key)
+}
+
+fn read_store_encryption_key(
+    path: &Path,
+) -> IdentityResult<[u8; SECRET_STORE_ENCRYPTION_KEY_BYTES]> {
+    let stored = fs::read(path).map_err(|error| IdentityError::Internal(error.to_string()))?;
+    #[cfg(windows)]
+    let unwrapped =
+        windows_security::dpapi_unprotect_current_user(stored.as_slice()).map_err(|error| {
+            IdentityError::Cryptographic(format!(
+                "failed to unprotect identity store encryption key: {error}"
+            ))
+        })?;
+    #[cfg(not(windows))]
+    let unwrapped = stored;
+
+    let key_bytes: [u8; SECRET_STORE_ENCRYPTION_KEY_BYTES] =
+        unwrapped.try_into().map_err(|_| {
+            IdentityError::Cryptographic(
+                "identity store encryption key has invalid length".to_owned(),
+            )
+        })?;
+    Ok(key_bytes)
+}
+
+fn write_store_encryption_key(
+    path: &Path,
+    raw_key: &[u8; SECRET_STORE_ENCRYPTION_KEY_BYTES],
+    #[cfg(windows)] owner_sid: Option<&str>,
+) -> IdentityResult<()> {
+    #[cfg(windows)]
+    let encoded = windows_security::dpapi_protect_current_user(raw_key).map_err(|error| {
+        IdentityError::Cryptographic(format!(
+            "failed to protect identity store encryption key: {error}"
+        ))
+    })?;
+    #[cfg(not(windows))]
+    let encoded = raw_key.to_vec();
+
+    let tmp_path = path.with_extension(format!("tmp.{}", ulid::Ulid::new()));
+
+    let write_result: IdentityResult<()> = (|| {
+        #[cfg(windows)]
+        {
+            use std::io::Write;
+
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp_path)
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            harden_windows_path_permissions(
+                &tmp_path,
+                owner_sid.ok_or_else(|| {
+                    IdentityError::Internal(
+                        "identity store encryption key owner SID is missing".to_owned(),
+                    )
+                })?,
+                false,
+            )?;
+            file.write_all(encoded.as_slice())
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            file.sync_all().map_err(|error| IdentityError::Internal(error.to_string()))?;
+            fs::rename(&tmp_path, path)
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            harden_windows_path_permissions(
+                path,
+                owner_sid.ok_or_else(|| {
+                    IdentityError::Internal(
+                        "identity store encryption key owner SID is missing".to_owned(),
+                    )
+                })?,
+                false,
+            )?;
+        }
+        #[cfg(not(windows))]
+        {
+            use std::{
+                io::Write,
+                os::unix::fs::{OpenOptionsExt, PermissionsExt},
+            };
+
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            file.write_all(encoded.as_slice())
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            file.sync_all().map_err(|error| IdentityError::Internal(error.to_string()))?;
+            fs::rename(&tmp_path, path)
+                .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            if let Some(parent) = path.parent() {
+                fs::File::open(parent)
+                    .map_err(|error| IdentityError::Internal(error.to_string()))?
+                    .sync_all()
+                    .map_err(|error| IdentityError::Internal(error.to_string()))?;
+            }
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() && tmp_path.exists() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
 }
 
 #[cfg(windows)]
@@ -307,7 +525,7 @@ pub fn default_identity_storage_path(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join(".palyra").join("identity")
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     #[cfg(windows)]
     use super::{FilesystemSecretStore, SecretStore};
@@ -415,6 +633,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn filesystem_secret_store_encrypts_payloads_at_rest() {
+        let temp = tempdir().expect("temp dir should initialize");
+        let store = FilesystemSecretStore::new(temp.path()).expect("store should initialize");
+        let key = "identity/pairing/paired_devices.json";
+        let payload = br#"{"sequence":7}"#;
+
+        store.write_secret(key, payload).expect("secret should persist");
+
+        let raw_path = store.key_path(key).expect("key should map to path");
+        let raw_bytes = std::fs::read(raw_path).expect("raw store bytes should be readable");
+        assert_ne!(raw_bytes, payload, "secret payload should not persist in plaintext");
+        assert!(
+            raw_bytes.starts_with(super::SECRET_STORE_ENCRYPTION_MAGIC),
+            "encrypted payload should include the expected store header"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_secret_store_reads_legacy_plaintext_payloads() {
+        let temp = tempdir().expect("temp dir should initialize");
+        let store = FilesystemSecretStore::new(temp.path()).expect("store should initialize");
+        let key = "identity/pairing/paired_devices.json";
+        let payload = br#"{"sequence":9}"#;
+        let raw_path = store.key_path(key).expect("key should map to path");
+        std::fs::write(&raw_path, payload).expect("legacy plaintext payload should be writable");
+
+        let loaded = store.read_secret(key).expect("legacy plaintext payload should still load");
+        assert_eq!(loaded, payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn filesystem_secret_store_handles_concurrent_writes_without_tmp_collisions() {
         let temp = tempdir().expect("temp dir should initialize");
         let store =
@@ -468,5 +719,24 @@ mod tests {
         assert_eq!(loaded, payload);
         store.delete_secret(key).expect("secret should delete");
         assert!(matches!(store.read_secret(key), Err(crate::error::IdentityError::SecretNotFound)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn filesystem_secret_store_encrypts_payloads_at_rest_on_windows() {
+        let temp = tempdir().expect("temp dir should initialize");
+        let store = FilesystemSecretStore::new(temp.path()).expect("store should initialize");
+        let key = "identity/pairing/paired_devices.json";
+        let payload = br#"{"device":"ok"}"#;
+
+        store.write_secret(key, payload).expect("secret should persist");
+
+        let raw_path = store.key_path(key).expect("key should map to path");
+        let raw_bytes = std::fs::read(raw_path).expect("raw store bytes should be readable");
+        assert_ne!(raw_bytes, payload, "secret payload should not persist in plaintext");
+        assert!(
+            raw_bytes.starts_with(super::SECRET_STORE_ENCRYPTION_MAGIC),
+            "encrypted payload should include the expected store header"
+        );
     }
 }

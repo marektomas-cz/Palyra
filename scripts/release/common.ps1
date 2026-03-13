@@ -188,5 +188,33 @@ function Invoke-ExecutableQuiet {
         [string[]]$Arguments = @()
     )
 
-    $null = & $ExecutablePath @Arguments
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $ExecutablePath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    foreach ($argument in $Arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) {
+        throw "Failed to start executable quietly: $ExecutablePath"
+    }
+
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if ($process.ExitCode -ne 0) {
+        $detail = if ([string]::IsNullOrWhiteSpace($stderr)) { $stdout } else { $stderr }
+        if ([string]::IsNullOrWhiteSpace($detail)) {
+            $trimmed = ""
+        } else {
+            $trimmed = " Output: $($detail.Trim())"
+        }
+        throw "Executable exited with code $($process.ExitCode): $ExecutablePath$trimmed"
+    }
 }

@@ -14,6 +14,7 @@ hex.workspace = true
 hkdf.workspace = true
 palyra-common = { version = "0.1.0", path = "../palyra-common" }
 rcgen.workspace = true
+ring.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
