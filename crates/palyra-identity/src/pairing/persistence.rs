@@ -16,10 +16,15 @@ use crate::{
     unix_ms,
 };
 
-use super::{models::PersistedIdentityState, IdentityManager};
+use super::{
+    models::{
+        LegacyPersistedIdentityStateBundle, PersistedIdentityState, PersistedIdentityStateBundle,
+    },
+    IdentityManager,
+};
 
 pub(super) const IDENTITY_STATE_BUNDLE_KEY: &str = "identity/state.v1.json";
-const GATEWAY_CA_STATE_KEY: &str = "identity/ca/state.json";
+pub(super) const GATEWAY_CA_STATE_KEY: &str = "identity/ca/state.json";
 const PAIRED_DEVICES_STATE_KEY: &str = "identity/pairing/paired_devices.json";
 const REVOKED_DEVICES_STATE_KEY: &str = "identity/pairing/revoked_devices.json";
 const REVOKED_CERTIFICATES_STATE_KEY: &str = "identity/pairing/revoked_certificates.json";
@@ -131,9 +136,9 @@ impl IdentityManager {
 
     pub(super) fn persist_identity_state_bundle(&mut self) -> IdentityResult<()> {
         let next_generation = self.state_generation.saturating_add(1);
-        let state = PersistedIdentityState {
+        write_sealed_json(self.store.as_ref(), GATEWAY_CA_STATE_KEY, &self.ca.to_stored())?;
+        let state = PersistedIdentityStateBundle {
             generation: next_generation,
-            ca: self.ca.to_stored(),
             paired_devices: self.paired_devices.clone(),
             revoked_devices: self.revoked_devices.clone(),
             revoked_certificate_fingerprints: self.revoked_certificate_fingerprints.clone(),
@@ -290,7 +295,7 @@ fn load_or_init_gateway_ca(store: &dyn SecretStore) -> IdentityResult<Certificat
         }
         Err(IdentityError::SecretNotFound) => {
             let ca = CertificateAuthority::new("Palyra Gateway CA")?;
-            write_json(store, GATEWAY_CA_STATE_KEY, &ca.to_stored())?;
+            write_sealed_json(store, GATEWAY_CA_STATE_KEY, &ca.to_stored())?;
             Ok(ca)
         }
         Err(error) => Err(error),
@@ -327,9 +332,27 @@ fn load_identity_state_bundle(
 ) -> IdentityResult<Option<PersistedIdentityState>> {
     match store.read_secret(IDENTITY_STATE_BUNDLE_KEY) {
         Ok(raw) => {
-            let state: PersistedIdentityState = serde_json::from_slice(&raw)
+            if let Ok(legacy) = serde_json::from_slice::<LegacyPersistedIdentityStateBundle>(&raw) {
+                write_sealed_json(store, GATEWAY_CA_STATE_KEY, &legacy.ca)?;
+                return Ok(Some(PersistedIdentityState {
+                    generation: legacy.generation,
+                    ca: legacy.ca,
+                    paired_devices: legacy.paired_devices,
+                    revoked_devices: legacy.revoked_devices,
+                    revoked_certificate_fingerprints: legacy.revoked_certificate_fingerprints,
+                }));
+            }
+
+            let state: PersistedIdentityStateBundle = serde_json::from_slice(&raw)
                 .map_err(|error| IdentityError::Internal(error.to_string()))?;
-            Ok(Some(state))
+            let ca = load_or_init_gateway_ca(store)?.to_stored();
+            Ok(Some(PersistedIdentityState {
+                generation: state.generation,
+                ca,
+                paired_devices: state.paired_devices,
+                revoked_devices: state.revoked_devices,
+                revoked_certificate_fingerprints: state.revoked_certificate_fingerprints,
+            }))
         }
         Err(IdentityError::SecretNotFound) => Ok(None),
         Err(error) => Err(error),
@@ -356,4 +379,13 @@ where
     let encoded =
         serde_json::to_vec(value).map_err(|error| IdentityError::Internal(error.to_string()))?;
     store.write_secret(key, &encoded)
+}
+
+fn write_sealed_json<T>(store: &dyn SecretStore, key: &str, value: &T) -> IdentityResult<()>
+where
+    T: serde::Serialize,
+{
+    let encoded =
+        serde_json::to_vec(value).map_err(|error| IdentityError::Internal(error.to_string()))?;
+    store.write_sealed_value(key, &encoded)
 }

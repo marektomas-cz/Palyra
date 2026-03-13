@@ -125,8 +125,26 @@ pub struct RevokedDevice {
     pub revoked_at_unix_ms: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub(super) struct PersistedIdentityState {
+    pub(super) generation: u64,
+    pub(super) ca: StoredCertificateAuthority,
+    pub(super) paired_devices: HashMap<String, PairedDevice>,
+    pub(super) revoked_devices: HashMap<String, RevokedDevice>,
+    pub(super) revoked_certificate_fingerprints: HashSet<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct PersistedIdentityStateBundle {
+    #[serde(default)]
+    pub(super) generation: u64,
+    pub(super) paired_devices: HashMap<String, PairedDevice>,
+    pub(super) revoked_devices: HashMap<String, RevokedDevice>,
+    pub(super) revoked_certificate_fingerprints: HashSet<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct LegacyPersistedIdentityStateBundle {
     #[serde(default)]
     pub(super) generation: u64,
     pub(super) ca: StoredCertificateAuthority,

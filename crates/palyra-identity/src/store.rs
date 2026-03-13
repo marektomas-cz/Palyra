@@ -24,6 +24,7 @@ const SECRET_STORE_KEY_FILE: &str = ".store-key.v1";
 
 pub trait SecretStore: Send + Sync {
     fn write_secret(&self, key: &str, value: &[u8]) -> IdentityResult<()>;
+    fn write_sealed_value(&self, key: &str, value: &[u8]) -> IdentityResult<()>;
     fn read_secret(&self, key: &str) -> IdentityResult<Vec<u8>>;
     fn delete_secret(&self, key: &str) -> IdentityResult<()>;
     fn as_any(&self) -> &dyn Any;
@@ -43,12 +44,11 @@ impl InMemorySecretStore {
 
 impl SecretStore for InMemorySecretStore {
     fn write_secret(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| IdentityError::Internal("store lock poisoned".to_owned()))?;
-        state.insert(key.to_owned(), value.to_vec());
-        Ok(())
+        self.insert_value(key, value)
+    }
+
+    fn write_sealed_value(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
+        self.insert_value(key, value)
     }
 
     fn read_secret(&self, key: &str) -> IdentityResult<Vec<u8>> {
@@ -70,6 +70,17 @@ impl SecretStore for InMemorySecretStore {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl InMemorySecretStore {
+    fn insert_value(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| IdentityError::Internal("store lock poisoned".to_owned()))?;
+        state.insert(key.to_owned(), value.to_vec());
+        Ok(())
     }
 }
 
@@ -123,6 +134,40 @@ impl FilesystemSecretStore {
 
 impl SecretStore for FilesystemSecretStore {
     fn write_secret(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
+        self.write_value(key, value)
+    }
+
+    fn write_sealed_value(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
+        self.write_value(key, value)
+    }
+
+    fn read_secret(&self, key: &str) -> IdentityResult<Vec<u8>> {
+        let path = self.key_path(key)?;
+        let bytes = fs::read(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                IdentityError::SecretNotFound
+            } else {
+                IdentityError::Internal(error.to_string())
+            }
+        })?;
+        decrypt_secret_payload(&self.encryption_key, bytes.as_slice())
+    }
+
+    fn delete_secret(&self, key: &str) -> IdentityResult<()> {
+        let path = self.key_path(key)?;
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| IdentityError::Internal(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl FilesystemSecretStore {
+    fn write_value(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
         let encrypted = encrypt_secret_payload(&self.encryption_key, value)?;
         #[cfg(windows)]
         {
@@ -200,30 +245,6 @@ impl SecretStore for FilesystemSecretStore {
             }
             write_result
         }
-    }
-
-    fn read_secret(&self, key: &str) -> IdentityResult<Vec<u8>> {
-        let path = self.key_path(key)?;
-        let bytes = fs::read(path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                IdentityError::SecretNotFound
-            } else {
-                IdentityError::Internal(error.to_string())
-            }
-        })?;
-        decrypt_secret_payload(&self.encryption_key, bytes.as_slice())
-    }
-
-    fn delete_secret(&self, key: &str) -> IdentityResult<()> {
-        let path = self.key_path(key)?;
-        if path.exists() {
-            fs::remove_file(path).map_err(|error| IdentityError::Internal(error.to_string()))?;
-        }
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

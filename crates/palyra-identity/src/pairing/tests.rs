@@ -43,21 +43,11 @@ impl ToggleFailSecretStore {
 
 impl SecretStore for ToggleFailSecretStore {
     fn write_secret(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
-        let fail_writes = self
-            .fail_writes
-            .lock()
-            .map_err(|_| IdentityError::Internal("store fail_writes lock poisoned".to_owned()))?;
-        if *fail_writes {
-            return Err(IdentityError::Internal("injected write failure".to_owned()));
-        }
-        drop(fail_writes);
+        self.insert_value(key, value)
+    }
 
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| IdentityError::Internal("store state lock poisoned".to_owned()))?;
-        state.insert(key.to_owned(), value.to_vec());
-        Ok(())
+    fn write_sealed_value(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
+        self.insert_value(key, value)
     }
 
     fn read_secret(&self, key: &str) -> IdentityResult<Vec<u8>> {
@@ -79,6 +69,26 @@ impl SecretStore for ToggleFailSecretStore {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl ToggleFailSecretStore {
+    fn insert_value(&self, key: &str, value: &[u8]) -> IdentityResult<()> {
+        let fail_writes = self
+            .fail_writes
+            .lock()
+            .map_err(|_| IdentityError::Internal("store fail_writes lock poisoned".to_owned()))?;
+        if *fail_writes {
+            return Err(IdentityError::Internal("injected write failure".to_owned()));
+        }
+        drop(fail_writes);
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| IdentityError::Internal("store state lock poisoned".to_owned()))?;
+        state.insert(key.to_owned(), value.to_vec());
+        Ok(())
     }
 }
 
@@ -539,6 +549,37 @@ fn revocation_state_is_loaded_from_secret_store() {
     let second = IdentityManager::with_store(store).expect("manager should reload from store");
     assert!(second.revoked_devices().contains(sample_device_id()));
     assert_eq!(second.revoked_certificate_fingerprints(), revoked_fingerprints);
+}
+
+#[test]
+fn identity_state_bundle_excludes_gateway_ca_private_key_material() {
+    let store = Arc::new(crate::InMemorySecretStore::new());
+    let mut manager =
+        IdentityManager::with_store(store.clone()).expect("manager should initialize");
+    let (_, _, hello) = start_pin_pairing(&mut manager, "123456");
+    manager.complete_pairing(hello, SystemTime::now()).expect("pairing should complete");
+
+    let bundle = String::from_utf8(
+        store
+            .read_secret(super::persistence::IDENTITY_STATE_BUNDLE_KEY)
+            .expect("identity state bundle should exist"),
+    )
+    .expect("identity state bundle should be utf-8");
+    assert!(
+        !bundle.contains("private_key_pem"),
+        "public identity state bundle must not persist gateway CA private key"
+    );
+
+    let gateway_ca = String::from_utf8(
+        store
+            .read_secret(super::persistence::GATEWAY_CA_STATE_KEY)
+            .expect("gateway CA state should exist"),
+    )
+    .expect("gateway CA state should be utf-8");
+    assert!(
+        gateway_ca.contains("private_key_pem"),
+        "gateway CA state should continue to carry the CA private key for reload"
+    );
 }
 
 #[test]

@@ -188,6 +188,20 @@ function Invoke-ExecutableQuiet {
         [string[]]$Arguments = @()
     )
 
+    if (-not $IsWindows) {
+        $output = @(& $ExecutablePath @Arguments 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $detail =
+                if ($output.Count -eq 0) {
+                    ""
+                } else {
+                    " Output: $((($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine).Trim())"
+                }
+            throw "Executable exited with code ${LASTEXITCODE}: $ExecutablePath$detail"
+        }
+        return
+    }
+
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $ExecutablePath
     $startInfo.UseShellExecute = $false
