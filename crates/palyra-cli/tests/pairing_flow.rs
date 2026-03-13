@@ -60,8 +60,9 @@ fn pairing_pair_outputs_verifiable_identity_and_rotation() -> Result<()> {
     assert!(stdout.contains("pairing.status=paired"));
     assert!(stdout.contains("device_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"));
     assert!(stdout.contains("client_kind=desktop"));
-    assert!(stdout.contains("identity_fingerprint="));
-    assert!(stdout.contains("transcript_hash="));
+    assert!(!stdout.contains("identity_fingerprint="));
+    assert!(!stdout.contains("signing_public_key_hex="));
+    assert!(!stdout.contains("transcript_hash="));
     assert!(stdout.contains("pairing.rotation=simulated"));
     Ok(())
 }

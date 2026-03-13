@@ -47,23 +47,22 @@ pub(crate) fn run_pairing(command: PairingCommand) -> Result<()> {
                     SystemTime::now(),
                 );
                 if let Err(rollback_error) = rollback {
+                    let _ = (store_error, rollback_error);
                     anyhow::bail!(
-                        "failed to persist device identity after pairing ({store_error}); rollback revoke failed ({rollback_error})"
+                        "failed to persist device identity after pairing; rollback revoke also failed"
                     );
                 }
+                let _ = store_error;
                 anyhow::bail!(
-                    "failed to persist device identity after pairing: {store_error}; pairing was rolled back"
+                    "failed to persist device identity after pairing; pairing was rolled back"
                 );
             }
 
             println!(
-                "pairing.status=paired device_id={} client_kind={} method={} identity_fingerprint={} signing_public_key_hex={} transcript_hash={} store_root={}",
+                "pairing.status=paired device_id={} client_kind={} method={} store_root={}",
                 result.device.device_id,
                 result.device.client_kind.as_str(),
                 method.as_str(),
-                result.identity_fingerprint,
-                result.signing_public_key_hex,
-                result.transcript_hash_hex,
                 store_root.display(),
             );
 
