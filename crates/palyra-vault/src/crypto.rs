@@ -28,16 +28,23 @@ pub(crate) fn derive_device_kek(identity_store_root: &Path) -> Result<[u8; 32], 
     let _manager = IdentityManager::with_store(store.clone()).map_err(|error| {
         VaultError::Io(format!("failed to initialize identity manager for key derivation: {error}"))
     })?;
-    let seed_material = store
-        .read_secret(IDENTITY_STATE_BUNDLE_KEY)
-        .or_else(|_| store.read_secret(LEGACY_CA_STATE_KEY))
-        .map_err(|error| {
-            VaultError::Crypto(format!(
-                "failed to read identity key material for vault KEK derivation: {error}"
-            ))
-        })?;
-    let seed = extract_kek_seed_material(seed_material.as_slice())?;
+    let seed = load_kek_seed_material(store.as_ref())?;
     derive_kek_from_seed_material(seed.as_slice())
+}
+
+fn load_kek_seed_material(store: &dyn SecretStore) -> Result<Vec<u8>, VaultError> {
+    if let Ok(bundle_state) = store.read_secret(IDENTITY_STATE_BUNDLE_KEY) {
+        if let Ok(seed) = extract_kek_seed_material(bundle_state.as_slice()) {
+            return Ok(seed);
+        }
+    }
+
+    let ca_state = store.read_secret(LEGACY_CA_STATE_KEY).map_err(|error| {
+        VaultError::Crypto(format!(
+            "failed to read identity key material for vault KEK derivation: {error}"
+        ))
+    })?;
+    extract_kek_seed_material(ca_state.as_slice())
 }
 
 pub(crate) fn extract_kek_seed_material(raw_state: &[u8]) -> Result<Vec<u8>, VaultError> {

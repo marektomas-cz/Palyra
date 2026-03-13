@@ -1,6 +1,6 @@
 use crate::{
     backend::{BackendKind, BackendPreference, BlobBackend},
-    crypto::{derive_kek_from_seed_material, extract_kek_seed_material},
+    crypto::{derive_device_kek, derive_kek_from_seed_material, extract_kek_seed_material},
     envelope::seal,
     filesystem::ensure_owner_only_dir,
     metadata::{
@@ -10,6 +10,7 @@ use crate::{
     Vault, VaultConfig, VaultError, VaultRef, VaultScope,
 };
 use anyhow::Result;
+use palyra_identity::{CertificateAuthority, FilesystemSecretStore, SecretStore};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -491,6 +492,31 @@ fn kek_derivation_uses_stable_private_key_material() -> Result<()> {
     assert_eq!(
         kek_before, kek_after,
         "KEK derivation must remain stable across state metadata changes"
+    );
+    Ok(())
+}
+
+#[test]
+fn derive_device_kek_falls_back_to_standalone_ca_state() -> Result<()> {
+    let temp = tempdir()?;
+    let store = FilesystemSecretStore::new(temp.path())?;
+    let bundle_without_private_key = br#"{
+        "generation": 4,
+        "paired_devices": {},
+        "revoked_devices": {},
+        "revoked_certificate_fingerprints": []
+    }"#;
+    store.write_secret("identity/state.v1.json", bundle_without_private_key)?;
+
+    let ca = CertificateAuthority::new("Vault KEK Test CA")?.to_stored();
+    let ca_state = serde_json::to_vec(&ca)?;
+    store.write_sealed_value("identity/ca/state.json", ca_state.as_slice())?;
+
+    let derived = derive_device_kek(temp.path())?;
+    let expected = derive_kek_from_seed_material(ca.private_key_pem.as_bytes())?;
+    assert_eq!(
+        derived, expected,
+        "vault KEK derivation must fall back to standalone CA state when the public bundle omits key material"
     );
     Ok(())
 }
