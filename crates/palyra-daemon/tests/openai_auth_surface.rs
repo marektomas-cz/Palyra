@@ -1040,14 +1040,17 @@ impl OpenAiMockServer {
             while !stop_for_worker.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        if let Err(error) =
-                            handle_openai_mock_request(&mut stream, &state_for_worker)
-                        {
-                            let mut guard = state_for_worker
-                                .lock()
-                                .expect("OpenAI mock state lock should be available");
-                            guard.request_errors.push(error.to_string());
-                        }
+                        let state_for_connection = Arc::clone(&state_for_worker);
+                        thread::spawn(move || {
+                            if let Err(error) =
+                                handle_openai_mock_request(&mut stream, &state_for_connection)
+                            {
+                                let mut guard = state_for_connection
+                                    .lock()
+                                    .expect("OpenAI mock state lock should be available");
+                                guard.request_errors.push(error.to_string());
+                            }
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25));
