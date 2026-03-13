@@ -1,99 +1,49 @@
 import type { Dispatch, SetStateAction } from "react";
+import { HashRouter, MemoryRouter } from "react-router-dom";
 
-import { ConsoleSectionContent } from "./console/ConsoleSectionContent";
-import { ConsoleShell } from "./console/ConsoleShell";
+import { ConsoleRoutedShell } from "./console/ConsoleRoutedShell";
+import { ConsoleAuthScreen } from "./console/components/layout/ConsoleAuthScreen";
+import { ConsoleBootScreen } from "./console/components/layout/ConsoleBootScreen";
+import { getSectionPath } from "./console/navigation";
+import type { LoginForm } from "./console/stateTypes";
 import { useConsoleAppState } from "./console/useConsoleAppState";
-import { DEFAULT_LOGIN_FORM, type LoginForm } from "./console/stateTypes";
 
-export function App() {
+function ConsoleApp() {
   const app = useConsoleAppState();
   const loginForm: LoginForm = app.loginForm;
   const setLoginForm: Dispatch<SetStateAction<LoginForm>> = app.setLoginForm;
 
   if (app.booting) {
-    return (
-      <div className="console-root">
-        <main className="console-card console-card--center">
-          <p className="console-label">Palyra / M56</p>
-          <h1>Web Dashboard</h1>
-          <p>Checking existing session...</p>
-        </main>
-      </div>
-    );
+    return <ConsoleBootScreen />;
   }
 
   if (app.session === null) {
     return (
-      <div className="console-root">
-        <main className="console-card console-card--auth">
-          <p className="console-label">Palyra / M56</p>
-          <h1>Operator Dashboard</h1>
-          <p className="console-copy">
-            Sign in with an `admin:*` principal. Session cookie + CSRF are required for privileged actions.
-          </p>
-          <form className="console-form" onSubmit={(event) => void app.signIn(event)}>
-            <label>
-              Admin token
-              <input
-                type="password"
-                value={loginForm.adminToken}
-                onChange={(event) =>
-                  setLoginForm((previous) => ({ ...previous, adminToken: event.target.value }))
-                }
-              />
-            </label>
-            <label>
-              Principal
-              <input
-                value={loginForm.principal}
-                onChange={(event) =>
-                  setLoginForm((previous) => ({ ...previous, principal: event.target.value }))
-                }
-                required
-              />
-            </label>
-            <label>
-              Device ID
-              <input
-                value={loginForm.deviceId}
-                onChange={(event) =>
-                  setLoginForm((previous) => ({ ...previous, deviceId: event.target.value }))
-                }
-                required
-              />
-            </label>
-            <label>
-              Channel
-              <input
-                value={loginForm.channel}
-                onChange={(event) =>
-                  setLoginForm((previous) => ({ ...previous, channel: event.target.value }))
-                }
-              />
-            </label>
-            <div className="console-inline-actions">
-              <button type="submit" disabled={app.loginBusy}>
-                {app.loginBusy ? "Signing in..." : "Sign in"}
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setLoginForm(DEFAULT_LOGIN_FORM)}
-                disabled={app.loginBusy}
-              >
-                Reset
-              </button>
-            </div>
-          </form>
-          {app.error !== null && <p className="console-error">{app.error}</p>}
-        </main>
-      </div>
+      <ConsoleAuthScreen
+        error={app.error}
+        loginBusy={app.loginBusy}
+        loginForm={loginForm}
+        onSubmit={(event) => void app.signIn(event)}
+        setLoginForm={setLoginForm}
+      />
+    );
+  }
+
+  return <ConsoleRoutedShell app={app} />;
+}
+
+export function App() {
+  if (import.meta.env.MODE === "test") {
+    return (
+      <MemoryRouter initialEntries={[getSectionPath("overview")]}>
+        <ConsoleApp />
+      </MemoryRouter>
     );
   }
 
   return (
-    <ConsoleShell app={app}>
-      <ConsoleSectionContent app={app} />
-    </ConsoleShell>
+    <HashRouter>
+      <ConsoleApp />
+    </HashRouter>
   );
 }

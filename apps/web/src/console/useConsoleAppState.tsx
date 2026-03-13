@@ -3,7 +3,6 @@ import {
   type Dispatch,
   type FormEvent,
   type SetStateAction,
-  startTransition,
   useEffect,
   useMemo,
   useRef,
@@ -539,9 +538,7 @@ export function useConsoleAppState() {
   }, [section, session]);
 
   function setSection(nextSection: Section): void {
-    startTransition(() => {
-      setSectionState(nextSection);
-    });
+    setSectionState(nextSection);
   }
 
   function resetOperatorScopedState(): void {

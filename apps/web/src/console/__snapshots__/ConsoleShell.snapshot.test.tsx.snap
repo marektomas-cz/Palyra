@@ -2,307 +2,911 @@
 
 exports[`ConsoleShell snapshot coverage > renders deterministic shell navigation for the M56 parity surface 1`] = `
 <div
-  class="console-shell"
+  class="console-root min-h-screen px-4 py-6"
 >
   <header
-    class="console-topbar console-topbar--shell"
+    class="mb-5"
   >
     <div
-      class="console-topbar__title"
+      class="card card--default border border-white/30 bg-white/80 shadow-2xl shadow-slate-900/10 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/75"
+      data-slot="card"
     >
-      <p
-        class="console-label"
-      >
-        Palyra / M56
-      </p>
-      <h1>
-        Web Dashboard Operator Surface
-      </h1>
-      <p
-        class="console-copy"
-      >
-        Dashboard reflects the implemented control-plane surface, including direct actions, explicit CLI handoffs, and internal-only capability notes.
-      </p>
-    </div>
-    <div
-      class="console-session-box"
-    >
-      <p>
-        <strong>
-          Principal:
-        </strong>
-         
-        admin:web-console
-      </p>
-      <p>
-        <strong>
-          Device:
-        </strong>
-         
-        device-1
-      </p>
-      <p>
-        <strong>
-          Channel:
-        </strong>
-         
-        web
-      </p>
-      <p>
-        <strong>
-          Expires:
-        </strong>
-         
-        1970-01-01 00:00:00
-         UTC
-      </p>
       <div
-        class="console-inline-actions"
+        class="card__content gap-6 px-5 py-5 lg:flex-row lg:items-center lg:justify-between"
+        data-slot="card-content"
       >
-        <button
-          aria-label="Theme light"
-          type="button"
+        <div
+          class="space-y-3"
         >
-          Theme: 
-          light
-        </button>
-        <label
-          class="console-checkbox-inline"
+          <p
+            class="console-label"
+          >
+            Palyra / M56
+          </p>
+          <div
+            class="space-y-2"
+          >
+            <h1
+              class="text-3xl font-semibold tracking-tight text-slate-950 dark:text-slate-50"
+            >
+              Web Dashboard Operator Surface
+            </h1>
+            <p
+              class="max-w-3xl text-sm leading-6 text-slate-600 dark:text-slate-300"
+            >
+              Control
+               workspace focused on 
+              overview
+              .
+            </p>
+          </div>
+        </div>
+        <div
+          class="flex w-full max-w-lg flex-col items-start gap-4 lg:items-end"
         >
-          <input
-            type="checkbox"
-          />
-          Reveal sensitive values
-        </label>
-        <button
-          class="button--warn"
-          type="button"
-        >
-          Sign out
-        </button>
+          <div
+            class="flex flex-wrap items-center gap-2"
+          >
+            <span
+              class="chip chip--success chip--soft"
+              data-slot="chip"
+            >
+              <span
+                class="chip__label"
+                data-slot="chip-label"
+              >
+                Authenticated
+              </span>
+            </span>
+            <span
+              class="chip chip--default chip--soft"
+              data-slot="chip"
+            >
+              <span
+                class="chip__label"
+                data-slot="chip-label"
+              >
+                Control
+              </span>
+            </span>
+            <span
+              class="chip chip--default chip--secondary"
+              data-slot="chip"
+            >
+              Expires 
+              1970-01-01 00:00:00
+               UTC
+            </span>
+          </div>
+          <div
+            class="flex flex-wrap items-center gap-3"
+          >
+            <button
+              class="button button--md button--secondary"
+              data-rac=""
+              data-react-aria-pressable="true"
+              data-slot="button"
+              id="react-aria-_r_0_"
+              tabindex="0"
+              type="button"
+            >
+              Theme: 
+              light
+            </button>
+            <button
+              class="button button--md button--danger-soft"
+              data-rac=""
+              data-react-aria-pressable="true"
+              data-slot="button"
+              id="react-aria-_r_2_"
+              tabindex="0"
+              type="button"
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </header>
   <div
-    class="console-shell__layout"
+    class="grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]"
   >
     <aside
       aria-label="Dashboard domains"
-      class="console-sidebar"
     >
       <div
-        class="console-sidebar__intro"
+        class="card card--default border border-white/30 bg-white/75 shadow-xl shadow-slate-900/10 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/70"
+        data-slot="card"
       >
-        <p
-          class="console-label"
+        <div
+          class="card__content gap-6 p-5"
+          data-slot="card-content"
         >
-          Information Architecture
-        </p>
-        <h2>
-          Operator domains
-        </h2>
-        <p
-          class="console-copy"
-        >
-          Every menu maps to a live backend contract, a generated CLI handoff, or an explicit internal-only capability note.
-        </p>
+          <div
+            class="space-y-2"
+          >
+            <p
+              class="console-label"
+            >
+              Navigation
+            </p>
+            <div
+              class="space-y-1"
+            >
+              <h2
+                class="text-xl font-semibold tracking-tight text-slate-950 dark:text-slate-50"
+              >
+                Operator domains
+              </h2>
+              <p
+                class="text-sm leading-6 text-slate-600 dark:text-slate-300"
+              >
+                Chat, control, agent, and settings areas stay grouped around the live operator surface rather than backend taxonomy.
+              </p>
+            </div>
+            <div
+              class="flex flex-wrap items-center gap-2"
+            >
+              <span
+                class="chip chip--default chip--sm chip--secondary"
+                data-slot="chip"
+              >
+                <span
+                  class="chip__label"
+                  data-slot="chip-label"
+                >
+                  Route-driven shell
+                </span>
+              </span>
+              <span
+                class="chip chip--default chip--sm chip--soft"
+                data-slot="chip"
+              >
+                <span
+                  class="chip__label"
+                  data-slot="chip-label"
+                >
+                  Hash links
+                </span>
+              </span>
+            </div>
+          </div>
+          <nav
+            aria-label="Dashboard domains"
+            class="space-y-5"
+          >
+            <div
+              class="space-y-2"
+            >
+              <p
+                class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400 dark:text-slate-500"
+              >
+                Chat
+              </p>
+              <div
+                class="space-y-2"
+              >
+                <button
+                  aria-label="Chat and Sessions"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="M5 7.5A2.5 2.5 0 0 1 7.5 5h9A2.5 2.5 0 0 1 19 7.5v5A2.5 2.5 0 0 1 16.5 15H11l-4 4V15.5A2.5 2.5 0 0 1 5 13.1z"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Chat and Sessions
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Streaming operator workspace
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </div>
+            <div
+              class="space-y-2"
+            >
+              <p
+                class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400 dark:text-slate-500"
+              >
+                Control
+              </p>
+              <div
+                class="space-y-2"
+              >
+                <button
+                  aria-current="page"
+                  aria-label="Overview"
+                  class="console-sidebar-button console-sidebar-button--active"
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-accent/35 bg-accent/10 text-accent-700 dark:text-accent-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="M5 19V9l7-4 7 4v10"
+                      />
+                      <path
+                        d="M9 19v-5h6v5"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Overview
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Product posture and capability exposure map
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Approvals"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="M7 12.5 10.5 16 17 8"
+                      />
+                      <path
+                        d="M12 3 5 6v5c0 4.2 2.7 8 7 10 4.3-2 7-5.8 7-10V6z"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Approvals
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Sensitive action gate
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Cron"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="8"
+                      />
+                      <path
+                        d="M12 8v4l3 2"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Cron
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Scheduled prompts, runs, and logs
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Channels and Router"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="M6 8h12"
+                      />
+                      <path
+                        d="M6 12h8"
+                      />
+                      <path
+                        d="M6 16h10"
+                      />
+                      <path
+                        d="M18 9.5 21 12l-3 2.5"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Channels and Router
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Discord operations and routing policy
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Browser"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <rect
+                        height="14"
+                        rx="3"
+                        width="16"
+                        x="4"
+                        y="5"
+                      />
+                      <path
+                        d="M4 9h16"
+                      />
+                      <path
+                        d="M8 7.25h.01"
+                      />
+                      <path
+                        d="M11 7.25h.01"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Browser
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Profiles, relay, and downloads
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Support and Recovery"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="8"
+                      />
+                      <path
+                        d="M9.5 9.5a2.5 2.5 0 1 1 4.5 1.5c-.5.7-1.5 1.2-2 2"
+                      />
+                      <path
+                        d="M12 16h.01"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Support and Recovery
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Support bundle and recovery shortcuts
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </div>
+            <div
+              class="space-y-2"
+            >
+              <p
+                class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400 dark:text-slate-500"
+              >
+                Agent
+              </p>
+              <div
+                class="space-y-2"
+              >
+                <button
+                  aria-label="Skills"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="m8 13 3 3 5-6"
+                      />
+                      <path
+                        d="M6 5h12v14H6z"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Skills
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Install and runtime trust posture
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Memory"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="M8 7.5A3.5 3.5 0 0 1 11.5 4H14a4 4 0 0 1 0 8h-2.5A3.5 3.5 0 0 0 8 15.5V20"
+                      />
+                      <path
+                        d="M16 20H8"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Memory
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Retention, search, and purge
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </div>
+            <div
+              class="space-y-2"
+            >
+              <p
+                class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400 dark:text-slate-500"
+              >
+                Settings
+              </p>
+              <div
+                class="space-y-2"
+              >
+                <button
+                  aria-label="OpenAI and Auth Profiles"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <rect
+                        height="9"
+                        rx="2"
+                        width="12"
+                        x="6"
+                        y="10"
+                      />
+                      <path
+                        d="M9 10V8a3 3 0 1 1 6 0v2"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      OpenAI and Auth Profiles
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      OpenAI and auth profile state
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Config and Secrets"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="M12 4v4"
+                      />
+                      <path
+                        d="M12 16v4"
+                      />
+                      <path
+                        d="M4 12h4"
+                      />
+                      <path
+                        d="M16 12h4"
+                      />
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="3"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Config and Secrets
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Config lifecycle and secrets controls
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Pairing and Gateway Access"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="M8 12a4 4 0 0 1 8 0"
+                      />
+                      <path
+                        d="M8 12v4"
+                      />
+                      <path
+                        d="M16 12v4"
+                      />
+                      <path
+                        d="M6 19h12"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Pairing and Gateway Access
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Pairing lifecycle and remote access posture
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label="Diagnostics and Audit"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  >
+                    <svg
+                      class="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.8"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        d="M12 5v7l4 2"
+                      />
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="8"
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Diagnostics and Audit
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Runtime snapshots, audit, and CLI handoffs
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </div>
+          </nav>
+        </div>
       </div>
-      <nav
-        class="console-domain-nav"
-      >
-        <button
-          aria-current="page"
-          aria-label="Overview"
-          class="is-active"
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Overview
-          </span>
-          <small>
-            Product posture and capability exposure map
-          </small>
-        </button>
-        <button
-          aria-label="Chat and Sessions"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Chat and Sessions
-          </span>
-          <small>
-            Streaming operator workspace
-          </small>
-        </button>
-        <button
-          aria-label="Approvals"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Approvals
-          </span>
-          <small>
-            Sensitive action gate
-          </small>
-        </button>
-        <button
-          aria-label="Cron"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Cron
-          </span>
-          <small>
-            Scheduled prompts, runs, and logs
-          </small>
-        </button>
-        <button
-          aria-label="Channels and Router"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Channels and Router
-          </span>
-          <small>
-            Discord operations and routing policy
-          </small>
-        </button>
-        <button
-          aria-label="Browser"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Browser
-          </span>
-          <small>
-            Profiles, relay, and downloads
-          </small>
-        </button>
-        <button
-          aria-label="Memory"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Memory
-          </span>
-          <small>
-            Retention, search, and purge
-          </small>
-        </button>
-        <button
-          aria-label="Skills"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Skills
-          </span>
-          <small>
-            Install and runtime trust posture
-          </small>
-        </button>
-        <button
-          aria-label="OpenAI and Auth Profiles"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            OpenAI and Auth Profiles
-          </span>
-          <small>
-            Provider state and credential health
-          </small>
-        </button>
-        <button
-          aria-label="Config and Secrets"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Config and Secrets
-          </span>
-          <small>
-            Config lifecycle and vault metadata
-          </small>
-        </button>
-        <button
-          aria-label="Pairing and Gateway Access"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Pairing and Gateway Access
-          </span>
-          <small>
-            Pairing lifecycle and remote access posture
-          </small>
-        </button>
-        <button
-          aria-label="Diagnostics and Audit"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Diagnostics and Audit
-          </span>
-          <small>
-            Runtime snapshots, audit, and CLI handoffs
-          </small>
-        </button>
-        <button
-          aria-label="Support and Recovery"
-          class=""
-          type="button"
-        >
-          <span
-            aria-hidden="true"
-          >
-            Support and Recovery
-          </span>
-          <small>
-            Bundle export and recovery shortcuts
-          </small>
-        </button>
-      </nav>
     </aside>
     <section
-      class="console-shell__content"
+      class="space-y-4"
     >
-      <p
-        class="console-notice"
+      <div
+        class="card card--default border border-white/25 bg-white/65 shadow-none dark:border-white/10 dark:bg-slate-950/60"
+        data-slot="card"
       >
-        Overview refreshed.
-      </p>
+        <div
+          class="card__header flex flex-col items-start gap-2 px-4 pb-0 pt-4 sm:flex-row sm:items-center sm:justify-between"
+          data-slot="card-header"
+        >
+          <div>
+            <p
+              class="text-sm font-semibold text-slate-950 dark:text-slate-50"
+            >
+              Session context
+            </p>
+            <p
+              class="text-xs text-slate-500 dark:text-slate-400"
+            >
+              Principal, device, and disclosure controls for this workspace.
+            </p>
+          </div>
+          <button
+            aria-label="Reveal sensitive values"
+            class="button button--md button--ghost"
+            data-rac=""
+            data-react-aria-pressable="true"
+            data-slot="button"
+            id="react-aria-_r_4_"
+            tabindex="0"
+            type="button"
+          >
+            Reveal sensitive values: 
+            Off
+          </button>
+        </div>
+        <div
+          class="card__content flex flex-wrap items-center gap-2 px-4 py-4 text-sm"
+          data-slot="card-content"
+        >
+          <span
+            class="chip chip--default chip--secondary"
+            data-slot="chip"
+          >
+            <span
+              class="chip__label"
+              data-slot="chip-label"
+            >
+              admin:web-console
+            </span>
+          </span>
+          <span
+            class="chip chip--default chip--secondary"
+            data-slot="chip"
+          >
+            <span
+              class="chip__label"
+              data-slot="chip-label"
+            >
+              device-1
+            </span>
+          </span>
+          <span
+            class="chip chip--default chip--secondary"
+            data-slot="chip"
+          >
+            <span
+              class="chip__label"
+              data-slot="chip-label"
+            >
+              web
+            </span>
+          </span>
+          <span
+            class="chip chip--default chip--soft"
+            data-slot="chip"
+          >
+            <span
+              class="chip__label"
+              data-slot="chip-label"
+            >
+              Cookie session + CSRF
+            </span>
+          </span>
+        </div>
+      </div>
+      <div
+        class="card card--default border border-success/20 bg-success/10 shadow-none"
+        data-slot="card"
+      >
+        <div
+          class="card__content px-4 py-3 text-sm text-success-700 dark:text-success-300"
+          data-slot="card-content"
+        >
+          Overview refreshed.
+        </div>
+      </div>
       <section
         class="console-card"
       >

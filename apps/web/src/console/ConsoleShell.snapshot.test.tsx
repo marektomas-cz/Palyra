@@ -1,5 +1,6 @@
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 
 import { ConsoleShell } from "./ConsoleShell";
 import type { ConsoleAppState } from "./useConsoleAppState";
@@ -32,12 +33,14 @@ describe("ConsoleShell snapshot coverage", () => {
     } as unknown as ConsoleAppState;
 
     const rendered = render(
-      <ConsoleShell app={app}>
-        <section className="console-card">
-          <h2>Overview</h2>
-          <p>Baseline shell snapshot.</p>
-        </section>
-      </ConsoleShell>
+      <MemoryRouter>
+        <ConsoleShell app={app}>
+          <section className="console-card">
+            <h2>Overview</h2>
+            <p>Baseline shell snapshot.</p>
+          </section>
+        </ConsoleShell>
+      </MemoryRouter>
     );
 
     expect(rendered.container.firstChild).toMatchSnapshot();
