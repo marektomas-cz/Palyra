@@ -106,17 +106,11 @@ fn missing_web_ui_response() -> Response {
         .into_response()
 }
 
-async fn load_web_ui_response(
-    root: &Path,
-    request_path: &str,
-) -> Result<Response, WebUiLoadError> {
+async fn load_web_ui_response(root: &Path, request_path: &str) -> Result<Response, WebUiLoadError> {
     let asset_path = resolve_web_ui_asset_path(root, request_path)?;
     let bytes = fs::read(asset_path.as_path()).map_err(WebUiLoadError::Io)?;
     let mut response = bytes.into_response();
-    response.headers_mut().insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static(content_type_for_path(asset_path.as_path())),
@@ -296,10 +290,7 @@ mod tests {
         let response =
             load_web_ui_response(fixture.path(), "/").await.expect("root response should load");
         assert_eq!(
-            response
-                .headers()
-                .get("cache-control")
-                .and_then(|value| value.to_str().ok()),
+            response.headers().get("cache-control").and_then(|value| value.to_str().ok()),
             Some("no-store")
         );
     }
