@@ -19,10 +19,10 @@ use crate::observability::CorrelationSnapshot as ObservabilityCorrelationSnapsho
 use crate::{
     app::state::{AdminRateLimitEntry, AppState, CanvasRateLimitEntry, RemoteAdminAccessAttempt},
     classify_console_mutation_failure, refresh_console_session_cookie, runtime_status_response,
-    sha256_hex, unix_ms_now, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
-    ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, ADMIN_RATE_LIMIT_WINDOW_MS,
-    CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
-    CANVAS_RATE_LIMIT_WINDOW_MS,
+    sha256_hex, unix_ms_now, ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW,
+    ADMIN_RATE_LIMIT_MAX_IP_BUCKETS, ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+    ADMIN_RATE_LIMIT_WINDOW_MS, CANVAS_RATE_LIMIT_MAX_IP_BUCKETS,
+    CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CANVAS_RATE_LIMIT_WINDOW_MS,
 };
 
 pub(crate) async fn admin_console_security_headers_middleware(
@@ -118,6 +118,13 @@ fn consume_admin_rate_limit(state: &AppState, remote_addr: SocketAddr) -> bool {
     consume_admin_rate_limit_with_now(&state.admin_rate_limit, remote_addr.ip(), Instant::now())
 }
 
+fn admin_rate_limit_budget(remote_ip: IpAddr) -> u32 {
+    if remote_ip.is_loopback() {
+        return ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW;
+    }
+    ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW
+}
+
 pub(crate) fn consume_admin_rate_limit_with_now(
     buckets: &Mutex<HashMap<IpAddr, AdminRateLimitEntry>>,
     remote_ip: IpAddr,
@@ -148,7 +155,7 @@ pub(crate) fn consume_admin_rate_limit_with_now(
         entry.window_started_at = now;
         entry.requests_in_window = 0;
     }
-    if entry.requests_in_window >= ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+    if entry.requests_in_window >= admin_rate_limit_budget(remote_ip) {
         return false;
     }
     entry.requests_in_window = entry.requests_in_window.saturating_add(1);

@@ -29,7 +29,7 @@ describe("M35 web console app", () => {
     expect(document.documentElement.style.colorScheme).toBe("dark");
   });
 
-  it("retries bootstrap session after a redirected desktop handoff", async () => {
+  it("retries bootstrap session after a redirected desktop handoff rate limit", async () => {
     window.localStorage.removeItem("palyra.console.theme");
     const originalGetEntriesByType = window.performance.getEntriesByType.bind(window.performance);
     vi.spyOn(window.performance, "getEntriesByType").mockImplementation((type: string) => {
@@ -40,7 +40,8 @@ describe("M35 web console app", () => {
     });
 
     const fetchMock = createQueuedFetch([
-      jsonResponse({ error: "console session cookie is missing" }, 403),
+      jsonResponse({ error: "admin API rate limit exceeded for 127.0.0.1" }, 429),
+      jsonResponse({ error: "admin API rate limit exceeded for 127.0.0.1" }, 429),
       jsonResponse({
         principal: "admin:desktop-control-center",
         device_id: "device-1",
@@ -59,7 +60,7 @@ describe("M35 web console app", () => {
     const sessionCalls = fetchMock.mock.calls.filter(
       (call) => requestUrl(call[0]) === "/console/v1/auth/session"
     );
-    expect(sessionCalls).toHaveLength(2);
+    expect(sessionCalls).toHaveLength(3);
   });
 
   it("clears operator-scoped state on sign-out before next sign-in refresh completes", async () => {

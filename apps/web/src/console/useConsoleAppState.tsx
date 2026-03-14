@@ -47,8 +47,8 @@ export const AUTO_REFRESH_SECTION_TTL_MS: Partial<Record<Section, number>> = {
   support: 10_000
 };
 
-const BOOTSTRAP_SESSION_RETRY_DELAY_MS = 200;
-const BOOTSTRAP_SESSION_RETRY_ATTEMPTS = 4;
+const BOOTSTRAP_SESSION_RETRY_DELAY_MS = 250;
+const BOOTSTRAP_SESSION_RETRY_ATTEMPTS = 6;
 
 export function shouldAutoRefreshSection(
   section: Section,
@@ -82,7 +82,7 @@ function shouldRetryBootstrapSession(
   if (attempt >= maxAttempts) {
     return false;
   }
-  return error.status === 401 || error.status === 403;
+  return error.status === 401 || error.status === 403 || error.status === 429;
 }
 
 async function waitForBootstrapRetry(attempt: number): Promise<void> {

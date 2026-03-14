@@ -198,6 +198,7 @@ const GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 const GRPC_MAX_ENCODING_MESSAGE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const ADMIN_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
 pub(crate) const ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 30;
+pub(crate) const ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW: u32 = 120;
 pub(crate) const ADMIN_RATE_LIMIT_MAX_IP_BUCKETS: usize = 4_096;
 pub(crate) const CANVAS_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
 pub(crate) const CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 90;
@@ -2336,7 +2337,8 @@ mod tests {
         validate_canvas_http_token_query, validate_process_runner_backend_policy,
         ConsoleRelayToken, DiscordBotIdentitySummary, DiscordOnboardingRequest,
         DiscordOnboardingScope, DiscordPrivilegedIntentStatus, RemoteBindEndpoints,
-        RemoteBindGuardConfig, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
+        RemoteBindGuardConfig, ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW,
+        ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
         ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CANVAS_HTTP_MAX_TOKEN_BYTES,
         CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
         CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS, CONSOLE_RELAY_TOKEN_MAX_TTL_MS,
@@ -3397,7 +3399,7 @@ mod tests {
         let buckets = Mutex::new(HashMap::new());
         let ip = IpAddr::from_str("127.0.0.1").expect("IP literal should parse");
         let now = Instant::now();
-        for attempt in 0..ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+        for attempt in 0..ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW {
             let allowed = consume_admin_rate_limit_with_now(&buckets, ip, now);
             assert!(allowed, "attempt {attempt} should remain within the request budget");
         }
@@ -3408,11 +3410,26 @@ mod tests {
     }
 
     #[test]
+    fn admin_rate_limit_keeps_remote_budget_tighter_than_loopback() {
+        let buckets = Mutex::new(HashMap::new());
+        let ip = IpAddr::from_str("203.0.113.10").expect("IP literal should parse");
+        let now = Instant::now();
+        for attempt in 0..ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+            let allowed = consume_admin_rate_limit_with_now(&buckets, ip, now);
+            assert!(allowed, "remote attempt {attempt} should remain within the request budget");
+        }
+        assert!(
+            !consume_admin_rate_limit_with_now(&buckets, ip, now),
+            "remote request after budget exhaustion should be rejected"
+        );
+    }
+
+    #[test]
     fn admin_rate_limit_resets_budget_after_window_elapses() {
         let buckets = Mutex::new(HashMap::new());
         let ip = IpAddr::from_str("127.0.0.1").expect("IP literal should parse");
         let now = Instant::now();
-        for _ in 0..ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+        for _ in 0..ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW {
             let _ = consume_admin_rate_limit_with_now(&buckets, ip, now);
         }
         assert!(
