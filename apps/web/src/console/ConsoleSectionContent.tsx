@@ -1,5 +1,6 @@
 import { ChatConsolePanel } from "../chat/ChatConsolePanel";
 import { AccessSection } from "./sections/AccessSection";
+import { AgentsSection } from "./sections/AgentsSection";
 import { ApprovalsSection } from "./sections/ApprovalsSection";
 import { AuthSection } from "./sections/AuthSection";
 import { BrowserSection } from "./sections/BrowserSection";
@@ -38,6 +39,8 @@ export function ConsoleSectionContent({ app }: ConsoleSectionContentProps) {
       return <ChannelsSection app={app} />;
     case "browser":
       return <BrowserSection app={app} />;
+    case "agents":
+      return <AgentsSection app={app} />;
     case "memory":
       return <MemorySection app={app} />;
     case "skills":

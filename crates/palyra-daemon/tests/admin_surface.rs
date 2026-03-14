@@ -898,6 +898,181 @@ fn console_browser_relay_action_rejects_body_token_without_authorization_header(
 }
 
 #[test]
+fn console_agent_endpoints_require_session_and_csrf_and_bridge_runtime() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let no_session = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/agents"))
+        .send()
+        .context("failed to call agents list endpoint without session")?;
+    assert_eq!(no_session.status().as_u16(), 403, "agents list endpoint must require session");
+
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let empty_list = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/agents"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to call agents list endpoint with session")?
+        .error_for_status()
+        .context("agents list endpoint returned non-success status")?
+        .json::<palyra_control_plane::AgentListEnvelope>()
+        .context("failed to parse agents list response json")?;
+    assert!(empty_list.agents.is_empty(), "fresh daemon should start with an empty agent registry");
+    assert_eq!(
+        empty_list.default_agent_id, None,
+        "fresh daemon should not publish a default agent id"
+    );
+
+    let create_main_payload = serde_json::json!({
+        "agent_id": "main",
+        "display_name": "Main",
+        "workspace_roots": ["workspace"],
+        "default_tool_allowlist": ["palyra.echo"],
+        "default_skill_allowlist": ["acme.echo"],
+        "set_default": true,
+        "allow_absolute_paths": false
+    });
+
+    let create_without_csrf = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/agents"))
+        .header("Cookie", cookie.clone())
+        .json(&create_main_payload)
+        .send()
+        .context("failed to create agent without csrf token")?;
+    assert_eq!(
+        create_without_csrf.status().as_u16(),
+        403,
+        "agent create endpoint must enforce csrf token"
+    );
+
+    let created_main = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/agents"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&create_main_payload)
+        .send()
+        .context("failed to create main agent with csrf token")?
+        .error_for_status()
+        .context("main agent create returned non-success status")?
+        .json::<palyra_control_plane::AgentCreateEnvelope>()
+        .context("failed to parse main agent create response json")?;
+    assert_eq!(created_main.agent.agent_id, "main");
+    assert!(created_main.default_changed, "first created agent should become default");
+    assert_eq!(created_main.default_agent_id.as_deref(), Some("main"));
+    assert!(
+        !created_main.agent.agent_dir.trim().is_empty(),
+        "created agent should include its canonical agent_dir"
+    );
+
+    let created_review = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/agents"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "agent_id": "review",
+            "display_name": "Review",
+            "workspace_roots": ["workspace-review"],
+            "default_tool_allowlist": ["palyra.echo"],
+            "default_skill_allowlist": ["acme.review"],
+            "set_default": false,
+            "allow_absolute_paths": false
+        }))
+        .send()
+        .context("failed to create review agent with csrf token")?
+        .error_for_status()
+        .context("review agent create returned non-success status")?
+        .json::<palyra_control_plane::AgentCreateEnvelope>()
+        .context("failed to parse review agent create response json")?;
+    assert_eq!(created_review.agent.agent_id, "review");
+    assert!(
+        !created_review.default_changed,
+        "non-default create should not switch the default agent"
+    );
+    assert_eq!(created_review.default_agent_id.as_deref(), Some("main"));
+
+    let listed = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/agents"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to list agents after creation")?
+        .error_for_status()
+        .context("agents list after creation returned non-success status")?
+        .json::<palyra_control_plane::AgentListEnvelope>()
+        .context("failed to parse populated agents list response json")?;
+    assert_eq!(listed.agents.len(), 2, "agents list should include both created agents");
+    assert_eq!(listed.default_agent_id.as_deref(), Some("main"));
+
+    let fetched_main = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/agents/main"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to fetch main agent")?
+        .error_for_status()
+        .context("main agent fetch returned non-success status")?
+        .json::<palyra_control_plane::AgentEnvelope>()
+        .context("failed to parse main agent response json")?;
+    assert_eq!(fetched_main.agent.agent_id, "main");
+    assert!(fetched_main.is_default, "main agent should be default before set-default");
+
+    let set_default_without_csrf = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/agents/review/set-default"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to call set-default without csrf token")?;
+    assert_eq!(
+        set_default_without_csrf.status().as_u16(),
+        403,
+        "set-default endpoint must enforce csrf token"
+    );
+
+    let set_default = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/agents/review/set-default"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .send()
+        .context("failed to call set-default with csrf token")?
+        .error_for_status()
+        .context("set-default returned non-success status")?
+        .json::<palyra_control_plane::AgentSetDefaultEnvelope>()
+        .context("failed to parse set-default response json")?;
+    assert_eq!(set_default.previous_default_agent_id.as_deref(), Some("main"));
+    assert_eq!(set_default.default_agent_id, "review");
+
+    let fetched_review = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/agents/review"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to fetch review agent")?
+        .error_for_status()
+        .context("review agent fetch returned non-success status")?
+        .json::<palyra_control_plane::AgentEnvelope>()
+        .context("failed to parse review agent response json")?;
+    assert_eq!(fetched_review.agent.agent_id, "review");
+    assert!(fetched_review.is_default, "review agent should be default after set-default");
+
+    let final_list = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/agents"))
+        .header("Cookie", cookie)
+        .send()
+        .context("failed to list agents after set-default")?
+        .error_for_status()
+        .context("agents list after set-default returned non-success status")?
+        .json::<palyra_control_plane::AgentListEnvelope>()
+        .context("failed to parse final agents list response json")?;
+    assert_eq!(final_list.default_agent_id.as_deref(), Some("review"));
+
+    Ok(())
+}
+
+#[test]
 fn console_channels_endpoints_require_session_and_csrf() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
     let mut daemon = ChildGuard::new(child);

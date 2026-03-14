@@ -522,6 +522,30 @@ exports[`ConsoleShell snapshot coverage > renders deterministic shell navigation
                 class="space-y-2"
               >
                 <button
+                  aria-label="Agents"
+                  class="console-sidebar-button "
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"
+                  />
+                  <span
+                    class="flex flex-1 flex-col items-start text-left"
+                  >
+                    <span
+                      class="text-sm font-semibold"
+                    >
+                      Agents
+                    </span>
+                    <span
+                      class="text-xs text-foreground-500"
+                    >
+                      Registry, defaults, and workspace setup
+                    </span>
+                  </span>
+                </button>
+                <button
                   aria-label="Skills"
                   class="console-sidebar-button "
                   type="button"

@@ -483,6 +483,56 @@ export interface SupportBundleJobListEnvelope {
   page: PageInfo;
 }
 
+export interface AgentRecord {
+  agent_id: string;
+  display_name: string;
+  agent_dir: string;
+  workspace_roots: string[];
+  default_model_profile: string;
+  default_tool_allowlist: string[];
+  default_skill_allowlist: string[];
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
+export interface AgentListEnvelope {
+  contract: ContractDescriptor;
+  agents: AgentRecord[];
+  default_agent_id?: string;
+  page: PageInfo;
+}
+
+export interface AgentEnvelope {
+  contract: ContractDescriptor;
+  agent: AgentRecord;
+  is_default: boolean;
+}
+
+export interface AgentCreateRequest {
+  agent_id: string;
+  display_name: string;
+  agent_dir?: string;
+  workspace_roots?: string[];
+  default_model_profile?: string;
+  default_tool_allowlist?: string[];
+  default_skill_allowlist?: string[];
+  set_default?: boolean;
+  allow_absolute_paths?: boolean;
+}
+
+export interface AgentCreateEnvelope {
+  contract: ContractDescriptor;
+  agent: AgentRecord;
+  default_changed: boolean;
+  default_agent_id?: string;
+}
+
+export interface AgentSetDefaultEnvelope {
+  contract: ContractDescriptor;
+  default_agent_id: string;
+  previous_default_agent_id?: string;
+}
+
 export class ControlPlaneApiError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -829,6 +879,36 @@ export class ConsoleApiClient {
 
   async getPairingSummary(): Promise<PairingSummaryEnvelope> {
     return this.request("/console/v1/pairing");
+  }
+
+  async listAgents(params?: URLSearchParams): Promise<AgentListEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/agents", params));
+  }
+
+  async getAgent(agentId: string): Promise<AgentEnvelope> {
+    return this.request(`/console/v1/agents/${encodeURIComponent(agentId)}`);
+  }
+
+  async createAgent(payload: AgentCreateRequest): Promise<AgentCreateEnvelope> {
+    return this.request(
+      "/console/v1/agents",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      { csrf: true }
+    );
+  }
+
+  async setDefaultAgent(agentId: string): Promise<AgentSetDefaultEnvelope> {
+    return this.request(
+      `/console/v1/agents/${encodeURIComponent(agentId)}/set-default`,
+      {
+        method: "POST",
+        body: JSON.stringify({})
+      },
+      { csrf: true }
+    );
   }
 
   async mintPairingCode(payload: {

@@ -123,6 +123,13 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/deployment/posture",
             get(console::auth::console_deployment_posture_handler),
         )
+        .route("/console/v1/agents", get(console::agents::console_agents_list_handler))
+        .route("/console/v1/agents", post(console::agents::console_agent_create_handler))
+        .route("/console/v1/agents/{agent_id}", get(console::agents::console_agent_get_handler))
+        .route(
+            "/console/v1/agents/{agent_id}/set-default",
+            post(console::agents::console_agent_set_default_handler),
+        )
         .route("/console/v1/auth/profiles", get(console::auth::console_auth_profiles_list_handler))
         .route(
             "/console/v1/auth/profiles",

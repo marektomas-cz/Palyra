@@ -5,6 +5,7 @@ export const CONSOLE_SECTIONS = [
   { id: "cron", label: "Automation", detail: "Scheduled jobs, runs, and history" },
   { id: "channels", label: "Channels", detail: "Connectors, router, and Discord setup" },
   { id: "browser", label: "Browser", detail: "Profiles, relay, and downloads" },
+  { id: "agents", label: "Agents", detail: "Registry, defaults, and workspace setup" },
   { id: "memory", label: "Memory", detail: "Retention, search, and purge" },
   { id: "skills", label: "Skills", detail: "Install and runtime trust posture" },
   { id: "auth", label: "OpenAI and Auth Profiles", detail: "OpenAI and auth profile state" },

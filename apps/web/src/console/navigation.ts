@@ -5,6 +5,7 @@ export const CONSOLE_SECTIONS = [
   { id: "cron", label: "Automation", detail: "Scheduled jobs, runs, and history" },
   { id: "channels", label: "Channels", detail: "Connectors, router, and Discord setup" },
   { id: "browser", label: "Browser", detail: "Profiles, relay, and downloads" },
+  { id: "agents", label: "Agents", detail: "Registry, defaults, and workspace setup" },
   { id: "memory", label: "Memory", detail: "Retention, search, and purge" },
   { id: "skills", label: "Skills", detail: "Install and runtime trust posture" },
   { id: "auth", label: "OpenAI and Auth Profiles", detail: "OpenAI and auth profile state" },
@@ -51,7 +52,7 @@ export const CONSOLE_NAV_GROUPS: readonly NavigationGroup[] = [
   {
     id: "agent",
     label: "Agent",
-    items: resolveEntries(["skills", "memory"])
+    items: resolveEntries(["agents", "skills", "memory"])
   },
   {
     id: "settings",
@@ -67,6 +68,7 @@ const SECTION_PATHS: Readonly<Record<Section, string>> = {
   cron: "/control/automation",
   channels: "/control/channels",
   browser: "/control/browser",
+  agents: "/agent/agents",
   memory: "/agent/memory",
   skills: "/agent/skills",
   auth: "/settings/profiles",
@@ -85,6 +87,7 @@ const SECTION_GROUPS: Readonly<Record<Section, NavigationGroup["id"]>> = {
   cron: "control",
   channels: "control",
   browser: "control",
+  agents: "agent",
   memory: "agent",
   skills: "agent",
   auth: "settings",

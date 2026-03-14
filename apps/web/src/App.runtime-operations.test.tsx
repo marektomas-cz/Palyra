@@ -351,6 +351,122 @@ describe("M56 runtime and operations surfaces", () => {
     expect((await screen.findAllByText(/report.csv/)).length).toBeGreaterThan(0);
   }, 15_000);
 
+  it("lists agents, creates a new agent from the wizard, and updates the default agent", async () => {
+    const agentState = {
+      default_agent_id: "main",
+      agents: [
+        {
+          agent_id: "main",
+          display_name: "Main Agent",
+          agent_dir: "state/agents/main",
+          workspace_roots: ["workspace"],
+          default_model_profile: "gpt-4o-mini",
+          default_tool_allowlist: ["palyra.echo"],
+          default_skill_allowlist: ["acme.echo"],
+          created_at_unix_ms: 1_730_000_000_000,
+          updated_at_unix_ms: 1_730_000_100_000
+        },
+        {
+          agent_id: "review",
+          display_name: "Review Agent",
+          agent_dir: "state/agents/review",
+          workspace_roots: ["workspace-review"],
+          default_model_profile: "gpt-4o-mini",
+          default_tool_allowlist: ["palyra.http.fetch"],
+          default_skill_allowlist: ["acme.review"],
+          created_at_unix_ms: 1_730_000_200_000,
+          updated_at_unix_ms: 1_730_000_300_000
+        }
+      ]
+    };
+
+    const fetchMock = createFetchRouter(routeBaseRequests, (request) => {
+      if (request.path === "/console/v1/agents" && request.method === "GET") {
+        return jsonResponse(agentListFixture(agentState));
+      }
+      if (request.path === "/console/v1/agents/main" && request.method === "GET") {
+        return jsonResponse(agentEnvelopeFixture(agentState, "main"));
+      }
+      if (request.path === "/console/v1/agents/review" && request.method === "GET") {
+        return jsonResponse(agentEnvelopeFixture(agentState, "review"));
+      }
+      if (request.path === "/console/v1/agents/review-agent" && request.method === "GET") {
+        return jsonResponse(agentEnvelopeFixture(agentState, "review-agent"));
+      }
+      if (request.path === "/console/v1/agents" && request.method === "POST") {
+        agentState.agents.push({
+          agent_id: "review-agent",
+          display_name: "Review Agent Wizard",
+          agent_dir: "state/agents/review-agent",
+          workspace_roots: ["workspace", "workspace-review"],
+          default_model_profile: "gpt-4.1-mini",
+          default_tool_allowlist: ["palyra.echo"],
+          default_skill_allowlist: ["acme.review"],
+          created_at_unix_ms: 1_730_000_400_000,
+          updated_at_unix_ms: 1_730_000_400_000
+        });
+        agentState.default_agent_id = "review-agent";
+        return jsonResponse({
+          contract: { contract_version: "control-plane.v1" },
+          agent: agentState.agents[2],
+          default_changed: true,
+          default_agent_id: "review-agent"
+        });
+      }
+      if (request.path === "/console/v1/agents/main/set-default" && request.method === "POST") {
+        agentState.default_agent_id = "main";
+        return jsonResponse({
+          contract: { contract_version: "control-plane.v1" },
+          default_agent_id: "main",
+          previous_default_agent_id: "review-agent"
+        });
+      }
+      return undefined;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Agents" }));
+    expect(await screen.findByRole("heading", { name: "Agents" })).toBeInTheDocument();
+    expect((await screen.findAllByText("Main Agent")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Review Agent")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("state/agents/main")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create agent" }));
+    fireEvent.change(screen.getByLabelText("Agent ID"), { target: { value: "review-agent" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Review Agent Wizard" } });
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.change(screen.getByLabelText("Workspace roots"), {
+      target: { value: "workspace\nworkspace-review" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.change(screen.getByLabelText("Default model profile"), {
+      target: { value: "gpt-4.1-mini" }
+    });
+    fireEvent.change(screen.getByLabelText("Tool allowlist"), { target: { value: "palyra.echo" } });
+    fireEvent.change(screen.getByLabelText("Skill allowlist"), { target: { value: "acme.review" } });
+    fireEvent.click(screen.getByLabelText("Set as default agent"));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create agent" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Agent 'Review Agent Wizard' created.")).toBeInTheDocument();
+    });
+    expect((await screen.findAllByText("review-agent")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("state/agents/review-agent")).toBeInTheDocument();
+
+    const mainAgentButton = screen.getByText("Main Agent").closest("button");
+    expect(mainAgentButton).not.toBeNull();
+    fireEvent.click(mainAgentButton!);
+    fireEvent.click(await screen.findByRole("button", { name: "Set as default" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Default agent set to 'main'.")).toBeInTheDocument();
+    });
+    expect(await screen.findByText("Default main")).toBeInTheDocument();
+  }, 15_000);
+
 });
 
 function routeBaseRequests(request: { path: string; method: string }) {
@@ -373,4 +489,59 @@ function routeBaseRequests(request: { path: string; method: string }) {
     return jsonResponse(auditEventsFixture());
   }
   return undefined;
+}
+
+function agentListFixture(state: {
+  default_agent_id: string;
+  agents: Array<{
+    agent_id: string;
+    display_name: string;
+    agent_dir: string;
+    workspace_roots: string[];
+    default_model_profile: string;
+    default_tool_allowlist: string[];
+    default_skill_allowlist: string[];
+    created_at_unix_ms: number;
+    updated_at_unix_ms: number;
+  }>;
+}) {
+  return {
+    contract: { contract_version: "control-plane.v1" },
+    agents: state.agents,
+    default_agent_id: state.default_agent_id,
+    page: {
+      limit: 50,
+      returned: state.agents.length,
+      has_more: false,
+      next_cursor: null
+    }
+  };
+}
+
+function agentEnvelopeFixture(
+  state: {
+    default_agent_id: string;
+    agents: Array<{
+      agent_id: string;
+      display_name: string;
+      agent_dir: string;
+      workspace_roots: string[];
+      default_model_profile: string;
+      default_tool_allowlist: string[];
+      default_skill_allowlist: string[];
+      created_at_unix_ms: number;
+      updated_at_unix_ms: number;
+    }>;
+  },
+  agentId: string
+) {
+  const agent = state.agents.find((entry) => entry.agent_id === agentId);
+  if (agent === undefined) {
+    throw new Error(`Missing agent fixture: ${agentId}`);
+  }
+  return {
+    contract: { contract_version: "control-plane.v1" },
+    agent,
+    is_default: state.default_agent_id === agentId
+  };
 }

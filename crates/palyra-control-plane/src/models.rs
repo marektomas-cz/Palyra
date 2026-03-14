@@ -146,6 +146,76 @@ pub struct ConfigMutationEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRecord {
+    pub agent_id: String,
+    pub display_name: String,
+    pub agent_dir: String,
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
+    pub default_model_profile: String,
+    #[serde(default)]
+    pub default_tool_allowlist: Vec<String>,
+    #[serde(default)]
+    pub default_skill_allowlist: Vec<String>,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentListEnvelope {
+    pub contract: ContractDescriptor,
+    #[serde(default)]
+    pub agents: Vec<AgentRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_agent_id: Option<String>,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEnvelope {
+    pub contract: ContractDescriptor,
+    pub agent: AgentRecord,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCreateRequest {
+    pub agent_id: String,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_dir: Option<String>,
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model_profile: Option<String>,
+    #[serde(default)]
+    pub default_tool_allowlist: Vec<String>,
+    #[serde(default)]
+    pub default_skill_allowlist: Vec<String>,
+    #[serde(default)]
+    pub set_default: bool,
+    #[serde(default)]
+    pub allow_absolute_paths: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCreateEnvelope {
+    pub contract: ContractDescriptor,
+    pub agent: AgentRecord,
+    pub default_changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSetDefaultEnvelope {
+    pub contract: ContractDescriptor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_default_agent_id: Option<String>,
+    pub default_agent_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthProfileProvider {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
