@@ -213,6 +213,7 @@ fn normalize_optional_text(raw: &str) -> Option<&str> {
     }
 }
 
+#[derive(Debug)]
 enum WebUiLoadError {
     InvalidPath,
     Io(std::io::Error),
