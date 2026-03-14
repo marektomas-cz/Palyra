@@ -31,6 +31,7 @@ const DEFAULT_DASHBOARD_HASH_ROUTE: &str = "#/control/overview";
 const CONSOLE_SESSION_EXPIRY_SKEW_MS: i64 = 5_000;
 const CONSOLE_PAYLOAD_CACHE_TTL_MS: i64 = 15_000;
 const CONSOLE_PAYLOAD_STALE_WARNING_MS: i64 = 60_000;
+const DESKTOP_BROWSER_HANDOFF_QUERY_PARAM: &str = "desktop_handoff_token";
 
 #[derive(Debug, Serialize)]
 pub(crate) struct DiscordStatusSnapshot {
@@ -960,7 +961,7 @@ pub(crate) async fn build_dashboard_open_url(
         })
         .await
         .map_err(|error| anyhow!("browser handoff bootstrap failed: {error}"))?;
-    Ok(handoff.handoff_url)
+    desktop_browser_handoff_url(dashboard_url, handoff.handoff_url.as_str())
 }
 
 async fn request_console_session(
@@ -1007,6 +1008,23 @@ fn dashboard_redirect_path_from_url(dashboard_url: &str) -> Result<String> {
         redirect_path.insert(0, '/');
     }
     Ok(redirect_path)
+}
+
+fn desktop_browser_handoff_url(dashboard_url: &str, handoff_url: &str) -> Result<String> {
+    let mut dashboard = Url::parse(dashboard_url)
+        .with_context(|| format!("failed to parse dashboard URL {dashboard_url}"))?;
+    let handoff = Url::parse(handoff_url)
+        .with_context(|| format!("failed to parse browser handoff URL {handoff_url}"))?;
+    let handoff_token = handoff
+        .query_pairs()
+        .find_map(|(key, value)| {
+            (key == "token" && !value.trim().is_empty()).then(|| value.into_owned())
+        })
+        .ok_or_else(|| anyhow!("browser handoff URL is missing a token query parameter"))?;
+    dashboard
+        .query_pairs_mut()
+        .append_pair(DESKTOP_BROWSER_HANDOFF_QUERY_PARAM, handoff_token.as_str());
+    Ok(dashboard.to_string())
 }
 
 async fn fetch_console_json(
@@ -1196,7 +1214,9 @@ fn support_bundle_inherited_env_keys() -> &'static [&'static str] {
 mod tests {
     use serde_json::json;
 
-    use super::{collect_redacted_errors, dashboard_redirect_path_from_url};
+    use super::{
+        collect_redacted_errors, dashboard_redirect_path_from_url, desktop_browser_handoff_url,
+    };
 
     #[test]
     fn collect_redacted_errors_ignores_internal_failure_class_labels() {
@@ -1235,6 +1255,19 @@ mod tests {
         let redirect_path = dashboard_redirect_path_from_url("http://127.0.0.1:7142/#/control/overview")
             .expect("loopback dashboard URL should produce redirect path");
         assert_eq!(redirect_path, "/#/control/overview");
+    }
+
+    #[test]
+    fn desktop_browser_handoff_url_embeds_query_token_without_losing_hash_route() {
+        let handoff_url = desktop_browser_handoff_url(
+            "http://127.0.0.1:7142/#/control/overview",
+            "http://127.0.0.1:7142/console/v1/auth/browser-handoff/consume?token=test-token",
+        )
+        .expect("handoff URL should convert into a dashboard bootstrap URL");
+        assert_eq!(
+            handoff_url,
+            "http://127.0.0.1:7142/?desktop_handoff_token=test-token#/control/overview"
+        );
     }
 }
 

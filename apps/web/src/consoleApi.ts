@@ -611,6 +611,19 @@ export class ConsoleApiClient {
     return session;
   }
 
+  async consumeDesktopHandoff(token: string): Promise<ConsoleSession> {
+    const session = await this.request<ConsoleSession>(
+      "/console/v1/auth/browser-handoff/session",
+      {
+        method: "POST",
+        body: JSON.stringify({ token })
+      },
+      { csrf: false }
+    );
+    this.csrfToken = session.csrf_token;
+    return session;
+  }
+
   async logout(): Promise<void> {
     await this.request<{ signed_out: boolean }>(
       "/console/v1/auth/logout",

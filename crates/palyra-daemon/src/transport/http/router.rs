@@ -124,6 +124,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(console::auth::console_browser_bootstrap_handler),
         )
         .route(
+            "/console/v1/auth/browser-handoff/session",
+            post(console::auth::console_browser_session_bootstrap_handler),
+        )
+        .route(
             "/console/v1/control-plane/capabilities",
             get(console::auth::console_capability_catalog_handler),
         )

@@ -12,6 +12,7 @@ use std::{
 use anyhow::{Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use reqwest::blocking::Client;
+use reqwest::Url;
 use serde_json::Value;
 
 const ADMIN_TOKEN: &str = "test-admin-token";
@@ -463,6 +464,77 @@ fn console_browser_handoff_bootstraps_a_browser_session() -> Result<()> {
         .next()
         .ok_or_else(|| anyhow::anyhow!("browser handoff set-cookie header missing cookie pair"))?
         .to_owned();
+
+    let session_response = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/auth/session"))
+        .header("Cookie", handoff_cookie)
+        .send()
+        .context("failed to verify browser handoff session")?
+        .error_for_status()
+        .context("browser handoff session did not authorize console auth/session")?;
+    assert_admin_console_security_headers(session_response.headers())?;
+
+    Ok(())
+}
+
+#[test]
+fn console_browser_handoff_session_endpoint_bootstraps_a_browser_session() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let handoff_response = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/auth/browser-handoff"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "redirect_path": "/#/control/overview"
+        }))
+        .send()
+        .context("failed to create console browser handoff")?
+        .error_for_status()
+        .context("console browser handoff endpoint returned non-success status")?;
+    let handoff = handoff_response
+        .json::<Value>()
+        .context("failed to parse console browser handoff response json")?;
+    let handoff_url = handoff
+        .get("handoff_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("browser handoff response missing handoff_url"))?;
+    let handoff_token = Url::parse(handoff_url)
+        .context("failed to parse handoff_url")?
+        .query_pairs()
+        .find_map(|(key, value)| (key == "token").then(|| value.into_owned()))
+        .ok_or_else(|| anyhow::anyhow!("browser handoff_url missing token query parameter"))?;
+
+    let bootstrap_response = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/auth/browser-handoff/session"))
+        .json(&serde_json::json!({ "token": handoff_token }))
+        .send()
+        .context("failed to consume console browser handoff through session endpoint")?
+        .error_for_status()
+        .context("console browser handoff session endpoint returned non-success status")?;
+    assert_admin_console_security_headers(bootstrap_response.headers())?;
+    let handoff_cookie = header_value(bootstrap_response.headers(), "set-cookie")?
+        .split(';')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("browser handoff set-cookie header missing cookie pair"))?
+        .to_owned();
+    let session = bootstrap_response
+        .json::<Value>()
+        .context("failed to parse handoff session response json")?;
+    assert_eq!(
+        session.get("principal").and_then(Value::as_str),
+        Some(CONSOLE_ADMIN_PRINCIPAL),
+        "browser handoff session bootstrap should inherit the desktop admin principal"
+    );
 
     let session_response = client
         .get(format!("http://127.0.0.1:{admin_port}/console/v1/auth/session"))

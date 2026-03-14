@@ -47,8 +47,11 @@ export const AUTO_REFRESH_SECTION_TTL_MS: Partial<Record<Section, number>> = {
   support: 10_000
 };
 
-const BOOTSTRAP_SESSION_RETRY_DELAY_MS = 250;
-const BOOTSTRAP_SESSION_RETRY_ATTEMPTS = 6;
+const BOOTSTRAP_SESSION_RETRY_DELAY_MS = 150;
+const BOOTSTRAP_SESSION_RETRY_ATTEMPTS = 5;
+const DESKTOP_SESSION_RECOVERY_DELAY_MS = 750;
+const DESKTOP_SESSION_RECOVERY_ATTEMPTS = 8;
+const DESKTOP_HANDOFF_QUERY_PARAM = "desktop_handoff_token";
 
 export function shouldAutoRefreshSection(
   section: Section,
@@ -60,15 +63,6 @@ export function shouldAutoRefreshSection(
     return true;
   }
   return now - lastRefreshedAt >= ttlMs;
-}
-
-function navigationLikelyFollowedBrowserHandoff(): boolean {
-  if (typeof window === "undefined" || typeof performance === "undefined") {
-    return false;
-  }
-
-  const [entry] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
-  return (entry?.redirectCount ?? 0) > 0;
 }
 
 function shouldRetryBootstrapSession(
@@ -90,16 +84,17 @@ async function waitForBootstrapRetry(attempt: number): Promise<void> {
   await new Promise((resolve) => window.setTimeout(resolve, delayMs));
 }
 
-async function loadBootstrapSession(api: ConsoleApiClient): Promise<ConsoleSession> {
-  const maxAttempts = navigationLikelyFollowedBrowserHandoff()
-    ? BOOTSTRAP_SESSION_RETRY_ATTEMPTS
-    : 1;
+async function waitForDesktopSessionRecovery(attempt: number): Promise<void> {
+  const delayMs = DESKTOP_SESSION_RECOVERY_DELAY_MS * attempt;
+  await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+}
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+async function loadBootstrapSession(api: ConsoleApiClient): Promise<ConsoleSession> {
+  for (let attempt = 1; attempt <= BOOTSTRAP_SESSION_RETRY_ATTEMPTS; attempt += 1) {
     try {
       return await api.getSession();
     } catch (error) {
-      if (!shouldRetryBootstrapSession(error, attempt, maxAttempts)) {
+      if (!shouldRetryBootstrapSession(error, attempt, BOOTSTRAP_SESSION_RETRY_ATTEMPTS)) {
         throw error;
       }
       await waitForBootstrapRetry(attempt);
@@ -109,8 +104,54 @@ async function loadBootstrapSession(api: ConsoleApiClient): Promise<ConsoleSessi
   throw new Error("Bootstrap session retry loop exhausted without returning a session.");
 }
 
+async function loadDesktopHandoffSession(
+  api: ConsoleApiClient,
+  desktopHandoffToken: string
+): Promise<ConsoleSession> {
+  try {
+    return await api.consumeDesktopHandoff(desktopHandoffToken);
+  } catch (handoffError) {
+    try {
+      return await loadBootstrapSession(api);
+    } catch {
+      throw handoffError;
+    }
+  }
+}
+
+function shouldAttemptDesktopSessionRecovery(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const hostname = window.location.hostname.trim().toLowerCase();
+  return hostname === "127.0.0.1" || hostname === "localhost";
+}
+
+function readDesktopHandoffToken(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const token = new URLSearchParams(window.location.search).get(DESKTOP_HANDOFF_QUERY_PARAM);
+  if (token === null) {
+    return null;
+  }
+  const trimmed = token.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function clearDesktopHandoffTokenFromAddressBar(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const current = new URL(window.location.href);
+  current.searchParams.delete(DESKTOP_HANDOFF_QUERY_PARAM);
+  const next = `${current.pathname}${current.search}${current.hash}`;
+  window.history.replaceState(window.history.state, "", next);
+}
+
 export function useConsoleAppState() {
   const api = useMemo(() => new ConsoleApiClient(""), []);
+  const desktopSessionRecoveryAttemptedRef = useRef(false);
 
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<ConsoleSession | null>(null);
@@ -494,26 +535,48 @@ export function useConsoleAppState() {
     resetSupportDomain
   } = supportDomain;
 
+  function applyConsoleSession(current: ConsoleSession): void {
+    setSession(current);
+    setLoginForm((previous: LoginForm) => ({
+      ...previous,
+      principal: current.principal,
+      deviceId: current.device_id,
+      channel: current.channel ?? previous.channel
+    }));
+    setBrowserPrincipal((previous) => (previous.trim().length === 0 ? current.principal : previous));
+  }
+
   useEffect(() => {
     let cancelled = false;
     const bootstrap = async () => {
       setBooting(true);
+      setError(null);
       try {
+        const desktopHandoffToken = readDesktopHandoffToken();
+        if (desktopHandoffToken !== null) {
+          try {
+            const current = await loadDesktopHandoffSession(api, desktopHandoffToken);
+            if (cancelled) {
+              return;
+            }
+            clearDesktopHandoffTokenFromAddressBar();
+            desktopSessionRecoveryAttemptedRef.current = true;
+            applyConsoleSession(current);
+            return;
+          } catch {
+            clearDesktopHandoffTokenFromAddressBar();
+          }
+        }
         const current = await loadBootstrapSession(api);
         if (cancelled) {
           return;
         }
-        setSession(current);
-        setLoginForm((previous: LoginForm) => ({
-          ...previous,
-          principal: current.principal,
-          deviceId: current.device_id,
-          channel: current.channel ?? previous.channel
-        }));
-        setBrowserPrincipal((previous) => (previous.trim().length === 0 ? current.principal : previous));
-      } catch {
+        desktopSessionRecoveryAttemptedRef.current = true;
+        applyConsoleSession(current);
+      } catch (failure) {
         if (!cancelled) {
           setSession(null);
+          setError(toErrorMessage(failure));
         }
       } finally {
         if (!cancelled) {
@@ -526,6 +589,48 @@ export function useConsoleAppState() {
       cancelled = true;
     };
   }, [api]);
+
+  useEffect(() => {
+    if (
+      booting ||
+      session !== null ||
+      loginBusy ||
+      logoutBusy ||
+      desktopSessionRecoveryAttemptedRef.current ||
+      !shouldAttemptDesktopSessionRecovery()
+    ) {
+      return;
+    }
+
+    desktopSessionRecoveryAttemptedRef.current = true;
+    let cancelled = false;
+    const recoverDesktopSession = async () => {
+      for (let attempt = 1; attempt <= DESKTOP_SESSION_RECOVERY_ATTEMPTS; attempt += 1) {
+        try {
+          const current = await api.getSession();
+          if (cancelled) {
+            return;
+          }
+          setError(null);
+          applyConsoleSession(current);
+          return;
+        } catch (failure) {
+          if (!cancelled) {
+            setError(toErrorMessage(failure));
+          }
+          if (attempt >= DESKTOP_SESSION_RECOVERY_ATTEMPTS) {
+            return;
+          }
+          await waitForDesktopSessionRecovery(attempt);
+        }
+      }
+    };
+
+    void recoverDesktopSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [api, booting, loginBusy, logoutBusy, session]);
 
   useEffect(() => {
     const root = document.documentElement;

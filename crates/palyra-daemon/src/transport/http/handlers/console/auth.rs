@@ -10,6 +10,11 @@ pub(crate) struct ConsoleBrowserBootstrapQuery {
     token: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ConsoleBrowserBootstrapRequest {
+    token: String,
+}
+
 pub(crate) async fn console_login_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -157,26 +162,12 @@ pub(crate) async fn console_browser_bootstrap_handler(
     headers: HeaderMap,
     Query(query): Query<ConsoleBrowserBootstrapQuery>,
 ) -> Result<Response, Response> {
-    let token = query.token.trim();
-    if token.is_empty() {
-        return Err(runtime_status_response(tonic::Status::invalid_argument(
-            "browser handoff token is required",
-        )));
-    }
     let now = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
         )))
     })?;
-    let handoff = {
-        let mut handoffs = lock_console_browser_handoffs(&state.console_browser_handoffs);
-        handoffs.retain(|_, existing| existing.expires_at_unix_ms > now);
-        handoffs.remove(sha256_hex(token.as_bytes()).as_str()).ok_or_else(|| {
-            runtime_status_response(tonic::Status::permission_denied(
-                "browser handoff token is invalid or expired",
-            ))
-        })?
-    };
+    let handoff = consume_console_browser_handoff(&state, query.token.trim(), now)?;
     let (session_token, _session) = issue_console_session(&state, handoff.context, now);
     let mut response_headers = HeaderMap::new();
     response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -196,6 +187,29 @@ pub(crate) async fn console_browser_bootstrap_handler(
     *response.status_mut() = StatusCode::SEE_OTHER;
     *response.headers_mut() = response_headers;
     Ok(response)
+}
+
+pub(crate) async fn console_browser_session_bootstrap_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ConsoleBrowserBootstrapRequest>,
+) -> Result<(HeaderMap, Json<ConsoleSessionResponse>), Response> {
+    let now = unix_ms_now().map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to read system clock: {error}"
+        )))
+    })?;
+    let handoff = consume_console_browser_handoff(&state, payload.token.trim(), now)?;
+    let (session_token, session) = issue_console_session(&state, handoff.context, now);
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        SET_COOKIE,
+        build_console_session_cookie(session_token.as_str(), request_uses_tls(&headers))?,
+    );
+    Ok((
+        response_headers,
+        Json(build_console_session_response(&session, session.csrf_token.clone())),
+    ))
 }
 
 pub(crate) async fn console_session_handler(
@@ -609,7 +623,7 @@ pub(crate) async fn console_openai_provider_default_profile_handler(
     select_default_openai_auth_profile(&state, &session.context, payload).await.map(Json)
 }
 
-fn issue_console_session(
+pub(crate) fn issue_console_session(
     state: &AppState,
     context: gateway::RequestContext,
     now: i64,
@@ -646,6 +660,25 @@ fn issue_console_session(
     }
 
     (session_token, session)
+}
+
+pub(crate) fn consume_console_browser_handoff(
+    state: &AppState,
+    token: &str,
+    now: i64,
+) -> Result<ConsoleBrowserHandoff, Response> {
+    if token.is_empty() {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "browser handoff token is required",
+        )));
+    }
+    let mut handoffs = lock_console_browser_handoffs(&state.console_browser_handoffs);
+    handoffs.retain(|_, existing| existing.expires_at_unix_ms > now);
+    handoffs.remove(sha256_hex(token.as_bytes()).as_str()).ok_or_else(|| {
+        runtime_status_response(tonic::Status::permission_denied(
+            "browser handoff token is invalid or expired",
+        ))
+    })
 }
 
 #[allow(clippy::result_large_err)]

@@ -4,7 +4,7 @@ use std::{
 };
 
 use axum::{
-    http::{header::CONTENT_TYPE, HeaderValue, StatusCode, Uri},
+    http::{header::CACHE_CONTROL, header::CONTENT_TYPE, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
 };
 
@@ -106,10 +106,17 @@ fn missing_web_ui_response() -> Response {
         .into_response()
 }
 
-async fn load_web_ui_response(root: &Path, request_path: &str) -> Result<Response, WebUiLoadError> {
+async fn load_web_ui_response(
+    root: &Path,
+    request_path: &str,
+) -> Result<Response, WebUiLoadError> {
     let asset_path = resolve_web_ui_asset_path(root, request_path)?;
     let bytes = fs::read(asset_path.as_path()).map_err(WebUiLoadError::Io)?;
     let mut response = bytes.into_response();
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
     response.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static(content_type_for_path(asset_path.as_path())),
@@ -224,7 +231,10 @@ enum WebUiLoadError {
 mod tests {
     use std::path::Path;
 
-    use super::{canonicalize_web_ui_root, content_type_for_path, resolve_web_ui_asset_path};
+    use super::{
+        canonicalize_web_ui_root, content_type_for_path, load_web_ui_response,
+        resolve_web_ui_asset_path,
+    };
 
     fn create_fixture() -> tempfile::TempDir {
         let fixture = tempfile::tempdir().expect("tempdir should initialize");
@@ -278,5 +288,19 @@ mod tests {
             "text/javascript; charset=utf-8"
         );
         assert_eq!(content_type_for_path(Path::new("assets/app.css")), "text/css; charset=utf-8");
+    }
+
+    #[tokio::test]
+    async fn load_web_ui_response_disables_browser_caching() {
+        let fixture = create_fixture();
+        let response =
+            load_web_ui_response(fixture.path(), "/").await.expect("root response should load");
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
     }
 }

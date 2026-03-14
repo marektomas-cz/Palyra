@@ -22,23 +22,17 @@ describe("M35 web console app", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Operator Dashboard" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Operator Dashboard" })).toBeInTheDocument();
+    }, { timeout: 4_000 });
     expect(screen.queryByRole("button", { name: "Approvals" })).not.toBeInTheDocument();
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.classList.contains("dark")).toBe(true);
     expect(document.documentElement.style.colorScheme).toBe("dark");
   });
 
-  it("retries bootstrap session after a redirected desktop handoff rate limit", async () => {
+  it("retries bootstrap session before falling back to the auth screen", async () => {
     window.localStorage.removeItem("palyra.console.theme");
-    const originalGetEntriesByType = window.performance.getEntriesByType.bind(window.performance);
-    vi.spyOn(window.performance, "getEntriesByType").mockImplementation((type: string) => {
-      if (type === "navigation") {
-        return [{ redirectCount: 1 } as unknown as PerformanceNavigationTiming];
-      }
-      return originalGetEntriesByType(type);
-    });
-
     const fetchMock = createQueuedFetch([
       jsonResponse({ error: "admin API rate limit exceeded for 127.0.0.1" }, 429),
       jsonResponse({ error: "admin API rate limit exceeded for 127.0.0.1" }, 429),
@@ -54,13 +48,106 @@ describe("M35 web console app", () => {
 
     render(<App />);
 
-    expect(
-      await screen.findByRole("heading", { name: "Web Dashboard Operator Surface" })
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
+    }, { timeout: 4_000 });
     const sessionCalls = fetchMock.mock.calls.filter(
       (call) => requestUrl(call[0]) === "/console/v1/auth/session"
     );
     expect(sessionCalls).toHaveLength(3);
+  });
+
+  it("consumes the desktop handoff token before showing the auth screen", async () => {
+    window.localStorage.removeItem("palyra.console.theme");
+    window.history.replaceState(null, "", "/?desktop_handoff_token=handoff-token#/control/overview");
+    const fetchMock = createQueuedFetch([
+      jsonResponse({
+        principal: "admin:desktop-control-center",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 300
+      })
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
+    }, { timeout: 4_000 });
+    expect(screen.queryByRole("heading", { name: "Operator Dashboard" })).not.toBeInTheDocument();
+    const sessionCalls = fetchMock.mock.calls.filter(
+      (call) => requestUrl(call[0]) === "/console/v1/auth/session"
+    );
+    expect(sessionCalls).toHaveLength(0);
+    const handoffCalls = fetchMock.mock.calls.filter(
+      (call) => requestUrl(call[0]) === "/console/v1/auth/browser-handoff/session"
+    );
+    expect(handoffCalls).toHaveLength(1);
+    expect(window.location.search).toBe("");
+  });
+
+  it("falls back to the existing session when the desktop handoff token is already spent", async () => {
+    window.localStorage.removeItem("palyra.console.theme");
+    window.history.replaceState(null, "", "/?desktop_handoff_token=handoff-token#/control/overview");
+    const fetchMock = createQueuedFetch([
+      jsonResponse({ error: "missing session" }, 403),
+      jsonResponse({
+        principal: "admin:desktop-control-center",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 300
+      })
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
+    }, { timeout: 4_000 });
+    const sessionCalls = fetchMock.mock.calls.filter(
+      (call) => requestUrl(call[0]) === "/console/v1/auth/session"
+    );
+    expect(sessionCalls).toHaveLength(1);
+    const handoffCalls = fetchMock.mock.calls.filter(
+      (call) => requestUrl(call[0]) === "/console/v1/auth/browser-handoff/session"
+    );
+    expect(handoffCalls).toHaveLength(1);
+    expect(window.location.search).toBe("");
+  });
+
+  it("keeps the boot screen visible until a delayed desktop session arrives", async () => {
+    window.localStorage.removeItem("palyra.console.theme");
+    const fetchMock = createQueuedFetch([
+      jsonResponse({ error: "missing session" }, 403),
+      jsonResponse({ error: "missing session" }, 403),
+      jsonResponse({ error: "missing session" }, 403),
+      jsonResponse({ error: "missing session" }, 403),
+      jsonResponse({ error: "missing session" }, 403),
+      jsonResponse({
+        principal: "admin:desktop-control-center",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 300
+      })
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "Web Dashboard" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
+    }, { timeout: 4_000 });
+    expect(screen.queryByRole("heading", { name: "Operator Dashboard" })).not.toBeInTheDocument();
+    const sessionCalls = fetchMock.mock.calls.filter(
+      (call) => requestUrl(call[0]) === "/console/v1/auth/session"
+    );
+    expect(sessionCalls).toHaveLength(6);
   });
 
   it("clears operator-scoped state on sign-out before next sign-in refresh completes", async () => {
