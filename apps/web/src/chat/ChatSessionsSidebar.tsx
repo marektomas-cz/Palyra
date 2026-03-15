@@ -1,10 +1,9 @@
-import { Button, ScrollShadow } from "@heroui/react";
+import { Button } from "@heroui/react";
 
 import {
   ActionButton,
   ActionCluster,
   EmptyState,
-  SectionCard,
   TextInputField
 } from "../console/components/ui";
 import type { ChatSessionRecord } from "../consoleApi";
@@ -43,12 +42,14 @@ export function ChatSessionsSidebar({
   return (
     <aside className="chat-sessions" aria-label="Chat sessions">
       <div className="workspace-panel__intro">
-        <p className="workspace-kicker">Sessions</p>
+        <p className="workspace-kicker">Session rail</p>
         <h3>Conversation rail</h3>
-        <p className="chat-muted">Keep sessions secondary to the conversation, but always one click away.</p>
+        <p className="chat-muted">
+          Keep the rail compact and operational: create, rename, reset, then switch sessions fast.
+        </p>
       </div>
 
-      <SectionCard title="New session">
+      <div className="workspace-stack">
         <TextInputField
           label="New label"
           placeholder="optional"
@@ -65,9 +66,16 @@ export function ChatSessionsSidebar({
             {sessionsBusy ? "Creating..." : "Create"}
           </ActionButton>
         </ActionCluster>
-      </SectionCard>
+      </div>
 
-      <SectionCard title="Selected session">
+      <div className="workspace-callout">
+        <div className="workspace-panel__intro">
+          <p className="workspace-kicker">Selected session</p>
+          <h3>
+            {selectedSession?.session_label?.trim() ||
+              (selectedSession ? shortId(selectedSession.session_id) : "None")}
+          </h3>
+        </div>
         <TextInputField
           disabled={selectedSession === null || sessionsBusy}
           label="Active label"
@@ -92,9 +100,9 @@ export function ChatSessionsSidebar({
             Reset
           </ActionButton>
         </ActionCluster>
-      </SectionCard>
+      </div>
 
-      <ScrollShadow className="chat-session-list" role="listbox">
+      <div className="chat-session-list" role="listbox">
         {sortedSessions.length === 0 ? (
           <EmptyState
             compact
@@ -115,7 +123,7 @@ export function ChatSessionsSidebar({
                 className="chat-session-item"
                 fullWidth
                 type="button"
-                variant={active ? "secondary" : "tertiary"}
+                variant={active ? "secondary" : "ghost"}
                 onPress={() => setActiveSessionId(session.session_id)}
               >
                 <span className="flex w-full flex-col items-start gap-1 text-left">
@@ -129,7 +137,7 @@ export function ChatSessionsSidebar({
             );
           })
         )}
-      </ScrollShadow>
+      </div>
     </aside>
   );
 }

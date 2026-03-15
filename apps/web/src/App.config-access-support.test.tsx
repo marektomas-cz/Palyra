@@ -99,7 +99,7 @@ describe("M56 config, access, and support surfaces", () => {
       );
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Mutate" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Mutate" }));
     fireEvent.change(screen.getByLabelText("Key"), { target: { value: "model_provider.auth_profile_id" } });
     fireEvent.change(screen.getByLabelText("Value"), { target: { value: "\"openai-rotated\"" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply mutation" }));
@@ -109,13 +109,13 @@ describe("M56 config, access, and support surfaces", () => {
     });
     expect(screen.getAllByText(/openai-rotated/).length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Inspect" }));
     fireEvent.click(screen.getByRole("button", { name: "Migrate" }));
     await waitFor(() => {
       expect(screen.getByText("Config migration completed.")).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Recover" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Recover" }));
     fireEvent.click(screen.getByRole("button", { name: "Recover backup" }));
     await waitFor(() => {
       expect(screen.getByText("Recovered config from backup 1.")).toBeInTheDocument();

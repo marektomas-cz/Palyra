@@ -172,7 +172,7 @@ describe("M56 runtime and operations surfaces", () => {
       expect(screen.getByText(/Channel test dispatched/)).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Router" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Router" }));
     expect(await screen.findByText("Broadcast messages remain denied by default.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Preview route" }));
@@ -185,7 +185,7 @@ describe("M56 runtime and operations surfaces", () => {
       expect(screen.getByText("Pairing code minted: 777888.")).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Discord setup" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Discord setup" }));
     fireEvent.change(screen.getByLabelText("Bot token"), { target: { value: "discord-bot-token" } });
     fireEvent.change(screen.getByLabelText("Verify channel ID"), {
       target: { value: "123456789012345678" },

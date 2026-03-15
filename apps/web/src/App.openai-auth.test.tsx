@@ -329,9 +329,9 @@ describe("M54 web auth surface", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start OpenAI OAuth" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "Poll callback" }))[0]);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "OpenAI OAuth attempt expired before the callback completed."
-    );
+    expect(
+      (await screen.findAllByText("OpenAI OAuth attempt expired before the callback completed.")).length
+    ).toBeGreaterThan(0);
   });
 
   it("supports default selection plus refresh reconnect and revoke for stored profiles", async () => {

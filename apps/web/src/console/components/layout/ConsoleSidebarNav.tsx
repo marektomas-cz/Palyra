@@ -1,4 +1,4 @@
-import { Button, Card, CardContent, Chip, ScrollShadow } from "@heroui/react";
+import { Button, Card, CardContent } from "@heroui/react";
 import { useNavigate } from "react-router-dom";
 
 import { CONSOLE_NAV_GROUPS, getSectionPath } from "../../navigation";
@@ -13,37 +13,26 @@ export function ConsoleSidebarNav({ currentSection, onSelect }: ConsoleSidebarNa
   const navigate = useNavigate();
 
   return (
-    <Card className="border border-white/30 bg-white/75 shadow-xl shadow-slate-900/10 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/70">
-      <CardContent className="gap-6 p-5">
-        <div className="space-y-2">
+    <Card className="workspace-card" variant="default">
+      <CardContent className="grid gap-4 p-4">
+        <div className="console-sidebar-header">
           <p className="console-label">Navigation</p>
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">
-              Operator domains
-            </h2>
-            <p className="text-sm leading-6 text-slate-600 dark:text-slate-300">
-              Chat, control, agent, and settings areas stay grouped around the live operator
-              surface rather than backend taxonomy.
+          <div className="grid gap-1">
+            <h2 className="text-lg font-semibold tracking-tight">Operator domains</h2>
+            <p className="console-copy">
+              Chat, control, agent, and settings stay grouped as one working rail.
             </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Chip size="sm" variant="secondary">
-              Route-driven shell
-            </Chip>
-            <Chip size="sm" variant="soft">
-              Hash links
-            </Chip>
           </div>
         </div>
 
-        <ScrollShadow className="console-sidebar__scroll">
-          <nav aria-label="Dashboard domains" className="space-y-5 pr-2">
+        <div className="console-sidebar-scroll">
+          <nav aria-label="Dashboard domains" className="grid gap-4 pr-2">
             {CONSOLE_NAV_GROUPS.map((group) => (
-              <div key={group.id} className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400 dark:text-slate-500">
+              <div key={group.id} className="console-sidebar-group">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted">
                   {group.label}
                 </p>
-                <div className="space-y-2">
+                <div className="console-nav-list">
                   {group.items.map((entry) => {
                     const selected = currentSection === entry.id;
                     const accessibleLabel = legacyNavigationLabel(entry.id) ?? entry.label;
@@ -52,23 +41,21 @@ export function ConsoleSidebarNav({ currentSection, onSelect }: ConsoleSidebarNa
                         key={entry.id}
                         aria-current={selected ? "page" : undefined}
                         aria-label={accessibleLabel}
-                        className="justify-start px-4 py-3"
+                        className="console-nav-item"
                         fullWidth
+                        size="sm"
                         variant={selected ? "secondary" : "ghost"}
                         onPress={() => {
                           onSelect(entry.id);
                           void navigate(getSectionPath(entry.id));
                         }}
                       >
-                        <span
-                          aria-hidden="true"
-                          className={`flex h-10 w-10 items-center justify-center rounded-2xl border ${selected ? "border-accent/35 bg-accent/10 text-accent-700 dark:text-accent-300" : "border-white/40 bg-white/60 text-slate-500 dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-300"}`}
-                        >
+                        <span aria-hidden="true" className="flex h-8 w-8 items-center justify-center rounded-lg border">
                           <NavigationGlyph section={entry.id} />
                         </span>
-                        <span className="flex flex-1 flex-col items-start text-left">
+                        <span className="console-nav-item__content">
                           <span className="text-sm font-semibold">{entry.label}</span>
-                          <span className="text-xs text-foreground-500">{entry.detail}</span>
+                          <span className="text-xs text-muted">{entry.detail}</span>
                         </span>
                       </Button>
                     );
@@ -77,7 +64,7 @@ export function ConsoleSidebarNav({ currentSection, onSelect }: ConsoleSidebarNa
               </div>
             ))}
           </nav>
-        </ScrollShadow>
+        </div>
       </CardContent>
     </Card>
   );

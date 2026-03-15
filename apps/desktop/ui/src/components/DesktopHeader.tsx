@@ -13,8 +13,8 @@ export function DesktopHeader({ snapshot, loading }: DesktopHeaderProps) {
   return (
     <PageHeader
       eyebrow="Desktop Control Center"
-      title="Start the local runtime, watch it stabilize, then hand off to the dashboard."
-      description="This surface stays intentionally small. It covers launcher controls, runtime health, and the shortest path into the operator dashboard without re-embedding onboarding or settings workflows in desktop."
+      title="Launch the runtime, verify posture, then open the dashboard."
+      description="Desktop stays intentionally short: lifecycle controls, runtime health, and the fastest handoff into the full operator console."
       status={
         <>
           <StatusChip tone={overallTone(snapshot.overall_status)}>

@@ -1,7 +1,7 @@
 import { Alert } from "@heroui/react";
 import type { PropsWithChildren } from "react";
 
-import { resolveAlertStatus, type UiTone } from "./utils";
+import { joinClassNames, resolveAlertStatus, type UiTone } from "./utils";
 
 type InlineNoticeProps = PropsWithChildren<{
   title?: string;
@@ -15,8 +15,14 @@ export function InlineNotice({
   className,
   children
 }: InlineNoticeProps) {
+  const alertRole = tone === "danger" ? "alert" : undefined;
+
   return (
-    <Alert className={className} status={resolveAlertStatus(tone)}>
+    <Alert
+      className={joinClassNames("workspace-inline-notice", className)}
+      role={alertRole}
+      status={resolveAlertStatus(tone)}
+    >
       <Alert.Content>
         {title !== undefined && <Alert.Title>{title}</Alert.Title>}
         <Alert.Description>{children}</Alert.Description>

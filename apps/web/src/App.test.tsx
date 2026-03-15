@@ -28,7 +28,6 @@ describe("M35 web console app", () => {
     expect(screen.queryByRole("button", { name: "Approvals" })).not.toBeInTheDocument();
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.classList.contains("dark")).toBe(true);
-    expect(document.documentElement.style.colorScheme).toBe("dark");
   });
 
   it("retries bootstrap session before falling back to the auth screen", async () => {
@@ -148,6 +147,37 @@ describe("M35 web console app", () => {
       (call) => requestUrl(call[0]) === "/console/v1/auth/session"
     );
     expect(sessionCalls).toHaveLength(6);
+  });
+
+  it("does not surface a false overview error after a successful baseline refresh", async () => {
+    const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestUrl(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (path === "/console/v1/auth/session" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:web-console",
+            device_id: "device-1",
+            channel: "web",
+            csrf_token: "csrf-1",
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 300
+          })
+        );
+      }
+      throw new Error(`Unhandled mocked request: ${method} ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
+    }, { timeout: 4_000 });
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("Unexpected failure.")).not.toBeInTheDocument();
+    }, { timeout: 4_000 });
   });
 
   it("clears operator-scoped state on sign-out before next sign-in refresh completes", async () => {
@@ -683,7 +713,7 @@ describe("M35 web console app", () => {
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Channels and Router" }));
-    fireEvent.click(screen.getByRole("button", { name: "Discord setup" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Discord setup" }));
     expect(await screen.findByRole("heading", { name: "Discord onboarding wizard" })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Bot token"), {

@@ -6,7 +6,7 @@ import {
   ActionButton,
   EmptyState,
   KeyValueList,
-  MetricCard,
+  PageHeader,
   SectionCard,
   StatusChip,
   SwitchField
@@ -103,41 +103,73 @@ export function ChatConsolePanel({
 
   return (
     <main className="workspace-page chat-workspace">
-      <section className="workspace-summary-grid">
-        <MetricCard
-          detail="Current working conversation."
-          label="Session"
-          tone={sessions.selectedSession ? "success" : "warning"}
-          value={
-            sessions.selectedSession?.session_label?.trim() ||
-            (sessions.selectedSession ? shortId(sessions.selectedSession.session_id) : "none")
-          }
-        />
-        <MetricCard
-          detail="Most recent run in focus."
-          label="Active run"
-          tone={activeRunId ? "default" : "warning"}
-          value={activeRunId ?? "none"}
-        />
-        <MetricCard
-          detail="Inline approval requests awaiting a decision."
-          label="Pending approvals"
-          tone={pendingApprovalCount > 0 ? "warning" : "success"}
-          value={String(pendingApprovalCount)}
-        />
-        <MetricCard
-          detail="Published A2UI surfaces for the current session."
-          label="A2UI surfaces"
-          tone={a2uiSurfaces.length > 0 ? "default" : "success"}
-          value={String(a2uiSurfaces.length)}
-        />
-      </section>
+      <PageHeader
+        eyebrow="Chat"
+        title={
+          sessions.selectedSession?.session_label?.trim() ||
+          (sessions.selectedSession ? shortId(sessions.selectedSession.session_id) : "Operator workspace")
+        }
+        description="Sessions, transcript, approvals, and run inspection stay on one operator surface without duplicate hero headers or consumer chat chrome."
+        status={
+          <>
+            <StatusChip tone={streaming ? "warning" : "success"}>
+              {streaming ? "Streaming" : "Idle"}
+            </StatusChip>
+            <StatusChip tone={pendingApprovalCount > 0 ? "warning" : "default"}>
+              {pendingApprovalCount} pending approval{pendingApprovalCount === 1 ? "" : "s"}
+            </StatusChip>
+            <StatusChip tone={runIds.length > 0 ? "accent" : "default"}>
+              {runIds.length} known run{runIds.length === 1 ? "" : "s"}
+            </StatusChip>
+            <Chip size="sm" variant="secondary">
+              {a2uiSurfaces.length} A2UI surface{a2uiSurfaces.length === 1 ? "" : "s"}
+            </Chip>
+          </>
+        }
+        actions={
+          <div className="workspace-inline-actions">
+            <SwitchField
+              checked={allowSensitiveTools}
+              description="Applies to the next run only."
+              label="Allow sensitive tools"
+              onChange={setAllowSensitiveTools}
+            />
+            <ActionButton
+              isDisabled={sessions.sessionsBusy}
+              type="button"
+              variant="secondary"
+              onPress={() => void sessions.refreshSessions(false)}
+            >
+              {sessions.sessionsBusy ? "Refreshing..." : "Refresh sessions"}
+            </ActionButton>
+            <ActionButton
+              isDisabled={(activeRunId ?? runIds[0] ?? null) === null}
+              type="button"
+              onPress={() => {
+                const targetRunId = activeRunId ?? runIds[0] ?? null;
+                if (targetRunId === null) {
+                  setError("No run is available for inspection.");
+                  return;
+                }
+                openRunDetails(targetRunId);
+              }}
+            >
+              Run details
+            </ActionButton>
+          </div>
+        }
+      />
 
       <section className="chat-workspace__layout">
         <SectionCard
           className="chat-panel"
-          description="Create, rename, reset, and switch sessions."
+          description="Create, rename, reset, and switch sessions without leaving the active conversation."
           title="Sessions"
+          actions={
+            <StatusChip tone={sessions.selectedSession ? "success" : "warning"}>
+              {sessions.selectedSession ? "Active session" : "No session"}
+            </StatusChip>
+          }
         >
           <ChatSessionsSidebar
             sessionsBusy={sessions.sessionsBusy}
@@ -163,18 +195,15 @@ export function ChatConsolePanel({
 
         <SectionCard
           className="chat-panel chat-panel--conversation"
-          description="Conversation state, streaming output, and operator controls."
-          title={
-            sessions.selectedSession === null
-              ? "No active session"
-              : sessions.selectedSession.session_label?.trim().length
-                ? sessions.selectedSession.session_label
-                : shortId(sessions.selectedSession.session_id)
-          }
+          description="Transcript, approvals, and composer for the current working session."
+          title="Conversation"
           actions={
             <div className="workspace-inline-actions">
               <StatusChip tone={streaming ? "warning" : "success"}>
                 {streaming ? "Streaming" : "Idle"}
+              </StatusChip>
+              <StatusChip tone={pendingApprovalCount > 0 ? "warning" : "default"}>
+                {pendingApprovalCount} approval{pendingApprovalCount === 1 ? "" : "s"}
               </StatusChip>
               <Chip variant="secondary">
                 {activeRunId === null ? "No active run" : `Active run: ${activeRunId}`}
@@ -183,53 +212,6 @@ export function ChatConsolePanel({
           }
         >
           <div className="chat-panel__body">
-            <div className="chat-main-header">
-              <div className="workspace-panel__intro">
-                <p className="workspace-kicker">Chat</p>
-                <h2>
-                  {sessions.selectedSession === null
-                    ? "No active session"
-                    : sessions.selectedSession.session_label?.trim().length
-                      ? sessions.selectedSession.session_label
-                      : shortId(sessions.selectedSession.session_id)}
-                </h2>
-                <p className="chat-muted">
-                  {activeRunId === null ? "No active run" : `Active run: ${activeRunId}`}
-                </p>
-              </div>
-              <div className="workspace-inline-actions">
-                <SwitchField
-                  checked={allowSensitiveTools}
-                  description="Applies to the next run only."
-                  label="Allow sensitive tools"
-                  onChange={setAllowSensitiveTools}
-                />
-                <ActionButton
-                  isDisabled={sessions.sessionsBusy}
-                  type="button"
-                  variant="secondary"
-                  onPress={() => void sessions.refreshSessions(false)}
-                >
-                  {sessions.sessionsBusy ? "Refreshing..." : "Refresh sessions"}
-                </ActionButton>
-                <ActionButton
-                  isDisabled={(activeRunId ?? runIds[0] ?? null) === null}
-                  type="button"
-                  variant="primary"
-                  onPress={() => {
-                    const targetRunId = activeRunId ?? runIds[0] ?? null;
-                    if (targetRunId === null) {
-                      setError("No run is available for inspection.");
-                      return;
-                    }
-                    openRunDetails(targetRunId);
-                  }}
-                >
-                  Run details
-                </ActionButton>
-              </div>
-            </div>
-
             <ChatTranscript
               visibleTranscript={visibleTranscript}
               hiddenTranscriptItems={hiddenTranscriptItems}
@@ -264,44 +246,7 @@ export function ChatConsolePanel({
         <div className="chat-inspector-column">
           <SectionCard
             className="chat-panel chat-panel--sticky"
-            description="Fast session context while you work."
-            title={sessions.selectedSession?.session_label?.trim() || "Session summary"}
-          >
-            <KeyValueList
-              items={[
-                {
-                  label: "Session ID",
-                  value: sessions.selectedSession
-                    ? shortId(sessions.selectedSession.session_id)
-                    : "none"
-                },
-                {
-                  label: "Updated",
-                  value: sessions.selectedSession
-                    ? new Date(sessions.selectedSession.updated_at_unix_ms).toLocaleString()
-                    : "n/a"
-                },
-                { label: "Visible transcript", value: visibleTranscript.length },
-                { label: "Known runs", value: runIds.length }
-              ]}
-            />
-            <div className="workspace-inline-actions">
-              <ActionButton
-                isDisabled={sessions.selectedSession === null || sessions.sessionsBusy}
-                type="button"
-                variant="danger"
-                onPress={() => {
-                  void resetSessionAndTranscript();
-                }}
-              >
-                Reset session
-              </ActionButton>
-            </div>
-          </SectionCard>
-
-          <SectionCard
-            className="chat-panel"
-            description="Approval and surface signals stay visible without taking over the main transcript."
+            description="Approval backlog, surface count, and run inventory stay visible without turning the chat into a dashboard."
             title="Workspace signals"
           >
             <div className="workspace-tag-row">
@@ -311,7 +256,25 @@ export function ChatConsolePanel({
               <Chip variant="secondary">
                 {a2uiSurfaces.length} A2UI surface{a2uiSurfaces.length === 1 ? "" : "s"}
               </Chip>
+              <Chip variant="secondary">{runIds.length} known run{runIds.length === 1 ? "" : "s"}</Chip>
             </div>
+            <KeyValueList
+              items={[
+                {
+                  label: "Session",
+                  value:
+                    sessions.selectedSession?.session_label?.trim() ||
+                    (sessions.selectedSession ? shortId(sessions.selectedSession.session_id) : "none")
+                },
+                {
+                  label: "Updated",
+                  value: sessions.selectedSession
+                    ? new Date(sessions.selectedSession.updated_at_unix_ms).toLocaleString()
+                    : "n/a"
+                },
+                { label: "Visible transcript", value: visibleTranscript.length }
+              ]}
+            />
             {a2uiSurfaces.length === 0 ? (
               <EmptyState
                 compact
@@ -330,7 +293,7 @@ export function ChatConsolePanel({
           {inspectorVisible ? (
             <SectionCard
               className="chat-panel"
-              description="Status, tape, and token usage for the selected run."
+              description="Status, tape, and token usage stay secondary to the transcript but available on demand."
               title="Run inspector"
             >
               <ChatRunDrawer
@@ -350,7 +313,7 @@ export function ChatConsolePanel({
             <SectionCard
               className="chat-panel"
               description="Run details become available after the first streamed response."
-              title="Inspector"
+              title="Run inspector"
             >
               <EmptyState
                 compact

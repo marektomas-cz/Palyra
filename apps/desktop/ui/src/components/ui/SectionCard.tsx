@@ -10,6 +10,7 @@ type SectionCardProps = PropsWithChildren<{
   actions?: ReactNode;
   footer?: ReactNode;
   className?: string;
+  variant?: "transparent" | "default" | "secondary" | "tertiary";
 }>;
 
 export function SectionCard({
@@ -19,10 +20,11 @@ export function SectionCard({
   actions,
   footer,
   className,
+  variant = "default",
   children
 }: SectionCardProps) {
   return (
-    <Card className={joinClassNames("desktop-surface", className)}>
+    <Card className={joinClassNames("desktop-card desktop-section-card", className)} variant={variant}>
       <CardHeader className="desktop-section-card__header">
         <div className="desktop-section-card__copy">
           {eyebrow !== undefined && <p className="desktop-eyebrow">{eyebrow}</p>}

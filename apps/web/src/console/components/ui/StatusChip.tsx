@@ -1,7 +1,7 @@
 import { Chip } from "@heroui/react";
 import type { PropsWithChildren } from "react";
 
-import { resolveToneColor, type UiTone } from "./utils";
+import { joinClassNames, resolveToneColor, type UiTone } from "./utils";
 
 type StatusChipProps = PropsWithChildren<{
   tone?: UiTone;
@@ -12,7 +12,11 @@ export function StatusChip({
   tone = "default"
 }: StatusChipProps) {
   return (
-    <Chip color={resolveToneColor(tone)} variant="soft">
+    <Chip
+      className={joinClassNames("workspace-status-chip", tone === "accent" && "workspace-status-chip--accent")}
+      color={resolveToneColor(tone)}
+      variant={tone === "default" ? "secondary" : "soft"}
+    >
       {children}
     </Chip>
   );

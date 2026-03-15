@@ -21,10 +21,11 @@ export function EmptyState({
     <SectionCard
       title={title}
       className={joinClassNames(
-        "workspace-empty-state border-dashed shadow-none",
+        "workspace-empty-state",
         compact && "workspace-empty-state--compact"
       )}
       description={description}
+      variant="transparent"
       actions={
         typeof action === "string" ? (
           <Button size="sm" variant="secondary">

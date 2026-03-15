@@ -58,7 +58,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     }
 
     const firstFailure = firstRejectedReason([catalog, deployment, jobs]);
-    if (firstFailure !== null) {
+    if (firstFailure !== undefined) {
       setError(toErrorMessage(firstFailure));
     }
     setOverviewBusy(false);

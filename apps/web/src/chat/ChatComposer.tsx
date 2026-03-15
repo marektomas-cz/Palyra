@@ -32,10 +32,6 @@ export function ChatComposer({
         submitMessage();
       }}
     >
-      <div className="workspace-panel__intro">
-        <p className="workspace-kicker">Composer</p>
-        <h4>Next operator instruction</h4>
-      </div>
       <TextAreaField
         label="Message"
         placeholder="Describe what you want the assistant to do"

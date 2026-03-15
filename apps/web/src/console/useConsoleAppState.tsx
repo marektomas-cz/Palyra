@@ -636,7 +636,6 @@ export function useConsoleAppState() {
     const root = document.documentElement;
     root.setAttribute("data-theme", theme);
     root.classList.toggle("dark", theme === "dark");
-    root.style.colorScheme = theme;
     if (typeof window !== "undefined") {
       window.localStorage.setItem("palyra.console.theme", theme);
     }

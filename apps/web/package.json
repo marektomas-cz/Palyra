@@ -22,6 +22,7 @@
     "verify-install": "node ./scripts/devex.mjs verify-install"
   },
   "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.7",
     "@heroui/react": "3.0.0-beta.8",
     "@heroui/styles": "3.0.0-beta.8",
     "@tailwindcss/vite": "4.2.1",

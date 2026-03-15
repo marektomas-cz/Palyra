@@ -20,7 +20,7 @@ export function AttentionCard({
     <SectionCard
       eyebrow="Attention"
       title="Warnings and recovery notes"
-      description="Redacted warnings and diagnostics are folded into one small operator queue for the launcher."
+      description="Warnings stay secondary, but visible enough to block a bad handoff."
       actions={
         <StatusChip tone={tone}>
           {attentionItems.length === 0 ? "Stable" : "Review"}

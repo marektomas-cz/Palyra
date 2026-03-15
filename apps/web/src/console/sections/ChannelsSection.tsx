@@ -1,3 +1,4 @@
+import { Tabs } from "@heroui/react";
 import { useMemo, useState } from "react";
 
 import { DiscordOnboardingPanel } from "../../features/channels/connectors/discord/components/DiscordOnboardingPanel";
@@ -190,29 +191,31 @@ export function ChannelsSection({ app }: { app: ConsoleAppState }) {
         />
       </section>
 
-      <ActionCluster className="workspace-tab-row" aria-label="Channels workspace modes">
-        <ActionButton
-          variant={activeTab === "connectors" ? "primary" : "ghost"}
-          onPress={() => setActiveTab("connectors")}
-        >
-          Connectors
-        </ActionButton>
-        <ActionButton
-          variant={activeTab === "router" ? "primary" : "ghost"}
-          onPress={() => setActiveTab("router")}
-        >
-          Router
-        </ActionButton>
-        <ActionButton
-          variant={activeTab === "discord" ? "primary" : "ghost"}
-          onPress={() => setActiveTab("discord")}
-        >
-          Discord setup
-        </ActionButton>
-      </ActionCluster>
+      <Tabs
+        className="w-full"
+        selectedKey={activeTab}
+        variant="secondary"
+        onSelectionChange={(key) => setActiveTab(String(key) as ChannelsTab)}
+      >
+        <Tabs.ListContainer>
+          <Tabs.List aria-label="Channels workspace modes" className="w-fit">
+            <Tabs.Tab id="connectors">
+              Connectors
+              <Tabs.Indicator />
+            </Tabs.Tab>
+            <Tabs.Tab id="router">
+              Router
+              <Tabs.Indicator />
+            </Tabs.Tab>
+            <Tabs.Tab id="discord">
+              Discord setup
+              <Tabs.Indicator />
+            </Tabs.Tab>
+          </Tabs.List>
+        </Tabs.ListContainer>
 
-      {activeTab === "connectors" && (
-        <section className="workspace-two-column">
+        <Tabs.Panel className="pt-4" id="connectors">
+          <section className="workspace-two-column">
           <WorkspaceSectionCard
             title="Connector inventory"
             description="Enable, disable, and select the connector you want to inspect before using test or recovery actions."
@@ -487,11 +490,11 @@ export function ChannelsSection({ app }: { app: ConsoleAppState }) {
               )}
             </div>
           </WorkspaceSectionCard>
-        </section>
-      )}
+          </section>
+        </Tabs.Panel>
 
-      {activeTab === "router" && (
-        <section className="workspace-two-column">
+        <Tabs.Panel className="pt-4" id="router">
+          <section className="workspace-two-column">
           <WorkspaceSectionCard
             title="Router rules and warnings"
             description="Preview route acceptance and keep warnings visible before broadening ingress policy."
@@ -684,11 +687,11 @@ export function ChannelsSection({ app }: { app: ConsoleAppState }) {
               />
             </div>
           </WorkspaceSectionCard>
-        </section>
-      )}
+          </section>
+        </Tabs.Panel>
 
-      {activeTab === "discord" && (
-        <section className="workspace-two-column">
+        <Tabs.Panel className="pt-4" id="discord">
+          <section className="workspace-two-column">
           <WorkspaceSectionCard
             title="Discord onboarding"
             description="Probe, apply, and verify onboarding from the dashboard instead of the old desktop flow."
@@ -728,8 +731,9 @@ export function ChannelsSection({ app }: { app: ConsoleAppState }) {
               />
             </div>
           </WorkspaceSectionCard>
-        </section>
-      )}
+          </section>
+        </Tabs.Panel>
+      </Tabs>
     </main>
   );
 }

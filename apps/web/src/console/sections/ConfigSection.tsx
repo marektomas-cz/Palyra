@@ -1,4 +1,4 @@
-import { Button, ButtonGroup } from "@heroui/react";
+import { Tabs } from "@heroui/react";
 import { useState } from "react";
 
 import {
@@ -141,21 +141,25 @@ export function ConfigSection({ app }: ConfigSectionProps) {
         </WorkspaceInlineNotice>
       ) : null}
 
-      <ButtonGroup className="workspace-inline">
-        {(["inspect", "validate", "mutate", "recover"] as const).map((tab) => (
-          <Button
-            key={tab}
-            type="button"
-            variant={activeTab === tab ? "secondary" : "ghost"}
-            onPress={() => setActiveTab(tab)}
-          >
-            {tab[0].toUpperCase() + tab.slice(1)}
-          </Button>
-        ))}
-      </ButtonGroup>
+      <Tabs
+        className="w-full"
+        selectedKey={activeTab}
+        variant="secondary"
+        onSelectionChange={(key) => setActiveTab(String(key) as ConfigTab)}
+      >
+        <Tabs.ListContainer>
+          <Tabs.List aria-label="Config workspace modes" className="w-fit">
+            {(["inspect", "validate", "mutate", "recover"] as const).map((tab) => (
+              <Tabs.Tab id={tab} key={tab}>
+                {tab[0].toUpperCase() + tab.slice(1)}
+                <Tabs.Indicator />
+              </Tabs.Tab>
+            ))}
+          </Tabs.List>
+        </Tabs.ListContainer>
 
-      {activeTab === "inspect" && (
-        <section className="workspace-two-column">
+        <Tabs.Panel className="pt-4" id="inspect">
+          <section className="workspace-two-column">
           <WorkspaceSectionCard
             description="Read the current document safely and keep migration as an explicit operator action."
             title="Inspect and migrate"
@@ -211,11 +215,11 @@ export function ConfigSection({ app }: ConfigSectionProps) {
               />
             )}
           </WorkspaceSectionCard>
-        </section>
-      )}
+          </section>
+        </Tabs.Panel>
 
-      {activeTab === "validate" && (
-        <section className="workspace-two-column">
+        <Tabs.Panel className="pt-4" id="validate">
+          <section className="workspace-two-column">
           <WorkspaceSectionCard
             description="Keep validation result obvious before any mutation or recovery step."
             title="Validation"
@@ -273,11 +277,11 @@ export function ConfigSection({ app }: ConfigSectionProps) {
               />
             )}
           </WorkspaceSectionCard>
-        </section>
-      )}
+          </section>
+        </Tabs.Panel>
 
-      {activeTab === "mutate" && (
-        <section className="workspace-two-column">
+        <Tabs.Panel className="pt-4" id="mutate">
+          <section className="workspace-two-column">
           <WorkspaceSectionCard
             description="Keep mutation small and explicit, with mode, key, and value separated from the rest of the page."
             title="Mutate config"
@@ -359,11 +363,11 @@ export function ConfigSection({ app }: ConfigSectionProps) {
               />
             )}
           </WorkspaceSectionCard>
-        </section>
-      )}
+          </section>
+        </Tabs.Panel>
 
-      {activeTab === "recover" && (
-        <section className="workspace-two-column">
+        <Tabs.Panel className="pt-4" id="recover">
+          <section className="workspace-two-column">
           <WorkspaceSectionCard
             description="Recovery stays visibly risky and grounded in the actual retained backup list."
             title="Recover from backup"
@@ -419,8 +423,9 @@ export function ConfigSection({ app }: ConfigSectionProps) {
               </WorkspaceTable>
             )}
           </WorkspaceSectionCard>
-        </section>
-      )}
+          </section>
+        </Tabs.Panel>
+      </Tabs>
     </main>
   );
 }

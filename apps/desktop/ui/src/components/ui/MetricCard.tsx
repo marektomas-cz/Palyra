@@ -24,6 +24,7 @@ export function MetricCard({
       title={label}
       actions={<StatusChip tone={tone}>{label}</StatusChip>}
       className={joinClassNames("desktop-metric-card", className)}
+      variant="secondary"
     >
       <div className="desktop-metric-card__value">{value}</div>
       {detail !== undefined && <div className="desktop-metric-card__detail">{detail}</div>}

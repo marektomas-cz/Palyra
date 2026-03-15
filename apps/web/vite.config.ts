@@ -6,8 +6,23 @@ const isCi = Boolean(
   (globalThis as typeof globalThis & { process?: { env?: { CI?: string } } }).process?.env?.CI
 );
 
+function resolveFsPath(relativePath: string): string {
+  return decodeURIComponent(new URL(relativePath, import.meta.url).pathname).replace(
+    /^\/([A-Za-z]:\/)/,
+    "$1"
+  );
+}
+
+const appRoot = resolveFsPath("./");
+const sharedUiRoot = resolveFsPath("../shared-ui");
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  server: {
+    fs: {
+      allow: [appRoot, sharedUiRoot]
+    }
+  },
   test: {
     environment: "jsdom",
     globals: true,

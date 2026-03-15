@@ -1,4 +1,4 @@
-import { Modal } from "@heroui/react";
+import { Modal, Tabs } from "@heroui/react";
 import { useEffect, useMemo, useState } from "react";
 
 import type {
@@ -492,147 +492,177 @@ export function AgentsSection({ app }: AgentsSectionProps) {
               </div>
             </Modal.Header>
             <Modal.Body>
-              <ActionCluster className="workspace-tab-row">
-                {WIZARD_STEPS.map((step) => (
-                  <ActionButton
-                    key={step.id}
-                    type="button"
-                    variant={wizardStep === step.id ? "primary" : "ghost"}
-                    onPress={() => setWizardStep(step.id)}
-                  >
-                    {step.label}
-                  </ActionButton>
-                ))}
-              </ActionCluster>
-
-              <WorkspaceSectionCard
-                title={WIZARD_STEPS[wizardStep].label}
-                description={WIZARD_STEPS[wizardStep].description}
-                className="workspace-section-card--nested"
+              <Tabs
+                className="w-full"
+                selectedKey={String(wizardStep)}
+                variant="secondary"
+                onSelectionChange={(key) => setWizardStep(Number(key) as WizardStep)}
               >
-                {wizardStep === 0 ? (
-                  <div className="workspace-form-grid">
-                    <TextInputField
-                      label="Agent ID"
-                      value={draft.agentId}
-                      onChange={(agentId) => setDraft((current) => ({ ...current, agentId }))}
-                      placeholder="review-agent"
-                    />
-                    <TextInputField
-                      label="Display name"
-                      value={draft.displayName}
-                      onChange={(displayName) =>
-                        setDraft((current) => ({ ...current, displayName }))
-                      }
-                      placeholder="Review Agent"
-                    />
-                  </div>
-                ) : null}
+                <Tabs.ListContainer>
+                  <Tabs.List aria-label="Agent setup steps" className="w-fit">
+                    {WIZARD_STEPS.map((step) => (
+                      <Tabs.Tab id={String(step.id)} key={step.id}>
+                        {step.label}
+                        <Tabs.Indicator />
+                      </Tabs.Tab>
+                    ))}
+                  </Tabs.List>
+                </Tabs.ListContainer>
 
-                {wizardStep === 1 ? (
-                  <div className="workspace-stack">
-                    <TextInputField
-                      label="Agent dir"
-                      value={draft.agentDir}
-                      onChange={(agentDir) => setDraft((current) => ({ ...current, agentDir }))}
-                      placeholder="Leave blank for safe state-root defaults"
-                    />
-                    <TextAreaField
-                      label="Workspace roots"
-                      rows={4}
-                      value={draft.workspaceRoots}
-                      onChange={(workspaceRoots) =>
-                        setDraft((current) => ({ ...current, workspaceRoots }))
-                      }
-                      placeholder={"workspace\nworkspace-review"}
-                    />
-                    <CheckboxField
-                      label="Allow absolute paths"
-                      checked={draft.allowAbsolutePaths}
-                      onChange={(allowAbsolutePaths) =>
-                        setDraft((current) => ({ ...current, allowAbsolutePaths }))
-                      }
-                    />
-                  </div>
-                ) : null}
-
-                {wizardStep === 2 ? (
-                  <div className="workspace-stack">
+                <Tabs.Panel className="pt-4" id="0">
+                  <WorkspaceSectionCard
+                    title={WIZARD_STEPS[0].label}
+                    description={WIZARD_STEPS[0].description}
+                    className="workspace-section-card--nested"
+                  >
                     <div className="workspace-form-grid">
                       <TextInputField
-                        label="Default model profile"
-                        value={draft.defaultModelProfile}
-                        onChange={(defaultModelProfile) =>
-                          setDraft((current) => ({ ...current, defaultModelProfile }))
+                        label="Agent ID"
+                        value={draft.agentId}
+                        onChange={(agentId) => setDraft((current) => ({ ...current, agentId }))}
+                        placeholder="review-agent"
+                      />
+                      <TextInputField
+                        label="Display name"
+                        value={draft.displayName}
+                        onChange={(displayName) =>
+                          setDraft((current) => ({ ...current, displayName }))
                         }
-                        placeholder="gpt-4o-mini"
+                        placeholder="Review Agent"
+                      />
+                    </div>
+                    {wizardStep === 0 && validationMessage !== null ? (
+                      <InlineNotice title="Validation" tone="warning">
+                        {validationMessage}
+                      </InlineNotice>
+                    ) : null}
+                  </WorkspaceSectionCard>
+                </Tabs.Panel>
+
+                <Tabs.Panel className="pt-4" id="1">
+                  <WorkspaceSectionCard
+                    title={WIZARD_STEPS[1].label}
+                    description={WIZARD_STEPS[1].description}
+                    className="workspace-section-card--nested"
+                  >
+                    <div className="workspace-stack">
+                      <TextInputField
+                        label="Agent dir"
+                        value={draft.agentDir}
+                        onChange={(agentDir) => setDraft((current) => ({ ...current, agentDir }))}
+                        placeholder="Leave blank for safe state-root defaults"
+                      />
+                      <TextAreaField
+                        label="Workspace roots"
+                        rows={4}
+                        value={draft.workspaceRoots}
+                        onChange={(workspaceRoots) =>
+                          setDraft((current) => ({ ...current, workspaceRoots }))
+                        }
+                        placeholder={"workspace\nworkspace-review"}
                       />
                       <CheckboxField
-                        label="Set as default agent"
-                        checked={draft.setDefault}
-                        onChange={(setDefault) =>
-                          setDraft((current) => ({ ...current, setDefault }))
+                        label="Allow absolute paths"
+                        checked={draft.allowAbsolutePaths}
+                        onChange={(allowAbsolutePaths) =>
+                          setDraft((current) => ({ ...current, allowAbsolutePaths }))
                         }
                       />
                     </div>
-                    <TextAreaField
-                      label="Tool allowlist"
-                      rows={3}
-                      value={draft.defaultToolAllowlist}
-                      onChange={(defaultToolAllowlist) =>
-                        setDraft((current) => ({ ...current, defaultToolAllowlist }))
-                      }
-                      placeholder={"palyra.echo\npalyra.http.fetch"}
-                    />
-                    <TextAreaField
-                      label="Skill allowlist"
-                      rows={3}
-                      value={draft.defaultSkillAllowlist}
-                      onChange={(defaultSkillAllowlist) =>
-                        setDraft((current) => ({ ...current, defaultSkillAllowlist }))
-                      }
-                      placeholder={"acme.echo\nacme.review"}
-                    />
-                  </div>
-                ) : null}
+                    {wizardStep === 1 && validationMessage !== null ? (
+                      <InlineNotice title="Validation" tone="warning">
+                        {validationMessage}
+                      </InlineNotice>
+                    ) : null}
+                  </WorkspaceSectionCard>
+                </Tabs.Panel>
 
-                {wizardStep === 3 ? (
-                  <KeyValueList
-                    items={[
-                      { label: "Agent ID", value: draft.agentId.trim() || "n/a" },
-                      { label: "Display name", value: draft.displayName.trim() || "n/a" },
-                      { label: "Agent dir", value: draft.agentDir.trim() || "Auto under state root" },
-                      { label: "Workspace roots", value: resolveWorkspaceRoots(draft).join(", ") },
-                      {
-                        label: "Model profile",
-                        value: draft.defaultModelProfile.trim() || "Backend default"
-                      },
-                      {
-                        label: "Tool allowlist",
-                        value: parseTextList(draft.defaultToolAllowlist).join(", ") || "none"
-                      },
-                      {
-                        label: "Skill allowlist",
-                        value: parseTextList(draft.defaultSkillAllowlist).join(", ") || "none"
-                      },
-                      {
-                        label: "Default selection",
-                        value: draft.setDefault ? "Set as default" : "Keep current default"
-                      },
-                      {
-                        label: "Absolute paths",
-                        value: draft.allowAbsolutePaths ? "Allowed" : "Disabled"
-                      }
-                    ]}
-                  />
-                ) : null}
+                <Tabs.Panel className="pt-4" id="2">
+                  <WorkspaceSectionCard
+                    title={WIZARD_STEPS[2].label}
+                    description={WIZARD_STEPS[2].description}
+                    className="workspace-section-card--nested"
+                  >
+                    <div className="workspace-stack">
+                      <div className="workspace-form-grid">
+                        <TextInputField
+                          label="Default model profile"
+                          value={draft.defaultModelProfile}
+                          onChange={(defaultModelProfile) =>
+                            setDraft((current) => ({ ...current, defaultModelProfile }))
+                          }
+                          placeholder="gpt-4o-mini"
+                        />
+                        <CheckboxField
+                          label="Set as default agent"
+                          checked={draft.setDefault}
+                          onChange={(setDefault) =>
+                            setDraft((current) => ({ ...current, setDefault }))
+                          }
+                        />
+                      </div>
+                      <TextAreaField
+                        label="Tool allowlist"
+                        rows={3}
+                        value={draft.defaultToolAllowlist}
+                        onChange={(defaultToolAllowlist) =>
+                          setDraft((current) => ({ ...current, defaultToolAllowlist }))
+                        }
+                        placeholder={"palyra.echo\npalyra.http.fetch"}
+                      />
+                      <TextAreaField
+                        label="Skill allowlist"
+                        rows={3}
+                        value={draft.defaultSkillAllowlist}
+                        onChange={(defaultSkillAllowlist) =>
+                          setDraft((current) => ({ ...current, defaultSkillAllowlist }))
+                        }
+                        placeholder={"acme.echo\nacme.review"}
+                      />
+                    </div>
+                  </WorkspaceSectionCard>
+                </Tabs.Panel>
 
-                {validationMessage !== null ? (
-                  <InlineNotice title="Validation" tone="warning">
-                    {validationMessage}
-                  </InlineNotice>
-                ) : null}
-              </WorkspaceSectionCard>
+                <Tabs.Panel className="pt-4" id="3">
+                  <WorkspaceSectionCard
+                    title={WIZARD_STEPS[3].label}
+                    description={WIZARD_STEPS[3].description}
+                    className="workspace-section-card--nested"
+                  >
+                    <KeyValueList
+                      items={[
+                        { label: "Agent ID", value: draft.agentId.trim() || "n/a" },
+                        { label: "Display name", value: draft.displayName.trim() || "n/a" },
+                        {
+                          label: "Agent dir",
+                          value: draft.agentDir.trim() || "Auto under state root"
+                        },
+                        { label: "Workspace roots", value: resolveWorkspaceRoots(draft).join(", ") },
+                        {
+                          label: "Model profile",
+                          value: draft.defaultModelProfile.trim() || "Backend default"
+                        },
+                        {
+                          label: "Tool allowlist",
+                          value: parseTextList(draft.defaultToolAllowlist).join(", ") || "none"
+                        },
+                        {
+                          label: "Skill allowlist",
+                          value: parseTextList(draft.defaultSkillAllowlist).join(", ") || "none"
+                        },
+                        {
+                          label: "Default selection",
+                          value: draft.setDefault ? "Set as default" : "Keep current default"
+                        },
+                        {
+                          label: "Absolute paths",
+                          value: draft.allowAbsolutePaths ? "Allowed" : "Disabled"
+                        }
+                      ]}
+                    />
+                  </WorkspaceSectionCard>
+                </Tabs.Panel>
+              </Tabs>
             </Modal.Body>
             <Modal.Footer>
               <ActionCluster>

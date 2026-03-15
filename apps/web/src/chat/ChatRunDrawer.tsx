@@ -8,6 +8,7 @@ import {
   SectionCard
 } from "../console/components/ui";
 import type { ChatRunStatusRecord, ChatRunTapeSnapshot } from "../consoleApi";
+import { Tabs } from "@heroui/react";
 
 import { parseTapePayload, toPrettyJson } from "./chatShared";
 
@@ -42,12 +43,6 @@ export function ChatRunDrawer({
 
   return (
     <aside className="chat-run-drawer" aria-label="Run details inspector">
-      <div className="workspace-panel__intro">
-        <p className="workspace-kicker">Inspector</p>
-        <h3>Run details</h3>
-        <p className="chat-muted">Inspect status, tape events, and token accounting only when you need to.</p>
-      </div>
-
       <div className="workspace-field-grid workspace-field-grid--double">
         <SelectField
           label="Run"
@@ -79,56 +74,73 @@ export function ChatRunDrawer({
         />
       ) : (
         <>
-          {runStatus === null ? (
-            <EmptyState
-              compact
-              description="Refresh a run to inspect its current status."
-              title="No run status loaded yet"
-            />
-          ) : (
-            <SectionCard title="Status">
-              <KeyValueList
-                items={[
-                  { label: "State", value: runStatus.state },
-                  { label: "Prompt tokens", value: runStatus.prompt_tokens },
-                  { label: "Completion tokens", value: runStatus.completion_tokens },
-                  { label: "Total tokens", value: runStatus.total_tokens },
-                  { label: "Tape events", value: runStatus.tape_events },
-                  {
-                    label: "Updated",
-                    value: new Date(runStatus.updated_at_unix_ms).toLocaleString()
-                  }
-                ]}
-              />
-              {runStatus.last_error !== undefined && runStatus.last_error.length > 0 ? (
-                <InlineNotice title="Run error" tone="danger">
-                  {runStatus.last_error}
-                </InlineNotice>
-              ) : null}
-            </SectionCard>
-          )}
-
-          {runTape === null ? (
-            <EmptyState
-              compact
-              description="Refresh a run to load its tape snapshot."
-              title="No tape snapshot loaded"
-            />
-          ) : (
-            <SectionCard title={`Tape events (${runTape.events.length})`}>
-              <div className="chat-tape-list">
-                {runTape.events.map((event) => (
-                  <article key={`${event.seq}-${event.event_type}`} className="chat-tape-item">
-                    <header>
-                      <strong>#{event.seq}</strong>
-                      <span>{event.event_type}</span>
-                    </header>
-                    <pre>{toPrettyJson(parseTapePayload(event.payload_json), revealSensitiveValues)}</pre>
-                  </article>
-                ))}
-              </div>
-            </SectionCard>
-          )}
+          <Tabs defaultSelectedKey="status" variant="secondary">
+            <Tabs.ListContainer>
+              <Tabs.List aria-label="Run inspector sections" className="w-full">
+                <Tabs.Tab id="status">
+                  Status
+                  <Tabs.Indicator />
+                </Tabs.Tab>
+                <Tabs.Tab id="tape">
+                  Tape
+                  <Tabs.Indicator />
+                </Tabs.Tab>
+              </Tabs.List>
+            </Tabs.ListContainer>
+            <Tabs.Panel className="pt-4" id="status">
+              {runStatus === null ? (
+                <EmptyState
+                  compact
+                  description="Refresh a run to inspect its current status."
+                  title="No run status loaded yet"
+                />
+              ) : (
+                <SectionCard title="Run status" variant="transparent">
+                  <KeyValueList
+                    items={[
+                      { label: "State", value: runStatus.state },
+                      { label: "Prompt tokens", value: runStatus.prompt_tokens },
+                      { label: "Completion tokens", value: runStatus.completion_tokens },
+                      { label: "Total tokens", value: runStatus.total_tokens },
+                      { label: "Tape events", value: runStatus.tape_events },
+                      {
+                        label: "Updated",
+                        value: new Date(runStatus.updated_at_unix_ms).toLocaleString()
+                      }
+                    ]}
+                  />
+                  {runStatus.last_error !== undefined && runStatus.last_error.length > 0 ? (
+                    <InlineNotice title="Run error" tone="danger">
+                      {runStatus.last_error}
+                    </InlineNotice>
+                  ) : null}
+                </SectionCard>
+              )}
+            </Tabs.Panel>
+            <Tabs.Panel className="pt-4" id="tape">
+              {runTape === null ? (
+                <EmptyState
+                  compact
+                  description="Refresh a run to load its tape snapshot."
+                  title="No tape snapshot loaded"
+                />
+              ) : (
+                <SectionCard title={`Tape events (${runTape.events.length})`} variant="transparent">
+                  <div className="chat-tape-list">
+                    {runTape.events.map((event) => (
+                      <article key={`${event.seq}-${event.event_type}`} className="chat-tape-item">
+                        <header>
+                          <strong>#{event.seq}</strong>
+                          <span>{event.event_type}</span>
+                        </header>
+                        <pre>{toPrettyJson(parseTapePayload(event.payload_json), revealSensitiveValues)}</pre>
+                      </article>
+                    ))}
+                  </div>
+                </SectionCard>
+              )}
+            </Tabs.Panel>
+          </Tabs>
         </>
       )}
     </aside>

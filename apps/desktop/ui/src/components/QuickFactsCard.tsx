@@ -22,7 +22,7 @@ export function QuickFactsCard({ snapshot, loading }: QuickFactsCardProps) {
     <SectionCard
       eyebrow="Handoff"
       title="Dashboard target"
-      description="Desktop stays focused on quick launch and verification, then hands control to the full dashboard."
+      description="Keep the URL, mode, and runtime metadata close to the handoff action."
       actions={<StatusChip tone="accent">{snapshot.quick_facts.dashboard_access_mode}</StatusChip>}
     >
       <div className="desktop-url-block">

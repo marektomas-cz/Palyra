@@ -1,0 +1,79 @@
+:root,
+.light,
+.default,
+[data-theme="light"],
+[data-theme="default"] {
+  --accent: oklch(54.26% 0.2317 274.67);
+  --accent-foreground: oklch(99.11% 0 0);
+  --background: oklch(97.02% 0 0);
+  --border: oklch(90% 0 0);
+  --danger: oklch(65.32% 0.2328 28.24);
+  --danger-foreground: oklch(99.11% 0 0);
+  --default: oklch(94% 0 0);
+  --default-foreground: oklch(21.03% 0 0);
+  --field-background: oklch(100% 0 0);
+  --field-foreground: oklch(21.03% 0 0);
+  --field-placeholder: oklch(55.17% 0 0);
+  --focus: oklch(54.26% 0.2317 274.67);
+  --foreground: oklch(21.03% 0 0);
+  --muted: oklch(55.17% 0 0);
+  --overlay: oklch(100% 0 0);
+  --overlay-foreground: oklch(21.03% 0 0);
+  --scrollbar: oklch(87.1% 0 0);
+  --segment: oklch(100% 0 0);
+  --segment-foreground: oklch(21.03% 0 0);
+  --separator: oklch(92% 0 0);
+  --success: oklch(73.29% 0.1935 153.31);
+  --success-foreground: oklch(21.03% 0.0059 153.31);
+  --surface: oklch(100% 0 0);
+  --surface-foreground: oklch(21.03% 0 0);
+  --surface-secondary: oklch(95.24% 0 0);
+  --surface-secondary-foreground: oklch(21.03% 0 0);
+  --surface-tertiary: oklch(93.73% 0 0);
+  --surface-tertiary-foreground: oklch(21.03% 0 0);
+  --warning: oklch(78.19% 0.1585 74.83);
+  --warning-foreground: oklch(21.03% 0.0059 74.83);
+  --radius: 0.25rem;
+  --field-radius: 0.5rem;
+  --font-sans:
+    "JetBrains Mono",
+    "SFMono-Regular",
+    "Consolas",
+    "Liberation Mono",
+    monospace;
+}
+
+.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --accent: oklch(54.26% 0.2317 274.67);
+  --accent-foreground: oklch(99.11% 0 0);
+  --background: oklch(12% 0 0);
+  --border: oklch(28% 0 0);
+  --danger: oklch(59.4% 0.1967 27.13);
+  --danger-foreground: oklch(99.11% 0 0);
+  --default: oklch(27.4% 0 0);
+  --default-foreground: oklch(99.11% 0 0);
+  --field-background: oklch(21.03% 0 0);
+  --field-foreground: oklch(99.11% 0 0);
+  --field-placeholder: oklch(70.5% 0 0);
+  --focus: oklch(54.26% 0.2317 274.67);
+  --foreground: oklch(99.11% 0 0);
+  --muted: oklch(70.5% 0 0);
+  --overlay: oklch(21.03% 0 0);
+  --overlay-foreground: oklch(99.11% 0 0);
+  --scrollbar: oklch(70.5% 0 0);
+  --segment: oklch(39.64% 0 0);
+  --segment-foreground: oklch(99.11% 0 0);
+  --separator: oklch(25% 0 0);
+  --success: oklch(73.29% 0.1935 153.31);
+  --success-foreground: oklch(21.03% 0.0059 153.31);
+  --surface: oklch(21.03% 0 0);
+  --surface-foreground: oklch(99.11% 0 0);
+  --surface-secondary: oklch(25.7% 0 0);
+  --surface-secondary-foreground: oklch(99.11% 0 0);
+  --surface-tertiary: oklch(27.21% 0 0);
+  --surface-tertiary-foreground: oklch(99.11% 0 0);
+  --warning: oklch(82.03% 0.1388 78.84);
+  --warning-foreground: oklch(21.03% 0.0059 78.84);
+}

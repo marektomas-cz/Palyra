@@ -18,7 +18,7 @@ export function LifecycleActionBar({
   const isBusy = actionState !== null;
 
   return (
-    <Card className="desktop-surface">
+    <Card className="desktop-card" variant="secondary">
       <CardContent className="desktop-action-bar">
         <div className="desktop-action-bar__cluster">
           <p className="desktop-label">Lifecycle</p>
@@ -68,7 +68,7 @@ export function LifecycleActionBar({
                 <span>Waiting for the desktop bridge to finish the requested action.</span>
               </>
             ) : (
-              <span>Actions keep the existing Tauri bridge and snapshot refresh flow unchanged.</span>
+              <span>Use lifecycle first, then hand off to the dashboard when the runtime is ready.</span>
             )}
           </div>
         </div>

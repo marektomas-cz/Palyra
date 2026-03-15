@@ -9,6 +9,7 @@ type SectionCardProps = PropsWithChildren<{
   actions?: ReactNode;
   className?: string;
   footer?: ReactNode;
+  variant?: "transparent" | "default" | "secondary" | "tertiary";
 }>;
 
 export function SectionCard({
@@ -17,15 +18,11 @@ export function SectionCard({
   actions,
   className,
   footer,
+  variant = "default",
   children
 }: SectionCardProps) {
   return (
-    <Card
-      className={joinClassNames(
-        "border border-white/25 bg-white/70 shadow-xl shadow-slate-900/5 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/60",
-        className
-      )}
-    >
+    <Card className={joinClassNames("workspace-card workspace-section-card", className)} variant={variant}>
       <CardHeader className="workspace-section-card__header">
         <div className="workspace-section-card__copy">
           <h3>{title}</h3>

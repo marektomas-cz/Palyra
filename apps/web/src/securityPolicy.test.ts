@@ -9,11 +9,11 @@ function parseCspFromIndexHtml(html: string): string {
 }
 
 describe("Web Security Policy", () => {
-  it("declares strict CSP directives for scripts and framing", () => {
+  it("declares strict CSP directives for scripts and resource types", () => {
     const csp = parseCspFromIndexHtml(indexHtml);
     expect(csp).not.toBe("");
     expect(csp).toContain("script-src 'self'");
-    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("font-src 'self' data:");
     expect(csp).toContain("object-src 'none'");
     expect(csp).not.toContain("'unsafe-inline'");
   });

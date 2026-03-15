@@ -102,6 +102,7 @@ export function TextInputField({
         placeholder={placeholder}
         readOnly={readOnly}
         type={type}
+        variant="secondary"
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
       />
@@ -136,6 +137,7 @@ export function TextAreaField({
         placeholder={placeholder}
         readOnly={readOnly}
         rows={rows}
+        variant="secondary"
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
       />

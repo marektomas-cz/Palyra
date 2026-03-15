@@ -47,7 +47,7 @@ type ProcessPaneProps = {
 
 function ProcessPane({ title, process, loading }: ProcessPaneProps) {
   return (
-    <Card className="desktop-subcard">
+    <Card className="desktop-card desktop-subcard" variant="transparent">
       <CardHeader className="desktop-subcard__header">
         <div>
           <p className="desktop-label">{process.service}</p>
@@ -73,7 +73,7 @@ export function ProcessMonitorCard({
     <SectionCard
       eyebrow="Runtime detail"
       title="Process monitor"
-      description="Desktop keeps the two supervised processes visible without expanding into a full operations cockpit."
+      description="Keep gateway and browserd readable without expanding into a full operations cockpit."
       actions={
         <StatusChip tone={processTone(browserdProcess)}>
           {browserdProcess.running ? "Browserd up" : "Browserd down"}

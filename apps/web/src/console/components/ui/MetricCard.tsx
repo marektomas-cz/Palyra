@@ -21,6 +21,7 @@ export function MetricCard({
     <SectionCard
       title={label}
       className="workspace-metric-card"
+      variant="secondary"
       actions={<StatusChip tone={tone}>{label}</StatusChip>}
     >
       <div className="workspace-metric-card__value">{value}</div>

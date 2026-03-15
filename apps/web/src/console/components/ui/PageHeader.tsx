@@ -1,6 +1,8 @@
 import { Card, CardContent } from "@heroui/react";
 import type { ReactNode } from "react";
 
+import { joinClassNames } from "./utils";
+
 type PageHeaderProps = {
   eyebrow?: string;
   title: string;
@@ -8,6 +10,7 @@ type PageHeaderProps = {
   description: string;
   status?: ReactNode;
   actions?: ReactNode;
+  className?: string;
 };
 
 export function PageHeader({
@@ -16,10 +19,14 @@ export function PageHeader({
   headingLabel,
   description,
   status,
-  actions
+  actions,
+  className
 }: PageHeaderProps) {
   return (
-    <Card className="border border-white/25 bg-white/75 shadow-xl shadow-slate-900/5 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/60">
+    <Card
+      className={joinClassNames("workspace-card workspace-page-header-card", className)}
+      variant="secondary"
+    >
       <CardContent className="workspace-page-header">
         <div className="workspace-page-header__copy">
           {eyebrow !== undefined && <p className="console-label">{eyebrow}</p>}

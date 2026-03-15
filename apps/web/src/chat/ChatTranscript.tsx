@@ -1,5 +1,3 @@
-import { ScrollShadow } from "@heroui/react";
-
 import { ActionButton, EmptyState } from "../console/components/ui";
 import { A2uiRenderer, type A2uiDocument } from "../a2ui";
 
@@ -41,7 +39,7 @@ export function ChatTranscript({
         </p>
       )}
 
-      <ScrollShadow className="chat-transcript" ref={transcriptBoxRef} role="log" aria-live="polite">
+      <div className="chat-transcript" ref={transcriptBoxRef} role="log" aria-live="polite">
         {visibleTranscript.length === 0 ? (
           <div className="chat-transcript__empty">
             <EmptyState
@@ -106,7 +104,7 @@ export function ChatTranscript({
             </article>
           ))
         )}
-      </ScrollShadow>
+      </div>
     </>
   );
 }

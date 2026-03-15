@@ -104,6 +104,7 @@ describe("ChatConsolePanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Run details" }));
     expect(await screen.findByText("initial-two")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Tape" }));
     expect(await screen.findByText(/run-two-initial/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: / Run$/ }));
@@ -124,8 +125,13 @@ describe("ChatConsolePanel", () => {
       tape: createRunTape(runTwoId, "run-two-fresh")
     });
 
+    fireEvent.click(screen.getByRole("tab", { name: "Status" }));
     await waitFor(() => {
       expect(screen.getByText("fresh-two")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Tape" }));
+    await waitFor(() => {
       expect(screen.getByText(/run-two-fresh/)).toBeInTheDocument();
     });
 
@@ -138,10 +144,14 @@ describe("ChatConsolePanel", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("fresh-two")).toBeInTheDocument();
       expect(screen.getByText(/run-two-fresh/)).toBeInTheDocument();
-      expect(screen.queryByText("stale-one")).not.toBeInTheDocument();
       expect(screen.queryByText(/run-one-stale/)).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Status" }));
+    await waitFor(() => {
+      expect(screen.getByText("fresh-two")).toBeInTheDocument();
+      expect(screen.queryByText("stale-one")).not.toBeInTheDocument();
     });
   }, 15_000);
 });
