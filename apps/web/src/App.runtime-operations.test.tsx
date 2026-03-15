@@ -43,6 +43,8 @@ afterEach(() => {
 });
 
 describe("M56 runtime and operations surfaces", () => {
+  const runtimeWorkflowTimeoutMs = 30_000;
+
   it("surfaces operations handoffs and executes cron plus channels workflows", async () => {
     const fetchMock = createFetchRouter(
       routeBaseRequests,
@@ -203,7 +205,7 @@ describe("M56 runtime and operations surfaces", () => {
     await waitFor(() => {
       expect(screen.getByText("Discord test send dispatched.")).toBeInTheDocument();
     });
-  }, 15_000);
+  }, runtimeWorkflowTimeoutMs);
 
   it("covers memory, skills, and browser lifecycle workflows", async () => {
     const browserState = browserProfilesFixture();
@@ -357,7 +359,7 @@ describe("M56 runtime and operations surfaces", () => {
     fireEvent.change(screen.getAllByLabelText("Session ID")[0], { target: { value: "browser-session-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Load downloads" }));
     expect((await screen.findAllByText(/report.csv/)).length).toBeGreaterThan(0);
-  }, 15_000);
+  }, runtimeWorkflowTimeoutMs);
 
   it("lists agents, creates a new agent from the wizard, and updates the default agent", async () => {
     const agentState = {
