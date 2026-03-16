@@ -1008,43 +1008,18 @@ fn set_rlimit(resource: libc::c_int, limit: libc::rlim_t) -> std::io::Result<()>
 #[cfg(unix)]
 fn set_cpu_rlimit(cpu_time_limit_ms: u64) -> std::io::Result<()> {
     let cpu_limit_seconds = current_process_cpu_rlimit_seconds(cpu_time_limit_ms)?;
-    tolerate_macos_einval_rlimit_pre_exec(set_rlimit(
-        libc::RLIMIT_CPU as libc::c_int,
-        cpu_limit_seconds as libc::rlim_t,
-    ))
+    set_rlimit(libc::RLIMIT_CPU as libc::c_int, cpu_limit_seconds as libc::rlim_t)
 }
 
 #[cfg(unix)]
 fn set_memory_rlimit(memory_limit_bytes: u64) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return tolerate_macos_einval_rlimit_pre_exec(set_rlimit(
-            libc::RLIMIT_DATA as libc::c_int,
-            memory_limit_bytes as libc::rlim_t,
-        ));
+        return set_rlimit(libc::RLIMIT_AS as libc::c_int, memory_limit_bytes as libc::rlim_t);
     }
     #[cfg(not(target_os = "macos"))]
     {
         set_rlimit(libc::RLIMIT_AS as libc::c_int, memory_limit_bytes as libc::rlim_t)
-    }
-}
-
-#[cfg(unix)]
-fn tolerate_macos_einval_rlimit_pre_exec(result: std::io::Result<()>) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        // macOS can reject child pre-exec RLIMIT updates with EINVAL when the Rust test runner
-        // already inherited a larger footprint than the requested cap allows. Treat that case as
-        // best-effort so the sandboxed command can still execute and be governed by the remaining
-        // timeout/output controls instead of failing during spawn.
-        match result {
-            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
-            other => other,
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        result
     }
 }
 
@@ -1226,7 +1201,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             // The child inherits the test binary's resident footprint before pre_exec applies
-            // RLIMIT_DATA, so tiny test-only quotas can fail before the behavior under test runs.
+            // RLIMIT_AS, so tiny test-only quotas can fail before the behavior under test runs.
             return 512 * 1024 * 1024;
         }
         #[cfg(not(target_os = "macos"))]
@@ -1879,15 +1854,6 @@ mod tests {
     fn cpu_rlimit_seconds_accounts_for_consumed_process_time() {
         let limit = cpu_rlimit_seconds_from_usage_micros(2_000, 3_250_000);
         assert_eq!(limit, 6);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn tolerate_macos_einval_rlimit_pre_exec_allows_einval() {
-        let result = super::tolerate_macos_einval_rlimit_pre_exec(Err(
-            std::io::Error::from_raw_os_error(libc::EINVAL),
-        ));
-        assert!(result.is_ok(), "macOS EINVAL should not abort sandbox spawn");
     }
 
     #[test]

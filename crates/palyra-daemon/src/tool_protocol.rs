@@ -925,7 +925,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             // Keep macOS test fixtures above the inherited harness footprint so fail-closed
-            // RLIMIT_DATA setup does not short-circuit the behavior being exercised.
+            // RLIMIT_AS setup does not short-circuit the behavior being exercised.
             return 512 * 1024 * 1024;
         }
         #[cfg(not(target_os = "macos"))]
