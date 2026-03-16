@@ -15,6 +15,7 @@ describe("Web Security Policy", () => {
     expect(csp).toContain("script-src 'self'");
     expect(csp).toContain("font-src 'self' data:");
     expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).not.toContain("'unsafe-inline'");
   });
 
