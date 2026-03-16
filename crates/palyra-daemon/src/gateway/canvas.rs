@@ -1,6 +1,17 @@
 use super::*;
 use reqwest::Url;
 
+pub(crate) const MAX_CANVAS_SQLITE_VERSION: u64 = i64::MAX as u64;
+
+pub(crate) fn ensure_canvas_version_fits_sqlite(field: &str, value: u64) -> Result<(), Status> {
+    if value > MAX_CANVAS_SQLITE_VERSION {
+        return Err(Status::invalid_argument(format!(
+            "{field} exceeds maximum supported value {MAX_CANVAS_SQLITE_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
 fn canvas_bundle_message(bundle: &CanvasBundleRecord) -> gateway_v1::CanvasBundle {
     let mut assets = bundle.assets.iter().collect::<Vec<_>>();
     assets.sort_by(|left, right| left.0.cmp(right.0));
@@ -87,10 +98,12 @@ pub(crate) fn resolve_canvas_state_schema_version(
             )));
         }
     }
-    Ok(requested_state_schema_version
+    let resolved = requested_state_schema_version
         .or(embedded_state_schema_version)
         .or(fallback_state_schema_version)
-        .unwrap_or(1))
+        .unwrap_or(1);
+    ensure_canvas_version_fits_sqlite("state_schema_version", resolved)?;
+    Ok(resolved)
 }
 
 pub(crate) fn load_canvas_records_from_snapshots(

@@ -3009,6 +3009,36 @@ impl JournalStore {
                 reason: "state_schema_version must be greater than 0".to_owned(),
             });
         }
+        let state_version = i64::try_from(request.state_version).map_err(|_| {
+            JournalError::InvalidCanvasReplay {
+                canvas_id: request.canvas_id.clone(),
+                reason: format!(
+                    "state_version {} exceeds maximum supported value {}",
+                    request.state_version,
+                    i64::MAX
+                ),
+            }
+        })?;
+        let base_state_version = i64::try_from(request.base_state_version).map_err(|_| {
+            JournalError::InvalidCanvasReplay {
+                canvas_id: request.canvas_id.clone(),
+                reason: format!(
+                    "base_state_version {} exceeds maximum supported value {}",
+                    request.base_state_version,
+                    i64::MAX
+                ),
+            }
+        })?;
+        let state_schema_version = i64::try_from(request.state_schema_version).map_err(|_| {
+            JournalError::InvalidCanvasReplay {
+                canvas_id: request.canvas_id.clone(),
+                reason: format!(
+                    "state_schema_version {} exceeds maximum supported value {}",
+                    request.state_schema_version,
+                    i64::MAX
+                ),
+            }
+        })?;
         if request.state_version <= request.base_state_version {
             return Err(JournalError::InvalidCanvasReplay {
                 canvas_id: request.canvas_id.clone(),
@@ -3073,9 +3103,9 @@ impl JournalStore {
             "#,
             params![
                 request.canvas_id.as_str(),
-                request.state_version as i64,
-                request.base_state_version as i64,
-                request.state_schema_version as i64,
+                state_version,
+                base_state_version,
+                state_schema_version,
                 request.patch_json.as_str(),
                 request.state_json.as_str(),
                 i64::from(request.closed),
@@ -3138,8 +3168,8 @@ impl JournalStore {
                 request.canvas_id.as_str(),
                 request.session_id.as_str(),
                 request.principal.as_str(),
-                request.state_version as i64,
-                request.state_schema_version as i64,
+                state_version,
+                state_schema_version,
                 request.state_json.as_str(),
                 request.bundle_json.as_str(),
                 request.allowed_parent_origins_json.as_str(),
@@ -6779,6 +6809,71 @@ mod tests {
                 actual_bytes: _,
                 max_bytes: 96
             } if payload_kind == "canvas_state"
+        ));
+    }
+
+    #[test]
+    fn canvas_state_transition_rejects_version_values_above_i64_max() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let oversized = (i64::MAX as u64) + 1;
+
+        let mut state_version_request = sample_canvas_transition_request(
+            "01ARZ3NDEKTSV4RRFFQ69G5FD2",
+            1,
+            0,
+            r#"{"content":"ok"}"#,
+            r#"{"v":1,"ops":[{"op":"replace","path":"","value":{"content":"ok"}}]}"#,
+            false,
+        );
+        state_version_request.state_version = oversized;
+        let state_version_error = store
+            .record_canvas_state_transition(&state_version_request)
+            .expect_err("oversized state_version should fail");
+        assert!(matches!(
+            state_version_error,
+            JournalError::InvalidCanvasReplay { ref reason, .. }
+                if reason.contains("state_version")
+                    && reason.contains(i64::MAX.to_string().as_str())
+        ));
+
+        let mut base_state_version_request = sample_canvas_transition_request(
+            "01ARZ3NDEKTSV4RRFFQ69G5FD3",
+            1,
+            0,
+            r#"{"content":"ok"}"#,
+            r#"{"v":1,"ops":[{"op":"replace","path":"","value":{"content":"ok"}}]}"#,
+            false,
+        );
+        base_state_version_request.base_state_version = oversized;
+        let base_state_version_error = store
+            .record_canvas_state_transition(&base_state_version_request)
+            .expect_err("oversized base_state_version should fail");
+        assert!(matches!(
+            base_state_version_error,
+            JournalError::InvalidCanvasReplay { ref reason, .. }
+                if reason.contains("base_state_version")
+                    && reason.contains(i64::MAX.to_string().as_str())
+        ));
+
+        let mut state_schema_version_request = sample_canvas_transition_request(
+            "01ARZ3NDEKTSV4RRFFQ69G5FD4",
+            1,
+            0,
+            r#"{"content":"ok"}"#,
+            r#"{"v":1,"ops":[{"op":"replace","path":"","value":{"content":"ok"}}]}"#,
+            false,
+        );
+        state_schema_version_request.state_schema_version = oversized;
+        let state_schema_version_error = store
+            .record_canvas_state_transition(&state_schema_version_request)
+            .expect_err("oversized state_schema_version should fail");
+        assert!(matches!(
+            state_schema_version_error,
+            JournalError::InvalidCanvasReplay { ref reason, .. }
+                if reason.contains("state_schema_version")
+                    && reason.contains(i64::MAX.to_string().as_str())
         ));
     }
 

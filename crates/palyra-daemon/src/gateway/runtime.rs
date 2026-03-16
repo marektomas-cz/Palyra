@@ -1104,6 +1104,7 @@ impl GatewayRuntimeState {
             None => Ulid::new().to_string(),
         };
         let state_version = if initial_state_version == 0 { 1 } else { initial_state_version };
+        ensure_canvas_version_fits_sqlite("state_version", state_version)?;
         let allowed_parent_origins =
             parse_canvas_allowed_parent_origins(allowed_parent_origins.as_slice())?;
         let mut bundle = self.parse_canvas_bundle(bundle)?;
@@ -1319,7 +1320,12 @@ impl GatewayRuntimeState {
         }
         let canonical_patch_json = patch_document_to_bytes(&patch_document)
             .map_err(|error| Status::internal(format!("failed to encode patch JSON: {error}")))?;
-        let next_state_version = record.state_version.saturating_add(1);
+        if record.state_version >= MAX_CANVAS_SQLITE_VERSION {
+            return Err(Status::failed_precondition(format!(
+                "canvas state_version cannot advance beyond maximum supported value {MAX_CANVAS_SQLITE_VERSION}"
+            )));
+        }
+        let next_state_version = record.state_version + 1;
 
         while record
             .update_timestamps_unix_ms
@@ -1410,7 +1416,12 @@ impl GatewayRuntimeState {
             let close_patch_json = patch_document_to_bytes(&close_patch).map_err(|error| {
                 Status::internal(format!("failed to encode close patch: {error}"))
             })?;
-            let next_state_version = record.state_version.saturating_add(1);
+            if record.state_version >= MAX_CANVAS_SQLITE_VERSION {
+                return Err(Status::failed_precondition(format!(
+                    "canvas state_version cannot advance beyond maximum supported value {MAX_CANVAS_SQLITE_VERSION}"
+                )));
+            }
+            let next_state_version = record.state_version + 1;
             let transition = CanvasStateTransitionRequest {
                 canvas_id: record.canvas_id.clone(),
                 session_id: record.session_id.clone(),

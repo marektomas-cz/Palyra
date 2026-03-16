@@ -2997,6 +2997,51 @@ fn canvas_rejects_out_of_bounds_payloads() {
 }
 
 #[test]
+fn canvas_rejects_version_values_above_i64_max() {
+    let state = build_test_runtime_state(false);
+    let context = canvas_test_context();
+    let oversized = (i64::MAX as u64) + 1;
+
+    let create_version_error = state
+        .create_canvas(
+            &context,
+            None,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAJ".to_owned(),
+            br#"{"content":"ok"}"#,
+            oversized,
+            None,
+            canvas_test_bundle(br#"console.log("ok");"#),
+            vec!["https://console.example.com".to_owned()],
+            Some(600),
+        )
+        .expect_err("oversized initial_state_version should fail");
+    assert_eq!(create_version_error.code(), Code::InvalidArgument);
+    assert!(
+        create_version_error.message().contains("state_version"),
+        "error should mention the rejected state version: {create_version_error}"
+    );
+
+    let create_schema_error = state
+        .create_canvas(
+            &context,
+            None,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAK".to_owned(),
+            br#"{"content":"ok"}"#,
+            1,
+            Some(oversized),
+            canvas_test_bundle(br#"console.log("ok");"#),
+            vec!["https://console.example.com".to_owned()],
+            Some(600),
+        )
+        .expect_err("oversized state_schema_version should fail");
+    assert_eq!(create_schema_error.code(), Code::InvalidArgument);
+    assert!(
+        create_schema_error.message().contains("state_schema_version"),
+        "error should mention the rejected state schema version: {create_schema_error}"
+    );
+}
+
+#[test]
 fn canvas_rejects_oversized_bundle_and_missing_origin_allowlist() {
     let state = build_test_runtime_state(false);
     let context = canvas_test_context();
@@ -3142,4 +3187,40 @@ fn canvas_update_rejects_oversized_patch_payload() {
         )
         .expect_err("oversized patch payload must be rejected");
     assert_eq!(error.code(), Code::ResourceExhausted);
+}
+
+#[test]
+fn canvas_update_rejects_embedded_schema_version_above_i64_max() {
+    let state = build_test_runtime_state(false);
+    let context = canvas_test_context();
+    let (created, _descriptor) = state
+        .create_canvas(
+            &context,
+            None,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAL".to_owned(),
+            br#"{"content":"ok"}"#,
+            1,
+            None,
+            canvas_test_bundle(br#"console.log("ok");"#),
+            vec!["https://console.example.com".to_owned()],
+            Some(600),
+        )
+        .expect("canvas create should succeed");
+    let oversized_schema_state =
+        format!(r#"{{"content":"next","schema_version":{}}}"#, (i64::MAX as u64) + 1);
+    let error = state
+        .update_canvas_state(
+            &context,
+            created.canvas_id.as_str(),
+            Some(oversized_schema_state.as_bytes()),
+            None,
+            Some(created.state_version),
+            None,
+        )
+        .expect_err("oversized embedded schema_version should fail");
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(
+        error.message().contains("state_schema_version"),
+        "error should mention the rejected schema version: {error}"
+    );
 }
