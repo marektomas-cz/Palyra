@@ -146,6 +146,23 @@ fn unique_temp_trust_store_path() -> std::path::PathBuf {
 }
 
 #[test]
+fn manifest_rejects_dangerous_skill_ids() {
+    for invalid_skill_id in
+        [".", "..", "acme..echo_http", ".acme", "acme.", "c:temp", "acme:echo_http"]
+    {
+        let manifest = sample_manifest().replace(
+            "skill_id = \"acme.echo_http\"",
+            format!("skill_id = \"{invalid_skill_id}\"").as_str(),
+        );
+        let error = parse_manifest_toml(manifest.as_str()).expect_err("manifest should fail");
+        assert!(
+            matches!(error, SkillPackagingError::ManifestValidation(_)),
+            "expected manifest validation error for '{invalid_skill_id}', got {error:?}"
+        );
+    }
+}
+
+#[test]
 fn manifest_rejects_wildcard_without_opt_in() {
     let manifest = sample_manifest().replace("api.example.com", "*");
     let error = parse_manifest_toml(manifest.as_str()).expect_err("manifest should fail");

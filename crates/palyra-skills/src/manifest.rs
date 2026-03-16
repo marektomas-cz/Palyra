@@ -56,7 +56,7 @@ fn validate_manifest(manifest: &SkillManifest) -> Result<(), SkillPackagingError
         )));
     }
     let publisher = normalize_identifier(manifest.publisher.as_str(), "publisher")?;
-    normalize_identifier(manifest.skill_id.as_str(), "skill_id")?;
+    normalize_skill_id(manifest.skill_id.as_str())?;
     parse_semver(manifest.version.as_str(), "version")?;
     parse_semver(manifest.compat.min_palyra_version.as_str(), "compat.min_palyra_version")?;
     if manifest.name.trim().is_empty() {
@@ -268,6 +268,16 @@ fn validate_identifier_or_wildcard(
         )));
     }
     normalize_identifier(value, field).map(|_| ())
+}
+
+fn normalize_skill_id(value: &str) -> Result<String, SkillPackagingError> {
+    let normalized = normalize_identifier(value, "skill_id")?;
+    if normalized.contains(':') || normalized.split('.').any(str::is_empty) {
+        return Err(SkillPackagingError::ManifestValidation(
+            "skill_id must use non-empty dot-separated [a-z0-9_-] segments".to_owned(),
+        ));
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn normalize_identifier(
