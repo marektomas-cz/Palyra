@@ -3044,12 +3044,9 @@ fn resolve_download_target_preserves_original_case_for_href_and_filename() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn browser_service_relay_open_tab_succeeds_with_auth_token() {
+async fn browser_service_relay_open_tab_blocks_private_targets_even_with_auth_token() {
     const AUTH_TOKEN: &str = "test-token";
-    let (url, handle) = spawn_static_http_server(
-        200,
-        "<html><head><title>Relay Open Tab</title></head><body>relay open tab</body></html>",
-    );
+    let url = "http://127.0.0.1:8080/".to_owned();
     let runtime = std::sync::Arc::new(
         BrowserRuntimeState::new(&Args {
             bind: "127.0.0.1".to_owned(),
@@ -3113,13 +3110,15 @@ async fn browser_service_relay_open_tab_succeeds_with_auth_token() {
         .await
         .expect("relay open_tab should return response")
         .into_inner();
-    assert!(relay.success, "relay open_tab should succeed with auth enabled");
     assert!(
-        matches!(relay.result, Some(browser_v1::relay_action_response::Result::OpenedTab(_))),
-        "relay open_tab should return opened tab payload"
+        !relay.success,
+        "relay open_tab should fail closed for private targets even when the session allows them"
     );
-
-    handle.join().expect("test server thread should exit");
+    assert!(
+        relay.error.contains("private/local"),
+        "relay open_tab should explain private-target denial: {}",
+        relay.error
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

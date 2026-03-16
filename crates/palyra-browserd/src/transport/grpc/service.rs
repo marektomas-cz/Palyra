@@ -1,5 +1,8 @@
 use crate::*;
 
+#[derive(Debug, Clone, Copy)]
+struct RelayPrivateTargetBlock;
+
 #[derive(Clone)]
 pub(crate) struct BrowserServiceImpl {
     pub(crate) runtime: Arc<BrowserRuntimeState>,
@@ -1756,6 +1759,8 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         &self,
         request: Request<browser_v1::OpenTabRequest>,
     ) -> Result<Response<browser_v1::OpenTabResponse>, Status> {
+        let relay_private_target_block =
+            request.extensions().get::<RelayPrivateTargetBlock>().is_some();
         self.runtime.authorize(request.metadata()).await?;
         let mut payload = request.into_inner();
         let session_id = parse_session_id_from_proto(payload.session_id.take())
@@ -1791,8 +1796,11 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             let timeout_ms =
                 payload.timeout_ms.max(1).min(session.budget.max_navigation_timeout_ms);
             let max_response_bytes = session.budget.max_response_bytes;
-            let allow_private_targets =
-                payload.allow_private_targets || session.allow_private_targets;
+            let allow_private_targets = if relay_private_target_block {
+                false
+            } else {
+                payload.allow_private_targets || session.allow_private_targets
+            };
             let cookie_header = cookie_header_for_url(session, url.as_str());
             (created_tab_id, timeout_ms, max_response_bytes, allow_private_targets, cookie_header)
         };
@@ -2189,6 +2197,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 if let Some(value) = auth_header.clone() {
                     open_request.metadata_mut().insert(AUTHORIZATION_HEADER, value);
                 }
+                open_request.extensions_mut().insert(RelayPrivateTargetBlock);
                 let open_response = self.open_tab(open_request).await?;
                 let output = open_response.into_inner();
                 Ok(Response::new(browser_v1::RelayActionResponse {
