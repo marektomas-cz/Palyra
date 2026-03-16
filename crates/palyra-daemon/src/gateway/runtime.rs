@@ -1894,6 +1894,12 @@ impl GatewayRuntimeState {
                     "journal event already exists: {event_id}"
                 )));
             }
+            Err(JournalError::JournalCapacityExceeded { current_events, max_events }) => {
+                self.counters.journal_persist_failures.fetch_add(1, Ordering::Relaxed);
+                return Err(Status::resource_exhausted(format!(
+                    "journal capacity reached ({current_events} >= {max_events})"
+                )));
+            }
             Err(error) => {
                 self.counters.journal_persist_failures.fetch_add(1, Ordering::Relaxed);
                 return Err(Status::internal(format!(

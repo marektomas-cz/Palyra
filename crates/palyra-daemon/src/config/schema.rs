@@ -34,6 +34,7 @@ const DEFAULT_ALLOW_INSECURE_NODE_RPC_WITHOUT_MTLS: bool = false;
 const DEFAULT_JOURNAL_DB_PATH: &str = "data/journal.sqlite3";
 const DEFAULT_JOURNAL_HASH_CHAIN_ENABLED: bool = true;
 const DEFAULT_MAX_JOURNAL_PAYLOAD_BYTES: usize = 256 * 1024;
+const DEFAULT_MAX_JOURNAL_EVENTS: usize = 10_000;
 const DEFAULT_TOOL_CALL_MAX_CALLS_PER_RUN: u32 = 4;
 const DEFAULT_TOOL_CALL_EXECUTION_TIMEOUT_MS: u64 = 750;
 const DEFAULT_PROCESS_RUNNER_ENABLED: bool = false;
@@ -320,6 +321,7 @@ pub struct StorageConfig {
     pub journal_db_path: PathBuf,
     pub journal_hash_chain_enabled: bool,
     pub max_journal_payload_bytes: usize,
+    pub max_journal_events: usize,
     pub vault_dir: PathBuf,
 }
 
@@ -350,6 +352,7 @@ impl Default for StorageConfig {
             journal_db_path: PathBuf::from(DEFAULT_JOURNAL_DB_PATH),
             journal_hash_chain_enabled: DEFAULT_JOURNAL_HASH_CHAIN_ENABLED,
             max_journal_payload_bytes: DEFAULT_MAX_JOURNAL_PAYLOAD_BYTES,
+            max_journal_events: DEFAULT_MAX_JOURNAL_EVENTS,
             vault_dir: default_vault_dir(),
         }
     }

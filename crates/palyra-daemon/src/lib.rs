@@ -1086,6 +1086,7 @@ pub async fn run() -> Result<()> {
             db_path: loaded.storage.journal_db_path.clone(),
             hash_chain_enabled: loaded.storage.journal_hash_chain_enabled,
             max_payload_bytes: loaded.storage.max_journal_payload_bytes,
+            max_events: loaded.storage.max_journal_events,
         },
         memory_embedding_provider,
     )
@@ -1411,6 +1412,7 @@ pub async fn run() -> Result<()> {
         journal_db_path = %loaded.storage.journal_db_path.display(),
         journal_hash_chain_enabled = loaded.storage.journal_hash_chain_enabled,
         journal_max_payload_bytes = loaded.storage.max_journal_payload_bytes,
+        journal_max_events = loaded.storage.max_journal_events,
         storage_vault_dir = %loaded.storage.vault_dir.display(),
         identity_store_root = %identity_runtime.store_root.display(),
         revoked_certificate_count = identity_runtime.revoked_certificate_count,

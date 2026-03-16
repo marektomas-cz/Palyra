@@ -749,6 +749,10 @@ pub fn load_config() -> Result<LoadedConfig> {
                     "storage.max_journal_payload_bytes",
                 )?;
             }
+            if let Some(max_journal_events) = file_storage.max_journal_events {
+                storage.max_journal_events =
+                    parse_positive_usize(max_journal_events, "storage.max_journal_events")?;
+            }
             if let Some(vault_dir) = file_storage.vault_dir {
                 storage.vault_dir = parse_vault_dir(&vault_dir)?;
             }
@@ -1450,6 +1454,16 @@ pub fn load_config() -> Result<LoadedConfig> {
             "PALYRA_JOURNAL_MAX_PAYLOAD_BYTES",
         )?;
         source.push_str(" +env(PALYRA_JOURNAL_MAX_PAYLOAD_BYTES)");
+    }
+
+    if let Ok(max_journal_events) = env::var("PALYRA_JOURNAL_MAX_EVENTS") {
+        storage.max_journal_events = parse_positive_usize(
+            max_journal_events
+                .parse::<u64>()
+                .context("PALYRA_JOURNAL_MAX_EVENTS must be a valid u64")?,
+            "PALYRA_JOURNAL_MAX_EVENTS",
+        )?;
+        source.push_str(" +env(PALYRA_JOURNAL_MAX_EVENTS)");
     }
 
     if let Ok(vault_dir) = env::var("PALYRA_VAULT_DIR") {
@@ -2756,6 +2770,10 @@ mod tests {
             config.max_journal_payload_bytes,
             256 * 1024,
             "journal payload limit should default to 256 KiB"
+        );
+        assert_eq!(
+            config.max_journal_events, 10_000,
+            "journal event capacity should default to a bounded fail-closed limit"
         );
         assert!(
             config.vault_dir.ends_with("vault"),

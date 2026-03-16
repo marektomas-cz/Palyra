@@ -161,6 +161,7 @@ fn build_test_runtime_state_with_http_fetch_private_targets(
         db_path: db_path.clone(),
         hash_chain_enabled,
         max_payload_bytes: 256 * 1024,
+        max_events: 10_000,
     })
     .expect("journal store should initialize");
     GatewayRuntimeState::new(

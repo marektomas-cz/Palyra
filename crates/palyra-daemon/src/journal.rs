@@ -900,6 +900,7 @@ pub struct JournalConfig {
     pub db_path: PathBuf,
     pub hash_chain_enabled: bool,
     pub max_payload_bytes: usize,
+    pub max_events: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1115,6 +1116,10 @@ pub enum JournalError {
     PayloadTooLarge { payload_kind: &'static str, actual_bytes: usize, max_bytes: usize },
     #[error("journal max payload bytes must be greater than 0")]
     InvalidPayloadLimit,
+    #[error("journal max events must be greater than 0")]
+    InvalidEventLimit,
+    #[error("journal capacity reached ({current_events} >= {max_events})")]
+    JournalCapacityExceeded { current_events: usize, max_events: usize },
     #[error("memory embedding vector dimensions must be greater than 0")]
     InvalidMemoryVectorDimensions,
     #[error("journal sqlite operation failed: {0}")]
@@ -1552,6 +1557,12 @@ impl JournalStore {
             return Err(JournalError::InvalidMemoryVectorDimensions);
         }
         validate_db_path(&config.db_path)?;
+        if config.max_payload_bytes == 0 {
+            return Err(JournalError::InvalidPayloadLimit);
+        }
+        if config.max_events == 0 {
+            return Err(JournalError::InvalidEventLimit);
+        }
         if let Some(parent) = config.db_path.parent() {
             if !parent.as_os_str().is_empty() {
                 let parent_existed = parent.exists();
@@ -1596,6 +1607,15 @@ impl JournalStore {
 
         let mut guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         let transaction = guard.transaction()?;
+        let current_events: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM journal_events", [], |row| row.get(0))?;
+        let current_events = current_events.max(0) as usize;
+        if current_events >= self.config.max_events {
+            return Err(JournalError::JournalCapacityExceeded {
+                current_events,
+                max_events: self.config.max_events,
+            });
+        }
 
         let prev_hash = if self.config.hash_chain_enabled {
             transaction
@@ -3719,33 +3739,35 @@ impl JournalStore {
         let target_version = CURRENT_MEMORY_EMBEDDING_VERSION;
         let effective_batch = batch_size.clamp(1, MAX_MEMORY_SEARCH_CANDIDATES);
 
-        let mut guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
-        let pending_before = query_pending_memory_embeddings_count(
-            &guard,
-            target_model_id.as_str(),
-            target_dims,
-            target_version,
-        )?;
-        if pending_before == 0 {
-            return Ok(MemoryEmbeddingsBackfillOutcome {
-                ran_at_unix_ms,
-                batch_size: effective_batch,
-                scanned_count: 0,
-                updated_count: 0,
-                pending_count: 0,
-                target_model_id,
+        let pending_batch = {
+            let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+            let pending_before = query_pending_memory_embeddings_count(
+                &guard,
+                target_model_id.as_str(),
                 target_dims,
                 target_version,
-            });
-        }
+            )?;
+            if pending_before == 0 {
+                return Ok(MemoryEmbeddingsBackfillOutcome {
+                    ran_at_unix_ms,
+                    batch_size: effective_batch,
+                    scanned_count: 0,
+                    updated_count: 0,
+                    pending_count: 0,
+                    target_model_id,
+                    target_dims,
+                    target_version,
+                });
+            }
 
-        let pending_batch = load_pending_memory_embeddings_batch(
-            &guard,
-            target_model_id.as_str(),
-            target_dims,
-            target_version,
-            effective_batch,
-        )?;
+            load_pending_memory_embeddings_batch(
+                &guard,
+                target_model_id.as_str(),
+                target_dims,
+                target_version,
+                effective_batch,
+            )?
+        };
         if pending_batch.is_empty() {
             return Ok(MemoryEmbeddingsBackfillOutcome {
                 ran_at_unix_ms,
@@ -3768,6 +3790,7 @@ impl JournalStore {
             updates.push((memory_id.clone(), encode_vector_blob(vector.as_slice())));
         }
 
+        let mut guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         let transaction = guard.transaction()?;
         for (memory_id, vector_blob) in &updates {
             transaction.execute(
@@ -5461,8 +5484,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::{
         path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
-        sync::Arc,
+        sync::atomic::{AtomicBool, AtomicU64, Ordering},
+        sync::{mpsc, Arc, Mutex},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -5506,6 +5529,43 @@ mod tests {
         }
 
         fn embed_text(&self, _text: &str) -> Vec<f32> {
+            self.vector.clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingMemoryEmbeddingProvider {
+        model_name: &'static str,
+        dimensions: usize,
+        vector: Vec<f32>,
+        block_on_embed: AtomicBool,
+        started_tx: Mutex<Option<mpsc::Sender<()>>>,
+        release_rx: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl MemoryEmbeddingProvider for BlockingMemoryEmbeddingProvider {
+        fn model_name(&self) -> &'static str {
+            self.model_name
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn embed_text(&self, _text: &str) -> Vec<f32> {
+            if !self.block_on_embed.load(Ordering::SeqCst) {
+                return self.vector.clone();
+            }
+            if let Some(sender) =
+                self.started_tx.lock().expect("started sender lock should not be poisoned").take()
+            {
+                sender.send(()).expect("test should observe blocked embed");
+            }
+            self.release_rx
+                .lock()
+                .expect("release receiver lock should not be poisoned")
+                .recv()
+                .expect("test should release blocked embed");
             self.vector.clone()
         }
     }
@@ -5671,7 +5731,12 @@ mod tests {
     }
 
     fn test_journal_config(db_path: PathBuf, hash_chain_enabled: bool) -> JournalConfig {
-        JournalConfig { db_path, hash_chain_enabled, max_payload_bytes: 256 * 1024 }
+        JournalConfig {
+            db_path,
+            hash_chain_enabled,
+            max_payload_bytes: 256 * 1024,
+            max_events: 10_000,
+        }
     }
 
     #[test]
@@ -5847,6 +5912,7 @@ mod tests {
             db_path,
             hash_chain_enabled: false,
             max_payload_bytes: 32,
+            max_events: 10_000,
         })
         .expect("journal store should open");
 
@@ -5864,6 +5930,33 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn append_rejects_when_journal_capacity_reached() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(JournalConfig {
+            db_path,
+            hash_chain_enabled: false,
+            max_payload_bytes: 256 * 1024,
+            max_events: 2,
+        })
+        .expect("journal store should open");
+
+        store
+            .append(&build_request("01ARZ3NDEKTSV4RRFFQ69G5FD8", br#"{"index":0}"#))
+            .expect("first append should succeed");
+        store
+            .append(&build_request("01ARZ3NDEKTSV4RRFFQ69G5FD9", br#"{"index":1}"#))
+            .expect("second append should succeed");
+
+        let error = store
+            .append(&build_request("01ARZ3NDEKTSV4RRFFQ69G5FDA", br#"{"index":2}"#))
+            .expect_err("append should fail after configured journal capacity is reached");
+        assert!(matches!(
+            error,
+            JournalError::JournalCapacityExceeded { current_events: 2, max_events: 2 }
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn journal_store_open_sets_owner_only_permissions_for_new_storage() {
@@ -5873,6 +5966,7 @@ mod tests {
             db_path: db_path.clone(),
             hash_chain_enabled: false,
             max_payload_bytes: 4 * 1024,
+            max_events: 10_000,
         })
         .expect("journal store should open");
         drop(store);
@@ -6098,6 +6192,7 @@ mod tests {
             db_path,
             hash_chain_enabled: false,
             max_payload_bytes: 24,
+            max_events: 10_000,
         })
         .expect("journal store should open");
         upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5FAW");
@@ -6788,6 +6883,7 @@ mod tests {
             db_path,
             hash_chain_enabled: false,
             max_payload_bytes: 96,
+            max_events: 10_000,
         })
         .expect("journal store should open");
         let oversized = format!("\"{}\"", "a".repeat(256));
@@ -7934,6 +8030,65 @@ mod tests {
             .expect("vector row count query should succeed");
         drop(guard);
         assert_eq!(recreated, 1, "backfill should recreate missing vector row");
+    }
+
+    #[test]
+    fn memory_embeddings_backfill_releases_db_lock_before_embedding_calls() {
+        let db_path = temp_db_path();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let provider = Arc::new(BlockingMemoryEmbeddingProvider {
+            model_name: "semantic-embed-v3",
+            dimensions: 4,
+            vector: vec![0.4, 0.3, 0.2, 0.1],
+            block_on_embed: AtomicBool::new(false),
+            started_tx: Mutex::new(Some(started_tx)),
+            release_rx: Mutex::new(release_rx),
+        });
+        let store = Arc::new(
+            JournalStore::open_with_memory_embedding_provider(
+                test_journal_config(db_path, false),
+                provider.clone(),
+            )
+            .expect("journal store should open with blocking embedding provider"),
+        );
+        let memory_id = "01ARZ3NDEKTSV4RRFFQ69G5FE4";
+        store
+            .create_memory_item(&sample_memory_request(
+                memory_id,
+                "user:ops",
+                Some("cli"),
+                Some("01ARZ3NDEKTSV4RRFFQ69G5FB4"),
+                MemorySource::Manual,
+                "blocking-vector backfill row",
+            ))
+            .expect("memory item should be created");
+        {
+            let guard = store.connection.lock().expect("connection lock should not be poisoned");
+            guard
+                .execute("DELETE FROM memory_vectors WHERE memory_ulid = ?1", params![memory_id])
+                .expect("fixture should delete vector row");
+        }
+        provider.block_on_embed.store(true, Ordering::SeqCst);
+
+        let backfill_store = Arc::clone(&store);
+        let backfill_thread =
+            std::thread::spawn(move || backfill_store.run_memory_embeddings_backfill(8));
+        started_rx.recv().expect("backfill should reach blocking embed");
+
+        let connection_guard = store
+            .connection
+            .try_lock()
+            .expect("journal connection lock should remain available during embedding work");
+        drop(connection_guard);
+
+        release_tx.send(()).expect("test should unblock embedding work");
+        let outcome = backfill_thread
+            .join()
+            .expect("backfill thread should finish")
+            .expect("backfill should succeed");
+        assert_eq!(outcome.updated_count, 1);
+        assert_eq!(outcome.pending_count, 0);
     }
 
     #[test]

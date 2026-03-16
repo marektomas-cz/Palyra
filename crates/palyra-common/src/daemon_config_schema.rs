@@ -360,6 +360,7 @@ pub struct FileStorageConfig {
     pub journal_db_path: Option<String>,
     pub journal_hash_chain_enabled: Option<bool>,
     pub max_journal_payload_bytes: Option<u64>,
+    pub max_journal_events: Option<u64>,
     pub vault_dir: Option<String>,
 }
 
