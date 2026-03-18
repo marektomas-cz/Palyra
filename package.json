@@ -1,0 +1,46 @@
+{
+  "name": "@palyra/workspace",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@10.9.3",
+  "engines": {
+    "node": ">=22.18.0",
+    "npm": ">=10.9.3 <12"
+  },
+  "workspaces": [
+    "apps/web",
+    "apps/desktop/ui",
+    "apps/browser-extension"
+  ],
+  "scripts": {
+    "verify:js-install": "vp --version",
+    "js:fmt": "vp fmt apps/web apps/desktop/ui apps/browser-extension scripts",
+    "js:clean": "node ./scripts/js-artifacts.mjs clean-all",
+    "js:lint": "vp run lint:web && vp run lint:desktop-ui && vp run lint:browser-extension && vp run lint:tooling",
+    "js:check": "vp check apps/web apps/desktop/ui apps/browser-extension scripts",
+    "web:build": "vp run @palyra/web#build",
+    "web:clean": "vp run @palyra/web#clean",
+    "web:dev": "vp run @palyra/web#dev",
+    "web:lint": "vp run @palyra/web#lint",
+    "web:typecheck": "vp run @palyra/web#typecheck",
+    "web:test": "vp run @palyra/web#test:run",
+    "web:perf-smoke": "vp run @palyra/web#perf:smoke",
+    "web:ci": "vp run web:lint && vp run web:typecheck && vp run web:test && vp run web:build",
+    "desktop-ui:build": "vp run @palyra/desktop-ui#build",
+    "desktop-ui:clean": "vp run @palyra/desktop-ui#clean",
+    "desktop-ui:dev": "vp run @palyra/desktop-ui#dev",
+    "desktop-ui:lint": "vp run @palyra/desktop-ui#lint",
+    "desktop-ui:typecheck": "vp run @palyra/desktop-ui#typecheck",
+    "desktop-ui:ci": "vp run desktop-ui:lint && vp run desktop-ui:typecheck && vp run desktop-ui:build",
+    "browser-extension:lint": "vp run @palyra/browser-extension#lint",
+    "browser-extension:test": "vp run @palyra/browser-extension#test"
+  },
+  "devDependencies": {
+    "@voidzero-dev/vite-plus-core": "0.1.12",
+    "vite-plus": "0.1.12"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.1.12",
+    "vitest": "npm:@voidzero-dev/vite-plus-test@0.1.12"
+  }
+}

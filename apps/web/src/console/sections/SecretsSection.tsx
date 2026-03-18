@@ -1,22 +1,20 @@
 import { useState } from "react";
 
+import { ActionButton, TextInputField } from "../components/ui";
 import {
-  ActionButton,
-  TextInputField
-} from "../components/ui";
-import { WorkspaceMetricCard, WorkspacePageHeader, WorkspaceSectionCard, WorkspaceStatusChip } from "../components/workspace/WorkspaceChrome";
+  WorkspaceMetricCard,
+  WorkspacePageHeader,
+  WorkspaceSectionCard,
+  WorkspaceStatusChip,
+} from "../components/workspace/WorkspaceChrome";
 import {
   WorkspaceConfirmDialog,
   WorkspaceEmptyState,
   WorkspaceInlineNotice,
   WorkspaceRedactedValue,
-  WorkspaceTable
+  WorkspaceTable,
 } from "../components/workspace/WorkspacePatterns";
-import {
-  formatUnixMs,
-  readNumber,
-  readString
-} from "../shared";
+import { formatUnixMs, readNumber, readString } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
 type SecretsSectionProps = {
@@ -57,7 +55,7 @@ export function SecretsSection({ app }: SecretsSectionProps) {
     readString(app.configSecretReveal ?? {}, "value_base64");
   const totalBytes = app.configSecrets.reduce(
     (sum, secret) => sum + (readNumber(secret, "value_bytes") ?? 0),
-    0
+    0,
   );
 
   return (
@@ -68,17 +66,24 @@ export function SecretsSection({ app }: SecretsSectionProps) {
         description="Manage vault-backed secrets with explicit metadata reads, deliberate reveal actions, and destructive deletion kept behind confirmation."
         status={
           <>
-            <WorkspaceStatusChip tone="warning">{app.configSecrets.length} secret metadata rows</WorkspaceStatusChip>
+            <WorkspaceStatusChip tone="warning">
+              {app.configSecrets.length} secret metadata rows
+            </WorkspaceStatusChip>
             <WorkspaceStatusChip tone={app.configSecretReveal === null ? "default" : "danger"}>
               {app.configSecretReveal === null ? "Values masked" : "Reveal loaded"}
             </WorkspaceStatusChip>
           </>
         }
-        actions={(
-          <ActionButton type="button" variant="primary" onPress={() => void app.refreshSecrets()} isDisabled={app.configBusy}>
+        actions={
+          <ActionButton
+            type="button"
+            variant="primary"
+            onPress={() => void app.refreshSecrets()}
+            isDisabled={app.configBusy}
+          >
             {app.configBusy ? "Refreshing..." : "Refresh secrets"}
           </ActionButton>
-        )}
+        }
       />
 
       <section className="workspace-metric-grid workspace-metric-grid--compact">
@@ -106,9 +111,13 @@ export function SecretsSection({ app }: SecretsSectionProps) {
           <WorkspaceSectionCard
             title="Secret inventory"
             description="Pick a secret to inspect metadata or reveal it explicitly in the current session."
-            actions={(
-              <TextInputField label="Scope" value={app.configSecretsScope} onChange={app.setConfigSecretsScope} />
-            )}
+            actions={
+              <TextInputField
+                label="Scope"
+                value={app.configSecretsScope}
+                onChange={app.setConfigSecretsScope}
+              />
+            }
           >
             {app.configSecrets.length === 0 ? (
               <WorkspaceEmptyState
@@ -138,16 +147,26 @@ export function SecretsSection({ app }: SecretsSectionProps) {
                       <td>{readString(secret, "value_bytes") ?? "n/a"}</td>
                       <td>
                         <div className="workspace-table__actions">
-                          <ActionButton type="button" variant="secondary" onPress={() => {
+                          <ActionButton
+                            type="button"
+                            variant="secondary"
+                            onPress={() => {
                               app.setConfigSecretKey(key);
                               void app.loadSecretMetadata();
-                            }} isDisabled={app.configBusy}>
+                            }}
+                            isDisabled={app.configBusy}
+                          >
                             Inspect
                           </ActionButton>
-                          <ActionButton type="button" variant="secondary" onPress={() => {
+                          <ActionButton
+                            type="button"
+                            variant="secondary"
+                            onPress={() => {
                               app.setConfigSecretKey(key);
                               void app.revealSecretValue();
-                            }} isDisabled={app.configBusy}>
+                            }}
+                            isDisabled={app.configBusy}
+                          >
                             Reveal
                           </ActionButton>
                         </div>
@@ -182,13 +201,51 @@ export function SecretsSection({ app }: SecretsSectionProps) {
             description="Metadata reads, writes, reveal, and delete all stay explicit on the selected key."
           >
             <div className="workspace-stack">
-              <TextInputField label="Key" value={app.configSecretKey} onChange={app.setConfigSecretKey} />
-              <TextInputField label="Value" type="password" autoComplete="off" value={app.configSecretValue} onChange={app.setConfigSecretValue} />
+              <TextInputField
+                label="Key"
+                value={app.configSecretKey}
+                onChange={app.setConfigSecretKey}
+              />
+              <TextInputField
+                label="Value"
+                type="password"
+                autoComplete="off"
+                value={app.configSecretValue}
+                onChange={app.setConfigSecretValue}
+              />
               <div className="workspace-inline">
-                <ActionButton type="button" variant="primary" onPress={() => void app.loadSecretMetadata()} isDisabled={app.configBusy}>Load metadata</ActionButton>
-                <ActionButton type="button" variant="primary" onPress={() => void app.setSecretValue()} isDisabled={app.configBusy}>{app.configBusy ? "Working..." : "Store secret"}</ActionButton>
-                <ActionButton type="button" variant="secondary" onPress={() => void app.revealSecretValue()} isDisabled={app.configBusy}>Explicit reveal</ActionButton>
-                <ActionButton type="button" variant="danger" onPress={() => setConfirmingDelete(true)} isDisabled={app.configBusy || app.configSecretKey.trim().length === 0}>Delete secret</ActionButton>
+                <ActionButton
+                  type="button"
+                  variant="primary"
+                  onPress={() => void app.loadSecretMetadata()}
+                  isDisabled={app.configBusy}
+                >
+                  Load metadata
+                </ActionButton>
+                <ActionButton
+                  type="button"
+                  variant="primary"
+                  onPress={() => void app.setSecretValue()}
+                  isDisabled={app.configBusy}
+                >
+                  {app.configBusy ? "Working..." : "Store secret"}
+                </ActionButton>
+                <ActionButton
+                  type="button"
+                  variant="secondary"
+                  onPress={() => void app.revealSecretValue()}
+                  isDisabled={app.configBusy}
+                >
+                  Explicit reveal
+                </ActionButton>
+                <ActionButton
+                  type="button"
+                  variant="danger"
+                  onPress={() => setConfirmingDelete(true)}
+                  isDisabled={app.configBusy || app.configSecretKey.trim().length === 0}
+                >
+                  Delete secret
+                </ActionButton>
               </div>
             </div>
           </WorkspaceSectionCard>
@@ -215,11 +272,15 @@ export function SecretsSection({ app }: SecretsSectionProps) {
                 </div>
                 <div>
                   <dt>Created</dt>
-                  <dd>{formatUnixMs(readNumber(app.configSecretMetadata, "created_at_unix_ms"))}</dd>
+                  <dd>
+                    {formatUnixMs(readNumber(app.configSecretMetadata, "created_at_unix_ms"))}
+                  </dd>
                 </div>
                 <div>
                   <dt>Updated</dt>
-                  <dd>{formatUnixMs(readNumber(app.configSecretMetadata, "updated_at_unix_ms"))}</dd>
+                  <dd>
+                    {formatUnixMs(readNumber(app.configSecretMetadata, "updated_at_unix_ms"))}
+                  </dd>
                 </div>
                 <div>
                   <dt>Value bytes</dt>
@@ -231,8 +292,8 @@ export function SecretsSection({ app }: SecretsSectionProps) {
 
           <WorkspaceInlineNotice title="Why this page is strict" tone="warning">
             <p>
-              Secret values stay redacted by default. Reveal is deliberate, delete requires confirmation,
-              and the page avoids mixing config edits with credential storage.
+              Secret values stay redacted by default. Reveal is deliberate, delete requires
+              confirmation, and the page avoids mixing config edits with credential storage.
             </p>
           </WorkspaceInlineNotice>
         </div>

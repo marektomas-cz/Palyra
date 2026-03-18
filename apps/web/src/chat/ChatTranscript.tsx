@@ -5,7 +5,7 @@ import {
   ApprovalRequestControls,
   PrettyJsonBlock,
   type ApprovalDraft,
-  type TranscriptEntry
+  type TranscriptEntry,
 } from "./chatShared";
 
 type ChatTranscriptProps = {
@@ -29,13 +29,14 @@ export function ChatTranscript({
   revealSensitiveValues,
   updateApprovalDraft,
   decideInlineApproval,
-  openRunDetails
+  openRunDetails,
 }: ChatTranscriptProps) {
   return (
     <>
       {hiddenTranscriptItems > 0 && (
         <p className="chat-muted">
-          Showing latest 120 items. {hiddenTranscriptItems} older items are retained but not rendered.
+          Showing latest 120 items. {hiddenTranscriptItems} older items are retained but not
+          rendered.
         </p>
       )}
 
@@ -62,7 +63,9 @@ export function ChatTranscript({
                   approvalId={entry.approval_id}
                   draft={approvalDrafts[entry.approval_id]}
                   onDraftChange={(next) => updateApprovalDraft(entry.approval_id as string, next)}
-                  onDecision={(approved) => decideInlineApproval(entry.approval_id as string, approved)}
+                  onDecision={(approved) =>
+                    decideInlineApproval(entry.approval_id as string, approved)
+                  }
                 />
               )}
 
@@ -85,9 +88,14 @@ export function ChatTranscript({
                 />
               )}
 
-              {entry.payload !== undefined && entry.kind !== "assistant" && entry.kind !== "user" && (
-                <PrettyJsonBlock value={entry.payload} revealSensitiveValues={revealSensitiveValues} />
-              )}
+              {entry.payload !== undefined &&
+                entry.kind !== "assistant" &&
+                entry.kind !== "user" && (
+                  <PrettyJsonBlock
+                    value={entry.payload}
+                    revealSensitiveValues={revealSensitiveValues}
+                  />
+                )}
 
               {entry.run_id !== undefined && (
                 <div className="chat-entry-actions">

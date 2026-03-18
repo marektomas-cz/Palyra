@@ -1,11 +1,6 @@
 import { Button } from "@heroui/react";
 
-import {
-  ActionButton,
-  ActionCluster,
-  EmptyState,
-  TextInputField
-} from "../console/components/ui";
+import { ActionButton, ActionCluster, EmptyState, TextInputField } from "../console/components/ui";
 import type { ChatSessionRecord } from "../consoleApi";
 
 import { shortId } from "./chatShared";
@@ -37,7 +32,7 @@ export function ChatSessionsSidebar({
   resetSession,
   sortedSessions,
   activeSessionId,
-  setActiveSessionId
+  setActiveSessionId,
 }: ChatSessionsSidebarProps) {
   return (
     <aside className="chat-sessions" aria-label="Chat sessions">

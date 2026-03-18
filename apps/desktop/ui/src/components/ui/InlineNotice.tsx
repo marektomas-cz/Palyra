@@ -9,14 +9,12 @@ type InlineNoticeProps = PropsWithChildren<{
   className?: string;
 }>;
 
-export function InlineNotice({
-  title,
-  tone = "default",
-  className,
-  children
-}: InlineNoticeProps) {
+export function InlineNotice({ title, tone = "default", className, children }: InlineNoticeProps) {
   return (
-    <Alert className={joinClassNames("desktop-inline-notice", className)} status={resolveAlertStatus(tone)}>
+    <Alert
+      className={joinClassNames("desktop-inline-notice", className)}
+      status={resolveAlertStatus(tone)}
+    >
       <Alert.Content>
         {title !== undefined && <Alert.Title>{title}</Alert.Title>}
         <Alert.Description>{children}</Alert.Description>

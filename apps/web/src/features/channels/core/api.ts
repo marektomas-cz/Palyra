@@ -38,18 +38,14 @@ export function getChannelStatus(api: ConsoleApiClient, connectorId: string) {
   return api.getChannelStatus(connectorId);
 }
 
-export function setChannelEnabled(
-  api: ConsoleApiClient,
-  connectorId: string,
-  enabled: boolean
-) {
+export function setChannelEnabled(api: ConsoleApiClient, connectorId: string, enabled: boolean) {
   return api.setChannelEnabled(connectorId, enabled);
 }
 
 export function listChannelLogs(
   api: ConsoleApiClient,
   connectorId: string,
-  params?: URLSearchParams
+  params?: URLSearchParams,
 ) {
   return api.listChannelLogs(connectorId, params);
 }
@@ -57,7 +53,7 @@ export function listChannelLogs(
 export function sendChannelTestMessage(
   api: ConsoleApiClient,
   connectorId: string,
-  payload: ChannelTestMessagePayload
+  payload: ChannelTestMessagePayload,
 ) {
   return api.sendChannelTestMessage(connectorId, payload);
 }
@@ -70,23 +66,17 @@ export function getChannelRouterWarnings(api: ConsoleApiClient) {
   return api.getChannelRouterWarnings();
 }
 
-export function previewChannelRoute(
-  api: ConsoleApiClient,
-  payload: ChannelRoutePreviewPayload
-) {
+export function previewChannelRoute(api: ConsoleApiClient, payload: ChannelRoutePreviewPayload) {
   return api.previewChannelRoute(payload);
 }
 
-export function listChannelRouterPairings(
-  api: ConsoleApiClient,
-  params?: URLSearchParams
-) {
+export function listChannelRouterPairings(api: ConsoleApiClient, params?: URLSearchParams) {
   return api.listChannelRouterPairings(params);
 }
 
 export function mintChannelRouterPairingCode(
   api: ConsoleApiClient,
-  payload: ChannelRouterPairingCodePayload
+  payload: ChannelRouterPairingCodePayload,
 ) {
   return api.mintChannelRouterPairingCode(payload);
 }
@@ -106,7 +96,7 @@ export function drainChannelQueue(api: ConsoleApiClient, connectorId: string) {
 export function replayChannelDeadLetter(
   api: ConsoleApiClient,
   connectorId: string,
-  deadLetterId: number
+  deadLetterId: number,
 ) {
   return api.replayChannelDeadLetter(connectorId, deadLetterId);
 }
@@ -114,7 +104,7 @@ export function replayChannelDeadLetter(
 export function discardChannelDeadLetter(
   api: ConsoleApiClient,
   connectorId: string,
-  deadLetterId: number
+  deadLetterId: number,
 ) {
   return api.discardChannelDeadLetter(connectorId, deadLetterId);
 }

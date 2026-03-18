@@ -9,7 +9,7 @@ import {
   PageHeader,
   SectionCard,
   StatusChip,
-  SwitchField
+  SwitchField,
 } from "../console/components/ui";
 
 import { ChatComposer } from "./ChatComposer";
@@ -31,12 +31,12 @@ export function ChatConsolePanel({
   api,
   revealSensitiveValues,
   setError,
-  setNotice
+  setNotice,
 }: ChatConsolePanelProps) {
   const sessions = useChatSessions({
     api,
     setError,
-    setNotice
+    setNotice,
   });
 
   const {
@@ -66,21 +66,21 @@ export function ChatConsolePanel({
     setRunDrawerId,
     updateApprovalDraftValue,
     decideInlineApproval,
-    dispose
+    dispose,
   } = useChatRunStream({
     api,
     activeSessionId: sessions.activeSessionId,
     sessionLabelDraft: sessions.sessionLabelDraft,
     setError,
-    setNotice
+    setNotice,
   });
 
   const pendingApprovalCount = useMemo(
     () =>
       visibleTranscript.filter(
-        (entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string"
+        (entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string",
       ).length,
-    [visibleTranscript]
+    [visibleTranscript],
   );
   const a2uiSurfaces = useMemo(() => Object.keys(a2uiDocuments), [a2uiDocuments]);
   const inspectorVisible = runDrawerOpen || runIds.length > 0;
@@ -107,7 +107,9 @@ export function ChatConsolePanel({
         eyebrow="Chat"
         title={
           sessions.selectedSession?.session_label?.trim() ||
-          (sessions.selectedSession ? shortId(sessions.selectedSession.session_id) : "Operator workspace")
+          (sessions.selectedSession
+            ? shortId(sessions.selectedSession.session_id)
+            : "Operator workspace")
         }
         description="Sessions, transcript, approvals, and run inspection stay on one operator surface without duplicate hero headers or consumer chat chrome."
         status={
@@ -256,7 +258,9 @@ export function ChatConsolePanel({
               <Chip variant="secondary">
                 {a2uiSurfaces.length} A2UI surface{a2uiSurfaces.length === 1 ? "" : "s"}
               </Chip>
-              <Chip variant="secondary">{runIds.length} known run{runIds.length === 1 ? "" : "s"}</Chip>
+              <Chip variant="secondary">
+                {runIds.length} known run{runIds.length === 1 ? "" : "s"}
+              </Chip>
             </div>
             <KeyValueList
               items={[
@@ -264,15 +268,17 @@ export function ChatConsolePanel({
                   label: "Session",
                   value:
                     sessions.selectedSession?.session_label?.trim() ||
-                    (sessions.selectedSession ? shortId(sessions.selectedSession.session_id) : "none")
+                    (sessions.selectedSession
+                      ? shortId(sessions.selectedSession.session_id)
+                      : "none"),
                 },
                 {
                   label: "Updated",
                   value: sessions.selectedSession
                     ? new Date(sessions.selectedSession.updated_at_unix_ms).toLocaleString()
-                    : "n/a"
+                    : "n/a",
                 },
-                { label: "Visible transcript", value: visibleTranscript.length }
+                { label: "Visible transcript", value: visibleTranscript.length },
               ]}
             />
             {a2uiSurfaces.length === 0 ? (

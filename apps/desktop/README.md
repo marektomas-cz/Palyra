@@ -56,6 +56,7 @@
 1. Build runtime binaries:
 
 ```bash
+vp install
 ./scripts/test/ensure-desktop-ui.sh
 cargo build --workspace --locked
 ```
@@ -95,7 +96,7 @@ isolated `PALYRA_STATE_ROOT`.
 For UI-only iteration without launching the desktop runtime, use:
 
 ```bash
-npm --prefix apps/desktop/ui run dev
+vp run desktop-ui:dev
 ```
 
 ## File layout

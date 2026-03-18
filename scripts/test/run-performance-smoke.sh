@@ -34,11 +34,7 @@ cd "$ROOT_DIR"
 
 CARGO_BIN="$(resolve_cargo)"
 
-if [[ ! -d "$ROOT_DIR/apps/web/node_modules" ]]; then
-  npm --prefix apps/web run bootstrap
-else
-  npm --prefix apps/web run verify-install
-fi
+bash "$ROOT_DIR/scripts/test/ensure-js-workspace.sh"
 
 bash "$ROOT_DIR/scripts/test/ensure-desktop-ui.sh"
 
@@ -47,4 +43,4 @@ bash "$ROOT_DIR/scripts/test/ensure-desktop-ui.sh"
 "$CARGO_BIN" test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked desktop_refresh_payload_reuses_single_snapshot_build_for_home_and_onboarding_views
 "$CARGO_BIN" test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked support_bundle_export_plan_capture_does_not_hold_supervisor_lock
 
-npm --prefix apps/web run perf:smoke
+npm run web:perf-smoke

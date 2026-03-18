@@ -21,7 +21,7 @@ export function ConfirmActionDialog({
   confirmLabel,
   confirmTone = "danger",
   isBusy = false,
-  onConfirm
+  onConfirm,
 }: ConfirmActionDialogProps) {
   return (
     <AlertDialog isOpen={isOpen} onOpenChange={onOpenChange}>
@@ -36,11 +36,7 @@ export function ConfirmActionDialog({
           </AlertDialog.Header>
           <AlertDialog.Body>{description}</AlertDialog.Body>
           <AlertDialog.Footer>
-            <Button
-              isDisabled={isBusy}
-              variant="secondary"
-              onPress={() => onOpenChange(false)}
-            >
+            <Button isDisabled={isBusy} variant="secondary" onPress={() => onOpenChange(false)}>
               Cancel
             </Button>
             <Button

@@ -12,13 +12,7 @@ type MetricCardProps = {
   className?: string;
 };
 
-export function MetricCard({
-  label,
-  value,
-  detail,
-  tone = "default",
-  className
-}: MetricCardProps) {
+export function MetricCard({ label, value, detail, tone = "default", className }: MetricCardProps) {
   return (
     <SectionCard
       title={label}

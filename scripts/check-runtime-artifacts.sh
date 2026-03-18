@@ -6,10 +6,13 @@ cd "${repo_root}"
 
 prune_dirs=(
   "./.git"
+  "./node_modules"
   "./target"
-  "./apps/web/node_modules"
   "./apps/web/dist"
   "./apps/web/coverage"
+  "./apps/web/.vite"
+  "./apps/desktop/ui/dist"
+  "./apps/desktop/ui/.vite"
   "./security-artifacts"
 )
 
@@ -20,10 +23,13 @@ mapfile -t candidates < <(
   find . \
     \( \
       -path "./.git" \
+      -o -path "./node_modules" \
       -o -path "./target" \
-      -o -path "./apps/web/node_modules" \
       -o -path "./apps/web/dist" \
       -o -path "./apps/web/coverage" \
+      -o -path "./apps/web/.vite" \
+      -o -path "./apps/desktop/ui/dist" \
+      -o -path "./apps/desktop/ui/.vite" \
       -o -path "./security-artifacts" \
     \) -prune -o \
     -type f \

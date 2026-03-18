@@ -8,21 +8,14 @@ const DEFAULT_DISCORD_ACCOUNT_ID = "default";
 const DEFAULT_DISCORD_CONCURRENCY = "2";
 
 export function useDiscordChannelState() {
-  const [channelsDiscordTarget, setChannelsDiscordTarget] =
-    useState(DEFAULT_DISCORD_TARGET);
-  const [channelsDiscordText, setChannelsDiscordText] = useState(
-    DEFAULT_DISCORD_TEST_TEXT
-  );
+  const [channelsDiscordTarget, setChannelsDiscordTarget] = useState(DEFAULT_DISCORD_TARGET);
+  const [channelsDiscordText, setChannelsDiscordText] = useState(DEFAULT_DISCORD_TEST_TEXT);
   const [channelsDiscordAutoReaction, setChannelsDiscordAutoReaction] = useState("");
   const [channelsDiscordThreadId, setChannelsDiscordThreadId] = useState("");
   const [channelsDiscordConfirm, setChannelsDiscordConfirm] = useState(false);
   const [discordWizardBusy, setDiscordWizardBusy] = useState(false);
-  const [discordWizardAccountId, setDiscordWizardAccountId] = useState(
-    DEFAULT_DISCORD_ACCOUNT_ID
-  );
-  const [discordWizardMode, setDiscordWizardMode] = useState<"local" | "remote_vps">(
-    "local"
-  );
+  const [discordWizardAccountId, setDiscordWizardAccountId] = useState(DEFAULT_DISCORD_ACCOUNT_ID);
+  const [discordWizardMode, setDiscordWizardMode] = useState<"local" | "remote_vps">("local");
   const [discordWizardToken, setDiscordWizardToken] = useState("");
   const [discordWizardScope, setDiscordWizardScope] = useState<
     "dm_only" | "allowlisted_guild_channels" | "open_guild_channels"
@@ -34,18 +27,15 @@ export function useDiscordChannelState() {
     "deny" | "mention_only" | "allow"
   >("deny");
   const [discordWizardConcurrency, setDiscordWizardConcurrency] = useState(
-    DEFAULT_DISCORD_CONCURRENCY
+    DEFAULT_DISCORD_CONCURRENCY,
   );
   const [discordWizardConfirmOpen, setDiscordWizardConfirmOpen] = useState(false);
   const [discordWizardVerifyChannelId, setDiscordWizardVerifyChannelId] = useState("");
-  const [discordWizardPreflight, setDiscordWizardPreflight] =
-    useState<JsonObject | null>(null);
+  const [discordWizardPreflight, setDiscordWizardPreflight] = useState<JsonObject | null>(null);
   const [discordWizardApply, setDiscordWizardApply] = useState<JsonObject | null>(null);
   const [discordWizardVerifyTarget, setDiscordWizardVerifyTarget] =
     useState(DEFAULT_DISCORD_TARGET);
-  const [discordWizardVerifyText, setDiscordWizardVerifyText] = useState(
-    DEFAULT_DISCORD_TEST_TEXT
-  );
+  const [discordWizardVerifyText, setDiscordWizardVerifyText] = useState(DEFAULT_DISCORD_TEST_TEXT);
   const [discordWizardVerifyConfirm, setDiscordWizardVerifyConfirm] = useState(false);
 
   function resetDiscordChannelState(): void {

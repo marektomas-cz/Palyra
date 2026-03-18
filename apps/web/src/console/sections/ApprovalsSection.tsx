@@ -1,10 +1,12 @@
 import { Button } from "@heroui/react";
 
+import { SelectField, TextInputField } from "../components/ui";
 import {
-  SelectField,
-  TextInputField
-} from "../components/ui";
-import { WorkspaceMetricCard, WorkspacePageHeader, WorkspaceSectionCard, WorkspaceStatusChip } from "../components/workspace/WorkspaceChrome";
+  WorkspaceMetricCard,
+  WorkspacePageHeader,
+  WorkspaceSectionCard,
+  WorkspaceStatusChip,
+} from "../components/workspace/WorkspaceChrome";
 import { PrettyJsonBlock, formatUnixMs, readObject, readString, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
@@ -26,7 +28,9 @@ type ApprovalsSectionProps = {
 };
 
 export function ApprovalsSection({ app }: ApprovalsSectionProps) {
-  const pendingApprovals = app.approvals.filter((approval) => readString(approval, "decision") === null);
+  const pendingApprovals = app.approvals.filter(
+    (approval) => readString(approval, "decision") === null,
+  );
   const selectedApproval =
     app.approvals.find((approval) => readString(approval, "approval_id") === app.approvalId) ??
     app.approvals[0] ??
@@ -66,7 +70,11 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
         <WorkspaceMetricCard
           label="Review queue"
           value={pendingApprovals.length}
-          detail={pendingApprovals[0] === undefined ? "No pending approvals" : readString(pendingApprovals[0], "request_summary") ?? "Approval queued"}
+          detail={
+            pendingApprovals[0] === undefined
+              ? "No pending approvals"
+              : (readString(pendingApprovals[0], "request_summary") ?? "Approval queued")
+          }
           tone={pendingApprovals.length > 0 ? "warning" : "success"}
         />
         <WorkspaceMetricCard
@@ -77,7 +85,11 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
         <WorkspaceMetricCard
           label="Selected"
           value={selectedApprovalId.length > 0 ? selectedApprovalId : "None"}
-          detail={selectedApproval === null ? "Choose an item from the queue." : readString(selectedApproval, "subject_type") ?? "Unknown subject"}
+          detail={
+            selectedApproval === null
+              ? "Choose an item from the queue."
+              : (readString(selectedApproval, "subject_type") ?? "Unknown subject")
+          }
         />
       </section>
 
@@ -124,7 +136,9 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
           description="Keep the selected request, context, and decision controls on one surface."
         >
           {selectedApproval === null ? (
-            <p className="chat-muted">Select an approval to inspect request context and decide it.</p>
+            <p className="chat-muted">
+              Select an approval to inspect request context and decide it.
+            </p>
           ) : (
             <div className="workspace-stack">
               <div className="workspace-callout">
@@ -190,9 +204,28 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
               )}
 
               <div className="workspace-form-grid">
-                <TextInputField label="Approval ID" value={selectedApprovalId} readOnly onChange={() => {}} />
-                <TextInputField label="Reason" value={app.approvalReason} onChange={app.setApprovalReason} placeholder="Optional operator note" />
-                <SelectField label="Decision scope" value={app.approvalScope} onChange={app.setApprovalScope} options={[{ key: "once", label: "once" }, { key: "session", label: "session" }, { key: "timeboxed", label: "timeboxed" }]} />
+                <TextInputField
+                  label="Approval ID"
+                  value={selectedApprovalId}
+                  readOnly
+                  onChange={() => {}}
+                />
+                <TextInputField
+                  label="Reason"
+                  value={app.approvalReason}
+                  onChange={app.setApprovalReason}
+                  placeholder="Optional operator note"
+                />
+                <SelectField
+                  label="Decision scope"
+                  value={app.approvalScope}
+                  onChange={app.setApprovalScope}
+                  options={[
+                    { key: "once", label: "once" },
+                    { key: "session", label: "session" },
+                    { key: "timeboxed", label: "timeboxed" },
+                  ]}
+                />
               </div>
 
               <div className="console-inline-actions">

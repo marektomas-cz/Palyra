@@ -22,7 +22,7 @@ export const DEFAULT_LOGIN_FORM: LoginForm = {
   adminToken: "",
   principal: "admin:local-browser",
   deviceId: "local-browser",
-  channel: ""
+  channel: "",
 };
 
 export const DEFAULT_CRON_FORM: CronForm = {
@@ -33,5 +33,5 @@ export const DEFAULT_CRON_FORM: CronForm = {
   everyIntervalMs: "60000",
   atTimestampRfc3339: "",
   enabled: true,
-  channel: ""
+  channel: "",
 };

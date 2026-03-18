@@ -11,18 +11,13 @@ type EmptyStateProps = {
   compact?: boolean;
 };
 
-export function EmptyState({
-  title,
-  description,
-  action,
-  compact = false
-}: EmptyStateProps) {
+export function EmptyState({ title, description, action, compact = false }: EmptyStateProps) {
   return (
     <SectionCard
       title={title}
       className={joinClassNames(
         "workspace-empty-state",
-        compact && "workspace-empty-state--compact"
+        compact && "workspace-empty-state--compact",
       )}
       description={description}
       variant="transparent"

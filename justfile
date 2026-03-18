@@ -17,7 +17,7 @@ dev:
     just doctor
     just desktop-ui-ready
     cargo build --workspace --locked
-    @echo "Bootstrap complete. Run 'just web-bootstrap' for the apps/web clean-room bootstrap."
+    @echo "Bootstrap complete. Run 'vp install' to materialize the root JS workspace."
     @echo "Run 'just test' to verify workspace tests."
 
 lint:
@@ -28,16 +28,18 @@ lint-clients:
     bash apps/web/scripts/lint.sh
 
 web-bootstrap:
-    npm --prefix apps/web run bootstrap
+    vp install
 
 web-clean:
-    npm --prefix apps/web run clean
+    npm run web:clean
 
 web-check:
-    npm --prefix apps/web run ci:check
+    npm run web:ci
 
 web-cleanroom:
-    npm --prefix apps/web run cleanroom:check
+    rm -rf node_modules
+    vp install
+    npm run web:ci
 
 desktop-ui-ready:
     bash scripts/test/ensure-desktop-ui.sh

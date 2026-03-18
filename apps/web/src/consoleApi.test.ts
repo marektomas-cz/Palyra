@@ -1,10 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   ConsoleApiClient,
   ControlPlaneApiError,
   type ChatStreamLine,
-  type JsonValue
+  type JsonValue,
 } from "./consoleApi";
 
 afterEach(() => {
@@ -17,7 +17,7 @@ describe("ConsoleApiClient", () => {
     const fetcher = vi.fn(function (
       this: unknown,
       input: RequestInfo | URL,
-      init?: RequestInit
+      init?: RequestInit,
     ): Promise<Response> {
       expect(this).toBe(globalThis);
       calls.push({ input, init });
@@ -27,8 +27,8 @@ describe("ConsoleApiClient", () => {
           device_id: "device-1",
           csrf_token: "csrf-1",
           issued_at_unix_ms: 100,
-          expires_at_unix_ms: 200
-        })
+          expires_at_unix_ms: 200,
+        }),
       );
     }) as typeof fetch;
     vi.stubGlobal("fetch", fetcher);
@@ -49,10 +49,10 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({ jobs: [] }),
-      jsonResponse({ job: { job_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } })
+      jsonResponse({ job: { job_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -68,7 +68,7 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
 
     await client.listCronJobs();
@@ -76,7 +76,7 @@ describe("ConsoleApiClient", () => {
       name: "nightly",
       prompt: "run nightly",
       schedule_type: "every",
-      every_interval_ms: 60000
+      every_interval_ms: 60000,
     });
 
     expect(requestUrl(calls[1]?.input)).toBe("/console/v1/cron/jobs");
@@ -100,8 +100,8 @@ describe("ConsoleApiClient", () => {
         name: "nightly",
         prompt: "run nightly",
         schedule_type: "every",
-        every_interval_ms: 60000
-      })
+        every_interval_ms: 60000,
+      }),
     ).rejects.toThrow("Missing CSRF token");
   });
 
@@ -113,7 +113,7 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({
         connectors: [
@@ -122,9 +122,9 @@ describe("ConsoleApiClient", () => {
             kind: "echo",
             enabled: true,
             readiness: "ready",
-            liveness: "running"
-          }
-        ]
+            liveness: "running",
+          },
+        ],
       }),
       jsonResponse({
         connector: {
@@ -132,18 +132,18 @@ describe("ConsoleApiClient", () => {
           kind: "echo",
           enabled: false,
           readiness: "ready",
-          liveness: "stopped"
-        }
+          liveness: "stopped",
+        },
       }),
       jsonResponse({
         connector_id: "discord:default",
         bot: {
           id: "123",
-          username: "bot"
+          username: "bot",
         },
         warnings: [],
-        policy_warnings: []
-      })
+        policy_warnings: [],
+      }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -159,12 +159,12 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
     await client.listChannels();
     await client.setChannelEnabled("echo:default", false);
     await client.probeDiscordOnboarding({
-      token: "bot-token"
+      token: "bot-token",
     });
 
     expect(requestUrl(calls[1]?.input)).toBe("/console/v1/channels");
@@ -192,10 +192,10 @@ describe("ConsoleApiClient", () => {
             category: "policy",
             retryable: false,
             redacted: false,
-            validation_errors: []
+            validation_errors: [],
           },
-          403
-        )
+          403,
+        ),
       );
     };
     const client = new ConsoleApiClient("", fetcher);
@@ -225,23 +225,26 @@ describe("ConsoleApiClient", () => {
               error.name = "AbortError";
               reject(error);
             },
-            { once: true }
+            { once: true },
           );
         });
       };
       const client = new ConsoleApiClient("", fetcher);
       const internalClient = client as unknown as {
-        request<T>(path: string, init?: RequestInit, options?: { csrf?: boolean; timeoutMs?: number }): Promise<T>;
+        request<T>(
+          path: string,
+          init?: RequestInit,
+          options?: { csrf?: boolean; timeoutMs?: number },
+        ): Promise<T>;
       };
 
-      const pending = internalClient.request<JsonValue>(
-        "/console/v1/diagnostics",
-        undefined,
-        { timeoutMs: 50, csrf: false }
-      );
+      const pending = internalClient.request<JsonValue>("/console/v1/diagnostics", undefined, {
+        timeoutMs: 50,
+        csrf: false,
+      });
       const settled = pending.then(
         () => ({ ok: true as const }),
-        (error: unknown) => ({ ok: false as const, error })
+        (error: unknown) => ({ ok: false as const, error }),
       );
       await vi.advanceTimersByTimeAsync(50);
 
@@ -270,19 +273,23 @@ describe("ConsoleApiClient", () => {
             error.name = "AbortError";
             reject(error);
           },
-          { once: true }
+          { once: true },
         );
       });
     };
     const client = new ConsoleApiClient("", fetcher);
     const internalClient = client as unknown as {
-      request<T>(path: string, init?: RequestInit, options?: { csrf?: boolean; timeoutMs?: number }): Promise<T>;
+      request<T>(
+        path: string,
+        init?: RequestInit,
+        options?: { csrf?: boolean; timeoutMs?: number },
+      ): Promise<T>;
     };
     const controller = new AbortController();
     const pending = internalClient.request<JsonValue>(
       "/console/v1/diagnostics",
       { signal: controller.signal },
-      { timeoutMs: 1_000, csrf: false }
+      { timeoutMs: 1_000, csrf: false },
     );
 
     controller.abort();
@@ -303,10 +310,10 @@ describe("ConsoleApiClient", () => {
             selection: {
               selector: "body",
               selected_text: "ok",
-              truncated: false
-            }
-          }
-        })
+              truncated: false,
+            },
+          },
+        }),
       );
     };
     const client = new ConsoleApiClient("", fetcher);
@@ -318,10 +325,10 @@ describe("ConsoleApiClient", () => {
         action: "capture_selection",
         capture_selection: {
           selector: "body",
-          max_selection_bytes: 128
-        }
+          max_selection_bytes: 128,
+        },
       },
-      "relay-token-1"
+      "relay-token-1",
     );
 
     expect(requestUrl(calls[0]?.input)).toBe("/console/v1/browser/relay/actions");
@@ -329,7 +336,7 @@ describe("ConsoleApiClient", () => {
     expect(headers.get("authorization")).toBe("Bearer relay-token-1");
     expect(headers.get("x-palyra-csrf-token")).toBeNull();
     const relayBodyText = (calls[0]?.init?.body as string | undefined) ?? "{}";
-    expect(relayBodyText).not.toContain("\"relay_token\"");
+    expect(relayBodyText).not.toContain('"relay_token"');
   });
 
   it("loads diagnostics snapshot without requiring CSRF header", async () => {
@@ -340,15 +347,15 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({
         generated_at_unix_ms: 123,
         model_provider: { kind: "openai-compatible" },
         rate_limits: { admin_api_max_requests_per_window: 30 },
         auth_profiles: { summary: { total_profiles: 1 } },
-        browserd: { enabled: true }
-      })
+        browserd: { enabled: true },
+      }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -364,7 +371,7 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
     await client.getDiagnostics();
 
@@ -386,8 +393,8 @@ describe("ConsoleApiClient", () => {
           model_provider: {},
           rate_limits: {},
           auth_profiles: {},
-          browserd: {}
-        })
+          browserd: {},
+        }),
       );
     };
     const client = new ConsoleApiClient("", fetcher);
@@ -408,14 +415,14 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
         version: "capability-catalog.v1",
         generated_at_unix_ms: 123,
         capabilities: [],
-        migration_notes: []
+        migration_notes: [],
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -423,7 +430,7 @@ describe("ConsoleApiClient", () => {
         config_version: 1,
         redacted: true,
         document_toml: "version = 1\n",
-        backups: []
+        backups: [],
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -431,7 +438,7 @@ describe("ConsoleApiClient", () => {
         source_path: "palyra.toml",
         backups_retained: 5,
         config_version: 1,
-        changed_key: "model_provider.auth_profile_id"
+        changed_key: "model_provider.auth_profile_id",
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -439,9 +446,9 @@ describe("ConsoleApiClient", () => {
           job_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
           state: "queued",
           requested_at_unix_ms: 100,
-          command_output: ""
-        }
-      })
+          command_output: "",
+        },
+      }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -457,13 +464,13 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
     await client.getCapabilityCatalog();
     await client.inspectConfig({ path: "palyra.toml", show_secrets: false });
     await client.mutateConfig({
       key: "model_provider.auth_profile_id",
-      value: "\"openai-default\""
+      value: '"openai-default"',
     });
     await client.createSupportBundleJob({ retain_jobs: 8 });
 
@@ -489,34 +496,34 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
         operation: "migrate",
         source_path: "palyra.toml",
         backups_retained: 3,
-        config_version: 2
+        config_version: 2,
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
         operation: "recover",
         source_path: "palyra.toml",
         backups_retained: 3,
-        config_version: 1
+        config_version: 1,
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
-        channels: []
+        channels: [],
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
-        channels: []
+        channels: [],
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
         jobs: [],
-        page: { limit: 20, returned: 0, has_more: false }
+        page: { limit: 20, returned: 0, has_more: false },
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -524,8 +531,8 @@ describe("ConsoleApiClient", () => {
           job_id: "support-job-1",
           state: "queued",
           requested_at_unix_ms: 100,
-          command_output: ""
-        }
+          command_output: "",
+        },
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -533,8 +540,8 @@ describe("ConsoleApiClient", () => {
           job_id: "support-job-1",
           state: "queued",
           requested_at_unix_ms: 100,
-          command_output: ""
-        }
+          command_output: "",
+        },
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -543,9 +550,9 @@ describe("ConsoleApiClient", () => {
           key: "openai_api_key",
           created_at_unix_ms: 100,
           updated_at_unix_ms: 120,
-          value_bytes: 32
-        }
-      })
+          value_bytes: 32,
+        },
+      }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -561,7 +568,7 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
     await client.migrateConfig({ path: "palyra.toml", backups: 3 });
     await client.recoverConfig({ path: "palyra.toml", backup: 1, backups: 3 });
@@ -594,7 +601,7 @@ describe("ConsoleApiClient", () => {
     expect(new Headers(calls[7]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
 
     expect(requestUrl(calls[8]?.input)).toBe(
-      "/console/v1/secrets/metadata?scope=global&key=openai_api_key"
+      "/console/v1/secrets/metadata?scope=global&key=openai_api_key",
     );
   });
 
@@ -606,7 +613,7 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({ runs: [] }),
       jsonResponse({ config: {}, config_hash: "router-hash-1" }),
@@ -617,7 +624,11 @@ describe("ConsoleApiClient", () => {
       jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
       jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
       jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
-      jsonResponse({ connector: { connector_id: "discord:default" }, operations: {}, health_refresh: {} }),
+      jsonResponse({
+        connector: { connector_id: "discord:default" },
+        operations: {},
+        health_refresh: {},
+      }),
       jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
       jsonResponse({ connector: { connector_id: "discord:default" }, operations: {} }),
       jsonResponse({ report: { verified: true } }),
@@ -627,13 +638,13 @@ describe("ConsoleApiClient", () => {
       jsonResponse({
         principal: "admin:web-console",
         active_profile_id: "profile-1",
-        profiles: []
+        profiles: [],
       }),
       jsonResponse({ profile: { profile_id: "profile-1" } }),
       jsonResponse({ profile: { profile_id: "profile-1" } }),
       jsonResponse({ profile: { profile_id: "profile-1" } }),
       jsonResponse({ deleted: true, active_profile_id: "profile-1" }),
-      jsonResponse({ artifacts: [], truncated: false, error: "" })
+      jsonResponse({ artifacts: [], truncated: false, error: "" }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -649,7 +660,7 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
     await client.listCronRuns("cron-1");
     await client.getChannelRouterRules();
@@ -660,7 +671,9 @@ describe("ConsoleApiClient", () => {
     await client.pauseChannelQueue("discord:default");
     await client.resumeChannelQueue("discord:default");
     await client.drainChannelQueue("discord:default");
-    await client.refreshChannelHealth("discord:default", { verify_channel_id: "123456789012345678" });
+    await client.refreshChannelHealth("discord:default", {
+      verify_channel_id: "123456789012345678",
+    });
     await client.replayChannelDeadLetter("discord:default", 41);
     await client.discardChannelDeadLetter("discord:default", 41);
     await client.verifySkill("acme.echo_http", { version: "1.2.3" });
@@ -687,23 +700,23 @@ describe("ConsoleApiClient", () => {
     expect(requestUrl(calls[6]?.input)).toBe("/console/v1/channels/router/pairing-codes");
 
     expect(requestUrl(calls[7]?.input)).toBe(
-      "/console/v1/channels/discord%3Adefault/operations/queue/pause"
+      "/console/v1/channels/discord%3Adefault/operations/queue/pause",
     );
     expect(requestUrl(calls[8]?.input)).toBe(
-      "/console/v1/channels/discord%3Adefault/operations/queue/resume"
+      "/console/v1/channels/discord%3Adefault/operations/queue/resume",
     );
     expect(requestUrl(calls[9]?.input)).toBe(
-      "/console/v1/channels/discord%3Adefault/operations/queue/drain"
+      "/console/v1/channels/discord%3Adefault/operations/queue/drain",
     );
     expect(requestUrl(calls[10]?.input)).toBe(
-      "/console/v1/channels/discord%3Adefault/operations/health-refresh"
+      "/console/v1/channels/discord%3Adefault/operations/health-refresh",
     );
     expect(new Headers(calls[10]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(requestUrl(calls[11]?.input)).toBe(
-      "/console/v1/channels/discord%3Adefault/operations/dead-letters/41/replay"
+      "/console/v1/channels/discord%3Adefault/operations/dead-letters/41/replay",
     );
     expect(requestUrl(calls[12]?.input)).toBe(
-      "/console/v1/channels/discord%3Adefault/operations/dead-letters/41/discard"
+      "/console/v1/channels/discord%3Adefault/operations/dead-letters/41/discard",
     );
 
     expect(requestUrl(calls[13]?.input)).toBe("/console/v1/skills/acme.echo_http/verify");
@@ -727,7 +740,7 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({
         sessions: [
@@ -737,15 +750,15 @@ describe("ConsoleApiClient", () => {
             principal: "admin:web-console",
             device_id: "device-1",
             created_at_unix_ms: 100,
-            updated_at_unix_ms: 150
-          }
-        ]
+            updated_at_unix_ms: 150,
+          },
+        ],
       }),
       ndjsonResponse([
         {
           type: "meta",
           run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
-          session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+          session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         },
         {
           type: "event",
@@ -754,16 +767,16 @@ describe("ConsoleApiClient", () => {
             event_type: "status",
             status: {
               kind: "in_progress",
-              message: "ok"
-            }
-          }
+              message: "ok",
+            },
+          },
         },
         {
           type: "complete",
           run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
-          status: "done"
-        }
-      ])
+          status: "done",
+        },
+      ]),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -780,7 +793,7 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
 
     const sessions = await client.listChatSessions();
@@ -789,17 +802,19 @@ describe("ConsoleApiClient", () => {
     await client.streamChatMessage(
       "01ARZ3NDEKTSV4RRFFQ69G5FAV",
       {
-        text: "hello"
+        text: "hello",
       },
       {
         onLine: (line) => {
           lines.push(line);
-        }
-      }
+        },
+      },
     );
 
     expect(requestUrl(calls[1]?.input)).toBe("/console/v1/chat/sessions");
-    expect(requestUrl(calls[2]?.input)).toBe("/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages/stream");
+    expect(requestUrl(calls[2]?.input)).toBe(
+      "/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages/stream",
+    );
     const streamHeaders = new Headers(calls[2]?.init?.headers);
     expect(streamHeaders.get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(streamHeaders.get("content-type")).toBe("application/json");
@@ -818,8 +833,8 @@ describe("ConsoleApiClient", () => {
             device_id: "device-1",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 200
-          })
+            expires_at_unix_ms: 200,
+          }),
         );
       }
       void init;
@@ -827,9 +842,9 @@ describe("ConsoleApiClient", () => {
         new Response("this-is-not-json\n", {
           status: 200,
           headers: {
-            "content-type": "application/x-ndjson"
-          }
-        })
+            "content-type": "application/x-ndjson",
+          },
+        }),
       );
     };
     const client = new ConsoleApiClient("", fetcher);
@@ -837,15 +852,15 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
 
     await expect(
       client.streamChatMessage(
         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         { text: "hello" },
-        { onLine: () => {} }
-      )
+        { onLine: () => {} },
+      ),
     ).rejects.toThrow("malformed JSON line");
   });
 
@@ -857,7 +872,7 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -865,8 +880,8 @@ describe("ConsoleApiClient", () => {
         action: "api-key",
         state: "connected",
         message: "OpenAI API key stored.",
-        profile_id: "openai-default"
-      })
+        profile_id: "openai-default",
+      }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -882,21 +897,21 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
     await client.connectOpenAiApiKey({
       profile_name: "default-openai",
       scope: { kind: "global" },
       api_key: "sk-test-key",
-      set_default: true
+      set_default: true,
     });
 
     expect(requestUrl(calls[1]?.input)).toBe("/console/v1/auth/providers/openai/api-key");
     expect(calls[1]?.init?.method).toBe("POST");
     expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
     const connectBody = typeof calls[1]?.init?.body === "string" ? calls[1]?.init?.body : "";
-    expect(connectBody).toContain("\"profile_name\":\"default-openai\"");
-    expect(connectBody).toContain("\"set_default\":true");
+    expect(connectBody).toContain('"profile_name":"default-openai"');
+    expect(connectBody).toContain('"set_default":true');
   });
 
   it("queries OpenAI callback state with attempt_id and keeps GET requests CSRF-free", async () => {
@@ -907,7 +922,7 @@ describe("ConsoleApiClient", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -916,7 +931,7 @@ describe("ConsoleApiClient", () => {
         state: "pending",
         message: "Waiting for callback.",
         profile_id: "openai-default",
-        expires_at_unix_ms: 10_000
+        expires_at_unix_ms: 10_000,
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },
@@ -924,8 +939,8 @@ describe("ConsoleApiClient", () => {
         action: "refresh",
         state: "refreshed",
         message: "OpenAI token refreshed.",
-        profile_id: "openai-default"
-      })
+        profile_id: "openai-default",
+      }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -941,12 +956,14 @@ describe("ConsoleApiClient", () => {
       admin_token: "token",
       principal: "admin:web-console",
       device_id: "device-1",
-      channel: "web"
+      channel: "web",
     });
     await client.getOpenAiProviderCallbackState("attempt-1");
     await client.refreshOpenAiProvider({ profile_id: "openai-default" });
 
-    expect(requestUrl(calls[1]?.input)).toBe("/console/v1/auth/providers/openai/callback-state?attempt_id=attempt-1");
+    expect(requestUrl(calls[1]?.input)).toBe(
+      "/console/v1/auth/providers/openai/callback-state?attempt_id=attempt-1",
+    );
     expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
 
     expect(requestUrl(calls[2]?.input)).toBe("/console/v1/auth/providers/openai/refresh");
@@ -959,8 +976,8 @@ function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
-      "content-type": "application/json"
-    }
+      "content-type": "application/json",
+    },
   });
 }
 
@@ -982,7 +999,7 @@ function ndjsonResponse(lines: unknown[]): Response {
   return new Response(encoded, {
     status: 200,
     headers: {
-      "content-type": "application/x-ndjson"
-    }
+      "content-type": "application/x-ndjson",
+    },
   });
 }

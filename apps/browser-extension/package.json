@@ -1,9 +1,14 @@
 {
   "name": "@palyra/browser-extension",
-  "private": true,
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "scripts": {
+    "lint": "vp run -w lint:browser-extension",
     "test": "node --test ./tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.18.0",
+    "npm": ">=10.9.3 <12"
   }
 }

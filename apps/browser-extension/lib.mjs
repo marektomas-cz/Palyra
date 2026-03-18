@@ -154,7 +154,7 @@ export function validateOpenTabUrl(urlRaw, allowlistPrefixes) {
     let parsedPrefix;
     try {
       parsedPrefix = new URL(prefix);
-    } catch (_error) {
+    } catch {
       return false;
     }
     if (!["http:", "https:"].includes(parsedPrefix.protocol)) {

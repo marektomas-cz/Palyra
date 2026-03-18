@@ -11,7 +11,7 @@ const budgets = [
   { path: "apps/web/src/console/ConsoleSectionContent.tsx", maxLines: 500 },
   { path: "apps/web/src/console/useConsoleAppState.tsx", maxLines: 1900 },
   { path: "apps/web/src/chat/ChatConsolePanel.tsx", maxLines: 900 },
-  { path: "apps/desktop/src-tauri/src/lib.rs", maxLines: 1000 }
+  { path: "apps/desktop/src-tauri/src/lib.rs", maxLines: 1000 },
 ];
 
 let hasFailure = false;
@@ -22,7 +22,7 @@ for (const budget of budgets) {
   const lines = source.split(/\r?\n/).length;
   if (lines > budget.maxLines) {
     console.error(
-      `file budget exceeded: ${budget.path} has ${lines} lines (max ${budget.maxLines})`
+      `file budget exceeded: ${budget.path} has ${lines} lines (max ${budget.maxLines})`,
     );
     hasFailure = true;
     continue;

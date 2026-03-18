@@ -19,10 +19,13 @@ export function SectionCard({
   className,
   footer,
   variant = "default",
-  children
+  children,
 }: SectionCardProps) {
   return (
-    <Card className={joinClassNames("workspace-card workspace-section-card", className)} variant={variant}>
+    <Card
+      className={joinClassNames("workspace-card workspace-section-card", className)}
+      variant={variant}
+    >
       <CardHeader className="workspace-section-card__header">
         <div className="workspace-section-card__copy">
           <h3>{title}</h3>

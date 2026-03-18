@@ -6,7 +6,7 @@ import {
   AppForm,
   SectionCard,
   SelectField,
-  TextInputField
+  TextInputField,
 } from "../console/components/ui";
 import type { JsonValue } from "../consoleApi";
 
@@ -62,7 +62,10 @@ export interface ApprovalDraft {
   readonly busy: boolean;
 }
 
-type AssistantTokenBatchEntry = readonly [runId: string, update: { token: string; isFinal: boolean }];
+type AssistantTokenBatchEntry = readonly [
+  runId: string,
+  update: { token: string; isFinal: boolean },
+];
 
 type PrettyJsonBlockProps = {
   value: JsonValue;
@@ -81,13 +84,13 @@ export function ApprovalRequestControls({
   approvalId,
   draft,
   onDraftChange,
-  onDecision
+  onDecision,
 }: ApprovalRequestControlsProps) {
   const effectiveDraft = draft ?? {
     scope: DEFAULT_APPROVAL_SCOPE,
     reason: "",
     ttl_ms: DEFAULT_APPROVAL_TTL_MS,
-    busy: false
+    busy: false,
   };
 
   return (
@@ -103,13 +106,13 @@ export function ApprovalRequestControls({
           options={[
             { key: "once", label: "once" },
             { key: "session", label: "session" },
-            { key: "timeboxed", label: "timeboxed" }
+            { key: "timeboxed", label: "timeboxed" },
           ]}
           value={effectiveDraft.scope}
           onChange={(value) =>
             onDraftChange({
               ...effectiveDraft,
-              scope: normalizeScope(value)
+              scope: normalizeScope(value),
             })
           }
         />
@@ -121,7 +124,7 @@ export function ApprovalRequestControls({
           onChange={(value) =>
             onDraftChange({
               ...effectiveDraft,
-              ttl_ms: value
+              ttl_ms: value,
             })
           }
         />
@@ -132,7 +135,7 @@ export function ApprovalRequestControls({
           onChange={(value) =>
             onDraftChange({
               ...effectiveDraft,
-              reason: value
+              reason: value,
             })
           }
         />
@@ -170,7 +173,7 @@ export function applyAssistantTokenBatch(
   previous: TranscriptEntry[],
   assistantEntryByRun: Map<string, string>,
   queuedTokens: readonly AssistantTokenBatchEntry[],
-  createdAtUnixMs: number
+  createdAtUnixMs: number,
 ): TranscriptEntry[] {
   if (queuedTokens.length === 0) {
     return previous;
@@ -186,7 +189,7 @@ export function applyAssistantTokenBatch(
         const nextEntry: TranscriptEntry = {
           ...existing,
           text: `${existing.text ?? ""}${update.token}`,
-          is_final: Boolean(existing.is_final) || update.isFinal
+          is_final: Boolean(existing.is_final) || update.isFinal,
         };
         const updated = [...next];
         updated[index] = nextEntry;
@@ -206,8 +209,8 @@ export function applyAssistantTokenBatch(
         run_id: runId,
         title: "Assistant",
         text: update.token,
-        is_final: update.isFinal
-      }
+        is_final: update.isFinal,
+      },
     ];
   }
 
@@ -407,11 +410,11 @@ export function toPrettyJson(value: JsonValue, revealSensitive: boolean): string
 export const PrettyJsonBlock = memo(function PrettyJsonBlock({
   value,
   revealSensitiveValues,
-  className
+  className,
 }: PrettyJsonBlockProps) {
   const formatted = useMemo(
     () => toPrettyJson(value, revealSensitiveValues),
-    [value, revealSensitiveValues]
+    [value, revealSensitiveValues],
   );
   return <pre className={className}>{formatted}</pre>;
 });

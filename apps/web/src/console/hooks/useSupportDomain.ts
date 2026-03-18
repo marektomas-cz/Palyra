@@ -8,7 +8,7 @@ import {
   parseInteger,
   readString,
   toErrorMessage,
-  toJsonObjectArray
+  toJsonObjectArray,
 } from "../shared";
 
 type UseSupportDomainArgs = {
@@ -21,7 +21,9 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
   const [supportBusy, setSupportBusy] = useState(false);
   const [supportPairingSummary, setSupportPairingSummary] = useState<JsonObject | null>(null);
   const [supportDeployment, setSupportDeployment] = useState<JsonObject | null>(null);
-  const [supportDiagnosticsSnapshot, setSupportDiagnosticsSnapshot] = useState<JsonObject | null>(null);
+  const [supportDiagnosticsSnapshot, setSupportDiagnosticsSnapshot] = useState<JsonObject | null>(
+    null,
+  );
   const [supportPairingChannel, setSupportPairingChannel] = useState("discord:default");
   const [supportPairingIssuedBy, setSupportPairingIssuedBy] = useState("");
   const [supportPairingTtlMs, setSupportPairingTtlMs] = useState("600000");
@@ -34,25 +36,28 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     setSupportBusy(true);
     setError(null);
     try {
-      const [pairingResponse, jobsResponse, deploymentResponse, diagnosticsResponse] = await Promise.all([
-        api.getPairingSummary(),
-        api.listSupportBundleJobs(),
-        api.getDeploymentPosture(),
-        api.getDiagnostics()
-      ]);
+      const [pairingResponse, jobsResponse, deploymentResponse, diagnosticsResponse] =
+        await Promise.all([
+          api.getPairingSummary(),
+          api.listSupportBundleJobs(),
+          api.getDeploymentPosture(),
+          api.getDiagnostics(),
+        ]);
       setSupportPairingSummary(
-        isJsonObject(pairingResponse as unknown as JsonValue) ? (pairingResponse as unknown as JsonObject) : null
+        isJsonObject(pairingResponse as unknown as JsonValue)
+          ? (pairingResponse as unknown as JsonObject)
+          : null,
       );
       setSupportBundleJobs(toJsonObjectArray(jobsResponse.jobs as unknown as JsonValue[]));
       setSupportDeployment(
         isJsonObject(deploymentResponse as unknown as JsonValue)
           ? (deploymentResponse as unknown as JsonObject)
-          : null
+          : null,
       );
       setSupportDiagnosticsSnapshot(
         isJsonObject(diagnosticsResponse as unknown as JsonValue)
           ? (diagnosticsResponse as unknown as JsonObject)
-          : null
+          : null,
       );
       const nextSelectedJobId = supportSelectedBundleJobId.trim();
       if (nextSelectedJobId.length > 0) {
@@ -60,7 +65,7 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
         setSupportSelectedBundleJob(
           isJsonObject(jobResponse.job as unknown as JsonValue)
             ? (jobResponse.job as unknown as JsonObject)
-            : null
+            : null,
         );
       }
     } catch (failure) {
@@ -87,10 +92,10 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
       const response = await api.mintPairingCode({
         channel: supportPairingChannel.trim(),
         issued_by: emptyToUndefined(supportPairingIssuedBy),
-        ttl_ms: ttlMs
+        ttl_ms: ttlMs,
       });
       setSupportPairingSummary(
-        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null
+        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null,
       );
       setNotice("Pairing code minted.");
     } catch (failure) {
@@ -111,12 +116,13 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     setNotice(null);
     try {
       const response = await api.createSupportBundleJob({ retain_jobs: retainJobs });
-      const createdJob =
-        isJsonObject(response.job as unknown as JsonValue) ? (response.job as unknown as JsonObject) : null;
+      const createdJob = isJsonObject(response.job as unknown as JsonValue)
+        ? (response.job as unknown as JsonObject)
+        : null;
       setSupportSelectedBundleJob(createdJob);
       setSupportSelectedBundleJobId(readString(createdJob ?? {}, "job_id") ?? "");
       setNotice(
-        `Support bundle job queued: ${readString(response.job as unknown as JsonObject, "job_id") ?? "unknown"}.`
+        `Support bundle job queued: ${readString(response.job as unknown as JsonObject, "job_id") ?? "unknown"}.`,
       );
       await refreshSupport();
     } catch (failure) {
@@ -137,7 +143,9 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     try {
       const response = await api.getSupportBundleJob(jobId);
       setSupportSelectedBundleJob(
-        isJsonObject(response.job as unknown as JsonValue) ? (response.job as unknown as JsonObject) : null
+        isJsonObject(response.job as unknown as JsonValue)
+          ? (response.job as unknown as JsonObject)
+          : null,
       );
       setNotice("Support bundle job refreshed.");
     } catch (failure) {
@@ -182,6 +190,6 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     mintSupportPairingCode,
     createSupportBundle,
     loadSupportBundleJob,
-    resetSupportDomain
+    resetSupportDomain,
   };
 }

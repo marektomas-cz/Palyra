@@ -8,7 +8,7 @@ import {
   formatUptime,
   overallTone,
   processSummary,
-  processTone
+  processTone,
 } from "./desktopPresentation";
 import { MetricCard, StatusChip } from "./ui";
 
@@ -65,7 +65,9 @@ export function HealthStrip({ snapshot, attentionCount, loading }: HealthStripPr
           loading ? (
             <Skeleton className="desktop-skeleton desktop-skeleton--detail" />
           ) : (
-            <p className="desktop-muted">Gateway uptime {formatUptime(snapshot.quick_facts.gateway_uptime_seconds)}</p>
+            <p className="desktop-muted">
+              Gateway uptime {formatUptime(snapshot.quick_facts.gateway_uptime_seconds)}
+            </p>
           )
         }
       />
@@ -83,7 +85,9 @@ export function HealthStrip({ snapshot, attentionCount, loading }: HealthStripPr
                 {snapshot.quick_facts.browser_service.enabled ? "Enabled" : "Disabled by config"}
               </p>
               <StatusChip tone={attentionTone(attentionCount)}>
-                {attentionCount === 0 ? "diagnostics clear" : `${attentionCount} diagnostics alerts`}
+                {attentionCount === 0
+                  ? "diagnostics clear"
+                  : `${attentionCount} diagnostics alerts`}
               </StatusChip>
             </div>
           )

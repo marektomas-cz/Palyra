@@ -22,5 +22,5 @@ rootElement.classList.add("dark");
 createRoot(container).render(
   <StrictMode>
     <App />
-  </StrictMode>
+  </StrictMode>,
 );

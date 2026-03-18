@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { applyAssistantTokenBatch } from "./chat/chatShared";
 import { PrettyJsonBlock } from "./console/shared";
@@ -17,13 +17,13 @@ describe("M62 web performance smoke", () => {
       [],
       assistantEntries,
       [["run-1", { token: "Hello", isFinal: false }]],
-      100
+      100,
     );
     const secondPass = applyAssistantTokenBatch(
       firstPass,
       assistantEntries,
       [["run-1", { token: " world", isFinal: true }]],
-      120
+      120,
     );
 
     expect(secondPass).toHaveLength(1);
@@ -31,7 +31,7 @@ describe("M62 web performance smoke", () => {
       id: "assistant-run-1-100",
       kind: "assistant",
       text: "Hello world",
-      is_final: true
+      is_final: true,
     });
   });
 
@@ -51,11 +51,11 @@ describe("M62 web performance smoke", () => {
         value={{
           api_key: "sk-test-secret",
           nested: {
-            authorization: "Bearer top-secret"
-          }
+            authorization: "Bearer top-secret",
+          },
         }}
         revealSensitiveValues={false}
-      />
+      />,
     );
 
     const block = screen.getByText((content) => content.includes("[redacted]"));

@@ -24,36 +24,42 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
       api.getDeploymentPosture(),
       api.listApprovals(),
       api.getDiagnostics(),
-      api.listSupportBundleJobs()
+      api.listSupportBundleJobs(),
     ]);
 
     if (catalog.status === "fulfilled") {
       setOverviewCatalog(
-        isJsonObject(catalog.value as unknown as JsonValue) ? (catalog.value as unknown as JsonObject) : null
+        isJsonObject(catalog.value as unknown as JsonValue)
+          ? (catalog.value as unknown as JsonObject)
+          : null,
       );
     }
     if (deployment.status === "fulfilled") {
       setOverviewDeployment(
         isJsonObject(deployment.value as unknown as JsonValue)
           ? (deployment.value as unknown as JsonObject)
-          : null
+          : null,
       );
     }
     if (approvals.status === "fulfilled") {
       setOverviewApprovals(
-        toJsonObjectArray(Array.isArray(approvals.value.approvals) ? approvals.value.approvals : [])
+        toJsonObjectArray(
+          Array.isArray(approvals.value.approvals) ? approvals.value.approvals : [],
+        ),
       );
     }
     if (diagnostics.status === "fulfilled") {
       setOverviewDiagnostics(
         isJsonObject(diagnostics.value as unknown as JsonValue)
           ? (diagnostics.value as unknown as JsonObject)
-          : null
+          : null,
       );
     }
     if (jobs.status === "fulfilled") {
       setOverviewSupportJobs(
-        toJsonObjectArray(Array.isArray(jobs.value.jobs) ? (jobs.value.jobs as unknown as JsonValue[]) : [])
+        toJsonObjectArray(
+          Array.isArray(jobs.value.jobs) ? (jobs.value.jobs as unknown as JsonValue[]) : [],
+        ),
       );
     }
 
@@ -81,7 +87,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     overviewDiagnostics,
     overviewSupportJobs,
     refreshOverview,
-    resetOverviewDomain
+    resetOverviewDomain,
   };
 }
 

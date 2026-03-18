@@ -50,7 +50,10 @@ export function ConsoleSidebarNav({ currentSection, onSelect }: ConsoleSidebarNa
                           void navigate(getSectionPath(entry.id));
                         }}
                       >
-                        <span aria-hidden="true" className="flex h-8 w-8 items-center justify-center rounded-lg border">
+                        <span
+                          aria-hidden="true"
+                          className="flex h-8 w-8 items-center justify-center rounded-lg border"
+                        >
                           <NavigationGlyph section={entry.id} />
                         </span>
                         <span className="console-nav-item__content">
@@ -93,7 +96,7 @@ function NavigationGlyph({ section }: { section: Section }) {
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
     strokeWidth: 1.8,
-    viewBox: "0 0 24 24"
+    viewBox: "0 0 24 24",
   };
 
   switch (section) {

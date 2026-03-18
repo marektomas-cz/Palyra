@@ -1,5 +1,5 @@
 import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { normalizeA2uiDocument } from "../normalize";
 import { A2uiRenderer } from "../renderer";
@@ -14,24 +14,24 @@ describe("A2uiRenderer XSS regressions", () => {
           id: "text",
           type: "text",
           props: {
-            value: "<img src=x onerror=alert('xss')>"
-          }
+            value: "<img src=x onerror=alert('xss')>",
+          },
         },
         {
           id: "markdown",
           type: "markdown",
           props: {
             value:
-              "<script>alert('xss')</script>\n\n[click](javascript:alert('xss')) and [safe](https://example.com)"
-          }
+              "<script>alert('xss')</script>\n\n[click](javascript:alert('xss')) and [safe](https://example.com)",
+          },
         },
         {
           id: "table",
           type: "table",
           props: {
             columns: ["Unsafe", "Safe"],
-            rows: [["<svg onload=alert('xss')>", "ok"]]
-          }
+            rows: [["<svg onload=alert('xss')>", "ok"]],
+          },
         },
         {
           id: "form",
@@ -44,12 +44,12 @@ describe("A2uiRenderer XSS regressions", () => {
                 id: "username\" autofocus onfocus=\"alert('xss')",
                 label: "User",
                 type: "text",
-                default: ""
-              }
-            ]
-          }
-        }
-      ]
+                default: "",
+              },
+            ],
+          },
+        },
+      ],
     });
 
     const { container } = render(<A2uiRenderer document={document} />);
@@ -57,7 +57,7 @@ describe("A2uiRenderer XSS regressions", () => {
     const hasInlineEventHandler = Array.from(container.querySelectorAll("*")).some((element) =>
       element
         .getAttributeNames()
-        .some((attributeName) => attributeName.toLowerCase().startsWith("on"))
+        .some((attributeName) => attributeName.toLowerCase().startsWith("on")),
     );
 
     expect(container.querySelector("script")).toBeNull();

@@ -11,24 +11,28 @@ export function createDemoDocument(): A2uiDocument {
         type: "text",
         props: {
           tone: "success",
-          value: "Renderer online. Waiting for incremental patches."
-        }
+          value: "Renderer online. Waiting for incremental patches.",
+        },
       },
       {
         id: "summary",
         type: "markdown",
         props: {
           value:
-            "### A2UI Renderer\\nThis renderer keeps **strict escaping** and supports [safe links](https://palyra.dev)."
-        }
+            "### A2UI Renderer\\nThis renderer keeps **strict escaping** and supports [safe links](https://palyra.dev).",
+        },
       },
       {
         id: "tasks",
         type: "list",
         props: {
           ordered: false,
-          items: ["No `dangerouslySetInnerHTML`", "Deterministic patch application", "Budget-aware update queue"]
-        }
+          items: [
+            "No `dangerouslySetInnerHTML`",
+            "Deterministic patch application",
+            "Budget-aware update queue",
+          ],
+        },
       },
       {
         id: "metrics",
@@ -37,9 +41,9 @@ export function createDemoDocument(): A2uiDocument {
           columns: ["Metric", "Value"],
           rows: [
             ["Rendered components", "6"],
-            ["Queued patches", "0"]
-          ]
-        }
+            ["Queued patches", "0"],
+          ],
+        },
       },
       {
         id: "operator-form",
@@ -54,7 +58,7 @@ export function createDemoDocument(): A2uiDocument {
               type: "text",
               default: "",
               placeholder: "Type an audit note",
-              required: true
+              required: true,
             },
             {
               id: "target-priority",
@@ -63,17 +67,17 @@ export function createDemoDocument(): A2uiDocument {
               default: "normal",
               options: [
                 { label: "Normal", value: "normal" },
-                { label: "High", value: "high" }
-              ]
+                { label: "High", value: "high" },
+              ],
             },
             {
               id: "dry-run",
               label: "Dry run",
               type: "checkbox",
-              default: true
-            }
-          ]
-        }
+              default: true,
+            },
+          ],
+        },
       },
       {
         id: "latency-chart",
@@ -83,10 +87,10 @@ export function createDemoDocument(): A2uiDocument {
           series: [
             { label: "P50", value: 9 },
             { label: "P95", value: 16 },
-            { label: "P99", value: 23 }
-          ]
-        }
-      }
-    ]
+            { label: "P99", value: 23 },
+          ],
+        },
+      },
+    ],
   });
 }

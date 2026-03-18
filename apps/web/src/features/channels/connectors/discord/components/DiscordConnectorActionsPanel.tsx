@@ -2,7 +2,7 @@ import {
   ActionButton,
   AppForm,
   CheckboxField,
-  TextInputField
+  TextInputField,
 } from "../../../../../console/components/ui";
 import type { ConsoleAppState } from "../../../../../console/useConsoleAppState";
 
@@ -20,10 +20,7 @@ export function DiscordConnectorActionsPanel({
       {selectedConnectorKind === "discord" && (
         <>
           <h4>Discord direct verification</h4>
-          <AppForm
-            className="console-form"
-            onSubmit={(event) => void app.sendDiscordTest(event)}
-          >
+          <AppForm className="console-form" onSubmit={(event) => void app.sendDiscordTest(event)}>
             <div className="console-grid-4">
               <TextInputField
                 label="Target"

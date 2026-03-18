@@ -30,6 +30,7 @@ coverage/
 lcov.info
 
 # JS package manager artifacts
+/node_modules/
 **/node_modules/
 .cache/
 
@@ -41,9 +42,10 @@ lcov.info
 .tmp-rust-stubs.*
 **/sbom*.json
 !crates/palyra-skills/examples/echo-http/sbom.cdx.json
-apps/web/node_modules/
 apps/web/dist/
+apps/web/.vite/
 apps/desktop/ui/dist/
+apps/desktop/ui/.vite/
 .palyra-doctor-write-check.tmp
 fuzz/artifacts/
 fuzz/corpus/

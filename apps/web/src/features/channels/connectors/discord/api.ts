@@ -30,7 +30,7 @@ export type DiscordHealthRefreshPayload = {
 export function sendDiscordTest(
   api: ConsoleApiClient,
   connectorId: string,
-  payload: DiscordTestSendPayload
+  payload: DiscordTestSendPayload,
 ) {
   return api.sendChannelDiscordTestSend(connectorId, payload);
 }
@@ -38,21 +38,15 @@ export function sendDiscordTest(
 export function refreshDiscordChannelHealth(
   api: ConsoleApiClient,
   connectorId: string,
-  payload: DiscordHealthRefreshPayload
+  payload: DiscordHealthRefreshPayload,
 ) {
   return api.refreshChannelHealth(connectorId, payload);
 }
 
-export function probeDiscordOnboarding(
-  api: ConsoleApiClient,
-  payload: DiscordOnboardingPayload
-) {
+export function probeDiscordOnboarding(api: ConsoleApiClient, payload: DiscordOnboardingPayload) {
   return api.probeDiscordOnboarding(payload);
 }
 
-export function applyDiscordOnboarding(
-  api: ConsoleApiClient,
-  payload: DiscordOnboardingPayload
-) {
+export function applyDiscordOnboarding(api: ConsoleApiClient, payload: DiscordOnboardingPayload) {
   return api.applyDiscordOnboarding(payload);
 }

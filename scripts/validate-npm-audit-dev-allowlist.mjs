@@ -74,9 +74,7 @@ function advisoryIdFromVia(via) {
 
 function collectAdvisories(report) {
   const vulnerabilities =
-    report && typeof report === "object" && report.vulnerabilities
-      ? report.vulnerabilities
-      : {};
+    report && typeof report === "object" && report.vulnerabilities ? report.vulnerabilities : {};
   const advisories = new Map();
 
   function ensureEntry(id, data) {
@@ -156,7 +154,7 @@ function advisoryMapToObject(map) {
       severity: advisory.severity,
       title: advisory.title,
       url: advisory.url,
-      packages: [...advisory.packages].sort(),
+      packages: [...advisory.packages].sort((a, b) => a.localeCompare(b)),
     };
   }
   return output;
@@ -241,7 +239,7 @@ function main() {
       severity: advisory.severity,
       title: advisory.title,
       url: advisory.url,
-      packages: [...advisory.packages].sort(),
+      packages: [...advisory.packages].sort((a, b) => a.localeCompare(b)),
       allowlisted: Boolean(allow),
       expires_on: allow?.expires_on ?? null,
       expired,
@@ -251,7 +249,8 @@ function main() {
   }
 
   devOnlyAdvisories.sort((a, b) => {
-    const rankDiff = (SEVERITY_ORDER.get(b.severity) ?? -1) - (SEVERITY_ORDER.get(a.severity) ?? -1);
+    const rankDiff =
+      (SEVERITY_ORDER.get(b.severity) ?? -1) - (SEVERITY_ORDER.get(a.severity) ?? -1);
     if (rankDiff !== 0) {
       return rankDiff;
     }
@@ -299,28 +298,30 @@ function main() {
   }
 
   console.log(
-    `dev-only advisories (severity >= ${threshold}): ${devOnlyAdvisories.length}, unallowlisted: ${unallowlisted.length}, expired_allowlist_entries: ${expiredAllowlist.length}`
+    `dev-only advisories (severity >= ${threshold}): ${devOnlyAdvisories.length}, unallowlisted: ${unallowlisted.length}, expired_allowlist_entries: ${expiredAllowlist.length}`,
   );
 
   for (const item of unallowlisted) {
     console.log(
-      `::warning::Unallowlisted dev advisory ${item.id} (${item.severity}) affects ${item.packages.join(", ")}`
+      `::warning::Unallowlisted dev advisory ${item.id} (${item.severity}) affects ${item.packages.join(", ")}`,
     );
   }
 
   for (const item of expiredAllowlist) {
     console.log(
-      `::warning::Expired allowlist entry ${item.id} expired on ${item.expires_on} (owner: ${item.owner ?? "n/a"})`
+      `::warning::Expired allowlist entry ${item.id} expired on ${item.expires_on} (owner: ${item.owner ?? "n/a"})`,
     );
   }
 
   for (const item of staleAllowlist) {
-    console.log(`::notice::Stale allowlist entry ${item.id} is not present in current audit results`);
+    console.log(
+      `::notice::Stale allowlist entry ${item.id} is not present in current audit results`,
+    );
   }
 
   if (unallowlisted.length > 0 || expiredAllowlist.length > 0) {
     console.error(
-      `dev advisory governance check failed on ${formatUtcDate(now)}: unallowlisted=${unallowlisted.length}, expired_allowlist=${expiredAllowlist.length}`
+      `dev advisory governance check failed on ${formatUtcDate(now)}: unallowlisted=${unallowlisted.length}, expired_allowlist=${expiredAllowlist.length}`,
     );
     process.exit(1);
   }

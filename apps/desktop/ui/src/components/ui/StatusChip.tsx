@@ -8,17 +8,13 @@ type StatusChipProps = PropsWithChildren<{
   className?: string;
 }>;
 
-export function StatusChip({
-  children,
-  tone = "default",
-  className
-}: StatusChipProps) {
+export function StatusChip({ children, tone = "default", className }: StatusChipProps) {
   return (
     <Chip
       className={joinClassNames(
         "desktop-status-chip",
         tone === "accent" && "desktop-status-chip--accent",
-        className
+        className,
       )}
       color={resolveToneColor(tone)}
       variant={tone === "default" ? "secondary" : "soft"}

@@ -2,10 +2,7 @@ import type { CapabilityCatalog, CapabilityEntry } from "../consoleApi";
 
 import { CONSOLE_SECTIONS, type Section } from "./sectionMetadata";
 
-export type CapabilityExposureMode =
-  | "direct_action"
-  | "cli_handoff"
-  | "internal_only";
+export type CapabilityExposureMode = "direct_action" | "cli_handoff" | "internal_only";
 
 const SECTION_FALLBACK_BY_DOMAIN: Record<string, Section> = {
   approvals: "approvals",
@@ -23,19 +20,20 @@ const SECTION_FALLBACK_BY_DOMAIN: Record<string, Section> = {
   runtime: "operations",
   secrets: "secrets",
   skills: "skills",
-  support: "support"
+  support: "support",
 };
 
-export function normalizeCapabilityExposureMode(
-  entry: CapabilityEntry
-): CapabilityExposureMode {
+export function normalizeCapabilityExposureMode(entry: CapabilityEntry): CapabilityExposureMode {
   if (entry.dashboard_exposure === "direct_action") {
     return "direct_action";
   }
   if (entry.dashboard_exposure === "cli_handoff" || entry.dashboard_exposure === "internal_only") {
     return entry.dashboard_exposure;
   }
-  if (entry.execution_mode === "read_only_cli_handoff" || entry.execution_mode === "generated_cli") {
+  if (
+    entry.execution_mode === "read_only_cli_handoff" ||
+    entry.execution_mode === "generated_cli"
+  ) {
     return "cli_handoff";
   }
   if (entry.execution_mode === "internal_only" || entry.execution_mode === "internal") {
@@ -64,7 +62,7 @@ export function capabilitySection(entry: CapabilityEntry): Section {
 
 export function capabilitiesForSection(
   catalog: CapabilityCatalog | null | undefined,
-  section: Section
+  section: Section,
 ): CapabilityEntry[] {
   if (catalog === null || catalog === undefined) {
     return [];
@@ -72,7 +70,9 @@ export function capabilitiesForSection(
   return catalog.capabilities.filter((entry) => capabilitySection(entry) === section);
 }
 
-export function capabilityModeCounts(entries: CapabilityEntry[]): Record<CapabilityExposureMode, number> {
+export function capabilityModeCounts(
+  entries: CapabilityEntry[],
+): Record<CapabilityExposureMode, number> {
   return entries.reduce<Record<CapabilityExposureMode, number>>(
     (counts, entry) => {
       counts[normalizeCapabilityExposureMode(entry)] += 1;
@@ -81,14 +81,12 @@ export function capabilityModeCounts(entries: CapabilityEntry[]): Record<Capabil
     {
       direct_action: 0,
       cli_handoff: 0,
-      internal_only: 0
-    }
+      internal_only: 0,
+    },
   );
 }
 
-export function sectionCapabilityCounts(
-  catalog: CapabilityCatalog | null | undefined
-): Array<{
+export function sectionCapabilityCounts(catalog: CapabilityCatalog | null | undefined): Array<{
   section: Section;
   label: string;
   counts: Record<CapabilityExposureMode, number>;
@@ -96,17 +94,17 @@ export function sectionCapabilityCounts(
   return CONSOLE_SECTIONS.map((section) => ({
     section: section.id,
     label: section.label,
-    counts: capabilityModeCounts(capabilitiesForSection(catalog, section.id))
+    counts: capabilityModeCounts(capabilitiesForSection(catalog, section.id)),
   }));
 }
 
 export function capabilitiesByMode(
-  entries: CapabilityEntry[]
+  entries: CapabilityEntry[],
 ): Record<CapabilityExposureMode, CapabilityEntry[]> {
   const grouped: Record<CapabilityExposureMode, CapabilityEntry[]> = {
     direct_action: [],
     cli_handoff: [],
-    internal_only: []
+    internal_only: [],
   };
   for (const entry of entries) {
     grouped[normalizeCapabilityExposureMode(entry)].push(entry);

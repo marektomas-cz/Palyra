@@ -42,22 +42,20 @@ surface.
 
 ## Local commands
 
-- Canonical bootstrap:
-  - `npm --prefix apps/web run bootstrap`
-- Verify installed dependencies:
-  - `npm --prefix apps/web run verify-install`
-- Remove generated outputs and installed dependencies:
-  - `npm --prefix apps/web run clean`
-- Clean-room rebuild proof:
-  - `npm --prefix apps/web run cleanroom:check`
-- Lint:
-  - `npm --prefix apps/web run lint`
+- Canonical install:
+  - `vp install`
+- Format and lint the JS workspace:
+  - `vp check apps/web apps/desktop/ui apps/browser-extension scripts`
+- Lint the web dashboard only:
+  - `vp run web:lint`
 - Typecheck:
-  - `npm --prefix apps/web run typecheck`
+  - `vp run web:typecheck`
 - Tests:
-  - `npm --prefix apps/web run test:run`
+  - `vp run web:test`
 - Build:
-  - `npm --prefix apps/web run build`
+  - `vp run web:build`
+- Full web CI task:
+  - `vp run web:ci`
 
 ## Notes
 
@@ -65,7 +63,7 @@ surface.
   routes.
 - API calls always use `credentials: include` to bind requests to the session cookie.
 - Mutating requests require CSRF protection.
-- `apps/web/node_modules` is not a supported handoff artifact. Always rebuild from
-  `package-lock.json` via `npm --prefix apps/web run bootstrap`.
-- The clean-room guard verifies Node/npm ranges, launcher permissions, and the expected Rollup
-  native optional package for the current OS/architecture.
+- The dashboard now installs from the root workspace lockfile and reuses the root `node_modules`
+  tree. `apps/web/node_modules` is no longer part of the supported workflow.
+- Root toolchain baseline is Node `22.18.0` with `packageManager: npm@10.9.3`.
+- `vite`, `vitest`, linting, and formatting now run through the root Vite+ entrypoint.

@@ -20,7 +20,7 @@ export function PageHeader({
   description,
   status,
   actions,
-  className
+  className,
 }: PageHeaderProps) {
   return (
     <Card

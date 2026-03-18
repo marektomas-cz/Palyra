@@ -1,6 +1,10 @@
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 
-import { DESKTOP_PREVIEW_SNAPSHOT, type ControlCenterSnapshot, getSnapshot } from "../lib/desktopApi";
+import {
+  DESKTOP_PREVIEW_SNAPSHOT,
+  type ControlCenterSnapshot,
+  getSnapshot,
+} from "../lib/desktopApi";
 
 type SnapshotState = {
   error: string | null;

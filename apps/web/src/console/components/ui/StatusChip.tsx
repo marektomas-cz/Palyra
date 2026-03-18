@@ -7,13 +7,13 @@ type StatusChipProps = PropsWithChildren<{
   tone?: UiTone;
 }>;
 
-export function StatusChip({
-  children,
-  tone = "default"
-}: StatusChipProps) {
+export function StatusChip({ children, tone = "default" }: StatusChipProps) {
   return (
     <Chip
-      className={joinClassNames("workspace-status-chip", tone === "accent" && "workspace-status-chip--accent")}
+      className={joinClassNames(
+        "workspace-status-chip",
+        tone === "accent" && "workspace-status-chip--accent",
+      )}
       color={resolveToneColor(tone)}
       variant={tone === "default" ? "secondary" : "soft"}
     >

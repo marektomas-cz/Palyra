@@ -29,10 +29,7 @@ export type DiscordChannelDomainDeps = {
   discordWizardAccountId: string;
   discordWizardMode: "local" | "remote_vps";
   discordWizardToken: string;
-  discordWizardScope:
-    | "dm_only"
-    | "allowlisted_guild_channels"
-    | "open_guild_channels";
+  discordWizardScope: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
   discordWizardAllowFrom: string;
   discordWizardDenyFrom: string;
   discordWizardRequireMention: boolean;
@@ -162,9 +159,7 @@ export function createDiscordChannelDomain(deps: DiscordChannelDomainDeps) {
     } as const;
   }
 
-  async function submitChannelDiscordTestSend(
-    event: FormEvent<HTMLFormElement>
-  ): Promise<void> {
+  async function submitChannelDiscordTestSend(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (channelsSelectedConnectorId.trim().length === 0) {
       setError("Select a connector before dispatching Discord test send.");
@@ -213,13 +208,9 @@ export function createDiscordChannelDomain(deps: DiscordChannelDomainDeps) {
     setChannelsBusy(true);
     setError(null);
     try {
-      const response = await refreshDiscordChannelHealth(
-        api,
-        channelsSelectedConnectorId.trim(),
-        {
-          verify_channel_id: emptyToUndefined(discordWizardVerifyChannelId),
-        }
-      );
+      const response = await refreshDiscordChannelHealth(api, channelsSelectedConnectorId.trim(), {
+        verify_channel_id: emptyToUndefined(discordWizardVerifyChannelId),
+      });
       setSelectedChannelStatusPayload(response as JsonValue);
       setNotice("Channel health refresh completed.");
     } catch (failure) {
@@ -249,17 +240,15 @@ export function createDiscordChannelDomain(deps: DiscordChannelDomainDeps) {
     try {
       const response = await probeDiscordOnboarding(
         api,
-        buildDiscordWizardPayload(verifyChannel.value)
+        buildDiscordWizardPayload(verifyChannel.value),
       );
       setDiscordWizardPreflight(isJsonObject(response) ? response : null);
       const botId = isJsonObject(response.bot) ? readString(response.bot, "id") : null;
-      const botUsername = isJsonObject(response.bot)
-        ? readString(response.bot, "username")
-        : null;
+      const botUsername = isJsonObject(response.bot) ? readString(response.bot, "username") : null;
       setNotice(
         botId !== null && botUsername !== null
           ? `Discord preflight OK for ${botUsername} (${botId}).`
-          : "Discord preflight completed."
+          : "Discord preflight completed.",
       );
       await refreshChannels(connectorId);
     } catch (failure) {
@@ -294,7 +283,7 @@ export function createDiscordChannelDomain(deps: DiscordChannelDomainDeps) {
     try {
       const response = await applyDiscordOnboardingRequest(
         api,
-        buildDiscordWizardPayload(verifyChannel.value)
+        buildDiscordWizardPayload(verifyChannel.value),
       );
       setDiscordWizardApply(isJsonObject(response) ? response : null);
       const preflight = isJsonObject(response.preflight) ? response.preflight : null;
@@ -304,7 +293,7 @@ export function createDiscordChannelDomain(deps: DiscordChannelDomainDeps) {
       setNotice(
         botId !== null && botUsername !== null
           ? `Discord onboarding applied for ${botUsername} (${botId}).`
-          : "Discord onboarding applied."
+          : "Discord onboarding applied.",
       );
       setDiscordWizardToken("");
       await refreshChannels(connectorId);
@@ -343,7 +332,7 @@ export function createDiscordChannelDomain(deps: DiscordChannelDomainDeps) {
       setNotice(
         delivered !== null
           ? `Discord verification dispatched (delivered=${delivered}).`
-          : "Discord verification dispatched."
+          : "Discord verification dispatched.",
       );
       setDiscordWizardVerifyConfirm(false);
       await refreshChannels(connectorId);

@@ -6,10 +6,6 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -d "apps/web/node_modules" ]]; then
-  echo "Web lint failed: run 'npm --prefix apps/web run bootstrap' first." >&2
-  exit 1
-fi
+bash scripts/test/ensure-js-workspace.sh
 
-npm --prefix apps/web run verify-install
-npm --prefix apps/web run lint
+npm run web:lint

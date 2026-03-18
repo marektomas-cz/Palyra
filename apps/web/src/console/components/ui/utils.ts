@@ -12,7 +12,7 @@ export function joinClassNames(...values: Array<string | false | null | undefine
 }
 
 export function resolveToneColor(
-  tone: UiTone | undefined
+  tone: UiTone | undefined,
 ): "default" | "success" | "warning" | "danger" | undefined {
   if (tone === "accent") {
     return "default";
@@ -21,7 +21,7 @@ export function resolveToneColor(
 }
 
 export function resolveAlertStatus(
-  tone: UiTone | undefined
+  tone: UiTone | undefined,
 ): "default" | "success" | "warning" | "danger" {
   if (tone === undefined || tone === "accent") {
     return "default";

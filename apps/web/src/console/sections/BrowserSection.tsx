@@ -1,12 +1,20 @@
 import { Button } from "@heroui/react";
 
+import { CheckboxField, SelectField, TextInputField } from "../components/ui";
 import {
-  CheckboxField,
-  SelectField,
-  TextInputField
-} from "../components/ui";
-import { WorkspaceMetricCard, WorkspacePageHeader, WorkspaceSectionCard, WorkspaceStatusChip } from "../components/workspace/WorkspaceChrome";
-import { PrettyJsonBlock, formatUnixMs, readBool, readNumber, readString, type JsonObject } from "../shared";
+  WorkspaceMetricCard,
+  WorkspacePageHeader,
+  WorkspaceSectionCard,
+  WorkspaceStatusChip,
+} from "../components/workspace/WorkspaceChrome";
+import {
+  PrettyJsonBlock,
+  formatUnixMs,
+  readBool,
+  readNumber,
+  readString,
+  type JsonObject,
+} from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
 type BrowserSectionProps = {
@@ -64,9 +72,12 @@ type BrowserSectionProps = {
 export function BrowserSection({ app }: BrowserSectionProps) {
   const profiles = Array.isArray(app.browserProfiles) ? app.browserProfiles : [];
   const activeProfile =
-    profiles.find((profile) => readString(profile, "profile_id") === app.browserActiveProfileId) ?? null;
+    profiles.find((profile) => readString(profile, "profile_id") === app.browserActiveProfileId) ??
+    null;
   const downloads = Array.isArray(app.browserDownloads) ? app.browserDownloads : [];
-  const quarantinedDownloads = downloads.filter((artifact) => readBool(asJsonObject(artifact), "quarantined"));
+  const quarantinedDownloads = downloads.filter((artifact) =>
+    readBool(asJsonObject(artifact), "quarantined"),
+  );
 
   return (
     <main className="workspace-page">
@@ -102,23 +113,39 @@ export function BrowserSection({ app }: BrowserSectionProps) {
         <WorkspaceMetricCard
           label="Browser service"
           value={profiles.length > 0 ? "Ready" : "No profiles yet"}
-          detail={activeProfile === null ? "Create or load a profile to start." : readString(activeProfile, "name") ?? "Active profile loaded"}
+          detail={
+            activeProfile === null
+              ? "Create or load a profile to start."
+              : (readString(activeProfile, "name") ?? "Active profile loaded")
+          }
           tone={profiles.length > 0 ? "success" : "default"}
         />
         <WorkspaceMetricCard
           label="Active profile"
-          value={activeProfile === null ? "None" : readString(activeProfile, "name") ?? app.browserActiveProfileId}
+          value={
+            activeProfile === null
+              ? "None"
+              : (readString(activeProfile, "name") ?? app.browserActiveProfileId)
+          }
           detail={activeProfile === null ? "Nothing activated." : app.browserActiveProfileId}
         />
         <WorkspaceMetricCard
           label="Downloads"
           value={downloads.length}
-          detail={downloads[0] === undefined ? "No browser artifacts loaded." : readString(asJsonObject(downloads[0]), "file_name") ?? "Latest artifact available"}
+          detail={
+            downloads[0] === undefined
+              ? "No browser artifacts loaded."
+              : (readString(asJsonObject(downloads[0]), "file_name") ?? "Latest artifact available")
+          }
         />
         <WorkspaceMetricCard
           label="Relay access"
           value={app.browserRelayToken.trim().length > 0 ? "Token minted" : "Idle"}
-          detail={app.browserRelayTokenExpiry === null ? "No active relay token." : `Expires ${formatUnixMs(app.browserRelayTokenExpiry)}`}
+          detail={
+            app.browserRelayTokenExpiry === null
+              ? "No active relay token."
+              : `Expires ${formatUnixMs(app.browserRelayTokenExpiry)}`
+          }
           tone={app.browserRelayToken.trim().length > 0 ? "success" : "default"}
         />
       </section>
@@ -153,28 +180,28 @@ export function BrowserSection({ app }: BrowserSectionProps) {
                       </WorkspaceStatusChip>
                     </div>
                     <div className="console-inline-actions">
-                       <Button
-                         aria-label={`Select ${readString(profile, "name") ?? profileId}`}
-                         variant="secondary"
-                         size="sm"
-                         onPress={() => app.setBrowserRenameProfileId(profileId)}
-                       >
-                         Select
-                       </Button>
-                       <Button
-                         aria-label={`Activate ${readString(profile, "name") ?? profileId}`}
-                         size="sm"
-                         onPress={() => void app.activateBrowserProfile(profile)}
-                         isDisabled={app.browserBusy}
-                       >
-                         Activate
-                       </Button>
-                       <Button
-                         aria-label={`Delete ${readString(profile, "name") ?? profileId}`}
-                         variant="danger-soft"
-                         size="sm"
-                         onPress={() => void app.deleteBrowserProfile(profile)}
-                         isDisabled={app.browserBusy}
+                      <Button
+                        aria-label={`Select ${readString(profile, "name") ?? profileId}`}
+                        variant="secondary"
+                        size="sm"
+                        onPress={() => app.setBrowserRenameProfileId(profileId)}
+                      >
+                        Select
+                      </Button>
+                      <Button
+                        aria-label={`Activate ${readString(profile, "name") ?? profileId}`}
+                        size="sm"
+                        onPress={() => void app.activateBrowserProfile(profile)}
+                        isDisabled={app.browserBusy}
+                      >
+                        Activate
+                      </Button>
+                      <Button
+                        aria-label={`Delete ${readString(profile, "name") ?? profileId}`}
+                        variant="danger-soft"
+                        size="sm"
+                        onPress={() => void app.deleteBrowserProfile(profile)}
+                        isDisabled={app.browserBusy}
                       >
                         Delete
                       </Button>
@@ -191,28 +218,62 @@ export function BrowserSection({ app }: BrowserSectionProps) {
           description="Create and rename flows stay focused while preserving persistence and privacy controls."
         >
           <div className="workspace-stack">
-            <form className="workspace-form" onSubmit={(event) => void app.createBrowserProfile(event)}>
+            <form
+              className="workspace-form"
+              onSubmit={(event) => void app.createBrowserProfile(event)}
+            >
               <div className="workspace-form-grid">
-                <TextInputField label="Principal" value={app.browserPrincipal} onChange={app.setBrowserPrincipal} />
-                <TextInputField label="Profile name" value={app.browserProfileName} onChange={app.setBrowserProfileName} />
-                <TextInputField label="Theme color" value={app.browserProfileTheme} onChange={app.setBrowserProfileTheme} />
+                <TextInputField
+                  label="Principal"
+                  value={app.browserPrincipal}
+                  onChange={app.setBrowserPrincipal}
+                />
+                <TextInputField
+                  label="Profile name"
+                  value={app.browserProfileName}
+                  onChange={app.setBrowserProfileName}
+                />
+                <TextInputField
+                  label="Theme color"
+                  value={app.browserProfileTheme}
+                  onChange={app.setBrowserProfileTheme}
+                />
               </div>
               <div className="workspace-inline">
-                <CheckboxField checked={app.browserProfilePersistence} label="Persistence enabled" onChange={app.setBrowserProfilePersistence} />
-                <CheckboxField checked={app.browserProfilePrivate} label="Private profile" onChange={app.setBrowserProfilePrivate} />
+                <CheckboxField
+                  checked={app.browserProfilePersistence}
+                  label="Persistence enabled"
+                  onChange={app.setBrowserProfilePersistence}
+                />
+                <CheckboxField
+                  checked={app.browserProfilePrivate}
+                  label="Private profile"
+                  onChange={app.setBrowserProfilePrivate}
+                />
               </div>
               <Button type="submit" isDisabled={app.browserBusy}>
                 {app.browserBusy ? "Creating..." : "Create profile"}
               </Button>
             </form>
 
-            <form className="workspace-form" onSubmit={(event) => {
-              event.preventDefault();
-              void app.renameBrowserProfile();
-            }}>
+            <form
+              className="workspace-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void app.renameBrowserProfile();
+              }}
+            >
               <div className="workspace-form-grid">
-                <TextInputField label="Profile ID" value={app.browserRenameProfileId} onChange={app.setBrowserRenameProfileId} />
-                <TextInputField label="New name" value={app.browserRenameName} onChange={app.setBrowserRenameName} />
+                <TextInputField
+                  label="Profile ID"
+                  value={app.browserRenameProfileId}
+                  onChange={app.setBrowserRenameProfileId}
+                />
+                <TextInputField
+                  label="New name"
+                  value={app.browserRenameName}
+                  onChange={app.setBrowserRenameName}
+                />
               </div>
               <Button variant="secondary" type="submit" isDisabled={app.browserBusy}>
                 {app.browserBusy ? "Renaming..." : "Rename profile"}
@@ -238,8 +299,16 @@ export function BrowserSection({ app }: BrowserSectionProps) {
           }
         >
           <div className="workspace-form-grid">
-            <TextInputField label="Session ID" value={app.browserDownloadsSessionId} onChange={app.setBrowserDownloadsSessionId} />
-            <CheckboxField checked={app.browserDownloadsQuarantinedOnly} label="Quarantined only" onChange={app.setBrowserDownloadsQuarantinedOnly} />
+            <TextInputField
+              label="Session ID"
+              value={app.browserDownloadsSessionId}
+              onChange={app.setBrowserDownloadsSessionId}
+            />
+            <CheckboxField
+              checked={app.browserDownloadsQuarantinedOnly}
+              label="Quarantined only"
+              onChange={app.setBrowserDownloadsQuarantinedOnly}
+            />
           </div>
 
           {downloads.length === 0 ? (
@@ -260,7 +329,9 @@ export function BrowserSection({ app }: BrowserSectionProps) {
                       </p>
                     </div>
                     <div className="workspace-inline">
-                      <WorkspaceStatusChip tone={readBool(record, "quarantined") ? "warning" : "success"}>
+                      <WorkspaceStatusChip
+                        tone={readBool(record, "quarantined") ? "warning" : "success"}
+                      >
                         {readBool(record, "quarantined") ? "quarantined" : "available"}
                       </WorkspaceStatusChip>
                       <WorkspaceStatusChip tone="default">
@@ -280,23 +351,39 @@ export function BrowserSection({ app }: BrowserSectionProps) {
         >
           <div className="workspace-stack">
             <div className="workspace-form-grid">
-              <TextInputField label="Session ID" value={app.browserRelaySessionId} onChange={app.setBrowserRelaySessionId} />
-              <TextInputField label="Extension ID" value={app.browserRelayExtensionId} onChange={app.setBrowserRelayExtensionId} />
-              <TextInputField label="TTL ms" value={app.browserRelayTtlMs} onChange={app.setBrowserRelayTtlMs} />
+              <TextInputField
+                label="Session ID"
+                value={app.browserRelaySessionId}
+                onChange={app.setBrowserRelaySessionId}
+              />
+              <TextInputField
+                label="Extension ID"
+                value={app.browserRelayExtensionId}
+                onChange={app.setBrowserRelayExtensionId}
+              />
+              <TextInputField
+                label="TTL ms"
+                value={app.browserRelayTtlMs}
+                onChange={app.setBrowserRelayTtlMs}
+              />
             </div>
             <div className="console-inline-actions">
               <Button onPress={() => void app.mintBrowserRelayToken()} isDisabled={app.browserBusy}>
                 {app.browserBusy ? "Minting..." : "Mint relay token"}
               </Button>
-              <WorkspaceStatusChip tone={app.browserRelayToken.trim().length > 0 ? "success" : "default"}>
-                {app.browserRelayTokenExpiry === null ? "No token" : `Expires ${formatUnixMs(app.browserRelayTokenExpiry)}`}
+              <WorkspaceStatusChip
+                tone={app.browserRelayToken.trim().length > 0 ? "success" : "default"}
+              >
+                {app.browserRelayTokenExpiry === null
+                  ? "No token"
+                  : `Expires ${formatUnixMs(app.browserRelayTokenExpiry)}`}
               </WorkspaceStatusChip>
             </div>
             {(app.browserRelayToken.trim().length > 0 || app.browserRelayTokenExpiry !== null) && (
               <PrettyJsonBlock
                 value={{
                   relay_token: app.browserRelayToken,
-                  expires_at_unix_ms: app.browserRelayTokenExpiry
+                  expires_at_unix_ms: app.browserRelayTokenExpiry,
                 }}
                 revealSensitiveValues={app.revealSensitiveValues}
               />
@@ -308,17 +395,25 @@ export function BrowserSection({ app }: BrowserSectionProps) {
                 options={[
                   { key: "capture_selection", label: "capture_selection" },
                   { key: "open_tab", label: "open_tab" },
-                  { key: "send_page_snapshot", label: "send_page_snapshot" }
+                  { key: "send_page_snapshot", label: "send_page_snapshot" },
                 ]}
                 value={app.browserRelayAction}
                 onChange={(value) =>
                   app.setBrowserRelayAction(
-                    value as "open_tab" | "capture_selection" | "send_page_snapshot"
+                    value as "open_tab" | "capture_selection" | "send_page_snapshot",
                   )
                 }
               />
-              <TextInputField label="Open-tab URL" value={app.browserRelayOpenTabUrl} onChange={app.setBrowserRelayOpenTabUrl} />
-              <TextInputField label="Capture selector" value={app.browserRelaySelector} onChange={app.setBrowserRelaySelector} />
+              <TextInputField
+                label="Open-tab URL"
+                value={app.browserRelayOpenTabUrl}
+                onChange={app.setBrowserRelayOpenTabUrl}
+              />
+              <TextInputField
+                label="Capture selector"
+                value={app.browserRelaySelector}
+                onChange={app.setBrowserRelaySelector}
+              />
             </div>
 
             <Button

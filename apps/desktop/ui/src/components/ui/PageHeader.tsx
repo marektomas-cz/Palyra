@@ -18,10 +18,13 @@ export function PageHeader({
   description,
   status,
   actions,
-  className
+  className,
 }: PageHeaderProps) {
   return (
-    <Card className={joinClassNames("desktop-card desktop-page-header", className)} variant="secondary">
+    <Card
+      className={joinClassNames("desktop-card desktop-page-header", className)}
+      variant="secondary"
+    >
       <CardContent className="desktop-page-header__content">
         <div className="desktop-page-header__copy">
           {eyebrow !== undefined && <p className="desktop-kicker">{eyebrow}</p>}

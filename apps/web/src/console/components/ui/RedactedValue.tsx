@@ -22,7 +22,7 @@ export function RedactedValue({
   onReveal,
   allowCopy = false,
   placeholder = "Not loaded",
-  hint
+  hint,
 }: RedactedValueProps) {
   const [copied, setCopied] = useState(false);
   const canCopy = allowCopy && typeof value === "string" && value.length > 0;

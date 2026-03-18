@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { A2uiError } from "../errors";
 import { normalizeA2uiDocument } from "../normalize";
@@ -18,7 +18,7 @@ describe("A2uiRenderer fuzz and malicious payload resilience", () => {
         expect(normalizedMarkup.includes("<script")).toBe(false);
         expect(normalizedMarkup.includes("javascript:")).toBe(false);
       }),
-      { numRuns: 220 }
+      { numRuns: 220 },
     );
   });
 
@@ -26,11 +26,11 @@ describe("A2uiRenderer fuzz and malicious payload resilience", () => {
     const operationArbitrary = fc.record({
       op: fc.constantFrom("add", "replace", "remove"),
       path: fc.string({ minLength: 0, maxLength: 48 }),
-      value: fc.option(fc.jsonValue(), { nil: undefined })
+      value: fc.option(fc.jsonValue(), { nil: undefined }),
     });
     const patchArbitrary = fc.record({
       v: fc.constant(1),
-      ops: fc.array(operationArbitrary, { minLength: 1, maxLength: 24 })
+      ops: fc.array(operationArbitrary, { minLength: 1, maxLength: 24 }),
     });
 
     fc.assert(
@@ -43,7 +43,7 @@ describe("A2uiRenderer fuzz and malicious payload resilience", () => {
           expect(error).toBeInstanceOf(A2uiError);
         }
       }),
-      { numRuns: 180 }
+      { numRuns: 180 },
     );
   });
 });

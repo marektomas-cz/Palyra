@@ -9,13 +9,13 @@ export type NavigationGroup = {
 };
 
 const SECTION_LOOKUP: Readonly<Record<Section, NavigationEntry>> = Object.fromEntries(
-  CONSOLE_SECTIONS.map((entry) => [entry.id, entry])
+  CONSOLE_SECTIONS.map((entry) => [entry.id, entry]),
 ) as Record<Section, NavigationEntry>;
 const NAV_GROUP_LABELS = {
   chat: "Chat",
   control: "Control",
   agent: "Agent",
-  settings: "Settings"
+  settings: "Settings",
 } as const;
 
 function resolveEntries(sections: readonly Section[]): readonly NavigationEntry[] {
@@ -26,23 +26,23 @@ export const CONSOLE_NAV_GROUPS: readonly NavigationGroup[] = [
   {
     id: "chat",
     label: "Chat",
-    items: resolveEntries(["chat"])
+    items: resolveEntries(["chat"]),
   },
   {
     id: "control",
     label: "Control",
-    items: resolveEntries(["overview", "approvals", "cron", "channels", "browser", "support"])
+    items: resolveEntries(["overview", "approvals", "cron", "channels", "browser", "support"]),
   },
   {
     id: "agent",
     label: "Agent",
-    items: resolveEntries(["agents", "skills", "memory"])
+    items: resolveEntries(["agents", "skills", "memory"]),
   },
   {
     id: "settings",
     label: "Settings",
-    items: resolveEntries(["auth", "access", "config", "secrets", "operations"])
-  }
+    items: resolveEntries(["auth", "access", "config", "secrets", "operations"]),
+  },
 ] as const;
 
 const SECTION_PATHS: Readonly<Record<Section, string>> = {
@@ -60,10 +60,10 @@ const SECTION_PATHS: Readonly<Record<Section, string>> = {
   secrets: "/settings/secrets",
   access: "/settings/access",
   operations: "/settings/diagnostics",
-  support: "/control/support"
+  support: "/control/support",
 };
 const SECTION_PATH_ALIASES: Readonly<Record<string, Section>> = {
-  "/control": "overview"
+  "/control": "overview",
 };
 const SECTION_GROUPS: Readonly<Record<Section, NavigationGroup["id"]>> = {
   overview: "control",
@@ -80,7 +80,7 @@ const SECTION_GROUPS: Readonly<Record<Section, NavigationGroup["id"]>> = {
   secrets: "settings",
   access: "settings",
   operations: "settings",
-  support: "control"
+  support: "control",
 };
 
 export function getSectionPath(section: Section): string {

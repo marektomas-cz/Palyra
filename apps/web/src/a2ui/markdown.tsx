@@ -39,7 +39,7 @@ export function SanitizedMarkdown({ value }: SanitizedMarkdownProps): ReactEleme
           {unorderedItems.items.map((item, index) => (
             <li key={`${cursor}-${index}`}>{renderInline(item, `${cursor}-${index}`)}</li>
           ))}
-        </ul>
+        </ul>,
       );
       cursor = unorderedItems.nextCursor;
       continue;
@@ -52,7 +52,7 @@ export function SanitizedMarkdown({ value }: SanitizedMarkdownProps): ReactEleme
           {orderedItems.items.map((item, index) => (
             <li key={`${cursor}-${index}`}>{renderInline(item, `${cursor}-${index}`)}</li>
           ))}
-        </ol>
+        </ol>,
       );
       cursor = orderedItems.nextCursor;
       continue;
@@ -61,7 +61,7 @@ export function SanitizedMarkdown({ value }: SanitizedMarkdownProps): ReactEleme
     blocks.push(
       <p key={`p-${cursor}`} className="a2ui-markdown-paragraph">
         {renderInline(line, `p-${cursor}`)}
-      </p>
+      </p>,
     );
     cursor += 1;
   }
@@ -70,7 +70,7 @@ export function SanitizedMarkdown({ value }: SanitizedMarkdownProps): ReactEleme
     blocks.push(
       <p key="empty" className="a2ui-markdown-empty">
         No content.
-      </p>
+      </p>,
     );
   }
 
@@ -123,7 +123,7 @@ function renderInline(value: string, keySeed: string): ReactNode[] {
       nodes.push(
         <code key={`code-${keySeed}-${index}`} className="a2ui-markdown-code">
           {token.slice(1, -1)}
-        </code>
+        </code>,
       );
       lastIndex = index + token.length;
       continue;
@@ -149,14 +149,9 @@ function renderInline(value: string, keySeed: string): ReactNode[] {
         nodes.push(<span key={`link-fallback-${keySeed}-${index}`}>{label}</span>);
       } else {
         nodes.push(
-          <a
-            key={`link-${keySeed}-${index}`}
-            href={href}
-            rel="noreferrer noopener"
-            target="_blank"
-          >
+          <a key={`link-${keySeed}-${index}`} href={href} rel="noreferrer noopener" target="_blank">
             {label}
-          </a>
+          </a>,
         );
       }
       lastIndex = index + token.length;
@@ -177,7 +172,7 @@ function renderInline(value: string, keySeed: string): ReactNode[] {
 function collectList(
   lines: readonly string[],
   start: number,
-  pattern: RegExp
+  pattern: RegExp,
 ): { items: string[]; nextCursor: number } {
   const items: string[] = [];
   let cursor = start;
@@ -194,6 +189,6 @@ function collectList(
 
   return {
     items,
-    nextCursor: cursor
+    nextCursor: cursor,
   };
 }

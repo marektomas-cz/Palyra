@@ -15,7 +15,7 @@ function formatSessionExpiry(unixMs: number): string {
   return new Intl.DateTimeFormat("sv-SE", {
     dateStyle: "short",
     timeStyle: "medium",
-    timeZone: "UTC"
+    timeZone: "UTC",
   })
     .format(new Date(unixMs))
     .replace(",", "");
@@ -87,9 +87,7 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
           <Card className="workspace-card" variant="default">
             <CardHeader className="flex flex-col items-start gap-3 px-4 pb-0 pt-4 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <p className="text-sm font-semibold">
-                  Session context
-                </p>
+                <p className="text-sm font-semibold">Session context</p>
                 <p className="text-xs text-muted">
                   Principal, device, and disclosure controls stay compact and secondary to the page.
                 </p>
@@ -110,7 +108,7 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
                   { label: "Principal", value: session.principal },
                   { label: "Device", value: session.device_id },
                   { label: "Channel", value: session.channel ?? "none" },
-                  { label: "Transport", value: "Cookie session + CSRF" }
+                  { label: "Transport", value: "Cookie session + CSRF" },
                 ]}
               />
             </CardContent>

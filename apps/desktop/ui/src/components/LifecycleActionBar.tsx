@@ -13,7 +13,7 @@ export function LifecycleActionBar({
   actionState,
   isGatewayRunning,
   onAction,
-  onRefresh
+  onRefresh,
 }: LifecycleActionBarProps) {
   const isBusy = actionState !== null;
 
@@ -23,11 +23,7 @@ export function LifecycleActionBar({
         <div className="desktop-action-bar__cluster">
           <p className="desktop-label">Lifecycle</p>
           <ButtonGroup className="desktop-action-group" hideSeparator>
-            <Button
-              isDisabled={isBusy}
-              variant="primary"
-              onPress={() => onAction("start")}
-            >
+            <Button isDisabled={isBusy} variant="primary" onPress={() => onAction("start")}>
               {actionLabel(actionState, "start", "Start Palyra", "Starting Palyra...")}
             </Button>
             <Button
@@ -50,11 +46,7 @@ export function LifecycleActionBar({
         <div className="desktop-action-bar__cluster desktop-action-bar__cluster--end">
           <p className="desktop-label">Handoff</p>
           <ButtonGroup className="desktop-action-group" hideSeparator>
-            <Button
-              isDisabled={isBusy}
-              variant="ghost"
-              onPress={() => onAction("dashboard")}
-            >
+            <Button isDisabled={isBusy} variant="ghost" onPress={() => onAction("dashboard")}>
               {actionLabel(actionState, "dashboard", "Open Dashboard", "Opening Dashboard...")}
             </Button>
             <Button isDisabled={isBusy} variant="ghost" onPress={onRefresh}>
@@ -68,7 +60,9 @@ export function LifecycleActionBar({
                 <span>Waiting for the desktop bridge to finish the requested action.</span>
               </>
             ) : (
-              <span>Use lifecycle first, then hand off to the dashboard when the runtime is ready.</span>
+              <span>
+                Use lifecycle first, then hand off to the dashboard when the runtime is ready.
+              </span>
             )}
           </div>
         </div>

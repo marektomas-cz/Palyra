@@ -1,6 +1,8 @@
 import { controlPlaneContract } from "./m56ControlPlane";
 
-export function configInspectFixture(documentToml = "version = 1\n[model_provider]\nauth_profile_id = \"openai-default\"\n") {
+export function configInspectFixture(
+  documentToml = 'version = 1\n[model_provider]\nauth_profile_id = "openai-default"\n',
+) {
   return {
     contract: controlPlaneContract(),
     source_path: "palyra.toml",
@@ -25,7 +27,10 @@ export function configValidationFixture(valid = true) {
   };
 }
 
-export function configMutationFixture(operation = "set", changedKey = "model_provider.auth_profile_id") {
+export function configMutationFixture(
+  operation = "set",
+  changedKey = "model_provider.auth_profile_id",
+) {
   return {
     contract: controlPlaneContract(),
     operation,
@@ -78,9 +83,7 @@ export function secretRevealFixture() {
 
 export function cronJobsFixture() {
   return {
-    jobs: [
-      { job_id: "cron-1", name: "nightly", enabled: true },
-    ],
+    jobs: [{ job_id: "cron-1", name: "nightly", enabled: true }],
   };
 }
 

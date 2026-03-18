@@ -41,7 +41,8 @@ async function loadConfig() {
   const stored = state[STORAGE_KEY] || {};
   const defaults = defaultConfig();
   return {
-    relayBaseUrl: typeof stored.relayBaseUrl === "string" ? stored.relayBaseUrl : defaults.relayBaseUrl,
+    relayBaseUrl:
+      typeof stored.relayBaseUrl === "string" ? stored.relayBaseUrl : defaults.relayBaseUrl,
     sessionId: typeof stored.sessionId === "string" ? stored.sessionId : defaults.sessionId,
     relayToken: typeof stored.relayToken === "string" ? stored.relayToken : defaults.relayToken,
     extensionId: typeof stored.extensionId === "string" ? stored.extensionId : defaults.extensionId,
@@ -50,10 +51,7 @@ async function loadConfig() {
         ? stored.openTabAllowlistRaw
         : defaults.openTabAllowlistRaw,
     maxDomSnapshotBytes: toSafeNumber(stored.maxDomSnapshotBytes, defaults.maxDomSnapshotBytes),
-    maxVisibleTextBytes: toSafeNumber(
-      stored.maxVisibleTextBytes,
-      defaults.maxVisibleTextBytes,
-    ),
+    maxVisibleTextBytes: toSafeNumber(stored.maxVisibleTextBytes, defaults.maxVisibleTextBytes),
     maxScreenshotBytes: toSafeNumber(stored.maxScreenshotBytes, defaults.maxScreenshotBytes),
   };
 }
@@ -177,11 +175,12 @@ async function dispatchRelayAction(config, actionBody) {
   let data;
   try {
     data = text ? JSON.parse(text) : {};
-  } catch (_error) {
+  } catch {
     data = { raw: text };
   }
   if (!response.ok) {
-    const message = data?.error || data?.message || `Relay request failed (HTTP ${response.status}).`;
+    const message =
+      data?.error || data?.message || `Relay request failed (HTTP ${response.status}).`;
     throw new Error(message);
   }
   return data;

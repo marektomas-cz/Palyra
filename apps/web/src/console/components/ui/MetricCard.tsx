@@ -11,12 +11,7 @@ type MetricCardProps = {
   tone?: UiTone;
 };
 
-export function MetricCard({
-  label,
-  value,
-  detail,
-  tone = "default"
-}: MetricCardProps) {
+export function MetricCard({ label, value, detail, tone = "default" }: MetricCardProps) {
   return (
     <SectionCard
       title={label}

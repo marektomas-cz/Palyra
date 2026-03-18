@@ -5,26 +5,11 @@
     "moduleResolution": "Bundler",
     "strict": true,
     "jsx": "react-jsx",
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable"
-    ],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "noEmit": true,
     "skipLibCheck": true,
-    "types": [
-      "vite/client",
-      "vitest/globals"
-    ]
+    "types": ["vite/client", "vite-plus/test/globals"]
   },
-  "include": [
-    "src",
-    "vite.config.ts",
-    "vitest.setup.ts"
-  ],
-  "exclude": [
-    "dist",
-    "node_modules",
-    "coverage"
-  ]
+  "include": ["src", "vite.config.ts", "vitest.setup.ts"],
+  "exclude": ["dist", "node_modules", "coverage"]
 }

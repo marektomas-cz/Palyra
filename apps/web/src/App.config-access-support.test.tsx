@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { App } from "./App";
 import {
@@ -18,11 +18,7 @@ import {
   secretMetadataListFixture,
   secretRevealFixture,
 } from "./console/__fixtures__/m56Operations";
-import {
-  createFetchRouter,
-  jsonResponse,
-  sessionResponse,
-} from "./console/testUtils";
+import { createFetchRouter, jsonResponse, sessionResponse } from "./console/testUtils";
 import type { MockRequest } from "./console/testUtils";
 
 afterEach(() => {
@@ -36,114 +32,117 @@ describe("M56 config, access, and support surfaces", () => {
     "operates config lifecycle and explicit secret reveal with default redaction",
     { timeout: 15_000 },
     async () => {
-    const initialToml = "version = 1\n[model_provider]\nauth_profile_id = \"openai-default\"\n";
-    const migratedToml = "version = 2\n[model_provider]\nauth_profile_id = \"openai-migrated\"\n";
-    let currentToml = initialToml;
+      const initialToml = 'version = 1\n[model_provider]\nauth_profile_id = "openai-default"\n';
+      const migratedToml = 'version = 2\n[model_provider]\nauth_profile_id = "openai-migrated"\n';
+      let currentToml = initialToml;
 
-    const fetchMock = createFetchRouter(
-      (request) => routeOverviewRequests(request),
-      (request) => {
-        if (request.path === "/console/v1/config/inspect" && request.method === "POST") {
-          return jsonResponse(configInspectFixture(currentToml));
-        }
-        if (request.path === "/console/v1/config/validate" && request.method === "POST") {
-          return jsonResponse(configValidationFixture(true));
-        }
-        if (request.path === "/console/v1/config/mutate" && request.method === "POST") {
-          const body = JSON.parse(request.body) as { key: string; value?: string };
-          expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
-          currentToml = `version = 1\n[model_provider]\nauth_profile_id = ${body.value ?? "\"unset\"" }\n`;
-          return jsonResponse(configMutationFixture("set", body.key));
-        }
-        if (request.path === "/console/v1/config/migrate" && request.method === "POST") {
-          expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
-          currentToml = migratedToml;
-          return jsonResponse(configMutationFixture("migrate", "config_version"));
-        }
-        if (request.path === "/console/v1/config/recover" && request.method === "POST") {
-          expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
-          currentToml = initialToml;
-          return jsonResponse(configMutationFixture("recover", "config_version"));
-        }
-        if (request.path === "/console/v1/secrets" && request.method === "GET") {
-          expect(request.url.searchParams.get("scope")).toBe("global");
-          return jsonResponse(secretMetadataListFixture());
-        }
-        if (request.path === "/console/v1/secrets/metadata" && request.method === "GET") {
-          return jsonResponse(secretMetadataFixture());
-        }
-        if (request.path === "/console/v1/secrets" && request.method === "POST") {
-          expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
-          return jsonResponse(secretMetadataFixture());
-        }
-        if (request.path === "/console/v1/secrets/reveal" && request.method === "POST") {
-          expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
-          return jsonResponse(secretRevealFixture());
-        }
-        if (request.path === "/console/v1/secrets/delete" && request.method === "POST") {
-          expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
-          return jsonResponse(secretMetadataFixture());
-        }
-        return undefined;
-      },
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<App />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Config" }));
-    expect(await screen.findByRole("heading", { name: "Config" })).toBeInTheDocument();
-    await waitFor(() => {
-      expect(document.body).toHaveTextContent(
-        "Remote gateway exposure requires explicit verification and operator acknowledgement."
+      const fetchMock = createFetchRouter(
+        (request) => routeOverviewRequests(request),
+        (request) => {
+          if (request.path === "/console/v1/config/inspect" && request.method === "POST") {
+            return jsonResponse(configInspectFixture(currentToml));
+          }
+          if (request.path === "/console/v1/config/validate" && request.method === "POST") {
+            return jsonResponse(configValidationFixture(true));
+          }
+          if (request.path === "/console/v1/config/mutate" && request.method === "POST") {
+            const body = JSON.parse(request.body) as { key: string; value?: string };
+            expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
+            currentToml = `version = 1\n[model_provider]\nauth_profile_id = ${body.value ?? '"unset"'}\n`;
+            return jsonResponse(configMutationFixture("set", body.key));
+          }
+          if (request.path === "/console/v1/config/migrate" && request.method === "POST") {
+            expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
+            currentToml = migratedToml;
+            return jsonResponse(configMutationFixture("migrate", "config_version"));
+          }
+          if (request.path === "/console/v1/config/recover" && request.method === "POST") {
+            expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
+            currentToml = initialToml;
+            return jsonResponse(configMutationFixture("recover", "config_version"));
+          }
+          if (request.path === "/console/v1/secrets" && request.method === "GET") {
+            expect(request.url.searchParams.get("scope")).toBe("global");
+            return jsonResponse(secretMetadataListFixture());
+          }
+          if (request.path === "/console/v1/secrets/metadata" && request.method === "GET") {
+            return jsonResponse(secretMetadataFixture());
+          }
+          if (request.path === "/console/v1/secrets" && request.method === "POST") {
+            expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
+            return jsonResponse(secretMetadataFixture());
+          }
+          if (request.path === "/console/v1/secrets/reveal" && request.method === "POST") {
+            expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
+            return jsonResponse(secretRevealFixture());
+          }
+          if (request.path === "/console/v1/secrets/delete" && request.method === "POST") {
+            expect(request.headers.get("x-palyra-csrf-token")).toBe("csrf-1");
+            return jsonResponse(secretMetadataFixture());
+          }
+          return undefined;
+        },
       );
-    });
+      vi.stubGlobal("fetch", fetchMock);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Mutate" }));
-    fireEvent.change(screen.getByLabelText("Key"), { target: { value: "model_provider.auth_profile_id" } });
-    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "\"openai-rotated\"" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply mutation" }));
+      render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Config mutation applied.")).toBeInTheDocument();
-    });
-    expect(screen.getAllByText(/openai-rotated/).length).toBeGreaterThan(0);
+      fireEvent.click(await screen.findByRole("button", { name: "Config" }));
+      expect(await screen.findByRole("heading", { name: "Config" })).toBeInTheDocument();
+      await waitFor(() => {
+        expect(document.body).toHaveTextContent(
+          "Remote gateway exposure requires explicit verification and operator acknowledgement.",
+        );
+      });
 
-    fireEvent.click(screen.getByRole("tab", { name: "Inspect" }));
-    fireEvent.click(screen.getByRole("button", { name: "Migrate" }));
-    await waitFor(() => {
-      expect(screen.getByText("Config migration completed.")).toBeInTheDocument();
-    });
+      fireEvent.click(screen.getByRole("tab", { name: "Mutate" }));
+      fireEvent.change(screen.getByLabelText("Key"), {
+        target: { value: "model_provider.auth_profile_id" },
+      });
+      fireEvent.change(screen.getByLabelText("Value"), { target: { value: '"openai-rotated"' } });
+      fireEvent.click(screen.getByRole("button", { name: "Apply mutation" }));
 
-    fireEvent.click(screen.getByRole("tab", { name: "Recover" }));
-    fireEvent.click(screen.getByRole("button", { name: "Recover backup" }));
-    await waitFor(() => {
-      expect(screen.getByText("Recovered config from backup 1.")).toBeInTheDocument();
-    });
+      await waitFor(() => {
+        expect(screen.getByText("Config mutation applied.")).toBeInTheDocument();
+      });
+      expect(screen.getAllByText(/openai-rotated/).length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Secrets" }));
-    expect(await screen.findByRole("heading", { name: "Secrets" })).toBeInTheDocument();
-    fireEvent.change(screen.getAllByLabelText("Key")[0], { target: { value: "openai_api_key" } });
-    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "sk-test-key" } });
-    fireEvent.click(screen.getByRole("button", { name: "Store secret" }));
-    await waitFor(() => {
-      expect(screen.getByText("Secret metadata refreshed.")).toBeInTheDocument();
-    });
+      fireEvent.click(screen.getByRole("tab", { name: "Inspect" }));
+      fireEvent.click(screen.getByRole("button", { name: "Migrate" }));
+      await waitFor(() => {
+        expect(screen.getByText("Config migration completed.")).toBeInTheDocument();
+      });
 
-    fireEvent.click(screen.getByRole("button", { name: "Explicit reveal" }));
-    expect(screen.getByText("Sensitive / masked")).toBeInTheDocument();
-    expect(screen.queryByText("sk-test-key")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: "Recover" }));
+      fireEvent.click(screen.getByRole("button", { name: "Recover backup" }));
+      await waitFor(() => {
+        expect(screen.getByText("Recovered config from backup 1.")).toBeInTheDocument();
+      });
 
-    fireEvent.click(screen.getByLabelText("Reveal sensitive values"));
-    expect(await screen.findByText(/sk-test-key/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Secrets" }));
+      expect(await screen.findByRole("heading", { name: "Secrets" })).toBeInTheDocument();
+      fireEvent.change(screen.getAllByLabelText("Key")[0], { target: { value: "openai_api_key" } });
+      fireEvent.change(screen.getByLabelText("Value"), { target: { value: "sk-test-key" } });
+      fireEvent.click(screen.getByRole("button", { name: "Store secret" }));
+      await waitFor(() => {
+        expect(screen.getByText("Secret metadata refreshed.")).toBeInTheDocument();
+      });
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Delete secret" })[0]);
-    const deleteDialog = await screen.findByRole("alertdialog", { name: "Delete secret" });
-    fireEvent.click(within(deleteDialog).getByRole("button", { name: "Delete secret" }));
-    await waitFor(() => {
-      expect(screen.getByText("Secret deleted.")).toBeInTheDocument();
-    });
-  });
+      fireEvent.click(screen.getByRole("button", { name: "Explicit reveal" }));
+      expect(screen.getByText("Sensitive / masked")).toBeInTheDocument();
+      expect(screen.queryByText("sk-test-key")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Reveal sensitive values"));
+      expect(await screen.findByText(/sk-test-key/)).toBeInTheDocument();
+
+      fireEvent.click(screen.getAllByRole("button", { name: "Delete secret" })[0]);
+      const deleteDialog = await screen.findByRole("alertdialog", { name: "Delete secret" });
+      fireEvent.click(within(deleteDialog).getByRole("button", { name: "Delete secret" }));
+      await waitFor(() => {
+        expect(screen.getByText("Secret deleted.")).toBeInTheDocument();
+      });
+    },
+  );
 
   it("surfaces access CLI handoffs and support bundle recovery workflows", async () => {
     let pairingSummary = pairingSummaryFixture();
@@ -187,7 +186,10 @@ describe("M56 config, access, and support surfaces", () => {
           });
           return jsonResponse(supportBundleJobFixture("support-job-2"));
         }
-        if (request.path === "/console/v1/support-bundle/jobs/support-job-2" && request.method === "GET") {
+        if (
+          request.path === "/console/v1/support-bundle/jobs/support-job-2" &&
+          request.method === "GET"
+        ) {
           return jsonResponse(supportBundleJobFixture("support-job-2"));
         }
         return undefined;
@@ -208,11 +210,15 @@ describe("M56 config, access, and support surfaces", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Support and Recovery" }));
-    expect(await screen.findByRole("heading", { name: "Support and Recovery" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Support and Recovery" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Provider auth recovery")).toBeInTheDocument();
     expect(screen.getAllByText("Bundle reliability").length).toBeGreaterThan(0);
     expect(screen.getByText("Triage playbook")).toBeInTheDocument();
-    expect(screen.getByText("docs/operations/observability-supportability-v1.md")).toBeInTheDocument();
+    expect(
+      screen.getByText("docs/operations/observability-supportability-v1.md"),
+    ).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Retain jobs"), { target: { value: "8" } });
     fireEvent.click(screen.getByRole("button", { name: "Queue support bundle" }));
@@ -224,7 +230,7 @@ describe("M56 config, access, and support surfaces", () => {
     expect((await screen.findAllByText(/support-job-2/)).length).toBeGreaterThan(0);
     await waitFor(() => {
       expect(document.body).toHaveTextContent(
-        "Remote gateway exposure requires explicit verification and operator acknowledgement."
+        "Remote gateway exposure requires explicit verification and operator acknowledgement.",
       );
     });
   });
@@ -236,7 +242,7 @@ describe("M56 config, access, and support surfaces", () => {
     render(<App />);
 
     const cliHandoffs = capabilityCatalogFixture().capabilities.filter(
-      (entry) => entry.dashboard_exposure === "cli_handoff"
+      (entry) => entry.dashboard_exposure === "cli_handoff",
     );
     fireEvent.click(await screen.findByRole("button", { name: "Access" }));
     await waitFor(() => {
@@ -250,8 +256,7 @@ describe("M56 config, access, and support surfaces", () => {
     expect(screen.getByText(cliHandoffs[3].cli_handoff_commands[1])).toBeInTheDocument();
 
     expect(screen.queryByText("Chat sessions and run status")).not.toBeInTheDocument();
-    },
-  );
+  });
 });
 
 function routeOverviewRequests(request: MockRequest, jobs = supportBundleJobsFixture().jobs) {

@@ -2,7 +2,7 @@ import type {
   BrowserServiceSnapshot,
   ControlCenterSnapshot,
   RuntimeStatus,
-  ServiceProcessSnapshot
+  ServiceProcessSnapshot,
 } from "../lib/desktopApi";
 import type { UiTone } from "./ui";
 
@@ -49,7 +49,7 @@ export function actionLabel(
   action: ActionName,
   name: Exclude<ActionName, null>,
   idle: string,
-  busy: string
+  busy: string,
 ): string {
   return action === name ? busy : idle;
 }
@@ -92,7 +92,8 @@ export function processSummary(snapshot: ServiceProcessSnapshot): string {
   }
 
   const pid = snapshot.pid === null ? "pid n/a" : `pid ${snapshot.pid}`;
-  const ports = snapshot.bound_ports.length === 0 ? "no ports" : `ports ${snapshot.bound_ports.join(", ")}`;
+  const ports =
+    snapshot.bound_ports.length === 0 ? "no ports" : `ports ${snapshot.bound_ports.join(", ")}`;
   return `${snapshot.liveness} · ${pid} · ${ports}`;
 }
 

@@ -7,7 +7,7 @@ import {
   InlineNotice as WorkspaceInlineNotice,
   KeyValueList as WorkspaceKeyValueList,
   RedactedValue as WorkspaceRedactedValue,
-  workspaceToneForState
+  workspaceToneForState,
 } from "../ui";
 
 type WorkspaceTableProps = {
@@ -28,15 +28,10 @@ export {
   WorkspaceInlineNotice,
   WorkspaceKeyValueList,
   WorkspaceRedactedValue,
-  workspaceToneForState
+  workspaceToneForState,
 };
 
-export function WorkspaceTable({
-  ariaLabel,
-  columns,
-  children,
-  className
-}: WorkspaceTableProps) {
+export function WorkspaceTable({ ariaLabel, columns, children, className }: WorkspaceTableProps) {
   const rows = Children.toArray(children).flatMap((child, rowIndex) => {
     if (!isValidElement<{ children?: ReactNode }>(child)) {
       return [];
@@ -53,8 +48,8 @@ export function WorkspaceTable({
           }
 
           return (cell as ReactElement<{ children?: ReactNode }>).props.children ?? null;
-        })
-      }
+        }),
+      },
     ] satisfies LegacyRow[];
   });
 
@@ -66,7 +61,7 @@ export function WorkspaceTable({
         key: `column-${index}`,
         label: column,
         render: (row: LegacyRow) => row.cells[index] ?? null,
-        align: index === columns.length - 1 ? "end" : "start"
+        align: index === columns.length - 1 ? "end" : "start",
       }))}
       emptyDescription="No rows are currently available for this table."
       emptyTitle="No rows loaded"

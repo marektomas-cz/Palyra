@@ -1,12 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { App } from "./App";
 import {
   auditEventsFixture,
   capabilityCatalogFixture,
   deploymentPostureFixture,
-  supportBundleJobsFixture
+  supportBundleJobsFixture,
 } from "./console/__fixtures__/m56ControlPlane";
 
 afterEach(() => {
@@ -22,9 +22,12 @@ describe("M35 web console app", () => {
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Operator Dashboard" })).toBeInTheDocument();
-    }, { timeout: 4_000 });
+    await waitFor(
+      () => {
+        expect(screen.getByRole("heading", { name: "Operator Dashboard" })).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
     expect(screen.queryByRole("button", { name: "Approvals" })).not.toBeInTheDocument();
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.classList.contains("dark")).toBe(true);
@@ -40,48 +43,62 @@ describe("M35 web console app", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 300
-      })
+        expires_at_unix_ms: 300,
+      }),
     ]);
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
-    }, { timeout: 4_000 });
+    await waitFor(
+      () => {
+        expect(
+          screen.getByRole("heading", { name: "Web Dashboard Operator Surface" }),
+        ).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
     const sessionCalls = fetchMock.mock.calls.filter(
-      (call) => requestUrl(call[0]) === "/console/v1/auth/session"
+      (call) => requestUrl(call[0]) === "/console/v1/auth/session",
     );
     expect(sessionCalls).toHaveLength(3);
   });
 
   it("consumes the desktop handoff token before showing the auth screen", async () => {
     window.localStorage.removeItem("palyra.console.theme");
-    window.history.replaceState(null, "", "/?desktop_handoff_token=handoff-token#/control/overview");
+    window.history.replaceState(
+      null,
+      "",
+      "/?desktop_handoff_token=handoff-token#/control/overview",
+    );
     const fetchMock = createQueuedFetch([
       jsonResponse({
         principal: "admin:desktop-control-center",
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 300
-      })
+        expires_at_unix_ms: 300,
+      }),
     ]);
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
-    }, { timeout: 4_000 });
+    await waitFor(
+      () => {
+        expect(
+          screen.getByRole("heading", { name: "Web Dashboard Operator Surface" }),
+        ).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
     expect(screen.queryByRole("heading", { name: "Operator Dashboard" })).not.toBeInTheDocument();
     const sessionCalls = fetchMock.mock.calls.filter(
-      (call) => requestUrl(call[0]) === "/console/v1/auth/session"
+      (call) => requestUrl(call[0]) === "/console/v1/auth/session",
     );
     expect(sessionCalls).toHaveLength(0);
     const handoffCalls = fetchMock.mock.calls.filter(
-      (call) => requestUrl(call[0]) === "/console/v1/auth/browser-handoff/session"
+      (call) => requestUrl(call[0]) === "/console/v1/auth/browser-handoff/session",
     );
     expect(handoffCalls).toHaveLength(1);
     expect(window.location.search).toBe("");
@@ -89,7 +106,11 @@ describe("M35 web console app", () => {
 
   it("falls back to the existing session when the desktop handoff token is already spent", async () => {
     window.localStorage.removeItem("palyra.console.theme");
-    window.history.replaceState(null, "", "/?desktop_handoff_token=handoff-token#/control/overview");
+    window.history.replaceState(
+      null,
+      "",
+      "/?desktop_handoff_token=handoff-token#/control/overview",
+    );
     const fetchMock = createQueuedFetch([
       jsonResponse({ error: "missing session" }, 403),
       jsonResponse({
@@ -97,22 +118,27 @@ describe("M35 web console app", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 300
-      })
+        expires_at_unix_ms: 300,
+      }),
     ]);
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
-    }, { timeout: 4_000 });
+    await waitFor(
+      () => {
+        expect(
+          screen.getByRole("heading", { name: "Web Dashboard Operator Surface" }),
+        ).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
     const sessionCalls = fetchMock.mock.calls.filter(
-      (call) => requestUrl(call[0]) === "/console/v1/auth/session"
+      (call) => requestUrl(call[0]) === "/console/v1/auth/session",
     );
     expect(sessionCalls).toHaveLength(1);
     const handoffCalls = fetchMock.mock.calls.filter(
-      (call) => requestUrl(call[0]) === "/console/v1/auth/browser-handoff/session"
+      (call) => requestUrl(call[0]) === "/console/v1/auth/browser-handoff/session",
     );
     expect(handoffCalls).toHaveLength(1);
     expect(window.location.search).toBe("");
@@ -131,20 +157,25 @@ describe("M35 web console app", () => {
         device_id: "device-1",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 300
-      })
+        expires_at_unix_ms: 300,
+      }),
     ]);
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Web Dashboard" })).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
-    }, { timeout: 4_000 });
+    await waitFor(
+      () => {
+        expect(
+          screen.getByRole("heading", { name: "Web Dashboard Operator Surface" }),
+        ).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
     expect(screen.queryByRole("heading", { name: "Operator Dashboard" })).not.toBeInTheDocument();
     const sessionCalls = fetchMock.mock.calls.filter(
-      (call) => requestUrl(call[0]) === "/console/v1/auth/session"
+      (call) => requestUrl(call[0]) === "/console/v1/auth/session",
     );
     expect(sessionCalls).toHaveLength(6);
   });
@@ -161,8 +192,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
       throw new Error(`Unhandled mocked request: ${method} ${path}`);
@@ -171,13 +202,21 @@ describe("M35 web console app", () => {
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
-    }, { timeout: 4_000 });
+    await waitFor(
+      () => {
+        expect(
+          screen.getByRole("heading", { name: "Web Dashboard Operator Surface" }),
+        ).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
     expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.queryByText("Unexpected failure.")).not.toBeInTheDocument();
-    }, { timeout: 4_000 });
+    await waitFor(
+      () => {
+        expect(screen.queryByText("Unexpected failure.")).not.toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
   });
 
   it("clears operator-scoped state on sign-out before next sign-in refresh completes", async () => {
@@ -198,8 +237,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-a",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
@@ -207,14 +246,14 @@ describe("M35 web console app", () => {
         if (activePrincipal === "admin:user-a") {
           return Promise.resolve(
             jsonResponse({
-              approvals: [{ approval_id: "APPROVAL-A", subject_type: "tool", decision: "pending" }]
-            })
+              approvals: [{ approval_id: "APPROVAL-A", subject_type: "tool", decision: "pending" }],
+            }),
           );
         }
         return userBApprovalsReady.then(() =>
           jsonResponse({
-            approvals: [{ approval_id: "APPROVAL-B", subject_type: "tool", decision: "pending" }]
-          })
+            approvals: [{ approval_id: "APPROVAL-B", subject_type: "tool", decision: "pending" }],
+          }),
         );
       }
 
@@ -231,8 +270,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-b",
             issued_at_unix_ms: 200,
-            expires_at_unix_ms: 400
-          })
+            expires_at_unix_ms: 400,
+          }),
         );
       }
 
@@ -242,19 +281,26 @@ describe("M35 web console app", () => {
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Approvals" }));
-    await waitFor(() => {
-      expect((screen.getAllByText("APPROVAL-A").length)).toBeGreaterThan(0);
-    }, { timeout: 5000 });
+    await waitFor(
+      () => {
+        expect(screen.getAllByText("APPROVAL-A").length).toBeGreaterThan(0);
+      },
+      { timeout: 5000 },
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     expect(await screen.findByRole("heading", { name: "Operator Dashboard" })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Admin token"), { target: { value: "token-b" } });
-    fireEvent.change(screen.getByLabelText("Operator principal"), { target: { value: "admin:user-b" } });
+    fireEvent.change(screen.getByLabelText("Operator principal"), {
+      target: { value: "admin:user-b" },
+    });
     fireEvent.change(screen.getByLabelText("Device label"), { target: { value: "device-b" } });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
-    expect(await screen.findByRole("heading", { name: "Web Dashboard Operator Surface" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Web Dashboard Operator Surface" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Approvals" }));
     expect(screen.queryByText("APPROVAL-A")).not.toBeInTheDocument();
     expect(screen.getByText("No approval records loaded.")).toBeInTheDocument();
@@ -284,22 +330,24 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
       if (path === "/console/v1/approvals" && method === "GET") {
         return Promise.resolve(
           jsonResponse({
-            approvals: [{ approval_id: "A1", subject_type: "tool", decision: approvalDecision }]
-          })
+            approvals: [{ approval_id: "A1", subject_type: "tool", decision: approvalDecision }],
+          }),
         );
       }
 
       if (path === "/console/v1/approvals/A1/decision" && method === "POST") {
         approvalDecision = "allow";
-        return Promise.resolve(jsonResponse({ approval: { approval_id: "A1", decision: "allow" } }));
+        return Promise.resolve(
+          jsonResponse({ approval: { approval_id: "A1", decision: "allow" } }),
+        );
       }
 
       throw new Error(`Unhandled mocked request: ${method} ${path}`);
@@ -316,7 +364,7 @@ describe("M35 web console app", () => {
     });
 
     const decisionCalls = fetchMock.mock.calls.filter(
-      (call) => requestUrl(call[0]) === "/console/v1/approvals/A1/decision"
+      (call) => requestUrl(call[0]) === "/console/v1/approvals/A1/decision",
     );
     expect(decisionCalls.length).toBeGreaterThan(0);
     const decisionRequest = decisionCalls[decisionCalls.length - 1][1];
@@ -338,8 +386,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
@@ -367,7 +415,9 @@ describe("M35 web console app", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "New automation" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "web-job" } });
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "run from web console" } });
+    fireEvent.change(screen.getByLabelText("Prompt"), {
+      target: { value: "run from web console" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
 
     await waitFor(() => {
@@ -383,9 +433,13 @@ describe("M35 web console app", () => {
     const [, createRequest] = findRequestCall(fetchMock, "/console/v1/cron/jobs", "POST");
     expect(createRequest?.method).toBe("POST");
 
-    const [, toggleRequest] = findRequestCall(fetchMock, "/console/v1/cron/jobs/J1/enabled", "POST");
+    const [, toggleRequest] = findRequestCall(
+      fetchMock,
+      "/console/v1/cron/jobs/J1/enabled",
+      "POST",
+    );
     expect(toggleRequest?.method).toBe("POST");
-    expect(requestBody(toggleRequest?.body)).toContain("\"enabled\":false");
+    expect(requestBody(toggleRequest?.body)).toContain('"enabled":false');
   });
 
   it("manages channel connectors from channels section with CSRF-protected enable toggle", async () => {
@@ -400,7 +454,7 @@ describe("M35 web console app", () => {
         enabled,
         readiness: "ready",
         liveness: enabled ? "running" : "stopped",
-        queue_depth: { pending_outbox: 0, dead_letters: enabled ? 1 : 0 }
+        queue_depth: { pending_outbox: 0, dead_letters: enabled ? 1 : 0 },
       };
 
       if (path === "/console/v1/auth/session" && method === "GET") {
@@ -411,8 +465,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
@@ -436,8 +490,8 @@ describe("M35 web console app", () => {
                       event_type: "outbox.retry",
                       level: "warn",
                       message: "retry scheduled",
-                      created_at_unix_ms: 111
-                    }
+                      created_at_unix_ms: 111,
+                    },
                   ],
                   dead_letters: [
                     {
@@ -446,12 +500,12 @@ describe("M35 web console app", () => {
                       envelope_id: "env-1:0",
                       reason: "permanent",
                       payload: { text: "failed" },
-                      created_at_unix_ms: 112
-                    }
-                  ]
+                      created_at_unix_ms: 112,
+                    },
+                  ],
                 }
-              : { events: [], dead_letters: [] }
-          )
+              : { events: [], dead_letters: [] },
+          ),
         );
       }
 
@@ -461,28 +515,30 @@ describe("M35 web console app", () => {
             config: {
               enabled: true,
               default_direct_message_policy: "deny",
-              channels: [{ channel: "echo:default", enabled: true }]
+              channels: [{ channel: "echo:default", enabled: true }],
             },
-            config_hash: enabled ? "router-hash-1" : "router-hash-2"
-          })
+            config_hash: enabled ? "router-hash-1" : "router-hash-2",
+          }),
         );
       }
 
       if (path === "/console/v1/channels/router/warnings" && method === "GET") {
         return Promise.resolve(
-          jsonResponse({ warnings: [], config_hash: enabled ? "router-hash-1" : "router-hash-2" })
+          jsonResponse({ warnings: [], config_hash: enabled ? "router-hash-1" : "router-hash-2" }),
         );
       }
 
       if (path === "/console/v1/channels/router/pairings" && method === "GET") {
         return Promise.resolve(
-          jsonResponse({ pairings: [], config_hash: enabled ? "router-hash-1" : "router-hash-2" })
+          jsonResponse({ pairings: [], config_hash: enabled ? "router-hash-1" : "router-hash-2" }),
         );
       }
 
       if (path === "/console/v1/channels/echo%3Adefault/enabled" && method === "POST") {
         enabled = false;
-        return Promise.resolve(jsonResponse({ connector: { ...connector, enabled: false, liveness: "stopped" } }));
+        return Promise.resolve(
+          jsonResponse({ connector: { ...connector, enabled: false, liveness: "stopped" } }),
+        );
       }
 
       throw new Error(`Unhandled mocked request: ${method} ${path}`);
@@ -492,10 +548,13 @@ describe("M35 web console app", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Channels and Router" }));
     expect(await screen.findByRole("heading", { name: "Channels" })).toBeInTheDocument();
-    await waitFor(() => {
-      expect(document.body).toHaveTextContent("echo:default");
-      expect(document.body).toHaveTextContent("internal_test_only");
-    }, { timeout: 5_000 });
+    await waitFor(
+      () => {
+        expect(document.body).toHaveTextContent("echo:default");
+        expect(document.body).toHaveTextContent("internal_test_only");
+      },
+      { timeout: 5_000 },
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Disable echo:default" }));
 
@@ -503,11 +562,15 @@ describe("M35 web console app", () => {
       expect(screen.getByText("Connector disabled.")).toBeInTheDocument();
     });
 
-    const [, request] = findRequestCall(fetchMock, "/console/v1/channels/echo%3Adefault/enabled", "POST");
+    const [, request] = findRequestCall(
+      fetchMock,
+      "/console/v1/channels/echo%3Adefault/enabled",
+      "POST",
+    );
     const headers = new Headers(request?.headers);
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(request?.method).toBe("POST");
-    expect(requestBody(request?.body)).toContain("\"enabled\":false");
+    expect(requestBody(request?.body)).toContain('"enabled":false');
   });
 
   it("hides deferred connectors from channels section and selects the first visible connector", async () => {
@@ -523,8 +586,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
@@ -539,7 +602,7 @@ describe("M35 web console app", () => {
                 enabled: false,
                 readiness: "misconfigured",
                 liveness: "stopped",
-                queue_depth: { pending_outbox: 0, dead_letters: 0 }
+                queue_depth: { pending_outbox: 0, dead_letters: 0 },
               },
               {
                 connector_id: "echo:default",
@@ -548,10 +611,10 @@ describe("M35 web console app", () => {
                 enabled: true,
                 readiness: "ready",
                 liveness: "running",
-                queue_depth: { pending_outbox: 0, dead_letters: 0 }
-              }
-            ]
-          })
+                queue_depth: { pending_outbox: 0, dead_letters: 0 },
+              },
+            ],
+          }),
         );
       }
 
@@ -565,9 +628,9 @@ describe("M35 web console app", () => {
               enabled: true,
               readiness: "ready",
               liveness: "running",
-              queue_depth: { pending_outbox: 0, dead_letters: 0 }
-            }
-          })
+              queue_depth: { pending_outbox: 0, dead_letters: 0 },
+            },
+          }),
         );
       }
 
@@ -581,10 +644,10 @@ describe("M35 web console app", () => {
             config: {
               enabled: true,
               default_direct_message_policy: "deny",
-              channels: [{ channel: "echo:default", enabled: true }]
+              channels: [{ channel: "echo:default", enabled: true }],
             },
-            config_hash: "router-hash-1"
-          })
+            config_hash: "router-hash-1",
+          }),
         );
       }
 
@@ -603,10 +666,13 @@ describe("M35 web console app", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Channels and Router" }));
 
-    await waitFor(() => {
-      expect(document.body).toHaveTextContent("echo:default");
-      expect(document.body).toHaveTextContent("internal_test_only");
-    }, { timeout: 5_000 });
+    await waitFor(
+      () => {
+        expect(document.body).toHaveTextContent("echo:default");
+        expect(document.body).toHaveTextContent("internal_test_only");
+      },
+      { timeout: 5_000 },
+    );
     expect(screen.queryByText("slack:default")).not.toBeInTheDocument();
     expect(findRequestCall(fetchMock, "/console/v1/channels/echo%3Adefault", "GET")).toBeDefined();
   });
@@ -622,7 +688,7 @@ describe("M35 web console app", () => {
         enabled: false,
         readiness: "missing_credential",
         liveness: "stopped",
-        queue_depth: { pending_outbox: 0, dead_letters: 0 }
+        queue_depth: { pending_outbox: 0, dead_letters: 0 },
       };
 
       if (path === "/console/v1/auth/session" && method === "GET") {
@@ -633,8 +699,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
@@ -656,10 +722,10 @@ describe("M35 web console app", () => {
             config: {
               enabled: true,
               default_direct_message_policy: "deny",
-              channels: [{ channel: "discord:default", enabled: true }]
+              channels: [{ channel: "discord:default", enabled: true }],
             },
-            config_hash: "router-hash-1"
-          })
+            config_hash: "router-hash-1",
+          }),
         );
       }
 
@@ -685,7 +751,7 @@ describe("M35 web console app", () => {
               "Read Message History",
               "Embed Links",
               "Attach Files",
-              "Send Messages in Threads"
+              "Send Messages in Threads",
             ],
             egress_allowlist: ["discord.com", "*.discord.com"],
             security_defaults: ["Attachments ingestion is metadata only by default."],
@@ -697,13 +763,14 @@ describe("M35 web console app", () => {
               can_read_message_history: true,
               can_embed_links: true,
               can_attach_files: true,
-              can_send_messages_in_threads: true
+              can_send_messages_in_threads: true,
             },
             warnings: [],
             policy_warnings: [],
             routing_preview: { connector_id: "discord:default" },
-            invite_url_template: "https://discord.com/oauth2/authorize?client_id=123&scope=bot&permissions=205824"
-          })
+            invite_url_template:
+              "https://discord.com/oauth2/authorize?client_id=123&scope=bot&permissions=205824",
+          }),
         );
       }
 
@@ -714,13 +781,15 @@ describe("M35 web console app", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Channels and Router" }));
     fireEvent.click(screen.getByRole("tab", { name: "Discord setup" }));
-    expect(await screen.findByRole("heading", { name: "Discord onboarding wizard" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Discord onboarding wizard" }),
+    ).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Bot token"), {
-      target: { value: "test-token" }
+      target: { value: "test-token" },
     });
     fireEvent.change(screen.getByLabelText("Verify channel ID"), {
-      target: { value: "123456789012345678" }
+      target: { value: "123456789012345678" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Run preflight" }));
 
@@ -729,14 +798,20 @@ describe("M35 web console app", () => {
     });
     expect(screen.getByRole("heading", { name: "Preflight highlights" })).toBeInTheDocument();
     expect(screen.getByText("discord.com")).toBeInTheDocument();
-    expect(screen.getByText("Attachments ingestion is metadata only by default.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Attachments ingestion is metadata only by default."),
+    ).toBeInTheDocument();
 
-    const [, request] = findRequestCall(fetchMock, "/console/v1/channels/discord/onboarding/probe", "POST");
+    const [, request] = findRequestCall(
+      fetchMock,
+      "/console/v1/channels/discord/onboarding/probe",
+      "POST",
+    );
     const headers = new Headers(request?.headers);
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(request?.method).toBe("POST");
-    expect(requestBody(request?.body)).toContain("\"token\":\"test-token\"");
-    expect(requestBody(request?.body)).toContain("\"verify_channel_id\":\"123456789012345678\"");
+    expect(requestBody(request?.body)).toContain('"token":"test-token"');
+    expect(requestBody(request?.body)).toContain('"verify_channel_id":"123456789012345678"');
   });
 
   it("issues browser relay token from browser section with CSRF protection", async () => {
@@ -752,8 +827,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
@@ -762,8 +837,8 @@ describe("M35 web console app", () => {
           jsonResponse({
             principal: "admin:web-console",
             active_profile_id: null,
-            profiles: []
-          })
+            profiles: [],
+          }),
         );
       }
 
@@ -776,8 +851,8 @@ describe("M35 web console app", () => {
             issued_at_unix_ms: 100,
             expires_at_unix_ms: 500,
             token_ttl_ms: 300000,
-            warning: "short-lived"
-          })
+            warning: "short-lived",
+          }),
         );
       }
 
@@ -790,18 +865,20 @@ describe("M35 web console app", () => {
     expect(await screen.findByRole("heading", { name: "Browser" })).toBeInTheDocument();
 
     fireEvent.change(screen.getAllByLabelText("Session ID")[1], {
-      target: { value: "01ARZ3NDEKTSV4RRFFQ69G5FAV" }
+      target: { value: "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Mint relay token" }));
 
     await waitFor(() => {
-      expect(document.body).toHaveTextContent("Browser relay token minted. Keep it private and short-lived.");
+      expect(document.body).toHaveTextContent(
+        "Browser relay token minted. Keep it private and short-lived.",
+      );
     });
 
     const [, request] = findRequestCall(fetchMock, "/console/v1/browser/relay/tokens", "POST");
     const headers = new Headers(request?.headers);
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
-    expect(requestBody(request?.body)).toContain("\"extension_id\":\"com.palyra.extension\"");
+    expect(requestBody(request?.body)).toContain('"extension_id":"com.palyra.extension"');
   });
 
   it("loads diagnostics snapshot in dedicated diagnostics section", async () => {
@@ -812,15 +889,15 @@ describe("M35 web console app", () => {
         channel: "web",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 300
+        expires_at_unix_ms: 300,
       }),
       jsonResponse({
         generated_at_unix_ms: 123,
         model_provider: { kind: "openai-compatible" },
         rate_limits: { admin_api_max_requests_per_window: 30 },
         auth_profiles: { summary: { total_profiles: 1 } },
-        browserd: { enabled: true, sessions: { active: 0 } }
-      })
+        browserd: { enabled: true, sessions: { active: 0 } },
+      }),
     ]);
     vi.stubGlobal("fetch", fetchMock);
 
@@ -839,7 +916,7 @@ describe("M35 web console app", () => {
         channel: "web",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 300
+        expires_at_unix_ms: 300,
       }),
       jsonResponse({
         generated_at_unix_ms: 123,
@@ -848,9 +925,9 @@ describe("M35 web console app", () => {
         auth_profiles: { profiles: [{ access_token: "oauth-secret" }] },
         browserd: {
           relay_token: "relay-secret",
-          last_error: "Bearer browser-secret"
-        }
-      })
+          last_error: "Bearer browser-secret",
+        },
+      }),
     ]);
     vi.stubGlobal("fetch", fetchMock);
 
@@ -875,7 +952,7 @@ describe("M35 web console app", () => {
       device_id: "device-1",
       channel: "web",
       created_at_unix_ms: 100,
-      updated_at_unix_ms: 100
+      updated_at_unix_ms: 100,
     };
     let sessions = [] as Array<typeof sessionRecord & { last_run_id?: string }>;
     const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
@@ -890,8 +967,8 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
@@ -905,19 +982,24 @@ describe("M35 web console app", () => {
           jsonResponse({
             session: sessionRecord,
             created: true,
-            reset_applied: false
-          })
+            reset_applied: false,
+          }),
         );
       }
 
-      if (path === "/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages/stream" && method === "POST") {
-        sessions = [{ ...sessionRecord, updated_at_unix_ms: 200, last_run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX" }];
+      if (
+        path === "/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages/stream" &&
+        method === "POST"
+      ) {
+        sessions = [
+          { ...sessionRecord, updated_at_unix_ms: 200, last_run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX" },
+        ];
         return Promise.resolve(
           ndjsonResponse([
             {
               type: "meta",
               run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
-              session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+              session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             },
             {
               type: "event",
@@ -926,9 +1008,9 @@ describe("M35 web console app", () => {
                 event_type: "model_token",
                 model_token: {
                   token: "hello from model",
-                  is_final: false
-                }
-              }
+                  is_final: false,
+                },
+              },
             },
             {
               type: "event",
@@ -939,21 +1021,23 @@ describe("M35 web console app", () => {
                   proposal_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0",
                   approval_id: "A1",
                   tool_name: "palyra.fs.apply_patch",
-                  request_summary: "Needs approval"
-                }
-              }
+                  request_summary: "Needs approval",
+                },
+              },
             },
             {
               type: "complete",
               run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
-              status: "done"
-            }
-          ])
+              status: "done",
+            },
+          ]),
         );
       }
 
       if (path === "/console/v1/approvals/A1/decision" && method === "POST") {
-        return Promise.resolve(jsonResponse({ approval: { approval_id: "A1", decision: "allow" } }));
+        return Promise.resolve(
+          jsonResponse({ approval: { approval_id: "A1", decision: "allow" } }),
+        );
       }
 
       throw new Error(`Unhandled mocked request: ${method} ${path}`);
@@ -983,11 +1067,15 @@ describe("M35 web console app", () => {
     const [, streamRequest] = findRequestCall(
       fetchMock,
       "/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages/stream",
-      "POST"
+      "POST",
     );
     expect(streamRequest?.method).toBe("POST");
 
-    const [, decisionRequest] = findRequestCall(fetchMock, "/console/v1/approvals/A1/decision", "POST");
+    const [, decisionRequest] = findRequestCall(
+      fetchMock,
+      "/console/v1/approvals/A1/decision",
+      "POST",
+    );
     const decisionHeaders = new Headers(decisionRequest?.headers);
     expect(decisionHeaders.get("x-palyra-csrf-token")).toBe("csrf-1");
   });
@@ -1000,7 +1088,7 @@ describe("M35 web console app", () => {
       device_id: "device-1",
       channel: "web",
       created_at_unix_ms: 100,
-      updated_at_unix_ms: 100
+      updated_at_unix_ms: 100,
     };
     const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
       const path = requestUrl(input);
@@ -1014,26 +1102,35 @@ describe("M35 web console app", () => {
             channel: "web",
             csrf_token: "csrf-1",
             issued_at_unix_ms: 100,
-            expires_at_unix_ms: 300
-          })
+            expires_at_unix_ms: 300,
+          }),
         );
       }
 
       if (path === "/console/v1/chat/sessions" && method === "GET") {
         return Promise.resolve(
           jsonResponse({
-            sessions: [{ ...sessionRecord, updated_at_unix_ms: 200, last_run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX" }]
-          })
+            sessions: [
+              {
+                ...sessionRecord,
+                updated_at_unix_ms: 200,
+                last_run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+              },
+            ],
+          }),
         );
       }
 
-      if (path === "/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages/stream" && method === "POST") {
+      if (
+        path === "/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/messages/stream" &&
+        method === "POST"
+      ) {
         return Promise.resolve(
           ndjsonResponse([
             {
               type: "meta",
               run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
-              session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+              session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             },
             {
               type: "event",
@@ -1042,9 +1139,9 @@ describe("M35 web console app", () => {
                 event_type: "model_token",
                 model_token: {
                   token: "<img src='x' onerror='alert(1)'>",
-                  is_final: false
-                }
-              }
+                  is_final: false,
+                },
+              },
             },
             {
               type: "event",
@@ -1057,17 +1154,17 @@ describe("M35 web console app", () => {
                   output_json: {
                     payload: "<script>alert(1)</script>",
                     frame_url: "/canvas/v1/frame/01ARZ3NDEKTSV4RRFFQ69G5FB1?token=test-token",
-                    malicious_frame_url: "/canvas/v1/frame/../../console/v1/diagnostics?token=evil"
-                  }
-                }
-              }
+                    malicious_frame_url: "/canvas/v1/frame/../../console/v1/diagnostics?token=evil",
+                  },
+                },
+              },
             },
             {
               type: "complete",
               run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
-              status: "done"
-            }
-          ])
+              status: "done",
+            },
+          ]),
         );
       }
 
@@ -1083,7 +1180,7 @@ describe("M35 web console app", () => {
     });
 
     fireEvent.change(screen.getByLabelText("Message"), {
-      target: { value: "<img src='x' onerror='alert(1)'>" }
+      target: { value: "<img src='x' onerror='alert(1)'>" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
@@ -1095,8 +1192,13 @@ describe("M35 web console app", () => {
 
     const frame = await screen.findByTitle("Canvas 01ARZ3NDEKTSV4RRFFQ69G5FAX");
     expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-same-origin");
-    expect(frame).toHaveAttribute("src", "/canvas/v1/frame/01ARZ3NDEKTSV4RRFFQ69G5FB1?token=test-token");
-    expect(rendered.container.querySelector("iframe[src='/console/v1/diagnostics?token=evil']")).toBeNull();
+    expect(frame).toHaveAttribute(
+      "src",
+      "/canvas/v1/frame/01ARZ3NDEKTSV4RRFFQ69G5FB1?token=test-token",
+    );
+    expect(
+      rendered.container.querySelector("iframe[src='/console/v1/diagnostics?token=evil']"),
+    ).toBeNull();
   });
 });
 
@@ -1118,8 +1220,8 @@ function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
-      "content-type": "application/json"
-    }
+      "content-type": "application/json",
+    },
   });
 }
 
@@ -1141,7 +1243,9 @@ function requestBody(body: BodyInit | null | undefined): string {
   return "";
 }
 
-function withM56Baseline(handler: (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>) {
+function withM56Baseline(
+  handler: (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>,
+) {
   return vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const baseline = routeM56BaselineRequest(input, init);
     if (baseline !== undefined) {
@@ -1151,7 +1255,10 @@ function withM56Baseline(handler: (input: RequestInfo | URL, init?: RequestInit)
   });
 }
 
-function routeM56BaselineRequest(input: RequestInfo | URL, init?: RequestInit): Response | undefined {
+function routeM56BaselineRequest(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Response | undefined {
   const path = requestUrl(input);
   const method = (init?.method ?? "GET").toUpperCase();
 
@@ -1176,28 +1283,33 @@ function routeM56BaselineRequest(input: RequestInfo | URL, init?: RequestInit): 
 function findRequestCall(
   fetchMock: { mock: { calls: unknown[] } },
   path: string,
-  method: string
+  method: string,
 ): [RequestInfo | URL, RequestInit | undefined] {
-  const match = fetchMock.mock.calls.find((entry): entry is [RequestInfo | URL, RequestInit | undefined] => {
-    if (!Array.isArray(entry) || entry.length === 0) {
-      return false;
-    }
+  const match = fetchMock.mock.calls.find(
+    (entry): entry is [RequestInfo | URL, RequestInit | undefined] => {
+      if (!Array.isArray(entry) || entry.length === 0) {
+        return false;
+      }
 
-    const [input, init] = entry as [unknown, unknown];
-    const validInput =
-      typeof input === "string" ||
-      input instanceof URL ||
-      (typeof Request !== "undefined" && input instanceof Request);
-    if (!validInput) {
-      return false;
-    }
-    if (init !== undefined && (typeof init !== "object" || init === null)) {
-      return false;
-    }
+      const [input, init] = entry as [unknown, unknown];
+      const validInput =
+        typeof input === "string" ||
+        input instanceof URL ||
+        (typeof Request !== "undefined" && input instanceof Request);
+      if (!validInput) {
+        return false;
+      }
+      if (init !== undefined && (typeof init !== "object" || init === null)) {
+        return false;
+      }
 
-    const typedInit = init as RequestInit | undefined;
-    return requestUrl(input as RequestInfo | URL) === path && (typedInit?.method ?? "GET").toUpperCase() === method;
-  });
+      const typedInit = init as RequestInit | undefined;
+      return (
+        requestUrl(input as RequestInfo | URL) === path &&
+        (typedInit?.method ?? "GET").toUpperCase() === method
+      );
+    },
+  );
   expect(match).toBeDefined();
   if (match === undefined) {
     throw new Error(`Missing mocked request: ${method} ${path}`);
@@ -1210,7 +1322,7 @@ function ndjsonResponse(lines: unknown[]): Response {
   return new Response(body, {
     status: 200,
     headers: {
-      "content-type": "application/x-ndjson"
-    }
+      "content-type": "application/x-ndjson",
+    },
   });
 }

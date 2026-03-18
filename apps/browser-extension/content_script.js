@@ -88,10 +88,7 @@
   }
 
   function escapeHtmlText(value) {
-    return String(value)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;");
+    return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   }
 
   function escapeHtmlAttribute(value) {
@@ -154,7 +151,9 @@
   }
 
   function normalizeVisibleTextFragment(value) {
-    return String(value || "").replace(/\s+/g, " ").trim();
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   function collectVisibleTextCapped(body, maxBytes) {

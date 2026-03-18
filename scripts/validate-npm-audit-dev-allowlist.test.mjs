@@ -8,7 +8,9 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-const scriptPath = fileURLToPath(new URL("./validate-npm-audit-dev-allowlist.mjs", import.meta.url));
+const scriptPath = fileURLToPath(
+  new URL("./validate-npm-audit-dev-allowlist.mjs", import.meta.url),
+);
 
 function dateWithOffsetDays(days) {
   const date = new Date();
@@ -62,7 +64,7 @@ function runValidator({ full, runtime, allowlist, summary }) {
       "--threshold",
       "high",
     ],
-    { encoding: "utf8" }
+    { encoding: "utf8" },
   );
 }
 

@@ -1,4 +1,7 @@
-import "@testing-library/jest-dom/vitest";
+import * as matchers from "@testing-library/jest-dom/matchers";
+import { expect } from "vite-plus/test";
+
+expect.extend(matchers);
 
 class ResizeObserverMock {
   observe(): void {}
@@ -12,7 +15,10 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   globalThis.ResizeObserver = ResizeObserverMock as typeof ResizeObserver;
 }
 
-if (typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.scrollIntoView !== "function") {
+if (
+  typeof HTMLElement !== "undefined" &&
+  typeof HTMLElement.prototype.scrollIntoView !== "function"
+) {
   HTMLElement.prototype.scrollIntoView = () => undefined;
 }
 

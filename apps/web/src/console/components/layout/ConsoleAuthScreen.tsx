@@ -2,10 +2,7 @@ import type { Dispatch, FormEvent, SetStateAction } from "react";
 
 import { Alert, Button, Card, CardContent, Disclosure } from "@heroui/react";
 
-import {
-  AppForm,
-  TextInputField
-} from "../ui";
+import { AppForm, TextInputField } from "../ui";
 import { DEFAULT_LOGIN_FORM, type LoginForm } from "../../stateTypes";
 
 type ConsoleAuthScreenProps = {
@@ -21,7 +18,7 @@ export function ConsoleAuthScreen({
   loginBusy,
   loginForm,
   onSubmit,
-  setLoginForm
+  setLoginForm,
 }: ConsoleAuthScreenProps) {
   return (
     <div className="console-root console-root--auth flex min-h-screen items-center justify-center">
@@ -44,9 +41,7 @@ export function ConsoleAuthScreen({
               required
               type="password"
               value={loginForm.adminToken}
-              onChange={(value) =>
-                setLoginForm((previous) => ({ ...previous, adminToken: value }))
-              }
+              onChange={(value) => setLoginForm((previous) => ({ ...previous, adminToken: value }))}
             />
 
             <Disclosure>

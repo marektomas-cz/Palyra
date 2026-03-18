@@ -65,7 +65,12 @@ function createTreeWalker(root) {
   };
 }
 
-function loadContentScript({ documentElement, body, title = "Snapshot Test", url = "https://example.test/path" }) {
+function loadContentScript({
+  documentElement,
+  body,
+  title = "Snapshot Test",
+  url = "https://example.test/path",
+}) {
   let onMessageListener;
   const context = {
     TextEncoder,
@@ -107,7 +112,11 @@ function loadContentScript({ documentElement, body, title = "Snapshot Test", url
   vm.runInNewContext(CONTENT_SCRIPT_SOURCE, context, {
     filename: "content_script.js",
   });
-  assert.equal(typeof onMessageListener, "function", "content script should register a message listener");
+  assert.equal(
+    typeof onMessageListener,
+    "function",
+    "content script should register a message listener",
+  );
 
   return {
     dispatch(message) {

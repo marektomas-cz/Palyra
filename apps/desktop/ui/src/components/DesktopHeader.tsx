@@ -38,7 +38,7 @@ export function DesktopHeader({ snapshot, loading }: DesktopHeaderProps) {
                   <StatusChip tone={overallTone(snapshot.overall_status)}>
                     {snapshot.overall_status}
                   </StatusChip>
-                )
+                ),
               },
               {
                 label: "Dashboard mode",
@@ -46,7 +46,7 @@ export function DesktopHeader({ snapshot, loading }: DesktopHeaderProps) {
                   <Skeleton className="desktop-skeleton desktop-skeleton--text" />
                 ) : (
                   <strong>{snapshot.quick_facts.dashboard_access_mode}</strong>
-                )
+                ),
               },
               {
                 label: "Last snapshot",
@@ -54,8 +54,8 @@ export function DesktopHeader({ snapshot, loading }: DesktopHeaderProps) {
                   <Skeleton className="desktop-skeleton desktop-skeleton--text" />
                 ) : (
                   <strong>{formatUnixMs(snapshot.generated_at_unix_ms)}</strong>
-                )
-              }
+                ),
+              },
             ]}
           />
         </div>

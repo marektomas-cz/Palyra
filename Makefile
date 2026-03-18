@@ -14,7 +14,7 @@ validate-env:
 	$(MAKE) doctor
 
 dev: validate-env build
-	@echo "Bootstrap complete. Run 'make web-bootstrap' for the apps/web clean-room bootstrap."
+	@echo "Bootstrap complete. Run 'vp install' to materialize the root JS workspace."
 	@echo "Run 'make test' to verify workspace tests."
 
 lint:
@@ -78,16 +78,18 @@ security-artifacts:
 	bash scripts/generate-attestation-placeholder.sh security-artifacts/attestation-placeholder.json
 
 web-bootstrap:
-	npm --prefix apps/web run bootstrap
+	vp install
 
 web-clean:
-	npm --prefix apps/web run clean
+	npm run web:clean
 
 web-check:
-	npm --prefix apps/web run ci:check
+	npm run web:ci
 
 web-cleanroom:
-	npm --prefix apps/web run cleanroom:check
+	rm -rf node_modules
+	vp install
+	npm run web:ci
 
 desktop-ui-ready:
 	bash scripts/test/ensure-desktop-ui.sh

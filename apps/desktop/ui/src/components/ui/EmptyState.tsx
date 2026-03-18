@@ -16,7 +16,7 @@ export function EmptyState({
   description,
   action,
   compact = false,
-  className
+  className,
 }: EmptyStateProps) {
   return (
     <SectionCard
@@ -26,7 +26,7 @@ export function EmptyState({
       className={joinClassNames(
         "desktop-empty-state",
         compact && "desktop-empty-state--compact",
-        className
+        className,
       )}
     >
       <p className="desktop-muted">{description}</p>

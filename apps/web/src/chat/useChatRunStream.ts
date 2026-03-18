@@ -5,7 +5,7 @@ import {
   documentToJsonValue,
   normalizeA2uiDocument,
   parsePatchDocument,
-  type A2uiDocument
+  type A2uiDocument,
 } from "../a2ui";
 import type {
   ChatRunStatusRecord,
@@ -13,7 +13,7 @@ import type {
   ChatStreamEventEnvelope,
   ChatStreamLine,
   ConsoleApiClient,
-  JsonValue
+  JsonValue,
 } from "../consoleApi";
 
 import {
@@ -33,7 +33,7 @@ import {
   retainTranscriptWindow,
   toErrorMessage,
   type ApprovalDraft,
-  type TranscriptEntry
+  type TranscriptEntry,
 } from "./chatShared";
 
 type UseChatRunStreamArgs = {
@@ -79,7 +79,7 @@ export function useChatRunStream({
   activeSessionId,
   sessionLabelDraft,
   setError,
-  setNotice
+  setNotice,
 }: UseChatRunStreamArgs): UseChatRunStreamResult {
   const [composerText, setComposerText] = useState("");
   const [allowSensitiveTools, setAllowSensitiveTools] = useState(false);
@@ -100,7 +100,7 @@ export function useChatRunStream({
   const assistantEntryByRunRef = useRef<Map<string, string>>(new Map());
   const canvasEntrySetRef = useRef<Set<string>>(new Set());
   const pendingAssistantTokensRef = useRef<Map<string, { token: string; isFinal: boolean }>>(
-    new Map()
+    new Map(),
   );
   const pendingA2uiPatchesRef = useRef<Array<{ surface: string; patchValue: JsonValue }>>([]);
   const streamFlushHandleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -198,7 +198,7 @@ export function useChatRunStream({
       created_at_unix_ms: Date.now(),
       session_id: activeSessionId,
       title: "You",
-      text: trimmed
+      text: trimmed,
     });
 
     const controller = new AbortController();
@@ -210,12 +210,12 @@ export function useChatRunStream({
         {
           text: trimmed,
           allow_sensitive_tools: allowSensitiveTools,
-          session_label: emptyToUndefined(sessionLabelDraft)
+          session_label: emptyToUndefined(sessionLabelDraft),
         },
         {
           signal: controller.signal,
-          onLine: handleStreamLine
-        }
+          onLine: handleStreamLine,
+        },
       );
       flushPendingStreamUpdates();
       await onStreamComplete();
@@ -255,7 +255,7 @@ export function useChatRunStream({
         run_id: line.run_id,
         session_id: line.session_id,
         title: "Run accepted",
-        text: `Run ${line.run_id} attached to session ${line.session_id}.`
+        text: `Run ${line.run_id} attached to session ${line.session_id}.`,
       });
       return;
     }
@@ -267,7 +267,7 @@ export function useChatRunStream({
         created_at_unix_ms: Date.now(),
         run_id: line.run_id,
         title: "Stream error",
-        text: line.error
+        text: line.error,
       });
       setError(line.error);
       return;
@@ -281,7 +281,7 @@ export function useChatRunStream({
         run_id: line.run_id,
         title: "Run complete",
         text: `Run status: ${line.status}`,
-        status: line.status
+        status: line.status,
       });
       setActiveRunId(line.run_id);
       setRunDrawerId((previous) => (previous.trim().length === 0 ? line.run_id : previous));
@@ -319,7 +319,7 @@ export function useChatRunStream({
         title: `Status: ${statusKind}`,
         text: message,
         status: statusKind,
-        payload: event
+        payload: event,
       });
       return;
     }
@@ -343,7 +343,7 @@ export function useChatRunStream({
         approval_id: approvalId,
         proposal_id: proposalId,
         tool_name: toolName,
-        payload: request ?? event
+        payload: request ?? event,
       });
       return;
     }
@@ -355,7 +355,7 @@ export function useChatRunStream({
         created_at_unix_ms: Date.now(),
         run_id: runId,
         title: "Approval response",
-        payload: event.tool_approval_response ?? event
+        payload: event.tool_approval_response ?? event,
       });
       return;
     }
@@ -374,7 +374,7 @@ export function useChatRunStream({
         run_id: runId,
         title: `A2UI update: ${surface}`,
         surface,
-        payload: update ?? event
+        payload: update ?? event,
       });
       return;
     }
@@ -386,7 +386,7 @@ export function useChatRunStream({
         created_at_unix_ms: Date.now(),
         run_id: runId,
         title: "Journal event",
-        payload: event.journal_event ?? event
+        payload: event.journal_event ?? event,
       });
       return;
     }
@@ -405,7 +405,7 @@ export function useChatRunStream({
         created_at_unix_ms: Date.now(),
         run_id: runId,
         title: prettifyEventType(event.event_type),
-        payload: payloadValue ?? event
+        payload: payloadValue ?? event,
       });
       const canvasCandidates = collectCanvasFrameUrls(payloadValue ?? event);
       for (const canvasUrl of canvasCandidates) {
@@ -420,7 +420,7 @@ export function useChatRunStream({
       created_at_unix_ms: Date.now(),
       run_id: runId,
       title: prettifyEventType(event.event_type),
-      payload: event
+      payload: event,
     });
   }
 
@@ -435,8 +435,8 @@ export function useChatRunStream({
           scope: DEFAULT_APPROVAL_SCOPE,
           reason: "",
           ttl_ms: DEFAULT_APPROVAL_TTL_MS,
-          busy: false
-        }
+          busy: false,
+        },
       };
     });
   }
@@ -454,7 +454,7 @@ export function useChatRunStream({
       run_id: runId,
       title: "Canvas",
       canvas_url: canvasUrl,
-      text: canvasUrl
+      text: canvasUrl,
     });
   }
 
@@ -462,7 +462,7 @@ export function useChatRunStream({
     const current = pendingAssistantTokensRef.current.get(runId);
     pendingAssistantTokensRef.current.set(runId, {
       token: `${current?.token ?? ""}${token}`,
-      isFinal: Boolean(current?.isFinal) || isFinal
+      isFinal: Boolean(current?.isFinal) || isFinal,
     });
     scheduleStreamFlush();
   }
@@ -507,7 +507,7 @@ export function useChatRunStream({
         nextTranscript,
         assistantEntryByRunRef.current,
         queuedTokens,
-        Date.now()
+        Date.now(),
       );
       transcriptChanged = nextTranscript !== transcriptRef.current;
       if (transcriptChanged) {
@@ -523,7 +523,7 @@ export function useChatRunStream({
         normalizeA2uiDocument({
           v: 1,
           surface,
-          components: []
+          components: [],
         });
       let nextDocument: A2uiDocument;
       try {
@@ -539,7 +539,7 @@ export function useChatRunStream({
       }
       nextDocuments = {
         ...nextDocuments,
-        [surface]: nextDocument
+        [surface]: nextDocument,
       };
       documentsChanged = true;
     }
@@ -569,7 +569,7 @@ export function useChatRunStream({
 
   function updateApprovalDraft(
     approvalId: string,
-    mutator: (draft: ApprovalDraft) => ApprovalDraft
+    mutator: (draft: ApprovalDraft) => ApprovalDraft,
   ): void {
     setApprovalDrafts((previous) => {
       const current =
@@ -578,11 +578,11 @@ export function useChatRunStream({
           scope: DEFAULT_APPROVAL_SCOPE,
           reason: "",
           ttl_ms: DEFAULT_APPROVAL_TTL_MS,
-          busy: false
+          busy: false,
         } satisfies ApprovalDraft);
       return {
         ...previous,
-        [approvalId]: mutator(current)
+        [approvalId]: mutator(current),
       };
     });
   }
@@ -608,7 +608,7 @@ export function useChatRunStream({
         reason: emptyToUndefined(draft.reason),
         decision_scope: draft.scope,
         decision_scope_ttl_ms:
-          draft.scope === "timeboxed" && ttl !== null && ttl > 0 ? ttl : undefined
+          draft.scope === "timeboxed" && ttl !== null && ttl > 0 ? ttl : undefined,
       });
       setNotice(approved ? `Approval ${approvalId} allowed.` : `Approval ${approvalId} denied.`);
     } catch (error) {
@@ -627,7 +627,7 @@ export function useChatRunStream({
       params.set("limit", "256");
       const [statusResponse, eventsResponse] = await Promise.all([
         api.chatRunStatus(runId),
-        api.chatRunEvents(runId, params)
+        api.chatRunEvents(runId, params),
       ]);
       if (requestSeq !== runDetailsRequestSeqRef.current) {
         return;
@@ -688,6 +688,6 @@ export function useChatRunStream({
     setRunDrawerId,
     updateApprovalDraftValue,
     decideInlineApproval,
-    dispose
+    dispose,
   };
 }

@@ -11,7 +11,7 @@ export const DEFAULT_RENDER_INPUT_LIMITS: Readonly<RenderInputLimits> = Object.f
   maxTableRows: 256,
   maxFormFields: 32,
   maxSelectOptions: 64,
-  maxChartPoints: 64
+  maxChartPoints: 64,
 });
 
 export const DEFAULT_PATCH_BUDGET: Readonly<PatchProcessingBudget> = Object.freeze({
@@ -19,5 +19,5 @@ export const DEFAULT_PATCH_BUDGET: Readonly<PatchProcessingBudget> = Object.free
   maxOpsPerTick: 512,
   maxQueueDepth: 1_024,
   maxPathLength: 512,
-  maxApplyMsPerTick: 12
+  maxApplyMsPerTick: 12,
 });

@@ -21,10 +21,13 @@ export function SectionCard({
   footer,
   className,
   variant = "default",
-  children
+  children,
 }: SectionCardProps) {
   return (
-    <Card className={joinClassNames("desktop-card desktop-section-card", className)} variant={variant}>
+    <Card
+      className={joinClassNames("desktop-card desktop-section-card", className)}
+      variant={variant}
+    >
       <CardHeader className="desktop-section-card__header">
         <div className="desktop-section-card__copy">
           {eyebrow !== undefined && <p className="desktop-eyebrow">{eyebrow}</p>}

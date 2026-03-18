@@ -5,7 +5,7 @@ import type {
   AgentCreateRequest,
   AgentEnvelope,
   AgentListEnvelope,
-  AgentRecord
+  AgentRecord,
 } from "../../consoleApi";
 import {
   ActionButton,
@@ -16,13 +16,13 @@ import {
   InlineNotice,
   KeyValueList,
   TextAreaField,
-  TextInputField
+  TextInputField,
 } from "../components/ui";
 import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
   WorkspaceSectionCard,
-  WorkspaceStatusChip
+  WorkspaceStatusChip,
 } from "../components/workspace/WorkspaceChrome";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
@@ -54,10 +54,22 @@ const WIZARD_STEPS: ReadonlyArray<{
   label: string;
   description: string;
 }> = [
-  { id: 0, label: "Identity", description: "Choose a stable id and an operator-friendly display name." },
-  { id: 1, label: "Storage", description: "Keep workspace paths local unless you explicitly opt into absolute paths." },
-  { id: 2, label: "Defaults", description: "Set the default model and any explicit tool or skill allowlists." },
-  { id: 3, label: "Review", description: "Confirm the new registry entry before submitting it." }
+  {
+    id: 0,
+    label: "Identity",
+    description: "Choose a stable id and an operator-friendly display name.",
+  },
+  {
+    id: 1,
+    label: "Storage",
+    description: "Keep workspace paths local unless you explicitly opt into absolute paths.",
+  },
+  {
+    id: 2,
+    label: "Defaults",
+    description: "Set the default model and any explicit tool or skill allowlists.",
+  },
+  { id: 3, label: "Review", description: "Confirm the new registry entry before submitting it." },
 ];
 
 function createDefaultDraft(): AgentDraft {
@@ -70,7 +82,7 @@ function createDefaultDraft(): AgentDraft {
     defaultToolAllowlist: "",
     defaultSkillAllowlist: "",
     setDefault: false,
-    allowAbsolutePaths: false
+    allowAbsolutePaths: false,
   };
 }
 
@@ -117,7 +129,7 @@ function buildCreatePayload(draft: AgentDraft): AgentCreateRequest {
     default_tool_allowlist: parseTextList(draft.defaultToolAllowlist),
     default_skill_allowlist: parseTextList(draft.defaultSkillAllowlist),
     set_default: draft.setDefault,
-    allow_absolute_paths: draft.allowAbsolutePaths
+    allow_absolute_paths: draft.allowAbsolutePaths,
   };
 }
 
@@ -125,7 +137,7 @@ function formatUnixMs(value: number): string {
   return new Intl.DateTimeFormat("sv-SE", {
     dateStyle: "short",
     timeStyle: "short",
-    timeZone: "UTC"
+    timeZone: "UTC",
   })
     .format(new Date(value))
     .replace(",", "");
@@ -171,9 +183,10 @@ export function AgentsSection({ app }: AgentsSectionProps) {
 
       const nextSelectedId =
         preferredAgentId ??
-        (selectedAgentId.length > 0 && envelope.agents.some((agent) => agent.agent_id === selectedAgentId)
+        (selectedAgentId.length > 0 &&
+        envelope.agents.some((agent) => agent.agent_id === selectedAgentId)
           ? selectedAgentId
-          : envelope.default_agent_id ?? envelope.agents[0]?.agent_id ?? "");
+          : (envelope.default_agent_id ?? envelope.agents[0]?.agent_id ?? ""));
 
       setSelectedAgentId(nextSelectedId);
       if (nextSelectedId.length === 0) {
@@ -204,13 +217,15 @@ export function AgentsSection({ app }: AgentsSectionProps) {
     const agentRows = agents.map((agent) => ({
       ...agent,
       isDefault: agent.agent_id === defaultAgentId,
-      isSelected: agent.agent_id === selectedAgentId
+      isSelected: agent.agent_id === selectedAgentId,
     }));
     if (query.length === 0) {
       return agentRows;
     }
     return agentRows.filter((agent) =>
-      `${agent.display_name} ${agent.agent_id} ${agent.default_model_profile}`.toLowerCase().includes(query)
+      `${agent.display_name} ${agent.agent_id} ${agent.default_model_profile}`
+        .toLowerCase()
+        .includes(query),
     );
   }, [agents, defaultAgentId, filter, selectedAgentId]);
 
@@ -334,7 +349,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                       <strong>{agent.display_name}</strong>
                       <span className="chat-muted">{agent.agent_id}</span>
                     </div>
-                  )
+                  ),
                 },
                 {
                   key: "state",
@@ -351,7 +366,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                         <WorkspaceStatusChip tone="accent">selected</WorkspaceStatusChip>
                       ) : null}
                     </div>
-                  )
+                  ),
                 },
                 {
                   key: "actions",
@@ -378,8 +393,8 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                         </ActionButton>
                       ) : null}
                     </ActionCluster>
-                  )
-                }
+                  ),
+                },
               ]}
               rows={filteredAgents}
               getRowId={(agent: AgentRow) => agent.agent_id}
@@ -422,7 +437,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                   { label: "Agent ID", value: detailRecord.agent_id },
                   { label: "Agent dir", value: detailRecord.agent_dir },
                   { label: "Created", value: formatUnixMs(detailRecord.created_at_unix_ms) },
-                  { label: "Updated", value: formatUnixMs(detailRecord.updated_at_unix_ms) }
+                  { label: "Updated", value: formatUnixMs(detailRecord.updated_at_unix_ms) },
                 ]}
               />
 
@@ -450,14 +465,14 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                         label: "Tools",
                         value:
                           detailRecord.default_tool_allowlist.join(", ") ||
-                          "No explicit tool allowlist"
+                          "No explicit tool allowlist",
                       },
                       {
                         label: "Skills",
                         value:
                           detailRecord.default_skill_allowlist.join(", ") ||
-                          "No explicit skill allowlist"
-                      }
+                          "No explicit skill allowlist",
+                      },
                     ]}
                   />
                 </WorkspaceSectionCard>
@@ -635,29 +650,32 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                         { label: "Display name", value: draft.displayName.trim() || "n/a" },
                         {
                           label: "Agent dir",
-                          value: draft.agentDir.trim() || "Auto under state root"
+                          value: draft.agentDir.trim() || "Auto under state root",
                         },
-                        { label: "Workspace roots", value: resolveWorkspaceRoots(draft).join(", ") },
+                        {
+                          label: "Workspace roots",
+                          value: resolveWorkspaceRoots(draft).join(", "),
+                        },
                         {
                           label: "Model profile",
-                          value: draft.defaultModelProfile.trim() || "Backend default"
+                          value: draft.defaultModelProfile.trim() || "Backend default",
                         },
                         {
                           label: "Tool allowlist",
-                          value: parseTextList(draft.defaultToolAllowlist).join(", ") || "none"
+                          value: parseTextList(draft.defaultToolAllowlist).join(", ") || "none",
                         },
                         {
                           label: "Skill allowlist",
-                          value: parseTextList(draft.defaultSkillAllowlist).join(", ") || "none"
+                          value: parseTextList(draft.defaultSkillAllowlist).join(", ") || "none",
                         },
                         {
                           label: "Default selection",
-                          value: draft.setDefault ? "Set as default" : "Keep current default"
+                          value: draft.setDefault ? "Set as default" : "Keep current default",
                         },
                         {
                           label: "Absolute paths",
-                          value: draft.allowAbsolutePaths ? "Allowed" : "Disabled"
-                        }
+                          value: draft.allowAbsolutePaths ? "Allowed" : "Disabled",
+                        },
                       ]}
                     />
                   </WorkspaceSectionCard>

@@ -9,7 +9,7 @@ import {
   Select,
   Switch,
   TextArea,
-  TextField
+  TextField,
 } from "@heroui/react";
 import type { FormEvent, HTMLAttributes, ReactNode } from "react";
 
@@ -87,15 +87,10 @@ export function TextInputField({
   readOnly = false,
   type = "text",
   autoComplete,
-  name
+  name,
 }: TextInputFieldProps) {
   return (
-    <TextField
-      className="workspace-field"
-      isDisabled={disabled}
-      isRequired={required}
-      name={name}
-    >
+    <TextField className="workspace-field" isDisabled={disabled} isRequired={required} name={name}>
       <Label>{label}</Label>
       <Input
         autoComplete={autoComplete}
@@ -122,15 +117,10 @@ export function TextAreaField({
   readOnly = false,
   autoComplete,
   name,
-  rows = 4
+  rows = 4,
 }: TextAreaFieldProps) {
   return (
-    <TextField
-      className="workspace-field"
-      isDisabled={disabled}
-      isRequired={required}
-      name={name}
-    >
+    <TextField className="workspace-field" isDisabled={disabled} isRequired={required} name={name}>
       <Label>{label}</Label>
       <TextArea
         autoComplete={autoComplete}
@@ -154,7 +144,7 @@ export function SelectField({
   description,
   disabled = false,
   placeholder,
-  name
+  name,
 }: SelectFieldProps) {
   const selectedValue = value.trim().length === 0 ? null : value;
 
@@ -176,11 +166,7 @@ export function SelectField({
       <Select.Popover>
         <ListBox>
           {options.map((option) => (
-            <ListBox.Item
-              id={option.key}
-              key={option.key}
-              textValue={stringLabel(option.label)}
-            >
+            <ListBox.Item id={option.key} key={option.key} textValue={stringLabel(option.label)}>
               <div className="workspace-listbox-option">
                 <Label>{option.label}</Label>
                 {option.description !== undefined ? (
@@ -201,7 +187,7 @@ export function CheckboxField({
   description,
   checked,
   onChange,
-  disabled = false
+  disabled = false,
 }: ToggleFieldProps) {
   return (
     <Checkbox
@@ -228,7 +214,7 @@ export function SwitchField({
   description,
   checked,
   onChange,
-  disabled = false
+  disabled = false,
 }: ToggleFieldProps) {
   return (
     <Switch
@@ -258,10 +244,7 @@ export function ActionCluster({ children, className, ...props }: ActionClusterPr
   );
 }
 
-export function ActionButton({
-  children,
-  ...props
-}: React.ComponentProps<typeof Button>) {
+export function ActionButton({ children, ...props }: React.ComponentProps<typeof Button>) {
   return <Button {...props}>{children}</Button>;
 }
 

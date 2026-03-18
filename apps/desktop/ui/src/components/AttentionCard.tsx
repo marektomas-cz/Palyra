@@ -9,11 +9,7 @@ type AttentionCardProps = {
   previewMode: boolean;
 };
 
-export function AttentionCard({
-  attentionItems,
-  loading,
-  previewMode
-}: AttentionCardProps) {
+export function AttentionCard({ attentionItems, loading, previewMode }: AttentionCardProps) {
   const tone = attentionTone(attentionItems.length);
 
   return (
@@ -22,9 +18,7 @@ export function AttentionCard({
       title="Warnings and recovery notes"
       description="Warnings stay secondary, but visible enough to block a bad handoff."
       actions={
-        <StatusChip tone={tone}>
-          {attentionItems.length === 0 ? "Stable" : "Review"}
-        </StatusChip>
+        <StatusChip tone={tone}>{attentionItems.length === 0 ? "Stable" : "Review"}</StatusChip>
       }
     >
       {loading ? (
@@ -35,7 +29,10 @@ export function AttentionCard({
         </div>
       ) : attentionItems.length === 0 ? (
         <p className="desktop-muted">
-          Local runtime signals are currently clean. {previewMode ? "Preview data is active for this desktop surface." : "If the dashboard still refuses to open, refresh the snapshot once before retrying the handoff."}
+          Local runtime signals are currently clean.{" "}
+          {previewMode
+            ? "Preview data is active for this desktop surface."
+            : "If the dashboard still refuses to open, refresh the snapshot once before retrying the handoff."}
         </p>
       ) : (
         <ScrollShadow className="desktop-scroll-list" hideScrollBar size={56}>

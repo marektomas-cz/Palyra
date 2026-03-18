@@ -45,5 +45,5 @@ The extension is intentionally narrow:
 ## Local tests
 
 ```bash
-npm --prefix apps/browser-extension test
+vp run browser-extension:test
 ```

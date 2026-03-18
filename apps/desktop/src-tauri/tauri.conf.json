@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "io.palyra.controlcenter",
   "build": {
-    "beforeBuildCommand": "npm --prefix ../ui run build",
+    "beforeBuildCommand": "npm --prefix ../.. run desktop-ui:build",
     "frontendDist": "../ui/dist"
   },
   "app": {

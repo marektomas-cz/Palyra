@@ -4,13 +4,13 @@ import {
   EmptyState,
   EntityTable,
   InlineNotice,
-  TextInputField
+  TextInputField,
 } from "../components/ui";
 import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
   WorkspaceSectionCard,
-  WorkspaceStatusChip
+  WorkspaceStatusChip,
 } from "../components/workspace/WorkspaceChrome";
 import {
   PrettyJsonBlock,
@@ -19,7 +19,7 @@ import {
   readObject,
   readString,
   toStringArray,
-  type JsonObject
+  type JsonObject,
 } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
@@ -64,7 +64,7 @@ export function SupportSection({ app }: SupportSectionProps) {
   const supportJobRows: SupportJobRow[] = app.supportBundleJobs.map((job) => ({
     jobId: readString(job, "job_id") ?? "unknown",
     state: readString(job, "state") ?? "unknown",
-    requestedAt: formatUnixMs(readUnixMillis(job, "requested_at_unix_ms"))
+    requestedAt: formatUnixMs(readUnixMillis(job, "requested_at_unix_ms")),
   }));
 
   return (
@@ -105,7 +105,7 @@ export function SupportSection({ app }: SupportSectionProps) {
           detail={
             app.supportBundleJobs[0] === undefined
               ? "No queued jobs"
-              : readString(app.supportBundleJobs[0], "state") ?? "unknown"
+              : (readString(app.supportBundleJobs[0], "state") ?? "unknown")
           }
           tone={failedJobs.length > 0 ? "warning" : "default"}
         />
@@ -125,12 +125,12 @@ export function SupportSection({ app }: SupportSectionProps) {
           value={
             latestFailure === null
               ? "None"
-              : readString(latestFailure, "failure_class") ?? "Unknown"
+              : (readString(latestFailure, "failure_class") ?? "Unknown")
           }
           detail={
             latestFailure === null
               ? "No recent failure signal."
-              : readString(latestFailure, "operation") ?? "Operation unavailable"
+              : (readString(latestFailure, "operation") ?? "Operation unavailable")
           }
           tone={latestFailure === null ? "default" : "warning"}
         />
@@ -185,7 +185,10 @@ export function SupportSection({ app }: SupportSectionProps) {
             />
           ) : (
             <div className="workspace-stack">
-              <InlineNotice title={readString(latestFailure, "failure_class") ?? "Unknown failure"} tone="danger">
+              <InlineNotice
+                title={readString(latestFailure, "failure_class") ?? "Unknown failure"}
+                tone="danger"
+              >
                 {readString(latestFailure, "operation") ?? "Operation unavailable"} ·{" "}
                 {readString(latestFailure, "message_redacted") ??
                   readString(latestFailure, "message") ??
@@ -271,7 +274,7 @@ export function SupportSection({ app }: SupportSectionProps) {
                     <strong>{row.jobId}</strong>
                     <span className="chat-muted">requested {row.requestedAt}</span>
                   </div>
-                )
+                ),
               },
               {
                 key: "state",
@@ -280,7 +283,7 @@ export function SupportSection({ app }: SupportSectionProps) {
                   <WorkspaceStatusChip tone={row.state === "failed" ? "danger" : "default"}>
                     {row.state}
                   </WorkspaceStatusChip>
-                )
+                ),
               },
               {
                 key: "actions",
@@ -294,8 +297,8 @@ export function SupportSection({ app }: SupportSectionProps) {
                   >
                     Select
                   </ActionButton>
-                )
-              }
+                ),
+              },
             ]}
             rows={supportJobRows}
             getRowId={(row) => row.jobId}

@@ -72,13 +72,13 @@ export const DESKTOP_PREVIEW_SNAPSHOT: ControlCenterSnapshot = {
       healthy: true,
       status: "running",
       uptime_seconds: 141,
-      last_error: null
-    }
+      last_error: null,
+    },
   },
   diagnostics: {
     generated_at_unix_ms: Date.UTC(2026, 2, 13, 12, 0, 0),
     errors: [],
-    dropped_log_events_total: 0
+    dropped_log_events_total: 0,
   },
   gateway_process: {
     service: "gateway",
@@ -90,7 +90,7 @@ export const DESKTOP_PREVIEW_SNAPSHOT: ControlCenterSnapshot = {
     last_exit: null,
     restart_attempt: 0,
     next_restart_unix_ms: null,
-    bound_ports: [7142, 7152]
+    bound_ports: [7142, 7152],
   },
   browserd_process: {
     service: "browserd",
@@ -102,9 +102,9 @@ export const DESKTOP_PREVIEW_SNAPSHOT: ControlCenterSnapshot = {
     last_exit: null,
     restart_attempt: 0,
     next_restart_unix_ms: null,
-    bound_ports: [9222]
+    bound_ports: [9222],
   },
-  warnings: []
+  warnings: [],
 };
 
 function desktopGlobal(): DesktopGlobal {

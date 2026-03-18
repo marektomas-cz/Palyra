@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { createDemoDocument } from "../sample";
 import { processPatchQueue } from "../runtime";
@@ -13,14 +13,14 @@ describe("A2UI runtime patch queue", () => {
           {
             op: "replace",
             path: "/components/0/props/value",
-            value: "budget-step-1"
+            value: "budget-step-1",
           },
           {
             op: "replace",
             path: "/components/5/props/series/0/value",
-            value: 7
-          }
-        ]
+            value: 7,
+          },
+        ],
       },
       {
         v: 1,
@@ -28,15 +28,15 @@ describe("A2UI runtime patch queue", () => {
           {
             op: "replace",
             path: "/components/0/props/value",
-            value: "budget-step-2"
+            value: "budget-step-2",
           },
           {
             op: "replace",
             path: "/components/5/props/series/1/value",
-            value: 9
-          }
-        ]
-      }
+            value: 9,
+          },
+        ],
+      },
     ];
 
     const budget: PatchProcessingBudget = {
@@ -44,7 +44,7 @@ describe("A2UI runtime patch queue", () => {
       maxOpsPerTick: 2,
       maxQueueDepth: 128,
       maxPathLength: 512,
-      maxApplyMsPerTick: 32
+      maxApplyMsPerTick: 32,
     };
 
     const result = processPatchQueue(createDemoDocument(), patches, budget);

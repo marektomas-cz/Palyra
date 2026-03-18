@@ -12,7 +12,7 @@ export {
   SelectField,
   SwitchField,
   TextAreaField,
-  TextInputField
+  TextInputField,
 } from "./fields";
 export { InlineNotice } from "./InlineNotice";
 export { KeyValueList } from "./KeyValueList";

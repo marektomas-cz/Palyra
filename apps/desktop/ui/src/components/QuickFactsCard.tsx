@@ -37,15 +37,15 @@ export function QuickFactsCard({ snapshot, loading }: QuickFactsCardProps) {
         items={[
           {
             label: "Version",
-            value: textValue(snapshot.quick_facts.gateway_version ?? "Unavailable", loading)
+            value: textValue(snapshot.quick_facts.gateway_version ?? "Unavailable", loading),
           },
           {
             label: "Git hash",
-            value: textValue(snapshot.quick_facts.gateway_git_hash ?? "-", loading, "desktop-mono")
+            value: textValue(snapshot.quick_facts.gateway_git_hash ?? "-", loading, "desktop-mono"),
           },
           {
             label: "Gateway uptime",
-            value: textValue(formatUptime(snapshot.quick_facts.gateway_uptime_seconds), loading)
+            value: textValue(formatUptime(snapshot.quick_facts.gateway_uptime_seconds), loading),
           },
           {
             label: "Browser health",
@@ -55,16 +55,19 @@ export function QuickFactsCard({ snapshot, loading }: QuickFactsCardProps) {
               <StatusChip tone={browserTone(snapshot.quick_facts.browser_service)}>
                 {snapshot.quick_facts.browser_service.healthy ? "healthy" : "needs attention"}
               </StatusChip>
-            )
+            ),
           },
           {
             label: "Browser last error",
-            value: textValue(fallbackText(snapshot.quick_facts.browser_service.last_error), loading)
+            value: textValue(
+              fallbackText(snapshot.quick_facts.browser_service.last_error),
+              loading,
+            ),
           },
           {
             label: "Diagnostics time",
-            value: textValue(formatUnixMs(snapshot.diagnostics.generated_at_unix_ms), loading)
-          }
+            value: textValue(formatUnixMs(snapshot.diagnostics.generated_at_unix_ms), loading),
+          },
         ]}
       />
     </SectionCard>

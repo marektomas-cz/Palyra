@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { MemoryRouter } from "react-router-dom";
 
 import { ConsoleShell } from "./ConsoleShell";
@@ -18,7 +18,7 @@ describe("ConsoleShell layout coverage", () => {
         channel: "web",
         csrf_token: "csrf-1",
         issued_at_unix_ms: 100,
-        expires_at_unix_ms: 200
+        expires_at_unix_ms: 200,
       },
       theme: "dark",
       setTheme: vi.fn(),
@@ -29,7 +29,7 @@ describe("ConsoleShell layout coverage", () => {
       section: "overview",
       setSection: vi.fn(),
       notice: "Overview refreshed.",
-      error: null
+      error: null,
     } as unknown as ConsoleAppState;
 
     render(
@@ -40,17 +40,15 @@ describe("ConsoleShell layout coverage", () => {
             <p>Baseline shell snapshot.</p>
           </section>
         </ConsoleShell>
-      </MemoryRouter>
+      </MemoryRouter>,
     );
 
     expect(
-      screen.getByRole("heading", { name: "Web Dashboard Operator Surface" })
+      screen.getByRole("heading", { name: "Web Dashboard Operator Surface" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Overview refreshed.")).toBeInTheDocument();
     expect(screen.getByText("admin:web-console")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Reveal sensitive values" })
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reveal sensitive values" })).toBeInTheDocument();
     expect(screen.getByText("Cookie session + CSRF")).toBeInTheDocument();
   });
 });

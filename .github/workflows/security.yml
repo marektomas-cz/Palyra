@@ -19,24 +19,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        if: ${{ hashFiles('apps/web/package-lock.json') != '' }}
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
-
-      - name: Bootstrap web app
-        if: ${{ hashFiles('apps/web/package-lock.json') != '' }}
-        run: npm --prefix apps/web run bootstrap
+          node-version-file: .node-version
+          cache: true
+          run-install: true
 
       - name: npm audit (high)
-        if: ${{ hashFiles('apps/web/package-lock.json') != '' }}
-        run: npm --prefix apps/web audit --audit-level=high --omit=dev
+        run: npm audit --workspace @palyra/web --audit-level=high --omit=dev
 
       - name: Collect npm audit reports (runtime + full)
-        if: ${{ hashFiles('apps/web/package-lock.json') != '' }}
         run: |
           mkdir -p security-artifacts
           run_audit_json() {
@@ -44,7 +37,7 @@ jobs:
             shift
 
             set +e
-            npm --prefix apps/web audit --json "$@" > "$output_file"
+            npm audit --workspace @palyra/web --json "$@" > "$output_file"
             local audit_exit_code=$?
             set -e
 
@@ -60,7 +53,6 @@ jobs:
           run_audit_json security-artifacts/npm-audit-full.json
 
       - name: Validate dev-only npm advisories allowlist
-        if: ${{ hashFiles('apps/web/package-lock.json') != '' }}
         run: |
           node scripts/validate-npm-audit-dev-allowlist.mjs \
             --full security-artifacts/npm-audit-full.json \

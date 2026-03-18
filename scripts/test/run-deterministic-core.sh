@@ -34,11 +34,7 @@ cd "$ROOT_DIR"
 
 CARGO_BIN="$(resolve_cargo)"
 
-if [[ ! -d "$ROOT_DIR/apps/web/node_modules" ]]; then
-  npm --prefix apps/web run bootstrap
-else
-  npm --prefix apps/web run verify-install
-fi
+bash "$ROOT_DIR/scripts/test/ensure-js-workspace.sh"
 
 bash "$ROOT_DIR/scripts/test/ensure-desktop-ui.sh"
 
@@ -59,7 +55,7 @@ bash "$ROOT_DIR/scripts/test/check-deterministic-fixtures.sh"
 "$CARGO_BIN" test -p palyra-daemon --test gateway_grpc --locked grpc_route_message_preserves_attachment_metadata_in_outbound_and_journal
 "$CARGO_BIN" test -p palyra-daemon --test gateway_grpc --locked grpc_approvals_service_persists_and_exports_denied_tool_approval
 
-npm --prefix apps/web run test:run -- \
+npm run web:test -- \
   src/App.openai-auth.test.tsx \
   src/App.config-access-support.test.tsx \
   src/App.runtime-operations.test.tsx \

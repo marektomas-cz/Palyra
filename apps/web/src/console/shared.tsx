@@ -29,23 +29,36 @@ export function DiscordOnboardingHighlights({ title, payload }: DiscordOnboardin
   const channelPermissionCheck = isJsonObject(preflight["channel_permission_check"])
     ? preflight["channel_permission_check"]
     : null;
-  const permissionFlags: Array<[string, boolean]> = channelPermissionCheck === null
-    ? []
-    : [
-      ["View Channels", readBool(channelPermissionCheck, "can_view_channel")],
-      ["Send Messages", readBool(channelPermissionCheck, "can_send_messages")],
-      ["Read Message History", readBool(channelPermissionCheck, "can_read_message_history")],
-      ["Embed Links", readBool(channelPermissionCheck, "can_embed_links")],
-      ["Attach Files", readBool(channelPermissionCheck, "can_attach_files")],
-      ["Send Messages in Threads", readBool(channelPermissionCheck, "can_send_messages_in_threads")]
-    ];
+  const permissionFlags: Array<[string, boolean]> =
+    channelPermissionCheck === null
+      ? []
+      : [
+          ["View Channels", readBool(channelPermissionCheck, "can_view_channel")],
+          ["Send Messages", readBool(channelPermissionCheck, "can_send_messages")],
+          ["Read Message History", readBool(channelPermissionCheck, "can_read_message_history")],
+          ["Embed Links", readBool(channelPermissionCheck, "can_embed_links")],
+          ["Attach Files", readBool(channelPermissionCheck, "can_attach_files")],
+          [
+            "Send Messages in Threads",
+            readBool(channelPermissionCheck, "can_send_messages_in_threads"),
+          ],
+        ];
 
   return (
     <section className="console-subpanel">
       <h4>{title}</h4>
-      {inviteUrl !== null && <p><strong>Invite URL template:</strong> {inviteUrl}</p>}
-      <p><strong>Required permissions:</strong> {requiredPermissions.length > 0 ? requiredPermissions.join(", ") : "-"}</p>
-      <p><strong>Egress allowlist:</strong></p>
+      {inviteUrl !== null && (
+        <p>
+          <strong>Invite URL template:</strong> {inviteUrl}
+        </p>
+      )}
+      <p>
+        <strong>Required permissions:</strong>{" "}
+        {requiredPermissions.length > 0 ? requiredPermissions.join(", ") : "-"}
+      </p>
+      <p>
+        <strong>Egress allowlist:</strong>
+      </p>
       {egressAllowlist.length > 0 ? (
         <ul>
           {egressAllowlist.map((entry) => (
@@ -55,7 +68,9 @@ export function DiscordOnboardingHighlights({ title, payload }: DiscordOnboardin
       ) : (
         <p>-</p>
       )}
-      <p><strong>Security defaults:</strong></p>
+      <p>
+        <strong>Security defaults:</strong>
+      </p>
       {securityDefaults.length > 0 ? (
         <ul>
           {securityDefaults.map((entry) => (
@@ -68,13 +83,15 @@ export function DiscordOnboardingHighlights({ title, payload }: DiscordOnboardin
       {channelPermissionCheck !== null && (
         <>
           <p>
-            <strong>Channel permission check:</strong>{" "}
-            channel_id={readString(channelPermissionCheck, "channel_id") ?? "unknown"} status=
+            <strong>Channel permission check:</strong> channel_id=
+            {readString(channelPermissionCheck, "channel_id") ?? "unknown"} status=
             {readString(channelPermissionCheck, "status") ?? "unknown"}
           </p>
           <ul>
             {permissionFlags.map(([label, enabled]) => (
-              <li key={label}>{label}: {enabled ? "yes" : "no"}</li>
+              <li key={label}>
+                {label}: {enabled ? "yes" : "no"}
+              </li>
             ))}
           </ul>
         </>
@@ -231,11 +248,11 @@ export function toPrettyJson(value: JsonValue, revealSensitive: boolean): string
 export const PrettyJsonBlock = memo(function PrettyJsonBlock({
   value,
   revealSensitiveValues,
-  className
+  className,
 }: PrettyJsonBlockProps) {
   const formatted = useMemo(
     () => toPrettyJson(value, revealSensitiveValues),
-    [value, revealSensitiveValues]
+    [value, revealSensitiveValues],
   );
   return <pre className={className}>{formatted}</pre>;
 });

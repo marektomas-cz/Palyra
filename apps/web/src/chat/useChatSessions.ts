@@ -29,7 +29,7 @@ type UseChatSessionsResult = {
 export function useChatSessions({
   api,
   setError,
-  setNotice
+  setNotice,
 }: UseChatSessionsArgs): UseChatSessionsResult {
   const [sessionsBusy, setSessionsBusy] = useState(false);
   const [sessions, setSessions] = useState<ChatSessionRecord[]>([]);
@@ -58,11 +58,11 @@ export function useChatSessions({
     try {
       const response = await api.listChatSessions();
       const nextSessions = [...response.sessions].sort(
-        (left, right) => right.updated_at_unix_ms - left.updated_at_unix_ms
+        (left, right) => right.updated_at_unix_ms - left.updated_at_unix_ms,
       );
       if (nextSessions.length === 0 && ensureSession) {
         const created = await api.resolveChatSession({
-          session_label: emptyToUndefined(newSessionLabel)
+          session_label: emptyToUndefined(newSessionLabel),
         });
         setSessions([created.session]);
         setActiveSessionId(created.session.session_id);
@@ -76,7 +76,10 @@ export function useChatSessions({
         return;
       }
       setActiveSessionId((previous) => {
-        if (previous.length > 0 && nextSessions.some((session) => session.session_id === previous)) {
+        if (
+          previous.length > 0 &&
+          nextSessions.some((session) => session.session_id === previous)
+        ) {
           return previous;
         }
         return nextSessions[0].session_id;
@@ -94,10 +97,12 @@ export function useChatSessions({
     setSessionsBusy(true);
     try {
       const response = await api.resolveChatSession({
-        session_label: emptyToUndefined(newSessionLabel)
+        session_label: emptyToUndefined(newSessionLabel),
       });
       setSessions((previous) => {
-        const without = previous.filter((entry) => entry.session_id !== response.session.session_id);
+        const without = previous.filter(
+          (entry) => entry.session_id !== response.session.session_id,
+        );
         return [response.session, ...without];
       });
       setActiveSessionId(response.session.session_id);
@@ -124,7 +129,7 @@ export function useChatSessions({
     setSessionsBusy(true);
     try {
       const response = await api.renameChatSession(activeSessionId, {
-        session_label: sessionLabelDraft.trim()
+        session_label: sessionLabelDraft.trim(),
       });
       setSessions((previous) => {
         return previous.map((entry) => {
@@ -183,6 +188,6 @@ export function useChatSessions({
     refreshSessions,
     createSession,
     renameSession,
-    resetSession
+    resetSession,
   };
 }

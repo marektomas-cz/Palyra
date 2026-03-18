@@ -123,4 +123,4 @@ relaySnapshotButton.addEventListener("click", () => withUiErrorBoundary(relaySen
 relaySelectionButton.addEventListener("click", () => withUiErrorBoundary(relayCaptureSelection));
 relayOpenTabButton.addEventListener("click", () => withUiErrorBoundary(relayOpenTab));
 
-withUiErrorBoundary(refreshConfig);
+void withUiErrorBoundary(refreshConfig);

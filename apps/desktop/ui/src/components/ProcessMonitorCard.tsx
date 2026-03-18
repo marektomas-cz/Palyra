@@ -16,14 +16,20 @@ function processItems(process: ServiceProcessSnapshot, loading: boolean) {
       { label: "PID", value: <Skeleton className="desktop-skeleton desktop-skeleton--text" /> },
       {
         label: "Restart attempts",
-        value: <Skeleton className="desktop-skeleton desktop-skeleton--text" />
+        value: <Skeleton className="desktop-skeleton desktop-skeleton--text" />,
       },
       {
         label: "Bound ports",
-        value: <Skeleton className="desktop-skeleton desktop-skeleton--text" />
+        value: <Skeleton className="desktop-skeleton desktop-skeleton--text" />,
       },
-      { label: "Last start", value: <Skeleton className="desktop-skeleton desktop-skeleton--text" /> },
-      { label: "Last exit", value: <Skeleton className="desktop-skeleton desktop-skeleton--text" /> }
+      {
+        label: "Last start",
+        value: <Skeleton className="desktop-skeleton desktop-skeleton--text" />,
+      },
+      {
+        label: "Last exit",
+        value: <Skeleton className="desktop-skeleton desktop-skeleton--text" />,
+      },
     ];
   }
 
@@ -32,10 +38,10 @@ function processItems(process: ServiceProcessSnapshot, loading: boolean) {
     { label: "Restart attempts", value: process.restart_attempt },
     {
       label: "Bound ports",
-      value: process.bound_ports.join(", ") || "None"
+      value: process.bound_ports.join(", ") || "None",
     },
     { label: "Last start", value: formatUnixMs(process.last_start_unix_ms) },
-    { label: "Last exit", value: fallbackText(process.last_exit) }
+    { label: "Last exit", value: fallbackText(process.last_exit) },
   ];
 }
 
@@ -67,7 +73,7 @@ function ProcessPane({ title, process, loading }: ProcessPaneProps) {
 export function ProcessMonitorCard({
   gatewayProcess,
   browserdProcess,
-  loading
+  loading,
 }: ProcessMonitorCardProps) {
   return (
     <SectionCard

@@ -7,7 +7,7 @@ import type {
   PatchDocument,
   PatchOperation,
   PatchOperationKind,
-  PatchProcessingBudget
+  PatchProcessingBudget,
 } from "./types";
 import { isJsonObject, isJsonValue } from "./types";
 
@@ -17,7 +17,7 @@ const FORBIDDEN_POINTER_TOKENS = new Set(["__proto__", "prototype", "constructor
 
 export function parsePatchDocument(
   input: unknown,
-  budget: PatchProcessingBudget = DEFAULT_PATCH_BUDGET
+  budget: PatchProcessingBudget = DEFAULT_PATCH_BUDGET,
 ): PatchDocument {
   if (!isJsonObject(input)) {
     throw new A2uiError("invalid_patch", "Patch payload must be a JSON object.");
@@ -31,16 +31,16 @@ export function parsePatchDocument(
   if (input.ops.length > budget.maxOpsPerPatch) {
     throw new A2uiError(
       "budget_exceeded",
-      `Patch operation count ${input.ops.length} exceeds maxOpsPerPatch=${budget.maxOpsPerPatch}.`
+      `Patch operation count ${input.ops.length} exceeds maxOpsPerPatch=${budget.maxOpsPerPatch}.`,
     );
   }
 
   const operations: PatchOperation[] = input.ops.map((entry, index) =>
-    parsePatchOperation(entry, index, budget)
+    parsePatchOperation(entry, index, budget),
   );
   return {
     v: 1,
-    ops: operations
+    ops: operations,
   };
 }
 
@@ -48,7 +48,7 @@ export function applyPatchDocument(
   state: JsonValue,
   patch: PatchDocument,
   budget: PatchProcessingBudget = DEFAULT_PATCH_BUDGET,
-  now: () => number = currentTimeMs
+  now: () => number = currentTimeMs,
 ): JsonValue {
   if (patch.v !== 1) {
     throw new A2uiError("invalid_patch", "Patch payload must use version v=1.");
@@ -59,7 +59,7 @@ export function applyPatchDocument(
   if (patch.ops.length > budget.maxOpsPerPatch) {
     throw new A2uiError(
       "budget_exceeded",
-      `Patch operation count ${patch.ops.length} exceeds maxOpsPerPatch=${budget.maxOpsPerPatch}.`
+      `Patch operation count ${patch.ops.length} exceeds maxOpsPerPatch=${budget.maxOpsPerPatch}.`,
     );
   }
 
@@ -72,14 +72,14 @@ export function applyPatchDocument(
       throw new A2uiError(
         "budget_exceeded",
         `Patch path exceeds maxPathLength=${budget.maxPathLength}.`,
-        operation.path
+        operation.path,
       );
     }
     const elapsed = now() - startedAt;
     if (elapsed > budget.maxApplyMsPerTick) {
       throw new A2uiError(
         "budget_exceeded",
-        `Patch application exceeded maxApplyMsPerTick=${budget.maxApplyMsPerTick}.`
+        `Patch application exceeded maxApplyMsPerTick=${budget.maxApplyMsPerTick}.`,
       );
     }
     nextState = applySingleOperation(nextState, operation, index, budget.maxPathLength);
@@ -91,7 +91,7 @@ export function applyPatchDocument(
 function parsePatchOperation(
   value: unknown,
   index: number,
-  budget: PatchProcessingBudget
+  budget: PatchProcessingBudget,
 ): PatchOperation {
   if (!isJsonObject(value)) {
     throw new A2uiError("invalid_patch", `Patch operation at index ${index} must be an object.`);
@@ -104,7 +104,7 @@ function parsePatchOperation(
     if (hasValue) {
       throw new A2uiError(
         "invalid_patch",
-        `Patch remove operation at index ${index} must not include a value.`
+        `Patch remove operation at index ${index} must not include a value.`,
       );
     }
     return { op, path };
@@ -113,14 +113,14 @@ function parsePatchOperation(
   if (!hasValue || !isJsonValue(value.value)) {
     throw new A2uiError(
       "invalid_patch",
-      `Patch ${op} operation at index ${index} must include a JSON value.`
+      `Patch ${op} operation at index ${index} must include a JSON value.`,
     );
   }
 
   return {
     op,
     path,
-    value: cloneJsonValue(value.value)
+    value: cloneJsonValue(value.value),
   };
 }
 
@@ -131,20 +131,23 @@ function parseOperationKind(value: unknown, index: number): PatchOperationKind {
   if (value === "add" || value === "replace" || value === "remove") {
     return value;
   }
-  throw new A2uiError("invalid_patch", `Patch operation at index ${index} uses unsupported op '${value}'.`);
+  throw new A2uiError(
+    "invalid_patch",
+    `Patch operation at index ${index} uses unsupported op '${value}'.`,
+  );
 }
 
 function parseOperationPath(value: unknown, index: number, maxPathLength: number): string {
   if (typeof value !== "string") {
     throw new A2uiError(
       "invalid_patch",
-      `Patch operation at index ${index} has invalid path type.`
+      `Patch operation at index ${index} has invalid path type.`,
     );
   }
   if (value.length > maxPathLength) {
     throw new A2uiError(
       "budget_exceeded",
-      `Patch path length ${value.length} exceeds maxPathLength=${maxPathLength}.`
+      `Patch path length ${value.length} exceeds maxPathLength=${maxPathLength}.`,
     );
   }
   if (value === "") {
@@ -153,7 +156,7 @@ function parseOperationPath(value: unknown, index: number, maxPathLength: number
   if (!value.startsWith("/")) {
     throw new A2uiError(
       "invalid_patch",
-      `Patch path '${value}' at index ${index} must start with '/'.`
+      `Patch path '${value}' at index ${index} must start with '/'.`,
     );
   }
   return value;
@@ -163,7 +166,7 @@ function applySingleOperation(
   root: JsonValue,
   operation: PatchOperation,
   opIndex: number,
-  maxPathLength: number
+  maxPathLength: number,
 ): JsonValue {
   const tokens = parsePointerTokens(operation.path, opIndex, maxPathLength);
   if (tokens.length === 0) {
@@ -190,7 +193,7 @@ function applyAddOperation(
   container: MutableContainer,
   token: string,
   value: JsonValue,
-  opIndex: number
+  opIndex: number,
 ): void {
   if (Array.isArray(container)) {
     if (token === "-") {
@@ -208,7 +211,7 @@ function applyReplaceOperation(
   container: MutableContainer,
   token: string,
   value: JsonValue,
-  opIndex: number
+  opIndex: number,
 ): void {
   if (Array.isArray(container)) {
     const index = parseArrayIndex(token, opIndex, container.length, false);
@@ -218,7 +221,7 @@ function applyReplaceOperation(
   if (!Object.prototype.hasOwnProperty.call(container, token)) {
     throw new A2uiError(
       "conflict",
-      `Patch operation at index ${opIndex} cannot replace missing object path '${token}'.`
+      `Patch operation at index ${opIndex} cannot replace missing object path '${token}'.`,
     );
   }
   container[token] = cloneJsonValue(value);
@@ -233,7 +236,7 @@ function applyRemoveOperation(container: MutableContainer, token: string, opInde
   if (!Object.prototype.hasOwnProperty.call(container, token)) {
     throw new A2uiError(
       "conflict",
-      `Patch operation at index ${opIndex} cannot remove missing object path '${token}'.`
+      `Patch operation at index ${opIndex} cannot remove missing object path '${token}'.`,
     );
   }
   delete container[token];
@@ -243,7 +246,7 @@ function resolveContainer(
   root: JsonValue,
   tokens: readonly string[],
   opIndex: number,
-  originalPath: string
+  originalPath: string,
 ): { container: MutableContainer; token: string } {
   let current: JsonValue = root;
 
@@ -258,7 +261,7 @@ function resolveContainer(
       if (!Object.prototype.hasOwnProperty.call(current, token)) {
         throw new A2uiError(
           "conflict",
-          `Patch operation at index ${opIndex} cannot resolve path '${originalPath}'.`
+          `Patch operation at index ${opIndex} cannot resolve path '${originalPath}'.`,
         );
       }
       current = current[token];
@@ -266,20 +269,20 @@ function resolveContainer(
     }
     throw new A2uiError(
       "conflict",
-      `Patch operation at index ${opIndex} cannot traverse into primitive at '${originalPath}'.`
+      `Patch operation at index ${opIndex} cannot traverse into primitive at '${originalPath}'.`,
     );
   }
 
   if (Array.isArray(current) || isJsonObject(current)) {
     return {
       container: current,
-      token: tokens[tokens.length - 1]
+      token: tokens[tokens.length - 1],
     };
   }
 
   throw new A2uiError(
     "conflict",
-    `Patch operation at index ${opIndex} cannot modify primitive at '${originalPath}'.`
+    `Patch operation at index ${opIndex} cannot modify primitive at '${originalPath}'.`,
   );
 }
 
@@ -287,7 +290,7 @@ function parsePointerTokens(path: string, opIndex: number, maxPathLength: number
   if (path.length > maxPathLength) {
     throw new A2uiError(
       "budget_exceeded",
-      `Patch path length ${path.length} exceeds maxPathLength=${maxPathLength}.`
+      `Patch path length ${path.length} exceeds maxPathLength=${maxPathLength}.`,
     );
   }
   if (path === "") {
@@ -303,7 +306,7 @@ function parsePointerTokens(path: string, opIndex: number, maxPathLength: number
     if (FORBIDDEN_POINTER_TOKENS.has(decoded)) {
       throw new A2uiError(
         "invalid_patch",
-        `Patch path '${path}' at index ${opIndex} contains forbidden token '${decoded}'.`
+        `Patch path '${path}' at index ${opIndex} contains forbidden token '${decoded}'.`,
       );
     }
     return decoded;
@@ -321,7 +324,7 @@ function decodePointerSegment(segment: string, opIndex: number, originalPath: st
     if (cursor + 1 >= segment.length) {
       throw new A2uiError(
         "invalid_patch",
-        `Patch path '${originalPath}' at index ${opIndex} has invalid escape sequence.`
+        `Patch path '${originalPath}' at index ${opIndex} has invalid escape sequence.`,
       );
     }
     const escaped = segment[cursor + 1];
@@ -337,7 +340,7 @@ function decodePointerSegment(segment: string, opIndex: number, originalPath: st
     }
     throw new A2uiError(
       "invalid_patch",
-      `Patch path '${originalPath}' at index ${opIndex} has invalid escape sequence.`
+      `Patch path '${originalPath}' at index ${opIndex} has invalid escape sequence.`,
     );
   }
   return decoded;
@@ -347,17 +350,20 @@ function parseArrayIndex(
   raw: string,
   opIndex: number,
   arrayLength: number,
-  allowEndExclusive: boolean
+  allowEndExclusive: boolean,
 ): number {
   if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
-    throw new A2uiError("conflict", `Patch operation at index ${opIndex} has invalid array index '${raw}'.`);
+    throw new A2uiError(
+      "conflict",
+      `Patch operation at index ${opIndex} has invalid array index '${raw}'.`,
+    );
   }
   const value = Number.parseInt(raw, 10);
   const maxAllowed = allowEndExclusive ? arrayLength : arrayLength - 1;
   if (value > maxAllowed) {
     throw new A2uiError(
       "conflict",
-      `Patch operation at index ${opIndex} index ${value} is out of bounds (len=${arrayLength}).`
+      `Patch operation at index ${opIndex} index ${value} is out of bounds (len=${arrayLength}).`,
     );
   }
   return value;

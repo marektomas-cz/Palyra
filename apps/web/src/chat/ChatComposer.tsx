@@ -1,9 +1,4 @@
-import {
-  ActionButton,
-  ActionCluster,
-  AppForm,
-  TextAreaField
-} from "../console/components/ui";
+import { ActionButton, ActionCluster, AppForm, TextAreaField } from "../console/components/ui";
 
 type ChatComposerProps = {
   composerText: string;
@@ -22,7 +17,7 @@ export function ChatComposer({
   activeSessionId,
   submitMessage,
   cancelStreaming,
-  clearTranscript
+  clearTranscript,
 }: ChatComposerProps) {
   return (
     <AppForm

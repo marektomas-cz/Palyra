@@ -1,4 +1,3 @@
-
 import {
   type Dispatch,
   type FormEvent,
@@ -6,10 +5,15 @@ import {
   useEffect,
   useMemo,
   useRef,
-  useState
+  useState,
 } from "react";
 
-import { ConsoleApiClient, ControlPlaneApiError, type ConsoleSession, type JsonValue } from "../consoleApi";
+import {
+  ConsoleApiClient,
+  ControlPlaneApiError,
+  type ConsoleSession,
+  type JsonValue,
+} from "../consoleApi";
 import { createChannelCoreDomain } from "../features/channels/core/domain";
 import { useChannelCoreState } from "../features/channels/core/useChannelCoreState";
 import { createDiscordChannelDomain } from "../features/channels/connectors/discord/domain";
@@ -27,7 +31,7 @@ import {
   skillMetadata,
   toErrorMessage,
   toJsonObjectArray,
-  type JsonObject
+  type JsonObject,
 } from "./shared";
 
 export type { Section } from "./sectionMetadata";
@@ -44,7 +48,7 @@ export const AUTO_REFRESH_SECTION_TTL_MS: Partial<Record<Section, number>> = {
   secrets: 15_000,
   access: 10_000,
   operations: 10_000,
-  support: 10_000
+  support: 10_000,
 };
 
 const BOOTSTRAP_SESSION_RETRY_DELAY_MS = 150;
@@ -56,7 +60,7 @@ const DESKTOP_HANDOFF_QUERY_PARAM = "desktop_handoff_token";
 export function shouldAutoRefreshSection(
   section: Section,
   lastRefreshedAt: number | null,
-  now: number = Date.now()
+  now: number = Date.now(),
 ): boolean {
   const ttlMs = AUTO_REFRESH_SECTION_TTL_MS[section];
   if (ttlMs === undefined || lastRefreshedAt === null) {
@@ -68,7 +72,7 @@ export function shouldAutoRefreshSection(
 function shouldRetryBootstrapSession(
   error: unknown,
   attempt: number,
-  maxAttempts: number
+  maxAttempts: number,
 ): boolean {
   if (!(error instanceof ControlPlaneApiError)) {
     return false;
@@ -106,7 +110,7 @@ async function loadBootstrapSession(api: ConsoleApiClient): Promise<ConsoleSessi
 
 async function loadDesktopHandoffSession(
   api: ConsoleApiClient,
-  desktopHandoffToken: string
+  desktopHandoffToken: string,
 ): Promise<ConsoleSession> {
   try {
     return await api.consumeDesktopHandoff(desktopHandoffToken);
@@ -165,7 +169,10 @@ export function useConsoleAppState() {
     if (stored === "light" || stored === "dark") {
       return stored;
     }
-    if (window.matchMedia !== undefined && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+    if (
+      window.matchMedia !== undefined &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches
+    ) {
       return "dark";
     }
     return "dark";
@@ -176,7 +183,9 @@ export function useConsoleAppState() {
 
   const [loginBusy, setLoginBusy] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
-  const [loginFormState, setLoginFormState] = useState<LoginForm>(() => ({ ...DEFAULT_LOGIN_FORM }));
+  const [loginFormState, setLoginFormState] = useState<LoginForm>(() => ({
+    ...DEFAULT_LOGIN_FORM,
+  }));
   const loginForm: LoginForm = loginFormState;
   const setLoginForm: Dispatch<SetStateAction<LoginForm>> = setLoginFormState;
 
@@ -448,7 +457,9 @@ export function useConsoleAppState() {
   const [browserRelayTtlMs, setBrowserRelayTtlMs] = useState("300000");
   const [browserRelayToken, setBrowserRelayToken] = useState("");
   const [browserRelayTokenExpiry, setBrowserRelayTokenExpiry] = useState<number | null>(null);
-  const [browserRelayAction, setBrowserRelayAction] = useState<"open_tab" | "capture_selection" | "send_page_snapshot">("capture_selection");
+  const [browserRelayAction, setBrowserRelayAction] = useState<
+    "open_tab" | "capture_selection" | "send_page_snapshot"
+  >("capture_selection");
   const [browserRelayOpenTabUrl, setBrowserRelayOpenTabUrl] = useState("");
   const [browserRelaySelector, setBrowserRelaySelector] = useState("body");
   const [browserRelayResult, setBrowserRelayResult] = useState<JsonValue | null>(null);
@@ -468,7 +479,7 @@ export function useConsoleAppState() {
     overviewDiagnostics,
     overviewSupportJobs,
     refreshOverview,
-    resetOverviewDomain
+    resetOverviewDomain,
   } = overviewDomain;
   const {
     configBusy,
@@ -509,7 +520,7 @@ export function useConsoleAppState() {
     setSecretValue,
     revealSecretValue,
     deleteSecretValue,
-    resetConfigDomain
+    resetConfigDomain,
   } = configDomain;
   const {
     supportBusy,
@@ -532,7 +543,7 @@ export function useConsoleAppState() {
     mintSupportPairingCode,
     createSupportBundle,
     loadSupportBundleJob,
-    resetSupportDomain
+    resetSupportDomain,
   } = supportDomain;
 
   function applyConsoleSession(current: ConsoleSession): void {
@@ -541,9 +552,11 @@ export function useConsoleAppState() {
       ...previous,
       principal: current.principal,
       deviceId: current.device_id,
-      channel: current.channel ?? previous.channel
+      channel: current.channel ?? previous.channel,
     }));
-    setBrowserPrincipal((previous) => (previous.trim().length === 0 ? current.principal : previous));
+    setBrowserPrincipal((previous) =>
+      previous.trim().length === 0 ? current.principal : previous,
+    );
   }
 
   useEffect(() => {
@@ -785,7 +798,7 @@ export function useConsoleAppState() {
         admin_token: loginForm.adminToken,
         principal: loginForm.principal.trim(),
         device_id: loginForm.deviceId.trim(),
-        channel: emptyToUndefined(loginForm.channel)
+        channel: emptyToUndefined(loginForm.channel),
       });
       resetOperatorScopedState();
       setSession(next);
@@ -795,7 +808,7 @@ export function useConsoleAppState() {
         adminToken: "",
         principal: next.principal,
         deviceId: next.device_id,
-        channel: next.channel ?? previous.channel
+        channel: next.channel ?? previous.channel,
       }));
       setNotice("Signed in.");
     } catch (failure) {
@@ -845,7 +858,8 @@ export function useConsoleAppState() {
       await api.decideApproval(approvalId.trim(), {
         approved,
         reason: emptyToUndefined(approvalReason),
-        decision_scope: approvalScope === "session" || approvalScope === "timeboxed" ? approvalScope : "once"
+        decision_scope:
+          approvalScope === "session" || approvalScope === "timeboxed" ? approvalScope : "once",
       });
       setNotice(approved ? "Approval allowed." : "Approval denied.");
       await refreshApprovals();
@@ -878,11 +892,18 @@ export function useConsoleAppState() {
         name: cronForm.name.trim(),
         prompt: cronForm.prompt.trim(),
         schedule_type: cronForm.scheduleType,
-        cron_expression: cronForm.scheduleType === "cron" ? emptyToUndefined(cronForm.cronExpression) : undefined,
-        every_interval_ms: cronForm.scheduleType === "every" ? parseInteger(cronForm.everyIntervalMs) ?? undefined : undefined,
-        at_timestamp_rfc3339: cronForm.scheduleType === "at" ? emptyToUndefined(cronForm.atTimestampRfc3339) : undefined,
+        cron_expression:
+          cronForm.scheduleType === "cron" ? emptyToUndefined(cronForm.cronExpression) : undefined,
+        every_interval_ms:
+          cronForm.scheduleType === "every"
+            ? (parseInteger(cronForm.everyIntervalMs) ?? undefined)
+            : undefined,
+        at_timestamp_rfc3339:
+          cronForm.scheduleType === "at"
+            ? emptyToUndefined(cronForm.atTimestampRfc3339)
+            : undefined,
         enabled: cronForm.enabled,
-        channel: emptyToUndefined(cronForm.channel)
+        channel: emptyToUndefined(cronForm.channel),
       });
       setCronForm(DEFAULT_CRON_FORM);
       setNotice("Cron job created.");
@@ -981,7 +1002,7 @@ export function useConsoleAppState() {
       setMemoryStatus({
         usage: response.usage,
         retention: response.retention,
-        maintenance: response.maintenance
+        maintenance: response.maintenance,
       });
     } catch (failure) {
       setError(toErrorMessage(failure));
@@ -997,7 +1018,7 @@ export function useConsoleAppState() {
       const response = await api.purgeMemory({
         channel: emptyToUndefined(memoryPurgeChannel),
         session_id: emptyToUndefined(memoryPurgeSessionId),
-        purge_all_principal: memoryPurgeAll
+        purge_all_principal: memoryPurgeAll,
       });
       setNotice(`Purged ${response.deleted_count} memory item(s).`);
       setMemoryHits([]);
@@ -1034,7 +1055,7 @@ export function useConsoleAppState() {
       await api.installSkill({
         artifact_path: skillArtifactPath.trim(),
         allow_tofu: skillAllowTofu,
-        allow_untrusted: skillAllowUntrusted
+        allow_untrusted: skillAllowUntrusted,
       });
       setSkillArtifactPath("");
       setNotice("Skill installed.");
@@ -1046,7 +1067,10 @@ export function useConsoleAppState() {
     }
   }
 
-  async function executeSkillAction(entry: JsonObject, action: "verify" | "audit" | "quarantine" | "enable"): Promise<void> {
+  async function executeSkillAction(
+    entry: JsonObject,
+    action: "verify" | "audit" | "quarantine" | "enable",
+  ): Promise<void> {
     const metadata = skillMetadata(entry);
     if (metadata === null) {
       setError("Skill entry is missing record metadata.");
@@ -1063,21 +1087,21 @@ export function useConsoleAppState() {
         await api.auditSkill(metadata.skillId, {
           version: metadata.version,
           allow_tofu: false,
-          quarantine_on_fail: true
+          quarantine_on_fail: true,
         });
       }
       if (action === "quarantine") {
         await api.quarantineSkill({
           skill_id: metadata.skillId,
           version: metadata.version,
-          reason: emptyToUndefined(skillReason)
+          reason: emptyToUndefined(skillReason),
         });
       }
       if (action === "enable") {
         await api.enableSkill({
           skill_id: metadata.skillId,
           version: metadata.version,
-          reason: emptyToUndefined(skillReason)
+          reason: emptyToUndefined(skillReason),
         });
       }
       setNotice(`Skill action '${action}' completed.`);
@@ -1127,7 +1151,7 @@ export function useConsoleAppState() {
         name: browserProfileName.trim(),
         theme_color: emptyToUndefined(browserProfileTheme),
         persistence_enabled: browserProfilePersistence,
-        private_profile: browserProfilePrivate
+        private_profile: browserProfilePrivate,
       });
       setBrowserProfileName("");
       setBrowserProfileTheme("");
@@ -1155,7 +1179,7 @@ export function useConsoleAppState() {
     try {
       await api.renameBrowserProfile(browserRenameProfileId.trim(), {
         principal: emptyToUndefined(browserPrincipal),
-        name: browserRenameName.trim()
+        name: browserRenameName.trim(),
       });
       setNotice("Browser profile renamed.");
       setBrowserRenameName("");
@@ -1177,7 +1201,7 @@ export function useConsoleAppState() {
     setError(null);
     try {
       await api.activateBrowserProfile(profileId, {
-        principal: emptyToUndefined(browserPrincipal)
+        principal: emptyToUndefined(browserPrincipal),
       });
       setNotice("Browser profile activated.");
       await refreshBrowserProfiles();
@@ -1196,7 +1220,9 @@ export function useConsoleAppState() {
     }
     const profileName = readString(profile, "name") ?? profileId;
     if (shouldConfirmBrowserDeletion()) {
-      const confirmed = window.confirm(`Delete browser profile '${profileName}'? This cannot be undone.`);
+      const confirmed = window.confirm(
+        `Delete browser profile '${profileName}'? This cannot be undone.`,
+      );
       if (!confirmed) {
         setNotice("Browser profile deletion canceled.");
         return;
@@ -1206,7 +1232,7 @@ export function useConsoleAppState() {
     setError(null);
     try {
       await api.deleteBrowserProfile(profileId, {
-        principal: emptyToUndefined(browserPrincipal)
+        principal: emptyToUndefined(browserPrincipal),
       });
       setNotice("Browser profile deleted.");
       await refreshBrowserProfiles();
@@ -1232,7 +1258,7 @@ export function useConsoleAppState() {
       const response = await api.mintBrowserRelayToken({
         session_id: browserRelaySessionId.trim(),
         extension_id: browserRelayExtensionId.trim(),
-        ttl_ms: parseInteger(browserRelayTtlMs) ?? undefined
+        ttl_ms: parseInteger(browserRelayTtlMs) ?? undefined,
       });
       setBrowserRelayToken(response.relay_token);
       setBrowserRelayTokenExpiry(response.expires_at_unix_ms);
@@ -1283,20 +1309,20 @@ export function useConsoleAppState() {
         session_id: browserRelaySessionId.trim(),
         extension_id: browserRelayExtensionId.trim(),
         action: browserRelayAction,
-        max_payload_bytes: 16384
+        max_payload_bytes: 16384,
       };
 
       if (browserRelayAction === "open_tab") {
         payload.open_tab = {
           url: browserRelayOpenTabUrl.trim(),
           activate: true,
-          timeout_ms: 6000
+          timeout_ms: 6000,
         };
       }
       if (browserRelayAction === "capture_selection") {
         payload.capture_selection = {
           selector: browserRelaySelector.trim(),
-          max_selection_bytes: 2048
+          max_selection_bytes: 2048,
         };
       }
       if (browserRelayAction === "send_page_snapshot") {
@@ -1304,7 +1330,7 @@ export function useConsoleAppState() {
           include_dom_snapshot: true,
           include_visible_text: true,
           max_dom_snapshot_bytes: 4096,
-          max_visible_text_bytes: 4096
+          max_visible_text_bytes: 4096,
         };
       }
       const response = await api.relayBrowserAction(payload, browserRelayToken);
@@ -1687,7 +1713,7 @@ export function useConsoleAppState() {
     refreshSupport,
     mintSupportPairingCode,
     createSupportBundle,
-    loadSupportBundleJob
+    loadSupportBundleJob,
   };
 }
 
@@ -1702,4 +1728,3 @@ function shouldConfirmBrowserDeletion(): boolean {
   }
   return !navigator.userAgent.toLowerCase().includes("jsdom");
 }
-

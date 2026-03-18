@@ -5,7 +5,7 @@ import {
   coerceFiniteNumber,
   coerceString,
   sanitizeIdentifier,
-  stringifyJsonValue
+  stringifyJsonValue,
 } from "./sanitize";
 import type {
   A2uiChartComponent,
@@ -20,13 +20,13 @@ import type {
   A2uiTableComponent,
   A2uiTextComponent,
   JsonValue,
-  RenderInputLimits
+  RenderInputLimits,
 } from "./types";
 import { isJsonObject } from "./types";
 
 export function normalizeA2uiDocument(
   input: unknown,
-  limits: RenderInputLimits = DEFAULT_RENDER_INPUT_LIMITS
+  limits: RenderInputLimits = DEFAULT_RENDER_INPUT_LIMITS,
 ): A2uiDocument {
   if (!isJsonObject(input)) {
     throw new A2uiError("invalid_input", "A2UI document must be a JSON object.");
@@ -53,7 +53,7 @@ export function normalizeA2uiDocument(
       boundedComponents[index],
       index,
       limits,
-      seenComponentIds
+      seenComponentIds,
     );
     if (normalized !== null) {
       components.push(normalized);
@@ -63,7 +63,7 @@ export function normalizeA2uiDocument(
   return {
     v: 1,
     surface,
-    components
+    components,
   };
 }
 
@@ -71,7 +71,7 @@ function normalizeComponent(
   value: unknown,
   index: number,
   limits: RenderInputLimits,
-  seenComponentIds: Set<string>
+  seenComponentIds: Set<string>,
 ): A2uiComponent | null {
   if (!isJsonObject(value)) {
     return null;
@@ -106,7 +106,7 @@ function normalizeComponent(
 function normalizeTextComponent(
   id: string,
   props: Record<string, unknown>,
-  limits: RenderInputLimits
+  limits: RenderInputLimits,
 ): A2uiTextComponent {
   const toneRaw = coerceString(props.tone, "normal", 16).toLowerCase();
   const tone = resolveTextTone(toneRaw);
@@ -116,15 +116,15 @@ function normalizeTextComponent(
     type: "text",
     props: {
       tone,
-      value
-    }
+      value,
+    },
   };
 }
 
 function normalizeMarkdownComponent(
   id: string,
   props: Record<string, unknown>,
-  limits: RenderInputLimits
+  limits: RenderInputLimits,
 ): A2uiMarkdownComponent {
   const raw = typeof props.value === "string" ? props.value : props.markdown;
   const value = coerceString(raw, "", limits.maxMarkdownLength);
@@ -132,15 +132,15 @@ function normalizeMarkdownComponent(
     id,
     type: "markdown",
     props: {
-      value
-    }
+      value,
+    },
   };
 }
 
 function normalizeListComponent(
   id: string,
   props: Record<string, unknown>,
-  limits: RenderInputLimits
+  limits: RenderInputLimits,
 ): A2uiListComponent {
   const ordered = coerceBoolean(props.ordered, false);
   const rawItems = Array.isArray(props.items) ? props.items : [];
@@ -152,41 +152,47 @@ function normalizeListComponent(
     type: "list",
     props: {
       ordered,
-      items
-    }
+      items,
+    },
   };
 }
 
 function normalizeTableComponent(
   id: string,
   props: Record<string, unknown>,
-  limits: RenderInputLimits
+  limits: RenderInputLimits,
 ): A2uiTableComponent {
   const rawColumns = Array.isArray(props.columns) ? props.columns : [];
   const columns = rawColumns
     .slice(0, limits.maxTableColumns)
     .map((entry, index) =>
-      coerceString(entry, `Column ${index + 1}`, Math.max(8, Math.floor(limits.maxStringLength / 2)))
+      coerceString(
+        entry,
+        `Column ${index + 1}`,
+        Math.max(8, Math.floor(limits.maxStringLength / 2)),
+      ),
     );
   const safeColumns = columns.length > 0 ? columns : ["Value"];
 
   const rawRows = Array.isArray(props.rows) ? props.rows : [];
-  const rows = rawRows.slice(0, limits.maxTableRows).map((row) => normalizeTableRow(row, safeColumns.length, limits));
+  const rows = rawRows
+    .slice(0, limits.maxTableRows)
+    .map((row) => normalizeTableRow(row, safeColumns.length, limits));
 
   return {
     id,
     type: "table",
     props: {
       columns: safeColumns,
-      rows
-    }
+      rows,
+    },
   };
 }
 
 function normalizeTableRow(
   row: unknown,
   columnCount: number,
-  limits: RenderInputLimits
+  limits: RenderInputLimits,
 ): readonly string[] {
   if (!Array.isArray(row)) {
     return Array.from({ length: columnCount }, () => "");
@@ -203,7 +209,7 @@ function normalizeTableRow(
 function normalizeFormComponent(
   id: string,
   props: Record<string, unknown>,
-  limits: RenderInputLimits
+  limits: RenderInputLimits,
 ): A2uiFormComponent {
   const title = coerceString(props.title, "Form", limits.maxStringLength);
   const submitLabel = coerceString(props.submit_label ?? props.submitLabel, "Submit", 48);
@@ -219,15 +225,15 @@ function normalizeFormComponent(
     props: {
       title,
       submitLabel,
-      fields
-    }
+      fields,
+    },
   };
 }
 
 function normalizeFormField(
   value: unknown,
   index: number,
-  limits: RenderInputLimits
+  limits: RenderInputLimits,
 ): A2uiFormField | null {
   if (!isJsonObject(value)) {
     return null;
@@ -253,7 +259,7 @@ function normalizeFormField(
       min,
       max,
       step,
-      defaultValue
+      defaultValue,
     };
   }
 
@@ -269,7 +275,7 @@ function normalizeFormField(
     const defaultCandidate = coerceString(
       value.default,
       options[0].value,
-      Math.max(16, Math.floor(limits.maxStringLength / 2))
+      Math.max(16, Math.floor(limits.maxStringLength / 2)),
     );
     const hasDefaultCandidate = options.some((option) => option.value === defaultCandidate);
     return {
@@ -279,7 +285,7 @@ function normalizeFormField(
       hint,
       required,
       options,
-      defaultValue: hasDefaultCandidate ? defaultCandidate : options[0].value
+      defaultValue: hasDefaultCandidate ? defaultCandidate : options[0].value,
     };
   }
 
@@ -290,7 +296,7 @@ function normalizeFormField(
       type,
       hint,
       required,
-      defaultValue: coerceBoolean(value.default, false)
+      defaultValue: coerceBoolean(value.default, false),
     };
   }
 
@@ -301,13 +307,13 @@ function normalizeFormField(
     hint,
     required,
     placeholder: coerceString(value.placeholder, "", 96),
-    defaultValue: coerceString(value.default, "", limits.maxStringLength)
+    defaultValue: coerceString(value.default, "", limits.maxStringLength),
   };
 }
 
 function normalizeSelectOption(
   value: unknown,
-  index: number
+  index: number,
 ): { label: string; value: string } | null {
   if (!isJsonObject(value)) {
     return null;
@@ -319,14 +325,14 @@ function normalizeSelectOption(
   }
   return {
     label,
-    value: optionValue
+    value: optionValue,
   };
 }
 
 function normalizeChartComponent(
   id: string,
   props: Record<string, unknown>,
-  limits: RenderInputLimits
+  limits: RenderInputLimits,
 ): A2uiChartComponent {
   const title = coerceString(props.title, "Chart", limits.maxStringLength);
   const rawSeries = Array.isArray(props.series) ? props.series : [];
@@ -340,21 +346,18 @@ function normalizeChartComponent(
     type: "chart",
     props: {
       title,
-      series
-    }
+      series,
+    },
   };
 }
 
-function normalizeChartPoint(
-  value: unknown,
-  index: number
-): A2uiChartSeriesPoint | null {
+function normalizeChartPoint(value: unknown, index: number): A2uiChartSeriesPoint | null {
   if (!isJsonObject(value)) {
     return null;
   }
   return {
     label: coerceString(value.label, `Point ${index + 1}`, 64),
-    value: coerceFiniteNumber(value.value, 0, 0, 1_000_000)
+    value: coerceFiniteNumber(value.value, 0, 0, 1_000_000),
   };
 }
 
@@ -386,7 +389,11 @@ function resolveTextTone(value: string): "normal" | "muted" | "success" | "criti
   }
 }
 
-function buildUniqueIdentifier(base: string, seenComponentIds: Set<string>, maxLength: number): string {
+function buildUniqueIdentifier(
+  base: string,
+  seenComponentIds: Set<string>,
+  maxLength: number,
+): string {
   if (!seenComponentIds.has(base)) {
     seenComponentIds.add(base);
     return base;

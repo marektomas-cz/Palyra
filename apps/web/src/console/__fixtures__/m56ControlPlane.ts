@@ -11,27 +11,55 @@ export function capabilityCatalogFixture() {
       capability("chat.sessions", "chat", "chat", "Chat sessions and run status"),
       capability("approvals", "approvals", "approvals", "Approval inbox and decisions"),
       capability("cron", "cron", "cron", "Cron job create, update, run-now, and logs"),
-      capability("channels", "channels", "channels", "Channel connector status, test, and enablement"),
-      capability("channel.router", "channels", "channels", "Router previews, pairings, and warnings"),
+      capability(
+        "channels",
+        "channels",
+        "channels",
+        "Channel connector status, test, and enablement",
+      ),
+      capability(
+        "channel.router",
+        "channels",
+        "channels",
+        "Router previews, pairings, and warnings",
+      ),
       capability("browser.profiles", "browser", "browser", "Browser profile lifecycle"),
       capability("memory", "memory", "memory", "Memory status, search, and purge"),
-      capability("skills", "skills", "skills", "Skill install, verify, audit, quarantine, and enable"),
+      capability(
+        "skills",
+        "skills",
+        "skills",
+        "Skill install, verify, audit, quarantine, and enable",
+      ),
       capability("auth.openai", "auth", "auth", "OpenAI provider auth contract surface"),
       capability("config.mutate", "config", "config", "Config mutate, migrate, and recover", {
-        notes: "Dashboard executes redacted inspect, validate, mutate, migrate, and recover flows without raw config hand edits.",
+        notes:
+          "Dashboard executes redacted inspect, validate, mutate, migrate, and recover flows without raw config hand edits.",
       }),
       capability("secrets", "secrets", "config", "Secret metadata, reveal, write, and delete"),
       capability("pairing", "pairing", "access", "DM pairing codes and approval state"),
-      capability("gateway.access", "deployment", "access", "Gateway access and deployment posture summary"),
-      capability("gateway.access.verify_remote", "deployment", "access", "Remote dashboard URL verification", {
-        owner: "palyra-cli",
-        execution_mode: "generated_cli",
-        dashboard_exposure: "cli_handoff",
-        cli_handoff_commands: [
-          "cargo run -p palyra-cli -- daemon dashboard-url --verify-remote --json",
-        ],
-        notes: "Remote verification stays CLI-driven because it may require host-local trust material.",
-      }),
+      capability(
+        "gateway.access",
+        "deployment",
+        "access",
+        "Gateway access and deployment posture summary",
+      ),
+      capability(
+        "gateway.access.verify_remote",
+        "deployment",
+        "access",
+        "Remote dashboard URL verification",
+        {
+          owner: "palyra-cli",
+          execution_mode: "generated_cli",
+          dashboard_exposure: "cli_handoff",
+          cli_handoff_commands: [
+            "cargo run -p palyra-cli -- daemon dashboard-url --verify-remote --json",
+          ],
+          notes:
+            "Remote verification stays CLI-driven because it may require host-local trust material.",
+        },
+      ),
       capability("gateway.access.tunnel", "deployment", "access", "SSH tunnel helper", {
         owner: "palyra-cli",
         execution_mode: "generated_cli",
@@ -39,7 +67,8 @@ export function capabilityCatalogFixture() {
         cli_handoff_commands: [
           "cargo run -p palyra-cli -- tunnel --ssh <user>@<host> --remote-port 7142 --local-port 7142",
         ],
-        notes: "Tunnel setup remains a CLI handoff because it depends on operator-specific SSH topology.",
+        notes:
+          "Tunnel setup remains a CLI handoff because it depends on operator-specific SSH topology.",
       }),
       capability("runtime.health", "runtime", "operations", "Daemon and runtime health"),
       capability("runtime.doctor", "runtime", "operations", "Doctor JSON diagnostics export", {
@@ -68,7 +97,8 @@ export function capabilityCatalogFixture() {
     migration_notes: [
       {
         id: "m56-capability-exposure",
-        message: "M56 publishes dashboard exposure and CLI handoff metadata for every current capability.",
+        message:
+          "M56 publishes dashboard exposure and CLI handoff metadata for every current capability.",
       },
     ],
   };

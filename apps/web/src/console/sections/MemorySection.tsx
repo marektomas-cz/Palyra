@@ -1,29 +1,19 @@
 import { useState } from "react";
 
-import {
-  ActionButton,
-  CheckboxField,
-  TextInputField
-} from "../components/ui";
+import { ActionButton, CheckboxField, TextInputField } from "../components/ui";
 import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
   WorkspaceSectionCard,
-  WorkspaceStatusChip
+  WorkspaceStatusChip,
 } from "../components/workspace/WorkspaceChrome";
 import {
   WorkspaceConfirmDialog,
   WorkspaceEmptyState,
   WorkspaceInlineNotice,
-  WorkspaceTable
+  WorkspaceTable,
 } from "../components/workspace/WorkspacePatterns";
-import {
-  formatUnixMs,
-  readNumber,
-  readObject,
-  readString,
-  type JsonObject
-} from "../shared";
+import { formatUnixMs, readNumber, readObject, readString, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
 type MemorySectionProps = {
@@ -188,7 +178,11 @@ export function MemorySection({ app }: MemorySectionProps) {
               <dl className="workspace-key-value-grid">
                 <div>
                   <dt>Entries</dt>
-                  <dd>{readNumber(usage ?? {}, "item_count") ?? readNumber(usage ?? {}, "entries") ?? 0}</dd>
+                  <dd>
+                    {readNumber(usage ?? {}, "item_count") ??
+                      readNumber(usage ?? {}, "entries") ??
+                      0}
+                  </dd>
                 </div>
                 <div>
                   <dt>Approx bytes</dt>
@@ -207,13 +201,15 @@ export function MemorySection({ app }: MemorySectionProps) {
                   <dd>
                     {formatUnixMs(
                       readNumber(maintenance ?? {}, "last_vacuum_at_unix_ms") ??
-                        readNumber(app.memoryStatus, "last_vacuum_at_unix_ms")
+                        readNumber(app.memoryStatus, "last_vacuum_at_unix_ms"),
                     )}
                   </dd>
                 </div>
                 <div>
                   <dt>Next maintenance</dt>
-                  <dd>{formatUnixMs(readNumber(app.memoryStatus, "next_maintenance_run_at_unix_ms"))}</dd>
+                  <dd>
+                    {formatUnixMs(readNumber(app.memoryStatus, "next_maintenance_run_at_unix_ms"))}
+                  </dd>
                 </div>
               </dl>
             )}
@@ -257,8 +253,8 @@ export function MemorySection({ app }: MemorySectionProps) {
 
           <WorkspaceInlineNotice title="Operator guidance" tone="warning">
             <p>
-              Search first, purge second. The memory service is scoped per principal/channel/session,
-              so broad deletes should be rare and deliberate.
+              Search first, purge second. The memory service is scoped per
+              principal/channel/session, so broad deletes should be rare and deliberate.
             </p>
           </WorkspaceInlineNotice>
         </div>

@@ -6,11 +6,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 $rootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $rootDir
 
-if (-not (Test-Path (Join-Path $rootDir "apps\web\node_modules"))) {
-    npm --prefix apps/web run bootstrap
-} else {
-    npm --prefix apps/web run verify-install
-}
+& (Join-Path $PSScriptRoot "ensure-js-workspace.ps1")
 
 & (Join-Path $PSScriptRoot "ensure-desktop-ui.ps1")
 
@@ -31,7 +27,7 @@ cargo test -p palyra-daemon --test gateway_grpc --locked grpc_route_message_with
 cargo test -p palyra-daemon --test gateway_grpc --locked grpc_route_message_preserves_attachment_metadata_in_outbound_and_journal
 cargo test -p palyra-daemon --test gateway_grpc --locked grpc_approvals_service_persists_and_exports_denied_tool_approval
 
-npm --prefix apps/web run test:run -- `
+npm run web:test -- `
   src/App.openai-auth.test.tsx `
   src/App.config-access-support.test.tsx `
   src/App.runtime-operations.test.tsx `

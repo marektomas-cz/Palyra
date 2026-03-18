@@ -27,7 +27,7 @@ export function coerceFiniteNumber(
   value: unknown,
   fallback: number,
   min: number,
-  max: number
+  max: number,
 ): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return fallback;

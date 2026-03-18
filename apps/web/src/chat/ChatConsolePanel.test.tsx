@@ -1,12 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   type ChatRunStatusRecord,
   type ChatRunTapeSnapshot,
   type ChatSessionRecord,
   type ChatStreamLine,
-  type ConsoleApiClient
+  type ConsoleApiClient,
 } from "../consoleApi";
 import { ChatConsolePanel } from "./ChatConsolePanel";
 
@@ -23,7 +23,10 @@ describe("ChatConsolePanel", () => {
     const runOneStatus = createDeferred<{ run: ChatRunStatusRecord }>();
     const runOneEvents = createDeferred<{ run: ChatRunStatusRecord; tape: ChatRunTapeSnapshot }>();
     const runTwoFreshStatus = createDeferred<{ run: ChatRunStatusRecord }>();
-    const runTwoFreshEvents = createDeferred<{ run: ChatRunStatusRecord; tape: ChatRunTapeSnapshot }>();
+    const runTwoFreshEvents = createDeferred<{
+      run: ChatRunStatusRecord;
+      tape: ChatRunTapeSnapshot;
+    }>();
 
     let runTwoStatusCalls = 0;
     let runTwoEventCalls = 0;
@@ -32,7 +35,7 @@ describe("ChatConsolePanel", () => {
       (
         _sessionId: string,
         payload: { text: string },
-        options: { onLine: (line: ChatStreamLine) => void }
+        options: { onLine: (line: ChatStreamLine) => void },
       ) => {
         if (payload.text === "first run") {
           emitCompletedRun(options.onLine, session.session_id, runOneId, "first token");
@@ -40,7 +43,7 @@ describe("ChatConsolePanel", () => {
         }
         emitCompletedRun(options.onLine, session.session_id, runTwoId, "second token");
         return Promise.resolve();
-      }
+      },
     );
     const chatRunStatus = vi.fn((runId: string) => {
       if (runId === runOneId) {
@@ -50,7 +53,7 @@ describe("ChatConsolePanel", () => {
         runTwoStatusCalls += 1;
         if (runTwoStatusCalls === 1) {
           return Promise.resolve({
-            run: createRunStatus(runTwoId, "initial-two", 11, 200)
+            run: createRunStatus(runTwoId, "initial-two", 11, 200),
           });
         }
         return runTwoFreshStatus.promise;
@@ -66,7 +69,7 @@ describe("ChatConsolePanel", () => {
         if (runTwoEventCalls === 1) {
           return Promise.resolve({
             run: createRunStatus(runTwoId, "initial-two", 11, 200),
-            tape: createRunTape(runTwoId, "run-two-initial")
+            tape: createRunTape(runTwoId, "run-two-initial"),
           });
         }
         return runTwoFreshEvents.promise;
@@ -78,7 +81,7 @@ describe("ChatConsolePanel", () => {
       listChatSessions,
       streamChatMessage,
       chatRunStatus,
-      chatRunEvents
+      chatRunEvents,
     } as unknown as ConsoleApiClient;
 
     render(
@@ -87,7 +90,7 @@ describe("ChatConsolePanel", () => {
         revealSensitiveValues={false}
         setError={vi.fn()}
         setNotice={vi.fn()}
-      />
+      />,
     );
 
     await waitFor(() => {
@@ -118,11 +121,11 @@ describe("ChatConsolePanel", () => {
     });
 
     runTwoFreshStatus.resolve({
-      run: createRunStatus(runTwoId, "fresh-two", 22, 300)
+      run: createRunStatus(runTwoId, "fresh-two", 22, 300),
     });
     runTwoFreshEvents.resolve({
       run: createRunStatus(runTwoId, "fresh-two", 22, 300),
-      tape: createRunTape(runTwoId, "run-two-fresh")
+      tape: createRunTape(runTwoId, "run-two-fresh"),
     });
 
     fireEvent.click(screen.getByRole("tab", { name: "Status" }));
@@ -136,11 +139,11 @@ describe("ChatConsolePanel", () => {
     });
 
     runOneStatus.resolve({
-      run: createRunStatus(runOneId, "stale-one", 99, 400)
+      run: createRunStatus(runOneId, "stale-one", 99, 400),
     });
     runOneEvents.resolve({
       run: createRunStatus(runOneId, "stale-one", 99, 400),
-      tape: createRunTape(runOneId, "run-one-stale")
+      tape: createRunTape(runOneId, "run-one-stale"),
     });
 
     await waitFor(() => {
@@ -164,7 +167,7 @@ function sampleSession(): ChatSessionRecord {
     device_id: "device-1",
     channel: "web",
     created_at_unix_ms: 100,
-    updated_at_unix_ms: 100
+    updated_at_unix_ms: 100,
   };
 }
 
@@ -172,12 +175,12 @@ function emitCompletedRun(
   onLine: (line: ChatStreamLine) => void,
   sessionId: string,
   runId: string,
-  token: string
+  token: string,
 ): void {
   onLine({
     type: "meta",
     run_id: runId,
-    session_id: sessionId
+    session_id: sessionId,
   });
   onLine({
     type: "event",
@@ -186,14 +189,14 @@ function emitCompletedRun(
       event_type: "model_token",
       model_token: {
         token,
-        is_final: true
-      }
-    }
+        is_final: true,
+      },
+    },
   });
   onLine({
     type: "complete",
     run_id: runId,
-    status: "done"
+    status: "done",
   });
 }
 
@@ -201,7 +204,7 @@ function createRunStatus(
   runId: string,
   state: string,
   promptTokens: number,
-  updatedAtUnixMs: number
+  updatedAtUnixMs: number,
 ): ChatRunStatusRecord {
   return {
     run_id: runId,
@@ -217,7 +220,7 @@ function createRunStatus(
     created_at_unix_ms: 100,
     started_at_unix_ms: 110,
     updated_at_unix_ms: updatedAtUnixMs,
-    tape_events: 1
+    tape_events: 1,
   };
 }
 
@@ -231,9 +234,9 @@ function createRunTape(runId: string, marker: string): ChatRunTapeSnapshot {
       {
         seq: 1,
         event_type: "status",
-        payload_json: JSON.stringify({ marker })
-      }
-    ]
+        payload_json: JSON.stringify({ marker }),
+      },
+    ],
   };
 }
 

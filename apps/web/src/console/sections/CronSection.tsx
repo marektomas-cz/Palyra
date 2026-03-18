@@ -9,13 +9,13 @@ import {
   KeyValueList,
   SelectField,
   TextAreaField,
-  TextInputField
+  TextInputField,
 } from "../components/ui";
 import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
   WorkspaceSectionCard,
-  WorkspaceStatusChip
+  WorkspaceStatusChip,
 } from "../components/workspace/WorkspaceChrome";
 import { formatUnixMs, readBool, readString, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
@@ -58,13 +58,15 @@ type CronRunRow = {
 const SCHEDULE_OPTIONS = [
   { key: "every", label: "every" },
   { key: "cron", label: "cron" },
-  { key: "at", label: "at" }
+  { key: "at", label: "at" },
 ] as const;
 
 export function CronSection({ app }: CronSectionProps) {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const selectedJob =
-    app.cronJobs.find((job) => readString(job, "job_id") === app.cronJobId) ?? app.cronJobs[0] ?? null;
+    app.cronJobs.find((job) => readString(job, "job_id") === app.cronJobId) ??
+    app.cronJobs[0] ??
+    null;
   const enabledJobs = app.cronJobs.filter((job) => readBool(job, "enabled"));
 
   const jobRows = useMemo<CronJobRow[]>(
@@ -78,10 +80,10 @@ export function CronSection({ app }: CronSectionProps) {
           enabled: readBool(job, "enabled"),
           scheduleType: readString(job, "schedule_type") ?? "schedule unavailable",
           nextRun: formatUnixMs(readUnixMillis(job, "next_run_at_unix_ms")),
-          isSelected: selectedJob !== null && readString(selectedJob, "job_id") === jobId
+          isSelected: selectedJob !== null && readString(selectedJob, "job_id") === jobId,
         };
       }),
-    [app.cronJobs, selectedJob]
+    [app.cronJobs, selectedJob],
   );
 
   const runRows = useMemo<CronRunRow[]>(
@@ -90,9 +92,9 @@ export function CronSection({ app }: CronSectionProps) {
         runId: readString(run, "run_id") ?? "unknown",
         status: readString(run, "status") ?? "unknown",
         startedAt: formatUnixMs(readUnixMillis(run, "started_at_unix_ms")),
-        toolCalls: readString(run, "tool_calls") ?? "0"
+        toolCalls: readString(run, "tool_calls") ?? "0",
       })),
-    [app.cronRuns]
+    [app.cronRuns],
   );
 
   return (
@@ -153,12 +155,12 @@ export function CronSection({ app }: CronSectionProps) {
           value={
             selectedJob === null
               ? "None"
-              : readString(selectedJob, "name") ?? readString(selectedJob, "job_id") ?? "Unknown"
+              : (readString(selectedJob, "name") ?? readString(selectedJob, "job_id") ?? "Unknown")
           }
           detail={
             selectedJob === null
               ? "Choose a job to inspect next run windows and recent runs."
-              : readString(selectedJob, "schedule_type") ?? "Schedule type unavailable"
+              : (readString(selectedJob, "schedule_type") ?? "Schedule type unavailable")
           }
         />
       </section>
@@ -182,7 +184,7 @@ export function CronSection({ app }: CronSectionProps) {
                       {row.scheduleType} · next {row.nextRun}
                     </span>
                   </div>
-                )
+                ),
               },
               {
                 key: "state",
@@ -196,7 +198,7 @@ export function CronSection({ app }: CronSectionProps) {
                       <WorkspaceStatusChip tone="accent">selected</WorkspaceStatusChip>
                     ) : null}
                   </div>
-                )
+                ),
               },
               {
                 key: "actions",
@@ -230,8 +232,8 @@ export function CronSection({ app }: CronSectionProps) {
                       Run now
                     </ActionButton>
                   </ActionCluster>
-                )
-              }
+                ),
+              },
             ]}
             rows={jobRows}
             getRowId={(row) => row.jobId}
@@ -261,16 +263,12 @@ export function CronSection({ app }: CronSectionProps) {
                 <TextInputField
                   label="Name"
                   value={app.cronForm.name}
-                  onChange={(name) =>
-                    app.setCronForm((previous) => ({ ...previous, name }))
-                  }
+                  onChange={(name) => app.setCronForm((previous) => ({ ...previous, name }))}
                 />
                 <TextInputField
                   label="Channel"
                   value={app.cronForm.channel}
-                  onChange={(channel) =>
-                    app.setCronForm((previous) => ({ ...previous, channel }))
-                  }
+                  onChange={(channel) => app.setCronForm((previous) => ({ ...previous, channel }))}
                 />
                 <SelectField
                   label="Schedule type"
@@ -278,7 +276,7 @@ export function CronSection({ app }: CronSectionProps) {
                   onChange={(scheduleType) =>
                     app.setCronForm((previous) => ({
                       ...previous,
-                      scheduleType: scheduleType as "cron" | "every" | "at"
+                      scheduleType: scheduleType as "cron" | "every" | "at",
                     }))
                   }
                   options={SCHEDULE_OPTIONS}
@@ -347,24 +345,24 @@ export function CronSection({ app }: CronSectionProps) {
                 { label: "Job ID", value: readString(selectedJob, "job_id") ?? "n/a" },
                 {
                   label: "Schedule type",
-                  value: readString(selectedJob, "schedule_type") ?? "n/a"
+                  value: readString(selectedJob, "schedule_type") ?? "n/a",
                 },
                 {
                   label: "Next run",
-                  value: formatUnixMs(readUnixMillis(selectedJob, "next_run_at_unix_ms"))
+                  value: formatUnixMs(readUnixMillis(selectedJob, "next_run_at_unix_ms")),
                 },
                 {
                   label: "Last run",
-                  value: formatUnixMs(readUnixMillis(selectedJob, "last_run_at_unix_ms"))
+                  value: formatUnixMs(readUnixMillis(selectedJob, "last_run_at_unix_ms")),
                 },
                 {
                   label: "Owner",
-                  value: readString(selectedJob, "owner_principal") ?? "n/a"
+                  value: readString(selectedJob, "owner_principal") ?? "n/a",
                 },
                 {
                   label: "Channel",
-                  value: readString(selectedJob, "channel") ?? "n/a"
-                }
+                  value: readString(selectedJob, "channel") ?? "n/a",
+                },
               ]}
             />
           )}
@@ -396,24 +394,22 @@ export function CronSection({ app }: CronSectionProps) {
                     <strong>{row.runId}</strong>
                     <span className="chat-muted">started {row.startedAt}</span>
                   </div>
-                )
+                ),
               },
               {
                 key: "status",
                 label: "Status",
                 render: (row: CronRunRow) => (
-                  <WorkspaceStatusChip
-                    tone={row.status === "succeeded" ? "success" : "warning"}
-                  >
+                  <WorkspaceStatusChip tone={row.status === "succeeded" ? "success" : "warning"}>
                     {row.status}
                   </WorkspaceStatusChip>
-                )
+                ),
               },
               {
                 key: "tools",
                 label: "Tool calls",
-                render: (row: CronRunRow) => `${row.toolCalls} tool calls`
-              }
+                render: (row: CronRunRow) => `${row.toolCalls} tool calls`,
+              },
             ]}
             rows={runRows}
             getRowId={(row) => row.runId}

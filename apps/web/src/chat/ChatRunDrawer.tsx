@@ -5,7 +5,7 @@ import {
   InlineNotice,
   KeyValueList,
   SelectField,
-  SectionCard
+  SectionCard,
 } from "../console/components/ui";
 import type { ChatRunStatusRecord, ChatRunTapeSnapshot } from "../consoleApi";
 import { Tabs } from "@heroui/react";
@@ -35,7 +35,7 @@ export function ChatRunDrawer({
   runTape,
   revealSensitiveValues,
   refreshRun,
-  close
+  close,
 }: ChatRunDrawerProps) {
   if (!open) {
     return null;
@@ -105,8 +105,8 @@ export function ChatRunDrawer({
                       { label: "Tape events", value: runStatus.tape_events },
                       {
                         label: "Updated",
-                        value: new Date(runStatus.updated_at_unix_ms).toLocaleString()
-                      }
+                        value: new Date(runStatus.updated_at_unix_ms).toLocaleString(),
+                      },
                     ]}
                   />
                   {runStatus.last_error !== undefined && runStatus.last_error.length > 0 ? (
@@ -133,7 +133,12 @@ export function ChatRunDrawer({
                           <strong>#{event.seq}</strong>
                           <span>{event.event_type}</span>
                         </header>
-                        <pre>{toPrettyJson(parseTapePayload(event.payload_json), revealSensitiveValues)}</pre>
+                        <pre>
+                          {toPrettyJson(
+                            parseTapePayload(event.payload_json),
+                            revealSensitiveValues,
+                          )}
+                        </pre>
                       </article>
                     ))}
                   </div>

@@ -1,13 +1,19 @@
 import { useState } from "react";
 
+import { ActionButton, AppForm, CheckboxField, TextInputField } from "../components/ui";
 import {
-  ActionButton,
-  AppForm,
-  CheckboxField,
-  TextInputField
-} from "../components/ui";
-import { WorkspaceMetricCard, WorkspacePageHeader, WorkspaceSectionCard, WorkspaceStatusChip } from "../components/workspace/WorkspaceChrome";
-import { WorkspaceConfirmDialog, WorkspaceEmptyState, WorkspaceInlineNotice, WorkspaceTable, workspaceToneForState } from "../components/workspace/WorkspacePatterns";
+  WorkspaceMetricCard,
+  WorkspacePageHeader,
+  WorkspaceSectionCard,
+  WorkspaceStatusChip,
+} from "../components/workspace/WorkspaceChrome";
+import {
+  WorkspaceConfirmDialog,
+  WorkspaceEmptyState,
+  WorkspaceInlineNotice,
+  WorkspaceTable,
+  workspaceToneForState,
+} from "../components/workspace/WorkspacePatterns";
 import { readString, skillMetadata, toPrettyJson, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
@@ -39,7 +45,9 @@ export function SkillsSection({ app }: SkillsSectionProps) {
     action: Extract<SkillAction, "quarantine" | "enable">;
     skillId: string;
   } | null>(null);
-  const quarantinedCount = app.skillsEntries.filter((entry) => readString(entry, "status") === "quarantined").length;
+  const quarantinedCount = app.skillsEntries.filter(
+    (entry) => readString(entry, "status") === "quarantined",
+  ).length;
 
   return (
     <main className="workspace-page">
@@ -57,11 +65,16 @@ export function SkillsSection({ app }: SkillsSectionProps) {
             </WorkspaceStatusChip>
           </>
         }
-        actions={(
-          <ActionButton type="button" variant="primary" onPress={() => void app.refreshSkills()} isDisabled={app.skillsBusy}>
+        actions={
+          <ActionButton
+            type="button"
+            variant="primary"
+            onPress={() => void app.refreshSkills()}
+            isDisabled={app.skillsBusy}
+          >
             {app.skillsBusy ? "Refreshing..." : "Refresh skills"}
           </ActionButton>
-        )}
+        }
       />
 
       <section className="workspace-metric-grid workspace-metric-grid--compact">
@@ -79,7 +92,13 @@ export function SkillsSection({ app }: SkillsSectionProps) {
         />
         <WorkspaceMetricCard
           label="Install posture"
-          value={app.skillAllowUntrusted ? "Untrusted allowed" : app.skillAllowTofu ? "TOFU allowed" : "Strict"}
+          value={
+            app.skillAllowUntrusted
+              ? "Untrusted allowed"
+              : app.skillAllowTofu
+                ? "TOFU allowed"
+                : "Strict"
+          }
           detail="Keep trust exceptions visible instead of burying them in the install form."
           tone={app.skillAllowUntrusted ? "danger" : app.skillAllowTofu ? "warning" : "success"}
         />
@@ -103,9 +122,11 @@ export function SkillsSection({ app }: SkillsSectionProps) {
               >
                 {app.skillsEntries.map((entry, index) => {
                   const metadata = skillMetadata(entry);
-                  const skillId = metadata?.skillId ?? readString(entry, "skill_id") ?? `skill-${index + 1}`;
+                  const skillId =
+                    metadata?.skillId ?? readString(entry, "skill_id") ?? `skill-${index + 1}`;
                   const version = metadata?.version ?? readString(entry, "version") ?? "unknown";
-                  const status = readString(entry, "status") ?? readString(entry, "state") ?? "unknown";
+                  const status =
+                    readString(entry, "status") ?? readString(entry, "state") ?? "unknown";
                   const publisherState =
                     readString(entry, "trust_state") ??
                     readString(entry, "publisher") ??
@@ -117,7 +138,10 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                       <td>
                         <div className="workspace-table__meta">
                           <strong>{skillId}</strong>
-                          <span className="chat-muted">{readString(readRecord(entry), "description") ?? "Installed skill artifact"}</span>
+                          <span className="chat-muted">
+                            {readString(readRecord(entry), "description") ??
+                              "Installed skill artifact"}
+                          </span>
                         </div>
                       </td>
                       <td>
@@ -131,10 +155,40 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                       <td>{publisherState}</td>
                       <td>
                         <div className="workspace-table__actions">
-                          <ActionButton type="button" variant="secondary" onPress={() => void app.executeSkillAction(entry, "verify")} isDisabled={app.skillsBusy}>Verify</ActionButton>
-                          <ActionButton type="button" variant="secondary" onPress={() => void app.executeSkillAction(entry, "audit")} isDisabled={app.skillsBusy}>Audit</ActionButton>
-                          <ActionButton type="button" variant="danger" onPress={() => setPendingAction({ entry, action: "quarantine", skillId })} isDisabled={app.skillsBusy}>Quarantine</ActionButton>
-                          <ActionButton type="button" variant="secondary" onPress={() => setPendingAction({ entry, action: "enable", skillId })} isDisabled={app.skillsBusy}>Enable</ActionButton>
+                          <ActionButton
+                            type="button"
+                            variant="secondary"
+                            onPress={() => void app.executeSkillAction(entry, "verify")}
+                            isDisabled={app.skillsBusy}
+                          >
+                            Verify
+                          </ActionButton>
+                          <ActionButton
+                            type="button"
+                            variant="secondary"
+                            onPress={() => void app.executeSkillAction(entry, "audit")}
+                            isDisabled={app.skillsBusy}
+                          >
+                            Audit
+                          </ActionButton>
+                          <ActionButton
+                            type="button"
+                            variant="danger"
+                            onPress={() =>
+                              setPendingAction({ entry, action: "quarantine", skillId })
+                            }
+                            isDisabled={app.skillsBusy}
+                          >
+                            Quarantine
+                          </ActionButton>
+                          <ActionButton
+                            type="button"
+                            variant="secondary"
+                            onPress={() => setPendingAction({ entry, action: "enable", skillId })}
+                            isDisabled={app.skillsBusy}
+                          >
+                            Enable
+                          </ActionButton>
                         </div>
                       </td>
                     </tr>
@@ -151,12 +205,30 @@ export function SkillsSection({ app }: SkillsSectionProps) {
             description="Install stays compact and operational. This page should not feel like an app store."
           >
             <AppForm className="workspace-stack" onSubmit={(event) => void app.installSkill(event)}>
-              <TextInputField label="Artifact path" value={app.skillArtifactPath} onChange={app.setSkillArtifactPath} />
-              <TextInputField label="Operator reason" value={app.skillReason} onChange={app.setSkillReason} />
+              <TextInputField
+                label="Artifact path"
+                value={app.skillArtifactPath}
+                onChange={app.setSkillArtifactPath}
+              />
+              <TextInputField
+                label="Operator reason"
+                value={app.skillReason}
+                onChange={app.setSkillReason}
+              />
               <div className="workspace-inline">
-                <CheckboxField checked={app.skillAllowTofu} label="Allow TOFU" onChange={app.setSkillAllowTofu} />
-                <CheckboxField checked={app.skillAllowUntrusted} label="Allow untrusted" onChange={app.setSkillAllowUntrusted} />
-                <ActionButton type="submit" variant="primary" isDisabled={app.skillsBusy}>{app.skillsBusy ? "Installing..." : "Install skill"}</ActionButton>
+                <CheckboxField
+                  checked={app.skillAllowTofu}
+                  label="Allow TOFU"
+                  onChange={app.setSkillAllowTofu}
+                />
+                <CheckboxField
+                  checked={app.skillAllowUntrusted}
+                  label="Allow untrusted"
+                  onChange={app.setSkillAllowUntrusted}
+                />
+                <ActionButton type="submit" variant="primary" isDisabled={app.skillsBusy}>
+                  {app.skillsBusy ? "Installing..." : "Install skill"}
+                </ActionButton>
               </div>
             </AppForm>
           </WorkspaceSectionCard>
@@ -180,8 +252,8 @@ export function SkillsSection({ app }: SkillsSectionProps) {
 
           <WorkspaceInlineNotice title="Trust posture" tone="warning">
             <p>
-              Quarantine and enable are operational safety actions, not casual toggles. The page keeps
-              those mutations explicit and records an operator reason alongside the workflow.
+              Quarantine and enable are operational safety actions, not casual toggles. The page
+              keeps those mutations explicit and records an operator reason alongside the workflow.
             </p>
           </WorkspaceInlineNotice>
         </div>
@@ -221,5 +293,7 @@ export function SkillsSection({ app }: SkillsSectionProps) {
 
 function readRecord(entry: JsonObject): JsonObject {
   const record = entry.record;
-  return typeof record === "object" && record !== null && !Array.isArray(record) ? record as JsonObject : entry;
+  return typeof record === "object" && record !== null && !Array.isArray(record)
+    ? (record as JsonObject)
+    : entry;
 }

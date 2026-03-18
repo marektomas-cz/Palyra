@@ -1,21 +1,18 @@
 import type { CapabilityCatalog } from "../../consoleApi";
 import { capabilitiesByMode, capabilitiesForSection } from "../capabilityCatalog";
-import {
-  ActionButton,
-  TextInputField
-} from "../components/ui";
+import { ActionButton, TextInputField } from "../components/ui";
 import { CapabilityCardList } from "../components/CapabilityCards";
 import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
   WorkspaceSectionCard,
-  WorkspaceStatusChip
+  WorkspaceStatusChip,
 } from "../components/workspace/WorkspaceChrome";
 import {
   WorkspaceEmptyState,
   WorkspaceInlineNotice,
   WorkspaceTable,
-  workspaceToneForState
+  workspaceToneForState,
 } from "../components/workspace/WorkspacePatterns";
 import {
   formatUnixMs,
@@ -23,7 +20,7 @@ import {
   readBool,
   readString,
   toStringArray,
-  type JsonObject
+  type JsonObject,
 } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
@@ -51,11 +48,20 @@ export function AccessSection({ app }: AccessSectionProps) {
   const groupedCapabilities = capabilitiesByMode(capabilitiesForSection(catalog, "access"));
   const channels = readChannelSnapshots(app.supportPairingSummary);
   const warnings = toStringArray(
-    Array.isArray(app.supportDeployment?.warnings) ? app.supportDeployment.warnings : []
+    Array.isArray(app.supportDeployment?.warnings) ? app.supportDeployment.warnings : [],
   );
-  const pendingCount = channels.reduce((sum, channel) => sum + readArrayLength(channel, "pending"), 0);
-  const pairedCount = channels.reduce((sum, channel) => sum + readArrayLength(channel, "paired"), 0);
-  const codeCount = channels.reduce((sum, channel) => sum + readArrayLength(channel, "active_codes"), 0);
+  const pendingCount = channels.reduce(
+    (sum, channel) => sum + readArrayLength(channel, "pending"),
+    0,
+  );
+  const pairedCount = channels.reduce(
+    (sum, channel) => sum + readArrayLength(channel, "paired"),
+    0,
+  );
+  const codeCount = channels.reduce(
+    (sum, channel) => sum + readArrayLength(channel, "active_codes"),
+    0,
+  );
 
   return (
     <main className="workspace-page">
@@ -67,7 +73,7 @@ export function AccessSection({ app }: AccessSectionProps) {
           <>
             <WorkspaceStatusChip
               tone={workspaceToneForState(
-                readBool(app.supportDeployment ?? {}, "remote_bind_detected") ? "warning" : "ready"
+                readBool(app.supportDeployment ?? {}, "remote_bind_detected") ? "warning" : "ready",
               )}
             >
               {readBool(app.supportDeployment ?? {}, "remote_bind_detected")
@@ -207,11 +213,19 @@ export function AccessSection({ app }: AccessSectionProps) {
               </div>
               <div>
                 <dt>TLS</dt>
-                <dd>{readBool(readChild(app.supportDeployment, "tls"), "gateway_enabled") ? "enabled" : "disabled"}</dd>
+                <dd>
+                  {readBool(readChild(app.supportDeployment, "tls"), "gateway_enabled")
+                    ? "enabled"
+                    : "disabled"}
+                </dd>
               </div>
               <div>
                 <dt>Admin auth</dt>
-                <dd>{readBool(app.supportDeployment ?? {}, "admin_auth_required") ? "required" : "unknown"}</dd>
+                <dd>
+                  {readBool(app.supportDeployment ?? {}, "admin_auth_required")
+                    ? "required"
+                    : "unknown"}
+                </dd>
               </div>
             </dl>
           </WorkspaceSectionCard>

@@ -3,7 +3,7 @@ import {
   ActionCluster,
   CheckboxField,
   SelectField,
-  TextInputField
+  TextInputField,
 } from "../../../../../console/components/ui";
 import { DiscordOnboardingHighlights, toPrettyJson } from "../../../../../console/shared";
 import type { ConsoleAppState } from "../../../../../console/useConsoleAppState";
@@ -12,24 +12,22 @@ type DiscordOnboardingPanelProps = {
   app: ConsoleAppState;
 };
 
-export function DiscordOnboardingPanel({
-  app,
-}: DiscordOnboardingPanelProps) {
+export function DiscordOnboardingPanel({ app }: DiscordOnboardingPanelProps) {
   const modeOptions = [
     { key: "local", label: "local" },
-    { key: "remote_vps", label: "remote_vps" }
+    { key: "remote_vps", label: "remote_vps" },
   ] as const;
 
   const scopeOptions = [
     { key: "dm_only", label: "dm_only" },
     { key: "allowlisted_guild_channels", label: "allowlisted_guild_channels" },
-    { key: "open_guild_channels", label: "open_guild_channels" }
+    { key: "open_guild_channels", label: "open_guild_channels" },
   ] as const;
 
   const broadcastOptions = [
     { key: "deny", label: "deny" },
     { key: "mention_only", label: "mention_only" },
-    { key: "allow", label: "allow" }
+    { key: "allow", label: "allow" },
   ] as const;
 
   return (
@@ -38,8 +36,8 @@ export function DiscordOnboardingPanel({
         <div>
           <h3>Discord onboarding wizard</h3>
           <p className="chat-muted">
-            Probe, apply, and verify the live Discord connector contract without
-            falling back to manual config edits.
+            Probe, apply, and verify the live Discord connector contract without falling back to
+            manual config edits.
           </p>
         </div>
       </div>
@@ -75,7 +73,7 @@ export function DiscordOnboardingPanel({
           value={app.discordWizardScope}
           onChange={(value) =>
             app.setDiscordWizardScope(
-              value as "dm_only" | "allowlisted_guild_channels" | "open_guild_channels"
+              value as "dm_only" | "allowlisted_guild_channels" | "open_guild_channels",
             )
           }
           options={scopeOptions}
@@ -139,9 +137,7 @@ export function DiscordOnboardingPanel({
         />
       )}
       {app.discordWizardPreflight !== null && (
-        <pre>
-          {toPrettyJson(app.discordWizardPreflight, app.revealSensitiveValues)}
-        </pre>
+        <pre>{toPrettyJson(app.discordWizardPreflight, app.revealSensitiveValues)}</pre>
       )}
       {app.discordWizardApply !== null && (
         <pre>{toPrettyJson(app.discordWizardApply, app.revealSensitiveValues)}</pre>

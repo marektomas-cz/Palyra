@@ -13,7 +13,7 @@ export const CONSOLE_SECTIONS = [
   { id: "secrets", label: "Secrets", detail: "Vault-backed secret metadata and reveal flows" },
   { id: "access", label: "Access", detail: "Pairing lifecycle and remote access posture" },
   { id: "operations", label: "Diagnostics", detail: "Runtime snapshots, audit, and CLI handoffs" },
-  { id: "support", label: "Support", detail: "Bundles, recovery, and operator handoff" }
+  { id: "support", label: "Support", detail: "Bundles, recovery, and operator handoff" },
 ] as const;
 
 export type Section = (typeof CONSOLE_SECTIONS)[number]["id"];

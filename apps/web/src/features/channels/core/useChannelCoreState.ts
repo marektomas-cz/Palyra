@@ -21,10 +21,9 @@ export function useChannelCoreState() {
   const [channelsLogsLimit, setChannelsLogsLimit] = useState(DEFAULT_CHANNEL_LOGS_LIMIT);
   const [channelsTestText, setChannelsTestText] = useState(DEFAULT_CHANNEL_TEST_TEXT);
   const [channelsTestConversationId, setChannelsTestConversationId] = useState(
-    DEFAULT_CHANNEL_TEST_CONVERSATION_ID
+    DEFAULT_CHANNEL_TEST_CONVERSATION_ID,
   );
-  const [channelsTestSenderId, setChannelsTestSenderId] =
-    useState(DEFAULT_CHANNEL_TEST_SENDER_ID);
+  const [channelsTestSenderId, setChannelsTestSenderId] = useState(DEFAULT_CHANNEL_TEST_SENDER_ID);
   const [channelsTestSenderDisplay, setChannelsTestSenderDisplay] = useState("");
   const [channelsTestCrashOnce, setChannelsTestCrashOnce] = useState(false);
   const [channelsTestDirectMessage, setChannelsTestDirectMessage] = useState(true);
@@ -34,36 +33,31 @@ export function useChannelCoreState() {
   const [channelRouterWarnings, setChannelRouterWarnings] = useState<string[]>([]);
   const [channelRouterPreviewChannel, setChannelRouterPreviewChannel] = useState("");
   const [channelRouterPreviewText, setChannelRouterPreviewText] = useState(
-    DEFAULT_CHANNEL_ROUTER_PREVIEW_TEXT
+    DEFAULT_CHANNEL_ROUTER_PREVIEW_TEXT,
   );
-  const [channelRouterPreviewConversationId, setChannelRouterPreviewConversationId] =
-    useState("");
-  const [channelRouterPreviewSenderIdentity, setChannelRouterPreviewSenderIdentity] =
-    useState("");
-  const [channelRouterPreviewSenderDisplay, setChannelRouterPreviewSenderDisplay] =
-    useState("");
+  const [channelRouterPreviewConversationId, setChannelRouterPreviewConversationId] = useState("");
+  const [channelRouterPreviewSenderIdentity, setChannelRouterPreviewSenderIdentity] = useState("");
+  const [channelRouterPreviewSenderDisplay, setChannelRouterPreviewSenderDisplay] = useState("");
   const [channelRouterPreviewSenderVerified, setChannelRouterPreviewSenderVerified] =
     useState(true);
   const [channelRouterPreviewIsDirectMessage, setChannelRouterPreviewIsDirectMessage] =
     useState(true);
-  const [
-    channelRouterPreviewRequestedBroadcast,
-    setChannelRouterPreviewRequestedBroadcast,
-  ] = useState(false);
-  const [channelRouterPreviewMaxPayloadBytes, setChannelRouterPreviewMaxPayloadBytes] =
-    useState(DEFAULT_CHANNEL_ROUTER_PREVIEW_MAX_PAYLOAD_BYTES);
-  const [channelRouterPreviewResult, setChannelRouterPreviewResult] =
-    useState<JsonObject | null>(null);
-  const [channelRouterPairingsFilterChannel, setChannelRouterPairingsFilterChannel] =
-    useState("");
+  const [channelRouterPreviewRequestedBroadcast, setChannelRouterPreviewRequestedBroadcast] =
+    useState(false);
+  const [channelRouterPreviewMaxPayloadBytes, setChannelRouterPreviewMaxPayloadBytes] = useState(
+    DEFAULT_CHANNEL_ROUTER_PREVIEW_MAX_PAYLOAD_BYTES,
+  );
+  const [channelRouterPreviewResult, setChannelRouterPreviewResult] = useState<JsonObject | null>(
+    null,
+  );
+  const [channelRouterPairingsFilterChannel, setChannelRouterPairingsFilterChannel] = useState("");
   const [channelRouterPairings, setChannelRouterPairings] = useState<JsonObject[]>([]);
   const [channelRouterMintChannel, setChannelRouterMintChannel] = useState("");
   const [channelRouterMintIssuedBy, setChannelRouterMintIssuedBy] = useState("");
   const [channelRouterMintTtlMs, setChannelRouterMintTtlMs] = useState(
-    DEFAULT_CHANNEL_ROUTER_MINT_TTL_MS
+    DEFAULT_CHANNEL_ROUTER_MINT_TTL_MS,
   );
-  const [channelRouterMintResult, setChannelRouterMintResult] =
-    useState<JsonObject | null>(null);
+  const [channelRouterMintResult, setChannelRouterMintResult] = useState<JsonObject | null>(null);
 
   function setSelectedChannelStatusPayload(payload: JsonValue): void {
     setChannelsSelectedStatus(isJsonObject(payload) ? payload : null);
@@ -95,9 +89,7 @@ export function useChannelCoreState() {
     setChannelRouterPreviewSenderVerified(true);
     setChannelRouterPreviewIsDirectMessage(true);
     setChannelRouterPreviewRequestedBroadcast(false);
-    setChannelRouterPreviewMaxPayloadBytes(
-      DEFAULT_CHANNEL_ROUTER_PREVIEW_MAX_PAYLOAD_BYTES
-    );
+    setChannelRouterPreviewMaxPayloadBytes(DEFAULT_CHANNEL_ROUTER_PREVIEW_MAX_PAYLOAD_BYTES);
     setChannelRouterPreviewResult(null);
     setChannelRouterPairingsFilterChannel("");
     setChannelRouterPairings([]);

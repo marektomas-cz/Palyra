@@ -30,12 +30,12 @@ jobs:
           toolchain: 1.91.0
           components: rustfmt, clippy
 
-      - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/desktop/ui/package-lock.json
+          node-version-file: .node-version
+          cache: true
+          run-install: true
 
       - name: Build desktop UI
         shell: pwsh
@@ -59,12 +59,12 @@ jobs:
         with:
           toolchain: 1.91.0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/desktop/ui/package-lock.json
+          node-version-file: .node-version
+          cache: true
+          run-install: true
 
       - name: Install desktop Linux system dependencies
         run: |
@@ -101,12 +101,12 @@ jobs:
         with:
           toolchain: 1.91.0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/desktop/ui/package-lock.json
+          node-version-file: .node-version
+          cache: true
+          run-install: true
 
       - name: Install desktop Linux system dependencies
         if: ${{ matrix.os == 'ubuntu-latest' }}
@@ -137,14 +137,12 @@ jobs:
         with:
           toolchain: 1.91.0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            apps/desktop/ui/package-lock.json
+          node-version-file: .node-version
+          cache: true
+          run-install: true
 
       - name: Install desktop Linux system dependencies
         run: |
@@ -157,9 +155,6 @@ jobs:
             libxdo-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
-
-      - name: Bootstrap web app
-        run: npm --prefix apps/web run bootstrap
 
       - name: Run deterministic core suite
         run: bash scripts/test/run-deterministic-core.sh
@@ -176,14 +171,12 @@ jobs:
         with:
           toolchain: 1.91.0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            apps/desktop/ui/package-lock.json
+          node-version-file: .node-version
+          cache: true
+          run-install: true
 
       - name: Install desktop Linux system dependencies
         run: |
@@ -221,6 +214,16 @@ jobs:
         with:
           toolchain: 1.91.0
           components: rustfmt, clippy
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: true
+
+      - name: Vite+ check
+        run: vp check apps/web apps/desktop/ui apps/browser-extension scripts
 
       - name: Rustfmt check
         run: cargo fmt --all --check
@@ -330,27 +333,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          node-version-file: .node-version
+          cache: true
+          run-install: true
 
-      - name: Bootstrap web app
-        run: npm --prefix apps/web run bootstrap
-
-      - name: Lint web app
-        run: npm --prefix apps/web run lint
-
-      - name: Typecheck web app
-        run: npm --prefix apps/web run typecheck
-
-      - name: Test web app
-        run: npm --prefix apps/web run test:run
-
-      - name: Build web app
-        run: npm --prefix apps/web run build
+      - name: Run web Vite+ CI task
+        run: vp run web:ci
 
   web-cleanroom:
     name: Web clean-room (${{ matrix.os }})
@@ -363,18 +354,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Setup Node.js
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          node-version-file: .node-version
+          cache: true
 
-      - name: Bootstrap web app
-        run: npm --prefix apps/web run bootstrap
+      - name: Reinstall root workspace from clean checkout
+        shell: pwsh
+        run: |
+          if (Test-Path node_modules) {
+            Remove-Item -LiteralPath node_modules -Recurse -Force
+          }
+          vp install
 
       - name: Run clean-room web validation
-        run: npm --prefix apps/web run ci:check
+        run: vp run web:ci
 
   security:
     name: Security checks

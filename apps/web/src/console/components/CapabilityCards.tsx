@@ -1,8 +1,5 @@
 import type { CapabilityEntry } from "../../consoleApi";
-import {
-  capabilityExecutionLabel,
-  normalizeCapabilityExposureMode,
-} from "../capabilityCatalog";
+import { capabilityExecutionLabel, normalizeCapabilityExposureMode } from "../capabilityCatalog";
 
 type CapabilityCardListProps = {
   entries: CapabilityEntry[];
@@ -19,7 +16,10 @@ export function CapabilityCardList({ entries, emptyMessage }: CapabilityCardList
       {entries.map((entry) => {
         const exposure = normalizeCapabilityExposureMode(entry);
         return (
-          <article key={entry.id} className={`console-capability-card console-capability-card--${exposure}`}>
+          <article
+            key={entry.id}
+            className={`console-capability-card console-capability-card--${exposure}`}
+          >
             <div className="console-capability-card__header">
               <div>
                 <h4>{entry.title}</h4>
@@ -27,17 +27,25 @@ export function CapabilityCardList({ entries, emptyMessage }: CapabilityCardList
               </div>
               <span className="console-capability-badge">{capabilityExecutionLabel(exposure)}</span>
             </div>
-            <p><strong>Owner:</strong> {entry.owner}</p>
-            <p><strong>Surfaces:</strong> {joinOrDash(entry.surfaces)}</p>
-            <p><strong>Mutation classes:</strong> {joinOrDash(entry.mutation_classes)}</p>
-            {entry.notes !== undefined && entry.notes.trim().length > 0 && (
-              <p>{entry.notes}</p>
-            )}
+            <p>
+              <strong>Owner:</strong> {entry.owner}
+            </p>
+            <p>
+              <strong>Surfaces:</strong> {joinOrDash(entry.surfaces)}
+            </p>
+            <p>
+              <strong>Mutation classes:</strong> {joinOrDash(entry.mutation_classes)}
+            </p>
+            {entry.notes !== undefined && entry.notes.trim().length > 0 && <p>{entry.notes}</p>}
             {entry.cli_handoff_commands.length > 0 && (
               <div className="console-capability-card__commands">
-                <p><strong>CLI handoff</strong></p>
+                <p>
+                  <strong>CLI handoff</strong>
+                </p>
                 {entry.cli_handoff_commands.map((command) => (
-                  <pre key={command} className="console-code-block"><code>{command}</code></pre>
+                  <pre key={command} className="console-code-block">
+                    <code>{command}</code>
+                  </pre>
                 ))}
               </div>
             )}

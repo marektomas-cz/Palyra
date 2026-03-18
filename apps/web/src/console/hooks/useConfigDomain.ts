@@ -8,7 +8,7 @@ import {
   parseInteger,
   toErrorMessage,
   toJsonObjectArray,
-  type JsonObject
+  type JsonObject,
 } from "../shared";
 
 type UseConfigDomainArgs = {
@@ -42,29 +42,32 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
     setError(null);
     try {
       const backups = normalizedBackupCount(configBackups);
-      const [inspectResponse, validationResponse, secretsResponse, deploymentResponse] = await Promise.all([
-        api.inspectConfig({
-          path: emptyToUndefined(configInspectPath),
-          show_secrets: false,
-          backups
-        }),
-        api.validateConfig({ path: emptyToUndefined(configInspectPath) }),
-        api.listSecrets(configSecretsScope),
-        api.getDeploymentPosture()
-      ]);
+      const [inspectResponse, validationResponse, secretsResponse, deploymentResponse] =
+        await Promise.all([
+          api.inspectConfig({
+            path: emptyToUndefined(configInspectPath),
+            show_secrets: false,
+            backups,
+          }),
+          api.validateConfig({ path: emptyToUndefined(configInspectPath) }),
+          api.listSecrets(configSecretsScope),
+          api.getDeploymentPosture(),
+        ]);
       setConfigInspectSnapshot(
-        isJsonObject(inspectResponse as unknown as JsonValue) ? (inspectResponse as unknown as JsonObject) : null
+        isJsonObject(inspectResponse as unknown as JsonValue)
+          ? (inspectResponse as unknown as JsonObject)
+          : null,
       );
       setConfigValidation(
         isJsonObject(validationResponse as unknown as JsonValue)
           ? (validationResponse as unknown as JsonObject)
-          : null
+          : null,
       );
       setConfigSecrets(toJsonObjectArray(secretsResponse.secrets as unknown as JsonValue[]));
       setConfigDeploymentPosture(
         isJsonObject(deploymentResponse as unknown as JsonValue)
           ? (deploymentResponse as unknown as JsonObject)
-          : null
+          : null,
       );
     } catch (failure) {
       setError(toErrorMessage(failure));
@@ -81,9 +84,11 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
       const response = await api.inspectConfig({
         path: emptyToUndefined(configInspectPath),
         show_secrets: false,
-        backups
+        backups,
       });
-      setConfigInspectSnapshot(isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null);
+      setConfigInspectSnapshot(
+        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null,
+      );
       setNotice("Config snapshot refreshed.");
     } catch (failure) {
       setError(toErrorMessage(failure));
@@ -97,8 +102,12 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
     setError(null);
     try {
       const response = await api.validateConfig({ path: emptyToUndefined(configInspectPath) });
-      setConfigValidation(isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null);
-      setNotice(response.valid ? "Config validation passed." : "Config validation reported issues.");
+      setConfigValidation(
+        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null,
+      );
+      setNotice(
+        response.valid ? "Config validation passed." : "Config validation reported issues.",
+      );
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -120,20 +129,23 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
         path: emptyToUndefined(configInspectPath),
         key: configMutationKey.trim(),
         value: configMutationMode === "unset" ? undefined : configMutationValue,
-        backups: normalizedBackupCount(configBackups)
+        backups: normalizedBackupCount(configBackups),
       });
       setConfigLastMutation(
-        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null
+        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null,
       );
       const nextSnapshot = await api.inspectConfig({
         path: emptyToUndefined(configInspectPath),
         show_secrets: false,
-        backups: normalizedBackupCount(configBackups)
+        backups: normalizedBackupCount(configBackups),
       });
-      const normalizedSnapshot =
-        isJsonObject(nextSnapshot as unknown as JsonValue) ? (nextSnapshot as unknown as JsonObject) : null;
+      const normalizedSnapshot = isJsonObject(nextSnapshot as unknown as JsonValue)
+        ? (nextSnapshot as unknown as JsonObject)
+        : null;
       setConfigInspectSnapshot(normalizedSnapshot);
-      setConfigDiffPreview(buildRedactedDiff(previousSnapshot, readDocumentToml(normalizedSnapshot)));
+      setConfigDiffPreview(
+        buildRedactedDiff(previousSnapshot, readDocumentToml(normalizedSnapshot)),
+      );
       await validateConfigSurface();
       setNotice(`Config ${configMutationMode === "unset" ? "unset" : "mutation"} applied.`);
     } catch (failure) {
@@ -152,20 +164,23 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
       const response = await api.migrateConfig({
         path: emptyToUndefined(configInspectPath),
         show_secrets: false,
-        backups: normalizedBackupCount(configBackups)
+        backups: normalizedBackupCount(configBackups),
       });
       setConfigLastMutation(
-        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null
+        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null,
       );
       const nextSnapshot = await api.inspectConfig({
         path: emptyToUndefined(configInspectPath),
         show_secrets: false,
-        backups: normalizedBackupCount(configBackups)
+        backups: normalizedBackupCount(configBackups),
       });
-      const normalizedSnapshot =
-        isJsonObject(nextSnapshot as unknown as JsonValue) ? (nextSnapshot as unknown as JsonObject) : null;
+      const normalizedSnapshot = isJsonObject(nextSnapshot as unknown as JsonValue)
+        ? (nextSnapshot as unknown as JsonObject)
+        : null;
       setConfigInspectSnapshot(normalizedSnapshot);
-      setConfigDiffPreview(buildRedactedDiff(previousSnapshot, readDocumentToml(normalizedSnapshot)));
+      setConfigDiffPreview(
+        buildRedactedDiff(previousSnapshot, readDocumentToml(normalizedSnapshot)),
+      );
       await validateConfigSurface();
       setNotice("Config migration completed.");
     } catch (failure) {
@@ -189,20 +204,23 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
       const response = await api.recoverConfig({
         path: emptyToUndefined(configInspectPath),
         backup,
-        backups: normalizedBackupCount(configBackups)
+        backups: normalizedBackupCount(configBackups),
       });
       setConfigLastMutation(
-        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null
+        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null,
       );
       const nextSnapshot = await api.inspectConfig({
         path: emptyToUndefined(configInspectPath),
         show_secrets: false,
-        backups: normalizedBackupCount(configBackups)
+        backups: normalizedBackupCount(configBackups),
       });
-      const normalizedSnapshot =
-        isJsonObject(nextSnapshot as unknown as JsonValue) ? (nextSnapshot as unknown as JsonObject) : null;
+      const normalizedSnapshot = isJsonObject(nextSnapshot as unknown as JsonValue)
+        ? (nextSnapshot as unknown as JsonObject)
+        : null;
       setConfigInspectSnapshot(normalizedSnapshot);
-      setConfigDiffPreview(buildRedactedDiff(previousSnapshot, readDocumentToml(normalizedSnapshot)));
+      setConfigDiffPreview(
+        buildRedactedDiff(previousSnapshot, readDocumentToml(normalizedSnapshot)),
+      );
       await validateConfigSurface();
       setNotice(`Recovered config from backup ${backup}.`);
     } catch (failure) {
@@ -236,7 +254,9 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
     try {
       const response = await api.getSecretMetadata(configSecretsScope, configSecretKey.trim());
       setConfigSecretMetadata(
-        isJsonObject(response.secret as unknown as JsonValue) ? (response.secret as unknown as JsonObject) : null
+        isJsonObject(response.secret as unknown as JsonValue)
+          ? (response.secret as unknown as JsonObject)
+          : null,
       );
       setNotice("Secret metadata refreshed.");
     } catch (failure) {
@@ -258,7 +278,7 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
       await api.setSecret({
         scope: configSecretsScope,
         key: configSecretKey.trim(),
-        value_base64: encodeBase64(configSecretValue)
+        value_base64: encodeBase64(configSecretValue),
       });
       setNotice("Secret stored.");
       setConfigSecretValue("");
@@ -283,9 +303,11 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
       const response = await api.revealSecret({
         scope: configSecretsScope,
         key: configSecretKey.trim(),
-        reveal: true
+        reveal: true,
       });
-      setConfigSecretReveal(isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null);
+      setConfigSecretReveal(
+        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null,
+      );
       setNotice("Secret revealed in current session.");
     } catch (failure) {
       setError(toErrorMessage(failure));
@@ -305,7 +327,7 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
     try {
       await api.deleteSecret({
         scope: configSecretsScope,
-        key: configSecretKey.trim()
+        key: configSecretKey.trim(),
       });
       setNotice("Secret deleted.");
       setConfigSecretMetadata(null);
@@ -378,7 +400,7 @@ export function useConfigDomain({ api, setError, setNotice }: UseConfigDomainArg
     setSecretValue,
     revealSecretValue,
     deleteSecretValue,
-    resetConfigDomain
+    resetConfigDomain,
   };
 }
 

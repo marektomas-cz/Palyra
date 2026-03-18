@@ -551,7 +551,7 @@ export class ControlPlaneApiError extends Error {
       redacted?: boolean;
       validationErrors?: ValidationIssue[];
       cause?: unknown;
-    }
+    },
   ) {
     super(message, { cause: options.cause });
     this.name = "ControlPlaneApiError";
@@ -582,12 +582,12 @@ function buildPathWithQuery(path: string, params?: URLSearchParams): string {
 function invokeFetch(
   fetcher: typeof fetch,
   input: RequestInfo | URL,
-  init: RequestInit
+  init: RequestInit,
 ): Promise<Response> {
   return Reflect.apply(
     fetcher as unknown as (input: RequestInfo | URL, init: RequestInit) => Promise<Response>,
     globalThis,
-    [input, init]
+    [input, init],
   );
 }
 
@@ -596,7 +596,7 @@ export class ConsoleApiClient {
 
   constructor(
     private readonly basePath = "",
-    private readonly fetcher: typeof fetch = fetch
+    private readonly fetcher: typeof fetch = fetch,
   ) {}
 
   async getSession(): Promise<ConsoleSession> {
@@ -615,9 +615,9 @@ export class ConsoleApiClient {
       "/console/v1/auth/login",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: false }
+      { csrf: false },
     );
     this.csrfToken = session.csrf_token;
     return session;
@@ -628,9 +628,9 @@ export class ConsoleApiClient {
       "/console/v1/auth/browser-handoff/session",
       {
         method: "POST",
-        body: JSON.stringify({ token })
+        body: JSON.stringify({ token }),
       },
-      { csrf: false }
+      { csrf: false },
     );
     this.csrfToken = session.csrf_token;
     return session;
@@ -640,7 +640,7 @@ export class ConsoleApiClient {
     await this.request<{ signed_out: boolean }>(
       "/console/v1/auth/logout",
       { method: "POST" },
-      { csrf: true }
+      { csrf: true },
     );
     this.csrfToken = null;
   }
@@ -670,9 +670,9 @@ export class ConsoleApiClient {
       "/console/v1/auth/profiles",
       {
         method: "POST",
-        body: JSON.stringify(profile)
+        body: JSON.stringify(profile),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -681,9 +681,9 @@ export class ConsoleApiClient {
       `/console/v1/auth/profiles/${encodeURIComponent(profileId)}/delete`,
       {
         method: "POST",
-        body: JSON.stringify({})
+        body: JSON.stringify({}),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -691,14 +691,16 @@ export class ConsoleApiClient {
     return this.request(buildPathWithQuery("/console/v1/auth/health", params));
   }
 
-  async connectOpenAiApiKey(payload: OpenAiApiKeyUpsertRequest): Promise<ProviderAuthActionEnvelope> {
+  async connectOpenAiApiKey(
+    payload: OpenAiApiKeyUpsertRequest,
+  ): Promise<ProviderAuthActionEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/api-key",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -707,75 +709,77 @@ export class ConsoleApiClient {
   }
 
   async startOpenAiProviderBootstrap(
-    payload: OpenAiOAuthBootstrapRequest = {}
+    payload: OpenAiOAuthBootstrapRequest = {},
   ): Promise<OpenAiOAuthBootstrapEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/bootstrap",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async getOpenAiProviderCallbackState(
-    attemptId: string
+    attemptId: string,
   ): Promise<OpenAiOAuthCallbackStateEnvelope> {
     const params = new URLSearchParams();
     params.set("attempt_id", attemptId);
-    return this.request(buildPathWithQuery("/console/v1/auth/providers/openai/callback-state", params));
+    return this.request(
+      buildPathWithQuery("/console/v1/auth/providers/openai/callback-state", params),
+    );
   }
 
   async reconnectOpenAiProvider(
-    payload: ProviderAuthActionRequest = {}
+    payload: ProviderAuthActionRequest = {},
   ): Promise<OpenAiOAuthBootstrapEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/reconnect",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async refreshOpenAiProvider(
-    payload: ProviderAuthActionRequest = {}
+    payload: ProviderAuthActionRequest = {},
   ): Promise<ProviderAuthActionEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/refresh",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async revokeOpenAiProvider(
-    payload: ProviderAuthActionRequest = {}
+    payload: ProviderAuthActionRequest = {},
   ): Promise<ProviderAuthActionEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/revoke",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async setOpenAiDefaultProfile(
-    payload: ProviderAuthActionRequest = {}
+    payload: ProviderAuthActionRequest = {},
   ): Promise<ProviderAuthActionEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/default-profile",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -788,9 +792,9 @@ export class ConsoleApiClient {
       "/console/v1/config/inspect",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: false }
+      { csrf: false },
     );
   }
 
@@ -799,9 +803,9 @@ export class ConsoleApiClient {
       "/console/v1/config/validate",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: false }
+      { csrf: false },
     );
   }
 
@@ -815,9 +819,9 @@ export class ConsoleApiClient {
       "/console/v1/config/mutate",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -830,9 +834,9 @@ export class ConsoleApiClient {
       "/console/v1/config/migrate",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -845,9 +849,9 @@ export class ConsoleApiClient {
       "/console/v1/config/recover",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -857,7 +861,7 @@ export class ConsoleApiClient {
 
   async getSecretMetadata(scope: string, key: string): Promise<SecretMetadataEnvelope> {
     return this.request(
-      `/console/v1/secrets/metadata?scope=${encodeURIComponent(scope)}&key=${encodeURIComponent(key)}`
+      `/console/v1/secrets/metadata?scope=${encodeURIComponent(scope)}&key=${encodeURIComponent(key)}`,
     );
   }
 
@@ -870,9 +874,9 @@ export class ConsoleApiClient {
       "/console/v1/secrets",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -885,9 +889,9 @@ export class ConsoleApiClient {
       "/console/v1/secrets/reveal",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -896,9 +900,9 @@ export class ConsoleApiClient {
       "/console/v1/secrets/delete",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -919,9 +923,9 @@ export class ConsoleApiClient {
       "/console/v1/agents",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -930,9 +934,9 @@ export class ConsoleApiClient {
       `/console/v1/agents/${encodeURIComponent(agentId)}/set-default`,
       {
         method: "POST",
-        body: JSON.stringify({})
+        body: JSON.stringify({}),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -945,9 +949,9 @@ export class ConsoleApiClient {
       "/console/v1/pairing/codes",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -955,14 +959,16 @@ export class ConsoleApiClient {
     return this.request(buildPathWithQuery("/console/v1/support-bundle/jobs", params));
   }
 
-  async createSupportBundleJob(payload: { retain_jobs?: number } = {}): Promise<SupportBundleJobEnvelope> {
+  async createSupportBundleJob(
+    payload: { retain_jobs?: number } = {},
+  ): Promise<SupportBundleJobEnvelope> {
     return this.request(
       "/console/v1/support-bundle/jobs",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -992,33 +998,33 @@ export class ConsoleApiClient {
       "/console/v1/chat/sessions",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async renameChatSession(
     sessionId: string,
-    payload: { session_label: string }
+    payload: { session_label: string },
   ): Promise<{ session: ChatSessionRecord; created: boolean; reset_applied: boolean }> {
     return this.request(
       `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/rename`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async resetChatSession(
-    sessionId: string
+    sessionId: string,
   ): Promise<{ session: ChatSessionRecord; created: boolean; reset_applied: boolean }> {
     return this.request(
       `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/reset`,
       { method: "POST" },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1028,10 +1034,10 @@ export class ConsoleApiClient {
 
   async chatRunEvents(
     runId: string,
-    params?: URLSearchParams
+    params?: URLSearchParams,
   ): Promise<{ run: ChatRunStatusRecord; tape: ChatRunTapeSnapshot }> {
     return this.request(
-      buildPathWithQuery(`/console/v1/chat/runs/${encodeURIComponent(runId)}/events`, params)
+      buildPathWithQuery(`/console/v1/chat/runs/${encodeURIComponent(runId)}/events`, params),
     );
   }
 
@@ -1045,7 +1051,7 @@ export class ConsoleApiClient {
     options: {
       signal?: AbortSignal;
       onLine: (line: ChatStreamLine) => void;
-    }
+    },
   ): Promise<void> {
     const path = `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/messages/stream`;
     const headers = new Headers();
@@ -1059,7 +1065,7 @@ export class ConsoleApiClient {
       headers,
       body: JSON.stringify(payload),
       credentials: "include",
-      signal: options.signal
+      signal: options.signal,
     });
     if (!response.ok) {
       throw await buildRequestError(response);
@@ -1094,15 +1100,15 @@ export class ConsoleApiClient {
       reason?: string;
       decision_scope?: "once" | "session" | "timeboxed";
       decision_scope_ttl_ms?: number;
-    }
+    },
   ): Promise<{ approval: JsonValue }> {
     return this.request(
       `/console/v1/approvals/${encodeURIComponent(approvalId)}/decision`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1124,9 +1130,9 @@ export class ConsoleApiClient {
       "/console/v1/cron/jobs",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1135,54 +1141,56 @@ export class ConsoleApiClient {
       `/console/v1/cron/jobs/${encodeURIComponent(jobId)}/enabled`,
       {
         method: "POST",
-        body: JSON.stringify({ enabled })
+        body: JSON.stringify({ enabled }),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
-  async runCronJobNow(jobId: string): Promise<{ run_id?: string; status: string; message: string }> {
+  async runCronJobNow(
+    jobId: string,
+  ): Promise<{ run_id?: string; status: string; message: string }> {
     return this.request(
       `/console/v1/cron/jobs/${encodeURIComponent(jobId)}/run-now`,
       { method: "POST" },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async listCronRuns(jobId: string, params?: URLSearchParams): Promise<{ runs: JsonValue[] }> {
-    return this.request(buildPathWithQuery(`/console/v1/cron/jobs/${encodeURIComponent(jobId)}/runs`, params));
+    return this.request(
+      buildPathWithQuery(`/console/v1/cron/jobs/${encodeURIComponent(jobId)}/runs`, params),
+    );
   }
 
   async listChannels(): Promise<{ connectors: JsonValue[] }> {
     return this.request("/console/v1/channels");
   }
 
-  async getChannelStatus(
-    connectorId: string
-  ): Promise<ChannelStatusEnvelope> {
+  async getChannelStatus(connectorId: string): Promise<ChannelStatusEnvelope> {
     return this.request(`/console/v1/channels/${encodeURIComponent(connectorId)}`);
   }
 
   async setChannelEnabled(
     connectorId: string,
-    enabled: boolean
+    enabled: boolean,
   ): Promise<{ connector: JsonValue }> {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/enabled`,
       {
         method: "POST",
-        body: JSON.stringify({ enabled })
+        body: JSON.stringify({ enabled }),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async listChannelLogs(
     connectorId: string,
-    params?: URLSearchParams
+    params?: URLSearchParams,
   ): Promise<{ events: JsonValue[]; dead_letters: JsonValue[] }> {
     return this.request(
-      buildPathWithQuery(`/console/v1/channels/${encodeURIComponent(connectorId)}/logs`, params)
+      buildPathWithQuery(`/console/v1/channels/${encodeURIComponent(connectorId)}/logs`, params),
     );
   }
 
@@ -1196,15 +1204,15 @@ export class ConsoleApiClient {
       simulate_crash_once?: boolean;
       is_direct_message?: boolean;
       requested_broadcast?: boolean;
-    }
+    },
   ): Promise<{ ingest: JsonValue; status: JsonValue }> {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/test`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1216,29 +1224,29 @@ export class ConsoleApiClient {
       confirm: boolean;
       auto_reaction?: string;
       thread_id?: string;
-    }
+    },
   ): Promise<{ dispatch: JsonValue; status: JsonValue; runtime?: JsonValue }> {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/test-send`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async refreshChannelHealth(
     connectorId: string,
-    payload: { verify_channel_id?: string }
+    payload: { verify_channel_id?: string },
   ): Promise<ChannelStatusEnvelope> {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/health-refresh`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1246,7 +1254,7 @@ export class ConsoleApiClient {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/queue/pause`,
       { method: "POST" },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1254,7 +1262,7 @@ export class ConsoleApiClient {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/queue/resume`,
       { method: "POST" },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1262,29 +1270,29 @@ export class ConsoleApiClient {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/queue/drain`,
       { method: "POST" },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async replayChannelDeadLetter(
     connectorId: string,
-    deadLetterId: number
+    deadLetterId: number,
   ): Promise<ChannelStatusEnvelope> {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/dead-letters/${deadLetterId}/replay`,
       { method: "POST" },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async discardChannelDeadLetter(
     connectorId: string,
-    deadLetterId: number
+    deadLetterId: number,
   ): Promise<ChannelStatusEnvelope> {
     return this.request(
       `/console/v1/channels/${encodeURIComponent(connectorId)}/operations/dead-letters/${deadLetterId}/discard`,
       { method: "POST" },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1296,99 +1304,95 @@ export class ConsoleApiClient {
     return this.request("/console/v1/channels/router/warnings");
   }
 
-  async previewChannelRoute(
-    payload: {
-      channel: string;
-      text: string;
-      conversation_id?: string;
-      sender_identity?: string;
-      sender_display?: string;
-      sender_verified?: boolean;
-      is_direct_message?: boolean;
-      requested_broadcast?: boolean;
-      adapter_message_id?: string;
-      adapter_thread_id?: string;
-      max_payload_bytes?: number;
-    }
-  ): Promise<{ preview: JsonValue }> {
+  async previewChannelRoute(payload: {
+    channel: string;
+    text: string;
+    conversation_id?: string;
+    sender_identity?: string;
+    sender_display?: string;
+    sender_verified?: boolean;
+    is_direct_message?: boolean;
+    requested_broadcast?: boolean;
+    adapter_message_id?: string;
+    adapter_thread_id?: string;
+    max_payload_bytes?: number;
+  }): Promise<{ preview: JsonValue }> {
     return this.request(
       "/console/v1/channels/router/preview",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async listChannelRouterPairings(
-    params?: URLSearchParams
+    params?: URLSearchParams,
   ): Promise<{ pairings: JsonValue[]; config_hash: string }> {
     return this.request(buildPathWithQuery("/console/v1/channels/router/pairings", params));
   }
 
-  async mintChannelRouterPairingCode(
-    payload: { channel: string; issued_by?: string; ttl_ms?: number }
-  ): Promise<{ code: JsonValue; config_hash: string }> {
+  async mintChannelRouterPairingCode(payload: {
+    channel: string;
+    issued_by?: string;
+    ttl_ms?: number;
+  }): Promise<{ code: JsonValue; config_hash: string }> {
     return this.request(
       "/console/v1/channels/router/pairing-codes",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
-  async probeDiscordOnboarding(
-    payload: {
-      account_id?: string;
-      token: string;
-      mode?: "local" | "remote_vps";
-      inbound_scope?: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
-      allow_from?: string[];
-      deny_from?: string[];
-      require_mention?: boolean;
-      mention_patterns?: string[];
-      concurrency_limit?: number;
-      broadcast_strategy?: "deny" | "mention_only" | "allow";
-      confirm_open_guild_channels?: boolean;
-      verify_channel_id?: string;
-    }
-  ): Promise<{ [key: string]: JsonValue }> {
+  async probeDiscordOnboarding(payload: {
+    account_id?: string;
+    token: string;
+    mode?: "local" | "remote_vps";
+    inbound_scope?: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
+    allow_from?: string[];
+    deny_from?: string[];
+    require_mention?: boolean;
+    mention_patterns?: string[];
+    concurrency_limit?: number;
+    broadcast_strategy?: "deny" | "mention_only" | "allow";
+    confirm_open_guild_channels?: boolean;
+    verify_channel_id?: string;
+  }): Promise<{ [key: string]: JsonValue }> {
     return this.request(
       "/console/v1/channels/discord/onboarding/probe",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
-  async applyDiscordOnboarding(
-    payload: {
-      account_id?: string;
-      token: string;
-      mode?: "local" | "remote_vps";
-      inbound_scope?: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
-      allow_from?: string[];
-      deny_from?: string[];
-      require_mention?: boolean;
-      mention_patterns?: string[];
-      concurrency_limit?: number;
-      broadcast_strategy?: "deny" | "mention_only" | "allow";
-      confirm_open_guild_channels?: boolean;
-      verify_channel_id?: string;
-    }
-  ): Promise<{ [key: string]: JsonValue }> {
+  async applyDiscordOnboarding(payload: {
+    account_id?: string;
+    token: string;
+    mode?: "local" | "remote_vps";
+    inbound_scope?: "dm_only" | "allowlisted_guild_channels" | "open_guild_channels";
+    allow_from?: string[];
+    deny_from?: string[];
+    require_mention?: boolean;
+    mention_patterns?: string[];
+    concurrency_limit?: number;
+    broadcast_strategy?: "deny" | "mention_only" | "allow";
+    confirm_open_guild_channels?: boolean;
+    verify_channel_id?: string;
+  }): Promise<{ [key: string]: JsonValue }> {
     return this.request(
       "/console/v1/channels/discord/onboarding/apply",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1413,9 +1417,9 @@ export class ConsoleApiClient {
       "/console/v1/memory/purge",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1432,37 +1436,37 @@ export class ConsoleApiClient {
       "/console/v1/skills/install",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async verifySkill(
     skillId: string,
-    payload: { version?: string; allow_tofu?: boolean }
+    payload: { version?: string; allow_tofu?: boolean },
   ): Promise<{ report: JsonValue }> {
     return this.request(
       `/console/v1/skills/${encodeURIComponent(skillId)}/verify`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async auditSkill(
     skillId: string,
-    payload: { version?: string; allow_tofu?: boolean; quarantine_on_fail?: boolean }
+    payload: { version?: string; allow_tofu?: boolean; quarantine_on_fail?: boolean },
   ): Promise<{ report: JsonValue; quarantined: boolean }> {
     return this.request(
       `/console/v1/skills/${encodeURIComponent(skillId)}/audit`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1477,10 +1481,10 @@ export class ConsoleApiClient {
         method: "POST",
         body: JSON.stringify({
           version: payload.version,
-          reason: payload.reason
-        })
+          reason: payload.reason,
+        }),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1496,10 +1500,10 @@ export class ConsoleApiClient {
         body: JSON.stringify({
           version: payload.version,
           reason: payload.reason,
-          override: true
-        })
+          override: true,
+        }),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1526,51 +1530,51 @@ export class ConsoleApiClient {
       "/console/v1/browser/profiles/create",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async renameBrowserProfile(
     profileId: string,
-    payload: { principal?: string; name: string }
+    payload: { principal?: string; name: string },
   ): Promise<{ profile: JsonValue }> {
     return this.request(
       `/console/v1/browser/profiles/${encodeURIComponent(profileId)}/rename`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async deleteBrowserProfile(
     profileId: string,
-    payload: { principal?: string } = {}
+    payload: { principal?: string } = {},
   ): Promise<{ deleted: boolean; active_profile_id?: string }> {
     return this.request(
       `/console/v1/browser/profiles/${encodeURIComponent(profileId)}/delete`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
   async activateBrowserProfile(
     profileId: string,
-    payload: { principal?: string } = {}
+    payload: { principal?: string } = {},
   ): Promise<{ profile: JsonValue }> {
     return this.request(
       `/console/v1/browser/profiles/${encodeURIComponent(profileId)}/activate`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1599,9 +1603,9 @@ export class ConsoleApiClient {
       "/console/v1/browser/relay/tokens",
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: true }
+      { csrf: true },
     );
   }
 
@@ -1620,31 +1624,32 @@ export class ConsoleApiClient {
       };
       max_payload_bytes?: number;
     },
-    relayToken?: string
+    relayToken?: string,
   ): Promise<{
     success: boolean;
     action: string;
     error: string;
     result: JsonValue;
   }> {
-    const headers = relayToken !== undefined && relayToken.trim().length > 0
-      ? { authorization: `Bearer ${relayToken.trim()}` }
-      : undefined;
+    const headers =
+      relayToken !== undefined && relayToken.trim().length > 0
+        ? { authorization: `Bearer ${relayToken.trim()}` }
+        : undefined;
     return this.request(
       "/console/v1/browser/relay/actions",
       {
         method: "POST",
         headers,
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       },
-      { csrf: false }
+      { csrf: false },
     );
   }
 
   private async request<T>(
     path: string,
     init: RequestInit = {},
-    options: RequestOptions = {}
+    options: RequestOptions = {},
   ): Promise<T> {
     const headers = new Headers(init.headers);
     if (init.body !== undefined && !headers.has("Content-Type")) {
@@ -1652,7 +1657,7 @@ export class ConsoleApiClient {
     }
 
     const method = (init.method ?? "GET").toUpperCase();
-    const requiresCsrf = options.csrf ?? (method !== "GET");
+    const requiresCsrf = options.csrf ?? method !== "GET";
     if (requiresCsrf) {
       if (this.csrfToken === null) {
         throw new Error("Missing CSRF token. Please sign in again.");
@@ -1679,7 +1684,7 @@ export class ConsoleApiClient {
           ...init,
           headers,
           credentials: "include",
-          signal: requestController.signal
+          signal: requestController.signal,
         });
         return (await parseJsonResponse<T>(response)) as T;
       } catch (error) {
@@ -1709,7 +1714,10 @@ function normalizeRequestTimeoutMs(timeoutMs: number | undefined): number {
   return Math.floor(timeoutMs);
 }
 
-function forwardAbortSignal(signal: AbortSignal | null | undefined, controller: AbortController): () => void {
+function forwardAbortSignal(
+  signal: AbortSignal | null | undefined,
+  controller: AbortController,
+): () => void {
   if (signal === undefined || signal === null) {
     return () => {};
   }
@@ -1740,7 +1748,7 @@ function shouldRetrySafeRead(
   method: string,
   attempt: number,
   maxAttempts: number,
-  error: unknown
+  error: unknown,
 ): boolean {
   if (method !== "GET" || attempt >= maxAttempts) {
     return false;
@@ -1771,8 +1779,8 @@ function buildControlPlaneApiError(payload: JsonValue, status: number): ControlP
       category: envelope?.category,
       retryable: envelope?.retryable,
       redacted: envelope?.redacted,
-      validationErrors: envelope?.validation_errors
-    }
+      validationErrors: envelope?.validation_errors,
+    },
   );
 }
 
@@ -1800,7 +1808,7 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
 function flushNdjsonBuffer(
   buffer: string,
   onLine: (line: ChatStreamLine) => void,
-  flushRemainder = false
+  flushRemainder = false,
 ): string {
   let remainder = buffer;
   while (true) {
@@ -1841,7 +1849,7 @@ function parseChatStreamLine(line: string): ChatStreamLine {
     return {
       type: "meta",
       run_id: parsed.run_id,
-      session_id: parsed.session_id
+      session_id: parsed.session_id,
     };
   }
   if (parsed.type === "event") {
@@ -1855,7 +1863,7 @@ function parseChatStreamLine(line: string): ChatStreamLine {
     }
     return {
       type: "event",
-      event: parsed.event as ChatStreamEventEnvelope
+      event: parsed.event as ChatStreamEventEnvelope,
     };
   }
   if (parsed.type === "error") {
@@ -1865,7 +1873,7 @@ function parseChatStreamLine(line: string): ChatStreamLine {
     return {
       type: "error",
       run_id: typeof parsed.run_id === "string" ? parsed.run_id : undefined,
-      error: parsed.error
+      error: parsed.error,
     };
   }
   if (parsed.type === "complete") {
@@ -1875,7 +1883,7 @@ function parseChatStreamLine(line: string): ChatStreamLine {
     return {
       type: "complete",
       run_id: parsed.run_id,
-      status: parsed.status
+      status: parsed.status,
     };
   }
   throw new Error(`Unsupported chat stream line type '${parsed.type}'.`);

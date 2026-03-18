@@ -14,7 +14,7 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 include_regex='\.(rs|proto|ts|tsx|js|mjs|sh|ps1|css|html)$'
-exclude_regex='^(schemas/generated/|apps/web/dist/|apps/web/node_modules/|target/|fuzz/target/|security-artifacts/)'
+exclude_regex='^(node_modules/|schemas/generated/|apps/web/dist/|apps/web/.vite/|apps/desktop/ui/dist/|apps/desktop/ui/.vite/|target/|fuzz/target/|security-artifacts/)'
 
 declare -a warn_files=()
 declare -a critical_files=()

@@ -7,7 +7,7 @@ import {
   EmptyState,
   EntityTable,
   SelectField,
-  TextInputField
+  TextInputField,
 } from "../console/components/ui";
 import { SanitizedMarkdown } from "./markdown";
 import type {
@@ -17,7 +17,7 @@ import type {
   A2uiFormComponent,
   A2uiFormField,
   A2uiFormSubmitEvent,
-  A2uiFormValue
+  A2uiFormValue,
 } from "./types";
 
 interface A2uiRendererProps {
@@ -32,7 +32,11 @@ type A2uiTableRow = {
 
 export function A2uiRenderer({ document, onFormSubmit }: A2uiRendererProps) {
   return (
-    <section className="a2ui-renderer" data-surface={document.surface} aria-label={document.surface}>
+    <section
+      className="a2ui-renderer"
+      data-surface={document.surface}
+      aria-label={document.surface}
+    >
       {document.components.map((component) => (
         <article
           key={component.id}
@@ -62,7 +66,9 @@ interface ComponentBodyProps {
 function ComponentBody({ component, onFormSubmit }: ComponentBodyProps) {
   switch (component.type) {
     case "text":
-      return <p className={`a2ui-text a2ui-text-${component.props.tone}`}>{component.props.value}</p>;
+      return (
+        <p className={`a2ui-text a2ui-text-${component.props.tone}`}>{component.props.value}</p>
+      );
     case "markdown":
       return <SanitizedMarkdown value={component.props.value} />;
     case "list":
@@ -95,12 +101,12 @@ function A2uiTable({ component }: { component: Extract<A2uiComponent, { type: "t
     key: `column-${index}`,
     label: column,
     isRowHeader: index === 0,
-    render: (row: A2uiTableRow) => row.cells[index] ?? ""
+    render: (row: A2uiTableRow) => row.cells[index] ?? "",
   }));
 
   const rows: A2uiTableRow[] = component.props.rows.map((cells, rowIndex) => ({
     id: `${component.id}-row-${rowIndex}`,
-    cells
+    cells,
   }));
 
   return (
@@ -124,7 +130,7 @@ interface A2uiFormProps {
 function A2uiForm({ component, onSubmit }: A2uiFormProps) {
   const initialValues = useMemo(
     () => buildInitialFormValues(component.props.fields),
-    [component.props.fields]
+    [component.props.fields],
   );
   const [values, setValues] = useState<Record<string, A2uiFormValue>>(initialValues);
 
@@ -135,7 +141,7 @@ function A2uiForm({ component, onSubmit }: A2uiFormProps) {
   function updateFieldValue(fieldId: string, value: A2uiFormValue): void {
     setValues((current) => ({
       ...current,
-      [fieldId]: value
+      [fieldId]: value,
     }));
   }
 
@@ -143,7 +149,7 @@ function A2uiForm({ component, onSubmit }: A2uiFormProps) {
     event.preventDefault();
     onSubmit?.({
       componentId: component.id,
-      values
+      values,
     });
   }
 
@@ -203,7 +209,7 @@ function FormFieldRow({ componentId, field, value, onChange }: FormFieldRowProps
         onChange={(nextValue) => onChange(field.id, nextValue)}
         options={field.options.map((option) => ({
           key: option.value,
-          label: option.label
+          label: option.label,
         }))}
       />
     );
@@ -255,7 +261,10 @@ interface A2uiBarChartProps {
 }
 
 function A2uiBarChart({ component }: A2uiBarChartProps) {
-  const maxValue = component.props.series.reduce((maximum, entry) => Math.max(maximum, entry.value), 1);
+  const maxValue = component.props.series.reduce(
+    (maximum, entry) => Math.max(maximum, entry.value),
+    1,
+  );
 
   return (
     <figure className="a2ui-chart">
@@ -267,8 +276,20 @@ function A2uiBarChart({ component }: A2uiBarChartProps) {
             <div key={`${component.id}-${entry.label}`} className="a2ui-chart-row">
               <span className="a2ui-chart-label">{entry.label}</span>
               <span className="a2ui-chart-track" aria-hidden="true">
-                <svg className="a2ui-chart-track-svg" viewBox="0 0 100 10" preserveAspectRatio="none">
-                  <rect className="a2ui-chart-track-rect" x="0" y="0" width="100" height="10" rx="5" ry="5" />
+                <svg
+                  className="a2ui-chart-track-svg"
+                  viewBox="0 0 100 10"
+                  preserveAspectRatio="none"
+                >
+                  <rect
+                    className="a2ui-chart-track-rect"
+                    x="0"
+                    y="0"
+                    width="100"
+                    height="10"
+                    rx="5"
+                    ry="5"
+                  />
                   <rect
                     className="a2ui-chart-bar-rect"
                     x="0"

@@ -7,7 +7,7 @@ import type {
   ConsoleApiClient,
   OpenAiOAuthBootstrapEnvelope,
   OpenAiOAuthCallbackStateEnvelope,
-  ProviderAuthStateEnvelope
+  ProviderAuthStateEnvelope,
 } from "../../consoleApi";
 import { emptyToUndefined, toErrorMessage } from "../shared";
 
@@ -47,7 +47,9 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
   const [authPolling, setAuthPolling] = useState(false);
   const [authProfiles, setAuthProfiles] = useState<AuthProfileView[]>([]);
   const [authHealth, setAuthHealth] = useState<AuthHealthEnvelope | null>(null);
-  const [authProviderState, setAuthProviderState] = useState<ProviderAuthStateEnvelope | null>(null);
+  const [authProviderState, setAuthProviderState] = useState<ProviderAuthStateEnvelope | null>(
+    null,
+  );
   const [authApiKeyDraft, setAuthApiKeyDraft] = useState<AuthApiKeyDraft>(createDefaultApiKeyDraft);
   const [authOAuthDraft, setAuthOAuthDraft] = useState<AuthOAuthDraft>(createDefaultOAuthDraft);
   const [authActiveOauthAttempt, setAuthActiveOauthAttempt] =
@@ -90,13 +92,15 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     const [profilesResponse, healthResponse, providerResponse] = await Promise.all([
       api.listAuthProfiles(profileParams),
       api.getAuthHealth(healthParams),
-      api.getOpenAiProviderState()
+      api.getOpenAiProviderState(),
     ]);
 
-    setAuthProfiles(profilesResponse.profiles.filter((profile) => profile.provider.kind === "openai"));
+    setAuthProfiles(
+      profilesResponse.profiles.filter((profile) => profile.provider.kind === "openai"),
+    );
     setAuthHealth({
       ...healthResponse,
-      profiles: healthResponse.profiles.filter((profile) => profile.provider === "openai")
+      profiles: healthResponse.profiles.filter((profile) => profile.provider === "openai"),
     });
     setAuthProviderState(providerResponse);
   }
@@ -134,7 +138,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
         profile_name: profileName,
         scope: resolveScope(authApiKeyDraft.scopeKind, authApiKeyDraft.agentId),
         api_key: apiKey,
-        set_default: authApiKeyDraft.setDefault
+        set_default: authApiKeyDraft.setDefault,
       });
       resetAuthApiKeyDraft();
       setNotice(response.message);
@@ -173,7 +177,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
         client_id: clientId,
         client_secret: clientSecret,
         scopes: normalizeScopes(authOAuthDraft.scopes),
-        set_default: authOAuthDraft.setDefault
+        set_default: authOAuthDraft.setDefault,
       });
       beginOauthAttempt(response);
     } catch (failure) {
@@ -189,7 +193,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     setNotice(null);
     try {
       const response = await api.reconnectOpenAiProvider({
-        profile_id: normalizeProfileSelection(profileId)
+        profile_id: normalizeProfileSelection(profileId),
       });
       beginOauthAttempt(response);
     } catch (failure) {
@@ -205,7 +209,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     setNotice(null);
     try {
       const response = await api.refreshOpenAiProvider({
-        profile_id: normalizeProfileSelection(profileId)
+        profile_id: normalizeProfileSelection(profileId),
       });
       setNotice(response.message);
       await loadAuthState();
@@ -223,10 +227,10 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     try {
       const normalizedProfileId = normalizeProfileSelection(profileId);
       const response = await api.revokeOpenAiProvider({
-        profile_id: normalizedProfileId
+        profile_id: normalizedProfileId,
       });
       setAuthApiKeyDraft((current) =>
-        current.profileId === normalizedProfileId ? createDefaultApiKeyDraft() : current
+        current.profileId === normalizedProfileId ? createDefaultApiKeyDraft() : current,
       );
       if (authActiveOauthAttempt?.profile_id === normalizedProfileId) {
         clearOauthPolling();
@@ -248,7 +252,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     setNotice(null);
     try {
       const response = await api.setOpenAiDefaultProfile({
-        profile_id: normalizeProfileSelection(profileId)
+        profile_id: normalizeProfileSelection(profileId),
       });
       setNotice(response.message);
       await loadAuthState();
@@ -261,7 +265,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
 
   async function checkOpenAiCallbackState(attemptId?: string): Promise<void> {
     const activeAttemptId = normalizeProfileSelection(
-      attemptId ?? oauthAttemptIdRef.current ?? authActiveOauthAttempt?.attempt_id
+      attemptId ?? oauthAttemptIdRef.current ?? authActiveOauthAttempt?.attempt_id,
     );
     if (activeAttemptId === undefined) {
       setError("No active OpenAI OAuth attempt is waiting for a callback.");
@@ -301,7 +305,9 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     }
     oauthPopupRef.current = openOauthWindow(authActiveOauthAttempt.authorization_url);
     if (oauthPopupRef.current === null) {
-      setNotice("OpenAI OAuth URL is ready, but the browser blocked the pop-up. Use the manual link.");
+      setNotice(
+        "OpenAI OAuth URL is ready, but the browser blocked the pop-up. Use the manual link.",
+      );
       return;
     }
     setNotice("OpenAI OAuth window opened.");
@@ -314,10 +320,12 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
       scopeKind: profile.scope.kind === "agent" ? "agent" : "global",
       agentId: profile.scope.agent_id ?? "",
       apiKey: "",
-      setDefault: authProviderState?.default_profile_id === profile.profile_id
+      setDefault: authProviderState?.default_profile_id === profile.profile_id,
     });
     setError(null);
-    setNotice(`Editing OpenAI API key profile '${profile.profile_name}'. Submit a new key to rotate it.`);
+    setNotice(
+      `Editing OpenAI API key profile '${profile.profile_name}'. Submit a new key to rotate it.`,
+    );
   }
 
   function cancelApiKeyRotation(): void {
@@ -358,12 +366,14 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
       state: "pending",
       message: response.message,
       profile_id: response.profile_id,
-      expires_at_unix_ms: response.expires_at_unix_ms
+      expires_at_unix_ms: response.expires_at_unix_ms,
     });
     oauthPopupRef.current = openOauthWindow(response.authorization_url);
     scheduleOauthPolling(response.attempt_id);
     if (oauthPopupRef.current === null) {
-      setNotice("OpenAI OAuth URL issued. The pop-up was blocked, so use the manual open link below.");
+      setNotice(
+        "OpenAI OAuth URL issued. The pop-up was blocked, so use the manual open link below.",
+      );
       return;
     }
     setNotice("OpenAI OAuth window opened. Finish the authorization to complete the profile.");
@@ -423,7 +433,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     openActiveOauthWindow,
     prepareApiKeyRotation,
     cancelApiKeyRotation,
-    resetAuthDomain
+    resetAuthDomain,
   };
 }
 
@@ -434,7 +444,7 @@ function createDefaultApiKeyDraft(): AuthApiKeyDraft {
     scopeKind: "global",
     agentId: "",
     apiKey: "",
-    setDefault: true
+    setDefault: true,
   };
 }
 
@@ -446,7 +456,7 @@ function createDefaultOAuthDraft(): AuthOAuthDraft {
     clientId: "",
     clientSecret: "",
     scopes: DEFAULT_OPENAI_OAUTH_SCOPES,
-    setDefault: false
+    setDefault: false,
   };
 }
 
@@ -462,11 +472,11 @@ function resolveScope(scopeKind: OpenAiScopeKind, agentId: string): AuthProfileS
     }
     return {
       kind: "agent",
-      agent_id: normalizedAgentId
+      agent_id: normalizedAgentId,
     };
   }
   return {
-    kind: "global"
+    kind: "global",
   };
 }
 
@@ -485,15 +495,13 @@ function openOauthWindow(url: string): Window | null {
   const popup = window.open(
     url,
     "palyra-openai-auth",
-    "popup=yes,width=720,height=860,resizable=yes,scrollbars=yes"
+    "popup=yes,width=720,height=860,resizable=yes,scrollbars=yes",
   );
   popup?.focus();
   return popup;
 }
 
-function isOauthCallbackMessage(
-  value: unknown
-): value is { type: string; attempt_id: string } {
+function isOauthCallbackMessage(value: unknown): value is { type: string; attempt_id: string } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }

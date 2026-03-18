@@ -37,27 +37,27 @@ export function EntityTable<T extends object>({
   emptyTitle = "No records loaded",
   emptyDescription = "Refresh or adjust the current filters to load records.",
   loading = false,
-  className
+  className,
 }: EntityTableProps<T>) {
   const resolvedColumns = useMemo<readonly EntityTableColumn<T>[]>(() => {
     if (columns.some((column) => column.isRowHeader)) {
       return columns;
     }
     return columns.map((column, index) =>
-      index === 0 ? { ...column, isRowHeader: true } : column
+      index === 0 ? { ...column, isRowHeader: true } : column,
     );
   }, [columns]);
   const columnMap = useMemo(
     () => new Map(resolvedColumns.map((column) => [column.key, column])),
-    [resolvedColumns]
+    [resolvedColumns],
   );
   const tableRows = useMemo<TableRowItem<T>[]>(
     () =>
       rows.map((item, index) => ({
         rowKey: getRowId(item, index),
-        value: item
+        value: item,
       })),
-    [getRowId, rows]
+    [getRowId, rows],
   );
 
   if (loading) {
@@ -88,11 +88,7 @@ export function EntityTable<T extends object>({
             <Table.Body
               items={tableRows}
               renderEmptyState={() => (
-                <EmptyState
-                  compact
-                  description={emptyDescription}
-                  title={emptyTitle}
-                />
+                <EmptyState compact description={emptyDescription} title={emptyTitle} />
               )}
             >
               {(item) => (

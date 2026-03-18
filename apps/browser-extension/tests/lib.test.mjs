@@ -16,10 +16,7 @@ test("normalizeRelayBaseUrl accepts loopback hosts", () => {
 });
 
 test("normalizeRelayBaseUrl rejects non-loopback hosts", () => {
-  assert.throws(
-    () => normalizeRelayBaseUrl("https://example.com:7142"),
-    /loopback host/,
-  );
+  assert.throws(() => normalizeRelayBaseUrl("https://example.com:7142"), /loopback host/);
 });
 
 test("normalizeExtensionId enforces allowed characters", () => {
@@ -59,10 +56,9 @@ test("validateOpenTabUrl rejects host-prefix confusion", () => {
 
 test("validateOpenTabUrl accepts same-origin path-prefix entries", () => {
   assert.equal(
-    validateOpenTabUrl(
-      "https://docs.palyra.dev/security/guide",
-      ["https://docs.palyra.dev/security/"],
-    ),
+    validateOpenTabUrl("https://docs.palyra.dev/security/guide", [
+      "https://docs.palyra.dev/security/",
+    ]),
     "https://docs.palyra.dev/security/guide",
   );
 });

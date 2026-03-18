@@ -16,7 +16,7 @@ import {
   showMainWindow,
   startPalyra,
   stopPalyra,
-  type ActionResult
+  type ActionResult,
 } from "./lib/desktopApi";
 
 export function App() {
@@ -45,7 +45,10 @@ export function App() {
     void revealMainWindow();
   }, [revealMainWindow]);
 
-  async function runAction(action: ActionName, execute: () => Promise<ActionResult>): Promise<void> {
+  async function runAction(
+    action: ActionName,
+    execute: () => Promise<ActionResult>,
+  ): Promise<void> {
     if (action === null) {
       return;
     }
@@ -79,7 +82,7 @@ export function App() {
                 ? stopPalyra
                 : action === "restart"
                   ? restartPalyra
-                  : openDashboard
+                  : openDashboard,
           )
         }
         onRefresh={() => void refresh()}

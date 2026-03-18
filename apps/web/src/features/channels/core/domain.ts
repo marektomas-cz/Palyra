@@ -127,20 +127,13 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     if (parsedLimit !== null && parsedLimit > 0) {
       params.set("limit", String(parsedLimit));
     }
-    const response = await listChannelLogs(
-      api,
-      connectorId,
-      params.size > 0 ? params : undefined
-    );
+    const response = await listChannelLogs(api, connectorId, params.size > 0 ? params : undefined);
     setChannelsEvents(toJsonObjectArray(response.events));
     setChannelsDeadLetters(toJsonObjectArray(response.dead_letters));
   }
 
-  async function refreshChannelRouter(
-    pairingsFilterOverride?: string
-  ): Promise<void> {
-    const pairingsChannel = (pairingsFilterOverride ??
-      channelRouterPairingsFilterChannel).trim();
+  async function refreshChannelRouter(pairingsFilterOverride?: string): Promise<void> {
+    const pairingsChannel = (pairingsFilterOverride ?? channelRouterPairingsFilterChannel).trim();
     const pairingsParams = new URLSearchParams();
     if (pairingsChannel.length > 0) {
       pairingsParams.set("channel", pairingsChannel);
@@ -149,17 +142,12 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     const [rulesResponse, warningsResponse, pairingsResponse] = await Promise.all([
       getChannelRouterRules(api),
       getChannelRouterWarnings(api),
-      listChannelRouterPairings(
-        api,
-        pairingsParams.size > 0 ? pairingsParams : undefined
-      ),
+      listChannelRouterPairings(api, pairingsParams.size > 0 ? pairingsParams : undefined),
     ]);
 
     const rulesPayload = (rulesResponse as { rules?: unknown }).rules;
     const rules =
-      typeof rulesPayload === "object" &&
-      rulesPayload !== null &&
-      !Array.isArray(rulesPayload)
+      typeof rulesPayload === "object" && rulesPayload !== null && !Array.isArray(rulesPayload)
         ? (rulesPayload as JsonObject)
         : null;
     setChannelRouterRules(rules);
@@ -173,9 +161,7 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     setError(null);
     try {
       const response = await listChannels(api);
-      const connectors = toJsonObjectArray(response.connectors).filter(
-        isVisibleChannelConnector
-      );
+      const connectors = toJsonObjectArray(response.connectors).filter(isVisibleChannelConnector);
       setChannelsConnectors(connectors);
 
       const requested = preferredConnectorId ?? channelsSelectedConnectorId;
@@ -203,10 +189,10 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
       const statusResponse = await getChannelStatus(api, nextConnectorId);
       setSelectedChannelStatusPayload(statusResponse as JsonValue);
       setChannelRouterPreviewChannel((previous) =>
-        previous.trim().length > 0 ? previous : nextConnectorId
+        previous.trim().length > 0 ? previous : nextConnectorId,
       );
       setChannelRouterMintChannel((previous) =>
-        previous.trim().length > 0 ? previous : nextConnectorId
+        previous.trim().length > 0 ? previous : nextConnectorId,
       );
       const pairingsFilter =
         channelRouterPairingsFilterChannel.trim().length > 0
@@ -254,10 +240,7 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     }
   }
 
-  async function setChannelEnabled(
-    entry: JsonObject,
-    enabled: boolean
-  ): Promise<void> {
+  async function setChannelEnabled(entry: JsonObject, enabled: boolean): Promise<void> {
     const connectorId = readString(entry, "connector_id");
     if (connectorId === null) {
       setError("Connector payload missing connector_id.");
@@ -276,9 +259,7 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     }
   }
 
-  async function submitChannelTestMessage(
-    event: FormEvent<HTMLFormElement>
-  ): Promise<void> {
+  async function submitChannelTestMessage(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (channelsSelectedConnectorId.trim().length === 0) {
       setError("Select a connector before sending a test message.");
@@ -305,12 +286,11 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
         const accepted = response.ingest.accepted === true ? "true" : "false";
         const immediateDeliveryValue = response.ingest.immediate_delivery;
         const immediateDelivery =
-          typeof immediateDeliveryValue === "number" ||
-          typeof immediateDeliveryValue === "string"
+          typeof immediateDeliveryValue === "number" || typeof immediateDeliveryValue === "string"
             ? String(immediateDeliveryValue)
             : "0";
         setNotice(
-          `Channel test dispatched (accepted=${accepted}, immediate_delivery=${immediateDelivery}).`
+          `Channel test dispatched (accepted=${accepted}, immediate_delivery=${immediateDelivery}).`,
         );
       } else {
         setNotice("Channel test dispatched.");
@@ -325,9 +305,7 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     }
   }
 
-  async function submitChannelRouterPreview(
-    event: FormEvent<HTMLFormElement>
-  ): Promise<void> {
+  async function submitChannelRouterPreview(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const routeChannel = channelRouterPreviewChannel.trim();
     const text = channelRouterPreviewText.trim();
@@ -354,13 +332,9 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
         is_direct_message: channelRouterPreviewIsDirectMessage,
         requested_broadcast: channelRouterPreviewRequestedBroadcast,
         max_payload_bytes:
-          maxPayloadBytes !== null && maxPayloadBytes > 0
-            ? maxPayloadBytes
-            : undefined,
+          maxPayloadBytes !== null && maxPayloadBytes > 0 ? maxPayloadBytes : undefined,
       });
-      setChannelRouterPreviewResult(
-        isJsonObject(response.preview) ? response.preview : null
-      );
+      setChannelRouterPreviewResult(isJsonObject(response.preview) ? response.preview : null);
       if (isJsonObject(response.preview)) {
         const accepted = response.preview.accepted === true ? "accepted" : "rejected";
         const reason = readString(response.preview, "reason") ?? "unknown";
@@ -388,9 +362,7 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     }
   }
 
-  async function mintChannelRouterPairingCode(
-    event: FormEvent<HTMLFormElement>
-  ): Promise<void> {
+  async function mintChannelRouterPairingCode(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const routeChannel = channelRouterMintChannel.trim();
     if (routeChannel.length === 0) {
@@ -416,7 +388,7 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
       await refreshChannelRouter(
         channelRouterPairingsFilterChannel.trim().length > 0
           ? channelRouterPairingsFilterChannel.trim()
-          : routeChannel
+          : routeChannel,
       );
       if (isJsonObject(response.code)) {
         const code = readString(response.code, "code") ?? "(missing)";
@@ -501,11 +473,7 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     setError(null);
     try {
       const connectorId = channelsSelectedConnectorId.trim();
-      const response = await replayChannelDeadLetterRequest(
-        api,
-        connectorId,
-        deadLetterId
-      );
+      const response = await replayChannelDeadLetterRequest(api, connectorId, deadLetterId);
       setSelectedChannelStatusPayload(response as JsonValue);
       setNotice(`Dead letter ${deadLetterId} replayed.`);
       await refreshChannelLogs(connectorId);
@@ -525,11 +493,7 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     setError(null);
     try {
       const connectorId = channelsSelectedConnectorId.trim();
-      const response = await discardChannelDeadLetterRequest(
-        api,
-        connectorId,
-        deadLetterId
-      );
+      const response = await discardChannelDeadLetterRequest(api, connectorId, deadLetterId);
       setSelectedChannelStatusPayload(response as JsonValue);
       setNotice(`Dead letter ${deadLetterId} discarded.`);
       await refreshChannelLogs(connectorId);

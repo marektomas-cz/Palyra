@@ -3,12 +3,12 @@ import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
   WorkspaceSectionCard,
-  WorkspaceStatusChip
+  WorkspaceStatusChip,
 } from "../components/workspace/WorkspaceChrome";
 import {
   WorkspaceEmptyState,
   WorkspaceInlineNotice,
-  workspaceToneForState
+  workspaceToneForState,
 } from "../components/workspace/WorkspacePatterns";
 import { readBool, readObject, readString, toStringArray } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
@@ -38,7 +38,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     return decision === null || decision === "pending" || decision.length === 0;
   }).length;
   const failedSupportJobs = app.overviewSupportJobs.filter(
-    (job) => readString(job, "state") === "failed"
+    (job) => readString(job, "state") === "failed",
   ).length;
   const connectorDegraded = Number(readString(connector ?? {}, "degraded_connectors") ?? "0");
   const providerState =
@@ -50,7 +50,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     pendingApprovals,
     failedSupportJobs,
     connectorDegraded,
-    providerState
+    providerState,
   });
 
   return (
@@ -181,7 +181,9 @@ export function OverviewSection({ app }: OverviewSectionProps) {
               </div>
               <div>
                 <dt>Remote bind</dt>
-                <dd>{readBool(deployment, "remote_bind_detected") ? "detected" : "not detected"}</dd>
+                <dd>
+                  {readBool(deployment, "remote_bind_detected") ? "detected" : "not detected"}
+                </dd>
               </div>
               <div>
                 <dt>Provider auth</dt>
@@ -202,7 +204,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
 function QuickAction({
   label,
   detail,
-  onClick
+  onClick,
 }: {
   label: string;
   detail: string;
@@ -229,7 +231,7 @@ function buildAttentionItems({
   pendingApprovals,
   failedSupportJobs,
   connectorDegraded,
-  providerState
+  providerState,
 }: {
   warnings: string[];
   pendingApprovals: number;

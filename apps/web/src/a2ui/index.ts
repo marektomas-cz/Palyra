@@ -25,5 +25,5 @@ export type {
   PatchOperationKind,
   PatchProcessingBudget,
   PatchProcessingResult,
-  RenderInputLimits
+  RenderInputLimits,
 } from "./types";

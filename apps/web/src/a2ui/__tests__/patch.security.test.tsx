@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { A2uiError } from "../errors";
 import { applyPatchDocument, parsePatchDocument } from "../patch";
@@ -11,16 +11,16 @@ describe("A2UI patch security", () => {
     const badPatches: PatchDocument[] = [
       {
         v: 1,
-        ops: [{ op: "add", path: "/__proto__/polluted", value: "yes" }]
+        ops: [{ op: "add", path: "/__proto__/polluted", value: "yes" }],
       },
       {
         v: 1,
-        ops: [{ op: "add", path: "/components/0/props/__proto__/polluted", value: "yes" }]
+        ops: [{ op: "add", path: "/components/0/props/__proto__/polluted", value: "yes" }],
       },
       {
         v: 1,
-        ops: [{ op: "replace", path: "/constructor/prototype/polluted", value: "yes" }]
-      }
+        ops: [{ op: "replace", path: "/constructor/prototype/polluted", value: "yes" }],
+      },
     ];
 
     for (const patch of badPatches) {

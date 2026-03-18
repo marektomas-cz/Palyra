@@ -8,7 +8,7 @@ import type {
   A2uiDocument,
   PatchDocument,
   PatchProcessingBudget,
-  PatchProcessingResult
+  PatchProcessingResult,
 } from "./types";
 
 interface RuntimeOptions {
@@ -30,15 +30,14 @@ type FrameHandle =
   | { kind: "timeout"; value: ReturnType<typeof setTimeout> };
 
 export function mergePatchBudget(
-  budgetOverrides: Partial<PatchProcessingBudget> | undefined
+  budgetOverrides: Partial<PatchProcessingBudget> | undefined,
 ): PatchProcessingBudget {
   return {
     maxOpsPerPatch: budgetOverrides?.maxOpsPerPatch ?? DEFAULT_PATCH_BUDGET.maxOpsPerPatch,
     maxOpsPerTick: budgetOverrides?.maxOpsPerTick ?? DEFAULT_PATCH_BUDGET.maxOpsPerTick,
     maxQueueDepth: budgetOverrides?.maxQueueDepth ?? DEFAULT_PATCH_BUDGET.maxQueueDepth,
     maxPathLength: budgetOverrides?.maxPathLength ?? DEFAULT_PATCH_BUDGET.maxPathLength,
-    maxApplyMsPerTick:
-      budgetOverrides?.maxApplyMsPerTick ?? DEFAULT_PATCH_BUDGET.maxApplyMsPerTick
+    maxApplyMsPerTick: budgetOverrides?.maxApplyMsPerTick ?? DEFAULT_PATCH_BUDGET.maxApplyMsPerTick,
   };
 }
 
@@ -46,7 +45,7 @@ export function processPatchQueue(
   document: A2uiDocument,
   queuedPatches: readonly PatchDocument[],
   budget: PatchProcessingBudget = DEFAULT_PATCH_BUDGET,
-  now: () => number = currentTimeMs
+  now: () => number = currentTimeMs,
 ): PatchProcessingResult {
   if (queuedPatches.length === 0) {
     return {
@@ -54,7 +53,7 @@ export function processPatchQueue(
       appliedPatches: 0,
       remainingPatches: [],
       exhaustedBudget: false,
-      elapsedMs: 0
+      elapsedMs: 0,
     };
   }
 
@@ -86,13 +85,13 @@ export function processPatchQueue(
     appliedPatches,
     remainingPatches,
     exhaustedBudget: remainingPatches.length > 0,
-    elapsedMs
+    elapsedMs,
   };
 }
 
 export function useA2uiRuntime(
   initialDocument: unknown,
-  options: RuntimeOptions = {}
+  options: RuntimeOptions = {},
 ): A2uiRuntimeHandle {
   const [document, setDocument] = useState(() => normalizeA2uiDocument(initialDocument));
   const [pendingPatchCount, setPendingPatchCount] = useState(0);
@@ -115,7 +114,7 @@ export function useA2uiRuntime(
     options.budget?.maxOpsPerPatch,
     options.budget?.maxOpsPerTick,
     options.budget?.maxPathLength,
-    options.budget?.maxQueueDepth
+    options.budget?.maxQueueDepth,
   ]);
 
   useEffect(() => {
@@ -178,7 +177,7 @@ export function useA2uiRuntime(
     if (queueRef.current.length >= budget.maxQueueDepth) {
       throw new A2uiError(
         "budget_exceeded",
-        `Patch queue depth exceeds maxQueueDepth=${budget.maxQueueDepth}.`
+        `Patch queue depth exceeds maxQueueDepth=${budget.maxQueueDepth}.`,
       );
     }
     queueRef.current.push(patch);
@@ -207,7 +206,7 @@ export function useA2uiRuntime(
     pendingPatchCount,
     enqueuePatch,
     enqueuePatchValue,
-    replaceDocument
+    replaceDocument,
   };
 }
 
@@ -215,12 +214,12 @@ function scheduleFrame(callback: () => void): FrameHandle {
   if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
     return {
       kind: "raf",
-      value: window.requestAnimationFrame(() => callback())
+      value: window.requestAnimationFrame(() => callback()),
     };
   }
   return {
     kind: "timeout",
-    value: setTimeout(callback, 16)
+    value: setTimeout(callback, 16),
   };
 }
 

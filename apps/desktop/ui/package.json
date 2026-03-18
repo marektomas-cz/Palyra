@@ -3,16 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=20 <25",
-    "npm": ">=10 <12"
-  },
   "scripts": {
-    "bootstrap": "npm ci",
-    "build": "vite build",
-    "dev": "vite",
-    "typecheck": "tsc --noEmit",
-    "verify-install": "npm ls --depth=0"
+    "build": "vp build",
+    "clean": "node ../../../scripts/js-artifacts.mjs clean-desktop-ui",
+    "dev": "vp dev",
+    "lint": "vp run -w lint:desktop-ui",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.7",
@@ -29,6 +25,10 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.4",
     "typescript": "5.8.2",
-    "vite": "7.3.1"
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.1.12"
+  },
+  "engines": {
+    "node": ">=22.18.0",
+    "npm": ">=10.9.3 <12"
   }
 }
