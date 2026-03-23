@@ -12,14 +12,18 @@ pub(crate) fn run_status(
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for status command"))?;
     let http_connection = root_context.resolve_http_connection(
-        app::ConnectionOverrides { daemon_url: url, token, principal, device_id, channel, grpc_url: None },
+        app::ConnectionOverrides {
+            daemon_url: url,
+            token,
+            principal,
+            device_id,
+            channel,
+            grpc_url: None,
+        },
         app::ConnectionDefaults::USER,
     )?;
     let grpc_connection = root_context.resolve_grpc_connection(
-        app::ConnectionOverrides {
-            grpc_url,
-            ..app::ConnectionOverrides::default()
-        },
+        app::ConnectionOverrides { grpc_url, ..app::ConnectionOverrides::default() },
         app::ConnectionDefaults::USER,
     )?;
     let status_url = format!("{}/healthz", http_connection.base_url.trim_end_matches('/'));
@@ -30,7 +34,8 @@ pub(crate) fn run_status(
     let health = fetch_health_with_retry(&http_client, &status_url)?;
 
     let runtime = build_runtime()?;
-    let grpc_health = runtime.block_on(fetch_grpc_health_with_retry(grpc_connection.grpc_url.clone()))?;
+    let grpc_health =
+        runtime.block_on(fetch_grpc_health_with_retry(grpc_connection.grpc_url.clone()))?;
 
     let mut admin_payload = None;
     if admin {

@@ -24,10 +24,7 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
     match command {
         DaemonCommand::Status { url } => {
             let connection = root_context()?.resolve_http_connection(
-                app::ConnectionOverrides {
-                    daemon_url: url,
-                    ..app::ConnectionOverrides::default()
-                },
+                app::ConnectionOverrides { daemon_url: url, ..app::ConnectionOverrides::default() },
                 app::ConnectionDefaults::USER,
             )?;
             let status_url = format!("{}/healthz", connection.base_url.trim_end_matches('/'));
@@ -402,8 +399,10 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
                 },
                 app::ConnectionDefaults::USER,
             )?;
-            let endpoint =
-                format!("{}/admin/v1/runs/{run_id}/tape", connection.base_url.trim_end_matches('/'));
+            let endpoint = format!(
+                "{}/admin/v1/runs/{run_id}/tape",
+                connection.base_url.trim_end_matches('/')
+            );
             let client = Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
@@ -454,8 +453,10 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
                 },
                 app::ConnectionDefaults::USER,
             )?;
-            let endpoint =
-                format!("{}/admin/v1/runs/{run_id}/cancel", connection.base_url.trim_end_matches('/'));
+            let endpoint = format!(
+                "{}/admin/v1/runs/{run_id}/cancel",
+                connection.base_url.trim_end_matches('/')
+            );
             let client = Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()

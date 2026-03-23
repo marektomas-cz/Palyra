@@ -15,9 +15,9 @@ use ulid::Ulid;
 
 use crate::{
     args::{LogLevelArg, OutputFormatArg, RootOptions},
-    load_document_from_existing_path, normalize_client_socket, AgentConnection,
-    DEFAULT_CHANNEL, DEFAULT_DAEMON_BIND_ADDR, DEFAULT_DAEMON_PORT, DEFAULT_DAEMON_URL,
-    DEFAULT_DEVICE_ID, DEFAULT_GATEWAY_GRPC_BIND_ADDR, DEFAULT_GATEWAY_GRPC_PORT,
+    load_document_from_existing_path, normalize_client_socket, AgentConnection, DEFAULT_CHANNEL,
+    DEFAULT_DAEMON_BIND_ADDR, DEFAULT_DAEMON_PORT, DEFAULT_DAEMON_URL, DEFAULT_DEVICE_ID,
+    DEFAULT_GATEWAY_GRPC_BIND_ADDR, DEFAULT_GATEWAY_GRPC_PORT,
 };
 
 const CLI_PROFILE_ENV: &str = "PALYRA_CLI_PROFILE";
@@ -45,17 +45,11 @@ pub(crate) struct ConnectionDefaults {
 }
 
 impl ConnectionDefaults {
-    pub(crate) const USER: Self = Self {
-        principal: "user:local",
-        device_id: DEFAULT_DEVICE_ID,
-        channel: DEFAULT_CHANNEL,
-    };
+    pub(crate) const USER: Self =
+        Self { principal: "user:local", device_id: DEFAULT_DEVICE_ID, channel: DEFAULT_CHANNEL };
 
-    pub(crate) const ADMIN: Self = Self {
-        principal: "admin:local",
-        device_id: DEFAULT_DEVICE_ID,
-        channel: DEFAULT_CHANNEL,
-    };
+    pub(crate) const ADMIN: Self =
+        Self { principal: "admin:local", device_id: DEFAULT_DEVICE_ID, channel: DEFAULT_CHANNEL };
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,18 +111,14 @@ fn context_cell() -> &'static Mutex<Option<RootCommandContext>> {
 
 pub(crate) fn install_root_context(root: RootOptions) -> Result<RootCommandContext> {
     let context = build_root_context(root)?;
-    let mut guard = context_cell()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("CLI root context lock poisoned"))?;
+    let mut guard =
+        context_cell().lock().map_err(|_| anyhow::anyhow!("CLI root context lock poisoned"))?;
     *guard = Some(context.clone());
     Ok(context)
 }
 
 pub(crate) fn current_root_context() -> Option<RootCommandContext> {
-    context_cell()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().cloned())
+    context_cell().lock().ok().and_then(|guard| guard.as_ref().cloned())
 }
 
 impl RootCommandContext {
@@ -395,12 +385,13 @@ fn load_profiles_document(path: Option<&Path>) -> Result<CliProfilesDocument> {
     Ok(document)
 }
 
-fn resolve_active_profile_name(root: &RootOptions, profiles: &CliProfilesDocument) -> Option<String> {
+fn resolve_active_profile_name(
+    root: &RootOptions,
+    profiles: &CliProfilesDocument,
+) -> Option<String> {
     normalize_owned_text(root.profile.clone())
         .or_else(|| {
-            env::var(CLI_PROFILE_ENV)
-                .ok()
-                .and_then(|value| normalize_owned_text(Some(value)))
+            env::var(CLI_PROFILE_ENV).ok().and_then(|value| normalize_owned_text(Some(value)))
         })
         .or_else(|| normalize_owned_text(profiles.default_profile.clone()))
 }
@@ -425,7 +416,8 @@ fn resolve_explicit_or_env_state_root(explicit: Option<&str>) -> Result<PathBuf>
     }
     if let Ok(raw) = env::var("PALYRA_STATE_ROOT") {
         if let Some(raw) = normalize_optional_text(Some(raw.as_str())) {
-            return parse_config_path(raw).with_context(|| "PALYRA_STATE_ROOT contains an invalid path");
+            return parse_config_path(raw)
+                .with_context(|| "PALYRA_STATE_ROOT contains an invalid path");
         }
     }
     default_state_root().context("failed to resolve default state root")
@@ -439,12 +431,11 @@ fn resolve_final_state_root(
         return parse_config_path(explicit)
             .with_context(|| format!("state root path is invalid: {explicit}"));
     }
-    if let Some(profile_state_root) = profile
-        .and_then(|profile| normalize_optional_text(profile.state_root.as_deref()))
+    if let Some(profile_state_root) =
+        profile.and_then(|profile| normalize_optional_text(profile.state_root.as_deref()))
     {
-        return parse_config_path(profile_state_root).with_context(|| {
-            format!("profile state_root is invalid: {profile_state_root}")
-        });
+        return parse_config_path(profile_state_root)
+            .with_context(|| format!("profile state_root is invalid: {profile_state_root}"));
     }
     resolve_explicit_or_env_state_root(None)
 }
@@ -462,7 +453,9 @@ fn resolve_config_path(
         return Ok(Some(parsed));
     }
 
-    if let Some(profile_path) = profile.and_then(|profile| normalize_optional_text(profile.config_path.as_deref())) {
+    if let Some(profile_path) =
+        profile.and_then(|profile| normalize_optional_text(profile.config_path.as_deref()))
+    {
         let parsed = parse_config_path(profile_path)
             .with_context(|| format!("profile config_path is invalid: {profile_path}"))?;
         if !parsed.exists() {
@@ -473,8 +466,8 @@ fn resolve_config_path(
 
     if let Ok(raw) = env::var("PALYRA_CONFIG") {
         if let Some(raw) = normalize_optional_text(Some(raw.as_str())) {
-            let parsed = parse_config_path(raw)
-                .with_context(|| "PALYRA_CONFIG contains an invalid path")?;
+            let parsed =
+                parse_config_path(raw).with_context(|| "PALYRA_CONFIG contains an invalid path")?;
             if parsed.exists() {
                 return Ok(Some(parsed));
             }
@@ -539,16 +532,14 @@ fn normalize_optional_text(value: Option<&str>) -> Option<&str> {
 }
 
 fn normalize_owned_text(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    value.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_root_context, ConnectionDefaults, ConnectionOverrides, RootOptions, CLI_PROFILE_ENV,
-        CLI_PROFILES_PATH_ENV,
+        build_root_context, ConnectionDefaults, ConnectionOverrides, RootOptions,
+        CLI_PROFILES_PATH_ENV, CLI_PROFILE_ENV,
     };
     use crate::args::{LogLevelArg, OutputFormatArg};
     use anyhow::Result;
@@ -657,8 +648,10 @@ channel = "staging"
         env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
 
         let context = build_root_context(RootOptions::default())?;
-        let http = context.resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
-        let grpc = context.resolve_grpc_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+        let http = context
+            .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+        let grpc = context
+            .resolve_grpc_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
 
         assert_eq!(context.profile_name(), Some("staging"));
         assert_eq!(http.base_url, "http://127.0.0.1:8200");

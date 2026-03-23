@@ -129,10 +129,7 @@ pub(crate) fn inject_run_stream_metadata(
     );
     metadata.insert(
         "x-palyra-trace-id",
-        connection
-            .trace_id
-            .parse()
-            .context("invalid trace_id metadata value")?,
+        connection.trace_id.parse().context("invalid trace_id metadata value")?,
     );
     Ok(())
 }

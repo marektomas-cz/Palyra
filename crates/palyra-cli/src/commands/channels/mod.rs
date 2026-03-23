@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 use crate::{
-    args::ChannelsCommand, client::channels as channels_client, output, output::channels as channels_output,
+    args::ChannelsCommand, client::channels as channels_client, output,
+    output::channels as channels_output,
 };
 
 pub(crate) fn run(command: ChannelsCommand) -> Result<()> {
@@ -17,8 +18,9 @@ pub(crate) fn run(command: ChannelsCommand) -> Result<()> {
         ChannelsCommand::Discord { command } => connectors::discord::run(command)?,
         ChannelsCommand::Router { command } => router::run(command)?,
         ChannelsCommand::List { url, token, principal, device_id, channel, json } => {
-            let request_context =
-                channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
+            let request_context = channels_client::resolve_request_context(
+                url, token, principal, device_id, channel,
+            )?;
             let endpoint =
                 format!("{}/admin/v1/channels", request_context.base_url.trim_end_matches('/'));
             let client = channels_client::build_client()?;
@@ -240,8 +242,9 @@ pub(crate) fn run(command: ChannelsCommand) -> Result<()> {
             limit,
             json,
         } => {
-            let request_context =
-                channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
+            let request_context = channels_client::resolve_request_context(
+                url, token, principal, device_id, channel,
+            )?;
             let endpoint = format!(
                 "{}/admin/v1/channels/{}/logs",
                 request_context.base_url.trim_end_matches('/'),

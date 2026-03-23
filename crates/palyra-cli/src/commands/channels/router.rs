@@ -9,10 +9,13 @@ use crate::{
 pub(crate) fn run(command: ChannelsRouterCommand) -> Result<()> {
     match command {
         ChannelsRouterCommand::Rules { url, token, principal, device_id, channel, json } => {
-            let request_context =
-                channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
-            let endpoint =
-                format!("{}/admin/v1/channels/router/rules", request_context.base_url.trim_end_matches('/'));
+            let request_context = channels_client::resolve_request_context(
+                url, token, principal, device_id, channel,
+            )?;
+            let endpoint = format!(
+                "{}/admin/v1/channels/router/rules",
+                request_context.base_url.trim_end_matches('/')
+            );
             let client = channels_client::build_client()?;
             let response = channels_client::send_request(
                 client.get(endpoint),
@@ -22,10 +25,13 @@ pub(crate) fn run(command: ChannelsRouterCommand) -> Result<()> {
             channels_output::emit_router_rules(response, output::preferred_json(json))?;
         }
         ChannelsRouterCommand::Warnings { url, token, principal, device_id, channel, json } => {
-            let request_context =
-                channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
-            let endpoint =
-                format!("{}/admin/v1/channels/router/warnings", request_context.base_url.trim_end_matches('/'));
+            let request_context = channels_client::resolve_request_context(
+                url, token, principal, device_id, channel,
+            )?;
+            let endpoint = format!(
+                "{}/admin/v1/channels/router/warnings",
+                request_context.base_url.trim_end_matches('/')
+            );
             let client = channels_client::build_client()?;
             let response = channels_client::send_request(
                 client.get(endpoint),
@@ -55,10 +61,13 @@ pub(crate) fn run(command: ChannelsRouterCommand) -> Result<()> {
         } => {
             let route_channel = normalize_route_channel_arg(route_channel)?;
             let text = normalize_required_text_arg(text, "text")?;
-            let request_context =
-                channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
-            let endpoint =
-                format!("{}/admin/v1/channels/router/preview", request_context.base_url.trim_end_matches('/'));
+            let request_context = channels_client::resolve_request_context(
+                url, token, principal, device_id, channel,
+            )?;
+            let endpoint = format!(
+                "{}/admin/v1/channels/router/preview",
+                request_context.base_url.trim_end_matches('/')
+            );
             let client = channels_client::build_client()?;
             let payload = json!({
                 "channel": route_channel,
@@ -89,10 +98,13 @@ pub(crate) fn run(command: ChannelsRouterCommand) -> Result<()> {
             channel,
             json,
         } => {
-            let request_context =
-                channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
-            let endpoint =
-                format!("{}/admin/v1/channels/router/pairings", request_context.base_url.trim_end_matches('/'));
+            let request_context = channels_client::resolve_request_context(
+                url, token, principal, device_id, channel,
+            )?;
+            let endpoint = format!(
+                "{}/admin/v1/channels/router/pairings",
+                request_context.base_url.trim_end_matches('/')
+            );
             let client = channels_client::build_client()?;
             let mut request = client.get(endpoint);
             if let Some(route_channel) = route_channel {
@@ -118,8 +130,9 @@ pub(crate) fn run(command: ChannelsRouterCommand) -> Result<()> {
             json,
         } => {
             let route_channel = normalize_route_channel_arg(route_channel)?;
-            let request_context =
-                channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
+            let request_context = channels_client::resolve_request_context(
+                url, token, principal, device_id, channel,
+            )?;
             let endpoint = format!(
                 "{}/admin/v1/channels/router/pairing-codes",
                 request_context.base_url.trim_end_matches('/')

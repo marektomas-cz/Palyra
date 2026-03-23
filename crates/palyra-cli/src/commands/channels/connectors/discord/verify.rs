@@ -25,12 +25,11 @@ pub(crate) fn run(
     let connector_id = request::connector_id(account_id.as_str())?;
     let request_context =
         channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
-    let endpoint =
-        format!(
-            "{}/admin/v1/channels/{}/test-send",
-            request_context.base_url.trim_end_matches('/'),
-            connector_id
-        );
+    let endpoint = format!(
+        "{}/admin/v1/channels/{}/test-send",
+        request_context.base_url.trim_end_matches('/'),
+        connector_id
+    );
     let client = channels_client::build_client()?;
     let response = channels_client::send_request(
         client.post(endpoint).json(&request::verify_payload(

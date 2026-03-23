@@ -30,11 +30,10 @@ pub(crate) fn run(
     let setup_token = prompt::setup_token()?;
     let connector_id = request::connector_id(account_id.as_str())?;
     let client = channels_client::build_client()?;
-    let probe_endpoint =
-        format!(
-            "{}/admin/v1/channels/discord/onboarding/probe",
-            request_context.base_url.trim_end_matches('/'),
-        );
+    let probe_endpoint = format!(
+        "{}/admin/v1/channels/discord/onboarding/probe",
+        request_context.base_url.trim_end_matches('/'),
+    );
     let probe_response = channels_client::send_request(
         client.post(probe_endpoint).json(&request::probe_payload(
             account_id.as_str(),
@@ -71,11 +70,10 @@ pub(crate) fn run(
         false
     };
 
-    let apply_endpoint =
-        format!(
-            "{}/admin/v1/channels/discord/onboarding/apply",
-            request_context.base_url.trim_end_matches('/'),
-        );
+    let apply_endpoint = format!(
+        "{}/admin/v1/channels/discord/onboarding/apply",
+        request_context.base_url.trim_end_matches('/'),
+    );
     let response = channels_client::send_request(
         client.post(apply_endpoint).json(&request::apply_payload(
             account_id.as_str(),

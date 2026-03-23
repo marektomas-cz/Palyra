@@ -87,25 +87,23 @@ pub(crate) fn emit_error(error: &anyhow::Error) -> Result<CliExitCode> {
     let context = app::current_root_context();
     let trace_id = context.as_ref().map(|value| value.trace_id());
     let profile = context.as_ref().and_then(|value| value.profile_name());
-    let state_root = context
-        .as_ref()
-        .map(|value| value.state_root().display().to_string());
-    let log_level = context
-        .as_ref()
-        .map(|value| format!("{:?}", value.log_level()).to_ascii_lowercase());
+    let state_root = context.as_ref().map(|value| value.state_root().display().to_string());
+    let log_level =
+        context.as_ref().map(|value| format!("{:?}", value.log_level()).to_ascii_lowercase());
     let no_color = context.as_ref().map(|value| value.no_color());
     let message = format!("{error:#}");
-    let format = context
-        .as_ref()
-        .map(|value| value.output_format())
-        .unwrap_or(OutputFormatArg::Text);
+    let format =
+        context.as_ref().map(|value| value.output_format()).unwrap_or(OutputFormatArg::Text);
 
     match format {
         OutputFormatArg::Text => {
             if let Some(trace_id) = trace_id {
-                let profile_suffix = profile.map(|value| format!(" profile={value}")).unwrap_or_default();
-                let state_root_suffix =
-                    state_root.as_ref().map(|value| format!(" state_root={value}")).unwrap_or_default();
+                let profile_suffix =
+                    profile.map(|value| format!(" profile={value}")).unwrap_or_default();
+                let state_root_suffix = state_root
+                    .as_ref()
+                    .map(|value| format!(" state_root={value}"))
+                    .unwrap_or_default();
                 eprintln!(
                     "error[{kind}] trace_id={trace_id}{profile_suffix}{state_root_suffix} {}",
                     message
@@ -170,7 +168,9 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
     {
         return CliExitCode::Auth;
     }
-    if error.chain().any(|cause| cause.is::<reqwest::Error>() || cause.is::<tonic::transport::Error>())
+    if error
+        .chain()
+        .any(|cause| cause.is::<reqwest::Error>() || cause.is::<tonic::transport::Error>())
         || lower.contains("failed to connect")
         || lower.contains("connection refused")
         || lower.contains("deadline exceeded")

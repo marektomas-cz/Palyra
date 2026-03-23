@@ -3,8 +3,10 @@ use crate::*;
 pub(crate) fn run_agents(command: AgentsCommand) -> Result<()> {
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for agents command"))?;
-    let connection = root_context
-        .resolve_grpc_connection(app::ConnectionOverrides::default(), app::ConnectionDefaults::ADMIN)?;
+    let connection = root_context.resolve_grpc_connection(
+        app::ConnectionOverrides::default(),
+        app::ConnectionDefaults::ADMIN,
+    )?;
     let runtime = build_runtime()?;
     runtime.block_on(run_agents_async(command, connection))
 }

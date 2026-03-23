@@ -26,7 +26,10 @@ pub(crate) fn resolve_request_context(
             app::ConnectionOverrides {
                 daemon_url: url,
                 token,
-                principal: normalize_default_override(principal, app::ConnectionDefaults::USER.principal),
+                principal: normalize_default_override(
+                    principal,
+                    app::ConnectionDefaults::USER.principal,
+                ),
                 device_id: normalize_default_override(device_id, DEFAULT_DEVICE_ID),
                 channel,
                 ..Default::default()
