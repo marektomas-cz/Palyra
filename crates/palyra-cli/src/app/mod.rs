@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use palyra_common::{
     config_system::get_value_at_path, default_config_search_paths, default_state_root,
-    parse_config_path, parse_daemon_bind_socket,
+    parse_config_path, parse_daemon_bind_socket, IdentityStorePathError,
 };
 use serde::Deserialize;
 use ulid::Ulid;
@@ -309,7 +309,7 @@ impl RootCommandContext {
 }
 
 fn build_root_context(root: RootOptions) -> Result<RootCommandContext> {
-    let bootstrap_state_root = resolve_explicit_or_env_state_root(root.state_root.as_deref())?;
+    let bootstrap_state_root = resolve_cli_state_root(root.state_root.as_deref())?;
     let profiles_path = resolve_profiles_path(&bootstrap_state_root)?;
     let profiles = load_profiles_document(profiles_path.as_deref())?;
     let profile_name = resolve_active_profile_name(&root, &profiles);
@@ -409,7 +409,7 @@ fn resolve_profile(
     Ok(Some(profile.clone()))
 }
 
-fn resolve_explicit_or_env_state_root(explicit: Option<&str>) -> Result<PathBuf> {
+pub(crate) fn resolve_cli_state_root(explicit: Option<&str>) -> Result<PathBuf> {
     if let Some(explicit) = normalize_optional_text(explicit) {
         return parse_config_path(explicit)
             .with_context(|| format!("state root path is invalid: {explicit}"));
@@ -420,7 +420,27 @@ fn resolve_explicit_or_env_state_root(explicit: Option<&str>) -> Result<PathBuf>
                 .with_context(|| "PALYRA_STATE_ROOT contains an invalid path");
         }
     }
-    default_state_root().context("failed to resolve default state root")
+    default_state_root()
+        .or_else(fallback_cli_state_root)
+        .context("failed to resolve default state root")
+}
+
+#[cfg(windows)]
+fn fallback_cli_state_root(
+    error: IdentityStorePathError,
+) -> Result<PathBuf, IdentityStorePathError> {
+    match error {
+        IdentityStorePathError::AppDataNotSet => Ok(env::temp_dir().join("Palyra")),
+    }
+}
+
+#[cfg(not(windows))]
+fn fallback_cli_state_root(
+    error: IdentityStorePathError,
+) -> Result<PathBuf, IdentityStorePathError> {
+    match error {
+        IdentityStorePathError::HomeNotSet => Ok(env::temp_dir().join("palyra")),
+    }
 }
 
 fn resolve_final_state_root(
@@ -437,7 +457,7 @@ fn resolve_final_state_root(
         return parse_config_path(profile_state_root)
             .with_context(|| format!("profile state_root is invalid: {profile_state_root}"));
     }
-    resolve_explicit_or_env_state_root(None)
+    resolve_cli_state_root(None)
 }
 
 fn resolve_config_path(
@@ -538,12 +558,12 @@ fn normalize_owned_text(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_root_context, ConnectionDefaults, ConnectionOverrides, RootOptions,
-        CLI_PROFILES_PATH_ENV, CLI_PROFILE_ENV,
+        build_root_context, resolve_cli_state_root, ConnectionDefaults, ConnectionOverrides,
+        RootOptions, CLI_PROFILES_PATH_ENV, CLI_PROFILE_ENV,
     };
     use crate::args::{LogLevelArg, OutputFormatArg};
     use anyhow::Result;
-    use std::{env, fs, sync::Mutex, sync::OnceLock};
+    use std::{env, ffi::OsString, fs, sync::Mutex, sync::OnceLock};
     use tempfile::tempdir;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -564,6 +584,13 @@ mod tests {
             CLI_PROFILES_PATH_ENV,
         ] {
             env::remove_var(key);
+        }
+    }
+
+    fn restore_env_var(key: &str, value: Option<OsString>) {
+        match value {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
         }
     }
 
@@ -660,6 +687,38 @@ channel = "staging"
         assert_eq!(http.principal, "admin:staging");
         assert_eq!(grpc.device_id, "01ARZ3NDEKTSV4RRFFQ69G5FB2");
         assert_eq!(grpc.channel, "staging");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn state_root_falls_back_to_temp_when_windows_appdata_is_missing() -> Result<()> {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_env();
+        let previous_local_appdata = env::var_os("LOCALAPPDATA");
+        let previous_appdata = env::var_os("APPDATA");
+        env::remove_var("LOCALAPPDATA");
+        env::remove_var("APPDATA");
+        let state_root = resolve_cli_state_root(None)?;
+        restore_env_var("LOCALAPPDATA", previous_local_appdata);
+        restore_env_var("APPDATA", previous_appdata);
+        assert_eq!(state_root, env::temp_dir().join("Palyra"));
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn state_root_falls_back_to_temp_when_home_is_missing() -> Result<()> {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_env();
+        let previous_xdg_state_home = env::var_os("XDG_STATE_HOME");
+        let previous_home = env::var_os("HOME");
+        env::remove_var("XDG_STATE_HOME");
+        env::remove_var("HOME");
+        let state_root = resolve_cli_state_root(None)?;
+        restore_env_var("XDG_STATE_HOME", previous_xdg_state_home);
+        restore_env_var("HOME", previous_home);
+        assert_eq!(state_root, env::temp_dir().join("palyra"));
         Ok(())
     }
 }

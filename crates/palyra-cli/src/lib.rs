@@ -73,6 +73,7 @@ use cli::{
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use palyra_common::default_identity_store_root;
 use palyra_common::{
     build_metadata,
     config_system::{
@@ -92,7 +93,6 @@ use palyra_common::{
     },
     HealthResponse, CANONICAL_JSON_ENVELOPE_VERSION, CANONICAL_PROTOCOL_MAJOR,
 };
-use palyra_common::{default_identity_store_root, default_state_root};
 use palyra_identity::{DeviceIdentity, FilesystemSecretStore, SecretStore};
 #[cfg(not(windows))]
 use palyra_identity::{IdentityManager, PairingClientKind, PairingMethod, DEFAULT_CERT_VALIDITY};
@@ -331,14 +331,7 @@ fn resolve_init_path(path: Option<String>) -> Result<PathBuf> {
 }
 
 fn resolve_init_state_root() -> Result<PathBuf> {
-    if let Ok(raw_state_root) = env::var("PALYRA_STATE_ROOT") {
-        let trimmed = raw_state_root.trim();
-        if !trimmed.is_empty() {
-            return parse_config_path(trimmed)
-                .with_context(|| "PALYRA_STATE_ROOT contains an invalid path");
-        }
-    }
-    default_state_root().context("failed to resolve default state root")
+    app::resolve_cli_state_root(None)
 }
 
 fn generate_admin_token() -> String {
