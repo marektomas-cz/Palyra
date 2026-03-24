@@ -636,11 +636,12 @@ fn build_onboarding_answers(
     if let Some(workspace_root) = request.options.workspace_root.as_ref() {
         answers.insert("workspace_root".to_owned(), WizardValue::Text(workspace_root.clone()));
     }
-    let auth_method = request
-        .options
-        .auth_method
-        .map(auth_method_value)
-        .or_else(|| secrets.api_key.as_ref().map(|_| "api_key".to_owned()));
+    let auth_method = request.options.auth_method.map(auth_method_value).or_else(|| {
+        (request.options.api_key_env.is_some()
+            || request.options.api_key_stdin
+            || request.options.api_key_prompt)
+            .then(|| "api_key".to_owned())
+    });
     if let Some(auth_method) = auth_method {
         answers.insert("auth_method".to_owned(), WizardValue::Choice(auth_method));
     }
@@ -1737,8 +1738,8 @@ fn emit_onboarding_summary(summary: &OnboardingSummary, json_output: bool) -> Re
                 summary.skipped_sections.join(",")
             }
         );
-        for check in &summary.health_checks {
-            println!("onboarding.health_check check={} status={}", check.check, check.status);
+        if !summary.health_checks.is_empty() {
+            println!("onboarding.health_check_count={}", summary.health_checks.len());
         }
         if !summary.warnings.is_empty() {
             println!("onboarding.warning_count={}", summary.warnings.len());
