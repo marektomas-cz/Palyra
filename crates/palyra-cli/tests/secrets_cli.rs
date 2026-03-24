@@ -255,3 +255,99 @@ fn secrets_configure_browser_state_key_updates_config() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn secrets_audit_non_json_output_is_redacted() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = bootstrap_local_config(&workdir)?;
+
+    let configure_output = run_cli_with_stdin(
+        &workdir,
+        &[
+            "secrets",
+            "configure",
+            "openai-api-key",
+            "global",
+            "openai_api_key",
+            "--value-stdin",
+            "--path",
+            config_path.as_str(),
+        ],
+        b"sk-test-openai-secret",
+    )?;
+    assert!(
+        configure_output.status.success(),
+        "secrets configure openai-api-key should succeed: {}",
+        String::from_utf8_lossy(&configure_output.stderr)
+    );
+
+    let audit_output =
+        run_cli(&workdir, &["secrets", "audit", "--path", config_path.as_str(), "--offline"])?;
+    assert!(
+        audit_output.status.success(),
+        "secrets audit should succeed: {}",
+        String::from_utf8_lossy(&audit_output.stderr)
+    );
+    let audit_stdout = String::from_utf8(audit_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        audit_stdout.contains("secrets.audit summary=<redacted>"),
+        "audit stdout should be redacted in non-json mode: {audit_stdout}"
+    );
+    assert!(
+        audit_stdout.contains("use --json for structured output"),
+        "audit stdout should point callers to --json for details: {audit_stdout}"
+    );
+    assert!(
+        !audit_stdout.contains("global/openai_api_key"),
+        "audit stdout must not echo vault refs in non-json mode: {audit_stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn secrets_apply_non_json_output_is_redacted() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = bootstrap_local_config(&workdir)?;
+
+    let configure_output = run_cli_with_stdin(
+        &workdir,
+        &[
+            "secrets",
+            "configure",
+            "openai-api-key",
+            "global",
+            "openai_api_key",
+            "--value-stdin",
+            "--path",
+            config_path.as_str(),
+        ],
+        b"sk-test-openai-secret",
+    )?;
+    assert!(
+        configure_output.status.success(),
+        "secrets configure openai-api-key should succeed: {}",
+        String::from_utf8_lossy(&configure_output.stderr)
+    );
+
+    let apply_output =
+        run_cli(&workdir, &["secrets", "apply", "--path", config_path.as_str(), "--offline"])?;
+    assert!(
+        apply_output.status.success(),
+        "secrets apply should succeed: {}",
+        String::from_utf8_lossy(&apply_output.stderr)
+    );
+    let apply_stdout = String::from_utf8(apply_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        apply_stdout.contains("secrets.apply summary=<redacted>"),
+        "apply stdout should be redacted in non-json mode: {apply_stdout}"
+    );
+    assert!(
+        apply_stdout.contains("use --json for structured output"),
+        "apply stdout should point callers to --json for details: {apply_stdout}"
+    );
+    assert!(
+        !apply_stdout.contains("daemon_restart_required"),
+        "apply stdout must not expose plan details in non-json mode: {apply_stdout}"
+    );
+    Ok(())
+}

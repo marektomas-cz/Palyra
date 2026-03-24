@@ -173,17 +173,9 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
                     "failed to encode secrets apply output as JSON",
                 )?;
             } else {
-                println!(
-                    "secrets.apply blocking_findings={} action_modes={}",
-                    audit.summary.blocking_findings,
-                    action_modes.len()
-                );
-                for action_mode in action_modes {
-                    println!(
-                        "secrets.apply.mode apply_mode={} affected_components={}",
-                        action_mode.apply_mode, action_mode.affected_components
-                    );
-                }
+                output::print_text_line(
+                    "secrets.apply summary=<redacted> use --json for structured output",
+                )?;
             }
             std::io::stdout().flush().context("stdout flush failed")?;
             if strict && audit.summary.blocking_findings > 0 {
@@ -602,17 +594,9 @@ fn emit_secrets_audit(
             "failed to encode secrets audit payload as JSON",
         )?;
     } else {
-        println!(
-            "secrets.audit path={} references={} resolved={} blocking={} warnings={} info={} runtime_profiles_inspected={} runtime_error_present={}",
-            path,
-            summary.total_references,
-            summary.resolved_references,
-            summary.blocking_findings,
-            summary.warning_findings,
-            summary.info_findings,
-            runtime_profiles_inspected,
-            runtime_error_present
-        );
+        output::print_text_line(
+            "secrets.audit summary=<redacted> use --json for structured output",
+        )?;
     }
     std::io::stdout().flush().context("stdout flush failed")
 }
