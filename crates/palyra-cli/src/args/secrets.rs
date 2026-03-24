@@ -21,4 +21,56 @@ pub enum SecretsCommand {
         scope: String,
         key: String,
     },
+    Audit {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        offline: bool,
+        #[arg(long, default_value_t = false)]
+        strict: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Apply {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        offline: bool,
+        #[arg(long, default_value_t = false)]
+        strict: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Configure {
+        #[command(subcommand)]
+        command: SecretsConfigureCommand,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum SecretsConfigureCommand {
+    OpenaiApiKey {
+        scope: String,
+        key: String,
+        #[arg(long, default_value_t = false)]
+        value_stdin: bool,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        backups: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    BrowserStateKey {
+        scope: String,
+        key: String,
+        #[arg(long, default_value_t = false)]
+        value_stdin: bool,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        backups: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }

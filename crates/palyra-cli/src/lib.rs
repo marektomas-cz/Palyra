@@ -68,7 +68,8 @@ use cli::{
     CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg,
     DaemonCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
     MemoryScopeArg, MemorySourceArg, ModelsCommand, OnboardingCommand, PatchCommand, PolicyCommand,
-    ProtocolCommand, SecretsCommand, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    ProtocolCommand, SecretsCommand, SecurityCommand, SkillsCommand, SkillsPackageCommand,
+    SupportBundleCommand,
 };
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -250,6 +251,7 @@ fn run_cli() -> Result<()> {
         CliCommand::Patch { command } => commands::patch::run_patch(command),
         CliCommand::Skills { command } => commands::skills::run_skills(command),
         CliCommand::Secrets { command } => commands::secrets::run_secrets(command),
+        CliCommand::Security { command } => commands::security::run_security(command),
         CliCommand::Tunnel { ssh, remote_port, local_port, open, identity_file } => {
             commands::tunnel::run_tunnel(ssh, remote_port, local_port, open, identity_file)
         }

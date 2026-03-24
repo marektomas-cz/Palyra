@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
@@ -37,6 +38,19 @@ fn run_cli_with_stdin(workdir: &TempDir, args: &[&str], stdin_payload: &[u8]) ->
     child
         .wait_with_output()
         .with_context(|| format!("failed to wait for palyra {}", args.join(" ")))
+}
+
+fn bootstrap_local_config(workdir: &TempDir) -> Result<String> {
+    let config_path = workdir.path().join("palyra.toml");
+    let config_arg = config_path.to_string_lossy().into_owned();
+    let output =
+        run_cli(workdir, &["setup", "--mode", "local", "--path", config_arg.as_str(), "--force"])?;
+    assert!(
+        output.status.success(),
+        "setup should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(config_arg)
 }
 
 #[test]
@@ -122,6 +136,118 @@ fn secrets_get_missing_key_fails_with_not_found_error() -> Result<()> {
     assert!(
         stderr.contains("secret not found"),
         "missing secret errors should include not found context: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn secrets_configure_openai_api_key_updates_config_and_audit() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = bootstrap_local_config(&workdir)?;
+
+    let configure_output = run_cli_with_stdin(
+        &workdir,
+        &[
+            "secrets",
+            "configure",
+            "openai-api-key",
+            "global",
+            "openai_api_key",
+            "--value-stdin",
+            "--path",
+            config_path.as_str(),
+            "--json",
+        ],
+        b"sk-test-openai-secret",
+    )?;
+    assert!(
+        configure_output.status.success(),
+        "secrets configure openai-api-key should succeed: {}",
+        String::from_utf8_lossy(&configure_output.stderr)
+    );
+    let configure_stdout =
+        String::from_utf8(configure_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        configure_stdout.contains("\"vault_ref\": \"global/openai_api_key\""),
+        "configure output should report the stored vault ref: {configure_stdout}"
+    );
+
+    let config_toml = fs::read_to_string(&config_path).context("failed to read mutated config")?;
+    assert!(
+        config_toml.contains("openai_api_key_vault_ref = \"global/openai_api_key\""),
+        "config should reference the configured vault secret: {config_toml}"
+    );
+    assert!(
+        !config_toml.contains("sk-test-openai-secret"),
+        "raw secret must never be written into config: {config_toml}"
+    );
+
+    let audit_output = run_cli(
+        &workdir,
+        &["secrets", "audit", "--path", config_path.as_str(), "--offline", "--json"],
+    )?;
+    assert!(
+        audit_output.status.success(),
+        "secrets audit should succeed: {}",
+        String::from_utf8_lossy(&audit_output.stderr)
+    );
+    let audit_stdout = String::from_utf8(audit_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        audit_stdout.contains("\"blocking_findings\": 0"),
+        "audit should report zero blocking findings for configured secret refs: {audit_stdout}"
+    );
+    assert!(
+        audit_stdout.contains("\"reference\": \"global/openai_api_key\""),
+        "audit should include the configured secret reference: {audit_stdout}"
+    );
+
+    let apply_output = run_cli(
+        &workdir,
+        &["secrets", "apply", "--path", config_path.as_str(), "--offline", "--json"],
+    )?;
+    assert!(
+        apply_output.status.success(),
+        "secrets apply should succeed: {}",
+        String::from_utf8_lossy(&apply_output.stderr)
+    );
+    let apply_stdout = String::from_utf8(apply_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        apply_stdout.contains("\"apply_mode\": \"daemon_restart_required\""),
+        "apply should surface the daemon restart requirement for model provider secrets: {apply_stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn secrets_configure_browser_state_key_updates_config() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = bootstrap_local_config(&workdir)?;
+
+    let output = run_cli_with_stdin(
+        &workdir,
+        &[
+            "secrets",
+            "configure",
+            "browser-state-key",
+            "global",
+            "browser_state_key",
+            "--value-stdin",
+            "--path",
+            config_path.as_str(),
+            "--json",
+        ],
+        b"0123456789abcdef0123456789abcdef",
+    )?;
+    assert!(
+        output.status.success(),
+        "secrets configure browser-state-key should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config_toml = fs::read_to_string(&config_path).context("failed to read mutated config")?;
+    assert!(
+        config_toml.contains("state_key_vault_ref = \"global/browser_state_key\""),
+        "config should reference the configured browser state key: {config_toml}"
     );
     Ok(())
 }

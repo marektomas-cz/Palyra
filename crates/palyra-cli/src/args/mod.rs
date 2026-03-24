@@ -21,6 +21,7 @@ mod patch;
 mod policy;
 mod protocol;
 mod secrets;
+mod security;
 mod skills;
 mod support_bundle;
 
@@ -46,7 +47,8 @@ pub use pairing::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 pub use patch::PatchCommand;
 pub use policy::PolicyCommand;
 pub use protocol::ProtocolCommand;
-pub use secrets::SecretsCommand;
+pub use secrets::{SecretsCommand, SecretsConfigureCommand};
+pub use security::SecurityCommand;
 pub use skills::{SkillsCommand, SkillsPackageCommand};
 pub use support_bundle::SupportBundleCommand;
 
@@ -302,6 +304,10 @@ pub enum Command {
     Secrets {
         #[command(subcommand)]
         command: SecretsCommand,
+    },
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommand,
     },
     Tunnel {
         #[arg(long)]

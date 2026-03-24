@@ -1,22 +1,85 @@
-use crate::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::{args::SecretsConfigureCommand, *};
+use palyra_control_plane as control_plane;
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SecretAuditPayload {
+    pub(crate) path: String,
+    pub(crate) runtime_profiles_inspected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) runtime_error: Option<String>,
+    pub(crate) references: Vec<SecretReferenceAudit>,
+    pub(crate) findings: Vec<SecretAuditFinding>,
+    pub(crate) summary: SecretAuditSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SecretReferenceAudit {
+    pub(crate) component: String,
+    pub(crate) reference_kind: String,
+    pub(crate) reference: String,
+    pub(crate) scope: String,
+    pub(crate) key: String,
+    pub(crate) status: String,
+    pub(crate) detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SecretAuditFinding {
+    pub(crate) severity: String,
+    pub(crate) code: String,
+    pub(crate) component: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reference: Option<String>,
+    pub(crate) message: String,
+    pub(crate) remediation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SecretAuditSummary {
+    pub(crate) total_references: usize,
+    pub(crate) resolved_references: usize,
+    pub(crate) blocking_findings: usize,
+    pub(crate) warning_findings: usize,
+    pub(crate) info_findings: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct SecretsApplyPayload {
+    audit: SecretAuditSummary,
+    actions: Vec<SecretsApplyAction>,
+}
+
+#[derive(Debug, Serialize)]
+struct SecretsApplyAction {
+    component: String,
+    action: String,
+    apply_mode: String,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SecretsConfigurePayload {
+    component: String,
+    path: String,
+    vault_ref: String,
+    backups: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SecretReferenceCandidate {
+    component: String,
+    reference_kind: String,
+    reference: String,
+}
 
 pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
-    let vault = open_cli_vault().context("failed to initialize vault runtime")?;
     match command {
         SecretsCommand::Set { scope, key, value_stdin } => {
-            if !value_stdin {
-                anyhow::bail!(
-                    "secrets set requires --value-stdin to avoid exposing raw values in process args"
-                );
-            }
+            let vault = open_cli_vault().context("failed to initialize vault runtime")?;
+            let value = read_secret_bytes_from_stdin(value_stdin)?;
             let scope = parse_vault_scope(scope.as_str())?;
-            let mut value = Vec::new();
-            std::io::stdin()
-                .read_to_end(&mut value)
-                .context("failed to read secret value from stdin")?;
-            if value.is_empty() {
-                anyhow::bail!("stdin did not contain any secret bytes");
-            }
             let metadata = vault
                 .put_secret(&scope, key.as_str(), value.as_slice())
                 .with_context(|| format!("failed to store secret key={} scope={scope}", key))?;
@@ -30,6 +93,7 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
             std::io::stdout().flush().context("stdout flush failed")
         }
         SecretsCommand::Get { scope, key, reveal } => {
+            let vault = open_cli_vault().context("failed to initialize vault runtime")?;
             let scope = parse_vault_scope(scope.as_str())?;
             let value = vault
                 .get_secret(&scope, key.as_str())
@@ -52,6 +116,7 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
             std::io::stdout().flush().context("stdout flush failed")
         }
         SecretsCommand::List { scope } => {
+            let vault = open_cli_vault().context("failed to initialize vault runtime")?;
             let scope = parse_vault_scope(scope.as_str())?;
             let listed_entries = vault
                 .list_secrets(&scope)
@@ -87,6 +152,7 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
             std::io::stdout().flush().context("stdout flush failed")
         }
         SecretsCommand::Delete { scope, key } => {
+            let vault = open_cli_vault().context("failed to initialize vault runtime")?;
             let scope = parse_vault_scope(scope.as_str())?;
             let deleted = vault
                 .delete_secret(&scope, key.as_str())
@@ -94,5 +160,585 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
             println!("secrets.delete scope={} key={} deleted={}", scope, key, deleted);
             std::io::stdout().flush().context("stdout flush failed")
         }
+        SecretsCommand::Audit { path, offline, strict, json } => {
+            let payload = build_secrets_audit_payload(path, offline)?;
+            emit_secrets_audit(&payload, output::preferred_json(json))?;
+            if strict && payload.summary.blocking_findings > 0 {
+                anyhow::bail!(
+                    "secrets audit failed with {} blocking findings",
+                    payload.summary.blocking_findings
+                );
+            }
+            Ok(())
+        }
+        SecretsCommand::Apply { path, offline, strict, json } => {
+            let audit = build_secrets_audit_payload(path, offline)?;
+            let payload = build_secrets_apply_payload(&audit);
+            if output::preferred_json(json) {
+                output::print_json_pretty(
+                    &payload,
+                    "failed to encode secrets apply payload as JSON",
+                )?;
+            } else {
+                println!(
+                    "secrets.apply blocking_findings={} actions={}",
+                    payload.audit.blocking_findings,
+                    payload.actions.len()
+                );
+                for action in payload.actions {
+                    println!(
+                        "secrets.apply.action component={} mode={} action=\"{}\" reason=\"{}\"",
+                        action.component,
+                        action.apply_mode,
+                        action.action.replace('"', "'"),
+                        action.reason.replace('"', "'")
+                    );
+                }
+            }
+            std::io::stdout().flush().context("stdout flush failed")?;
+            if strict && audit.summary.blocking_findings > 0 {
+                anyhow::bail!(
+                    "secrets apply blocked by {} unresolved secret findings",
+                    audit.summary.blocking_findings
+                );
+            }
+            Ok(())
+        }
+        SecretsCommand::Configure { command } => run_secrets_configure(command),
     }
+}
+
+pub(crate) fn build_secrets_audit_payload(
+    path: Option<String>,
+    offline: bool,
+) -> Result<SecretAuditPayload> {
+    let vault = open_cli_vault().context("failed to initialize vault runtime")?;
+    let (path, document) = load_config_document_for_audit(path)?;
+    let inline_api_key = get_string_value_at_path(&document, "model_provider.openai_api_key")?;
+    let configured_auth_profile =
+        get_string_value_at_path(&document, "model_provider.auth_profile_id")?.or_else(|| {
+            get_string_value_at_path(&document, "model_provider.auth_profile_ref").ok().flatten()
+        });
+    let runtime_profiles = load_runtime_auth_profiles(offline)?;
+    let mut candidates = Vec::<SecretReferenceCandidate>::new();
+    let mut findings = Vec::<SecretAuditFinding>::new();
+
+    if let Some(reference) =
+        get_string_value_at_path(&document, "model_provider.openai_api_key_vault_ref")?
+    {
+        candidates.push(SecretReferenceCandidate {
+            component: "model_provider".to_owned(),
+            reference_kind: "model_provider_api_key".to_owned(),
+            reference,
+        });
+    }
+    if let Some(reference) =
+        get_string_value_at_path(&document, "tool_call.browser_service.state_key_vault_ref")?
+    {
+        candidates.push(SecretReferenceCandidate {
+            component: "browser_service".to_owned(),
+            reference_kind: "browser_state_key".to_owned(),
+            reference,
+        });
+    }
+
+    if inline_api_key.is_some() {
+        findings.push(SecretAuditFinding {
+            severity: "warning".to_owned(),
+            code: "inline_secret_configured".to_owned(),
+            component: "model_provider".to_owned(),
+            reference: None,
+            message: "model_provider.openai_api_key is set inline instead of using a vault reference or auth profile.".to_owned(),
+            remediation: "Prefer `palyra auth openai api-key` or `palyra secrets configure openai-api-key` so the OpenAI credential stays vault-backed.".to_owned(),
+        });
+    }
+
+    if let Some(profile_id) = configured_auth_profile.as_ref() {
+        if runtime_profiles.runtime_profiles_inspected
+            && !runtime_profiles
+                .profiles
+                .iter()
+                .any(|profile| profile.profile_id.as_str() == profile_id.as_str())
+        {
+            findings.push(SecretAuditFinding {
+                severity: "blocking".to_owned(),
+                code: "missing_auth_profile".to_owned(),
+                component: "model_provider".to_owned(),
+                reference: None,
+                message: format!(
+                    "model_provider.auth_profile_id points to missing runtime profile `{profile_id}`."
+                ),
+                remediation: "Run `palyra auth openai status` to inspect profiles or select a valid default profile with `palyra auth openai use-profile <profile-id>`.".to_owned(),
+            });
+        }
+    }
+
+    if configured_auth_profile.is_some()
+        && get_string_value_at_path(&document, "model_provider.openai_api_key_vault_ref")?.is_some()
+    {
+        findings.push(SecretAuditFinding {
+            severity: "info".to_owned(),
+            code: "legacy_vault_ref_shadowed".to_owned(),
+            component: "model_provider".to_owned(),
+            reference: get_string_value_at_path(&document, "model_provider.openai_api_key_vault_ref")?,
+            message: "model_provider.auth_profile_id takes precedence over model_provider.openai_api_key_vault_ref.".to_owned(),
+            remediation: "Remove the legacy vault reference if it is no longer needed, or unset model_provider.auth_profile_id when you want the direct vault ref to become effective.".to_owned(),
+        });
+    }
+
+    for profile in &runtime_profiles.profiles {
+        match &profile.credential {
+            control_plane::AuthCredentialView::ApiKey { api_key_vault_ref } => {
+                candidates.push(SecretReferenceCandidate {
+                    component: format!("auth_profile:{}", profile.profile_id),
+                    reference_kind: "auth_profile_api_key".to_owned(),
+                    reference: api_key_vault_ref.clone(),
+                });
+            }
+            control_plane::AuthCredentialView::Oauth {
+                access_token_vault_ref,
+                refresh_token_vault_ref,
+                client_secret_vault_ref,
+                ..
+            } => {
+                candidates.push(SecretReferenceCandidate {
+                    component: format!("auth_profile:{}", profile.profile_id),
+                    reference_kind: "auth_profile_oauth_access_token".to_owned(),
+                    reference: access_token_vault_ref.clone(),
+                });
+                candidates.push(SecretReferenceCandidate {
+                    component: format!("auth_profile:{}", profile.profile_id),
+                    reference_kind: "auth_profile_oauth_refresh_token".to_owned(),
+                    reference: refresh_token_vault_ref.clone(),
+                });
+                if let Some(reference) = client_secret_vault_ref
+                    .as_ref()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                {
+                    candidates.push(SecretReferenceCandidate {
+                        component: format!("auth_profile:{}", profile.profile_id),
+                        reference_kind: "auth_profile_oauth_client_secret".to_owned(),
+                        reference: reference.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut references = Vec::<SecretReferenceAudit>::new();
+    let mut used_refs_by_scope = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for candidate in candidates {
+        match VaultRef::parse(candidate.reference.as_str()) {
+            Ok(parsed) => {
+                let scope = parsed.scope.to_string();
+                let key = parsed.key.clone();
+                used_refs_by_scope.entry(scope.clone()).or_default().insert(key.clone());
+                let status = match vault.get_secret(&parsed.scope, key.as_str()) {
+                    Ok(value) if !value.is_empty() => {
+                        references.push(SecretReferenceAudit {
+                            component: candidate.component.clone(),
+                            reference_kind: candidate.reference_kind.clone(),
+                            reference: candidate.reference.clone(),
+                            scope,
+                            key,
+                            status: "resolved".to_owned(),
+                            detail: "secret value is readable".to_owned(),
+                        });
+                        continue;
+                    }
+                    Ok(_) => ("missing", "secret resolved to an empty value".to_owned()),
+                    Err(error) => ("missing", sanitize_secret_error(error.to_string().as_str())),
+                };
+                references.push(SecretReferenceAudit {
+                    component: candidate.component.clone(),
+                    reference_kind: candidate.reference_kind.clone(),
+                    reference: candidate.reference.clone(),
+                    scope: scope.clone(),
+                    key: key.clone(),
+                    status: status.0.to_owned(),
+                    detail: status.1.clone(),
+                });
+                findings.push(SecretAuditFinding {
+                    severity: "blocking".to_owned(),
+                    code: "unresolved_secret_ref".to_owned(),
+                    component: candidate.component,
+                    reference: Some(candidate.reference),
+                    message: format!("vault reference {scope}/{key} is missing or unreadable."),
+                    remediation: "Store the secret in the expected scope/key, or update the referencing config/auth profile to the correct vault ref.".to_owned(),
+                });
+            }
+            Err(error) => {
+                references.push(SecretReferenceAudit {
+                    component: candidate.component.clone(),
+                    reference_kind: candidate.reference_kind.clone(),
+                    reference: candidate.reference.clone(),
+                    scope: "invalid".to_owned(),
+                    key: String::new(),
+                    status: "invalid".to_owned(),
+                    detail: sanitize_secret_error(error.to_string().as_str()),
+                });
+                findings.push(SecretAuditFinding {
+                    severity: "blocking".to_owned(),
+                    code: "invalid_secret_ref".to_owned(),
+                    component: candidate.component,
+                    reference: Some(candidate.reference),
+                    message: "vault reference format is invalid.".to_owned(),
+                    remediation:
+                        "Use canonical `<scope>/<key>` vault refs such as `global/openai_api_key`."
+                            .to_owned(),
+                });
+            }
+        }
+    }
+
+    for (scope_raw, used_keys) in used_refs_by_scope {
+        let scope = match parse_vault_scope(scope_raw.as_str()) {
+            Ok(scope) => scope,
+            Err(_) => continue,
+        };
+        let entries = match vault.list_secrets(&scope) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            if used_keys.contains(entry.key.as_str()) {
+                continue;
+            }
+            findings.push(SecretAuditFinding {
+                severity: "info".to_owned(),
+                code: "potentially_unused_secret".to_owned(),
+                component: format!("vault_scope:{scope}"),
+                reference: Some(format!("{scope}/{}", entry.key)),
+                message: format!(
+                    "secret `{}/{}` is stored in a referenced scope but is not used by the current config or runtime auth profiles.",
+                    scope, entry.key
+                ),
+                remediation: "Delete the secret if it is obsolete, or keep it if another un-audited subsystem still depends on it.".to_owned(),
+            });
+        }
+    }
+
+    if let Some(error) = runtime_profiles.runtime_error.as_ref() {
+        findings.push(SecretAuditFinding {
+            severity: "warning".to_owned(),
+            code: "runtime_profiles_unavailable".to_owned(),
+            component: "auth_profiles".to_owned(),
+            reference: None,
+            message: format!("runtime auth profile inspection was skipped: {error}"),
+            remediation: "Ensure the daemon admin surface is reachable, or rerun with `--offline` when you only want a local vault/config audit.".to_owned(),
+        });
+    }
+
+    let summary = SecretAuditSummary {
+        total_references: references.len(),
+        resolved_references: references
+            .iter()
+            .filter(|reference| reference.status == "resolved")
+            .count(),
+        blocking_findings: findings.iter().filter(|finding| finding.severity == "blocking").count(),
+        warning_findings: findings.iter().filter(|finding| finding.severity == "warning").count(),
+        info_findings: findings.iter().filter(|finding| finding.severity == "info").count(),
+    };
+
+    Ok(SecretAuditPayload {
+        path,
+        runtime_profiles_inspected: runtime_profiles.runtime_profiles_inspected,
+        runtime_error: runtime_profiles.runtime_error,
+        references,
+        findings,
+        summary,
+    })
+}
+
+fn run_secrets_configure(command: SecretsConfigureCommand) -> Result<()> {
+    match command {
+        SecretsConfigureCommand::OpenaiApiKey { scope, key, value_stdin, path, backups, json } => {
+            let payload = configure_secret_backed_setting(
+                "openai_api_key",
+                scope,
+                key,
+                value_stdin,
+                path,
+                backups,
+                |document, vault_ref| {
+                    set_value_at_path(
+                        document,
+                        "model_provider.kind",
+                        toml::Value::String("openai_compatible".to_owned()),
+                    )?;
+                    if get_value_at_path(document, "model_provider.openai_base_url")?
+                        .and_then(toml::Value::as_str)
+                        .is_none()
+                    {
+                        set_value_at_path(
+                            document,
+                            "model_provider.openai_base_url",
+                            toml::Value::String("https://api.openai.com/v1".to_owned()),
+                        )?;
+                    }
+                    unset_value_at_path(document, "model_provider.openai_api_key")?;
+                    unset_value_at_path(document, "model_provider.auth_profile_id")?;
+                    unset_value_at_path(document, "model_provider.auth_profile_ref")?;
+                    unset_value_at_path(document, "model_provider.auth_provider_kind")?;
+                    set_value_at_path(
+                        document,
+                        "model_provider.openai_api_key_vault_ref",
+                        toml::Value::String(vault_ref.to_owned()),
+                    )?;
+                    Ok(())
+                },
+            )?;
+            emit_secret_configure_payload(payload, output::preferred_json(json))
+        }
+        SecretsConfigureCommand::BrowserStateKey {
+            scope,
+            key,
+            value_stdin,
+            path,
+            backups,
+            json,
+        } => {
+            let payload = configure_secret_backed_setting(
+                "browser_state_key",
+                scope,
+                key,
+                value_stdin,
+                path,
+                backups,
+                |document, vault_ref| {
+                    set_value_at_path(
+                        document,
+                        "tool_call.browser_service.state_key_vault_ref",
+                        toml::Value::String(vault_ref.to_owned()),
+                    )?;
+                    Ok(())
+                },
+            )?;
+            emit_secret_configure_payload(payload, output::preferred_json(json))
+        }
+    }
+}
+
+fn configure_secret_backed_setting<F>(
+    component: &'static str,
+    scope_raw: String,
+    key: String,
+    value_stdin: bool,
+    path: Option<String>,
+    backups: usize,
+    mutate_document: F,
+) -> Result<SecretsConfigurePayload>
+where
+    F: FnOnce(&mut toml::Value, &str) -> Result<()>,
+{
+    let vault = open_cli_vault().context("failed to initialize vault runtime")?;
+    let value = read_secret_bytes_from_stdin(value_stdin)?;
+    let scope = parse_vault_scope(scope_raw.as_str())?;
+    vault
+        .put_secret(&scope, key.as_str(), value.as_slice())
+        .with_context(|| format!("failed to store secret key={} scope={scope}", key))?;
+
+    let path = resolve_config_path(path, false)?;
+    let path_ref = Path::new(&path);
+    let (mut document, _) = load_document_for_mutation(path_ref)
+        .with_context(|| format!("failed to parse {}", path_ref.display()))?;
+    let vault_ref = format!("{scope}/{key}");
+    mutate_document(&mut document, vault_ref.as_str())?;
+    validate_daemon_compatible_document(&document).with_context(|| {
+        format!("mutated config {} does not match daemon schema", path_ref.display())
+    })?;
+    write_document_with_backups(path_ref, &document, backups)
+        .with_context(|| format!("failed to persist config {}", path_ref.display()))?;
+
+    Ok(SecretsConfigurePayload { component: component.to_owned(), path, vault_ref, backups })
+}
+
+fn emit_secret_configure_payload(
+    payload: SecretsConfigurePayload,
+    json_output: bool,
+) -> Result<()> {
+    if json_output {
+        output::print_json_pretty(&payload, "failed to encode secrets configure payload as JSON")?;
+    } else {
+        println!(
+            "secrets.configure component={} path={} vault_ref={} backups={}",
+            payload.component, payload.path, payload.vault_ref, payload.backups
+        );
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_secrets_audit(payload: &SecretAuditPayload, json_output: bool) -> Result<()> {
+    if json_output {
+        output::print_json_pretty(payload, "failed to encode secrets audit payload as JSON")?;
+    } else {
+        println!(
+            "secrets.audit path={} references={} resolved={} blocking={} warnings={} info={} runtime_profiles_inspected={}",
+            payload.path,
+            payload.summary.total_references,
+            payload.summary.resolved_references,
+            payload.summary.blocking_findings,
+            payload.summary.warning_findings,
+            payload.summary.info_findings,
+            payload.runtime_profiles_inspected
+        );
+        if let Some(error) = payload.runtime_error.as_deref() {
+            println!("secrets.audit.runtime_error=\"{}\"", error.replace('"', "'"));
+        }
+        for reference in &payload.references {
+            println!(
+                "secrets.audit.reference component={} kind={} ref={} status={} detail=\"{}\"",
+                reference.component,
+                reference.reference_kind,
+                reference.reference,
+                reference.status,
+                reference.detail.replace('"', "'")
+            );
+        }
+        for finding in &payload.findings {
+            println!(
+                "secrets.audit.finding severity={} code={} component={} ref={} message=\"{}\" remediation=\"{}\"",
+                finding.severity,
+                finding.code,
+                finding.component,
+                finding.reference.as_deref().unwrap_or("none"),
+                finding.message.replace('"', "'"),
+                finding.remediation.replace('"', "'")
+            );
+        }
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn build_secrets_apply_payload(audit: &SecretAuditPayload) -> SecretsApplyPayload {
+    let mut seen_actions = BTreeSet::<(String, String)>::new();
+    let mut actions = Vec::<SecretsApplyAction>::new();
+    for reference in &audit.references {
+        let (apply_mode, action, reason) = match reference.reference_kind.as_str() {
+            "model_provider_api_key" => (
+                "daemon_restart_required",
+                "restart palyrad so the model provider reloads the updated vault reference",
+                "model-provider API key vault refs are consumed through runtime config resolution",
+            ),
+            "browser_state_key" => (
+                "browserd_restart_required",
+                "restart palyra-browserd so encrypted browser state picks up the updated state key",
+                "browser state encryption keys are applied on browser service startup",
+            ),
+            kind if kind.starts_with("auth_profile_oauth_") => (
+                "live_refresh_supported",
+                "run `palyra auth openai refresh <profile-id>` or `palyra auth openai status` to validate the rotated credential",
+                "OAuth-backed auth profiles can be validated without rewriting daemon config",
+            ),
+            kind if kind.starts_with("auth_profile_") => (
+                "live_reference",
+                "run `palyra auth openai status` to confirm the runtime can still resolve the auth profile secret refs",
+                "auth profile secret refs are read through the auth runtime",
+            ),
+            _ => continue,
+        };
+        let entry = (reference.component.clone(), apply_mode.to_owned());
+        if !seen_actions.insert(entry.clone()) {
+            continue;
+        }
+        actions.push(SecretsApplyAction {
+            component: entry.0,
+            action: action.to_owned(),
+            apply_mode: entry.1,
+            reason: reason.to_owned(),
+        });
+    }
+    SecretsApplyPayload { audit: audit.summary.clone(), actions }
+}
+
+fn read_secret_bytes_from_stdin(value_stdin: bool) -> Result<Vec<u8>> {
+    if !value_stdin {
+        anyhow::bail!(
+            "command requires --value-stdin to avoid exposing raw values in process args"
+        );
+    }
+    let mut value = Vec::new();
+    std::io::stdin().read_to_end(&mut value).context("failed to read secret value from stdin")?;
+    if value.is_empty() {
+        anyhow::bail!("stdin did not contain any secret bytes");
+    }
+    Ok(value)
+}
+
+fn load_config_document_for_audit(path: Option<String>) -> Result<(String, toml::Value)> {
+    let resolved = match path {
+        Some(path) => resolve_config_path(Some(path), false)?,
+        None => match find_default_config_path() {
+            Some(path) => path,
+            None => {
+                let (document, _) = parse_document_with_migration("")
+                    .context("failed to initialize empty config snapshot for secrets audit")?;
+                return Ok(("defaults".to_owned(), document));
+            }
+        },
+    };
+    let (document, _) = load_document_from_existing_path(Path::new(&resolved))
+        .with_context(|| format!("failed to parse {resolved}"))?;
+    Ok((resolved, document))
+}
+
+fn get_string_value_at_path(document: &toml::Value, key: &str) -> Result<Option<String>> {
+    Ok(get_value_at_path(document, key)
+        .with_context(|| format!("invalid config key path: {key}"))?
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+struct RuntimeAuthProfiles {
+    runtime_profiles_inspected: bool,
+    runtime_error: Option<String>,
+    profiles: Vec<control_plane::AuthProfileView>,
+}
+
+fn load_runtime_auth_profiles(offline: bool) -> Result<RuntimeAuthProfiles> {
+    if offline {
+        return Ok(RuntimeAuthProfiles {
+            runtime_profiles_inspected: false,
+            runtime_error: None,
+            profiles: Vec::new(),
+        });
+    }
+
+    let runtime = build_runtime()?;
+    let result = runtime.block_on(async {
+        let context =
+            match client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                .await
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    return RuntimeAuthProfiles {
+                        runtime_profiles_inspected: false,
+                        runtime_error: Some(sanitize_secret_error(error.to_string().as_str())),
+                        profiles: Vec::new(),
+                    };
+                }
+            };
+        match context.client.list_auth_profiles("limit=200").await {
+            Ok(envelope) => RuntimeAuthProfiles {
+                runtime_profiles_inspected: true,
+                runtime_error: None,
+                profiles: envelope.profiles,
+            },
+            Err(error) => RuntimeAuthProfiles {
+                runtime_profiles_inspected: false,
+                runtime_error: Some(sanitize_secret_error(error.to_string().as_str())),
+                profiles: Vec::new(),
+            },
+        }
+    });
+    Ok(result)
+}
+
+fn sanitize_secret_error(raw: &str) -> String {
+    redact_auth_error(redact_url_segments_in_text(raw).as_str())
 }

@@ -19,6 +19,7 @@ pub mod patch;
 pub mod policy;
 pub mod protocol;
 pub mod secrets;
+pub mod security;
 pub mod skills;
 pub mod status;
 pub mod support_bundle;

@@ -7,8 +7,9 @@ use super::{
     Cli, Command, CompletionShell, ConfigCommand, CronCommand, CronConcurrencyPolicyArg,
     CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, InitModeArg, InitTlsScaffoldArg,
     JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
-    OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand,
-    SkillsPackageCommand, SupportBundleCommand,
+    OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand, SecretsCommand,
+    SecretsConfigureCommand, SecurityCommand, SkillsCommand, SkillsPackageCommand,
+    SupportBundleCommand,
 };
 #[cfg(not(windows))]
 use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -2275,6 +2276,147 @@ fn parse_secrets_delete_scope_key() {
             command: SecretsCommand::Delete {
                 scope: "skill:slack".to_owned(),
                 key: "bot_token".to_owned(),
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_secrets_audit_offline_strict_json() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "secrets",
+        "audit",
+        "--path",
+        "config/palyra.toml",
+        "--offline",
+        "--strict",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Secrets {
+            command: SecretsCommand::Audit {
+                path: Some("config/palyra.toml".to_owned()),
+                offline: true,
+                strict: true,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_secrets_apply_offline_strict_json() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "secrets",
+        "apply",
+        "--path",
+        "config/palyra.toml",
+        "--offline",
+        "--strict",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Secrets {
+            command: SecretsCommand::Apply {
+                path: Some("config/palyra.toml".to_owned()),
+                offline: true,
+                strict: true,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_secrets_configure_openai_api_key() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "secrets",
+        "configure",
+        "openai-api-key",
+        "global",
+        "openai_api_key",
+        "--value-stdin",
+        "--path",
+        "config/palyra.toml",
+        "--backups",
+        "3",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Secrets {
+            command: SecretsCommand::Configure {
+                command: SecretsConfigureCommand::OpenaiApiKey {
+                    scope: "global".to_owned(),
+                    key: "openai_api_key".to_owned(),
+                    value_stdin: true,
+                    path: Some("config/palyra.toml".to_owned()),
+                    backups: 3,
+                    json: true,
+                }
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_secrets_configure_browser_state_key() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "secrets",
+        "configure",
+        "browser-state-key",
+        "global",
+        "browser_state_key",
+        "--value-stdin",
+        "--path",
+        "config/palyra.toml",
+        "--backups",
+        "2",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Secrets {
+            command: SecretsCommand::Configure {
+                command: SecretsConfigureCommand::BrowserStateKey {
+                    scope: "global".to_owned(),
+                    key: "browser_state_key".to_owned(),
+                    value_stdin: true,
+                    path: Some("config/palyra.toml".to_owned()),
+                    backups: 2,
+                    json: true,
+                }
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_security_audit_offline_strict_json() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "security",
+        "audit",
+        "--path",
+        "config/palyra.toml",
+        "--offline",
+        "--strict",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Security {
+            command: SecurityCommand::Audit {
+                path: Some("config/palyra.toml".to_owned()),
+                offline: true,
+                strict: true,
+                json: true,
             }
         }
     );
