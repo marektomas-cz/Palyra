@@ -2482,6 +2482,7 @@ dependencies = [
  "palyra-auth",
  "palyra-common",
  "palyra-connector-discord",
+ "palyra-control-plane",
  "palyra-identity",
  "palyra-policy",
  "palyra-skills",

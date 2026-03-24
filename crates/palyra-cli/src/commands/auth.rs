@@ -1,17 +1,26 @@
 use crate::*;
+use palyra_control_plane as control_plane;
 
 pub(crate) fn run_auth(command: AuthCommand) -> Result<()> {
-    let root_context = app::current_root_context()
-        .ok_or_else(|| anyhow!("CLI root context is unavailable for auth command"))?;
-    let connection = root_context.resolve_grpc_connection(
-        app::ConnectionOverrides::default(),
-        app::ConnectionDefaults::ADMIN,
-    )?;
-    let runtime = build_runtime()?;
-    runtime.block_on(run_auth_async(command, connection))
+    match command {
+        AuthCommand::Profiles { .. } => {
+            let root_context = app::current_root_context()
+                .ok_or_else(|| anyhow!("CLI root context is unavailable for auth command"))?;
+            let connection = root_context.resolve_grpc_connection(
+                app::ConnectionOverrides::default(),
+                app::ConnectionDefaults::ADMIN,
+            )?;
+            let runtime = build_runtime()?;
+            runtime.block_on(run_auth_profiles_async(command, connection))
+        }
+        AuthCommand::Openai { command } => {
+            let runtime = build_runtime()?;
+            runtime.block_on(run_auth_openai_async(command))
+        }
+    }
 }
 
-pub(crate) async fn run_auth_async(
+pub(crate) async fn run_auth_profiles_async(
     command: AuthCommand,
     connection: AgentConnection,
 ) -> Result<()> {
@@ -22,7 +31,9 @@ pub(crate) async fn run_auth_async(
                 format!("failed to connect auth gRPC endpoint {}", connection.grpc_url)
             })?;
 
-    let AuthCommand::Profiles { command } = command;
+    let AuthCommand::Profiles { command } = command else {
+        anyhow::bail!("auth profiles command dispatch received an incompatible auth command");
+    };
     match command {
         AuthProfilesCommand::List {
             after,
@@ -265,4 +276,600 @@ pub(crate) async fn run_auth_async(
     }
 
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+struct OpenAiAuthHealthSummary {
+    #[serde(default)]
+    total: u64,
+    #[serde(default)]
+    ok: u64,
+    #[serde(default)]
+    expiring: u64,
+    #[serde(default)]
+    expired: u64,
+    #[serde(default)]
+    missing: u64,
+    #[serde(default)]
+    static_count: u64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAiRefreshMetricsValue {
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    attempts: u64,
+    #[serde(default)]
+    successes: u64,
+    #[serde(default)]
+    failures: u64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OpenAiRefreshMetricsEnvelope {
+    #[serde(default)]
+    attempts: u64,
+    #[serde(default)]
+    successes: u64,
+    #[serde(default)]
+    failures: u64,
+    #[serde(default)]
+    by_provider: Vec<OpenAiRefreshMetricsValue>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct OpenAiAuthHealthProfile {
+    #[serde(default)]
+    profile_id: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    expires_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiAuthStatusPayload {
+    provider: String,
+    provider_state: String,
+    note: Option<String>,
+    default_profile_id: Option<String>,
+    summary: OpenAiAuthHealthSummary,
+    refresh: OpenAiRefreshSnapshot,
+    profiles: Vec<OpenAiAuthProfilePayload>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiRefreshSnapshot {
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiAuthProfilePayload {
+    profile_id: String,
+    profile_name: String,
+    scope: String,
+    credential_type: &'static str,
+    health_state: String,
+    health_reason: String,
+    expires_at_unix_ms: Option<i64>,
+    is_default: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiActionPayload {
+    action: String,
+    state: String,
+    message: String,
+    profile_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiOAuthLaunchPayload {
+    attempt_id: String,
+    authorization_url: String,
+    expires_at_unix_ms: i64,
+    profile_id: Option<String>,
+    opened: bool,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiOAuthStatePayload {
+    attempt_id: String,
+    state: String,
+    message: String,
+    profile_id: Option<String>,
+    completed_at_unix_ms: Option<i64>,
+    expires_at_unix_ms: Option<i64>,
+}
+
+async fn run_auth_openai_async(command: AuthOpenAiCommand) -> Result<()> {
+    match command {
+        AuthOpenAiCommand::Status { json } => {
+            let context =
+                client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                    .await?;
+            let provider_state = context
+                .client
+                .get_openai_provider_state()
+                .await
+                .context("failed to fetch OpenAI provider state")?;
+            let auth_health = context
+                .client
+                .get_auth_health(true, None)
+                .await
+                .context("failed to fetch OpenAI auth health")?;
+            let profiles = context
+                .client
+                .list_auth_profiles("provider_kind=openai&limit=100")
+                .await
+                .context("failed to list OpenAI auth profiles")?;
+            let payload = build_openai_status_payload(provider_state, auth_health, profiles)?;
+            emit_openai_status(payload, output::preferred_json(json))
+        }
+        AuthOpenAiCommand::ApiKey {
+            profile_id,
+            profile_name,
+            scope,
+            agent_id,
+            api_key_env,
+            api_key_stdin,
+            api_key_prompt,
+            set_default,
+            json,
+        } => {
+            let api_key =
+                load_secret_input(api_key_env, api_key_stdin, api_key_prompt, "OpenAI API key: ")?;
+            let context =
+                client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                    .await?;
+            let response = context
+                .client
+                .connect_openai_api_key(&control_plane::OpenAiApiKeyUpsertRequest {
+                    profile_id,
+                    profile_name,
+                    scope: build_control_plane_scope(scope, agent_id)?,
+                    api_key,
+                    set_default,
+                })
+                .await
+                .context("failed to configure OpenAI API key profile")?;
+            emit_openai_action(
+                OpenAiActionPayload {
+                    action: response.action,
+                    state: response.state,
+                    message: response.message,
+                    profile_id: response.profile_id,
+                },
+                output::preferred_json(json),
+            )
+        }
+        AuthOpenAiCommand::OauthStart {
+            profile_id,
+            profile_name,
+            scope,
+            agent_id,
+            client_id,
+            client_secret_env,
+            client_secret_stdin,
+            client_secret_prompt,
+            scope_value,
+            set_default,
+            open,
+            json,
+        } => {
+            let client_secret =
+                if client_secret_env.is_some() || client_secret_stdin || client_secret_prompt {
+                    Some(load_secret_input(
+                        client_secret_env,
+                        client_secret_stdin,
+                        client_secret_prompt,
+                        "OpenAI OAuth client secret: ",
+                    )?)
+                } else {
+                    None
+                };
+            let context =
+                client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                    .await?;
+            let response = context
+                .client
+                .start_openai_oauth_bootstrap(&control_plane::OpenAiOAuthBootstrapRequest {
+                    profile_id,
+                    profile_name,
+                    scope: Some(build_control_plane_scope(scope, agent_id)?),
+                    client_id: Some(client_id),
+                    client_secret,
+                    scopes: scope_value,
+                    set_default,
+                })
+                .await
+                .context("failed to start OpenAI OAuth bootstrap")?;
+            let mut payload = OpenAiOAuthLaunchPayload {
+                attempt_id: response.attempt_id,
+                authorization_url: response.authorization_url,
+                expires_at_unix_ms: response.expires_at_unix_ms,
+                profile_id: response.profile_id,
+                opened: false,
+                message: response.message,
+            };
+            if open {
+                open_url_in_default_browser(payload.authorization_url.as_str()).with_context(
+                    || {
+                        format!(
+                            "failed to open OpenAI OAuth authorization URL {}",
+                            payload.authorization_url
+                        )
+                    },
+                )?;
+                payload.opened = true;
+            }
+            emit_openai_oauth_launch(payload, output::preferred_json(json))
+        }
+        AuthOpenAiCommand::OauthState { attempt_id, json } => {
+            let context =
+                client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                    .await?;
+            let response = context
+                .client
+                .get_openai_oauth_callback_state(attempt_id.as_str())
+                .await
+                .context("failed to fetch OpenAI OAuth callback state")?;
+            emit_openai_oauth_state(
+                OpenAiOAuthStatePayload {
+                    attempt_id: response.attempt_id,
+                    state: response.state,
+                    message: response.message,
+                    profile_id: response.profile_id,
+                    completed_at_unix_ms: response.completed_at_unix_ms,
+                    expires_at_unix_ms: response.expires_at_unix_ms,
+                },
+                output::preferred_json(json),
+            )
+        }
+        AuthOpenAiCommand::Refresh { profile_id, json } => {
+            let context =
+                client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                    .await?;
+            let response = context
+                .client
+                .run_openai_provider_action(
+                    "refresh",
+                    &control_plane::ProviderAuthActionRequest { profile_id: Some(profile_id) },
+                )
+                .await
+                .context("failed to refresh OpenAI auth profile")?;
+            emit_openai_action(
+                OpenAiActionPayload {
+                    action: response.action,
+                    state: response.state,
+                    message: response.message,
+                    profile_id: response.profile_id,
+                },
+                output::preferred_json(json),
+            )
+        }
+        AuthOpenAiCommand::Reconnect { profile_id, json } => {
+            let context =
+                client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                    .await?;
+            let response = context
+                .client
+                .run_openai_provider_action(
+                    "reconnect",
+                    &control_plane::ProviderAuthActionRequest { profile_id: Some(profile_id) },
+                )
+                .await
+                .context("failed to reconnect OpenAI auth profile")?;
+            emit_openai_action(
+                OpenAiActionPayload {
+                    action: response.action,
+                    state: response.state,
+                    message: response.message,
+                    profile_id: response.profile_id,
+                },
+                output::preferred_json(json),
+            )
+        }
+        AuthOpenAiCommand::Revoke { profile_id, json } => {
+            let context =
+                client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                    .await?;
+            let response = context
+                .client
+                .run_openai_provider_action(
+                    "revoke",
+                    &control_plane::ProviderAuthActionRequest { profile_id: Some(profile_id) },
+                )
+                .await
+                .context("failed to revoke OpenAI auth profile")?;
+            emit_openai_action(
+                OpenAiActionPayload {
+                    action: response.action,
+                    state: response.state,
+                    message: response.message,
+                    profile_id: response.profile_id,
+                },
+                output::preferred_json(json),
+            )
+        }
+        AuthOpenAiCommand::UseProfile { profile_id, json } => {
+            let context =
+                client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                    .await?;
+            let response = context
+                .client
+                .run_openai_provider_action(
+                    "default-profile",
+                    &control_plane::ProviderAuthActionRequest { profile_id: Some(profile_id) },
+                )
+                .await
+                .context("failed to select default OpenAI auth profile")?;
+            emit_openai_action(
+                OpenAiActionPayload {
+                    action: response.action,
+                    state: response.state,
+                    message: response.message,
+                    profile_id: response.profile_id,
+                },
+                output::preferred_json(json),
+            )
+        }
+    }
+}
+
+fn build_openai_status_payload(
+    provider_state: control_plane::ProviderAuthStateEnvelope,
+    auth_health: control_plane::AuthHealthEnvelope,
+    profiles: control_plane::AuthProfileListEnvelope,
+) -> Result<OpenAiAuthStatusPayload> {
+    let summary = serde_json::from_value::<OpenAiAuthHealthSummary>(auth_health.summary)
+        .context("failed to decode OpenAI auth health summary")?;
+    let refresh_metrics =
+        serde_json::from_value::<OpenAiRefreshMetricsEnvelope>(auth_health.refresh_metrics)
+            .context("failed to decode OpenAI refresh metrics")?;
+    let refresh = refresh_metrics
+        .by_provider
+        .into_iter()
+        .find(|entry| entry.provider.eq_ignore_ascii_case("openai"))
+        .map(|entry| OpenAiRefreshSnapshot {
+            attempts: entry.attempts,
+            successes: entry.successes,
+            failures: entry.failures,
+        })
+        .unwrap_or(OpenAiRefreshSnapshot {
+            attempts: refresh_metrics.attempts,
+            successes: refresh_metrics.successes,
+            failures: refresh_metrics.failures,
+        });
+    let health_profiles = auth_health
+        .profiles
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<OpenAiAuthHealthProfile>(value).ok())
+        .filter(|profile| profile.provider.eq_ignore_ascii_case("openai"))
+        .map(|profile| (profile.profile_id.clone(), profile))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let profiles = profiles
+        .profiles
+        .into_iter()
+        .map(|profile| {
+            let health = health_profiles.get(profile.profile_id.as_str());
+            OpenAiAuthProfilePayload {
+                profile_id: profile.profile_id.clone(),
+                profile_name: profile.profile_name,
+                scope: format_control_plane_scope(&profile.scope),
+                credential_type: match profile.credential {
+                    control_plane::AuthCredentialView::ApiKey { .. } => "api_key",
+                    control_plane::AuthCredentialView::Oauth { .. } => "oauth",
+                },
+                health_state: health
+                    .map(|value| normalize_openai_health_state(value.state.as_str()))
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                health_reason: health
+                    .map(|value| sanitize_auth_message(value.reason.as_str()))
+                    .unwrap_or_else(|| "No health report available.".to_owned()),
+                expires_at_unix_ms: health.and_then(|value| value.expires_at_unix_ms),
+                is_default: provider_state
+                    .default_profile_id
+                    .as_deref()
+                    .is_some_and(|value| value == profile.profile_id),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(OpenAiAuthStatusPayload {
+        provider: provider_state.provider,
+        provider_state: provider_state.state,
+        note: provider_state.note.map(|value| sanitize_auth_message(value.as_str())),
+        default_profile_id: provider_state.default_profile_id,
+        summary,
+        refresh,
+        profiles,
+    })
+}
+
+fn emit_openai_status(payload: OpenAiAuthStatusPayload, json_output: bool) -> Result<()> {
+    if json_output {
+        output::print_json_pretty(&payload, "failed to encode OpenAI auth status as JSON")?;
+    } else {
+        println!(
+            "auth.openai.status provider={} state={} default_profile_id={} note={}",
+            payload.provider,
+            payload.provider_state,
+            payload.default_profile_id.as_deref().unwrap_or("none"),
+            payload.note.as_deref().unwrap_or("none")
+        );
+        println!(
+            "auth.openai.summary total={} ok={} expiring={} expired={} missing={} static={} refresh_attempts={} refresh_successes={} refresh_failures={}",
+            payload.summary.total,
+            payload.summary.ok,
+            payload.summary.expiring,
+            payload.summary.expired,
+            payload.summary.missing,
+            payload.summary.static_count,
+            payload.refresh.attempts,
+            payload.refresh.successes,
+            payload.refresh.failures
+        );
+        for profile in payload.profiles {
+            println!(
+                "auth.openai.profile id={} name={} scope={} credential={} health={} default={} expires_at_unix_ms={} reason=\"{}\"",
+                profile.profile_id,
+                profile.profile_name,
+                profile.scope,
+                profile.credential_type,
+                profile.health_state,
+                profile.is_default,
+                profile
+                    .expires_at_unix_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_owned()),
+                profile.health_reason.replace('"', "'")
+            );
+        }
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_openai_action(payload: OpenAiActionPayload, json_output: bool) -> Result<()> {
+    if json_output {
+        output::print_json_pretty(&payload, "failed to encode OpenAI action as JSON")?;
+    } else {
+        println!(
+            "auth.openai.action action={} state={} profile_id={} message=\"{}\"",
+            payload.action,
+            payload.state,
+            payload.profile_id.as_deref().unwrap_or("none"),
+            payload.message.replace('"', "'")
+        );
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_openai_oauth_launch(payload: OpenAiOAuthLaunchPayload, json_output: bool) -> Result<()> {
+    if json_output {
+        output::print_json_pretty(&payload, "failed to encode OpenAI OAuth launch as JSON")?;
+    } else {
+        println!(
+            "auth.openai.oauth.start attempt_id={} profile_id={} expires_at_unix_ms={} authorization_url={} opened={}",
+            payload.attempt_id,
+            payload.profile_id.as_deref().unwrap_or("none"),
+            payload.expires_at_unix_ms,
+            payload.authorization_url,
+            payload.opened
+        );
+        println!("auth.openai.oauth.message=\"{}\"", payload.message.replace('"', "'"));
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_openai_oauth_state(payload: OpenAiOAuthStatePayload, json_output: bool) -> Result<()> {
+    if json_output {
+        output::print_json_pretty(
+            &payload,
+            "failed to encode OpenAI OAuth callback state as JSON",
+        )?;
+    } else {
+        println!(
+            "auth.openai.oauth.state attempt_id={} state={} profile_id={} completed_at_unix_ms={} expires_at_unix_ms={} message=\"{}\"",
+            payload.attempt_id,
+            payload.state,
+            payload.profile_id.as_deref().unwrap_or("none"),
+            payload
+                .completed_at_unix_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+            payload
+                .expires_at_unix_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+            payload.message.replace('"', "'")
+        );
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn build_control_plane_scope(
+    scope: AuthScopeArg,
+    agent_id: Option<String>,
+) -> Result<control_plane::AuthProfileScope> {
+    match scope {
+        AuthScopeArg::Global => {
+            Ok(control_plane::AuthProfileScope { kind: "global".to_owned(), agent_id: None })
+        }
+        AuthScopeArg::Agent => Ok(control_plane::AuthProfileScope {
+            kind: "agent".to_owned(),
+            agent_id: Some(agent_id.context("--agent-id is required when --scope=agent")?),
+        }),
+    }
+}
+
+fn format_control_plane_scope(scope: &control_plane::AuthProfileScope) -> String {
+    match scope.kind.trim().to_ascii_lowercase().as_str() {
+        "agent" => scope
+            .agent_id
+            .as_deref()
+            .map(|value| format!("agent:{value}"))
+            .unwrap_or_else(|| "agent".to_owned()),
+        "global" => "global".to_owned(),
+        _ => scope.kind.clone(),
+    }
+}
+
+fn normalize_openai_health_state(raw: &str) -> String {
+    let lowered = raw.trim().to_ascii_lowercase();
+    if lowered.is_empty() {
+        "unknown".to_owned()
+    } else {
+        lowered
+    }
+}
+
+fn sanitize_auth_message(raw: &str) -> String {
+    raw.trim().replace('\n', " ").replace('\r', " ")
+}
+
+fn load_secret_input(
+    env_name: Option<String>,
+    from_stdin: bool,
+    from_prompt: bool,
+    prompt: &str,
+) -> Result<String> {
+    let selected_sources =
+        usize::from(env_name.is_some()) + usize::from(from_stdin) + usize::from(from_prompt);
+    if selected_sources != 1 {
+        anyhow::bail!("select exactly one secret source: --*-env, --*-stdin, or --*-prompt");
+    }
+    if let Some(env_name) = env_name {
+        let value = env::var(env_name.as_str())
+            .with_context(|| format!("environment variable {env_name} is not set"))?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("environment variable {env_name} does not contain a usable secret value");
+        }
+        return Ok(trimmed.to_owned());
+    }
+    if from_stdin {
+        let mut value = String::new();
+        std::io::stdin()
+            .read_to_string(&mut value)
+            .context("failed to read secret value from stdin")?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("stdin did not contain a usable secret value");
+        }
+        return Ok(trimmed.to_owned());
+    }
+    let value = rpassword::prompt_password(prompt).context("failed to read secret from prompt")?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("prompt did not contain a usable secret value");
+    }
+    Ok(trimmed.to_owned())
 }

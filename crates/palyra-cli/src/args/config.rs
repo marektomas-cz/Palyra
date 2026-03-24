@@ -2,10 +2,23 @@ use clap::Subcommand;
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ConfigCommand {
+    Status {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Path {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Validate {
         #[arg(long)]
         path: Option<String>,
     },
+    #[command(visible_alias = "show")]
     List {
         #[arg(long)]
         path: Option<String>,

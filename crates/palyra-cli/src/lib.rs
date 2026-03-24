@@ -63,12 +63,12 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{CommandFactory, Parser};
 use cli::{
     AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg, ApprovalsCommand,
-    AuthCommand, AuthCredentialArg, AuthProfilesCommand, AuthProviderArg, AuthScopeArg,
-    BrowserCommand, Cli, Command as CliCommand, CompletionShell, ConfigCommand, CronCommand,
-    CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
-    InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg,
-    MemorySourceArg, OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand,
-    SecretsCommand, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
+    AuthScopeArg, BrowserCommand, Cli, Command as CliCommand, CompletionShell, ConfigCommand,
+    CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg,
+    DaemonCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
+    MemoryScopeArg, MemorySourceArg, ModelsCommand, OnboardingCommand, PatchCommand, PolicyCommand,
+    ProtocolCommand, SecretsCommand, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
 };
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -246,6 +246,7 @@ fn run_cli() -> Result<()> {
         CliCommand::Policy { command } => commands::policy::run_policy(command),
         CliCommand::Protocol { command } => commands::protocol::run_protocol(command),
         CliCommand::Config { command } => commands::config::run_config(command),
+        CliCommand::Models { command } => commands::models::run_models(command),
         CliCommand::Patch { command } => commands::patch::run_patch(command),
         CliCommand::Skills { command } => commands::skills::run_skills(command),
         CliCommand::Secrets { command } => commands::secrets::run_secrets(command),

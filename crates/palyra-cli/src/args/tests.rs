@@ -2,12 +2,13 @@ use clap::Parser;
 
 use super::{
     AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg, ApprovalsCommand,
-    AuthCommand, AuthCredentialArg, AuthProfilesCommand, AuthProviderArg, AuthScopeArg,
-    BrowserCommand, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command,
-    CompletionShell, ConfigCommand, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
-    CronScheduleTypeArg, DaemonCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg,
-    MemoryCommand, MemoryScopeArg, MemorySourceArg, OnboardingCommand, PatchCommand, PolicyCommand,
-    ProtocolCommand, SecretsCommand, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
+    AuthScopeArg, BrowserCommand, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand,
+    Cli, Command, CompletionShell, ConfigCommand, CronCommand, CronConcurrencyPolicyArg,
+    CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, InitModeArg, InitTlsScaffoldArg,
+    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
+    OnboardingCommand, PatchCommand, PolicyCommand, ProtocolCommand, SecretsCommand, SkillsCommand,
+    SkillsPackageCommand, SupportBundleCommand,
 };
 #[cfg(not(windows))]
 use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -731,6 +732,103 @@ fn parse_auth_profiles_set_oauth() {
                     client_secret_ref: Some("global/openai_client_secret".to_owned()),
                     scope_value: vec!["chat:read".to_owned(), "chat:write".to_owned()],
                     expires_at_unix_ms: Some(1_730_000_000_000),
+                    json: true,
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_auth_openai_api_key_from_stdin() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "auth",
+        "openai",
+        "api-key",
+        "--profile-name",
+        "Default OpenAI",
+        "--scope",
+        "agent",
+        "--agent-id",
+        "assistant",
+        "--api-key-stdin",
+        "--set-default",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Auth {
+            command: AuthCommand::Openai {
+                command: AuthOpenAiCommand::ApiKey {
+                    profile_id: None,
+                    profile_name: "Default OpenAI".to_owned(),
+                    scope: AuthScopeArg::Agent,
+                    agent_id: Some("assistant".to_owned()),
+                    api_key_env: None,
+                    api_key_stdin: true,
+                    api_key_prompt: false,
+                    set_default: true,
+                    json: true,
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_auth_openai_oauth_start() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "auth",
+        "openai",
+        "oauth-start",
+        "--profile-id",
+        "openai-default",
+        "--client-id",
+        "client-123",
+        "--client-secret-env",
+        "OPENAI_CLIENT_SECRET",
+        "--scope-value",
+        "openid",
+        "--scope-value",
+        "offline_access",
+        "--set-default",
+        "--open",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Auth {
+            command: AuthCommand::Openai {
+                command: AuthOpenAiCommand::OauthStart {
+                    profile_id: Some("openai-default".to_owned()),
+                    profile_name: None,
+                    scope: AuthScopeArg::Global,
+                    agent_id: None,
+                    client_id: "client-123".to_owned(),
+                    client_secret_env: Some("OPENAI_CLIENT_SECRET".to_owned()),
+                    client_secret_stdin: false,
+                    client_secret_prompt: false,
+                    scope_value: vec!["openid".to_owned(), "offline_access".to_owned()],
+                    set_default: true,
+                    open: true,
+                    json: false,
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_auth_openai_reconnect() {
+    let parsed =
+        Cli::parse_from(["palyra", "auth", "openai", "reconnect", "openai-default", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Auth {
+            command: AuthCommand::Openai {
+                command: AuthOpenAiCommand::Reconnect {
+                    profile_id: "openai-default".to_owned(),
                     json: true,
                 },
             },
@@ -1564,7 +1662,33 @@ fn parse_config_validate_with_path() {
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: ConfigCommand::Validate { path: Some("custom.toml".to_owned()) }
+            command: Some(ConfigCommand::Validate { path: Some("custom.toml".to_owned()) })
+        }
+    );
+}
+
+#[test]
+fn parse_config_without_subcommand_defaults_to_none() {
+    let parsed = Cli::parse_from(["palyra", "config"]);
+    assert_eq!(parsed.command, Command::Config { command: None });
+}
+
+#[test]
+fn parse_config_status_with_json() {
+    let parsed = Cli::parse_from(["palyra", "config", "status", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Config { command: Some(ConfigCommand::Status { path: None, json: true }) }
+    );
+}
+
+#[test]
+fn parse_config_path_with_explicit_path() {
+    let parsed = Cli::parse_from(["palyra", "config", "path", "--path", "custom.toml", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Config {
+            command: Some(ConfigCommand::Path { path: Some("custom.toml".to_owned()), json: true })
         }
     );
 }
@@ -1583,11 +1707,11 @@ fn parse_config_get_with_key() {
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: ConfigCommand::Get {
+            command: Some(ConfigCommand::Get {
                 path: Some("custom.toml".to_owned()),
                 key: "daemon.port".to_owned(),
                 show_secrets: false,
-            }
+            })
         }
     );
 }
@@ -1607,11 +1731,11 @@ fn parse_config_get_with_show_secrets() {
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: ConfigCommand::Get {
+            command: Some(ConfigCommand::Get {
                 path: Some("custom.toml".to_owned()),
                 key: "admin.auth_token".to_owned(),
                 show_secrets: true,
-            }
+            })
         }
     );
 }
@@ -1623,10 +1747,10 @@ fn parse_config_list_with_show_secrets() {
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: ConfigCommand::List {
+            command: Some(ConfigCommand::List {
                 path: Some("custom.toml".to_owned()),
                 show_secrets: true,
-            }
+            })
         }
     );
 }
@@ -1649,12 +1773,12 @@ fn parse_config_set_with_backups() {
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: ConfigCommand::Set {
+            command: Some(ConfigCommand::Set {
                 path: Some("custom.toml".to_owned()),
                 key: "daemon.port".to_owned(),
                 value: "7443".to_owned(),
                 backups: 7,
-            }
+            })
         }
     );
 }
@@ -1673,11 +1797,11 @@ fn parse_config_unset_with_defaults() {
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: ConfigCommand::Unset {
+            command: Some(ConfigCommand::Unset {
                 path: Some("custom.toml".to_owned()),
                 key: "daemon.port".to_owned(),
                 backups: 5,
-            }
+            })
         }
     );
 }
@@ -1689,7 +1813,10 @@ fn parse_config_migrate_with_backups() {
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: ConfigCommand::Migrate { path: Some("custom.toml".to_owned()), backups: 3 }
+            command: Some(ConfigCommand::Migrate {
+                path: Some("custom.toml".to_owned()),
+                backups: 3,
+            })
         }
     );
 }
@@ -1710,10 +1837,37 @@ fn parse_config_recover_with_backup_index() {
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: ConfigCommand::Recover {
+            command: Some(ConfigCommand::Recover {
                 path: Some("custom.toml".to_owned()),
                 backup: 2,
                 backups: 4,
+            })
+        }
+    );
+}
+
+#[test]
+fn parse_models_set_embeddings() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "models",
+        "set-embeddings",
+        "text-embedding-3-small",
+        "--dims",
+        "1536",
+        "--path",
+        "custom.toml",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Models {
+            command: ModelsCommand::SetEmbeddings {
+                model: "text-embedding-3-small".to_owned(),
+                dims: Some(1536),
+                path: Some("custom.toml".to_owned()),
+                backups: 5,
+                json: true,
             }
         }
     );

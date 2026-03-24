@@ -11,6 +11,7 @@ pub mod daemon;
 pub mod doctor;
 pub mod init;
 pub mod memory;
+pub mod models;
 pub mod onboarding;
 #[cfg(not(windows))]
 pub mod pairing;

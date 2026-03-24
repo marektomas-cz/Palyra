@@ -1,7 +1,50 @@
 use crate::*;
 
-pub(crate) fn run_config(command: ConfigCommand) -> Result<()> {
+pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
+    let command = command
+        .unwrap_or(ConfigCommand::Status { path: None, json: output::preferred_json(false) });
     match command {
+        ConfigCommand::Status { path, json } => {
+            let payload = build_config_status_payload(path)?;
+            if output::preferred_json(json) {
+                output::print_json_pretty(&payload, "failed to encode config status as JSON")?;
+            } else {
+                println!(
+                    "config.status path={} exists={} parsed={} migrated={} source_version={} target_version={} provider_kind={} auth_profile_id={}",
+                    payload.path.as_deref().unwrap_or("none"),
+                    payload.exists,
+                    payload.parsed,
+                    payload.migrated,
+                    payload
+                        .source_version
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_owned()),
+                    payload
+                        .target_version
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_owned()),
+                    payload.provider_kind.as_deref().unwrap_or("none"),
+                    payload.auth_profile_id.as_deref().unwrap_or("none")
+                );
+            }
+            std::io::stdout().flush().context("stdout flush failed")
+        }
+        ConfigCommand::Path { path, json } => {
+            let resolved = match path {
+                Some(explicit) => resolve_config_path(Some(explicit), false)?,
+                None => find_default_config_path()
+                    .context("no default config file found; pass --path to select a config file")?,
+            };
+            if output::preferred_json(json) {
+                output::print_json_pretty(
+                    &json!({ "path": resolved }),
+                    "failed to encode config path as JSON",
+                )?;
+            } else {
+                println!("config.path path={resolved}");
+            }
+            std::io::stdout().flush().context("stdout flush failed")
+        }
         ConfigCommand::Validate { path } => {
             let path = match path {
                 Some(explicit) => resolve_config_path(Some(explicit), true)?,
@@ -151,4 +194,70 @@ pub(crate) fn run_config(command: ConfigCommand) -> Result<()> {
             std::io::stdout().flush().context("stdout flush failed")
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigStatusPayload {
+    path: Option<String>,
+    exists: bool,
+    parsed: bool,
+    migrated: bool,
+    source_version: Option<u32>,
+    target_version: Option<u32>,
+    provider_kind: Option<String>,
+    auth_profile_id: Option<String>,
+}
+
+fn build_config_status_payload(path: Option<String>) -> Result<ConfigStatusPayload> {
+    let path = match path {
+        Some(explicit) => Some(resolve_config_path(Some(explicit), false)?),
+        None => find_default_config_path(),
+    };
+    let Some(path_value) = path else {
+        return Ok(ConfigStatusPayload {
+            path: None,
+            exists: false,
+            parsed: false,
+            migrated: false,
+            source_version: None,
+            target_version: None,
+            provider_kind: None,
+            auth_profile_id: None,
+        });
+    };
+    let path_ref = Path::new(&path_value);
+    if !path_ref.exists() {
+        return Ok(ConfigStatusPayload {
+            path: Some(path_value),
+            exists: false,
+            parsed: false,
+            migrated: false,
+            source_version: None,
+            target_version: None,
+            provider_kind: None,
+            auth_profile_id: None,
+        });
+    }
+    let (document, migration) = load_document_from_existing_path(path_ref)
+        .with_context(|| format!("failed to parse {}", path_ref.display()))?;
+    let provider_kind = get_value_at_path(&document, "model_provider.kind")
+        .with_context(|| "invalid config key path: model_provider.kind")?
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned);
+    let auth_profile_id = get_value_at_path(&document, "model_provider.auth_profile_id")
+        .with_context(|| "invalid config key path: model_provider.auth_profile_id")?
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    Ok(ConfigStatusPayload {
+        path: Some(path_value),
+        exists: true,
+        parsed: true,
+        migrated: migration.migrated,
+        source_version: Some(migration.source_version),
+        target_version: Some(migration.target_version),
+        provider_kind,
+        auth_profile_id,
+    })
 }

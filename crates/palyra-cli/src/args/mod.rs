@@ -13,6 +13,7 @@ mod cron;
 mod daemon;
 mod init;
 mod memory;
+mod models;
 mod onboarding;
 #[cfg(not(windows))]
 mod pairing;
@@ -27,7 +28,8 @@ pub use agent::AgentCommand;
 pub use agents::AgentsCommand;
 pub use approvals::{ApprovalDecisionArg, ApprovalExportFormatArg, ApprovalsCommand};
 pub use auth::{
-    AuthCommand, AuthCredentialArg, AuthProfilesCommand, AuthProviderArg, AuthScopeArg,
+    AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
+    AuthScopeArg,
 };
 pub use browser::BrowserCommand;
 pub use channels::{ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand};
@@ -37,6 +39,7 @@ pub use cron::{CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg, Cron
 pub use daemon::{DaemonCommand, JournalCheckpointModeArg};
 pub use init::{InitModeArg, InitTlsScaffoldArg};
 pub use memory::{MemoryCommand, MemoryScopeArg, MemorySourceArg};
+pub use models::ModelsCommand;
 pub use onboarding::OnboardingCommand;
 #[cfg(not(windows))]
 pub use pairing::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -281,7 +284,11 @@ pub enum Command {
     },
     Config {
         #[command(subcommand)]
-        command: ConfigCommand,
+        command: Option<ConfigCommand>,
+    },
+    Models {
+        #[command(subcommand)]
+        command: ModelsCommand,
     },
     Patch {
         #[command(subcommand)]
