@@ -2,6 +2,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+fn normalize_help_text(text: &str) -> String {
+    text.replace("palyra.exe", "palyra")
+}
+
 fn run_help(args: &[&str]) -> Result<String> {
     let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
         .args(args)
@@ -27,47 +31,41 @@ fn run_help(args: &[&str]) -> Result<String> {
         previous_blank = is_blank;
         collapsed.push(line);
     }
-    Ok(collapsed.join("\n").trim_end().to_owned())
+    Ok(normalize_help_text(collapsed.join("\n").trim_end()))
+}
+
+fn assert_help_snapshot(args: &[&str], snapshot: &str) -> Result<()> {
+    assert_eq!(run_help(args)?, normalize_help_text(snapshot.trim_end()));
+    Ok(())
 }
 
 #[test]
 fn root_help_snapshot_matches() -> Result<()> {
-    assert_eq!(run_help(&["--help"])?, include_str!("help_snapshots/root-help.txt").trim_end());
-    Ok(())
+    assert_help_snapshot(&["--help"], include_str!("help_snapshots/root-help.txt"))
 }
 
 #[test]
 fn setup_help_snapshot_matches() -> Result<()> {
-    assert_eq!(
-        run_help(&["setup", "--help"])?,
-        include_str!("help_snapshots/setup-help.txt").trim_end()
-    );
-    Ok(())
+    assert_help_snapshot(&["setup", "--help"], include_str!("help_snapshots/setup-help.txt"))
 }
 
 #[test]
 fn gateway_help_snapshot_matches() -> Result<()> {
-    assert_eq!(
-        run_help(&["gateway", "--help"])?,
-        include_str!("help_snapshots/gateway-help.txt").trim_end()
-    );
-    Ok(())
+    assert_help_snapshot(&["gateway", "--help"], include_str!("help_snapshots/gateway-help.txt"))
 }
 
 #[test]
 fn dashboard_help_snapshot_matches() -> Result<()> {
-    assert_eq!(
-        run_help(&["dashboard", "--help"])?,
-        include_str!("help_snapshots/dashboard-help.txt").trim_end()
-    );
-    Ok(())
+    assert_help_snapshot(
+        &["dashboard", "--help"],
+        include_str!("help_snapshots/dashboard-help.txt"),
+    )
 }
 
 #[test]
 fn completion_help_snapshot_matches() -> Result<()> {
-    assert_eq!(
-        run_help(&["completion", "--help"])?,
-        include_str!("help_snapshots/completion-help.txt").trim_end()
-    );
-    Ok(())
+    assert_help_snapshot(
+        &["completion", "--help"],
+        include_str!("help_snapshots/completion-help.txt"),
+    )
 }
