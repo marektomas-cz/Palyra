@@ -2633,7 +2633,7 @@ fn section_follow_up_checks(
         ConfigureSectionArg::Gateway => {
             let mut values = vec!["palyra gateway status".to_owned()];
             if get_string_value_at_path(document, "gateway_access.remote_base_url")?.is_some() {
-                values.push("palyra daemon dashboard-url --verify-remote".to_owned());
+                values.push("palyra dashboard --verify-remote".to_owned());
             }
             values
         }

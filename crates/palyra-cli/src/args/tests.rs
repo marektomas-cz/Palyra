@@ -89,6 +89,49 @@ fn parse_doctor_json() {
 }
 
 #[test]
+fn parse_health_with_explicit_endpoints() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "health",
+        "--url",
+        "http://127.0.0.1:7142",
+        "--grpc-url",
+        "http://127.0.0.1:7443",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Health {
+            url: Some("http://127.0.0.1:7142".to_owned()),
+            grpc_url: Some("http://127.0.0.1:7443".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn parse_logs_with_follow() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "logs",
+        "--db-path",
+        "data/journal.sqlite3",
+        "--lines",
+        "100",
+        "--follow",
+        "--poll-interval-ms",
+        "2500",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Logs {
+            db_path: Some("data/journal.sqlite3".to_owned()),
+            lines: 100,
+            follow: true,
+            poll_interval_ms: 2500,
+        }
+    );
+}
+
+#[test]
 fn parse_status_with_admin_context() {
     let parsed = Cli::parse_from([
         "palyra",
@@ -1638,6 +1681,99 @@ fn parse_daemon_status_with_url() {
         parsed.command,
         Command::Gateway {
             command: DaemonCommand::Status { url: Some("http://127.0.0.1:7142".to_owned()) }
+        }
+    );
+}
+
+#[test]
+fn parse_daemon_probe_with_context_and_dashboard_options() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "daemon",
+        "probe",
+        "--url",
+        "http://127.0.0.1:7142",
+        "--grpc-url",
+        "http://127.0.0.1:7443",
+        "--token",
+        "test-token",
+        "--principal",
+        "user:ops",
+        "--device-id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "--channel",
+        "cli",
+        "--path",
+        "./palyra.toml",
+        "--verify-remote",
+        "--identity-store-dir",
+        "./identity",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Gateway {
+            command: DaemonCommand::Probe {
+                url: Some("http://127.0.0.1:7142".to_owned()),
+                grpc_url: Some("http://127.0.0.1:7443".to_owned()),
+                token: Some("test-token".to_owned()),
+                principal: Some("user:ops".to_owned()),
+                device_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+                channel: Some("cli".to_owned()),
+                path: Some("./palyra.toml".to_owned()),
+                verify_remote: true,
+                identity_store_dir: Some("./identity".to_owned()),
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_daemon_call_with_params() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "daemon",
+        "call",
+        "run.status",
+        "--params",
+        "{\"run_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAX\"}",
+        "--token",
+        "test-token",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Gateway {
+            command: DaemonCommand::Call {
+                method: "run.status".to_owned(),
+                params: Some("{\"run_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAX\"}".to_owned()),
+                url: None,
+                grpc_url: None,
+                token: Some("test-token".to_owned()),
+                principal: None,
+                device_id: None,
+                channel: None,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_daemon_usage_cost_with_days() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "daemon",
+        "usage-cost",
+        "--db-path",
+        "data/journal.sqlite3",
+        "--days",
+        "7",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Gateway {
+            command: DaemonCommand::UsageCost {
+                db_path: Some("data/journal.sqlite3".to_owned()),
+                days: 7,
+            }
         }
     );
 }

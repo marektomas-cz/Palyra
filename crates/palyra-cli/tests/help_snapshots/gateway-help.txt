@@ -3,6 +3,12 @@ Gateway and runtime diagnostics surface
 Usage: palyra.exe gateway [OPTIONS] <COMMAND>
 
 Commands:
+  run
+  health
+  probe
+  discover
+  call
+  usage-cost
   status
   admin-status
   journal-recent
@@ -40,6 +46,12 @@ Global Options:
       --no-color
 
 Examples:
+  palyra gateway run
+  palyra gateway health
+  palyra gateway probe
+  palyra gateway discover --verify-remote
+  palyra gateway call health
+  palyra gateway usage-cost --days 7
   palyra gateway status
   palyra gateway admin-status --token <token>
   palyra gateway dashboard-url --verify-remote --open

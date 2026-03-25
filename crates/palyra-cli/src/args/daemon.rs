@@ -10,6 +10,91 @@ pub enum JournalCheckpointModeArg {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum DaemonCommand {
+    Run {
+        #[arg(long)]
+        bin_path: Option<String>,
+    },
+    Health {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        grpc_url: Option<String>,
+    },
+    Probe {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        grpc_url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        device_id: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        verify_remote: bool,
+        #[arg(long)]
+        identity_store_dir: Option<String>,
+    },
+    Discover {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        verify_remote: bool,
+        #[arg(long)]
+        identity_store_dir: Option<String>,
+    },
+    Call {
+        method: String,
+        #[arg(long)]
+        params: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        grpc_url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        device_id: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+    },
+    UsageCost {
+        #[arg(long)]
+        db_path: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
+    Install {
+        #[arg(long)]
+        service_name: Option<String>,
+        #[arg(long)]
+        bin_path: Option<String>,
+        #[arg(long)]
+        log_dir: Option<String>,
+        #[arg(long, default_value_t = false)]
+        start: bool,
+    },
+    Start,
+    Stop,
+    Restart,
+    Uninstall,
+    Logs {
+        #[arg(long)]
+        db_path: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+        #[arg(long, default_value_t = false)]
+        follow: bool,
+        #[arg(long, default_value_t = 1000)]
+        poll_interval_ms: u64,
+    },
     Status {
         #[arg(long)]
         url: Option<String>,

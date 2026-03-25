@@ -105,6 +105,12 @@ Discoverability:
 
 const GATEWAY_AFTER_HELP: &str = "\
 Examples:
+  palyra gateway run
+  palyra gateway health
+  palyra gateway probe
+  palyra gateway discover --verify-remote
+  palyra gateway call health
+  palyra gateway usage-cost --days 7
   palyra gateway status
   palyra gateway admin-status --token <token>
   palyra gateway dashboard-url --verify-remote --open
@@ -117,6 +123,18 @@ Examples:
   palyra dashboard
   palyra dashboard --open
   palyra dashboard --path ./palyra.toml --verify-remote --json";
+
+const HEALTH_AFTER_HELP: &str = "\
+Examples:
+  palyra health
+  palyra health --output-format json
+  palyra gateway health --url http://127.0.0.1:7142";
+
+const LOGS_AFTER_HELP: &str = "\
+Examples:
+  palyra logs
+  palyra logs --lines 100
+  palyra logs --follow";
 
 const COMPLETION_AFTER_HELP: &str = "\
 Examples:
@@ -217,6 +235,30 @@ pub enum Command {
         strict: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+    #[command(
+        about = "Run a narrow liveness/readiness probe across HTTP and gRPC gateway surfaces",
+        after_long_help = HEALTH_AFTER_HELP
+    )]
+    Health {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        grpc_url: Option<String>,
+    },
+    #[command(
+        about = "Tail local gateway journal diagnostics",
+        after_long_help = LOGS_AFTER_HELP
+    )]
+    Logs {
+        #[arg(long)]
+        db_path: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+        #[arg(long, default_value_t = false)]
+        follow: bool,
+        #[arg(long, default_value_t = 1000)]
+        poll_interval_ms: u64,
     },
     #[command(about = "Show transport and admin status across HTTP/gRPC surfaces")]
     Status {

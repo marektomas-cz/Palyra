@@ -56,6 +56,16 @@ fn setup_help_snapshot_matches() -> Result<()> {
 }
 
 #[test]
+fn health_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(&["health", "--help"], include_str!("help_snapshots/health-help.txt"))
+}
+
+#[test]
+fn logs_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(&["logs", "--help"], include_str!("help_snapshots/logs-help.txt"))
+}
+
+#[test]
 fn onboarding_help_snapshot_matches() -> Result<()> {
     assert_help_snapshot(
         &["onboarding", "--help"],

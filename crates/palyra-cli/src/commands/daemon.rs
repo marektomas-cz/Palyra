@@ -22,6 +22,53 @@ fn apply_http_connection_headers(
 
 pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
     match command {
+        DaemonCommand::Run { bin_path } => run_gateway_foreground(bin_path),
+        DaemonCommand::Health { url, grpc_url } => super::health::run_health(url, grpc_url),
+        DaemonCommand::Probe {
+            url,
+            grpc_url,
+            token,
+            principal,
+            device_id,
+            channel,
+            path,
+            verify_remote,
+            identity_store_dir,
+        } => run_gateway_probe(
+            url,
+            grpc_url,
+            token,
+            principal,
+            device_id,
+            channel,
+            path,
+            verify_remote,
+            identity_store_dir,
+        ),
+        DaemonCommand::Discover { path, verify_remote, identity_store_dir } => {
+            run_gateway_discover(path, verify_remote, identity_store_dir)
+        }
+        DaemonCommand::Call {
+            method,
+            params,
+            url,
+            grpc_url,
+            token,
+            principal,
+            device_id,
+            channel,
+        } => run_gateway_call(method, params, url, grpc_url, token, principal, device_id, channel),
+        DaemonCommand::UsageCost { db_path, days } => run_gateway_usage_cost(db_path, days),
+        DaemonCommand::Install { service_name, bin_path, log_dir, start } => {
+            run_gateway_install(service_name, bin_path, log_dir, start)
+        }
+        DaemonCommand::Start => run_gateway_service_action("start"),
+        DaemonCommand::Stop => run_gateway_service_action("stop"),
+        DaemonCommand::Restart => run_gateway_service_action("restart"),
+        DaemonCommand::Uninstall => run_gateway_service_action("uninstall"),
+        DaemonCommand::Logs { db_path, lines, follow, poll_interval_ms } => {
+            super::logs::run_logs(db_path, lines, follow, poll_interval_ms)
+        }
         DaemonCommand::Status { url } => {
             let connection = root_context()?.resolve_http_connection(
                 app::ConnectionOverrides { daemon_url: url, ..app::ConnectionOverrides::default() },
@@ -479,4 +526,689 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
             std::io::stdout().flush().context("stdout flush failed")
         }
     }
+}
+
+fn resolve_palyrad_binary(bin_path: Option<String>) -> Result<PathBuf> {
+    if let Some(path) = bin_path {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        anyhow::bail!("palyrad binary does not exist: {}", path.display());
+    }
+
+    let executable = if cfg!(windows) { "palyrad.exe" } else { "palyrad" };
+    let current_exe = std::env::current_exe().context("failed to resolve current CLI executable")?;
+    let mut candidates = Vec::new();
+    if let Some(parent) = current_exe.parent() {
+        candidates.push(parent.join(executable));
+        candidates.push(parent.join("deps").join(executable));
+    }
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!(
+        "failed to locate palyrad next to the current CLI; pass --bin-path to `palyra gateway run`"
+    )
+}
+
+fn run_gateway_foreground(bin_path: Option<String>) -> Result<()> {
+    let context = root_context()?;
+    let binary = resolve_palyrad_binary(bin_path)?;
+    let mut command = std::process::Command::new(&binary);
+    if let Some(config_path) = context.config_path() {
+        command.env("PALYRA_CONFIG", config_path);
+    }
+    command.env("PALYRA_STATE_ROOT", context.state_root());
+
+    let status = command
+        .status()
+        .with_context(|| format!("failed to start palyrad foreground process {}", binary.display()))?;
+    if !status.success() {
+        anyhow::bail!(
+            "palyrad exited with status {}",
+            status.code().map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_owned())
+        );
+    }
+    Ok(())
+}
+
+fn run_gateway_install(
+    service_name: Option<String>,
+    bin_path: Option<String>,
+    log_dir: Option<String>,
+    start: bool,
+) -> Result<()> {
+    let context = root_context()?;
+    let daemon_bin = resolve_palyrad_binary(bin_path)?;
+    let request = support::service::GatewayServiceInstallRequest {
+        service_name,
+        daemon_bin,
+        state_root: context.state_root().to_path_buf(),
+        config_path: context.config_path().map(Path::to_path_buf),
+        log_dir: log_dir.map(PathBuf::from),
+        start_now: start,
+    };
+    let status = support::service::install_gateway_service(&request)?;
+    emit_gateway_service_status("gateway.install", &status)
+}
+
+fn run_gateway_service_action(action: &str) -> Result<()> {
+    let context = root_context()?;
+    let status = match action {
+        "start" => support::service::start_gateway_service(context.state_root())?,
+        "stop" => support::service::stop_gateway_service(context.state_root())?,
+        "restart" => support::service::restart_gateway_service(context.state_root())?,
+        "uninstall" => support::service::uninstall_gateway_service(context.state_root())?,
+        _ => anyhow::bail!("unsupported gateway service action `{action}`"),
+    };
+    emit_gateway_service_status(format!("gateway.{action}").as_str(), &status)
+}
+
+fn emit_gateway_service_status(prefix: &str, status: &support::service::GatewayServiceStatus) -> Result<()> {
+    let context = root_context()?;
+    if context.prefers_json() {
+        return output::print_json_pretty(
+            &json!({
+                "action": prefix,
+                "service": status,
+            }),
+            "failed to encode gateway service output as JSON",
+        );
+    }
+    if context.prefers_ndjson() {
+        return output::print_json_line(
+            &json!({
+                "action": prefix,
+                "installed": status.installed,
+                "running": status.running,
+                "enabled": status.enabled,
+                "manager": status.manager,
+                "service_name": status.service_name,
+                "definition_path": status.definition_path,
+                "stdout_log_path": status.stdout_log_path,
+                "stderr_log_path": status.stderr_log_path,
+                "detail": status.detail,
+            }),
+            "failed to encode gateway service output as NDJSON",
+        );
+    }
+
+    println!(
+        "{prefix} installed={} running={} enabled={} manager={} service_name={} definition_path={} stdout_log_path={} stderr_log_path={}",
+        status.installed,
+        status.running,
+        status.enabled,
+        status.manager,
+        status.service_name,
+        status.definition_path.as_deref().unwrap_or("none"),
+        status.stdout_log_path.as_deref().unwrap_or("none"),
+        status.stderr_log_path.as_deref().unwrap_or("none"),
+    );
+    if let Some(detail) = status.detail.as_deref() {
+        println!("{prefix}.detail={detail}");
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn collect_gateway_health(
+    url: Option<String>,
+    grpc_url: Option<String>,
+) -> Result<(app::HttpConnection, AgentConnection, HealthResponse, gateway_v1::HealthResponse)> {
+    let context = root_context()?;
+    let http_connection = context.resolve_http_connection(
+        app::ConnectionOverrides {
+            daemon_url: url,
+            grpc_url: None,
+            token: None,
+            principal: None,
+            device_id: None,
+            channel: None,
+        },
+        app::ConnectionDefaults::USER,
+    )?;
+    let grpc_connection = context.resolve_grpc_connection(
+        app::ConnectionOverrides {
+            daemon_url: None,
+            grpc_url,
+            token: None,
+            principal: None,
+            device_id: None,
+            channel: None,
+        },
+        app::ConnectionDefaults::USER,
+    )?;
+    let status_url = format!("{}/healthz", http_connection.base_url.trim_end_matches('/'));
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+    let http = fetch_health_with_retry(&client, &status_url)?;
+    let runtime = build_runtime()?;
+    let grpc = runtime.block_on(fetch_grpc_health_with_retry(grpc_connection.grpc_url.clone()))?;
+    Ok((http_connection, grpc_connection, http, grpc))
+}
+
+fn build_gateway_discover_payload(
+    path: Option<String>,
+    verify_remote: bool,
+    identity_store_dir: Option<String>,
+) -> Result<Value> {
+    let context = root_context()?;
+    let http_connection =
+        context.resolve_http_connection(app::ConnectionOverrides::default(), app::ConnectionDefaults::USER)?;
+    let grpc_connection =
+        context.resolve_grpc_connection(app::ConnectionOverrides::default(), app::ConnectionDefaults::USER)?;
+    let target = resolve_dashboard_access_target(path)?;
+    let verification_report = if verify_remote {
+        let _ =
+            verify_dashboard_remote_target(&target, identity_store_dir.and_then(normalize_optional_text_arg))?;
+        target
+            .verification
+            .as_ref()
+            .map(|verification| redacted_dashboard_verification_report(verification, true))
+    } else {
+        None
+    };
+    Ok(json!({
+        "mode": "config_profile_tunnel_first",
+        "profile": context.profile_name(),
+        "config_path": context.config_path().map(|value| value.display().to_string()),
+        "state_root": context.state_root().display().to_string(),
+        "daemon_url": http_connection.base_url,
+        "grpc_url": grpc_connection.grpc_url,
+        "dashboard": {
+            "url": target.url,
+            "mode": target.mode.as_str(),
+            "source": target.source.as_str(),
+            "config_path": target.config_path,
+            "verification": verification_report,
+        },
+        "remote_access_hint": if matches!(target.mode, DashboardAccessMode::Remote) {
+            Some("Prefer `palyra tunnel --ssh <user>@<host> --open` unless you intentionally operate a verified HTTPS dashboard endpoint.")
+        } else {
+            None
+        },
+    }))
+}
+
+fn run_gateway_discover(
+    path: Option<String>,
+    verify_remote: bool,
+    identity_store_dir: Option<String>,
+) -> Result<()> {
+    let payload = build_gateway_discover_payload(path, verify_remote, identity_store_dir)?;
+    let context = root_context()?;
+    if context.prefers_json() {
+        return output::print_json_pretty(&payload, "failed to encode gateway discover output as JSON");
+    }
+    if context.prefers_ndjson() {
+        return output::print_json_line(&payload, "failed to encode gateway discover output as NDJSON");
+    }
+
+    println!(
+        "gateway.discover mode={} profile={} config_path={} state_root={} daemon_url={} grpc_url={}",
+        payload.get("mode").and_then(Value::as_str).unwrap_or("unknown"),
+        payload.get("profile").and_then(Value::as_str).unwrap_or("none"),
+        payload.get("config_path").and_then(Value::as_str).unwrap_or("none"),
+        payload.get("state_root").and_then(Value::as_str).unwrap_or("none"),
+        payload.get("daemon_url").and_then(Value::as_str).unwrap_or("none"),
+        payload.get("grpc_url").and_then(Value::as_str).unwrap_or("none")
+    );
+    if let Some(dashboard) = payload.get("dashboard") {
+        println!(
+            "gateway.discover.dashboard mode={} source={} url={}",
+            dashboard.get("mode").and_then(Value::as_str).unwrap_or("unknown"),
+            dashboard.get("source").and_then(Value::as_str).unwrap_or("unknown"),
+            dashboard.get("url").and_then(Value::as_str).unwrap_or("none")
+        );
+        if let Some(verification) = dashboard.get("verification") {
+            println!(
+                "gateway.discover.dashboard.verification method={} verified={}",
+                verification.get("method").and_then(Value::as_str).unwrap_or("unknown"),
+                verification.get("verified").and_then(Value::as_bool).unwrap_or(false)
+            );
+        }
+    }
+    if let Some(hint) = payload.get("remote_access_hint").and_then(Value::as_str) {
+        println!("gateway.discover.hint={hint}");
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_gateway_probe(
+    url: Option<String>,
+    grpc_url: Option<String>,
+    token: Option<String>,
+    principal: Option<String>,
+    device_id: Option<String>,
+    channel: Option<String>,
+    path: Option<String>,
+    verify_remote: bool,
+    identity_store_dir: Option<String>,
+) -> Result<()> {
+    let (http_connection, grpc_connection, http, grpc) =
+        collect_gateway_health(url.clone(), grpc_url.clone())?;
+    let discover = build_gateway_discover_payload(path, verify_remote, identity_store_dir)?;
+    let context = root_context()?;
+    let admin_connection = context.resolve_http_connection(
+        app::ConnectionOverrides {
+            daemon_url: url,
+            grpc_url: None,
+            token,
+            principal,
+            device_id,
+            channel,
+        },
+        app::ConnectionDefaults::ADMIN,
+    )?;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+    let admin = match fetch_admin_status_payload(
+        &client,
+        admin_connection.base_url.as_str(),
+        admin_connection.token.clone(),
+        admin_connection.principal.clone(),
+        admin_connection.device_id.clone(),
+        Some(admin_connection.channel.clone()),
+        Some(admin_connection.trace_id.clone()),
+    ) {
+        Ok(payload) => json!({
+            "available": true,
+            "payload": payload,
+        }),
+        Err(error) => json!({
+            "available": false,
+            "error": sanitize_diagnostic_error(error.to_string().as_str()),
+        }),
+    };
+
+    let payload = json!({
+        "overall": "ok",
+        "daemon_url": http_connection.base_url,
+        "grpc_url": grpc_connection.grpc_url,
+        "http": {
+            "status": http.status,
+            "service": http.service,
+            "version": http.version,
+            "git_hash": http.git_hash,
+            "uptime_seconds": http.uptime_seconds,
+        },
+        "grpc": {
+            "status": grpc.status,
+            "service": grpc.service,
+            "version": grpc.version,
+            "git_hash": grpc.git_hash,
+            "uptime_seconds": grpc.uptime_seconds,
+        },
+        "admin": admin,
+        "discover": discover,
+    });
+
+    if context.prefers_json() {
+        return output::print_json_pretty(&payload, "failed to encode gateway probe output as JSON");
+    }
+    if context.prefers_ndjson() {
+        return output::print_json_line(&payload, "failed to encode gateway probe output as NDJSON");
+    }
+
+    println!(
+        "gateway.probe overall=ok daemon_url={} grpc_url={}",
+        payload.get("daemon_url").and_then(Value::as_str).unwrap_or("none"),
+        payload.get("grpc_url").and_then(Value::as_str).unwrap_or("none")
+    );
+    println!(
+        "gateway.probe.http={} service={} version={} git_hash={} uptime_seconds={}",
+        http.status, http.service, http.version, http.git_hash, http.uptime_seconds
+    );
+    println!(
+        "gateway.probe.grpc={} service={} version={} git_hash={} uptime_seconds={}",
+        grpc.status, grpc.service, grpc.version, grpc.git_hash, grpc.uptime_seconds
+    );
+    println!(
+        "gateway.probe.dashboard mode={} url={}",
+        payload
+            .pointer("/discover/dashboard/mode")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        payload
+            .pointer("/discover/dashboard/url")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+    );
+    if payload
+        .pointer("/admin/available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let admin_payload = payload.pointer("/admin/payload").unwrap_or(&Value::Null);
+        println!(
+            "gateway.probe.admin status={} journal_events={} denied_requests={}",
+            admin_payload.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+            admin_payload
+                .pointer("/counters/journal_events")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            admin_payload
+                .pointer("/counters/denied_requests")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        );
+    } else if let Some(error) = payload.pointer("/admin/error").and_then(Value::as_str) {
+        println!("gateway.probe.admin status=unavailable error={error}");
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_gateway_call(
+    method: String,
+    params: Option<String>,
+    url: Option<String>,
+    grpc_url: Option<String>,
+    token: Option<String>,
+    principal: Option<String>,
+    device_id: Option<String>,
+    channel: Option<String>,
+) -> Result<()> {
+    let params = match params {
+        Some(raw) => serde_json::from_str::<Value>(raw.as_str())
+            .with_context(|| format!("failed to parse --params as JSON for method {method}"))?,
+        None => json!({}),
+    };
+    let payload = match method.as_str() {
+        "health" => {
+            let (http_connection, grpc_connection, http, grpc) = collect_gateway_health(url, grpc_url)?;
+            json!({
+                "daemon_url": http_connection.base_url,
+                "grpc_url": grpc_connection.grpc_url,
+                "http": {
+                    "status": http.status,
+                    "service": http.service,
+                    "version": http.version,
+                    "git_hash": http.git_hash,
+                    "uptime_seconds": http.uptime_seconds,
+                },
+                "grpc": {
+                    "status": grpc.status,
+                    "service": grpc.service,
+                    "version": grpc.version,
+                    "git_hash": grpc.git_hash,
+                    "uptime_seconds": grpc.uptime_seconds,
+                },
+            })
+        }
+        "discover" => build_gateway_discover_payload(
+            params.get("path").and_then(Value::as_str).map(str::to_owned),
+            params.get("verify_remote").and_then(Value::as_bool).unwrap_or(false),
+            params.get("identity_store_dir").and_then(Value::as_str).map(str::to_owned),
+        )?,
+        "admin.status" => {
+            let context = root_context()?;
+            let connection = context.resolve_http_connection(
+                app::ConnectionOverrides {
+                    daemon_url: url,
+                    grpc_url: None,
+                    token,
+                    principal,
+                    device_id,
+                    channel,
+                },
+                app::ConnectionDefaults::ADMIN,
+            )?;
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .context("failed to build HTTP client")?;
+            fetch_admin_status_payload(
+                &client,
+                connection.base_url.as_str(),
+                connection.token,
+                connection.principal,
+                connection.device_id,
+                Some(connection.channel),
+                Some(connection.trace_id),
+            )?
+        }
+        "journal.recent" => {
+            let context = root_context()?;
+            let connection = context.resolve_http_connection(
+                app::ConnectionOverrides {
+                    daemon_url: url,
+                    grpc_url: None,
+                    token,
+                    principal,
+                    device_id,
+                    channel,
+                },
+                app::ConnectionDefaults::ADMIN,
+            )?;
+            let endpoint =
+                format!("{}/admin/v1/journal/recent", connection.base_url.trim_end_matches('/'));
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20);
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .context("failed to build HTTP client")?;
+            let response: JournalRecentResponse = apply_http_connection_headers(client.get(endpoint), &connection)
+                .query(&[("limit", limit)])
+                .send()
+                .context("failed to call daemon journal recent endpoint")?
+                .error_for_status()
+                .context("daemon journal recent endpoint returned non-success status")?
+                .json()
+                .context("failed to parse daemon journal recent payload")?;
+            serde_json::to_value(response).context("failed to encode journal recent payload")?
+        }
+        "run.status" => {
+            let run_id = params
+                .get("run_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("gateway call run.status requires params.run_id"))?;
+            validate_canonical_id(run_id).context("params.run_id must be a canonical ULID")?;
+            let context = root_context()?;
+            let connection = context.resolve_http_connection(
+                app::ConnectionOverrides {
+                    daemon_url: url,
+                    grpc_url: None,
+                    token,
+                    principal,
+                    device_id,
+                    channel,
+                },
+                app::ConnectionDefaults::ADMIN,
+            )?;
+            let endpoint =
+                format!("{}/admin/v1/runs/{run_id}", connection.base_url.trim_end_matches('/'));
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .context("failed to build HTTP client")?;
+            let response: RunStatusResponse = apply_http_connection_headers(client.get(endpoint), &connection)
+                .send()
+                .context("failed to call daemon run status endpoint")?
+                .error_for_status()
+                .context("daemon run status endpoint returned non-success status")?
+                .json()
+                .context("failed to parse daemon run status payload")?;
+            serde_json::to_value(response).context("failed to encode run status payload")?
+        }
+        "run.tape" => {
+            let run_id = params
+                .get("run_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("gateway call run.tape requires params.run_id"))?;
+            validate_canonical_id(run_id).context("params.run_id must be a canonical ULID")?;
+            let context = root_context()?;
+            let connection = context.resolve_http_connection(
+                app::ConnectionOverrides {
+                    daemon_url: url,
+                    grpc_url: None,
+                    token,
+                    principal,
+                    device_id,
+                    channel,
+                },
+                app::ConnectionDefaults::ADMIN,
+            )?;
+            let endpoint = format!(
+                "{}/admin/v1/runs/{run_id}/tape",
+                connection.base_url.trim_end_matches('/')
+            );
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .context("failed to build HTTP client")?;
+            let mut request = apply_http_connection_headers(client.get(endpoint), &connection);
+            if let Some(after_seq) = params.get("after_seq").and_then(Value::as_i64) {
+                request = request.query(&[("after_seq", after_seq)]);
+            }
+            if let Some(limit) = params.get("limit").and_then(Value::as_u64) {
+                request = request.query(&[("limit", limit)]);
+            }
+            let response: RunTapeResponse = request
+                .send()
+                .context("failed to call daemon run tape endpoint")?
+                .error_for_status()
+                .context("daemon run tape endpoint returned non-success status")?
+                .json()
+                .context("failed to parse daemon run tape payload")?;
+            serde_json::to_value(response).context("failed to encode run tape payload")?
+        }
+        "dashboard.url" => build_gateway_discover_payload(
+            params.get("path").and_then(Value::as_str).map(str::to_owned),
+            params.get("verify_remote").and_then(Value::as_bool).unwrap_or(false),
+            params.get("identity_store_dir").and_then(Value::as_str).map(str::to_owned),
+        )?,
+        "usage.cost" => build_gateway_usage_cost_value(
+            params.get("db_path").and_then(Value::as_str).map(str::to_owned),
+            params.get("days").and_then(Value::as_u64).unwrap_or(30) as u32,
+        )?,
+        _ => anyhow::bail!(
+            "unsupported gateway call method `{method}`; supported methods: health, discover, admin.status, journal.recent, run.status, run.tape, dashboard.url, usage.cost"
+        ),
+    };
+
+    let context = root_context()?;
+    if context.prefers_json() {
+        return output::print_json_pretty(&payload, "failed to encode gateway call output as JSON");
+    }
+    if context.prefers_ndjson() {
+        return output::print_json_line(&payload, "failed to encode gateway call output as NDJSON");
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "method": method,
+            "result": payload,
+        }))
+        .context("failed to encode gateway call output")?
+    );
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn build_gateway_usage_cost_value(db_path: Option<String>, days: u32) -> Result<Value> {
+    let days = days.clamp(1, 365);
+    let db_path = resolve_daemon_journal_db_path(db_path)?;
+    ensure_journal_db_exists(db_path.as_path())?;
+    let connection = Connection::open(db_path.as_path())
+        .with_context(|| format!("failed to open journal database {}", db_path.display()))?;
+    let lookback_ms =
+        now_unix_ms_i64()?.saturating_sub(i64::from(days).saturating_mul(24 * 60 * 60 * 1000));
+
+    let totals = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(total_tokens), 0)
+             FROM orchestrator_runs
+             WHERE started_at_unix_ms >= ?1",
+            [lookback_ms],
+            |row| {
+                Ok(json!({
+                    "runs": row.get::<_, i64>(0)?,
+                    "prompt_tokens": row.get::<_, i64>(1)?,
+                    "completion_tokens": row.get::<_, i64>(2)?,
+                    "total_tokens": row.get::<_, i64>(3)?,
+                }))
+            },
+        )
+        .context("failed to summarize orchestrator usage from journal database")?;
+
+    let mut statement = connection.prepare(
+        "SELECT date(started_at_unix_ms / 1000, 'unixepoch') AS run_date,
+                COUNT(*),
+                COALESCE(SUM(prompt_tokens), 0),
+                COALESCE(SUM(completion_tokens), 0),
+                COALESCE(SUM(total_tokens), 0)
+         FROM orchestrator_runs
+         WHERE started_at_unix_ms >= ?1
+         GROUP BY run_date
+         ORDER BY run_date ASC",
+    )?;
+    let mut rows = statement.query([lookback_ms])?;
+    let mut daily = Vec::new();
+    while let Some(row) = rows.next()? {
+        daily.push(json!({
+            "date": row.get::<_, String>(0)?,
+            "runs": row.get::<_, i64>(1)?,
+            "prompt_tokens": row.get::<_, i64>(2)?,
+            "completion_tokens": row.get::<_, i64>(3)?,
+            "total_tokens": row.get::<_, i64>(4)?,
+            "estimated_cost_usd": Value::Null,
+        }));
+    }
+
+    Ok(json!({
+        "db_path": db_path.display().to_string(),
+        "days": days,
+        "cost_tracking_available": false,
+        "estimated_cost_usd": Value::Null,
+        "totals": totals,
+        "daily": daily,
+        "notes": [
+            "Palyra currently persists token usage in orchestrator_runs but does not persist provider pricing metadata.",
+            "Use this command as a practical usage summary; cost fields remain null until pricing accounting lands."
+        ],
+    }))
+}
+
+fn run_gateway_usage_cost(db_path: Option<String>, days: u32) -> Result<()> {
+    let payload = build_gateway_usage_cost_value(db_path, days)?;
+    let context = root_context()?;
+    if context.prefers_json() {
+        return output::print_json_pretty(
+            &payload,
+            "failed to encode gateway usage-cost output as JSON",
+        );
+    }
+    if context.prefers_ndjson() {
+        return output::print_json_line(
+            &payload,
+            "failed to encode gateway usage-cost output as NDJSON",
+        );
+    }
+
+    println!(
+        "gateway.usage_cost days={} db_path={} runs={} prompt_tokens={} completion_tokens={} total_tokens={} estimated_cost_usd=unavailable",
+        payload.get("days").and_then(Value::as_u64).unwrap_or(0),
+        payload.get("db_path").and_then(Value::as_str).unwrap_or("none"),
+        payload.pointer("/totals/runs").and_then(Value::as_i64).unwrap_or(0),
+        payload.pointer("/totals/prompt_tokens").and_then(Value::as_i64).unwrap_or(0),
+        payload.pointer("/totals/completion_tokens").and_then(Value::as_i64).unwrap_or(0),
+        payload.pointer("/totals/total_tokens").and_then(Value::as_i64).unwrap_or(0),
+    );
+    if let Some(last_day) = payload.get("daily").and_then(Value::as_array).and_then(|entries| entries.last()) {
+        println!(
+            "gateway.usage_cost.latest_day date={} runs={} total_tokens={}",
+            last_day.get("date").and_then(Value::as_str).unwrap_or("unknown"),
+            last_day.get("runs").and_then(Value::as_i64).unwrap_or(0),
+            last_day.get("total_tokens").and_then(Value::as_i64).unwrap_or(0)
+        );
+    }
+    std::io::stdout().flush().context("stdout flush failed")
 }

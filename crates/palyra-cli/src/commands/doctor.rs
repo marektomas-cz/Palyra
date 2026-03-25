@@ -3,6 +3,8 @@ use crate::*;
 pub(crate) fn run_doctor(strict: bool, json: bool) -> Result<()> {
     let checks = build_doctor_checks();
     let report = build_doctor_report(checks.as_slice())?;
+    let blocking_checks = checks.iter().filter(|check| check.required && !check.ok).collect::<Vec<_>>();
+    let warning_checks = checks.iter().filter(|check| !check.required && !check.ok).collect::<Vec<_>>();
 
     if json {
         let encoded = serde_json::to_string_pretty(&report)
@@ -46,6 +48,18 @@ pub(crate) fn run_doctor(strict: bool, json: bool) -> Result<()> {
             report.deployment.admin_auth_required,
             report.deployment.admin_token_configured,
         );
+        println!(
+            "doctor.summary blocking={} warnings={} required_checks_failed={}",
+            blocking_checks.len(),
+            warning_checks.len(),
+            report.summary.required_checks_failed
+        );
+        for check in blocking_checks.as_slice() {
+            println!("doctor.finding severity=blocking key={}", check.key);
+        }
+        for check in warning_checks.as_slice() {
+            println!("doctor.finding severity=warning key={}", check.key);
+        }
         for warning in report.deployment.warnings.as_slice() {
             println!("doctor.warning={warning}");
         }
@@ -54,6 +68,17 @@ pub(crate) fn run_doctor(strict: bool, json: bool) -> Result<()> {
             println!(
                 "doctor.hint.memory_embeddings_model=configure model_provider.openai_embeddings_model (or PALYRA_MODEL_PROVIDER_OPENAI_EMBEDDINGS_MODEL) for openai-compatible semantic memory embeddings"
             );
+        }
+        if !report.connectivity.http.ok || !report.connectivity.grpc.ok || !blocking_checks.is_empty() {
+            println!("doctor.next_step=palyra health");
+            println!("doctor.next_step=palyra logs --lines 50");
+        }
+        if !report.deployment.warnings.is_empty() {
+            println!("doctor.next_step=palyra security audit --offline");
+        }
+        if !blocking_checks.is_empty() || !warning_checks.is_empty() || !report.deployment.warnings.is_empty()
+        {
+            println!("doctor.next_step=palyra support-bundle export --output ./support-bundle.json");
         }
     }
 

@@ -220,6 +220,10 @@ fn run_cli() -> Result<()> {
             commands::setup::run_setup(mode, path, force, tls_scaffold, wizard, wizard_options)
         }
         CliCommand::Doctor { strict, json } => commands::doctor::run_doctor(strict, json),
+        CliCommand::Health { url, grpc_url } => commands::health::run_health(url, grpc_url),
+        CliCommand::Logs { db_path, lines, follow, poll_interval_ms } => {
+            commands::logs::run_logs(db_path, lines, follow, poll_interval_ms)
+        }
         CliCommand::Status { url, grpc_url, admin, token, principal, device_id, channel } => {
             commands::status::run_status(url, grpc_url, admin, token, principal, device_id, channel)
         }
@@ -5715,14 +5719,14 @@ struct AdminCountersSnapshot {
     journal_events: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct JournalRecentResponse {
     total_events: u64,
     hash_chain_enabled: bool,
     events: Vec<JournalRecentEvent>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct JournalRecentEvent {
     event_id: String,
     kind: i32,
@@ -5737,7 +5741,7 @@ struct RunCancelRequestBody {
     reason: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct RunStatusResponse {
     run_id: String,
     state: String,
@@ -5748,7 +5752,7 @@ struct RunStatusResponse {
     tape_events: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct RunTapeResponse {
     run_id: String,
     #[serde(default)]
@@ -5757,7 +5761,7 @@ struct RunTapeResponse {
     events: Vec<RunTapeEvent>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct RunTapeEvent {
     seq: i64,
     event_type: String,
