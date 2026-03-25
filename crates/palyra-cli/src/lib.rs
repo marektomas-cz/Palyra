@@ -9,6 +9,7 @@ pub mod infra;
 pub mod output;
 pub mod support;
 pub mod transport;
+mod tui;
 
 pub mod proto {
     pub mod palyra {
@@ -69,8 +70,7 @@ use cli::{
     CronScheduleTypeArg, DaemonCommand, GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg,
     JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
     OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand,
-    ProtocolCommand, RemoteVerificationModeArg, SecretsCommand, SecurityCommand,
-    SessionsCommand,
+    ProtocolCommand, RemoteVerificationModeArg, SecretsCommand, SecurityCommand, SessionsCommand,
     SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
     WizardOverridesArg,
 };
@@ -235,6 +235,7 @@ fn run_cli() -> Result<()> {
         CliCommand::Message { command } => commands::message::run_message(command),
         CliCommand::Approvals { command } => commands::approvals::run_approvals(command),
         CliCommand::Sessions { command } => commands::sessions::run_sessions(command),
+        CliCommand::Tui { command } => commands::tui::run_tui(command),
         CliCommand::Auth { command } => commands::auth::run_auth(command),
         CliCommand::Channels { command } => commands::channels::run(command),
         CliCommand::Browser { command } => commands::browser::run_browser(command),

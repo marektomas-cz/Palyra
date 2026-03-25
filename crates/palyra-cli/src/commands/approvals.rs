@@ -23,7 +23,7 @@ async fn run_approvals_grpc(command: ApprovalsCommand) -> Result<()> {
         .ok_or_else(|| anyhow!("CLI root context is unavailable for approvals command"))?;
     let connection = root_context.resolve_grpc_connection(
         app::ConnectionOverrides::default(),
-        app::ConnectionDefaults::USER,
+        app::ConnectionDefaults::ADMIN,
     )?;
     let mut client = gateway_v1::approvals_service_client::ApprovalsServiceClient::connect(
         connection.grpc_url.clone(),
@@ -143,21 +143,22 @@ async fn run_approval_decide(
 ) -> Result<()> {
     validate_canonical_id(approval_id.as_str()).context("approval id must be a canonical ULID")?;
     validate_approval_decision_scope(scope, ttl_ms)?;
-    let context =
-        client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
-    let payload = context
-        .client
+    let root_context = app::current_root_context()
+        .ok_or_else(|| anyhow!("CLI root context is unavailable for approvals command"))?;
+    let connection = root_context.resolve_grpc_connection(
+        app::ConnectionOverrides::default(),
+        app::ConnectionDefaults::USER,
+    )?;
+    let runtime = client::operator::OperatorRuntime::new(connection);
+    let payload = runtime
         .decide_approval(
-            approval_id.as_str(),
-            &control_plane::ApprovalDecisionRequest {
-                approved: matches!(decision, ApprovalResolveDecisionArg::Allow),
-                reason: normalize_optional_reason(reason),
-                decision_scope: Some(approval_scope_arg_to_text(scope).to_owned()),
-                decision_scope_ttl_ms: ttl_ms,
-            },
+            approval_id,
+            matches!(decision, ApprovalResolveDecisionArg::Allow),
+            approval_scope_arg_to_text(scope).to_owned(),
+            ttl_ms,
+            normalize_optional_reason(reason),
         )
-        .await
-        .with_context(|| format!("failed to resolve approval {approval_id}"))?;
+        .await?;
     emit_approval_decision(&payload, output::preferred_json(json))
 }
 

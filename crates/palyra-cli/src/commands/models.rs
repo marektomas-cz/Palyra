@@ -6,41 +6,41 @@ const CURATED_TEXT_MODELS: &[&str] = &["gpt-4o-mini", "gpt-4.1-mini"];
 const CURATED_EMBEDDING_MODELS: &[&str] = &["text-embedding-3-small", "text-embedding-3-large"];
 
 #[derive(Debug, Serialize)]
-struct ModelsStatusPayload {
-    path: String,
-    provider_kind: String,
-    openai_base_url: Option<String>,
-    text_model: Option<String>,
-    embeddings_model: Option<String>,
-    embeddings_dims: Option<u32>,
-    auth_profile_id: Option<String>,
-    api_key_configured: bool,
-    migrated: bool,
+pub(crate) struct ModelsStatusPayload {
+    pub(crate) path: String,
+    pub(crate) provider_kind: String,
+    pub(crate) openai_base_url: Option<String>,
+    pub(crate) text_model: Option<String>,
+    pub(crate) embeddings_model: Option<String>,
+    pub(crate) embeddings_dims: Option<u32>,
+    pub(crate) auth_profile_id: Option<String>,
+    pub(crate) api_key_configured: bool,
+    pub(crate) migrated: bool,
 }
 
 #[derive(Debug, Serialize)]
-struct ModelCatalogEntry<'a> {
-    target: &'a str,
-    id: String,
-    configured: bool,
-    preferred: bool,
-    source: &'a str,
+pub(crate) struct ModelCatalogEntry<'a> {
+    pub(crate) target: &'a str,
+    pub(crate) id: String,
+    pub(crate) configured: bool,
+    pub(crate) preferred: bool,
+    pub(crate) source: &'a str,
 }
 
 #[derive(Debug, Serialize)]
-struct ModelsListPayload {
-    status: ModelsStatusPayload,
-    models: Vec<ModelCatalogEntry<'static>>,
+pub(crate) struct ModelsListPayload {
+    pub(crate) status: ModelsStatusPayload,
+    pub(crate) models: Vec<ModelCatalogEntry<'static>>,
 }
 
 #[derive(Debug, Serialize)]
-struct ModelsMutationPayload {
-    path: String,
-    provider_kind: String,
-    target: &'static str,
-    model: String,
-    embeddings_dims: Option<u32>,
-    backups: usize,
+pub(crate) struct ModelsMutationPayload {
+    pub(crate) path: String,
+    pub(crate) provider_kind: String,
+    pub(crate) target: &'static str,
+    pub(crate) model: String,
+    pub(crate) embeddings_dims: Option<u32>,
+    pub(crate) backups: usize,
 }
 
 pub(crate) fn run_models(command: ModelsCommand) -> Result<()> {
@@ -127,7 +127,7 @@ fn emit_models_mutation(payload: &ModelsMutationPayload, json_output: bool) -> R
     std::io::stdout().flush().context("stdout flush failed")
 }
 
-fn build_models_list(path: Option<String>) -> Result<ModelsListPayload> {
+pub(crate) fn build_models_list(path: Option<String>) -> Result<ModelsListPayload> {
     let status = load_models_status(path)?;
     let mut models = Vec::new();
     append_catalog_entries(
@@ -188,7 +188,7 @@ fn append_ad_hoc_entry(
     });
 }
 
-fn mutate_model_defaults(
+pub(crate) fn mutate_model_defaults(
     path: Option<String>,
     backups: usize,
     target: &'static str,
@@ -258,7 +258,7 @@ fn mutate_model_defaults(
     })
 }
 
-fn load_models_status(path: Option<String>) -> Result<ModelsStatusPayload> {
+pub(crate) fn load_models_status(path: Option<String>) -> Result<ModelsStatusPayload> {
     let path = resolve_config_path(path, true)?;
     let (document, migration) = load_document_from_existing_path(Path::new(&path))
         .with_context(|| format!("failed to parse {path}"))?;

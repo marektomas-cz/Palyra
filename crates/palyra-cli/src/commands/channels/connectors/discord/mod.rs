@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::{
     args::ChannelsDiscordCommand,
-    commands::channels::{get_connector_status, post_connector_action},
+    commands::channels::{post_connector_action, resolve_connector_status},
     output::channels as channels_output,
 };
 
@@ -43,7 +43,7 @@ pub(crate) fn run(command: ChannelsDiscordCommand) -> Result<()> {
             json,
         } => {
             let connector_id = request::connector_id(account_id.as_str())?;
-            let response = get_connector_status(
+            let response = resolve_connector_status(
                 connector_id.as_str(),
                 url,
                 token,

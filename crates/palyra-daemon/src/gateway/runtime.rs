@@ -1,7 +1,7 @@
 use super::*;
 use crate::agents::{
-    AgentBindingOutcome, AgentBindingQuery, AgentBindingRequest, AgentDeleteOutcome,
-    AgentListPage, AgentRecord, AgentResolveOutcome, AgentResolveRequest, AgentSetDefaultOutcome,
+    AgentBindingOutcome, AgentBindingQuery, AgentBindingRequest, AgentDeleteOutcome, AgentListPage,
+    AgentRecord, AgentResolveOutcome, AgentResolveRequest, AgentSetDefaultOutcome,
     AgentUnbindOutcome, AgentUnbindRequest, SessionAgentBinding,
 };
 use crate::application::auth::map_auth_profile_error;
@@ -2509,11 +2509,10 @@ impl GatewayRuntimeState {
         request: AgentUnbindRequest,
     ) -> Result<AgentUnbindOutcome, Status> {
         let state = Arc::clone(self);
-        let result = tokio::task::spawn_blocking(move || {
-            state.unbind_agent_for_context_blocking(&request)
-        })
-        .await
-        .map_err(|_| Status::internal("agent unbind worker panicked"))?;
+        let result =
+            tokio::task::spawn_blocking(move || state.unbind_agent_for_context_blocking(&request))
+                .await
+                .map_err(|_| Status::internal("agent unbind worker panicked"))?;
         match &result {
             Ok(outcome) => {
                 if outcome.removed {

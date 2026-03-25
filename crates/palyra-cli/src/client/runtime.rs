@@ -24,10 +24,7 @@ impl GatewayRunStream {
     }
 
     pub(crate) async fn send_request(&self, request: common_v1::RunStreamRequest) -> Result<()> {
-        self.request_sender
-            .send(request)
-            .await
-            .context("failed to queue RunStream request message")
+        self.request_sender.send(request).await.context("failed to queue RunStream request message")
     }
 
     pub(crate) async fn send_tool_approval_response(
@@ -58,7 +55,9 @@ impl GatewayRuntimeClient {
             connection.grpc_url.clone(),
         )
         .await
-        .with_context(|| format!("failed to connect gateway gRPC endpoint {}", connection.grpc_url))?;
+        .with_context(|| {
+            format!("failed to connect gateway gRPC endpoint {}", connection.grpc_url)
+        })?;
         Ok(Self { client, connection })
     }
 
@@ -85,11 +84,12 @@ impl GatewayRuntimeClient {
             .map(|response| response.into_inner())
     }
 
-    pub(crate) async fn get_agent(&mut self, agent_id: String) -> Result<gateway_v1::GetAgentResponse> {
-        let request = self.request(gateway_v1::GetAgentRequest {
-            v: CANONICAL_PROTOCOL_MAJOR,
-            agent_id,
-        })?;
+    pub(crate) async fn get_agent(
+        &mut self,
+        agent_id: String,
+    ) -> Result<gateway_v1::GetAgentResponse> {
+        let request =
+            self.request(gateway_v1::GetAgentRequest { v: CANONICAL_PROTOCOL_MAJOR, agent_id })?;
         self.client
             .get_agent(request)
             .await
@@ -113,10 +113,8 @@ impl GatewayRuntimeClient {
         &mut self,
         agent_id: String,
     ) -> Result<gateway_v1::DeleteAgentResponse> {
-        let request = self.request(gateway_v1::DeleteAgentRequest {
-            v: CANONICAL_PROTOCOL_MAJOR,
-            agent_id,
-        })?;
+        let request =
+            self.request(gateway_v1::DeleteAgentRequest { v: CANONICAL_PROTOCOL_MAJOR, agent_id })?;
         self.client
             .delete_agent(request)
             .await
@@ -258,12 +256,8 @@ impl GatewayRuntimeClient {
             .context("failed to queue initial RunStream request message")?;
         let mut request = Request::new(ReceiverStream::new(request_receiver));
         inject_run_stream_metadata(request.metadata_mut(), &self.connection)?;
-        let event_stream = self
-            .client
-            .run_stream(request)
-            .await
-            .context("failed to call RunStream")?
-            .into_inner();
+        let event_stream =
+            self.client.run_stream(request).await.context("failed to call RunStream")?.into_inner();
         Ok(GatewayRunStream { event_stream, request_sender })
     }
 }

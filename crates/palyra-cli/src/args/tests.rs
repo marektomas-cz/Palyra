@@ -12,7 +12,7 @@ use super::{
     ModelsCommand, OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand,
     PolicyCommand, ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg,
     SecretsCommand, SecretsConfigureCommand, SecurityCommand, SessionsCommand,
-    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand, TuiCommand,
     UninstallCommand, UpdateCommand, WizardOverridesArg,
 };
 #[cfg(not(windows))]
@@ -740,6 +740,65 @@ fn parse_message_send_with_thread_id() {
                 device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
                 channel: None,
                 json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_tui_with_session_controls() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "tui",
+        "--grpc-url",
+        "http://127.0.0.1:7443",
+        "--token",
+        "test-token",
+        "--session-key",
+        "ops:triage",
+        "--session-label",
+        "Ops Triage",
+        "--require-existing",
+        "--allow-sensitive-tools",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Tui {
+            command: TuiCommand {
+                grpc_url: Some("http://127.0.0.1:7443".to_owned()),
+                token: Some("test-token".to_owned()),
+                principal: None,
+                device_id: None,
+                channel: None,
+                session_id: None,
+                session_key: Some("ops:triage".to_owned()),
+                session_label: Some("Ops Triage".to_owned()),
+                require_existing: true,
+                allow_sensitive_tools: true,
+                include_archived_sessions: false,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_tui_with_archived_sessions_flag() {
+    let parsed = Cli::parse_from(["palyra", "tui", "--include-archived-sessions"]);
+    assert_eq!(
+        parsed.command,
+        Command::Tui {
+            command: TuiCommand {
+                grpc_url: None,
+                token: None,
+                principal: None,
+                device_id: None,
+                channel: None,
+                session_id: None,
+                session_key: None,
+                session_label: None,
+                require_existing: false,
+                allow_sensitive_tools: false,
+                include_archived_sessions: true,
             }
         }
     );
@@ -3423,6 +3482,37 @@ fn parse_pairing_pair_rejects_proof_without_insecure_ack() {
         "--approve",
     ]);
     assert!(result.is_err(), "proof should require explicit insecure acknowledgement flag");
+}
+
+#[test]
+fn parse_tui_with_session_key() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "tui",
+        "--session-key",
+        "ops:triage",
+        "--session-label",
+        "Ops Triage",
+        "--allow-sensitive-tools",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Tui {
+            command: TuiCommand {
+                grpc_url: None,
+                token: None,
+                principal: None,
+                device_id: None,
+                channel: None,
+                session_id: None,
+                session_key: Some("ops:triage".to_owned()),
+                session_label: Some("Ops Triage".to_owned()),
+                require_existing: false,
+                allow_sensitive_tools: true,
+                include_archived_sessions: false,
+            }
+        }
+    );
 }
 
 #[test]

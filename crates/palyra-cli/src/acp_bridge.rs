@@ -212,17 +212,18 @@ impl PalyraAcpAgent {
         require_existing: bool,
         reset_session: bool,
     ) -> acp::Result<SessionBinding> {
-        let mut client =
-            GatewayRuntimeClient::connect(self.connection.clone()).await.map_err(acp_internal_error)?;
+        let mut client = GatewayRuntimeClient::connect(self.connection.clone())
+            .await
+            .map_err(acp_internal_error)?;
         let response = client
             .resolve_session(gateway_v1::ResolveSessionRequest {
-            v: 1,
-            session_id: None,
-            session_key: requested_session_key.clone(),
-            session_label: session_label.clone().unwrap_or_default(),
-            require_existing,
-            reset_session,
-        })
+                v: 1,
+                session_id: None,
+                session_key: requested_session_key.clone(),
+                session_label: session_label.clone().unwrap_or_default(),
+                require_existing,
+                reset_session,
+            })
             .await
             .map_err(acp_internal_error)?;
         let session = response.session.ok_or_else(|| {
@@ -285,12 +286,10 @@ impl PalyraAcpAgent {
         &self,
         cursor: Option<String>,
     ) -> acp::Result<gateway_v1::ListSessionsResponse> {
-        let mut client =
-            GatewayRuntimeClient::connect(self.connection.clone()).await.map_err(acp_internal_error)?;
-        client
-            .list_sessions(cursor, false, Some(100))
+        let mut client = GatewayRuntimeClient::connect(self.connection.clone())
             .await
-            .map_err(acp_internal_error)
+            .map_err(acp_internal_error)?;
+        client.list_sessions(cursor, false, Some(100)).await.map_err(acp_internal_error)
     }
 
     async fn abort_run_for_session(&self, acp_session_id: &acp::SessionId) -> acp::Result<()> {
@@ -303,8 +302,9 @@ impl PalyraAcpAgent {
             return Ok(());
         };
 
-        let mut client =
-            GatewayRuntimeClient::connect(self.connection.clone()).await.map_err(acp_internal_error)?;
+        let mut client = GatewayRuntimeClient::connect(self.connection.clone())
+            .await
+            .map_err(acp_internal_error)?;
         let _ = client
             .abort_run(run_id, Some("acp_session_cancel".to_owned()))
             .await
@@ -346,9 +346,11 @@ impl PalyraAcpAgent {
         initial_request.reset_session = session_overrides.reset_session.unwrap_or(false);
         initial_request.require_existing = session_overrides.require_existing.unwrap_or(false);
 
-        let mut client =
-            GatewayRuntimeClient::connect(self.connection.clone()).await.map_err(acp_internal_error)?;
-        let mut run_stream = client.open_run_stream(initial_request).await.map_err(acp_internal_error)?;
+        let mut client = GatewayRuntimeClient::connect(self.connection.clone())
+            .await
+            .map_err(acp_internal_error)?;
+        let mut run_stream =
+            client.open_run_stream(initial_request).await.map_err(acp_internal_error)?;
 
         {
             let mut state = self.lock_state()?;
@@ -359,7 +361,6 @@ impl PalyraAcpAgent {
 
         let mut stop_reason = acp::StopReason::EndTurn;
         while let Some(event) = run_stream.next_event().await.map_err(acp_internal_error)? {
-
             match event.body {
                 Some(common_v1::run_stream_event::Body::ModelToken(token)) => {
                     if !token.token.is_empty() {
@@ -414,7 +415,10 @@ impl PalyraAcpAgent {
                             decision_scope,
                             decision_scope_ttl_ms,
                         )?;
-                        run_stream.send_request(approval_request).await.map_err(acp_internal_error)?;
+                        run_stream
+                            .send_request(approval_request)
+                            .await
+                            .map_err(acp_internal_error)?;
                     }
                 }
                 Some(common_v1::run_stream_event::Body::ToolResult(result)) => {

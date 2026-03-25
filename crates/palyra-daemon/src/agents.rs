@@ -419,11 +419,8 @@ impl AgentRegistry {
             .ok_or_else(|| AgentRegistryError::AgentNotFound(agent_id.clone()))?;
         let removed_agent = next.agents.remove(index);
         let previous_default_agent_id = next.default_agent_id.clone();
-        let removed_bindings_count = next
-            .session_bindings
-            .iter()
-            .filter(|binding| binding.agent_id == agent_id)
-            .count();
+        let removed_bindings_count =
+            next.session_bindings.iter().filter(|binding| binding.agent_id == agent_id).count();
         next.session_bindings.retain(|binding| binding.agent_id != agent_id);
         if previous_default_agent_id.as_deref() == Some(agent_id.as_str()) {
             next.default_agent_id = next.agents.first().map(|agent| agent.agent_id.clone());
@@ -465,16 +462,12 @@ impl AgentRegistry {
             .session_bindings
             .iter()
             .filter(|binding| {
-                agent_id
-                    .as_deref()
-                    .is_none_or(|value| binding.agent_id == value)
-                    && principal
+                agent_id.as_deref().is_none_or(|value| binding.agent_id == value)
+                    && principal.as_deref().is_none_or(|value| binding.principal == value)
+                    && channel
                         .as_deref()
-                        .is_none_or(|value| binding.principal == value)
-                    && channel.as_deref().is_none_or(|value| binding.channel.as_deref() == Some(value))
-                    && session_id
-                        .as_deref()
-                        .is_none_or(|value| binding.session_id == value)
+                        .is_none_or(|value| binding.channel.as_deref() == Some(value))
+                    && session_id.as_deref().is_none_or(|value| binding.session_id == value)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -527,9 +520,8 @@ impl AgentRegistry {
             };
             next.session_bindings.push(binding.clone());
             if next.session_bindings.len() > MAX_SESSION_BINDINGS {
-                next.session_bindings.sort_by(|left, right| {
-                    right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms)
-                });
+                next.session_bindings
+                    .sort_by(|left, right| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms));
                 next.session_bindings.truncate(MAX_SESSION_BINDINGS);
             }
             binding

@@ -215,7 +215,8 @@ pub(crate) async fn run_agents_async(
             }
         }
         AgentsCommand::SetDefault { agent_id, json: _ } => {
-            let response = client.set_default_agent(normalize_agent_id_cli(agent_id.as_str())?).await?;
+            let response =
+                client.set_default_agent(normalize_agent_id_cli(agent_id.as_str())?).await?;
             if json {
                 println!(
                     "{}",
@@ -374,9 +375,8 @@ pub(crate) async fn run_agents_async(
                     persist_session_binding: persist_binding,
                 })
                 .await?;
-            let agent = response
-                .agent
-                .context("ResolveAgentForContext returned empty agent payload")?;
+            let agent =
+                response.agent.context("ResolveAgentForContext returned empty agent payload")?;
             if json {
                 println!(
                     "{}",

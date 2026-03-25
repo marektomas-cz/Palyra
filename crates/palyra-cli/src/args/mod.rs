@@ -29,6 +29,7 @@ mod security;
 mod sessions;
 mod skills;
 mod support_bundle;
+mod tui;
 mod uninstall;
 mod update;
 
@@ -69,6 +70,7 @@ pub use security::SecurityCommand;
 pub use sessions::SessionsCommand;
 pub use skills::{SkillsCommand, SkillsPackageCommand};
 pub use support_bundle::SupportBundleCommand;
+pub use tui::TuiCommand;
 pub use uninstall::UninstallCommand;
 pub use update::UpdateCommand;
 
@@ -181,6 +183,16 @@ const COMPLETION_AFTER_HELP: &str = "\
 Examples:
   palyra completion --shell powershell
   palyra completion --shell bash > palyra.bash";
+
+const TUI_AFTER_HELP: &str = "\
+Examples:
+  palyra tui
+  palyra tui --session-key ops:triage
+  palyra tui --allow-sensitive-tools --include-archived-sessions
+
+Keys:
+  Tab switches focus, F2/F3/F4 open agent/session/model pickers, F5 opens settings, Ctrl+R reloads data.
+  Enter sends input, `/` starts slash commands, `!` enters the local shell flow with explicit opt-in.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -345,6 +357,14 @@ pub enum Command {
     Sessions {
         #[command(subcommand)]
         command: SessionsCommand,
+    },
+    #[command(
+        about = "Launch the terminal operator client",
+        after_long_help = TUI_AFTER_HELP
+    )]
+    Tui {
+        #[command(flatten)]
+        command: TuiCommand,
     },
     Auth {
         #[command(subcommand)]

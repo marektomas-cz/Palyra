@@ -2076,9 +2076,7 @@ impl JournalStore {
             || session.device_id != request.device_id
             || session.channel != request.channel
         {
-            return Err(JournalError::SessionIdentityMismatch {
-                session_id: session.session_id,
-            });
+            return Err(JournalError::SessionIdentityMismatch { session_id: session.session_id });
         }
 
         let run_count = guard.query_row(

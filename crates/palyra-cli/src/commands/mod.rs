@@ -32,6 +32,7 @@ pub mod setup;
 pub mod skills;
 pub mod status;
 pub mod support_bundle;
+pub mod tui;
 pub mod tunnel;
 pub mod uninstall;
 pub mod update;

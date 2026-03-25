@@ -24,12 +24,12 @@ pub(crate) async fn run_sessions_async(
         | SessionsCommand::Cleanup { json, .. }
         | SessionsCommand::Abort { json, .. } => output::preferred_json(*json),
     };
-    let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
+    let runtime = client::operator::OperatorRuntime::new(connection);
 
     match command {
         SessionsCommand::List { after, limit, include_archived, json: _, ndjson } => {
             let ndjson = output::preferred_ndjson(json, ndjson);
-            let response = client.list_sessions(after, include_archived, limit).await?;
+            let response = runtime.list_sessions(after, include_archived, limit).await?;
             if json {
                 println!(
                     "{}",
@@ -74,7 +74,7 @@ pub(crate) async fn run_sessions_async(
             }
         }
         SessionsCommand::Show { session_id, session_key, json: _ } => {
-            let response = client
+            let response = runtime
                 .resolve_session(build_resolve_session_request(
                     session_id,
                     session_key,
@@ -83,9 +83,8 @@ pub(crate) async fn run_sessions_async(
                     false,
                 )?)
                 .await?;
-            let session = response
-                .session
-                .context("ResolveSession returned empty session payload")?;
+            let session =
+                response.session.context("ResolveSession returned empty session payload")?;
             if json {
                 println!(
                     "{}",
@@ -120,7 +119,7 @@ pub(crate) async fn run_sessions_async(
             reset,
             json: _,
         } => {
-            let response = client
+            let response = runtime
                 .resolve_session(build_resolve_session_request(
                     session_id,
                     session_key,
@@ -129,9 +128,8 @@ pub(crate) async fn run_sessions_async(
                     reset,
                 )?)
                 .await?;
-            let session = response
-                .session
-                .context("ResolveSession returned empty session payload")?;
+            let session =
+                response.session.context("ResolveSession returned empty session payload")?;
             if json {
                 println!(
                     "{}",
@@ -154,7 +152,7 @@ pub(crate) async fn run_sessions_async(
             }
         }
         SessionsCommand::Rename { session_id, session_label, json: _ } => {
-            let response = client
+            let response = runtime
                 .resolve_session(gateway_v1::ResolveSessionRequest {
                     v: CANONICAL_PROTOCOL_MAJOR,
                     session_id: Some(common_v1::CanonicalId {
@@ -166,9 +164,8 @@ pub(crate) async fn run_sessions_async(
                     reset_session: false,
                 })
                 .await?;
-            let session = response
-                .session
-                .context("ResolveSession returned empty session payload")?;
+            let session =
+                response.session.context("ResolveSession returned empty session payload")?;
             if json {
                 println!(
                     "{}",
@@ -189,7 +186,7 @@ pub(crate) async fn run_sessions_async(
             }
         }
         SessionsCommand::Reset { session_id, json: _ } => {
-            let response = client
+            let response = runtime
                 .resolve_session(gateway_v1::ResolveSessionRequest {
                     v: CANONICAL_PROTOCOL_MAJOR,
                     session_id: Some(common_v1::CanonicalId {
@@ -201,9 +198,8 @@ pub(crate) async fn run_sessions_async(
                     reset_session: true,
                 })
                 .await?;
-            let session = response
-                .session
-                .context("ResolveSession returned empty session payload")?;
+            let session =
+                response.session.context("ResolveSession returned empty session payload")?;
             if json {
                 println!(
                     "{}",
@@ -226,7 +222,7 @@ pub(crate) async fn run_sessions_async(
         SessionsCommand::Cleanup { session_id, session_key, yes, dry_run, json: _ } => {
             let request = build_cleanup_session_request(session_id, session_key)?;
             if dry_run {
-                let response = client
+                let response = runtime
                     .resolve_session(gateway_v1::ResolveSessionRequest {
                         v: CANONICAL_PROTOCOL_MAJOR,
                         session_id: request.session_id.clone(),
@@ -236,9 +232,8 @@ pub(crate) async fn run_sessions_async(
                         reset_session: false,
                     })
                     .await?;
-                let session = response
-                    .session
-                    .context("ResolveSession returned empty session payload")?;
+                let session =
+                    response.session.context("ResolveSession returned empty session payload")?;
                 if json {
                     println!(
                         "{}",
@@ -263,10 +258,9 @@ pub(crate) async fn run_sessions_async(
                         "sessions cleanup is destructive; rerun with --yes or preview with --dry-run"
                     );
                 }
-                let response = client.cleanup_session(request).await?;
-                let session = response
-                    .session
-                    .context("CleanupSession returned empty session payload")?;
+                let response = runtime.cleanup_session(request).await?;
+                let session =
+                    response.session.context("CleanupSession returned empty session payload")?;
                 if json {
                     println!(
                         "{}",
@@ -293,7 +287,7 @@ pub(crate) async fn run_sessions_async(
         }
         SessionsCommand::Abort { run_id, reason, json: _ } => {
             let response =
-                client.abort_run(resolve_or_generate_canonical_id(Some(run_id))?, reason).await?;
+                runtime.abort_run(resolve_or_generate_canonical_id(Some(run_id))?, reason).await?;
             if json {
                 println!(
                     "{}",
@@ -369,7 +363,11 @@ fn optional_unix_ms_text(value: i64) -> String {
 }
 
 fn empty_unix_ms(value: i64) -> Option<i64> {
-    if value > 0 { Some(value) } else { None }
+    if value > 0 {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 fn build_cleanup_session_request(

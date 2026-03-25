@@ -40,7 +40,7 @@ pub(crate) fn run(command: ChannelsCommand) -> Result<()> {
             channel,
             json,
         } => {
-            let response = get_connector_status(
+            let response = resolve_connector_status(
                 connector_id.as_str(),
                 url,
                 token,
@@ -303,7 +303,7 @@ pub(crate) fn run(command: ChannelsCommand) -> Result<()> {
     std::io::stdout().flush().context("stdout flush failed")
 }
 
-pub(crate) fn get_connector_status(
+pub(crate) fn resolve_connector_status(
     connector_id: &str,
     url: Option<String>,
     token: Option<String>,

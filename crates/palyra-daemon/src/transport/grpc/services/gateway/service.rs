@@ -9,7 +9,10 @@ use tracing::{info, warn};
 use ulid::Ulid;
 
 use crate::{
-    agents::{AgentBindingQuery, AgentBindingRequest, AgentCreateRequest, AgentResolveRequest, AgentUnbindRequest},
+    agents::{
+        AgentBindingQuery, AgentBindingRequest, AgentCreateRequest, AgentResolveRequest,
+        AgentUnbindRequest,
+    },
     application::{
         route_message::orchestration::handle_routed_route_message,
         run_stream::orchestration::{
@@ -274,7 +277,8 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 channel: context.channel.clone(),
             })
             .await?;
-        self.state.clear_tool_approval_cache_for_session(&context, outcome.session.session_id.as_str());
+        self.state
+            .clear_tool_approval_cache_for_session(&context, outcome.session.session_id.as_str());
         let _ = record_agent_journal_event(
             &self.state,
             &context,
@@ -986,19 +990,22 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
         .inspect_err(|_error| {
             self.state.record_denied();
         })?;
-        let bindings = self
-            .state
-            .list_agent_bindings(AgentBindingQuery {
-                agent_id: non_empty(payload.agent_id),
-                principal: non_empty(payload.principal),
-                channel: non_empty(payload.channel),
-                session_id: optional_canonical_id(payload.session_id, "session_id")
-                    .inspect_err(|_error| {
-                        self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
-                    })?,
-                limit: if payload.limit == 0 { None } else { Some(payload.limit as usize) },
-            })
-            .await?;
+        let bindings =
+            self.state
+                .list_agent_bindings(AgentBindingQuery {
+                    agent_id: non_empty(payload.agent_id),
+                    principal: non_empty(payload.principal),
+                    channel: non_empty(payload.channel),
+                    session_id: optional_canonical_id(payload.session_id, "session_id")
+                        .inspect_err(|_error| {
+                            self.state
+                                .counters
+                                .agent_validation_failures
+                                .fetch_add(1, Ordering::Relaxed);
+                        })?,
+                    limit: if payload.limit == 0 { None } else { Some(payload.limit as usize) },
+                })
+                .await?;
         Ok(Response::new(gateway_v1::ListAgentBindingsResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
             bindings: bindings.iter().map(agent_binding_message).collect(),
