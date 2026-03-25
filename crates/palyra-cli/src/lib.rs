@@ -2359,7 +2359,17 @@ where
     let resolved = prepare_agent_run_input(client, request).await?;
     let session_id = session_summary_id(&resolved.session)?;
     let mut stream = client.open_run_stream(build_resolved_run_stream_request(&resolved)?).await?;
+    let mut request_stream_closed = false;
     while let Some(event) = stream.next_event().await? {
+        let reached_terminal_status = matches!(
+            event.body.as_ref(),
+            Some(common_v1::run_stream_event::Body::Status(status))
+                if is_terminal_stream_status(status.kind)
+        );
+        if !request_stream_closed && run_stream_can_close_request_side(&event) {
+            stream.close_request_stream().await?;
+            request_stream_closed = true;
+        }
         emit_event(&event)?;
         std::io::stdout().flush().context("stdout flush failed")?;
         if let Some(common_v1::run_stream_event::Body::ToolApprovalRequest(approval)) =
@@ -2380,6 +2390,9 @@ where
                     },
                 )
                 .await?;
+        }
+        if reached_terminal_status {
+            break;
         }
     }
     Ok(resolved)
@@ -2418,16 +2431,18 @@ fn parse_acp_shim_input_line(
     if prompt.is_empty() {
         anyhow::bail!("NDJSON ACP input requires `prompt` field with non-empty text");
     }
-    build_agent_run_input(
-        parsed.session_id,
-        parsed.session_key,
-        parsed.session_label,
-        parsed.require_existing.unwrap_or(false),
-        parsed.reset_session.unwrap_or(false),
-        parsed.run_id,
-        prompt.to_owned(),
-        parsed.allow_sensitive_tools.unwrap_or(default_allow_sensitive_tools),
-    )
+    build_agent_run_input(AgentRunInputArgs {
+        session_id: parsed.session_id,
+        session_key: parsed.session_key,
+        session_label: parsed.session_label,
+        require_existing: parsed.require_existing.unwrap_or(false),
+        reset_session: parsed.reset_session.unwrap_or(false),
+        run_id: parsed.run_id,
+        prompt: prompt.to_owned(),
+        allow_sensitive_tools: parsed
+            .allow_sensitive_tools
+            .unwrap_or(default_allow_sensitive_tools),
+    })
 }
 
 fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<String> {
@@ -2455,7 +2470,7 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
     Ok(prompt.to_owned())
 }
 
-fn build_agent_run_input(
+struct AgentRunInputArgs {
     session_id: Option<String>,
     session_key: Option<String>,
     session_label: Option<String>,
@@ -2464,18 +2479,21 @@ fn build_agent_run_input(
     run_id: Option<String>,
     prompt: String,
     allow_sensitive_tools: bool,
-) -> Result<AgentRunInput> {
+}
+
+fn build_agent_run_input(input: AgentRunInputArgs) -> Result<AgentRunInput> {
     Ok(AgentRunInput {
-        session_id: session_id
+        session_id: input
+            .session_id
             .map(|value| resolve_or_generate_canonical_id(Some(value)))
             .transpose()?,
-        session_key: normalize_optional_owned_text(session_key),
-        session_label: normalize_optional_owned_text(session_label),
-        require_existing,
-        reset_session,
-        run_id: resolve_or_generate_canonical_id(run_id)?,
-        prompt,
-        allow_sensitive_tools,
+        session_key: normalize_optional_owned_text(input.session_key),
+        session_label: normalize_optional_owned_text(input.session_label),
+        require_existing: input.require_existing,
+        reset_session: input.reset_session,
+        run_id: resolve_or_generate_canonical_id(input.run_id)?,
+        prompt: input.prompt,
+        allow_sensitive_tools: input.allow_sensitive_tools,
     })
 }
 
@@ -2931,6 +2949,22 @@ fn emit_acp_event_ndjson(event: &common_v1::RunStreamEvent) -> Result<()> {
         serde_json::to_string(&payload).context("failed to serialize ACP NDJSON event")?
     );
     Ok(())
+}
+
+fn is_terminal_stream_status(kind: i32) -> bool {
+    kind == common_v1::stream_status::StatusKind::Done as i32
+        || kind == common_v1::stream_status::StatusKind::Failed as i32
+}
+
+fn run_stream_can_close_request_side(event: &common_v1::RunStreamEvent) -> bool {
+    matches!(
+        event.body.as_ref(),
+        Some(common_v1::run_stream_event::Body::ModelToken(token)) if token.is_final
+    ) || matches!(
+        event.body.as_ref(),
+        Some(common_v1::run_stream_event::Body::ToolResult(_))
+            | Some(common_v1::run_stream_event::Body::ToolAttestation(_))
+    )
 }
 
 fn stream_status_kind_to_text(kind: i32) -> &'static str {

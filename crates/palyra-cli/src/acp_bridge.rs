@@ -14,7 +14,7 @@ use crate::{
     build_agent_run_input, build_run_stream_request, build_runtime,
     client::runtime::GatewayRuntimeClient,
     proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
-    AgentConnection,
+    AgentConnection, AgentRunInputArgs,
 };
 
 const META_SESSION_KEY: &str = "sessionKey";
@@ -328,16 +328,16 @@ impl PalyraAcpAgent {
             ));
         }
 
-        let run_input = build_agent_run_input(
-            Some(binding.gateway_session_id_ulid.clone()),
-            None,
-            None,
-            false,
-            false,
-            None,
+        let run_input = build_agent_run_input(AgentRunInputArgs {
+            session_id: Some(binding.gateway_session_id_ulid.clone()),
+            session_key: None,
+            session_label: None,
+            require_existing: false,
+            reset_session: false,
+            run_id: None,
             prompt,
-            self.allow_sensitive_tools,
-        )
+            allow_sensitive_tools: self.allow_sensitive_tools,
+        })
         .map_err(acp_internal_error)?;
         let mut initial_request =
             build_run_stream_request(&run_input).map_err(acp_internal_error)?;

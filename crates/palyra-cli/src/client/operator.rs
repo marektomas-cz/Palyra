@@ -21,7 +21,7 @@ enum RunStreamControl {
 
 #[derive(Debug)]
 enum ManagedRunStreamEvent {
-    Event(common_v1::RunStreamEvent),
+    Event(Box<common_v1::RunStreamEvent>),
     Finished,
     Failed(String),
 }
@@ -39,7 +39,7 @@ impl ManagedRunStream {
 
     pub(crate) async fn next_event(&mut self) -> Result<Option<common_v1::RunStreamEvent>> {
         match self.event_rx.recv().await {
-            Some(ManagedRunStreamEvent::Event(event)) => Ok(Some(event)),
+            Some(ManagedRunStreamEvent::Event(event)) => Ok(Some(*event)),
             Some(ManagedRunStreamEvent::Finished) | None => Ok(None),
             Some(ManagedRunStreamEvent::Failed(error)) => Err(anyhow!("{error}")),
         }
@@ -146,11 +146,12 @@ impl OperatorRuntime {
         let background_session_id = session_id.clone();
         let background_run_id = run_id.clone();
         tokio::spawn(async move {
+            let mut request_stream_closed = false;
             loop {
                 tokio::select! {
                     maybe_control = control_rx.recv() => {
                         let Some(control) = maybe_control else {
-                            continue;
+                            break;
                         };
                         match control {
                             RunStreamControl::Approval(response) => {
@@ -171,7 +172,28 @@ impl OperatorRuntime {
                     next_event = stream.next_event() => {
                         match next_event {
                             Ok(Some(event)) => {
-                                if event_tx.send(ManagedRunStreamEvent::Event(event)).is_err() {
+                                let reached_terminal_status = matches!(
+                                    event.body.as_ref(),
+                                    Some(common_v1::run_stream_event::Body::Status(status))
+                                        if is_terminal_stream_status(status.kind)
+                                );
+                                if !request_stream_closed
+                                    && run_stream_can_close_request_side(&event)
+                                {
+                                    if let Err(error) = stream.close_request_stream().await {
+                                        let _ = event_tx.send(ManagedRunStreamEvent::Failed(error.to_string()));
+                                        break;
+                                    }
+                                    request_stream_closed = true;
+                                }
+                                if event_tx
+                                    .send(ManagedRunStreamEvent::Event(Box::new(event)))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                if reached_terminal_status {
+                                    let _ = event_tx.send(ManagedRunStreamEvent::Finished);
                                     break;
                                 }
                             }
@@ -221,7 +243,6 @@ impl OperatorRuntime {
             )
             .await
             .with_context(|| format!("failed to resolve approval {approval_id}"))
-            .map_err(Into::into)
     }
 
     pub(crate) async fn message_capabilities(

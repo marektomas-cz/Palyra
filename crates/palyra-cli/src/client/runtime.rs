@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
+use futures::stream;
 use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tokio_stream::StreamExt;
 use tonic::Request;
 
 use crate::*;
@@ -12,7 +13,12 @@ pub(crate) struct GatewayRuntimeClient {
 
 pub(crate) struct GatewayRunStream {
     event_stream: tonic::Streaming<common_v1::RunStreamEvent>,
-    request_sender: mpsc::Sender<common_v1::RunStreamRequest>,
+    request_sender: mpsc::Sender<RunStreamRequestEnvelope>,
+}
+
+enum RunStreamRequestEnvelope {
+    Request(Box<common_v1::RunStreamRequest>),
+    Close,
 }
 
 impl GatewayRunStream {
@@ -24,7 +30,17 @@ impl GatewayRunStream {
     }
 
     pub(crate) async fn send_request(&self, request: common_v1::RunStreamRequest) -> Result<()> {
-        self.request_sender.send(request).await.context("failed to queue RunStream request message")
+        self.request_sender
+            .send(RunStreamRequestEnvelope::Request(Box::new(request)))
+            .await
+            .context("failed to queue RunStream request message")
+    }
+
+    pub(crate) async fn close_request_stream(&self) -> Result<()> {
+        self.request_sender
+            .send(RunStreamRequestEnvelope::Close)
+            .await
+            .context("failed to close RunStream request stream")
     }
 
     pub(crate) async fn send_tool_approval_response(
@@ -251,10 +267,16 @@ impl GatewayRuntimeClient {
     ) -> Result<GatewayRunStream> {
         let (request_sender, request_receiver) = mpsc::channel(16);
         request_sender
-            .send(initial_request)
+            .send(RunStreamRequestEnvelope::Request(Box::new(initial_request)))
             .await
             .context("failed to queue initial RunStream request message")?;
-        let mut request = Request::new(ReceiverStream::new(request_receiver));
+        let request_stream = stream::unfold(request_receiver, |mut receiver| async move {
+            match receiver.recv().await {
+                Some(RunStreamRequestEnvelope::Request(request)) => Some((*request, receiver)),
+                Some(RunStreamRequestEnvelope::Close) | None => None,
+            }
+        });
+        let mut request = Request::new(request_stream);
         inject_run_stream_metadata(request.metadata_mut(), &self.connection)?;
         let event_stream =
             self.client.run_stream(request).await.context("failed to call RunStream")?.into_inner();

@@ -446,16 +446,16 @@ impl App {
         }
         self.push_entry(EntryKind::User, "You", value.clone());
         self.status_line = "Running prompt".to_owned();
-        let request = build_agent_run_input(
-            self.session.session_id.as_ref().map(|value| value.ulid.clone()),
-            None,
-            None,
-            true,
-            false,
-            None,
-            value,
-            self.allow_sensitive_tools,
-        )?;
+        let request = build_agent_run_input(AgentRunInputArgs {
+            session_id: self.session.session_id.as_ref().map(|value| value.ulid.clone()),
+            session_key: None,
+            session_label: None,
+            require_existing: true,
+            reset_session: false,
+            run_id: None,
+            prompt: value,
+            allow_sensitive_tools: self.allow_sensitive_tools,
+        })?;
         let stream = self.runtime.start_run_stream(request).await?;
         self.last_run_id = Some(stream.run_id().to_owned());
         self.active_stream = Some(stream);

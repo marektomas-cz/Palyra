@@ -460,6 +460,9 @@ public enum PalyraGatewayV1 {
     public struct Agent: Equatable {
         public init() {}
     }
+    public struct AgentBinding: Equatable {
+        public init() {}
+    }
     public struct AppendEventRequest: Equatable {
         public init() {}
     }
@@ -472,6 +475,12 @@ public enum PalyraGatewayV1 {
     public struct ApprovalRecord: Equatable {
         public init() {}
     }
+    public struct BindAgentForContextRequest: Equatable {
+        public init() {}
+    }
+    public struct BindAgentForContextResponse: Equatable {
+        public init() {}
+    }
     public struct Canvas: Equatable {
         public init() {}
     }
@@ -479,6 +488,12 @@ public enum PalyraGatewayV1 {
         public init() {}
     }
     public struct CanvasBundle: Equatable {
+        public init() {}
+    }
+    public struct CleanupSessionRequest: Equatable {
+        public init() {}
+    }
+    public struct CleanupSessionResponse: Equatable {
         public init() {}
     }
     public struct CloseCanvasRequest: Equatable {
@@ -497,6 +512,12 @@ public enum PalyraGatewayV1 {
         public init() {}
     }
     public struct CreateCanvasResponse: Equatable {
+        public init() {}
+    }
+    public struct DeleteAgentRequest: Equatable {
+        public init() {}
+    }
+    public struct DeleteAgentResponse: Equatable {
         public init() {}
     }
     public struct DeleteSecretRequest: Equatable {
@@ -539,6 +560,12 @@ public enum PalyraGatewayV1 {
         public init() {}
     }
     public struct HealthResponse: Equatable {
+        public init() {}
+    }
+    public struct ListAgentBindingsRequest: Equatable {
+        public init() {}
+    }
+    public struct ListAgentBindingsResponse: Equatable {
         public init() {}
     }
     public struct ListAgentsRequest: Equatable {
@@ -607,6 +634,12 @@ public enum PalyraGatewayV1 {
     public struct SubscribeCanvasUpdatesResponse: Equatable {
         public init() {}
     }
+    public struct UnbindAgentForContextRequest: Equatable {
+        public init() {}
+    }
+    public struct UnbindAgentForContextResponse: Equatable {
+        public init() {}
+    }
     public struct UpdateCanvasRequest: Equatable {
         public init() {}
     }
@@ -631,9 +664,13 @@ public enum PalyraGatewayV1 {
     public protocol GatewayServiceClient {
         func abortRun()
         func appendEvent()
+        func bindAgentForContext()
+        func cleanupSession()
         func createAgent()
+        func deleteAgent()
         func getAgent()
         func getHealth()
+        func listAgentBindings()
         func listAgents()
         func listSessions()
         func resolveAgentForContext()
@@ -641,6 +678,7 @@ public enum PalyraGatewayV1 {
         func routeMessage()
         func runStream()
         func setDefaultAgent()
+        func unbindAgentForContext()
     }
     public protocol VaultServiceClient {
         func deleteSecret()

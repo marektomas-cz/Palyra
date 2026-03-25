@@ -57,16 +57,16 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
                 },
                 app::ConnectionDefaults::USER,
             )?;
-            let request = build_agent_run_input(
+            let request = build_agent_run_input(AgentRunInputArgs {
                 session_id,
                 session_key,
                 session_label,
                 require_existing,
                 reset_session,
                 run_id,
-                input_prompt,
+                prompt: input_prompt,
                 allow_sensitive_tools,
-            )?;
+            })?;
             execute_agent_stream(connection, request, output::preferred_ndjson(false, ndjson))
         }
         AgentCommand::Interactive {
@@ -137,16 +137,16 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
             }
 
             let input_prompt = resolve_prompt_input(prompt, prompt_stdin)?;
-            let request = build_agent_run_input(
+            let request = build_agent_run_input(AgentRunInputArgs {
                 session_id,
                 session_key,
                 session_label,
                 require_existing,
                 reset_session,
                 run_id,
-                input_prompt,
+                prompt: input_prompt,
                 allow_sensitive_tools,
-            )?;
+            })?;
             run_agent_stream_as_acp(connection, request)
         }
         AgentCommand::Acp {
@@ -293,16 +293,16 @@ async fn run_agent_interactive_async(
             false,
         )
         .await?;
-        let request = build_agent_run_input(
-            resolved_session.session_id.as_ref().map(|value| value.ulid.clone()),
-            None,
-            None,
-            true,
-            false,
-            None,
-            prompt.to_owned(),
+        let request = build_agent_run_input(AgentRunInputArgs {
+            session_id: resolved_session.session_id.as_ref().map(|value| value.ulid.clone()),
+            session_key: None,
+            session_label: None,
+            require_existing: true,
+            reset_session: false,
+            run_id: None,
+            prompt: prompt.to_owned(),
             allow_sensitive_tools,
-        )?;
+        })?;
         last_run_id = Some(request.run_id.clone());
         execute_agent_stream(connection.clone(), request, ndjson)?;
     }

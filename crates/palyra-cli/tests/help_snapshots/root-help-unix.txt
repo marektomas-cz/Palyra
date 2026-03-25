@@ -13,7 +13,10 @@ Commands:
   agents
   cron
   memory
+  message
   approvals
+  sessions
+  tui             Launch the terminal operator client
   auth
   channels
   browser

@@ -331,6 +331,8 @@ pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct Agent;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct AgentBinding;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct AppendEventRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct AppendEventResponse;
@@ -339,11 +341,19 @@ pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ApprovalRecord;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct BindAgentForContextRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct BindAgentForContextResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct Canvas;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct CanvasAsset;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct CanvasBundle;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct CleanupSessionRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct CleanupSessionResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct CloseCanvasRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -356,6 +366,10 @@ pub mod palyra_gateway_v1 {
     pub struct CreateCanvasRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct CreateCanvasResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct DeleteAgentRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct DeleteAgentResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct DeleteSecretRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -384,6 +398,10 @@ pub mod palyra_gateway_v1 {
     pub struct HealthRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct HealthResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ListAgentBindingsRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ListAgentBindingsResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ListAgentsRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -429,6 +447,10 @@ pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SubscribeCanvasUpdatesResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct UnbindAgentForContextRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct UnbindAgentForContextResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct UpdateCanvasRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct UpdateCanvasResponse;
@@ -449,9 +471,13 @@ pub mod palyra_gateway_v1 {
     pub trait GatewayServiceClient {
         fn AbortRun(&self);
         fn AppendEvent(&self);
+        fn BindAgentForContext(&self);
+        fn CleanupSession(&self);
         fn CreateAgent(&self);
+        fn DeleteAgent(&self);
         fn GetAgent(&self);
         fn GetHealth(&self);
+        fn ListAgentBindings(&self);
         fn ListAgents(&self);
         fn ListSessions(&self);
         fn ResolveAgentForContext(&self);
@@ -459,6 +485,7 @@ pub mod palyra_gateway_v1 {
         fn RouteMessage(&self);
         fn RunStream(&self);
         fn SetDefaultAgent(&self);
+        fn UnbindAgentForContext(&self);
     }
     pub trait VaultServiceClient {
         fn DeleteSecret(&self);
