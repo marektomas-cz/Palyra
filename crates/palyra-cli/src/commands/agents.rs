@@ -123,11 +123,9 @@ pub(crate) async fn run_agents_async(
                         binding.agent_id,
                         binding.principal,
                         text_or_none(binding.channel.as_str()),
-                        binding
-                            .session_id
-                            .as_ref()
-                            .map(|value| value.ulid.as_str())
-                            .unwrap_or("none"),
+                        redacted_optional_identifier_for_output(
+                            binding.session_id.as_ref().map(|value| value.ulid.as_str()),
+                        ),
                         binding.updated_at_unix_ms
                     );
                 }
@@ -182,7 +180,9 @@ pub(crate) async fn run_agents_async(
                     binding.agent_id,
                     binding.principal,
                     text_or_none(binding.channel.as_str()),
-                    binding.session_id.as_ref().map(|value| value.ulid.as_str()).unwrap_or("none"),
+                    redacted_optional_identifier_for_output(
+                        binding.session_id.as_ref().map(|value| value.ulid.as_str()),
+                    ),
                     response.created
                 );
             }
@@ -407,7 +407,7 @@ fn agent_binding_to_json(binding: &gateway_v1::AgentBinding) -> Value {
         "agent_id": binding.agent_id,
         "principal": binding.principal,
         "channel": empty_to_none(binding.channel.clone()),
-        "session_id": binding.session_id.as_ref().map(|value| value.ulid.clone()),
+        "session_id": redacted_identifier_json_value(binding.session_id.as_ref().map(|value| value.ulid.as_str())),
         "updated_at_unix_ms": binding.updated_at_unix_ms,
     })
 }

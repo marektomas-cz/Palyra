@@ -2697,12 +2697,15 @@ fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStrea
 }
 
 fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
-    let run_id = event.run_id.as_ref().map(|id| id.ulid.as_str()).unwrap_or("unknown");
+    let run_id =
+        redacted_optional_identifier_for_output(event.run_id.as_ref().map(|id| id.ulid.as_str()));
     match event.body.as_ref() {
         Some(common_v1::run_stream_event::Body::ModelToken(token)) => {
             println!(
                 "agent.token run_id={} token={} final={}",
-                run_id, token.token, token.is_final
+                run_id,
+                redacted_text_for_output(token.token.as_str()),
+                token.is_final
             );
         }
         Some(common_v1::run_stream_event::Body::Status(status)) => {
@@ -2710,15 +2713,17 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 "agent.status run_id={} kind={} message={}",
                 run_id,
                 stream_status_kind_to_text(status.kind),
-                status.message
+                redacted_text_for_output(status.message.as_str())
             );
         }
         Some(common_v1::run_stream_event::Body::ToolProposal(proposal)) => {
             println!(
                 "agent.tool.proposal run_id={} proposal_id={} tool_name={} approval_required={}",
                 run_id,
-                proposal.proposal_id.as_ref().map(|value| value.ulid.as_str()).unwrap_or("unknown"),
-                proposal.tool_name,
+                redacted_optional_identifier_for_output(
+                    proposal.proposal_id.as_ref().map(|value| value.ulid.as_str()),
+                ),
+                redacted_text_for_output(proposal.tool_name.as_str()),
                 proposal.approval_required
             );
         }
@@ -2729,10 +2734,10 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 decision
                     .proposal_id
                     .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("unknown"),
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
                 tool_decision_kind_to_text(decision.kind),
-                decision.reason,
+                redacted_text_for_output(decision.reason.as_str()),
                 decision.approval_required,
                 decision.policy_enforced
             );
@@ -2744,16 +2749,16 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 approval_request
                     .proposal_id
                     .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("unknown"),
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
                 approval_request
                     .approval_id
                     .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("unknown"),
-                approval_request.tool_name,
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
+                redacted_text_for_output(approval_request.tool_name.as_str()),
                 approval_request.approval_required,
-                approval_request.request_summary
+                redacted_text_for_output(approval_request.request_summary.as_str())
             );
         }
         Some(common_v1::run_stream_event::Body::ToolApprovalResponse(approval_response)) => {
@@ -2763,26 +2768,30 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 approval_response
                     .proposal_id
                     .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("unknown"),
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
                 approval_response
                     .approval_id
                     .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("unknown"),
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
                 approval_response.approved,
                 approval_scope_to_text(approval_response.decision_scope),
                 approval_response.decision_scope_ttl_ms,
-                approval_response.reason
+                redacted_text_for_output(approval_response.reason.as_str())
             );
         }
         Some(common_v1::run_stream_event::Body::ToolResult(result)) => {
             println!(
                 "agent.tool.result run_id={} proposal_id={} success={} error={}",
                 run_id,
-                result.proposal_id.as_ref().map(|value| value.ulid.as_str()).unwrap_or("unknown"),
+                result
+                    .proposal_id
+                    .as_ref()
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
                 result.success,
-                result.error
+                redacted_text_for_output(result.error.as_str())
             );
         }
         Some(common_v1::run_stream_event::Body::ToolAttestation(attestation)) => {
@@ -2792,21 +2801,23 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 attestation
                     .proposal_id
                     .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("unknown"),
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
                 attestation
                     .attestation_id
                     .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("unknown"),
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
                 attestation.timed_out,
-                attestation.executor
+                redacted_text_for_output(attestation.executor.as_str())
             );
         }
         Some(common_v1::run_stream_event::Body::A2uiUpdate(update)) => {
             println!(
                 "agent.a2ui.update run_id={} surface={} version={}",
-                run_id, update.surface, update.v
+                run_id,
+                redacted_text_for_output(update.surface.as_str()),
+                update.v
             );
         }
         Some(common_v1::run_stream_event::Body::JournalEvent(journal_event)) => {
@@ -2816,8 +2827,8 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 journal_event
                     .event_id
                     .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("unknown"),
+                    .map(|value| redacted_identifier_for_output(value.ulid.as_str()))
+                    .unwrap_or_else(|| "none".to_owned()),
                 journal_event.kind,
                 journal_event.actor
             );
@@ -4085,6 +4096,50 @@ fn sha256_hex(payload: &[u8]) -> String {
         output.push_str(format!("{byte:02x}").as_str());
     }
     output
+}
+
+pub(crate) fn redacted_identifier_for_output(value: &str) -> String {
+    if value.trim().is_empty() {
+        return "none".to_owned();
+    }
+    let fingerprint = sha256_hex(value.as_bytes());
+    format!("{REDACTED}#{}", &fingerprint[..12])
+}
+
+pub(crate) fn redacted_optional_identifier_for_output(value: Option<&str>) -> String {
+    value
+        .filter(|candidate| !candidate.trim().is_empty())
+        .map(redacted_identifier_for_output)
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+pub(crate) fn redacted_text_for_output(value: &str) -> String {
+    if value.trim().is_empty() {
+        return "none".to_owned();
+    }
+    format!("{REDACTED}({} chars)", value.chars().count())
+}
+
+pub(crate) fn redacted_optional_text_for_output(value: Option<&str>) -> String {
+    value
+        .filter(|candidate| !candidate.trim().is_empty())
+        .map(redacted_text_for_output)
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+pub(crate) fn redacted_identifier_json_value(value: Option<&str>) -> Value {
+    match value.filter(|candidate| !candidate.trim().is_empty()) {
+        Some(value) => Value::String(redacted_identifier_for_output(value)),
+        None => Value::Null,
+    }
+}
+
+pub(crate) fn redacted_text_json_value(value: &str) -> Value {
+    if value.trim().is_empty() {
+        Value::Null
+    } else {
+        Value::String(redacted_text_for_output(value))
+    }
 }
 
 fn parse_semver_triplet(raw: &str) -> Option<(u32, u32, u32)> {

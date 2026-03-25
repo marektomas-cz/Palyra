@@ -663,11 +663,13 @@ impl App {
             format!(
                 "cancel_requested={} run_id={}",
                 response.cancel_requested,
-                response
-                    .run_id
-                    .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or(run_id.as_str())
+                redacted_optional_identifier_for_output(
+                    response
+                        .run_id
+                        .as_ref()
+                        .map(|value| value.ulid.as_str())
+                        .or(Some(run_id.as_str())),
+                )
             ),
         );
         self.status_line = "Abort requested".to_owned();
@@ -736,8 +738,10 @@ impl App {
                             },
                             detail: format!(
                                 "{} | key={} | updated={}",
-                                session_id,
-                                text_or_none(session.session_key.as_str()),
+                                redacted_identifier_for_output(session_id.as_str()),
+                                redacted_optional_text_for_output(Some(
+                                    session.session_key.as_str()
+                                )),
                                 session.updated_at_unix_ms
                             ),
                         }
@@ -1349,7 +1353,7 @@ fn display_session_identity(session: &gateway_v1::SessionSummary) -> String {
 }
 
 fn shorten_id(value: &str) -> String {
-    value.chars().take(8).collect()
+    redacted_identifier_for_output(value)
 }
 
 fn parse_toggle(value: Option<&str>, current: bool) -> Result<bool> {
@@ -1445,6 +1449,7 @@ fn format_shell_result(result: &ShellResult) -> String {
 mod tests {
     use super::{display_session_identity, parse_toggle};
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
+    use crate::redacted_identifier_for_output;
 
     #[test]
     fn parse_toggle_accepts_explicit_values() {
@@ -1467,6 +1472,8 @@ mod tests {
         };
         let display = display_session_identity(&summary);
         assert!(display.contains("Ops Triage"));
-        assert!(display.contains("01ARZ3ND"));
+        assert!(
+            display.contains(redacted_identifier_for_output("01ARZ3NDEKTSV4RRFFQ69G5FAW").as_str())
+        );
     }
 }

@@ -224,22 +224,12 @@ async fn run_agent_interactive_async(
             .await?;
             eprintln!(
                 "agent.interactive.session key={} label={} updated_at_unix_ms={} last_run_id={}",
-                if resolved_session.session_key.trim().is_empty() {
-                    "none"
-                } else {
-                    resolved_session.session_key.as_str()
-                },
-                if resolved_session.session_label.trim().is_empty() {
-                    "none"
-                } else {
-                    resolved_session.session_label.as_str()
-                },
+                redacted_optional_text_for_output(Some(resolved_session.session_key.as_str())),
+                redacted_optional_text_for_output(Some(resolved_session.session_label.as_str())),
                 resolved_session.updated_at_unix_ms,
-                resolved_session
-                    .last_run_id
-                    .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or("none")
+                redacted_optional_identifier_for_output(
+                    resolved_session.last_run_id.as_ref().map(|value| value.ulid.as_str()),
+                )
             );
             std::io::stderr().flush().context("stderr flush failed")?;
             continue;
@@ -271,13 +261,15 @@ async fn run_agent_interactive_async(
                 runtime.abort_run(run_id.clone(), Some("interactive_abort".to_owned())).await?;
             eprintln!(
                 "agent.interactive.abort run_id={} cancel_requested={} reason={}",
-                response
-                    .run_id
-                    .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or(run_id.as_str()),
+                redacted_optional_identifier_for_output(
+                    response
+                        .run_id
+                        .as_ref()
+                        .map(|value| value.ulid.as_str())
+                        .or(Some(run_id.as_str())),
+                ),
                 response.cancel_requested,
-                if response.reason.trim().is_empty() { "none" } else { response.reason.as_str() }
+                redacted_optional_text_for_output(Some(response.reason.as_str()))
             );
             std::io::stderr().flush().context("stderr flush failed")?;
             continue;
