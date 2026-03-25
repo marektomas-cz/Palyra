@@ -9,11 +9,10 @@ use anyhow::{Context, Result};
 use futures::io::AllowStdIo;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-use tonic::Request;
 
 use crate::{
-    build_agent_run_input, build_run_stream_request, build_runtime, inject_run_stream_metadata,
+    build_agent_run_input, build_run_stream_request, build_runtime,
+    client::runtime::GatewayRuntimeClient,
     proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
     AgentConnection,
 };
@@ -214,19 +213,18 @@ impl PalyraAcpAgent {
         reset_session: bool,
     ) -> acp::Result<SessionBinding> {
         let mut client =
-            connect_gateway_client(&self.connection).await.map_err(acp_internal_error)?;
-        let mut request = Request::new(gateway_v1::ResolveSessionRequest {
+            GatewayRuntimeClient::connect(self.connection.clone()).await.map_err(acp_internal_error)?;
+        let response = client
+            .resolve_session(gateway_v1::ResolveSessionRequest {
             v: 1,
             session_id: None,
             session_key: requested_session_key.clone(),
             session_label: session_label.clone().unwrap_or_default(),
             require_existing,
             reset_session,
-        });
-        inject_run_stream_metadata(request.metadata_mut(), &self.connection)
+        })
+            .await
             .map_err(acp_internal_error)?;
-        let response =
-            client.resolve_session(request).await.map_err(map_gateway_status_error)?.into_inner();
         let session = response.session.ok_or_else(|| {
             acp::Error::new(-32603, "gateway ResolveSession returned empty session")
         })?;
@@ -288,17 +286,11 @@ impl PalyraAcpAgent {
         cursor: Option<String>,
     ) -> acp::Result<gateway_v1::ListSessionsResponse> {
         let mut client =
-            connect_gateway_client(&self.connection).await.map_err(acp_internal_error)?;
-        let mut request = Request::new(gateway_v1::ListSessionsRequest {
-            v: 1,
-            after_session_key: cursor.unwrap_or_default(),
-            limit: 100,
-        });
-        inject_run_stream_metadata(request.metadata_mut(), &self.connection)
-            .map_err(acp_internal_error)?;
-        let response =
-            client.list_sessions(request).await.map_err(map_gateway_status_error)?.into_inner();
-        Ok(response)
+            GatewayRuntimeClient::connect(self.connection.clone()).await.map_err(acp_internal_error)?;
+        client
+            .list_sessions(cursor, false, Some(100))
+            .await
+            .map_err(acp_internal_error)
     }
 
     async fn abort_run_for_session(&self, acp_session_id: &acp::SessionId) -> acp::Result<()> {
@@ -312,15 +304,11 @@ impl PalyraAcpAgent {
         };
 
         let mut client =
-            connect_gateway_client(&self.connection).await.map_err(acp_internal_error)?;
-        let mut request = Request::new(gateway_v1::AbortRunRequest {
-            v: 1,
-            run_id: Some(common_v1::CanonicalId { ulid: run_id }),
-            reason: "acp_session_cancel".to_owned(),
-        });
-        inject_run_stream_metadata(request.metadata_mut(), &self.connection)
+            GatewayRuntimeClient::connect(self.connection.clone()).await.map_err(acp_internal_error)?;
+        let _ = client
+            .abort_run(run_id, Some("acp_session_cancel".to_owned()))
+            .await
             .map_err(acp_internal_error)?;
-        let _ = client.abort_run(request).await.map_err(map_gateway_status_error)?.into_inner();
         Ok(())
     }
 
@@ -343,6 +331,10 @@ impl PalyraAcpAgent {
         let run_input = build_agent_run_input(
             Some(binding.gateway_session_id_ulid.clone()),
             None,
+            None,
+            false,
+            false,
+            None,
             prompt,
             self.allow_sensitive_tools,
         )
@@ -354,8 +346,9 @@ impl PalyraAcpAgent {
         initial_request.reset_session = session_overrides.reset_session.unwrap_or(false);
         initial_request.require_existing = session_overrides.require_existing.unwrap_or(false);
 
-        let (mut event_stream, request_tx) =
-            open_run_stream(&self.connection, initial_request).await.map_err(acp_internal_error)?;
+        let mut client =
+            GatewayRuntimeClient::connect(self.connection.clone()).await.map_err(acp_internal_error)?;
+        let mut run_stream = client.open_run_stream(initial_request).await.map_err(acp_internal_error)?;
 
         {
             let mut state = self.lock_state()?;
@@ -365,28 +358,7 @@ impl PalyraAcpAgent {
         }
 
         let mut stop_reason = acp::StopReason::EndTurn;
-        while let Some(event) = event_stream.next().await {
-            let event = match event {
-                Ok(value) => value,
-                Err(status) => {
-                    stop_reason = if status.code() == tonic::Code::Cancelled {
-                        acp::StopReason::Cancelled
-                    } else {
-                        acp::StopReason::Refusal
-                    };
-                    self.send_session_update(
-                        &arguments.session_id,
-                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                            acp::ContentBlock::from(format!(
-                                "Palyra gateway stream error: {}",
-                                status.message()
-                            )),
-                        )),
-                    )
-                    .await?;
-                    break;
-                }
-            };
+        while let Some(event) = run_stream.next_event().await.map_err(acp_internal_error)? {
 
             match event.body {
                 Some(common_v1::run_stream_event::Body::ModelToken(token)) => {
@@ -442,12 +414,7 @@ impl PalyraAcpAgent {
                             decision_scope,
                             decision_scope_ttl_ms,
                         )?;
-                        request_tx.send(approval_request).await.map_err(|_| {
-                            acp::Error::new(
-                                -32603,
-                                "gateway approval request channel closed before sending response",
-                            )
-                        })?;
+                        run_stream.send_request(approval_request).await.map_err(acp_internal_error)?;
                     }
                 }
                 Some(common_v1::run_stream_event::Body::ToolResult(result)) => {
@@ -645,44 +612,6 @@ pub fn run_agent_acp_bridge(
 
 fn acp_internal_error(error: impl std::fmt::Display) -> acp::Error {
     acp::Error::new(-32603, error.to_string())
-}
-
-fn map_gateway_status_error(status: tonic::Status) -> acp::Error {
-    if status.code() == tonic::Code::InvalidArgument {
-        return acp::Error::new(-32602, status.message().to_owned());
-    }
-    acp::Error::new(-32603, status.message().to_owned())
-}
-
-async fn connect_gateway_client(
-    connection: &AgentConnection,
-) -> Result<gateway_v1::gateway_service_client::GatewayServiceClient<tonic::transport::Channel>> {
-    gateway_v1::gateway_service_client::GatewayServiceClient::connect(connection.grpc_url.clone())
-        .await
-        .with_context(|| format!("failed to connect gateway gRPC endpoint {}", connection.grpc_url))
-}
-
-async fn open_run_stream(
-    connection: &AgentConnection,
-    initial_request: common_v1::RunStreamRequest,
-) -> Result<(tonic::Streaming<common_v1::RunStreamEvent>, mpsc::Sender<common_v1::RunStreamRequest>)>
-{
-    let mut client = connect_gateway_client(connection).await?;
-    let (request_tx, request_rx) = mpsc::channel(16);
-    request_tx
-        .send(initial_request)
-        .await
-        .map_err(|_| anyhow::anyhow!("failed to queue initial RunStream request message"))?;
-
-    let mut stream_request = Request::new(ReceiverStream::new(request_rx));
-    inject_run_stream_metadata(stream_request.metadata_mut(), connection)
-        .context("failed to inject gRPC metadata for RunStream")?;
-    let stream = client
-        .run_stream(stream_request)
-        .await
-        .context("failed to call gateway RunStream")?
-        .into_inner();
-    Ok((stream, request_tx))
 }
 
 fn parse_json_bytes(raw: &[u8]) -> Option<Value> {
@@ -1088,6 +1017,7 @@ mod tests {
                     created_at_unix_ms: 0,
                     updated_at_unix_ms: 0,
                     last_run_id: None,
+                    archived_at_unix_ms: 0,
                 },
                 gateway_v1::SessionSummary {
                     session_id: Some(common_v1::CanonicalId {
@@ -1098,6 +1028,7 @@ mod tests {
                     created_at_unix_ms: 0,
                     updated_at_unix_ms: 0,
                     last_run_id: None,
+                    archived_at_unix_ms: 0,
                 },
             ],
             next_after_session_key: "  cursor-2  ".to_owned(),

@@ -17,6 +17,43 @@ pub enum AgentsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Bindings {
+        #[arg(long)]
+        agent_id: Option<String>,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, default_value_t = false, conflicts_with = "ndjson")]
+        json: bool,
+        #[arg(long, default_value_t = false, conflicts_with = "json")]
+        ndjson: bool,
+    },
+    Bind {
+        agent_id: String,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Unbind {
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     SetDefault {
         agent_id: String,
         #[arg(long, default_value_t = false)]
@@ -40,6 +77,29 @@ pub enum AgentsCommand {
         set_default: bool,
         #[arg(long, default_value_t = false)]
         allow_absolute_paths: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Delete {
+        agent_id: String,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Identity {
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        preferred_agent_id: Option<String>,
+        #[arg(long, default_value_t = false)]
+        persist_binding: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },

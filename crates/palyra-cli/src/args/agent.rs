@@ -16,6 +16,14 @@ pub enum AgentCommand {
         #[arg(long)]
         session_id: Option<String>,
         #[arg(long)]
+        session_key: Option<String>,
+        #[arg(long)]
+        session_label: Option<String>,
+        #[arg(long, default_value_t = false)]
+        require_existing: bool,
+        #[arg(long, default_value_t = false)]
+        reset_session: bool,
+        #[arg(long)]
         run_id: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
@@ -39,6 +47,12 @@ pub enum AgentCommand {
         channel: Option<String>,
         #[arg(long)]
         session_id: Option<String>,
+        #[arg(long)]
+        session_key: Option<String>,
+        #[arg(long)]
+        session_label: Option<String>,
+        #[arg(long, default_value_t = false)]
+        require_existing: bool,
         #[arg(long, default_value_t = false)]
         allow_sensitive_tools: bool,
         #[arg(long, default_value_t = false)]
@@ -57,6 +71,14 @@ pub enum AgentCommand {
         channel: Option<String>,
         #[arg(long)]
         session_id: Option<String>,
+        #[arg(long)]
+        session_key: Option<String>,
+        #[arg(long)]
+        session_label: Option<String>,
+        #[arg(long, default_value_t = false)]
+        require_existing: bool,
+        #[arg(long, default_value_t = false)]
+        reset_session: bool,
         #[arg(long)]
         run_id: Option<String>,
         #[arg(long)]

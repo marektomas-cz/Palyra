@@ -70,6 +70,7 @@ use cli::{
     JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
     OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand,
     ProtocolCommand, RemoteVerificationModeArg, SecretsCommand, SecurityCommand,
+    SessionsCommand,
     SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
     WizardOverridesArg,
 };
@@ -119,7 +120,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::time::sleep;
-use tokio_stream::{iter, StreamExt};
+use tokio_stream::StreamExt;
 use tonic::Request;
 use ulid::Ulid;
 
@@ -231,7 +232,9 @@ fn run_cli() -> Result<()> {
         CliCommand::Agents { command } => commands::agents::run_agents(command),
         CliCommand::Cron { command } => commands::cron::run_cron(command),
         CliCommand::Memory { command } => commands::memory::run_memory(command),
+        CliCommand::Message { command } => commands::message::run_message(command),
         CliCommand::Approvals { command } => commands::approvals::run_approvals(command),
+        CliCommand::Sessions { command } => commands::sessions::run_sessions(command),
         CliCommand::Auth { command } => commands::auth::run_auth(command),
         CliCommand::Channels { command } => commands::channels::run(command),
         CliCommand::Browser { command } => commands::browser::run_browser(command),
@@ -2315,37 +2318,70 @@ fn execute_agent_stream(
     request: AgentRunInput,
     ndjson: bool,
 ) -> Result<()> {
-    stream_agent_events(connection, request, |event| {
-        if ndjson {
-            emit_acp_event_ndjson(event)
-        } else {
-            emit_agent_event_text(event)
-        }
-    })
+    let runtime = build_runtime()?;
+    runtime
+        .block_on(async {
+            let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
+            let _resolved = stream_agent_events_async(&mut client, request, |event| {
+                if ndjson {
+                    emit_acp_event_ndjson(event)
+                } else {
+                    emit_agent_event_text(event)
+                }
+            })
+            .await?;
+            Result::<()>::Ok(())
+        })
+        .context("agent stream execution failed")
 }
 
 fn run_agent_stream_as_acp(connection: AgentConnection, request: AgentRunInput) -> Result<()> {
-    stream_agent_events(connection, request, emit_acp_event_ndjson)
+    let runtime = build_runtime()?;
+    runtime
+        .block_on(async {
+            let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
+            let _resolved =
+                stream_agent_events_async(&mut client, request, emit_acp_event_ndjson).await?;
+            Result::<()>::Ok(())
+        })
+        .context("ACP shim stream execution failed")
 }
 
-fn stream_agent_events<F>(
-    connection: AgentConnection,
+async fn stream_agent_events_async<F>(
+    client: &mut client::runtime::GatewayRuntimeClient,
     request: AgentRunInput,
     mut emit_event: F,
-) -> Result<()>
+) -> Result<ResolvedAgentRunInput>
 where
     F: FnMut(&common_v1::RunStreamEvent) -> Result<()>,
 {
-    let runtime = build_runtime()?;
-    runtime.block_on(async {
-        let mut stream = run_stream_with_retry(&connection, &request).await?;
-        while let Some(event) = stream.next().await {
-            let event = event.context("failed to read RunStream event")?;
-            emit_event(&event)?;
-            std::io::stdout().flush().context("stdout flush failed")?;
+    let resolved = prepare_agent_run_input(client, request).await?;
+    let session_id = session_summary_id(&resolved.session)?;
+    let mut stream = client.open_run_stream(build_resolved_run_stream_request(&resolved)?).await?;
+    while let Some(event) = stream.next_event().await? {
+        emit_event(&event)?;
+        std::io::stdout().flush().context("stdout flush failed")?;
+        if let Some(common_v1::run_stream_event::Body::ToolApprovalRequest(approval)) =
+            event.body.as_ref()
+        {
+            let decision = prompt_tool_approval_decision(approval)?;
+            stream
+                .send_tool_approval_response(
+                    session_id.as_str(),
+                    resolved.run_id.as_str(),
+                    common_v1::ToolApprovalResponse {
+                        proposal_id: approval.proposal_id.clone(),
+                        approved: decision.approved,
+                        reason: decision.reason,
+                        approval_id: approval.approval_id.clone(),
+                        decision_scope: common_v1::ApprovalDecisionScope::Once as i32,
+                        decision_scope_ttl_ms: 0,
+                    },
+                )
+                .await?;
         }
-        Result::<()>::Ok(())
-    })
+    }
+    Ok(resolved)
 }
 
 fn run_acp_shim_from_stdin(
@@ -2383,6 +2419,10 @@ fn parse_acp_shim_input_line(
     }
     build_agent_run_input(
         parsed.session_id,
+        parsed.session_key,
+        parsed.session_label,
+        parsed.require_existing.unwrap_or(false),
+        parsed.reset_session.unwrap_or(false),
         parsed.run_id,
         prompt.to_owned(),
         parsed.allow_sensitive_tools.unwrap_or(default_allow_sensitive_tools),
@@ -2416,15 +2456,105 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
 
 fn build_agent_run_input(
     session_id: Option<String>,
+    session_key: Option<String>,
+    session_label: Option<String>,
+    require_existing: bool,
+    reset_session: bool,
     run_id: Option<String>,
     prompt: String,
     allow_sensitive_tools: bool,
 ) -> Result<AgentRunInput> {
     Ok(AgentRunInput {
-        session_id: resolve_or_generate_canonical_id(session_id)?,
+        session_id: session_id
+            .map(|value| resolve_or_generate_canonical_id(Some(value)))
+            .transpose()?,
+        session_key: normalize_optional_owned_text(session_key),
+        session_label: normalize_optional_owned_text(session_label),
+        require_existing,
+        reset_session,
         run_id: resolve_or_generate_canonical_id(run_id)?,
         prompt,
         allow_sensitive_tools,
+    })
+}
+
+async fn prepare_agent_run_input(
+    client: &mut client::runtime::GatewayRuntimeClient,
+    input: AgentRunInput,
+) -> Result<ResolvedAgentRunInput> {
+    let response = client
+        .resolve_session(gateway_v1::ResolveSessionRequest {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            session_id: input
+                .session_id
+                .as_ref()
+                .map(|ulid| common_v1::CanonicalId { ulid: ulid.clone() }),
+            session_key: input.session_key.clone().unwrap_or_default(),
+            session_label: input.session_label.clone().unwrap_or_default(),
+            require_existing: input.require_existing,
+            reset_session: input.reset_session,
+        })
+        .await?;
+    let session = response.session.context("ResolveSession returned empty session payload")?;
+    Ok(ResolvedAgentRunInput {
+        session,
+        run_id: input.run_id,
+        prompt: input.prompt,
+        allow_sensitive_tools: input.allow_sensitive_tools,
+    })
+}
+
+fn normalize_optional_owned_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| empty_to_none(value.trim().to_owned()))
+}
+
+fn session_summary_id(session: &gateway_v1::SessionSummary) -> Result<String> {
+    session
+        .session_id
+        .as_ref()
+        .map(|value| value.ulid.clone())
+        .context("resolved session is missing session_id")
+}
+
+#[derive(Debug, Clone)]
+struct ToolApprovalDecision {
+    approved: bool,
+    reason: String,
+}
+
+fn prompt_tool_approval_decision(
+    approval: &common_v1::ToolApprovalRequest,
+) -> Result<ToolApprovalDecision> {
+    let tool_name = approval.tool_name.trim();
+    let summary = approval.request_summary.trim();
+    if !std::io::stdin().is_terminal() {
+        return Ok(ToolApprovalDecision {
+            approved: false,
+            reason: "approval_required_non_interactive_cli".to_owned(),
+        });
+    }
+
+    let tool_label = if tool_name.is_empty() { "unknown" } else { tool_name };
+    eprintln!(
+        "agent.approval.required tool={} summary={}",
+        tool_label,
+        if summary.is_empty() { "<none>" } else { summary }
+    );
+    eprint!("agent.approval.prompt allow_once [y/N]: ");
+    std::io::stderr().flush().context("stderr flush failed")?;
+    let mut input = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut input)
+        .context("failed to read tool approval decision from stdin")?;
+    let approved = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    Ok(ToolApprovalDecision {
+        approved,
+        reason: if approved {
+            "approved_by_cli_terminal".to_owned()
+        } else {
+            "denied_by_cli_terminal".to_owned()
+        },
     })
 }
 
@@ -2463,13 +2593,6 @@ async fn fetch_grpc_health_with_retry(grpc_url: String) -> Result<gateway_v1::He
     client::grpc::fetch_health_with_retry(grpc_url).await
 }
 
-async fn run_stream_with_retry(
-    connection: &AgentConnection,
-    request: &AgentRunInput,
-) -> Result<tonic::Streaming<common_v1::RunStreamEvent>> {
-    client::grpc::run_stream_with_retry(connection, request).await
-}
-
 #[cfg(test)]
 fn is_retryable_grpc_error(error: &anyhow::Error) -> bool {
     client::grpc::is_retryable_error(error)
@@ -2482,11 +2605,14 @@ fn inject_run_stream_metadata(
     client::grpc::inject_run_stream_metadata(metadata, connection)
 }
 
-fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStreamRequest> {
+fn build_resolved_run_stream_request(
+    input: &ResolvedAgentRunInput,
+) -> Result<common_v1::RunStreamRequest> {
     let timestamp_unix_ms = now_unix_ms_i64()?;
+    let session_id = session_summary_id(&input.session)?;
     Ok(common_v1::RunStreamRequest {
         v: RUN_STREAM_REQUEST_VERSION,
-        session_id: Some(common_v1::CanonicalId { ulid: input.session_id.clone() }),
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
         run_id: Some(common_v1::CanonicalId { ulid: input.run_id.clone() }),
         input: Some(common_v1::MessageEnvelope {
             v: CANONICAL_JSON_ENVELOPE_VERSION,
@@ -2495,7 +2621,7 @@ fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStrea
             origin: Some(common_v1::EnvelopeOrigin {
                 r#type: common_v1::envelope_origin::OriginType::Cli as i32,
                 channel: DEFAULT_CHANNEL.to_owned(),
-                conversation_id: input.session_id.clone(),
+                conversation_id: session_id,
                 sender_display: "palyra-cli".to_owned(),
                 sender_handle: "cli".to_owned(),
                 sender_verified: true,
@@ -2508,10 +2634,45 @@ fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStrea
             max_payload_bytes: 0,
         }),
         allow_sensitive_tools: input.allow_sensitive_tools,
-        session_key: String::new(),
-        session_label: String::new(),
+        session_key: input.session.session_key.clone(),
+        session_label: input.session.session_label.clone(),
         reset_session: false,
-        require_existing: false,
+        require_existing: true,
+        tool_approval_response: None,
+    })
+}
+
+fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStreamRequest> {
+    let timestamp_unix_ms = now_unix_ms_i64()?;
+    let session_id = input.session_id.clone().unwrap_or_else(generate_canonical_ulid);
+    Ok(common_v1::RunStreamRequest {
+        v: RUN_STREAM_REQUEST_VERSION,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        run_id: Some(common_v1::CanonicalId { ulid: input.run_id.clone() }),
+        input: Some(common_v1::MessageEnvelope {
+            v: CANONICAL_JSON_ENVELOPE_VERSION,
+            envelope_id: Some(common_v1::CanonicalId { ulid: generate_canonical_ulid() }),
+            timestamp_unix_ms,
+            origin: Some(common_v1::EnvelopeOrigin {
+                r#type: common_v1::envelope_origin::OriginType::Cli as i32,
+                channel: DEFAULT_CHANNEL.to_owned(),
+                conversation_id: session_id,
+                sender_display: "palyra-cli".to_owned(),
+                sender_handle: "cli".to_owned(),
+                sender_verified: true,
+            }),
+            content: Some(common_v1::MessageContent {
+                text: input.prompt.clone(),
+                attachments: Vec::new(),
+            }),
+            security: None,
+            max_payload_bytes: 0,
+        }),
+        allow_sensitive_tools: input.allow_sensitive_tools,
+        session_key: input.session_key.clone().unwrap_or_default(),
+        session_label: input.session_label.clone().unwrap_or_default(),
+        reset_session: input.reset_session,
+        require_existing: input.require_existing,
         tool_approval_response: None,
     })
 }
@@ -2879,7 +3040,19 @@ struct AgentConnection {
 
 #[derive(Debug, Clone)]
 struct AgentRunInput {
-    session_id: String,
+    session_id: Option<String>,
+    session_key: Option<String>,
+    session_label: Option<String>,
+    require_existing: bool,
+    reset_session: bool,
+    run_id: String,
+    prompt: String,
+    allow_sensitive_tools: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAgentRunInput {
+    session: gateway_v1::SessionSummary,
     run_id: String,
     prompt: String,
     allow_sensitive_tools: bool,
@@ -2888,6 +3061,10 @@ struct AgentRunInput {
 #[derive(Debug, Deserialize)]
 struct AcpShimInput {
     session_id: Option<String>,
+    session_key: Option<String>,
+    session_label: Option<String>,
+    require_existing: Option<bool>,
+    reset_session: Option<bool>,
     run_id: Option<String>,
     prompt: Option<String>,
     allow_sensitive_tools: Option<bool>,

@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use ulid::Ulid;
 
 use crate::{
-    agents::{AgentCreateRequest, AgentResolveRequest},
+    agents::{AgentBindingQuery, AgentBindingRequest, AgentCreateRequest, AgentResolveRequest, AgentUnbindRequest},
     application::{
         route_message::orchestration::handle_routed_route_message,
         run_stream::orchestration::{
@@ -23,7 +23,7 @@ use crate::{
         RoutedMessage as ChannelRoutedMessage,
     },
     gateway::{
-        agent_message, agent_resolution_source_to_proto, canonical_id,
+        agent_binding_message, agent_message, agent_resolution_source_to_proto, canonical_id,
         extract_pairing_code_command, finalize_run_failure, non_empty, normalize_agent_identifier,
         optional_canonical_id, record_agent_journal_event, record_message_router_journal_event,
         require_supported_version, security_requests_json_mode, session_summary_message,
@@ -32,7 +32,8 @@ use crate::{
     journal::{
         ApprovalCreateRequest, ApprovalDecisionScope, ApprovalPolicySnapshot, ApprovalPromptOption,
         ApprovalPromptRecord, ApprovalRiskLevel, ApprovalSubjectType, JournalAppendRequest,
-        OrchestratorCancelRequest, OrchestratorSessionResolveRequest,
+        OrchestratorCancelRequest, OrchestratorSessionCleanupRequest,
+        OrchestratorSessionResolveRequest,
     },
     orchestrator::RunStateMachine,
     transport::grpc::{
@@ -204,6 +205,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 context.principal.clone(),
                 context.device_id.clone(),
                 context.channel.clone(),
+                payload.include_archived,
                 requested_limit,
             )
             .await?;
@@ -250,6 +252,51 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             session: Some(session_summary_message(&outcome.session)),
             created: outcome.created,
             reset_applied: outcome.reset_applied,
+        }))
+    }
+
+    async fn cleanup_session(
+        &self,
+        request: Request<gateway_v1::CleanupSessionRequest>,
+    ) -> Result<Response<gateway_v1::CleanupSessionResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "CleanupSession")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        let session_id = optional_canonical_id(payload.session_id, "session_id")?;
+        let session_key = non_empty(payload.session_key);
+        let outcome = self
+            .state
+            .cleanup_orchestrator_session(OrchestratorSessionCleanupRequest {
+                session_id,
+                session_key,
+                principal: context.principal.clone(),
+                device_id: context.device_id.clone(),
+                channel: context.channel.clone(),
+            })
+            .await?;
+        self.state.clear_tool_approval_cache_for_session(&context, outcome.session.session_id.as_str());
+        let _ = record_agent_journal_event(
+            &self.state,
+            &context,
+            json!({
+                "event": "session.cleaned",
+                "session_id": outcome.session.session_id,
+                "new_session_key": outcome.session.session_key,
+                "previous_session_key": outcome.previous_session_key,
+                "archived_at_unix_ms": outcome.session.archived_at_unix_ms,
+                "run_count": outcome.run_count,
+                "cleaned": outcome.cleaned,
+                "newly_archived": outcome.newly_archived,
+            }),
+        )
+        .await;
+        Ok(Response::new(gateway_v1::CleanupSessionResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            session: Some(session_summary_message(&outcome.session)),
+            cleaned: outcome.cleaned,
+            newly_archived: outcome.newly_archived,
+            previous_session_key: outcome.previous_session_key,
+            run_count: outcome.run_count as u32,
         }))
     }
 
@@ -843,6 +890,50 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
         }))
     }
 
+    async fn delete_agent(
+        &self,
+        request: Request<gateway_v1::DeleteAgentRequest>,
+    ) -> Result<Response<gateway_v1::DeleteAgentResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "DeleteAgent")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.delete",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let agent_id = normalize_agent_identifier(payload.agent_id.as_str(), "agent_id")
+            .inspect_err(|_error| {
+                self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            })?;
+        let outcome = self.state.delete_agent(agent_id.to_owned()).await?;
+        let _ = record_agent_journal_event(
+            &self.state,
+            &context,
+            json!({
+                "event": "agent.deleted",
+                "agent_id": outcome.deleted_agent_id,
+                "agent_dir": outcome.agent_dir,
+                "removed_bindings_count": outcome.removed_bindings_count,
+                "previous_default_agent_id": outcome.previous_default_agent_id,
+                "default_agent_id": outcome.default_agent_id,
+            }),
+        )
+        .await;
+        Ok(Response::new(gateway_v1::DeleteAgentResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            deleted_agent_id: outcome.deleted_agent_id,
+            deleted: outcome.deleted,
+            removed_bindings_count: outcome.removed_bindings_count as u32,
+            previous_default_agent_id: outcome.previous_default_agent_id.unwrap_or_default(),
+            default_agent_id: outcome.default_agent_id.unwrap_or_default(),
+            agent_dir: outcome.agent_dir,
+        }))
+    }
+
     async fn set_default_agent(
         &self,
         request: Request<gateway_v1::SetDefaultAgentRequest>,
@@ -877,6 +968,160 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             v: CANONICAL_PROTOCOL_MAJOR,
             previous_agent_id: outcome.previous_default_agent_id.unwrap_or_default(),
             default_agent_id: outcome.default_agent_id,
+        }))
+    }
+
+    async fn list_agent_bindings(
+        &self,
+        request: Request<gateway_v1::ListAgentBindingsRequest>,
+    ) -> Result<Response<gateway_v1::ListAgentBindingsResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "ListAgentBindings")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.bindings",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let bindings = self
+            .state
+            .list_agent_bindings(AgentBindingQuery {
+                agent_id: non_empty(payload.agent_id),
+                principal: non_empty(payload.principal),
+                channel: non_empty(payload.channel),
+                session_id: optional_canonical_id(payload.session_id, "session_id")
+                    .inspect_err(|_error| {
+                        self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+                    })?,
+                limit: if payload.limit == 0 { None } else { Some(payload.limit as usize) },
+            })
+            .await?;
+        Ok(Response::new(gateway_v1::ListAgentBindingsResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            bindings: bindings.iter().map(agent_binding_message).collect(),
+        }))
+    }
+
+    async fn bind_agent_for_context(
+        &self,
+        request: Request<gateway_v1::BindAgentForContextRequest>,
+    ) -> Result<Response<gateway_v1::BindAgentForContextResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "BindAgentForContext")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.bind",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let principal = if let Some(value) = non_empty(payload.principal) {
+            if value != context.principal {
+                self.state.record_denied();
+                return Err(Status::permission_denied(
+                    "bind agent principal must match authenticated principal",
+                ));
+            }
+            value
+        } else {
+            context.principal.clone()
+        };
+        let agent_id = normalize_agent_identifier(payload.agent_id.as_str(), "agent_id")
+            .inspect_err(|_error| {
+                self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            })?;
+        let session_id = optional_canonical_id(payload.session_id, "session_id")
+            .inspect_err(|_error| {
+                self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            })?
+            .ok_or_else(|| Status::invalid_argument("session_id is required"))?;
+        let outcome = self
+            .state
+            .bind_agent_for_context(AgentBindingRequest {
+                agent_id: agent_id.to_owned(),
+                principal,
+                channel: non_empty(payload.channel),
+                session_id,
+            })
+            .await?;
+        let _ = record_agent_journal_event(
+            &self.state,
+            &context,
+            json!({
+                "event": "agent.binding_upserted",
+                "agent_id": outcome.binding.agent_id,
+                "session_id": outcome.binding.session_id,
+                "channel": outcome.binding.channel,
+                "created": outcome.created,
+            }),
+        )
+        .await;
+        Ok(Response::new(gateway_v1::BindAgentForContextResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            binding: Some(agent_binding_message(&outcome.binding)),
+            created: outcome.created,
+        }))
+    }
+
+    async fn unbind_agent_for_context(
+        &self,
+        request: Request<gateway_v1::UnbindAgentForContextRequest>,
+    ) -> Result<Response<gateway_v1::UnbindAgentForContextResponse>, Status> {
+        let context = self.authorize_rpc(request.metadata(), "UnbindAgentForContext")?;
+        let payload = request.into_inner();
+        require_supported_version(payload.v)?;
+        authorize_agent_management_action(
+            context.principal.as_str(),
+            "agent.unbind",
+            "agent:registry",
+        )
+        .inspect_err(|_error| {
+            self.state.record_denied();
+        })?;
+        let principal = if let Some(value) = non_empty(payload.principal) {
+            if value != context.principal {
+                self.state.record_denied();
+                return Err(Status::permission_denied(
+                    "unbind agent principal must match authenticated principal",
+                ));
+            }
+            value
+        } else {
+            context.principal.clone()
+        };
+        let session_id = optional_canonical_id(payload.session_id, "session_id")
+            .inspect_err(|_error| {
+                self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            })?
+            .ok_or_else(|| Status::invalid_argument("session_id is required"))?;
+        let outcome = self
+            .state
+            .unbind_agent_for_context(AgentUnbindRequest {
+                principal,
+                channel: non_empty(payload.channel),
+                session_id,
+            })
+            .await?;
+        if outcome.removed {
+            let _ = record_agent_journal_event(
+                &self.state,
+                &context,
+                json!({
+                    "event": "agent.binding_removed",
+                    "removed_agent_id": outcome.removed_agent_id,
+                }),
+            )
+            .await;
+        }
+        Ok(Response::new(gateway_v1::UnbindAgentForContextResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            removed: outcome.removed,
+            removed_agent_id: outcome.removed_agent_id.unwrap_or_default(),
         }))
     }
 

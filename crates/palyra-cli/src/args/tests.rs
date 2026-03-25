@@ -8,12 +8,12 @@ use super::{
     ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell, ConfigCommand,
     ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
     CronScheduleTypeArg, DaemonCommand, GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg,
-    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
-    OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand,
-    ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg, SecretsCommand,
-    SecretsConfigureCommand, SecurityCommand, SetupWizardOverridesArg, SkillsCommand,
-    SkillsPackageCommand, SupportBundleCommand, UninstallCommand, UpdateCommand,
-    WizardOverridesArg,
+    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, MessageCommand,
+    ModelsCommand, OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand,
+    PolicyCommand, ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg,
+    SecretsCommand, SecretsConfigureCommand, SecurityCommand, SessionsCommand,
+    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    UninstallCommand, UpdateCommand, WizardOverridesArg,
 };
 #[cfg(not(windows))]
 use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -322,6 +322,10 @@ fn parse_agent_run_with_prompt() {
                 device_id: None,
                 channel: None,
                 session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned()),
+                session_key: None,
+                session_label: None,
+                require_existing: false,
+                reset_session: false,
                 run_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned()),
                 prompt: Some("hello".to_owned()),
                 prompt_stdin: false,
@@ -345,6 +349,9 @@ fn parse_agent_interactive_with_defaults() {
                 device_id: None,
                 channel: None,
                 session_id: None,
+                session_key: None,
+                session_label: None,
+                require_existing: false,
                 allow_sensitive_tools: false,
                 ndjson: false,
             }
@@ -372,11 +379,86 @@ fn parse_agent_acp_shim_from_ndjson_stdin() {
                 device_id: None,
                 channel: None,
                 session_id: None,
+                session_key: None,
+                session_label: None,
+                require_existing: false,
+                reset_session: false,
                 run_id: None,
                 prompt: None,
                 prompt_stdin: false,
                 allow_sensitive_tools: false,
                 ndjson_stdin: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_agent_run_with_session_key_controls() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "agent",
+        "run",
+        "--session-key",
+        "ops:triage",
+        "--session-label",
+        "Ops Triage",
+        "--require-existing",
+        "--reset-session",
+        "--prompt",
+        "continue",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Agent {
+            command: AgentCommand::Run {
+                grpc_url: None,
+                token: None,
+                principal: None,
+                device_id: None,
+                channel: None,
+                session_id: None,
+                session_key: Some("ops:triage".to_owned()),
+                session_label: Some("Ops Triage".to_owned()),
+                require_existing: true,
+                reset_session: true,
+                run_id: None,
+                prompt: Some("continue".to_owned()),
+                prompt_stdin: false,
+                allow_sensitive_tools: false,
+                ndjson: false,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_agent_interactive_with_session_key() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "agent",
+        "interactive",
+        "--session-key",
+        "ops:triage",
+        "--session-label",
+        "Ops Triage",
+        "--require-existing",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Agent {
+            command: AgentCommand::Interactive {
+                grpc_url: None,
+                token: None,
+                principal: None,
+                device_id: None,
+                channel: None,
+                session_id: None,
+                session_key: Some("ops:triage".to_owned()),
+                session_label: Some("Ops Triage".to_owned()),
+                require_existing: true,
+                allow_sensitive_tools: false,
+                ndjson: false,
             }
         }
     );
@@ -500,6 +582,167 @@ fn parse_agents_create_with_workspace_roots() {
 fn parse_agents_list_ndjson_conflicts_with_json() {
     let result = Cli::try_parse_from(["palyra", "agents", "list", "--json", "--ndjson"]);
     assert!(result.is_err(), "--json and --ndjson must be mutually exclusive for agents list");
+}
+
+#[test]
+fn parse_sessions_list_ndjson() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "list",
+        "--after",
+        "principal=user:ops|device=01ARZ3NDEKTSV4RRFFQ69G5FAV|channel=cli|session=main",
+        "--limit",
+        "20",
+        "--ndjson",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Sessions {
+            command: SessionsCommand::List {
+                after: Some(
+                    "principal=user:ops|device=01ARZ3NDEKTSV4RRFFQ69G5FAV|channel=cli|session=main"
+                        .to_owned(),
+                ),
+                limit: Some(20),
+                include_archived: false,
+                json: false,
+                ndjson: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_sessions_resolve_with_label_and_reset() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "resolve",
+        "--session-key",
+        "ops:triage",
+        "--session-label",
+        "Ops Triage",
+        "--reset",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Sessions {
+            command: SessionsCommand::Resolve {
+                session_id: None,
+                session_key: Some("ops:triage".to_owned()),
+                session_label: Some("Ops Triage".to_owned()),
+                require_existing: false,
+                reset: true,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_sessions_rename_and_abort() {
+    let rename = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "rename",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "--session-label",
+        "Primary session",
+    ]);
+    assert_eq!(
+        rename.command,
+        Command::Sessions {
+            command: SessionsCommand::Rename {
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
+                session_label: "Primary session".to_owned(),
+                json: false,
+            }
+        }
+    );
+
+    let abort = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "abort",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        "--reason",
+        "operator requested stop",
+        "--json",
+    ]);
+    assert_eq!(
+        abort.command,
+        Command::Sessions {
+            command: SessionsCommand::Abort {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
+                reason: Some("operator requested stop".to_owned()),
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_sessions_cleanup_with_dry_run() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "cleanup",
+        "--session-key",
+        "ops:triage",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Sessions {
+            command: SessionsCommand::Cleanup {
+                session_id: None,
+                session_key: Some("ops:triage".to_owned()),
+                yes: false,
+                dry_run: true,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_message_send_with_thread_id() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "message",
+        "send",
+        "discord:default",
+        "--to",
+        "123456789",
+        "--text",
+        "hello",
+        "--confirm",
+        "--thread-id",
+        "thread-123",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Message {
+            command: MessageCommand::Send {
+                connector_id: "discord:default".to_owned(),
+                to: "123456789".to_owned(),
+                text: "hello".to_owned(),
+                confirm: true,
+                auto_reaction: None,
+                thread_id: Some("thread-123".to_owned()),
+                url: None,
+                token: None,
+                principal: "user:local".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: None,
+                json: true,
+            }
+        }
+    );
 }
 
 #[test]

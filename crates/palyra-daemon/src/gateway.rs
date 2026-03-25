@@ -44,8 +44,8 @@ pub(crate) use crate::transport::grpc::services::{
 };
 use crate::{
     agents::{
-        AgentCreateOutcome, AgentCreateRequest, AgentListPage, AgentRecord, AgentRegistry,
-        AgentRegistryError, AgentResolutionSource, AgentResolveOutcome, AgentSetDefaultOutcome,
+        AgentCreateOutcome, AgentCreateRequest, AgentRecord, AgentRegistry, AgentRegistryError,
+        AgentResolutionSource,
     },
     channel_router::{
         ChannelPairingSnapshot, ChannelRouter, ChannelRouterConfig,

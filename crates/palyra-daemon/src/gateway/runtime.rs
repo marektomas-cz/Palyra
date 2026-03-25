@@ -1,7 +1,13 @@
 use super::*;
-use crate::agents::AgentResolveRequest;
+use crate::agents::{
+    AgentBindingOutcome, AgentBindingQuery, AgentBindingRequest, AgentDeleteOutcome,
+    AgentListPage, AgentRecord, AgentResolveOutcome, AgentResolveRequest, AgentSetDefaultOutcome,
+    AgentUnbindOutcome, AgentUnbindRequest, SessionAgentBinding,
+};
 use crate::application::auth::map_auth_profile_error;
-use crate::journal::MemoryItemRecord;
+use crate::journal::{
+    MemoryItemRecord, OrchestratorSessionCleanupOutcome, OrchestratorSessionCleanupRequest,
+};
 use palyra_auth::AuthHealthReport;
 use std::path::PathBuf;
 
@@ -2226,6 +2232,7 @@ impl GatewayRuntimeState {
         principal: String,
         device_id: String,
         channel: Option<String>,
+        include_archived: bool,
         requested_limit: Option<usize>,
     ) -> Result<(Vec<OrchestratorSessionRecord>, Option<String>), Status> {
         let limit = requested_limit.unwrap_or(100).clamp(1, MAX_SESSIONS_PAGE_LIMIT);
@@ -2236,6 +2243,7 @@ impl GatewayRuntimeState {
                 principal.as_str(),
                 device_id.as_str(),
                 channel.as_deref(),
+                include_archived,
                 limit.saturating_add(1),
             )
             .map_err(|error| map_orchestrator_store_error("list orchestrator sessions", error))?;
@@ -2258,6 +2266,7 @@ impl GatewayRuntimeState {
         principal: String,
         device_id: String,
         channel: Option<String>,
+        include_archived: bool,
         requested_limit: Option<usize>,
     ) -> Result<(Vec<OrchestratorSessionRecord>, Option<String>), Status> {
         let state = Arc::clone(self);
@@ -2267,11 +2276,33 @@ impl GatewayRuntimeState {
                 principal,
                 device_id,
                 channel,
+                include_archived,
                 requested_limit,
             )
         })
         .await
         .map_err(|_| Status::internal("orchestrator session list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn cleanup_orchestrator_session_blocking(
+        &self,
+        request: &OrchestratorSessionCleanupRequest,
+    ) -> Result<OrchestratorSessionCleanupOutcome, Status> {
+        self.journal_store
+            .cleanup_orchestrator_session(request)
+            .map_err(|error| map_orchestrator_store_error("cleanup orchestrator session", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn cleanup_orchestrator_session(
+        self: &Arc<Self>,
+        request: OrchestratorSessionCleanupRequest,
+    ) -> Result<OrchestratorSessionCleanupOutcome, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.cleanup_orchestrator_session_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("orchestrator session cleanup worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]
@@ -2347,6 +2378,33 @@ impl GatewayRuntimeState {
     }
 
     #[allow(clippy::result_large_err)]
+    fn delete_agent_blocking(&self, agent_id: &str) -> Result<AgentDeleteOutcome, Status> {
+        self.agent_registry
+            .delete_agent(agent_id)
+            .map_err(|error| map_agent_registry_error("delete agent", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn delete_agent(
+        self: &Arc<Self>,
+        agent_id: String,
+    ) -> Result<AgentDeleteOutcome, Status> {
+        let state = Arc::clone(self);
+        let result =
+            tokio::task::spawn_blocking(move || state.delete_agent_blocking(agent_id.as_str()))
+                .await
+                .map_err(|_| Status::internal("agent delete worker panicked"))?;
+        if let Err(status) = &result {
+            if status.code() == tonic::Code::InvalidArgument {
+                self.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            self.counters.agent_mutations.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    #[allow(clippy::result_large_err)]
     fn set_default_agent_blocking(&self, agent_id: &str) -> Result<AgentSetDefaultOutcome, Status> {
         self.agent_registry
             .set_default_agent(agent_id)
@@ -2370,6 +2428,103 @@ impl GatewayRuntimeState {
             }
         } else {
             self.counters.agent_mutations.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_agent_bindings_blocking(
+        &self,
+        query: &AgentBindingQuery,
+    ) -> Result<Vec<SessionAgentBinding>, Status> {
+        self.agent_registry
+            .list_bindings(query.clone())
+            .map_err(|error| map_agent_registry_error("list agent bindings", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_agent_bindings(
+        self: &Arc<Self>,
+        query: AgentBindingQuery,
+    ) -> Result<Vec<SessionAgentBinding>, Status> {
+        let state = Arc::clone(self);
+        let result =
+            tokio::task::spawn_blocking(move || state.list_agent_bindings_blocking(&query))
+                .await
+                .map_err(|_| Status::internal("agent binding list worker panicked"))?;
+        if let Err(status) = &result {
+            if status.code() == tonic::Code::InvalidArgument {
+                self.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn bind_agent_for_context_blocking(
+        &self,
+        request: &AgentBindingRequest,
+    ) -> Result<AgentBindingOutcome, Status> {
+        self.agent_registry
+            .bind_agent_for_context(request.clone())
+            .map_err(|error| map_agent_registry_error("bind agent for context", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn bind_agent_for_context(
+        self: &Arc<Self>,
+        request: AgentBindingRequest,
+    ) -> Result<AgentBindingOutcome, Status> {
+        let state = Arc::clone(self);
+        let result =
+            tokio::task::spawn_blocking(move || state.bind_agent_for_context_blocking(&request))
+                .await
+                .map_err(|_| Status::internal("agent bind worker panicked"))?;
+        match &result {
+            Ok(_) => {
+                self.counters.agent_mutations.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(status) => {
+                if status.code() == tonic::Code::InvalidArgument {
+                    self.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        result
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn unbind_agent_for_context_blocking(
+        &self,
+        request: &AgentUnbindRequest,
+    ) -> Result<AgentUnbindOutcome, Status> {
+        self.agent_registry
+            .unbind_agent_for_context(request.clone())
+            .map_err(|error| map_agent_registry_error("unbind agent for context", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn unbind_agent_for_context(
+        self: &Arc<Self>,
+        request: AgentUnbindRequest,
+    ) -> Result<AgentUnbindOutcome, Status> {
+        let state = Arc::clone(self);
+        let result = tokio::task::spawn_blocking(move || {
+            state.unbind_agent_for_context_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("agent unbind worker panicked"))?;
+        match &result {
+            Ok(outcome) => {
+                if outcome.removed {
+                    self.counters.agent_mutations.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(status) => {
+                if status.code() == tonic::Code::InvalidArgument {
+                    self.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
         result
     }

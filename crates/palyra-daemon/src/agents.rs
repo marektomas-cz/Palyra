@@ -82,6 +82,52 @@ pub struct AgentSetDefaultOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDeleteOutcome {
+    pub deleted_agent_id: String,
+    pub deleted: bool,
+    pub removed_bindings_count: usize,
+    pub previous_default_agent_id: Option<String>,
+    pub default_agent_id: Option<String>,
+    pub agent_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentBindingRequest {
+    pub agent_id: String,
+    pub principal: String,
+    pub channel: Option<String>,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentBindingOutcome {
+    pub binding: SessionAgentBinding,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentBindingQuery {
+    pub agent_id: Option<String>,
+    pub principal: Option<String>,
+    pub channel: Option<String>,
+    pub session_id: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentUnbindRequest {
+    pub principal: String,
+    pub channel: Option<String>,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentUnbindOutcome {
+    pub removed: bool,
+    pub removed_agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentResolveRequest {
     pub principal: String,
     pub channel: Option<String>,
@@ -360,6 +406,161 @@ impl AgentRegistry {
             *guard = next;
         }
         Ok(AgentSetDefaultOutcome { previous_default_agent_id, default_agent_id: agent_id })
+    }
+
+    pub fn delete_agent(&self, agent_id: &str) -> Result<AgentDeleteOutcome, AgentRegistryError> {
+        let agent_id = normalize_agent_id(agent_id)?;
+        let mut guard = self.state.lock().map_err(|_| AgentRegistryError::LockPoisoned)?;
+        let mut next = guard.clone();
+        let index = next
+            .agents
+            .iter()
+            .position(|agent| agent.agent_id == agent_id)
+            .ok_or_else(|| AgentRegistryError::AgentNotFound(agent_id.clone()))?;
+        let removed_agent = next.agents.remove(index);
+        let previous_default_agent_id = next.default_agent_id.clone();
+        let removed_bindings_count = next
+            .session_bindings
+            .iter()
+            .filter(|binding| binding.agent_id == agent_id)
+            .count();
+        next.session_bindings.retain(|binding| binding.agent_id != agent_id);
+        if previous_default_agent_id.as_deref() == Some(agent_id.as_str()) {
+            next.default_agent_id = next.agents.first().map(|agent| agent.agent_id.clone());
+        }
+        persist_registry(self.registry_path.as_path(), &next)?;
+        let default_agent_id = next.default_agent_id.clone();
+        *guard = next;
+        Ok(AgentDeleteOutcome {
+            deleted_agent_id: agent_id,
+            deleted: true,
+            removed_bindings_count,
+            previous_default_agent_id,
+            default_agent_id,
+            agent_dir: removed_agent.agent_dir,
+        })
+    }
+
+    pub fn list_bindings(
+        &self,
+        query: AgentBindingQuery,
+    ) -> Result<Vec<SessionAgentBinding>, AgentRegistryError> {
+        let agent_id = query.agent_id.as_deref().map(normalize_agent_id).transpose()?;
+        let principal = query
+            .principal
+            .as_deref()
+            .map(|value| normalize_required_text(value, "principal"))
+            .transpose()?;
+        let channel = normalize_optional_text(query.channel.as_deref());
+        let session_id = if let Some(value) = query.session_id {
+            validate_canonical_id(value.as_str())
+                .map_err(|_| AgentRegistryError::InvalidSessionId(value.clone()))?;
+            Some(value)
+        } else {
+            None
+        };
+        let limit = query.limit.unwrap_or(500).clamp(1, 5_000);
+        let guard = self.state.lock().map_err(|_| AgentRegistryError::LockPoisoned)?;
+        let mut bindings = guard
+            .session_bindings
+            .iter()
+            .filter(|binding| {
+                agent_id
+                    .as_deref()
+                    .is_none_or(|value| binding.agent_id == value)
+                    && principal
+                        .as_deref()
+                        .is_none_or(|value| binding.principal == value)
+                    && channel.as_deref().is_none_or(|value| binding.channel.as_deref() == Some(value))
+                    && session_id
+                        .as_deref()
+                        .is_none_or(|value| binding.session_id == value)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        bindings.sort_by(|left, right| {
+            right
+                .updated_at_unix_ms
+                .cmp(&left.updated_at_unix_ms)
+                .then_with(|| left.agent_id.cmp(&right.agent_id))
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        bindings.truncate(limit);
+        Ok(bindings)
+    }
+
+    pub fn bind_agent_for_context(
+        &self,
+        request: AgentBindingRequest,
+    ) -> Result<AgentBindingOutcome, AgentRegistryError> {
+        let agent_id = normalize_agent_id(request.agent_id.as_str())?;
+        let principal = normalize_required_text(request.principal.as_str(), "principal")?;
+        let channel = normalize_optional_text(request.channel.as_deref());
+        validate_canonical_id(request.session_id.as_str())
+            .map_err(|_| AgentRegistryError::InvalidSessionId(request.session_id.clone()))?;
+
+        let mut guard = self.state.lock().map_err(|_| AgentRegistryError::LockPoisoned)?;
+        let mut next = guard.clone();
+        if !next.agents.iter().any(|agent| agent.agent_id == agent_id) {
+            return Err(AgentRegistryError::AgentNotFound(agent_id));
+        }
+        let now = current_unix_ms()?;
+        let mut created = false;
+        let binding = if let Some(existing) = next.session_bindings.iter_mut().find(|binding| {
+            binding.principal == principal
+                && binding.channel == channel
+                && binding.session_id == request.session_id
+        }) {
+            if existing.agent_id != agent_id {
+                existing.agent_id = agent_id.clone();
+            }
+            existing.updated_at_unix_ms = now;
+            existing.clone()
+        } else {
+            created = true;
+            let binding = SessionAgentBinding {
+                principal: principal.clone(),
+                channel: channel.clone(),
+                session_id: request.session_id.clone(),
+                agent_id: agent_id.clone(),
+                updated_at_unix_ms: now,
+            };
+            next.session_bindings.push(binding.clone());
+            if next.session_bindings.len() > MAX_SESSION_BINDINGS {
+                next.session_bindings.sort_by(|left, right| {
+                    right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms)
+                });
+                next.session_bindings.truncate(MAX_SESSION_BINDINGS);
+            }
+            binding
+        };
+        persist_registry(self.registry_path.as_path(), &next)?;
+        *guard = next;
+        Ok(AgentBindingOutcome { binding, created })
+    }
+
+    pub fn unbind_agent_for_context(
+        &self,
+        request: AgentUnbindRequest,
+    ) -> Result<AgentUnbindOutcome, AgentRegistryError> {
+        let principal = normalize_required_text(request.principal.as_str(), "principal")?;
+        let channel = normalize_optional_text(request.channel.as_deref());
+        validate_canonical_id(request.session_id.as_str())
+            .map_err(|_| AgentRegistryError::InvalidSessionId(request.session_id.clone()))?;
+
+        let mut guard = self.state.lock().map_err(|_| AgentRegistryError::LockPoisoned)?;
+        let mut next = guard.clone();
+        let Some(index) = next.session_bindings.iter().position(|binding| {
+            binding.principal == principal
+                && binding.channel == channel
+                && binding.session_id == request.session_id
+        }) else {
+            return Ok(AgentUnbindOutcome { removed: false, removed_agent_id: None });
+        };
+        let removed_agent_id = Some(next.session_bindings.remove(index).agent_id);
+        persist_registry(self.registry_path.as_path(), &next)?;
+        *guard = next;
+        Ok(AgentUnbindOutcome { removed: true, removed_agent_id })
     }
 
     pub fn resolve_agent_for_context(

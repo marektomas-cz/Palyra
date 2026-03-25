@@ -12,11 +12,18 @@ service GatewayService {
   rpc AbortRun(AbortRunRequest) returns (AbortRunResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc ResolveSession(ResolveSessionRequest) returns (ResolveSessionResponse);
+  rpc CleanupSession(CleanupSessionRequest) returns (CleanupSessionResponse);
   rpc RouteMessage(RouteMessageRequest) returns (RouteMessageResponse);
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
   rpc GetAgent(GetAgentRequest) returns (GetAgentResponse);
   rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse);
+  rpc DeleteAgent(DeleteAgentRequest) returns (DeleteAgentResponse);
   rpc SetDefaultAgent(SetDefaultAgentRequest) returns (SetDefaultAgentResponse);
+  rpc ListAgentBindings(ListAgentBindingsRequest) returns (ListAgentBindingsResponse);
+  rpc BindAgentForContext(BindAgentForContextRequest)
+      returns (BindAgentForContextResponse);
+  rpc UnbindAgentForContext(UnbindAgentForContextRequest)
+      returns (UnbindAgentForContextResponse);
   rpc ResolveAgentForContext(ResolveAgentForContextRequest)
       returns (ResolveAgentForContextResponse);
 }
@@ -417,16 +424,18 @@ message SessionSummary {
   int64 created_at_unix_ms = 4;
   int64 updated_at_unix_ms = 5;
   palyra.common.v1.CanonicalId last_run_id = 6;
+  int64 archived_at_unix_ms = 7;
 
-  reserved 7 to 16;
+  reserved 8 to 16;
 }
 
 message ListSessionsRequest {
   uint32 v = 1;
   string after_session_key = 2;
   uint32 limit = 3;
+  bool include_archived = 4;
 
-  reserved 4 to 10;
+  reserved 5 to 10;
 }
 
 message ListSessionsResponse {
@@ -455,6 +464,25 @@ message ResolveSessionResponse {
   bool reset_applied = 4;
 
   reserved 5 to 12;
+}
+
+message CleanupSessionRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  string session_key = 3;
+
+  reserved 4 to 10;
+}
+
+message CleanupSessionResponse {
+  uint32 v = 1;
+  SessionSummary session = 2;
+  bool cleaned = 3;
+  bool newly_archived = 4;
+  string previous_session_key = 5;
+  uint32 run_count = 6;
+
+  reserved 7 to 12;
 }
 
 message OutboundMessage {
@@ -580,6 +608,88 @@ message SetDefaultAgentResponse {
   uint32 v = 1;
   string previous_agent_id = 2;
   string default_agent_id = 3;
+
+  reserved 4 to 10;
+}
+
+message DeleteAgentRequest {
+  uint32 v = 1;
+  string agent_id = 2;
+
+  reserved 3 to 10;
+}
+
+message DeleteAgentResponse {
+  uint32 v = 1;
+  string deleted_agent_id = 2;
+  bool deleted = 3;
+  uint32 removed_bindings_count = 4;
+  string previous_default_agent_id = 5;
+  string default_agent_id = 6;
+  string agent_dir = 7;
+
+  reserved 8 to 16;
+}
+
+message AgentBinding {
+  string principal = 1;
+  string channel = 2;
+  palyra.common.v1.CanonicalId session_id = 3;
+  string agent_id = 4;
+  int64 updated_at_unix_ms = 5;
+
+  reserved 6 to 12;
+}
+
+message ListAgentBindingsRequest {
+  uint32 v = 1;
+  string agent_id = 2;
+  string principal = 3;
+  string channel = 4;
+  palyra.common.v1.CanonicalId session_id = 5;
+  uint32 limit = 6;
+
+  reserved 7 to 14;
+}
+
+message ListAgentBindingsResponse {
+  uint32 v = 1;
+  repeated AgentBinding bindings = 2;
+
+  reserved 3 to 10;
+}
+
+message BindAgentForContextRequest {
+  uint32 v = 1;
+  string agent_id = 2;
+  string principal = 3;
+  string channel = 4;
+  palyra.common.v1.CanonicalId session_id = 5;
+
+  reserved 6 to 12;
+}
+
+message BindAgentForContextResponse {
+  uint32 v = 1;
+  AgentBinding binding = 2;
+  bool created = 3;
+
+  reserved 4 to 10;
+}
+
+message UnbindAgentForContextRequest {
+  uint32 v = 1;
+  string principal = 2;
+  string channel = 3;
+  palyra.common.v1.CanonicalId session_id = 4;
+
+  reserved 5 to 12;
+}
+
+message UnbindAgentForContextResponse {
+  uint32 v = 1;
+  bool removed = 2;
+  string removed_agent_id = 3;
 
   reserved 4 to 10;
 }

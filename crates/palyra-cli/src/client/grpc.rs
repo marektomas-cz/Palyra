@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use tonic::Request;
 
 use crate::*;
 
@@ -40,54 +39,6 @@ pub(crate) async fn fetch_health_once(grpc_url: &str) -> Result<gateway_v1::Heal
         .await
         .context("failed to call gateway GetHealth")?;
     Ok(response.into_inner())
-}
-
-pub(crate) async fn run_stream_with_retry(
-    connection: &AgentConnection,
-    request: &AgentRunInput,
-) -> Result<tonic::Streaming<common_v1::RunStreamEvent>> {
-    let mut last_error = None;
-    for attempt in 1..=MAX_GRPC_ATTEMPTS {
-        match run_stream_once(connection, request).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => {
-                let retryable = is_retryable_error(&error);
-                last_error = Some(error);
-                if attempt < MAX_GRPC_ATTEMPTS && retryable {
-                    let delay_ms = BASE_GRPC_BACKOFF_MS * (1_u64 << (attempt - 1));
-                    sleep(Duration::from_millis(delay_ms)).await;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Some(error) = last_error {
-        Err(error).context(format!("agent stream failed after {MAX_GRPC_ATTEMPTS} attempts"))
-    } else {
-        anyhow::bail!("agent stream failed with no captured error")
-    }
-}
-
-pub(crate) async fn run_stream_once(
-    connection: &AgentConnection,
-    input: &AgentRunInput,
-) -> Result<tonic::Streaming<common_v1::RunStreamEvent>> {
-    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(
-        connection.grpc_url.clone(),
-    )
-    .await
-    .with_context(|| format!("failed to connect gateway gRPC endpoint {}", connection.grpc_url))?;
-    let request = build_run_stream_request(input)?;
-    let mut stream_request = Request::new(iter(vec![request]));
-    inject_run_stream_metadata(stream_request.metadata_mut(), connection)?;
-    let stream = client
-        .run_stream(stream_request)
-        .await
-        .context("failed to call gateway RunStream")?
-        .into_inner();
-    Ok(stream)
 }
 
 pub(crate) fn is_retryable_error(error: &anyhow::Error) -> bool {

@@ -967,6 +967,15 @@ pub struct OrchestratorSessionResolveRequest {
     pub reset_session: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorSessionCleanupRequest {
+    pub session_id: Option<String>,
+    pub session_key: Option<String>,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OrchestratorSessionRecord {
     pub session_id: String,
@@ -981,6 +990,8 @@ pub struct OrchestratorSessionRecord {
     pub updated_at_unix_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -988,6 +999,15 @@ pub struct OrchestratorSessionResolveOutcome {
     pub session: OrchestratorSessionRecord,
     pub created: bool,
     pub reset_applied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OrchestratorSessionCleanupOutcome {
+    pub session: OrchestratorSessionRecord,
+    pub cleaned: bool,
+    pub newly_archived: bool,
+    pub previous_session_key: String,
+    pub run_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1518,6 +1538,16 @@ const MIGRATIONS: &[Migration] = &[
                 ON memory_vectors(embedding_model_id, embedding_version);
         "#,
     },
+    Migration {
+        version: 11,
+        name: "orchestrator_sessions_add_archived_at",
+        sql: r#"
+            ALTER TABLE orchestrator_sessions
+                ADD COLUMN archived_at_unix_ms INTEGER;
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_sessions_archived_at
+                ON orchestrator_sessions(archived_at_unix_ms);
+        "#,
+    },
 ];
 
 pub struct JournalStore {
@@ -1963,6 +1993,7 @@ impl JournalStore {
                 created_at_unix_ms: now,
                 updated_at_unix_ms: now,
                 last_run_id: None,
+                archived_at_unix_ms: None,
             },
             created: true,
             reset_applied: false,
@@ -1975,6 +2006,7 @@ impl JournalStore {
         principal: &str,
         device_id: &str,
         channel: Option<&str>,
+        include_archived: bool,
         limit: usize,
     ) -> Result<Vec<OrchestratorSessionRecord>, JournalError> {
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
@@ -1985,8 +2017,113 @@ impl JournalStore {
             principal,
             device_id,
             channel,
+            include_archived,
             limit,
         )
+    }
+
+    pub fn cleanup_orchestrator_session(
+        &self,
+        request: &OrchestratorSessionCleanupRequest,
+    ) -> Result<OrchestratorSessionCleanupOutcome, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+
+        let requested_session_id =
+            request.session_id.clone().and_then(normalize_optional_session_field);
+        let requested_session_key =
+            request.session_key.clone().and_then(normalize_optional_session_field);
+        if requested_session_id.is_none() && requested_session_key.is_none() {
+            return Err(JournalError::InvalidSessionSelector {
+                reason: "session_id or session_key is required".to_owned(),
+            });
+        }
+
+        let existing_by_id = if let Some(session_id) = requested_session_id.as_deref() {
+            load_orchestrator_session_by_id(&guard, session_id)?
+        } else {
+            None
+        };
+        let existing_by_key = if let Some(session_key) = requested_session_key.as_deref() {
+            load_orchestrator_session_by_key(&guard, session_key)?
+        } else {
+            None
+        };
+
+        let mut session = match (existing_by_id, existing_by_key) {
+            (Some(by_id), Some(by_key)) => {
+                if by_id.session_id != by_key.session_id {
+                    return Err(JournalError::InvalidSessionSelector {
+                        reason:
+                            "session_id and session_key selectors resolve to different sessions"
+                                .to_owned(),
+                    });
+                }
+                by_id
+            }
+            (Some(by_id), None) => by_id,
+            (None, Some(by_key)) => by_key,
+            (None, None) => {
+                let selector = requested_session_id
+                    .clone()
+                    .or(requested_session_key.clone())
+                    .unwrap_or_else(|| "<unspecified>".to_owned());
+                return Err(JournalError::SessionNotFound { selector });
+            }
+        };
+
+        if session.principal != request.principal
+            || session.device_id != request.device_id
+            || session.channel != request.channel
+        {
+            return Err(JournalError::SessionIdentityMismatch {
+                session_id: session.session_id,
+            });
+        }
+
+        let run_count = guard.query_row(
+            "SELECT COUNT(*) FROM orchestrator_runs WHERE session_ulid = ?1",
+            params![session.session_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )? as u64;
+
+        let previous_session_key = session.session_key.clone();
+        if session.archived_at_unix_ms.is_some() {
+            return Ok(OrchestratorSessionCleanupOutcome {
+                session,
+                cleaned: false,
+                newly_archived: false,
+                previous_session_key,
+                run_count,
+            });
+        }
+
+        let archived_session_key = archived_session_key(session.session_id.as_str(), now);
+        guard.execute(
+            r#"
+                UPDATE orchestrator_sessions
+                SET
+                    session_key = ?2,
+                    updated_at_unix_ms = ?3,
+                    last_run_ulid = NULL,
+                    archived_at_unix_ms = ?3
+                WHERE session_ulid = ?1
+            "#,
+            params![session.session_id, archived_session_key, now],
+        )?;
+
+        session.session_key = archived_session_key;
+        session.updated_at_unix_ms = now;
+        session.last_run_id = None;
+        session.archived_at_unix_ms = Some(now);
+
+        Ok(OrchestratorSessionCleanupOutcome {
+            session,
+            cleaned: true,
+            newly_archived: true,
+            previous_session_key,
+            run_count,
+        })
     }
 
     pub fn start_orchestrator_run(
@@ -4088,6 +4225,7 @@ fn map_orchestrator_session_row(
         created_at_unix_ms: row.get(6)?,
         updated_at_unix_ms: row.get(7)?,
         last_run_id: row.get(8)?,
+        archived_at_unix_ms: row.get(9)?,
     })
 }
 
@@ -4106,7 +4244,8 @@ fn load_orchestrator_session_by_id(
                 channel,
                 created_at_unix_ms,
                 updated_at_unix_ms,
-                last_run_ulid
+                last_run_ulid,
+                archived_at_unix_ms
             FROM orchestrator_sessions
             WHERE session_ulid = ?1
             LIMIT 1
@@ -4133,7 +4272,8 @@ fn load_orchestrator_session_by_key(
                 channel,
                 created_at_unix_ms,
                 updated_at_unix_ms,
-                last_run_ulid
+                last_run_ulid,
+                archived_at_unix_ms
             FROM orchestrator_sessions
             WHERE session_key = ?1
             LIMIT 1
@@ -4160,9 +4300,11 @@ fn load_orchestrator_session_by_label(
                 channel,
                 created_at_unix_ms,
                 updated_at_unix_ms,
-                last_run_ulid
+                last_run_ulid,
+                archived_at_unix_ms
             FROM orchestrator_sessions
             WHERE session_label = ?1
+              AND archived_at_unix_ms IS NULL
             ORDER BY updated_at_unix_ms DESC
             LIMIT 1
         "#,
@@ -4179,6 +4321,7 @@ fn load_orchestrator_sessions_page(
     principal: &str,
     device_id: &str,
     channel: Option<&str>,
+    include_archived: bool,
     limit: usize,
 ) -> Result<Vec<OrchestratorSessionRecord>, JournalError> {
     let mut statement = connection.prepare(
@@ -4192,18 +4335,26 @@ fn load_orchestrator_sessions_page(
                 channel,
                 created_at_unix_ms,
                 updated_at_unix_ms,
-                last_run_ulid
+                last_run_ulid,
+                archived_at_unix_ms
             FROM orchestrator_sessions
             WHERE (?1 IS NULL OR session_key > ?1)
               AND principal = ?2
               AND device_id = ?3
               AND ((channel = ?4) OR (channel IS NULL AND ?4 IS NULL))
+              AND (?5 = 1 OR archived_at_unix_ms IS NULL)
             ORDER BY session_key ASC
-            LIMIT ?5
+            LIMIT ?6
         "#,
     )?;
-    let mut rows =
-        statement.query(params![after_session_key, principal, device_id, channel, limit as i64])?;
+    let mut rows = statement.query(params![
+        after_session_key,
+        principal,
+        device_id,
+        channel,
+        if include_archived { 1_i64 } else { 0_i64 },
+        limit as i64
+    ])?;
     let mut sessions = Vec::new();
     while let Some(row) = rows.next()? {
         sessions.push(map_orchestrator_session_row(row)?);
@@ -5465,6 +5616,10 @@ fn normalize_optional_session_field(value: String) -> Option<String> {
     }
 }
 
+fn archived_session_key(session_id: &str, archived_at_unix_ms: i64) -> String {
+    format!("archived:{session_id}:{archived_at_unix_ms}")
+}
+
 fn validate_db_path(path: &Path) -> Result<(), JournalError> {
     let path_text = path.to_string_lossy();
     if path_text.trim().is_empty() {
@@ -6326,6 +6481,7 @@ mod tests {
                 "user:ops",
                 "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 Some("cli"),
+                false,
                 1,
             )
             .expect("scoped session listing should succeed");
@@ -6341,6 +6497,7 @@ mod tests {
                 "user:ops",
                 "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 Some("cli"),
+                false,
                 2,
             )
             .expect("scoped session listing after cursor should succeed");

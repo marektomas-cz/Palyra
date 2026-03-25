@@ -303,7 +303,7 @@ pub(crate) fn run(command: ChannelsCommand) -> Result<()> {
     std::io::stdout().flush().context("stdout flush failed")
 }
 
-pub(super) fn get_connector_status(
+pub(crate) fn get_connector_status(
     connector_id: &str,
     url: Option<String>,
     token: Option<String>,
@@ -324,7 +324,7 @@ pub(super) fn get_connector_status(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn post_connector_action(
+pub(crate) fn post_connector_action(
     connector_id: &str,
     action_suffix: &str,
     payload: Option<Value>,

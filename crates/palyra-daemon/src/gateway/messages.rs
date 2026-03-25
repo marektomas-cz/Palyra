@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::SessionAgentBinding;
 
 pub(crate) fn session_summary_message(
     session: &OrchestratorSessionRecord,
@@ -13,6 +14,7 @@ pub(crate) fn session_summary_message(
             .last_run_id
             .as_ref()
             .map(|run_id| common_v1::CanonicalId { ulid: run_id.clone() }),
+        archived_at_unix_ms: session.archived_at_unix_ms.unwrap_or_default(),
     }
 }
 
@@ -27,6 +29,16 @@ pub(crate) fn agent_message(agent: &AgentRecord) -> gateway_v1::Agent {
         default_skill_allowlist: agent.default_skill_allowlist.clone(),
         created_at_unix_ms: agent.created_at_unix_ms,
         updated_at_unix_ms: agent.updated_at_unix_ms,
+    }
+}
+
+pub(crate) fn agent_binding_message(binding: &SessionAgentBinding) -> gateway_v1::AgentBinding {
+    gateway_v1::AgentBinding {
+        principal: binding.principal.clone(),
+        channel: binding.channel.clone().unwrap_or_default(),
+        session_id: Some(common_v1::CanonicalId { ulid: binding.session_id.clone() }),
+        agent_id: binding.agent_id.clone(),
+        updated_at_unix_ms: binding.updated_at_unix_ms,
     }
 }
 

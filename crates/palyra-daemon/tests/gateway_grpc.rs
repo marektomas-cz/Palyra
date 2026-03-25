@@ -2171,6 +2171,7 @@ async fn grpc_resolve_session_and_list_sessions_roundtrip() -> Result<()> {
         v: 1,
         after_session_key: String::new(),
         limit: 10,
+        include_archived: false,
     });
     authorize_metadata(list_request.metadata_mut())?;
     let listed = client
@@ -2222,6 +2223,7 @@ async fn grpc_list_sessions_is_scoped_to_authenticated_context() -> Result<()> {
         v: 1,
         after_session_key: String::new(),
         limit: 1,
+        include_archived: false,
     });
     authorize_metadata(first_page_request.metadata_mut())?;
     let first_page = client
@@ -2243,6 +2245,7 @@ async fn grpc_list_sessions_is_scoped_to_authenticated_context() -> Result<()> {
         v: 1,
         after_session_key: first_page.next_after_session_key.clone(),
         limit: 2,
+        include_archived: false,
     });
     authorize_metadata(second_page_request.metadata_mut())?;
     let second_page = client

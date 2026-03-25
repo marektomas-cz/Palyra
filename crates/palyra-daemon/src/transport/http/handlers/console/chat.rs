@@ -14,6 +14,7 @@ pub(crate) async fn console_chat_sessions_list_handler(
             session.context.principal.clone(),
             session.context.device_id.clone(),
             session.context.channel.clone(),
+            false,
             Some(limit),
         )
         .await

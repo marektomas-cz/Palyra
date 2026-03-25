@@ -15,27 +15,23 @@ pub(crate) async fn run_agents_async(
     command: AgentsCommand,
     connection: AgentConnection,
 ) -> Result<()> {
-    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(
-        connection.grpc_url.clone(),
-    )
-    .await
-    .with_context(|| format!("failed to connect gateway gRPC endpoint {}", connection.grpc_url))?;
+    let json = match &command {
+        AgentsCommand::List { json, .. }
+        | AgentsCommand::Bindings { json, .. }
+        | AgentsCommand::Show { json, .. }
+        | AgentsCommand::Bind { json, .. }
+        | AgentsCommand::Unbind { json, .. }
+        | AgentsCommand::SetDefault { json, .. }
+        | AgentsCommand::Create { json, .. }
+        | AgentsCommand::Delete { json, .. }
+        | AgentsCommand::Identity { json, .. } => output::preferred_json(*json),
+    };
+    let mut client = client::runtime::GatewayRuntimeClient::connect(connection.clone()).await?;
 
     match command {
-        AgentsCommand::List { after, limit, json, ndjson } => {
-            let json = output::preferred_json(json);
+        AgentsCommand::List { after, limit, json: _, ndjson } => {
             let ndjson = output::preferred_ndjson(json, ndjson);
-            let mut request = Request::new(gateway_v1::ListAgentsRequest {
-                v: CANONICAL_PROTOCOL_MAJOR,
-                limit: limit.unwrap_or(100),
-                after_agent_id: after.unwrap_or_default(),
-            });
-            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
-            let response = client
-                .list_agents(request)
-                .await
-                .context("failed to call ListAgents")?
-                .into_inner();
+            let response = client.list_agents(after, limit).await?;
             if json {
                 println!(
                     "{}",
@@ -47,27 +43,21 @@ pub(crate) async fn run_agents_async(
                 );
             } else if ndjson {
                 for agent in &response.agents {
-                    let line = json!({
-                        "type": "agent",
-                        "agent": agent_to_json(agent),
-                        "is_default": response.default_agent_id == agent.agent_id,
-                    });
-                    println!("{}", serde_json::to_string(&line)?);
+                    println!(
+                        "{}",
+                        serde_json::to_string(&json!({
+                            "type": "agent",
+                            "agent": agent_to_json(agent),
+                            "is_default": response.default_agent_id == agent.agent_id,
+                        }))?
+                    );
                 }
             } else {
                 println!(
                     "agents.list count={} default={} next_after={}",
                     response.agents.len(),
-                    if response.default_agent_id.is_empty() {
-                        "none"
-                    } else {
-                        response.default_agent_id.as_str()
-                    },
-                    if response.next_after_agent_id.is_empty() {
-                        "none"
-                    } else {
-                        response.next_after_agent_id.as_str()
-                    }
+                    text_or_none(response.default_agent_id.as_str()),
+                    text_or_none(response.next_after_agent_id.as_str())
                 );
                 for agent in &response.agents {
                     println!(
@@ -81,15 +71,70 @@ pub(crate) async fn run_agents_async(
                 }
             }
         }
-        AgentsCommand::Show { agent_id, json } => {
-            let json = output::preferred_json(json);
-            let mut request = Request::new(gateway_v1::GetAgentRequest {
-                v: CANONICAL_PROTOCOL_MAJOR,
-                agent_id: normalize_agent_id_cli(agent_id.as_str())?,
-            });
-            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
-            let response =
-                client.get_agent(request).await.context("failed to call GetAgent")?.into_inner();
+        AgentsCommand::Bindings {
+            agent_id,
+            principal,
+            channel,
+            session_id,
+            limit,
+            json: _,
+            ndjson,
+        } => {
+            let ndjson = output::preferred_ndjson(json, ndjson);
+            let response = client
+                .list_agent_bindings(gateway_v1::ListAgentBindingsRequest {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    agent_id: agent_id
+                        .map(|value| normalize_agent_id_cli(value.as_str()))
+                        .transpose()?
+                        .unwrap_or_default(),
+                    principal: principal.unwrap_or_default(),
+                    channel: channel.unwrap_or_default(),
+                    session_id: session_id
+                        .map(|value| resolve_or_generate_canonical_id(Some(value)))
+                        .transpose()?
+                        .map(|ulid| common_v1::CanonicalId { ulid })
+                        .or(None),
+                    limit: limit.unwrap_or(250),
+                })
+                .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "bindings": response.bindings.iter().map(agent_binding_to_json).collect::<Vec<_>>(),
+                    }))?
+                );
+            } else if ndjson {
+                for binding in &response.bindings {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&json!({
+                            "type": "agent_binding",
+                            "binding": agent_binding_to_json(binding),
+                        }))?
+                    );
+                }
+            } else {
+                println!("agents.bindings count={}", response.bindings.len());
+                for binding in &response.bindings {
+                    println!(
+                        "binding agent_id={} principal={} channel={} session_id={} updated_at_unix_ms={}",
+                        binding.agent_id,
+                        binding.principal,
+                        text_or_none(binding.channel.as_str()),
+                        binding
+                            .session_id
+                            .as_ref()
+                            .map(|value| value.ulid.as_str())
+                            .unwrap_or("none"),
+                        binding.updated_at_unix_ms
+                    );
+                }
+            }
+        }
+        AgentsCommand::Show { agent_id, json: _ } => {
+            let response = client.get_agent(normalize_agent_id_cli(agent_id.as_str())?).await?;
             let agent = response.agent.context("GetAgent returned empty agent payload")?;
             if json {
                 println!(
@@ -110,18 +155,67 @@ pub(crate) async fn run_agents_async(
                 );
             }
         }
-        AgentsCommand::SetDefault { agent_id, json } => {
-            let json = output::preferred_json(json);
-            let mut request = Request::new(gateway_v1::SetDefaultAgentRequest {
-                v: CANONICAL_PROTOCOL_MAJOR,
-                agent_id: normalize_agent_id_cli(agent_id.as_str())?,
-            });
-            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+        AgentsCommand::Bind { agent_id, principal, channel, session_id, json: _ } => {
             let response = client
-                .set_default_agent(request)
-                .await
-                .context("failed to call SetDefaultAgent")?
-                .into_inner();
+                .bind_agent_for_context(gateway_v1::BindAgentForContextRequest {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    agent_id: normalize_agent_id_cli(agent_id.as_str())?,
+                    principal: principal.unwrap_or_else(|| connection.principal.clone()),
+                    channel: channel.unwrap_or_else(|| connection.channel.clone()),
+                    session_id: Some(common_v1::CanonicalId {
+                        ulid: resolve_or_generate_canonical_id(Some(session_id))?,
+                    }),
+                })
+                .await?;
+            let binding = response.binding.context("BindAgentForContext returned empty binding")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "binding": agent_binding_to_json(&binding),
+                        "created": response.created,
+                    }))?
+                );
+            } else {
+                println!(
+                    "agents.bind agent_id={} principal={} channel={} session_id={} created={}",
+                    binding.agent_id,
+                    binding.principal,
+                    text_or_none(binding.channel.as_str()),
+                    binding.session_id.as_ref().map(|value| value.ulid.as_str()).unwrap_or("none"),
+                    response.created
+                );
+            }
+        }
+        AgentsCommand::Unbind { principal, channel, session_id, json: _ } => {
+            let response = client
+                .unbind_agent_for_context(gateway_v1::UnbindAgentForContextRequest {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    principal: principal.unwrap_or_else(|| connection.principal.clone()),
+                    channel: channel.unwrap_or_else(|| connection.channel.clone()),
+                    session_id: Some(common_v1::CanonicalId {
+                        ulid: resolve_or_generate_canonical_id(Some(session_id))?,
+                    }),
+                })
+                .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "removed": response.removed,
+                        "removed_agent_id": empty_to_none(response.removed_agent_id),
+                    }))?
+                );
+            } else {
+                println!(
+                    "agents.unbind removed={} removed_agent_id={}",
+                    response.removed,
+                    text_or_none(response.removed_agent_id.as_str())
+                );
+            }
+        }
+        AgentsCommand::SetDefault { agent_id, json: _ } => {
+            let response = client.set_default_agent(normalize_agent_id_cli(agent_id.as_str())?).await?;
             if json {
                 println!(
                     "{}",
@@ -133,11 +227,7 @@ pub(crate) async fn run_agents_async(
             } else {
                 println!(
                     "agents.set_default previous={} default={}",
-                    if response.previous_agent_id.is_empty() {
-                        "none"
-                    } else {
-                        response.previous_agent_id.as_str()
-                    },
+                    text_or_none(response.previous_agent_id.as_str()),
                     response.default_agent_id
                 );
             }
@@ -152,27 +242,22 @@ pub(crate) async fn run_agents_async(
             skill_allow,
             set_default,
             allow_absolute_paths,
-            json,
+            json: _,
         } => {
-            let json = output::preferred_json(json);
-            let mut request = Request::new(gateway_v1::CreateAgentRequest {
-                v: CANONICAL_PROTOCOL_MAJOR,
-                agent_id: normalize_agent_id_cli(agent_id.as_str())?,
-                display_name,
-                agent_dir: agent_dir.unwrap_or_default(),
-                workspace_roots: workspace_root,
-                default_model_profile: model_profile.unwrap_or_default(),
-                default_tool_allowlist: tool_allow,
-                default_skill_allowlist: skill_allow,
-                set_default,
-                allow_absolute_paths,
-            });
-            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
             let response = client
-                .create_agent(request)
-                .await
-                .context("failed to call CreateAgent")?
-                .into_inner();
+                .create_agent(gateway_v1::CreateAgentRequest {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    agent_id: normalize_agent_id_cli(agent_id.as_str())?,
+                    display_name,
+                    agent_dir: agent_dir.unwrap_or_default(),
+                    workspace_roots: workspace_root,
+                    default_model_profile: model_profile.unwrap_or_default(),
+                    default_tool_allowlist: tool_allow,
+                    default_skill_allowlist: skill_allow,
+                    set_default,
+                    allow_absolute_paths,
+                })
+                .await?;
             let agent = response.agent.context("CreateAgent returned empty agent payload")?;
             if json {
                 println!(
@@ -189,16 +274,159 @@ pub(crate) async fn run_agents_async(
                     agent.agent_id,
                     agent.display_name,
                     response.default_changed,
-                    if response.default_agent_id.is_empty() {
-                        "none"
-                    } else {
-                        response.default_agent_id.as_str()
-                    },
+                    text_or_none(response.default_agent_id.as_str()),
                     agent.agent_dir
+                );
+            }
+        }
+        AgentsCommand::Delete { agent_id, dry_run, yes, json: _ } => {
+            let normalized_agent_id = normalize_agent_id_cli(agent_id.as_str())?;
+            let agent = client
+                .get_agent(normalized_agent_id.clone())
+                .await?
+                .agent
+                .context("GetAgent returned empty agent payload")?;
+            let bindings = client
+                .list_agent_bindings(gateway_v1::ListAgentBindingsRequest {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    agent_id: normalized_agent_id.clone(),
+                    principal: String::new(),
+                    channel: String::new(),
+                    session_id: None,
+                    limit: 1_000,
+                })
+                .await?
+                .bindings;
+            if dry_run {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "agent": agent_to_json(&agent),
+                            "would_delete": true,
+                            "binding_count": bindings.len(),
+                            "bindings": bindings.iter().map(agent_binding_to_json).collect::<Vec<_>>(),
+                            "agent_dir_retained": true,
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "agents.delete.dry_run agent_id={} binding_count={} agent_dir={} agent_dir_retained=true",
+                        agent.agent_id,
+                        bindings.len(),
+                        agent.agent_dir
+                    );
+                }
+            } else {
+                if !yes {
+                    anyhow::bail!(
+                        "agents delete requires --yes; use --dry-run to inspect the impact first"
+                    );
+                }
+                let response = client.delete_agent(normalized_agent_id).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "deleted": response.deleted,
+                            "deleted_agent_id": response.deleted_agent_id,
+                            "removed_bindings_count": response.removed_bindings_count,
+                            "previous_default_agent_id": empty_to_none(response.previous_default_agent_id),
+                            "default_agent_id": empty_to_none(response.default_agent_id),
+                            "agent_dir": response.agent_dir,
+                            "agent_dir_retained": true,
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "agents.delete deleted={} agent_id={} removed_bindings={} previous_default={} default={} agent_dir={} agent_dir_retained=true",
+                        response.deleted,
+                        response.deleted_agent_id,
+                        response.removed_bindings_count,
+                        text_or_none(response.previous_default_agent_id.as_str()),
+                        text_or_none(response.default_agent_id.as_str()),
+                        response.agent_dir
+                    );
+                }
+            }
+        }
+        AgentsCommand::Identity {
+            principal,
+            channel,
+            session_id,
+            preferred_agent_id,
+            persist_binding,
+            json: _,
+        } => {
+            let response = client
+                .resolve_agent_for_context(gateway_v1::ResolveAgentForContextRequest {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    principal: principal.unwrap_or_else(|| connection.principal.clone()),
+                    channel: channel.unwrap_or_else(|| connection.channel.clone()),
+                    session_id: session_id
+                        .map(|value| resolve_or_generate_canonical_id(Some(value)))
+                        .transpose()?
+                        .map(|ulid| common_v1::CanonicalId { ulid }),
+                    preferred_agent_id: preferred_agent_id
+                        .map(|value| normalize_agent_id_cli(value.as_str()))
+                        .transpose()?
+                        .unwrap_or_default(),
+                    persist_session_binding: persist_binding,
+                })
+                .await?;
+            let agent = response
+                .agent
+                .context("ResolveAgentForContext returned empty agent payload")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "agent": agent_to_json(&agent),
+                        "source": agent_resolution_source_label(response.source),
+                        "binding_created": response.binding_created,
+                        "is_default": response.is_default,
+                    }))?
+                );
+            } else {
+                println!(
+                    "agents.identity agent_id={} source={} binding_created={} default={}",
+                    agent.agent_id,
+                    agent_resolution_source_label(response.source),
+                    response.binding_created,
+                    response.is_default
                 );
             }
         }
     }
 
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn agent_binding_to_json(binding: &gateway_v1::AgentBinding) -> Value {
+    json!({
+        "agent_id": binding.agent_id,
+        "principal": binding.principal,
+        "channel": empty_to_none(binding.channel.clone()),
+        "session_id": binding.session_id.as_ref().map(|value| value.ulid.clone()),
+        "updated_at_unix_ms": binding.updated_at_unix_ms,
+    })
+}
+
+fn text_or_none(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "none"
+    } else {
+        value
+    }
+}
+
+fn agent_resolution_source_label(raw: i32) -> &'static str {
+    match gateway_v1::AgentResolutionSource::try_from(raw)
+        .unwrap_or(gateway_v1::AgentResolutionSource::Unspecified)
+    {
+        gateway_v1::AgentResolutionSource::SessionBinding => "session_binding",
+        gateway_v1::AgentResolutionSource::Default => "default",
+        gateway_v1::AgentResolutionSource::Fallback => "fallback",
+        gateway_v1::AgentResolutionSource::Unspecified => "unspecified",
+    }
 }

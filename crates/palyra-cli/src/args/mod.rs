@@ -15,6 +15,7 @@ mod cron;
 mod daemon;
 mod init;
 mod memory;
+mod message;
 mod models;
 mod onboarding;
 #[cfg(not(windows))]
@@ -25,6 +26,7 @@ mod protocol;
 mod reset;
 mod secrets;
 mod security;
+mod sessions;
 mod skills;
 mod support_bundle;
 mod uninstall;
@@ -50,6 +52,7 @@ pub use cron::{CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg, Cron
 pub use daemon::{DaemonCommand, JournalCheckpointModeArg};
 pub use init::{InitModeArg, InitTlsScaffoldArg};
 pub use memory::{MemoryCommand, MemoryScopeArg, MemorySourceArg};
+pub use message::MessageCommand;
 pub use models::ModelsCommand;
 pub use onboarding::{
     GatewayBindProfileArg, OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg,
@@ -63,6 +66,7 @@ pub use protocol::ProtocolCommand;
 pub use reset::{ResetCommand, ResetScopeArg};
 pub use secrets::{SecretsCommand, SecretsConfigureCommand};
 pub use security::SecurityCommand;
+pub use sessions::SessionsCommand;
 pub use skills::{SkillsCommand, SkillsPackageCommand};
 pub use support_bundle::SupportBundleCommand;
 pub use uninstall::UninstallCommand;
@@ -330,9 +334,17 @@ pub enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    Message {
+        #[command(subcommand)]
+        command: MessageCommand,
+    },
     Approvals {
         #[command(subcommand)]
         command: ApprovalsCommand,
+    },
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
     },
     Auth {
         #[command(subcommand)]
