@@ -461,6 +461,8 @@ mod tests {
                 required_checks_total: 0,
                 required_checks_ok: 0,
                 required_checks_failed: 0,
+                warning_checks_failed: 0,
+                info_checks_failed: 0,
             },
             config: DoctorConfigSnapshot { path: None, exists: true, parsed: true, error: None },
             identity: DoctorIdentitySnapshot {

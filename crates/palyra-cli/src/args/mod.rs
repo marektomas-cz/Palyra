@@ -5,6 +5,7 @@ mod agent;
 mod agents;
 mod approvals;
 mod auth;
+mod backup;
 mod browser;
 mod channels;
 mod completion;
@@ -21,10 +22,13 @@ mod pairing;
 mod patch;
 mod policy;
 mod protocol;
+mod reset;
 mod secrets;
 mod security;
 mod skills;
 mod support_bundle;
+mod uninstall;
+mod update;
 
 pub use agent::AgentCommand;
 pub use agents::AgentsCommand;
@@ -36,6 +40,7 @@ pub use auth::{
     AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
     AuthScopeArg,
 };
+pub use backup::{BackupCommand, BackupComponentArg};
 pub use browser::BrowserCommand;
 pub use channels::{ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand};
 pub use completion::CompletionShell;
@@ -55,16 +60,21 @@ pub use pairing::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 pub use patch::PatchCommand;
 pub use policy::PolicyCommand;
 pub use protocol::ProtocolCommand;
+pub use reset::{ResetCommand, ResetScopeArg};
 pub use secrets::{SecretsCommand, SecretsConfigureCommand};
 pub use security::SecurityCommand;
 pub use skills::{SkillsCommand, SkillsPackageCommand};
 pub use support_bundle::SupportBundleCommand;
+pub use uninstall::UninstallCommand;
+pub use update::UpdateCommand;
 
 const ROOT_AFTER_HELP: &str = "\
 Examples:
   palyra setup --mode local
   palyra gateway status
   palyra dashboard --open
+  palyra backup create --output ./artifacts/palyra-backup.zip
+  palyra update --check
   palyra --profile staging agents list --json
   palyra --config ./palyra.toml --output-format json status --admin
 
@@ -73,6 +83,10 @@ Canonical command map:
   configure  Guided reconfiguration workflow for an existing installation
   gateway    Preferred runtime/admin family (`daemon` remains as a compatibility alias)
   dashboard  Thin operator shortcut for dashboard URL discovery/open workflows
+  backup     Portable lifecycle backup/create verification surface
+  reset      Destructive local recovery surface with explicit scope selection
+  uninstall  Installer-aware package removal surface
+  update     Package update/check orchestration surface
   onboarding Operator onboarding workflows (`onboard` remains as a compatibility alias)";
 
 const SETUP_AFTER_HELP: &str = "\
@@ -123,6 +137,29 @@ Examples:
   palyra dashboard
   palyra dashboard --open
   palyra dashboard --path ./palyra.toml --verify-remote --json";
+
+const BACKUP_AFTER_HELP: &str = "\
+Examples:
+  palyra backup create --output ./artifacts/palyra-backup.zip
+  palyra backup create --include workspace --workspace-root ./workspace --include-support-bundle
+  palyra backup verify --archive ./artifacts/palyra-backup.zip";
+
+const RESET_AFTER_HELP: &str = "\
+Examples:
+  palyra reset --scope service --dry-run
+  palyra reset --scope state --scope service --yes
+  palyra reset --scope config --config-path ./palyra.toml --dry-run";
+
+const UNINSTALL_AFTER_HELP: &str = "\
+Examples:
+  palyra uninstall --install-root ./install --dry-run
+  palyra uninstall --install-root ./install --remove-state --yes";
+
+const UPDATE_AFTER_HELP: &str = "\
+Examples:
+  palyra update --check
+  palyra update --install-root ./install --archive ./artifacts/palyra-headless.zip --dry-run
+  palyra update --install-root ./install --archive ./artifacts/palyra-headless.zip --yes --skip-service-restart";
 
 const HEALTH_AFTER_HELP: &str = "\
 Examples:
@@ -408,6 +445,38 @@ pub enum Command {
         open: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+    #[command(
+        about = "Create or verify portable operator backups",
+        after_long_help = BACKUP_AFTER_HELP
+    )]
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
+    #[command(
+        about = "Reset selected local runtime scopes",
+        after_long_help = RESET_AFTER_HELP
+    )]
+    Reset {
+        #[command(flatten)]
+        command: ResetCommand,
+    },
+    #[command(
+        about = "Remove an installed Palyra package and optional state",
+        after_long_help = UNINSTALL_AFTER_HELP
+    )]
+    Uninstall {
+        #[command(flatten)]
+        command: UninstallCommand,
+    },
+    #[command(
+        about = "Check or apply a packaged Palyra update",
+        after_long_help = UPDATE_AFTER_HELP
+    )]
+    Update {
+        #[command(flatten)]
+        command: UpdateCommand,
     },
     SupportBundle {
         #[command(subcommand)]

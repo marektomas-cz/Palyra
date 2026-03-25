@@ -2010,9 +2010,7 @@ fn console_m52_control_plane_domains_publish_contract_metadata() -> Result<()> {
     assert!(
         gateway_verify.get("cli_handoff_commands").and_then(Value::as_array).is_some_and(
             |commands| commands.iter().any(|command| {
-                command
-                    .as_str()
-                    .is_some_and(|value| value.contains("dashboard-url --verify-remote"))
+                command.as_str().is_some_and(|value| value.contains("dashboard --verify-remote"))
             })
         ),
         "gateway verify handoff should publish the generated CLI command"

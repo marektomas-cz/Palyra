@@ -1,0 +1,46 @@
+Check or apply a packaged Palyra update
+
+Usage: palyra.exe update [OPTIONS]
+
+Options:
+      --install-root <INSTALL_ROOT>
+
+      --archive <ARCHIVE>
+
+      --check
+
+      --dry-run
+
+      --yes
+
+      --skip-service-restart
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Global Options:
+      --profile <PROFILE>
+
+      --config <CONFIG_PATH>
+
+      --state-root <STATE_ROOT>
+
+  -v, --verbose...
+          Increase logging verbosity (-v => debug, -vv => trace)
+
+      --log-level <LOG_LEVEL>
+          [default: info]
+          [possible values: error, warn, info, debug, trace]
+
+      --output-format <OUTPUT_FORMAT>
+          [default: text]
+          [possible values: text, json, ndjson]
+
+      --plain
+
+      --no-color
+
+Examples:
+  palyra update --check
+  palyra update --install-root ./install --archive ./artifacts/palyra-headless.zip --dry-run
+  palyra update --install-root ./install --archive ./artifacts/palyra-headless.zip --yes --skip-service-restart

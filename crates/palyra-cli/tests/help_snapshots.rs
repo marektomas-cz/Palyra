@@ -95,6 +95,29 @@ fn dashboard_help_snapshot_matches() -> Result<()> {
 }
 
 #[test]
+fn backup_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(&["backup", "--help"], include_str!("help_snapshots/backup-help.txt"))
+}
+
+#[test]
+fn reset_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(&["reset", "--help"], include_str!("help_snapshots/reset-help.txt"))
+}
+
+#[test]
+fn uninstall_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(
+        &["uninstall", "--help"],
+        include_str!("help_snapshots/uninstall-help.txt"),
+    )
+}
+
+#[test]
+fn update_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(&["update", "--help"], include_str!("help_snapshots/update-help.txt"))
+}
+
+#[test]
 fn completion_help_snapshot_matches() -> Result<()> {
     assert_help_snapshot(
         &["completion", "--help"],

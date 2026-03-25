@@ -4,14 +4,15 @@ use super::{
     AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalDecisionScopeArg,
     ApprovalExportFormatArg, ApprovalResolveDecisionArg, ApprovalSubjectTypeArg, ApprovalsCommand,
     AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
-    AuthScopeArg, BrowserCommand, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand,
-    Cli, Command, CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand,
-    CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
-    GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg,
-    MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand, OnboardingAuthMethodArg,
-    OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand, ProtocolCommand,
-    RemoteVerificationModeArg, SecretsCommand, SecretsConfigureCommand, SecurityCommand,
-    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    AuthScopeArg, BackupCommand, BackupComponentArg, BrowserCommand, ChannelsCommand,
+    ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell, ConfigCommand,
+    ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
+    CronScheduleTypeArg, DaemonCommand, GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg,
+    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
+    OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand,
+    ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg, SecretsCommand,
+    SecretsConfigureCommand, SecurityCommand, SetupWizardOverridesArg, SkillsCommand,
+    SkillsPackageCommand, SupportBundleCommand, UninstallCommand, UpdateCommand,
     WizardOverridesArg,
 };
 #[cfg(not(windows))]
@@ -127,6 +128,134 @@ fn parse_logs_with_follow() {
             lines: 100,
             follow: true,
             poll_interval_ms: 2500,
+        }
+    );
+}
+
+#[test]
+fn parse_backup_create_with_explicit_components() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "backup",
+        "create",
+        "--output",
+        "artifacts/palyra-backup.zip",
+        "--config-path",
+        "config/palyra.toml",
+        "--state-root",
+        "state",
+        "--workspace-root",
+        "workspace",
+        "--include",
+        "workspace",
+        "--include",
+        "support-bundle",
+        "--include-workspace",
+        "--include-support-bundle",
+        "--force",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Backup {
+            command: BackupCommand::Create {
+                output: Some("artifacts/palyra-backup.zip".to_owned()),
+                config_path: Some("config/palyra.toml".to_owned()),
+                state_root: Some("state".to_owned()),
+                workspace_root: Some("workspace".to_owned()),
+                include: vec![BackupComponentArg::Workspace, BackupComponentArg::SupportBundle],
+                include_workspace: true,
+                include_support_bundle: true,
+                force: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_backup_verify() {
+    let parsed =
+        Cli::parse_from(["palyra", "backup", "verify", "--archive", "artifacts/palyra-backup.zip"]);
+    assert_eq!(
+        parsed.command,
+        Command::Backup {
+            command: BackupCommand::Verify { archive: "artifacts/palyra-backup.zip".to_owned() }
+        }
+    );
+}
+
+#[test]
+fn parse_reset_with_repeated_scope() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "reset",
+        "--scope",
+        "state",
+        "--scope",
+        "service",
+        "--workspace-root",
+        "workspace",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Reset {
+            command: ResetCommand {
+                scopes: vec![ResetScopeArg::State, ResetScopeArg::Service],
+                config_path: None,
+                workspace_root: Some("workspace".to_owned()),
+                dry_run: true,
+                yes: false,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_uninstall_with_remove_state() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "uninstall",
+        "--install-root",
+        "install",
+        "--remove-state",
+        "--yes",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Uninstall {
+            command: UninstallCommand {
+                install_root: Some("install".to_owned()),
+                remove_state: true,
+                yes: true,
+                dry_run: false,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_update_check_with_archive_hint() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "update",
+        "--install-root",
+        "install",
+        "--archive",
+        "artifacts/palyra-headless.zip",
+        "--check",
+        "--skip-service-restart",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Update {
+            command: UpdateCommand {
+                install_root: Some("install".to_owned()),
+                archive: Some("artifacts/palyra-headless.zip".to_owned()),
+                check: true,
+                dry_run: false,
+                yes: false,
+                skip_service_restart: true,
+            }
         }
     );
 }
@@ -1681,6 +1810,75 @@ fn parse_daemon_status_with_url() {
         parsed.command,
         Command::Gateway {
             command: DaemonCommand::Status { url: Some("http://127.0.0.1:7142".to_owned()) }
+        }
+    );
+}
+
+#[test]
+fn parse_daemon_install_with_service_options() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "daemon",
+        "install",
+        "--service-name",
+        "PalyraGateway",
+        "--bin-path",
+        "./target/debug/palyrad",
+        "--log-dir",
+        "./logs",
+        "--start",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Gateway {
+            command: DaemonCommand::Install {
+                service_name: Some("PalyraGateway".to_owned()),
+                bin_path: Some("./target/debug/palyrad".to_owned()),
+                log_dir: Some("./logs".to_owned()),
+                start: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_daemon_service_actions() {
+    let start = Cli::parse_from(["palyra", "daemon", "start"]);
+    assert_eq!(start.command, Command::Gateway { command: DaemonCommand::Start });
+
+    let stop = Cli::parse_from(["palyra", "daemon", "stop"]);
+    assert_eq!(stop.command, Command::Gateway { command: DaemonCommand::Stop });
+
+    let restart = Cli::parse_from(["palyra", "daemon", "restart"]);
+    assert_eq!(restart.command, Command::Gateway { command: DaemonCommand::Restart });
+
+    let uninstall = Cli::parse_from(["palyra", "daemon", "uninstall"]);
+    assert_eq!(uninstall.command, Command::Gateway { command: DaemonCommand::Uninstall });
+}
+
+#[test]
+fn parse_daemon_logs_with_follow() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "daemon",
+        "logs",
+        "--db-path",
+        "state/journal.sqlite3",
+        "--lines",
+        "75",
+        "--follow",
+        "--poll-interval-ms",
+        "2000",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Gateway {
+            command: DaemonCommand::Logs {
+                db_path: Some("state/journal.sqlite3".to_owned()),
+                lines: 75,
+                follow: true,
+                poll_interval_ms: 2000,
+            }
         }
     );
 }

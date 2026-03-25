@@ -9,6 +9,12 @@ Commands:
   discover
   call
   usage-cost
+  install
+  start
+  stop
+  restart
+  uninstall
+  logs
   status
   admin-status
   journal-recent

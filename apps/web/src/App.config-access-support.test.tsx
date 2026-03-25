@@ -201,7 +201,7 @@ describe("M56 config, access, and support surfaces", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Access" }));
     expect(await screen.findByRole("heading", { name: "Access" })).toBeInTheDocument();
-    expect(document.body).toHaveTextContent("dashboard-url --verify-remote");
+    expect(document.body).toHaveTextContent("dashboard --verify-remote");
     expect(document.body).toHaveTextContent("tunnel --ssh");
 
     fireEvent.click(await screen.findByRole("button", { name: "Mint pairing code" }));

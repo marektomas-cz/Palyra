@@ -54,7 +54,7 @@ export function capabilityCatalogFixture() {
           execution_mode: "generated_cli",
           dashboard_exposure: "cli_handoff",
           cli_handoff_commands: [
-            "cargo run -p palyra-cli -- daemon dashboard-url --verify-remote --json",
+            "cargo run -p palyra-cli -- dashboard --verify-remote --json",
           ],
           notes:
             "Remote verification stays CLI-driven because it may require host-local trust material.",

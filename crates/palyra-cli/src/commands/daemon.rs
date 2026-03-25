@@ -69,28 +69,7 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
         DaemonCommand::Logs { db_path, lines, follow, poll_interval_ms } => {
             super::logs::run_logs(db_path, lines, follow, poll_interval_ms)
         }
-        DaemonCommand::Status { url } => {
-            let connection = root_context()?.resolve_http_connection(
-                app::ConnectionOverrides { daemon_url: url, ..app::ConnectionOverrides::default() },
-                app::ConnectionDefaults::USER,
-            )?;
-            let status_url = format!("{}/healthz", connection.base_url.trim_end_matches('/'));
-            let client = Client::builder()
-                .timeout(std::time::Duration::from_secs(2))
-                .build()
-                .context("failed to build HTTP client")?;
-            let response = fetch_health_with_retry(&client, &status_url)?;
-
-            println!(
-                "status={} service={} version={} git_hash={} uptime_seconds={}",
-                response.status,
-                response.service,
-                response.version,
-                response.git_hash,
-                response.uptime_seconds
-            );
-            std::io::stdout().flush().context("stdout flush failed")
-        }
+        DaemonCommand::Status { url } => run_gateway_status(url),
         DaemonCommand::DashboardUrl { path, verify_remote, identity_store_dir, open, json } => {
             let target = resolve_dashboard_access_target(path)?;
             let verification_report = if verify_remote {
@@ -528,7 +507,17 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
     }
 }
 
-fn resolve_palyrad_binary(bin_path: Option<String>) -> Result<PathBuf> {
+#[derive(Debug, Serialize)]
+struct GatewayStatusReport {
+    daemon_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    health: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    health_error: Option<String>,
+    service: support::service::GatewayServiceStatus,
+}
+
+pub(crate) fn resolve_palyrad_binary(bin_path: Option<String>) -> Result<PathBuf> {
     if let Some(path) = bin_path {
         let path = PathBuf::from(path);
         if path.is_file() {
@@ -538,7 +527,8 @@ fn resolve_palyrad_binary(bin_path: Option<String>) -> Result<PathBuf> {
     }
 
     let executable = if cfg!(windows) { "palyrad.exe" } else { "palyrad" };
-    let current_exe = std::env::current_exe().context("failed to resolve current CLI executable")?;
+    let current_exe =
+        std::env::current_exe().context("failed to resolve current CLI executable")?;
     let mut candidates = Vec::new();
     if let Some(parent) = current_exe.parent() {
         candidates.push(parent.join(executable));
@@ -564,9 +554,9 @@ fn run_gateway_foreground(bin_path: Option<String>) -> Result<()> {
     }
     command.env("PALYRA_STATE_ROOT", context.state_root());
 
-    let status = command
-        .status()
-        .with_context(|| format!("failed to start palyrad foreground process {}", binary.display()))?;
+    let status = command.status().with_context(|| {
+        format!("failed to start palyrad foreground process {}", binary.display())
+    })?;
     if !status.success() {
         anyhow::bail!(
             "palyrad exited with status {}",
@@ -608,7 +598,10 @@ fn run_gateway_service_action(action: &str) -> Result<()> {
     emit_gateway_service_status(format!("gateway.{action}").as_str(), &status)
 }
 
-fn emit_gateway_service_status(prefix: &str, status: &support::service::GatewayServiceStatus) -> Result<()> {
+fn emit_gateway_service_status(
+    prefix: &str,
+    status: &support::service::GatewayServiceStatus,
+) -> Result<()> {
     let context = root_context()?;
     if context.prefers_json() {
         return output::print_json_pretty(
@@ -650,6 +643,85 @@ fn emit_gateway_service_status(prefix: &str, status: &support::service::GatewayS
     );
     if let Some(detail) = status.detail.as_deref() {
         println!("{prefix}.detail={detail}");
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn run_gateway_status(url: Option<String>) -> Result<()> {
+    let context = root_context()?;
+    let connection = context.resolve_http_connection(
+        app::ConnectionOverrides { daemon_url: url, ..app::ConnectionOverrides::default() },
+        app::ConnectionDefaults::USER,
+    )?;
+    let status_url = format!("{}/healthz", connection.base_url.trim_end_matches('/'));
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+    let service = support::service::query_gateway_service_status(context.state_root()).unwrap_or(
+        support::service::GatewayServiceStatus {
+            installed: false,
+            running: false,
+            enabled: false,
+            manager: "unknown".to_owned(),
+            service_name: support::service::default_service_name(),
+            definition_path: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            detail: Some("service status unavailable".to_owned()),
+        },
+    );
+    let (health, health_error) = match fetch_health_with_retry(&client, &status_url) {
+        Ok(response) => (
+            Some(json!({
+                "status": response.status,
+                "service": response.service,
+                "version": response.version,
+                "git_hash": response.git_hash,
+                "uptime_seconds": response.uptime_seconds,
+            })),
+            None,
+        ),
+        Err(error) => (None, Some(sanitize_diagnostic_error(error.to_string().as_str()))),
+    };
+
+    let report =
+        GatewayStatusReport { daemon_url: connection.base_url, health, health_error, service };
+    if context.prefers_json() {
+        return output::print_json_pretty(
+            &report,
+            "failed to encode gateway status output as JSON",
+        );
+    }
+    if context.prefers_ndjson() {
+        output::print_json_line(&report, "failed to encode gateway status output as NDJSON")?;
+        return std::io::stdout().flush().context("stdout flush failed");
+    }
+
+    println!(
+        "gateway.status daemon_url={} installed={} running={} enabled={} manager={} service_name={}",
+        report.daemon_url,
+        report.service.installed,
+        report.service.running,
+        report.service.enabled,
+        report.service.manager,
+        report.service.service_name
+    );
+    if let Some(health) = report.health.as_ref() {
+        println!(
+            "gateway.status.health status={} service={} version={} git_hash={} uptime_seconds={}",
+            health.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+            health.get("service").and_then(Value::as_str).unwrap_or("unknown"),
+            health.get("version").and_then(Value::as_str).unwrap_or("unknown"),
+            health.get("git_hash").and_then(Value::as_str).unwrap_or("unknown"),
+            health.get("uptime_seconds").and_then(Value::as_u64).unwrap_or(0)
+        );
+    }
+    if let Some(error) = report.health_error.as_deref() {
+        println!("gateway.status.health_error={error}");
+    }
+    if let Some(detail) = report.service.detail.as_deref() {
+        println!("gateway.status.service_detail={detail}");
     }
     std::io::stdout().flush().context("stdout flush failed")
 }
@@ -698,14 +770,20 @@ fn build_gateway_discover_payload(
     identity_store_dir: Option<String>,
 ) -> Result<Value> {
     let context = root_context()?;
-    let http_connection =
-        context.resolve_http_connection(app::ConnectionOverrides::default(), app::ConnectionDefaults::USER)?;
-    let grpc_connection =
-        context.resolve_grpc_connection(app::ConnectionOverrides::default(), app::ConnectionDefaults::USER)?;
+    let http_connection = context.resolve_http_connection(
+        app::ConnectionOverrides::default(),
+        app::ConnectionDefaults::USER,
+    )?;
+    let grpc_connection = context.resolve_grpc_connection(
+        app::ConnectionOverrides::default(),
+        app::ConnectionDefaults::USER,
+    )?;
     let target = resolve_dashboard_access_target(path)?;
     let verification_report = if verify_remote {
-        let _ =
-            verify_dashboard_remote_target(&target, identity_store_dir.and_then(normalize_optional_text_arg))?;
+        let _ = verify_dashboard_remote_target(
+            &target,
+            identity_store_dir.and_then(normalize_optional_text_arg),
+        )?;
         target
             .verification
             .as_ref()
@@ -743,10 +821,16 @@ fn run_gateway_discover(
     let payload = build_gateway_discover_payload(path, verify_remote, identity_store_dir)?;
     let context = root_context()?;
     if context.prefers_json() {
-        return output::print_json_pretty(&payload, "failed to encode gateway discover output as JSON");
+        return output::print_json_pretty(
+            &payload,
+            "failed to encode gateway discover output as JSON",
+        );
     }
     if context.prefers_ndjson() {
-        return output::print_json_line(&payload, "failed to encode gateway discover output as NDJSON");
+        return output::print_json_line(
+            &payload,
+            "failed to encode gateway discover output as NDJSON",
+        );
     }
 
     println!(
@@ -852,10 +936,16 @@ fn run_gateway_probe(
     });
 
     if context.prefers_json() {
-        return output::print_json_pretty(&payload, "failed to encode gateway probe output as JSON");
+        return output::print_json_pretty(
+            &payload,
+            "failed to encode gateway probe output as JSON",
+        );
     }
     if context.prefers_ndjson() {
-        return output::print_json_line(&payload, "failed to encode gateway probe output as NDJSON");
+        return output::print_json_line(
+            &payload,
+            "failed to encode gateway probe output as NDJSON",
+        );
     }
 
     println!(
@@ -873,32 +963,16 @@ fn run_gateway_probe(
     );
     println!(
         "gateway.probe.dashboard mode={} url={}",
-        payload
-            .pointer("/discover/dashboard/mode")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown"),
-        payload
-            .pointer("/discover/dashboard/url")
-            .and_then(Value::as_str)
-            .unwrap_or("none")
+        payload.pointer("/discover/dashboard/mode").and_then(Value::as_str).unwrap_or("unknown"),
+        payload.pointer("/discover/dashboard/url").and_then(Value::as_str).unwrap_or("none")
     );
-    if payload
-        .pointer("/admin/available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if payload.pointer("/admin/available").and_then(Value::as_bool).unwrap_or(false) {
         let admin_payload = payload.pointer("/admin/payload").unwrap_or(&Value::Null);
         println!(
             "gateway.probe.admin status={} journal_events={} denied_requests={}",
             admin_payload.get("status").and_then(Value::as_str).unwrap_or("unknown"),
-            admin_payload
-                .pointer("/counters/journal_events")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            admin_payload
-                .pointer("/counters/denied_requests")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
+            admin_payload.pointer("/counters/journal_events").and_then(Value::as_u64).unwrap_or(0),
+            admin_payload.pointer("/counters/denied_requests").and_then(Value::as_u64).unwrap_or(0)
         );
     } else if let Some(error) = payload.pointer("/admin/error").and_then(Value::as_str) {
         println!("gateway.probe.admin status=unavailable error={error}");
@@ -1202,7 +1276,9 @@ fn run_gateway_usage_cost(db_path: Option<String>, days: u32) -> Result<()> {
         payload.pointer("/totals/completion_tokens").and_then(Value::as_i64).unwrap_or(0),
         payload.pointer("/totals/total_tokens").and_then(Value::as_i64).unwrap_or(0),
     );
-    if let Some(last_day) = payload.get("daily").and_then(Value::as_array).and_then(|entries| entries.last()) {
+    if let Some(last_day) =
+        payload.get("daily").and_then(Value::as_array).and_then(|entries| entries.last())
+    {
         println!(
             "gateway.usage_cost.latest_day date={} runs={} total_tokens={}",
             last_day.get("date").and_then(Value::as_str).unwrap_or("unknown"),

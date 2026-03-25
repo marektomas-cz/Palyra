@@ -306,6 +306,10 @@ fn run_cli() -> Result<()> {
                 json,
             })
         }
+        CliCommand::Backup { command } => commands::backup::run_backup(command),
+        CliCommand::Reset { command } => commands::reset::run_reset(command),
+        CliCommand::Uninstall { command } => commands::uninstall::run_uninstall(command),
+        CliCommand::Update { command } => commands::update::run_update(command),
         CliCommand::SupportBundle { command } => {
             commands::support_bundle::run_support_bundle(command)
         }
@@ -538,108 +542,92 @@ fn emit_remote_init_guidance(
 
 fn build_doctor_checks() -> Vec<DoctorCheck> {
     vec![
-        DoctorCheck {
-            key: "toolchain_ok",
-            ok: command_available("rustc", &["--version"]),
-            required: true,
-        },
-        DoctorCheck {
-            key: "cargo_ok",
-            ok: command_available("cargo", &["--version"]),
-            required: true,
-        },
-        DoctorCheck {
-            key: "workspace_writable",
-            ok: is_workspace_writable().unwrap_or(false),
-            required: true,
-        },
-        DoctorCheck { key: "repo_scaffold_ok", ok: required_directories_ok(), required: true },
-        DoctorCheck {
-            key: "memory_embeddings_model_configured",
-            ok: memory_embeddings_model_config_ok(),
-            required: false,
-        },
-        DoctorCheck {
-            key: "process_runner_tier_b_egress_allowlists_preflight_only",
-            ok: process_runner_tier_b_allowlist_config_ok(),
-            required: false,
-        },
-        DoctorCheck {
-            key: "process_runner_tier_c_strict_offline_only",
-            ok: process_runner_tier_c_strict_offline_config_ok(),
-            required: false,
-        },
-        DoctorCheck {
-            key: "process_runner_tier_c_windows_backend_supported",
-            ok: process_runner_tier_c_windows_backend_config_ok(),
-            required: cfg!(windows),
-        },
-        DoctorCheck {
-            key: "gitleaks_installed",
-            ok: command_available("gitleaks", &["--version"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "cargo_audit_installed",
-            ok: command_available("cargo", &["audit", "--version"]),
-            required: true,
-        },
-        DoctorCheck {
-            key: "cargo_deny_installed",
-            ok: command_available("cargo", &["deny", "--version"]),
-            required: true,
-        },
-        DoctorCheck {
-            key: "cargo_cyclonedx_installed",
-            ok: command_available("cargo", &["cyclonedx", "--version"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "osv_scanner_installed",
-            ok: command_available("osv-scanner", &["--version"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "cargo_fuzz_installed",
-            ok: command_available("cargo", &["fuzz", "--help"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "protoc_installed",
-            ok: command_available("protoc", &["--version"])
+        DoctorCheck::blocking("toolchain_ok", command_available("rustc", &["--version"]), &[]),
+        DoctorCheck::blocking("cargo_ok", command_available("cargo", &["--version"]), &[]),
+        DoctorCheck::blocking(
+            "workspace_writable",
+            is_workspace_writable().unwrap_or(false),
+            &["palyra doctor", "palyra support-bundle export --output ./support-bundle.json"],
+        ),
+        DoctorCheck::blocking("repo_scaffold_ok", required_directories_ok(), &[]),
+        DoctorCheck::warning(
+            "memory_embeddings_model_configured",
+            memory_embeddings_model_config_ok(),
+            &["palyra config validate", "palyra doctor"],
+        ),
+        DoctorCheck::warning(
+            "process_runner_tier_b_egress_allowlists_preflight_only",
+            process_runner_tier_b_allowlist_config_ok(),
+            &["palyra security audit", "palyra doctor"],
+        ),
+        DoctorCheck::warning(
+            "process_runner_tier_c_strict_offline_only",
+            process_runner_tier_c_strict_offline_config_ok(),
+            &["palyra security audit", "palyra doctor"],
+        ),
+        DoctorCheck::warning(
+            "process_runner_tier_c_windows_backend_supported",
+            process_runner_tier_c_windows_backend_config_ok(),
+            &["palyra doctor", "palyra support-bundle export --output ./support-bundle.json"],
+        ),
+        DoctorCheck::warning(
+            "gitleaks_installed",
+            command_available("gitleaks", &["--version"]),
+            &["palyra security audit"],
+        ),
+        DoctorCheck::blocking(
+            "cargo_audit_installed",
+            command_available("cargo", &["audit", "--version"]),
+            &["cargo install cargo-audit"],
+        ),
+        DoctorCheck::blocking(
+            "cargo_deny_installed",
+            command_available("cargo", &["deny", "--version"]),
+            &["cargo install cargo-deny"],
+        ),
+        DoctorCheck::info(
+            "cargo_cyclonedx_installed",
+            command_available("cargo", &["cyclonedx", "--version"]),
+            &["cargo install cargo-cyclonedx"],
+        ),
+        DoctorCheck::warning(
+            "osv_scanner_installed",
+            command_available("osv-scanner", &["--version"]),
+            &["palyra security audit"],
+        ),
+        DoctorCheck::info(
+            "cargo_fuzz_installed",
+            command_available("cargo", &["fuzz", "--help"]),
+            &["cargo install cargo-fuzz"],
+        ),
+        DoctorCheck::blocking(
+            "protoc_installed",
+            command_available("protoc", &["--version"])
                 || command_available("protoc.exe", &["--version"]),
-            required: true,
-        },
-        DoctorCheck {
-            key: "swiftc_installed",
-            ok: command_available("swiftc", &["--version"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "kotlinc_installed",
-            ok: command_available("kotlinc", &["-version"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "just_installed",
-            ok: command_available("just", &["--version"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "npm_installed",
-            ok: command_available("npm", &["--version"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "swiftlint_installed",
-            ok: command_available("swiftlint", &["version"]),
-            required: false,
-        },
-        DoctorCheck {
-            key: "detekt_installed",
-            ok: command_available("detekt", &["--version"]),
-            required: false,
-        },
+            &["bash scripts/protocol/validate-proto.sh"],
+        ),
+        DoctorCheck::info(
+            "swiftc_installed",
+            command_available("swiftc", &["--version"]),
+            &["bash scripts/protocol/validate-swift-stubs.sh"],
+        ),
+        DoctorCheck::info(
+            "kotlinc_installed",
+            command_available("kotlinc", &["-version"]),
+            &["bash scripts/protocol/validate-kotlin-stubs.sh"],
+        ),
+        DoctorCheck::info(
+            "just_installed",
+            command_available("just", &["--version"]),
+            &["just doctor"],
+        ),
+        DoctorCheck::info(
+            "npm_installed",
+            command_available("npm", &["--version"]),
+            &["npm --prefix apps/web run build"],
+        ),
+        DoctorCheck::info("swiftlint_installed", command_available("swiftlint", &["version"]), &[]),
+        DoctorCheck::info("detekt_installed", command_available("detekt", &["--version"]), &[]),
     ]
 }
 
@@ -654,6 +642,12 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
     let required_checks_total = checks.iter().filter(|check| check.required).count();
     let required_checks_ok = checks.iter().filter(|check| check.required && check.ok).count();
     let required_checks_failed = required_checks_total.saturating_sub(required_checks_ok);
+    let warning_checks_failed = checks
+        .iter()
+        .filter(|check| check.severity == DoctorSeverity::Warning && !check.ok)
+        .count();
+    let info_checks_failed =
+        checks.iter().filter(|check| check.severity == DoctorSeverity::Info && !check.ok).count();
 
     Ok(DoctorReport {
         generated_at_unix_ms,
@@ -662,6 +656,8 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
             required_checks_total,
             required_checks_ok,
             required_checks_failed,
+            warning_checks_failed,
+            info_checks_failed,
         },
         config,
         identity,
@@ -1150,7 +1146,12 @@ fn resolve_support_bundle_output_path(
 fn build_support_bundle_config_snapshot() -> SupportBundleConfigSnapshot {
     let path = doctor_config_path().map(|value| value.to_string_lossy().into_owned());
     let Some(path_value) = path.clone() else {
-        return SupportBundleConfigSnapshot { path, redacted_document: None, error: None };
+        return SupportBundleConfigSnapshot {
+            path,
+            redacted_document: None,
+            fingerprint_sha256: None,
+            error: None,
+        };
     };
 
     let path_ref = PathBuf::from(path_value.as_str());
@@ -1158,6 +1159,7 @@ fn build_support_bundle_config_snapshot() -> SupportBundleConfigSnapshot {
         return SupportBundleConfigSnapshot {
             path,
             redacted_document: None,
+            fingerprint_sha256: None,
             error: Some("config path does not exist".to_owned()),
         };
     }
@@ -1168,15 +1170,19 @@ fn build_support_bundle_config_snapshot() -> SupportBundleConfigSnapshot {
             match serde_json::to_value(document) {
                 Ok(mut payload) => {
                     redact_json_value_tree(&mut payload, None);
+                    let fingerprint_sha256 =
+                        serde_json::to_vec(&payload).ok().map(|bytes| sha256_hex(bytes.as_slice()));
                     SupportBundleConfigSnapshot {
                         path,
                         redacted_document: Some(payload),
+                        fingerprint_sha256,
                         error: None,
                     }
                 }
                 Err(error) => SupportBundleConfigSnapshot {
                     path,
                     redacted_document: None,
+                    fingerprint_sha256: None,
                     error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
                 },
             }
@@ -1184,18 +1190,28 @@ fn build_support_bundle_config_snapshot() -> SupportBundleConfigSnapshot {
         Err(error) => SupportBundleConfigSnapshot {
             path,
             redacted_document: None,
+            fingerprint_sha256: None,
             error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
         },
     }
 }
 
 fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapshot {
+    let service_status = app::current_root_context()
+        .map(|context| support::service::query_gateway_service_status(context.state_root()))
+        .transpose()
+        .ok()
+        .flatten();
     let token = env::var("PALYRA_ADMIN_TOKEN")
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
     let Some(token) = token else {
         return SupportBundleDiagnosticsSnapshot {
+            gateway_health: build_support_bundle_gateway_health(None),
+            service_status,
+            browser_status: None,
+            node_status: None,
             admin_status: None,
             admin_status_error: Some("skipped (PALYRA_ADMIN_TOKEN is not set)".to_owned()),
         };
@@ -1205,6 +1221,10 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
         Ok(client) => client,
         Err(error) => {
             return SupportBundleDiagnosticsSnapshot {
+                gateway_health: None,
+                service_status,
+                browser_status: None,
+                node_status: None,
                 admin_status: None,
                 admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
             };
@@ -1214,11 +1234,16 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
         Ok(url) => url,
         Err(error) => {
             return SupportBundleDiagnosticsSnapshot {
+                gateway_health: None,
+                service_status,
+                browser_status: None,
+                node_status: None,
                 admin_status: None,
                 admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
             };
         }
     };
+    let gateway_health = build_support_bundle_gateway_health(Some((&client, daemon_url.as_str())));
     let principal = resolve_doctor_admin_principal();
     match fetch_admin_status_payload(
         &client,
@@ -1230,17 +1255,40 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
         None,
     ) {
         Ok(mut payload) => {
+            let browser_status = payload.get("browserd").cloned();
+            let node_status = payload.get("node").cloned();
             redact_json_value_tree(&mut payload, None);
             SupportBundleDiagnosticsSnapshot {
+                gateway_health,
+                service_status,
+                browser_status,
+                node_status,
                 admin_status: Some(payload),
                 admin_status_error: None,
             }
         }
         Err(error) => SupportBundleDiagnosticsSnapshot {
+            gateway_health,
+            service_status,
+            browser_status: None,
+            node_status: None,
             admin_status: None,
             admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
         },
     }
+}
+
+fn build_support_bundle_gateway_health(client_and_url: Option<(&Client, &str)>) -> Option<Value> {
+    let (client, daemon_url) = client_and_url?;
+    let health_url = format!("{}/healthz", daemon_url.trim_end_matches('/'));
+    let response = fetch_health_with_retry(client, health_url.as_str()).ok()?;
+    Some(json!({
+        "status": response.status,
+        "service": response.service,
+        "version": response.version,
+        "git_hash": response.git_hash,
+        "uptime_seconds": response.uptime_seconds,
+    }))
 }
 
 fn build_support_bundle_observability_snapshot(
@@ -5513,11 +5561,45 @@ fn fetch_health_with_retry(client: &Client, status_url: &str) -> Result<HealthRe
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DoctorSeverity {
+    Blocking,
+    Warning,
+    Info,
+}
+
+impl DoctorSeverity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::Warning => "warning",
+            Self::Info => "info",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 struct DoctorCheck {
     key: &'static str,
     ok: bool,
     required: bool,
+    severity: DoctorSeverity,
+    remediation: &'static [&'static str],
+}
+
+impl DoctorCheck {
+    const fn blocking(key: &'static str, ok: bool, remediation: &'static [&'static str]) -> Self {
+        Self { key, ok, required: true, severity: DoctorSeverity::Blocking, remediation }
+    }
+
+    const fn warning(key: &'static str, ok: bool, remediation: &'static [&'static str]) -> Self {
+        Self { key, ok, required: false, severity: DoctorSeverity::Warning, remediation }
+    }
+
+    const fn info(key: &'static str, ok: bool, remediation: &'static [&'static str]) -> Self {
+        Self { key, ok, required: false, severity: DoctorSeverity::Info, remediation }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -5538,6 +5620,8 @@ struct DoctorSummary {
     required_checks_total: usize,
     required_checks_ok: usize,
     required_checks_failed: usize,
+    warning_checks_failed: usize,
+    info_checks_failed: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -5651,11 +5735,21 @@ struct SupportBundleConfigSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     redacted_document: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct SupportBundleDiagnosticsSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_health: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_status: Option<support::service::GatewayServiceStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    browser_status: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_status: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     admin_status: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -6962,6 +7056,8 @@ mod diagnostics_bundle_tests {
                 required_checks_total: 2,
                 required_checks_ok: 2,
                 required_checks_failed: 0,
+                warning_checks_failed: 0,
+                info_checks_failed: 0,
             },
             config: DoctorConfigSnapshot {
                 path: Some("palyra.toml".to_owned()),
@@ -7050,6 +7146,7 @@ mod diagnostics_bundle_tests {
                         "huge": "x".repeat(24_000),
                     }
                 })),
+                fingerprint_sha256: Some("f".repeat(64)),
                 error: None,
             },
             observability: SupportBundleObservabilitySnapshot {
@@ -7073,6 +7170,13 @@ mod diagnostics_bundle_tests {
                 common_order: vec!["Check deployment posture and operator auth first.".to_owned()],
             },
             diagnostics: SupportBundleDiagnosticsSnapshot {
+                gateway_health: Some(json!({
+                    "status": "ok",
+                    "service": "palyrad",
+                })),
+                service_status: None,
+                browser_status: None,
+                node_status: None,
                 admin_status: Some(json!({
                     "model_provider": {
                         "kind": "openai-compatible",

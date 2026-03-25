@@ -22,6 +22,10 @@ Commands:
   configure       Safely reconfigure an existing installation
   gateway         Gateway and runtime diagnostics surface [aliases: daemon]
   dashboard       Resolve or open the operator dashboard URL
+  backup          Create or verify portable operator backups
+  reset           Reset selected local runtime scopes
+  uninstall       Remove an installed Palyra package and optional state
+  update          Check or apply a packaged Palyra update
   support-bundle
   policy
   protocol
@@ -63,6 +67,8 @@ Examples:
   palyra setup --mode local
   palyra gateway status
   palyra dashboard --open
+  palyra backup create --output ./artifacts/palyra-backup.zip
+  palyra update --check
   palyra --profile staging agents list --json
   palyra --config ./palyra.toml --output-format json status --admin
 
@@ -71,4 +77,8 @@ Canonical command map:
   configure  Guided reconfiguration workflow for an existing installation
   gateway    Preferred runtime/admin family (`daemon` remains as a compatibility alias)
   dashboard  Thin operator shortcut for dashboard URL discovery/open workflows
+  backup     Portable lifecycle backup/create verification surface
+  reset      Destructive local recovery surface with explicit scope selection
+  uninstall  Installer-aware package removal surface
+  update     Package update/check orchestration surface
   onboarding Operator onboarding workflows (`onboard` remains as a compatibility alias)

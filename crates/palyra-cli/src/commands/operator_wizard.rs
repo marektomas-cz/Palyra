@@ -114,6 +114,17 @@ enum ServiceInstallMode {
     #[default]
     NotNow,
     GuidanceOnly,
+    InstallNow,
+}
+
+impl ServiceInstallMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotNow => "not_now",
+            Self::GuidanceOnly => "guidance_only",
+            Self::InstallNow => "install_now",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,16 +461,17 @@ pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()
                     "configure.service.note",
                     "Daemon / Service",
                     format!(
-                        "Service lifecycle automation lands in a later phase. This section currently records safe next-step guidance only. Current state: {}",
+                        "Gateway service lifecycle is available via `palyra gateway install|start|stop|restart|uninstall`. This section records the current state and next-step guidance. Current state: {}",
                         join_section_state(before_snapshot.as_slice())
                     ),
                 ))?;
                 wizard.action(WizardStep::action(
                     "configure.service.action",
                     "Service Guidance",
-                    "Use `palyra gateway status` after applying changes and keep service installation manual until the dedicated lifecycle surface ships.",
+                    "Use `palyra gateway install --start` after applying changes to register the background gateway service, then verify it with `palyra gateway status`.",
                 ))?;
-                follow_up_checks.push("service install remains manual in this phase".to_owned());
+                follow_up_checks.push("palyra gateway install --start".to_owned());
+                follow_up_checks.push("palyra gateway status".to_owned());
             }
             ConfigureSectionArg::Channels => {
                 wizard.note(WizardStep::note(
@@ -898,23 +910,33 @@ fn execute_onboarding_flow(
         "Service Management",
         "Choose how to handle daemon service installation in this phase.",
         vec![
-            choice("not_now", "Not Now", Some("keep service install as a manual follow-up")),
+            choice(
+                "install_now",
+                "Install Now",
+                Some("write the config and register the background gateway service immediately"),
+            ),
             choice(
                 "guidance_only",
                 "Show Guidance",
-                Some("record the next-step guidance without trying to install a service"),
+                Some("record the service commands without installing anything yet"),
             ),
+            choice("not_now", "Not Now", Some("skip service setup for this run")),
         ],
         Some("not_now".to_owned()),
     ))?;
-    plan.service_install_mode = if service_mode == "guidance_only" {
-        plan.warnings.push(
-            "service lifecycle stays manual until the dedicated gateway/service milestone lands."
-                .to_owned(),
-        );
-        ServiceInstallMode::GuidanceOnly
-    } else {
-        ServiceInstallMode::NotNow
+    plan.service_install_mode = match service_mode.as_str() {
+        "install_now" => {
+            plan.risk_events.push("service_install_requested".to_owned());
+            ServiceInstallMode::InstallNow
+        }
+        "guidance_only" => {
+            plan.warnings.push(
+                "service install was deferred; use `palyra gateway install --start` when you are ready to move the runtime into background mode."
+                    .to_owned(),
+            );
+            ServiceInstallMode::GuidanceOnly
+        }
+        _ => ServiceInstallMode::NotNow,
     };
 
     let run_health_checks = wizard.confirm(confirm_step(
@@ -1580,6 +1602,20 @@ fn apply_onboarding_plan(
             .with_context(|| format!("failed to write {}", context.config_path.display()))?;
     }
 
+    if matches!(plan.service_install_mode, ServiceInstallMode::InstallNow) {
+        let daemon_bin = super::daemon::resolve_palyrad_binary(None)?;
+        let request = support::service::GatewayServiceInstallRequest {
+            service_name: None,
+            daemon_bin,
+            state_root: context.state_root.clone(),
+            config_path: Some(context.config_path.clone()),
+            log_dir: None,
+            start_now: true,
+        };
+        support::service::install_gateway_service(&request)
+            .context("failed to install gateway service from onboarding wizard")?;
+    }
+
     let target = resolve_dashboard_access_target(Some(context.config_path.display().to_string()))?;
     Ok(target.url)
 }
@@ -1716,11 +1752,12 @@ fn emit_onboarding_summary(summary: &OnboardingSummary, json_output: bool) -> Re
             summary.state_root
         );
         println!(
-            "onboarding.summary workspace_root_configured={} auth_method={} dashboard_access={} health_status={:?}",
+            "onboarding.summary workspace_root_configured={} auth_method={} dashboard_access={} health_status={:?} service_install_mode={}",
             summary.workspace_root.is_some(),
             summary.auth_method,
             if summary.dashboard_url.is_empty() { "none" } else { "configured" },
-            summary.health_status
+            summary.health_status,
+            summary.service_install_mode.as_str(),
         );
         println!(
             "onboarding.risk_events={}",
@@ -2580,7 +2617,7 @@ fn describe_configure_section(
                 get_string_value_at_path(document, "deployment.mode")?
                     .unwrap_or_else(|| "unset".to_owned())
             ),
-            "service_install=manual_follow_up".to_owned(),
+            "service_install=available_via_gateway_commands".to_owned(),
         ]),
         ConfigureSectionArg::Channels => Ok(vec![
             format!(
@@ -2638,7 +2675,7 @@ fn section_follow_up_checks(
             values
         }
         ConfigureSectionArg::DaemonService => {
-            vec!["service install remains manual in this phase".to_owned()]
+            vec!["palyra gateway install --start".to_owned(), "palyra gateway status".to_owned()]
         }
         ConfigureSectionArg::Channels => vec!["palyra channels discord setup".to_owned()],
         ConfigureSectionArg::Skills => {

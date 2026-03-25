@@ -39,6 +39,7 @@ tonic.workspace = true
 tonic-prost.workspace = true
 toml.workspace = true
 ulid.workspace = true
+zip.workspace = true
 
 [build-dependencies]
 protoc-bin-vendored.workspace = true

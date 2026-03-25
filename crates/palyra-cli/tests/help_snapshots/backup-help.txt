@@ -1,0 +1,38 @@
+Create or verify portable operator backups
+
+Usage: palyra.exe backup [OPTIONS] <COMMAND>
+
+Commands:
+  create
+  verify
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+Global Options:
+      --profile <PROFILE>
+
+      --config <CONFIG_PATH>
+
+      --state-root <STATE_ROOT>
+
+  -v, --verbose...
+          Increase logging verbosity (-v => debug, -vv => trace)
+
+      --log-level <LOG_LEVEL>
+          [default: info]
+          [possible values: error, warn, info, debug, trace]
+
+      --output-format <OUTPUT_FORMAT>
+          [default: text]
+          [possible values: text, json, ndjson]
+
+      --plain
+
+      --no-color
+
+Examples:
+  palyra backup create --output ./artifacts/palyra-backup.zip
+  palyra backup create --include workspace --workspace-root ./workspace --include-support-bundle
+  palyra backup verify --archive ./artifacts/palyra-backup.zip

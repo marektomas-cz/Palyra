@@ -1860,7 +1860,7 @@ pub(crate) fn build_capability_catalog() -> Result<control_plane::CapabilityCata
                 &[],
                 &["crates/palyra-cli/src/main.rs"],
                 &[
-                    "cargo run -p palyra-cli -- daemon dashboard-url --verify-remote --json",
+                    "cargo run -p palyra-cli -- dashboard --verify-remote --json",
                 ],
                 Some("Remote URL verification stays CLI-driven because operators may need host-specific identity store arguments and pin diagnostics."),
             ),

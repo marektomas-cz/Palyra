@@ -2503,6 +2503,7 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "ulid",
+ "zip",
 ]
 
 [[package]]
