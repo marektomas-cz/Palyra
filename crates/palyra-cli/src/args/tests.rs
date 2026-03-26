@@ -4,16 +4,17 @@ use super::{
     AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalDecisionScopeArg,
     ApprovalExportFormatArg, ApprovalResolveDecisionArg, ApprovalSubjectTypeArg, ApprovalsCommand,
     AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
-    AuthScopeArg, BackupCommand, BackupComponentArg, BrowserCommand, ChannelsCommand,
-    ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell, ConfigCommand,
-    ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
-    CronScheduleTypeArg, DaemonCommand, GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg,
-    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, MessageCommand,
-    ModelsCommand, OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand,
-    PolicyCommand, ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg,
-    SecretsCommand, SecretsConfigureCommand, SecurityCommand, SessionsCommand,
-    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand, TuiCommand,
-    UninstallCommand, UpdateCommand, WizardOverridesArg,
+    AuthScopeArg, BackupCommand, BackupComponentArg, BrowserCommand, ChannelProviderArg,
+    ChannelResolveEntityArg, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli,
+    Command, CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand,
+    CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
+    GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg,
+    MemoryCommand, MemoryScopeArg, MemorySourceArg, MessageCommand, ModelsCommand,
+    OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand,
+    ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg, SecretsCommand,
+    SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
+    SkillsCommand, SkillsPackageCommand, SupportBundleCommand, TuiCommand, UninstallCommand,
+    UpdateCommand, WizardOverridesArg,
 };
 #[cfg(not(windows))]
 use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -1507,6 +1508,102 @@ fn parse_channels_enable() {
 }
 
 #[test]
+fn parse_channels_add_non_interactive_discord() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "channels",
+        "add",
+        "--provider",
+        "discord",
+        "--account-id",
+        "ops",
+        "--credential-stdin",
+        "--mode",
+        "remote_vps",
+        "--inbound-scope",
+        "allowlisted_guild_channels",
+        "--allow-from",
+        "ops-team",
+        "--deny-from",
+        "spam-bot",
+        "--require-mention",
+        "true",
+        "--mention-pattern",
+        "<@123>",
+        "--direct-message-policy",
+        "pairing",
+        "--broadcast-strategy",
+        "mention_only",
+        "--concurrency-limit",
+        "4",
+        "--verify-channel-id",
+        "123456789012345678",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Channels {
+            command: ChannelsCommand::Add {
+                provider: ChannelProviderArg::Discord,
+                account_id: "ops".to_owned(),
+                interactive: false,
+                credential: None,
+                credential_stdin: true,
+                credential_prompt: false,
+                mode: "remote_vps".to_owned(),
+                inbound_scope: "allowlisted_guild_channels".to_owned(),
+                allow_from: vec!["ops-team".to_owned()],
+                deny_from: vec!["spam-bot".to_owned()],
+                require_mention: Some(true),
+                mention_patterns: vec!["<@123>".to_owned()],
+                concurrency_limit: Some(4),
+                direct_message_policy: Some("pairing".to_owned()),
+                broadcast_strategy: Some("mention_only".to_owned()),
+                confirm_open_guild_channels: false,
+                verify_channel_id: Some("123456789012345678".to_owned()),
+                url: None,
+                token: None,
+                principal: "user:local".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: None,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_channels_logout() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "channels",
+        "logout",
+        "--provider",
+        "discord",
+        "--account-id",
+        "ops",
+        "--keep-credential",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Channels {
+            command: ChannelsCommand::Logout {
+                provider: ChannelProviderArg::Discord,
+                account_id: "ops".to_owned(),
+                keep_credential: true,
+                url: None,
+                token: None,
+                principal: "user:local".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: None,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_channels_discord_setup() {
     let parsed = Cli::parse_from([
         "palyra",
@@ -1543,6 +1640,66 @@ fn parse_channels_discord_setup() {
                     verify_channel_id: Some("123456789012345678".to_owned()),
                     json: true,
                 },
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_channels_capabilities_with_provider_selector() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "channels",
+        "capabilities",
+        "--provider",
+        "discord",
+        "--account-id",
+        "ops",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Channels {
+            command: ChannelsCommand::Capabilities {
+                connector_id: None,
+                provider: Some(ChannelProviderArg::Discord),
+                account_id: Some("ops".to_owned()),
+                url: None,
+                token: None,
+                principal: "user:local".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: None,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_channels_resolve_discord_user() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "channels",
+        "resolve",
+        "--provider",
+        "discord",
+        "--account-id",
+        "ops",
+        "--entity",
+        "user",
+        "--value",
+        "<@12345>",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Channels {
+            command: ChannelsCommand::Resolve {
+                provider: ChannelProviderArg::Discord,
+                account_id: "ops".to_owned(),
+                entity: ChannelResolveEntityArg::User,
+                value: "<@12345>".to_owned(),
+                json: true,
             }
         }
     );
@@ -1618,6 +1775,75 @@ fn parse_channels_discord_health_refresh() {
                     channel: None,
                     json: true,
                 },
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_channels_pairings_with_provider_selector() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "channels",
+        "pairings",
+        "--provider",
+        "discord",
+        "--account-id",
+        "ops",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Channels {
+            command: ChannelsCommand::Pairings {
+                connector_id: None,
+                provider: Some(ChannelProviderArg::Discord),
+                account_id: Some("ops".to_owned()),
+                url: None,
+                token: None,
+                principal: "user:local".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: None,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_channels_qr_with_artifact() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "channels",
+        "qr",
+        "--provider",
+        "discord",
+        "--account-id",
+        "ops",
+        "--issued-by",
+        "admin:ops@01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "--ttl-ms",
+        "600000",
+        "--artifact",
+        "artifacts/pairing.txt",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Channels {
+            command: ChannelsCommand::Qr {
+                connector_id: None,
+                provider: Some(ChannelProviderArg::Discord),
+                account_id: Some("ops".to_owned()),
+                issued_by: Some("admin:ops@01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+                ttl_ms: Some(600000),
+                artifact: Some("artifacts/pairing.txt".to_owned()),
+                url: None,
+                token: None,
+                principal: "user:local".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: None,
+                json: true,
             }
         }
     );

@@ -45,7 +45,10 @@ pub use auth::{
 };
 pub use backup::{BackupCommand, BackupComponentArg};
 pub use browser::BrowserCommand;
-pub use channels::{ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand};
+pub use channels::{
+    ChannelProviderArg, ChannelResolveEntityArg, ChannelsCommand, ChannelsDiscordCommand,
+    ChannelsRouterCommand,
+};
 pub use completion::CompletionShell;
 pub use config::ConfigCommand;
 pub use configure::ConfigureSectionArg;

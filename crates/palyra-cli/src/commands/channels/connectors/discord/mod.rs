@@ -4,6 +4,9 @@ mod request;
 mod setup;
 mod verify;
 
+pub(crate) use request::{apply_payload, connector_id, probe_payload};
+pub(crate) use setup::emit_apply_response;
+
 use anyhow::Result;
 
 use crate::{

@@ -1,4 +1,21 @@
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChannelProviderArg {
+    Discord,
+    Slack,
+    Telegram,
+    Webhook,
+    Echo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChannelResolveEntityArg {
+    Channel,
+    Conversation,
+    Thread,
+    User,
+}
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ChannelsDiscordCommand {
@@ -189,6 +206,238 @@ pub enum ChannelsRouterCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ChannelsCommand {
+    Add {
+        #[arg(long, value_enum)]
+        provider: ChannelProviderArg,
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long, default_value_t = false)]
+        interactive: bool,
+        #[arg(long)]
+        credential: Option<String>,
+        #[arg(long, default_value_t = false)]
+        credential_stdin: bool,
+        #[arg(long, default_value_t = false)]
+        credential_prompt: bool,
+        #[arg(long, default_value = "local")]
+        mode: String,
+        #[arg(long, default_value = "dm_only")]
+        inbound_scope: String,
+        #[arg(long = "allow-from")]
+        allow_from: Vec<String>,
+        #[arg(long = "deny-from")]
+        deny_from: Vec<String>,
+        #[arg(long)]
+        require_mention: Option<bool>,
+        #[arg(long = "mention-pattern")]
+        mention_patterns: Vec<String>,
+        #[arg(long)]
+        concurrency_limit: Option<u64>,
+        #[arg(long)]
+        direct_message_policy: Option<String>,
+        #[arg(long)]
+        broadcast_strategy: Option<String>,
+        #[arg(long, default_value_t = false)]
+        confirm_open_guild_channels: bool,
+        #[arg(long)]
+        verify_channel_id: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Login {
+        #[arg(long, value_enum)]
+        provider: ChannelProviderArg,
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long)]
+        credential: Option<String>,
+        #[arg(long, default_value_t = false)]
+        credential_stdin: bool,
+        #[arg(long, default_value_t = false)]
+        credential_prompt: bool,
+        #[arg(long, default_value = "local")]
+        mode: String,
+        #[arg(long, default_value = "dm_only")]
+        inbound_scope: String,
+        #[arg(long = "allow-from")]
+        allow_from: Vec<String>,
+        #[arg(long = "deny-from")]
+        deny_from: Vec<String>,
+        #[arg(long)]
+        require_mention: Option<bool>,
+        #[arg(long = "mention-pattern")]
+        mention_patterns: Vec<String>,
+        #[arg(long)]
+        concurrency_limit: Option<u64>,
+        #[arg(long)]
+        direct_message_policy: Option<String>,
+        #[arg(long)]
+        broadcast_strategy: Option<String>,
+        #[arg(long, default_value_t = false)]
+        confirm_open_guild_channels: bool,
+        #[arg(long)]
+        verify_channel_id: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Logout {
+        #[arg(long, value_enum)]
+        provider: ChannelProviderArg,
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long, default_value_t = false)]
+        keep_credential: bool,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Remove {
+        #[arg(long, value_enum)]
+        provider: ChannelProviderArg,
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long, default_value_t = false)]
+        keep_credential: bool,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Capabilities {
+        connector_id: Option<String>,
+        #[arg(long, value_enum)]
+        provider: Option<ChannelProviderArg>,
+        #[arg(long)]
+        account_id: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Resolve {
+        #[arg(long, value_enum)]
+        provider: ChannelProviderArg,
+        #[arg(long, default_value = "default")]
+        account_id: String,
+        #[arg(long, value_enum)]
+        entity: ChannelResolveEntityArg,
+        #[arg(long)]
+        value: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Pairings {
+        connector_id: Option<String>,
+        #[arg(long, value_enum)]
+        provider: Option<ChannelProviderArg>,
+        #[arg(long)]
+        account_id: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    PairingCode {
+        connector_id: Option<String>,
+        #[arg(long, value_enum)]
+        provider: Option<ChannelProviderArg>,
+        #[arg(long)]
+        account_id: Option<String>,
+        #[arg(long)]
+        issued_by: Option<String>,
+        #[arg(long)]
+        ttl_ms: Option<u64>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Qr {
+        connector_id: Option<String>,
+        #[arg(long, value_enum)]
+        provider: Option<ChannelProviderArg>,
+        #[arg(long)]
+        account_id: Option<String>,
+        #[arg(long)]
+        issued_by: Option<String>,
+        #[arg(long)]
+        ttl_ms: Option<u64>,
+        #[arg(long)]
+        artifact: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "user:local")]
+        principal: String,
+        #[arg(long, default_value = "01ARZ3NDEKTSV4RRFFQ69G5FAV")]
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Discord {
         #[command(subcommand)]
         command: ChannelsDiscordCommand,
@@ -212,7 +461,11 @@ pub enum ChannelsCommand {
         json: bool,
     },
     Status {
-        connector_id: String,
+        connector_id: Option<String>,
+        #[arg(long, value_enum)]
+        provider: Option<ChannelProviderArg>,
+        #[arg(long)]
+        account_id: Option<String>,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]
@@ -227,7 +480,11 @@ pub enum ChannelsCommand {
         json: bool,
     },
     HealthRefresh {
-        connector_id: String,
+        connector_id: Option<String>,
+        #[arg(long, value_enum)]
+        provider: Option<ChannelProviderArg>,
+        #[arg(long)]
+        account_id: Option<String>,
         #[arg(long)]
         verify_channel_id: Option<String>,
         #[arg(long)]
@@ -351,7 +608,11 @@ pub enum ChannelsCommand {
         json: bool,
     },
     Logs {
-        connector_id: String,
+        connector_id: Option<String>,
+        #[arg(long, value_enum)]
+        provider: Option<ChannelProviderArg>,
+        #[arg(long)]
+        account_id: Option<String>,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]

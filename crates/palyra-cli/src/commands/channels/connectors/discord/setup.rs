@@ -80,9 +80,11 @@ pub(crate) fn run(
             setup_token.as_str(),
             setup_mode.as_str(),
             inbound_scope.as_str(),
+            &Vec::new(),
             &allow_from,
             &deny_from,
             require_mention,
+            None,
             concurrency_limit,
             broadcast_strategy.as_str(),
             confirm_open,
@@ -94,7 +96,11 @@ pub(crate) fn run(
     emit_apply_response(connector_id.as_str(), response, output::preferred_json(json_output))
 }
 
-fn emit_apply_response(connector_id: &str, response: Value, json_output: bool) -> Result<()> {
+pub(crate) fn emit_apply_response(
+    connector_id: &str,
+    response: Value,
+    json_output: bool,
+) -> Result<()> {
     if json_output {
         println!(
             "{}",
