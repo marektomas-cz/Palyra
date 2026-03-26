@@ -206,6 +206,79 @@ impl ControlPlaneClient {
         self.request_json(Method::POST, "console/v1/secrets/delete", Some(request), true).await
     }
 
+    pub async fn list_webhooks(
+        &self,
+        query: &str,
+    ) -> Result<WebhookIntegrationListEnvelope, ControlPlaneClientError> {
+        let path = if query.trim().is_empty() {
+            "console/v1/webhooks".to_owned()
+        } else {
+            format!("console/v1/webhooks?{query}")
+        };
+        self.request_json(Method::GET, path, None::<&Value>, false).await
+    }
+
+    pub async fn get_webhook(
+        &self,
+        integration_id: &str,
+    ) -> Result<WebhookIntegrationEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/webhooks/{}", urlencoding(integration_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn upsert_webhook(
+        &self,
+        request: &WebhookIntegrationUpsertRequest,
+    ) -> Result<WebhookIntegrationEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::POST, "console/v1/webhooks", Some(request), true).await
+    }
+
+    pub async fn set_webhook_enabled(
+        &self,
+        integration_id: &str,
+        request: &WebhookIntegrationEnabledRequest,
+    ) -> Result<WebhookIntegrationEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/webhooks/{}/enabled", urlencoding(integration_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
+    pub async fn delete_webhook(
+        &self,
+        integration_id: &str,
+    ) -> Result<WebhookIntegrationDeleteEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/webhooks/{}/delete", urlencoding(integration_id)),
+            Some(&serde_json::json!({})),
+            true,
+        )
+        .await
+    }
+
+    pub async fn test_webhook(
+        &self,
+        integration_id: &str,
+        request: &WebhookIntegrationTestRequest,
+    ) -> Result<WebhookIntegrationTestEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/webhooks/{}/test", urlencoding(integration_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
     pub async fn list_auth_profiles(
         &self,
         query: &str,

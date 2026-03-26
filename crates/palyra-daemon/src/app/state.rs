@@ -19,6 +19,7 @@ use crate::{
     gateway::{self, GatewayAuthConfig, GatewayRuntimeState},
     observability::ObservabilityState,
     openai_auth::OpenAiOAuthAttemptStateRecord,
+    webhooks,
 };
 
 #[derive(Clone)]
@@ -26,6 +27,7 @@ pub(crate) struct AppState {
     pub(crate) started_at: Instant,
     pub(crate) runtime: Arc<GatewayRuntimeState>,
     pub(crate) channels: Arc<channels::ChannelPlatform>,
+    pub(crate) webhooks: Arc<webhooks::WebhookRegistry>,
     pub(crate) vault: Arc<Vault>,
     pub(crate) tool_allowed_tools: Vec<String>,
     pub(crate) browser_service_config: gateway::BrowserServiceRuntimeConfig,

@@ -32,6 +32,7 @@ mod support_bundle;
 mod tui;
 mod uninstall;
 mod update;
+mod webhooks;
 
 pub use agent::AgentCommand;
 pub use agents::AgentsCommand;
@@ -76,6 +77,7 @@ pub use support_bundle::SupportBundleCommand;
 pub use tui::TuiCommand;
 pub use uninstall::UninstallCommand;
 pub use update::UpdateCommand;
+pub use webhooks::WebhooksCommand;
 
 const ROOT_AFTER_HELP: &str = "\
 Examples:
@@ -96,7 +98,8 @@ Canonical command map:
   reset      Destructive local recovery surface with explicit scope selection
   uninstall  Installer-aware package removal surface
   update     Package update/check orchestration surface
-  onboarding Operator onboarding workflows (`onboard` remains as a compatibility alias)";
+  onboarding Operator onboarding workflows (`onboard` remains as a compatibility alias)
+  webhooks   Webhook-backed integration management surface";
 
 const SETUP_AFTER_HELP: &str = "\
 Examples:
@@ -186,6 +189,15 @@ const COMPLETION_AFTER_HELP: &str = "\
 Examples:
   palyra completion --shell powershell
   palyra completion --shell bash > palyra.bash";
+
+const WEBHOOKS_AFTER_HELP: &str = "\
+Examples:
+  palyra webhooks list
+  palyra webhooks add github_repo_a github --secret-ref global/github_repo_a --allow-event push --allow-source github.repo_a
+  palyra webhooks test github_repo_a --payload-stdin
+
+Discoverability:
+  `webhooks` manages secret-aware webhook integrations without exposing a public ingress surface by default.";
 
 const TUI_AFTER_HELP: &str = "\
 Examples:
@@ -376,6 +388,11 @@ pub enum Command {
     Channels {
         #[command(subcommand)]
         command: ChannelsCommand,
+    },
+    #[command(about = "Manage webhook-backed integrations", after_long_help = WEBHOOKS_AFTER_HELP)]
+    Webhooks {
+        #[command(subcommand)]
+        command: WebhooksCommand,
     },
     Browser {
         #[command(subcommand)]

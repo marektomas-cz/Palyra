@@ -202,6 +202,7 @@ pub(crate) fn build_secrets_audit_payload(
             get_string_value_at_path(&document, "model_provider.auth_profile_ref").ok().flatten()
         });
     let runtime_profiles = load_runtime_auth_profiles(offline)?;
+    let runtime_webhooks = load_runtime_webhooks(offline)?;
     let mut candidates = Vec::<SecretReferenceCandidate>::new();
     let mut findings = Vec::<SecretAuditFinding>::new();
 
@@ -305,6 +306,17 @@ pub(crate) fn build_secrets_audit_payload(
                     });
                 }
             }
+        }
+    }
+
+    for webhook in &runtime_webhooks.webhooks {
+        let reference = webhook.secret_vault_ref.trim();
+        if !reference.is_empty() {
+            candidates.push(SecretReferenceCandidate {
+                component: format!("webhook:{}", webhook.integration_id),
+                reference_kind: "webhook_signing_secret".to_owned(),
+                reference: reference.to_owned(),
+            });
         }
     }
 
@@ -412,6 +424,24 @@ pub(crate) fn build_secrets_audit_payload(
             remediation: "Ensure the daemon admin surface is reachable, or rerun with `--offline` when you only want a local vault/config audit.".to_owned(),
         });
     }
+    if let Some(error) = runtime_webhooks.runtime_error.as_ref() {
+        findings.push(SecretAuditFinding {
+            severity: "warning".to_owned(),
+            code: "runtime_webhooks_unavailable".to_owned(),
+            component: "webhooks".to_owned(),
+            reference: None,
+            message: format!("runtime webhook inspection was skipped: {error}"),
+            remediation: "Ensure the daemon admin surface is reachable, or rerun with `--offline` when you only want a local vault/config audit.".to_owned(),
+        });
+    }
+
+    let runtime_error =
+        match (runtime_profiles.runtime_error.clone(), runtime_webhooks.runtime_error.clone()) {
+            (Some(left), Some(right)) => Some(format!("{left}; {right}")),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
 
     let summary = SecretAuditSummary {
         total_references: references.len(),
@@ -427,7 +457,7 @@ pub(crate) fn build_secrets_audit_payload(
     Ok(SecretAuditPayload {
         path,
         runtime_profiles_inspected: runtime_profiles.runtime_profiles_inspected,
-        runtime_error: runtime_profiles.runtime_error,
+        runtime_error,
         references,
         findings,
         summary,
@@ -671,6 +701,11 @@ struct RuntimeAuthProfiles {
     profiles: Vec<control_plane::AuthProfileView>,
 }
 
+struct RuntimeWebhookIntegrations {
+    runtime_error: Option<String>,
+    webhooks: Vec<control_plane::WebhookIntegrationView>,
+}
+
 fn load_runtime_auth_profiles(offline: bool) -> Result<RuntimeAuthProfiles> {
     if offline {
         return Ok(RuntimeAuthProfiles {
@@ -705,6 +740,38 @@ fn load_runtime_auth_profiles(offline: bool) -> Result<RuntimeAuthProfiles> {
                 runtime_profiles_inspected: false,
                 runtime_error: Some(sanitize_secret_error(error.to_string().as_str())),
                 profiles: Vec::new(),
+            },
+        }
+    });
+    Ok(result)
+}
+
+fn load_runtime_webhooks(offline: bool) -> Result<RuntimeWebhookIntegrations> {
+    if offline {
+        return Ok(RuntimeWebhookIntegrations { runtime_error: None, webhooks: Vec::new() });
+    }
+
+    let runtime = build_runtime()?;
+    let result = runtime.block_on(async {
+        let context =
+            match client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+                .await
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    return RuntimeWebhookIntegrations {
+                        runtime_error: Some(sanitize_secret_error(error.to_string().as_str())),
+                        webhooks: Vec::new(),
+                    };
+                }
+            };
+        match context.client.list_webhooks("").await {
+            Ok(envelope) => {
+                RuntimeWebhookIntegrations { runtime_error: None, webhooks: envelope.integrations }
+            }
+            Err(error) => RuntimeWebhookIntegrations {
+                runtime_error: Some(sanitize_secret_error(error.to_string().as_str())),
+                webhooks: Vec::new(),
             },
         }
     });

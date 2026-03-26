@@ -24,6 +24,7 @@ pub mod support;
 mod tool_protocol;
 pub mod transport;
 mod wasm_plugin_runner;
+mod webhooks;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -1123,6 +1124,15 @@ pub async fn run() -> Result<()> {
         .context("failed to initialize model provider runtime")?;
     let agent_registry = agents::AgentRegistry::open(identity_runtime.store_root.as_path())
         .context("failed to initialize agent registry state")?;
+    let webhook_state_root = identity_runtime
+        .store_root
+        .parent()
+        .map(FsPath::to_path_buf)
+        .unwrap_or_else(|| identity_runtime.store_root.clone());
+    let webhook_registry = Arc::new(
+        webhooks::WebhookRegistry::open(webhook_state_root.as_path())
+            .context("failed to initialize webhook registry state")?,
+    );
     let auth_runtime = Arc::new(gateway::AuthRuntimeState::new(
         Arc::clone(&auth_registry),
         Arc::new(HttpOAuthRefreshAdapter::default()) as Arc<dyn OAuthRefreshAdapter>,
@@ -1511,6 +1521,7 @@ pub async fn run() -> Result<()> {
         AppStateBuildContext {
             runtime: runtime.clone(),
             channels: Arc::clone(&channels),
+            webhooks: Arc::clone(&webhook_registry),
             vault: Arc::clone(&vault),
             auth_runtime: Arc::clone(&auth_runtime),
             auth: auth.clone(),

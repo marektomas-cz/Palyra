@@ -14,7 +14,7 @@ use super::{
     ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg, SecretsCommand,
     SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
     SkillsCommand, SkillsPackageCommand, SupportBundleCommand, TuiCommand, UninstallCommand,
-    UpdateCommand, WizardOverridesArg,
+    UpdateCommand, WebhooksCommand, WizardOverridesArg,
 };
 #[cfg(not(windows))]
 use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -3607,6 +3607,90 @@ fn parse_secrets_configure_browser_state_key() {
             }
         }
     );
+}
+
+#[test]
+fn parse_webhooks_add_and_test() {
+    let add = Cli::parse_from([
+        "palyra",
+        "webhooks",
+        "add",
+        "github_repo_a",
+        "github",
+        "--secret-ref",
+        "global/github_repo_a",
+        "--allow-event",
+        "push",
+        "--allow-source",
+        "github.repo_a",
+        "--require-signature",
+        "--json",
+    ]);
+    assert_eq!(
+        add.command,
+        Command::Webhooks {
+            command: WebhooksCommand::Add {
+                integration_id: "github_repo_a".to_owned(),
+                provider: "github".to_owned(),
+                display_name: None,
+                secret_vault_ref: "global/github_repo_a".to_owned(),
+                allowed_events: vec!["push".to_owned()],
+                allowed_sources: vec!["github.repo_a".to_owned()],
+                disabled: false,
+                require_signature: true,
+                max_payload_bytes: None,
+                json: true,
+            }
+        }
+    );
+
+    let test = Cli::parse_from([
+        "palyra",
+        "webhooks",
+        "test",
+        "github_repo_a",
+        "--payload-stdin",
+        "--json",
+    ]);
+    assert_eq!(
+        test.command,
+        Command::Webhooks {
+            command: WebhooksCommand::Test {
+                integration_id: "github_repo_a".to_owned(),
+                payload_stdin: true,
+                payload_file: None,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_webhooks_verify_alias_and_payload_source_conflict() {
+    let verify =
+        Cli::parse_from(["palyra", "webhooks", "verify", "github_repo_a", "--payload-stdin"]);
+    assert_eq!(
+        verify.command,
+        Command::Webhooks {
+            command: WebhooksCommand::Test {
+                integration_id: "github_repo_a".to_owned(),
+                payload_stdin: true,
+                payload_file: None,
+                json: false,
+            }
+        }
+    );
+
+    let conflict = Cli::try_parse_from([
+        "palyra",
+        "webhooks",
+        "test",
+        "github_repo_a",
+        "--payload-stdin",
+        "--payload-file",
+        "fixtures/webhook.json",
+    ]);
+    assert!(conflict.is_err(), "webhook test payload sources must remain mutually exclusive");
 }
 
 #[test]

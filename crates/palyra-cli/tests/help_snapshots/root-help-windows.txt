@@ -19,6 +19,7 @@ Commands:
   tui             Launch the terminal operator client
   auth
   channels
+  webhooks        Manage webhook-backed integrations
   browser
   completion      Generate shell completion scripts
   onboarding      [aliases: onboard]
@@ -85,3 +86,4 @@ Canonical command map:
   uninstall  Installer-aware package removal surface
   update     Package update/check orchestration surface
   onboarding Operator onboarding workflows (`onboard` remains as a compatibility alias)
+  webhooks   Webhook-backed integration management surface

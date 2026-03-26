@@ -13,3 +13,4 @@ pub(crate) mod pairing;
 pub(crate) mod secrets;
 pub(crate) mod skills;
 pub(crate) mod support_bundle;
+pub(crate) mod webhooks;

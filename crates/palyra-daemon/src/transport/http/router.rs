@@ -216,6 +216,24 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/console/v1/secrets/reveal", post(console::secrets::console_secret_reveal_handler))
         .route("/console/v1/secrets/delete", post(console::secrets::console_secret_delete_handler))
+        .route("/console/v1/webhooks", get(console::webhooks::console_webhooks_list_handler))
+        .route("/console/v1/webhooks", post(console::webhooks::console_webhook_upsert_handler))
+        .route(
+            "/console/v1/webhooks/{integration_id}",
+            get(console::webhooks::console_webhook_get_handler),
+        )
+        .route(
+            "/console/v1/webhooks/{integration_id}/enabled",
+            post(console::webhooks::console_webhook_set_enabled_handler),
+        )
+        .route(
+            "/console/v1/webhooks/{integration_id}/delete",
+            post(console::webhooks::console_webhook_delete_handler),
+        )
+        .route(
+            "/console/v1/webhooks/{integration_id}/test",
+            post(console::webhooks::console_webhook_test_handler),
+        )
         .route("/console/v1/pairing", get(console::pairing::console_pairing_summary_handler))
         .route(
             "/console/v1/pairing/codes",

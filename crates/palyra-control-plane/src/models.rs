@@ -562,6 +562,103 @@ pub struct SecretDeleteRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationView {
+    pub integration_id: String,
+    pub provider: String,
+    pub display_name: String,
+    pub secret_vault_ref: String,
+    pub secret_present: bool,
+    #[serde(default)]
+    pub allowed_events: Vec<String>,
+    #[serde(default)]
+    pub allowed_sources: Vec<String>,
+    pub enabled: bool,
+    pub signature_required: bool,
+    pub max_payload_bytes: u64,
+    pub status: String,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_test_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_test_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_test_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationListEnvelope {
+    pub contract: ContractDescriptor,
+    #[serde(default)]
+    pub integrations: Vec<WebhookIntegrationView>,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationEnvelope {
+    pub contract: ContractDescriptor,
+    pub integration: WebhookIntegrationView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationDeleteEnvelope {
+    pub contract: ContractDescriptor,
+    pub integration_id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationUpsertRequest {
+    pub integration_id: String,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub secret_vault_ref: String,
+    #[serde(default)]
+    pub allowed_events: Vec<String>,
+    #[serde(default)]
+    pub allowed_sources: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_payload_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationEnabledRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationTestRequest {
+    pub payload_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationTestResult {
+    pub integration_id: String,
+    pub valid: bool,
+    pub outcome: String,
+    pub message: String,
+    pub payload_bytes: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub signature_present: bool,
+    pub secret_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookIntegrationTestEnvelope {
+    pub contract: ContractDescriptor,
+    pub integration: WebhookIntegrationView,
+    pub result: WebhookIntegrationTestResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingCodeMintRequest {
     pub channel: String,
     #[serde(skip_serializing_if = "Option::is_none")]

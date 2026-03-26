@@ -72,7 +72,7 @@ use cli::{
     OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand,
     ProtocolCommand, RemoteVerificationModeArg, SecretsCommand, SecurityCommand, SessionsCommand,
     SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
-    WizardOverridesArg,
+    WebhooksCommand, WizardOverridesArg,
 };
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -238,6 +238,7 @@ fn run_cli() -> Result<()> {
         CliCommand::Tui { command } => commands::tui::run_tui(command),
         CliCommand::Auth { command } => commands::auth::run_auth(command),
         CliCommand::Channels { command } => commands::channels::run(command),
+        CliCommand::Webhooks { command } => commands::webhooks::run_webhooks(command),
         CliCommand::Browser { command } => commands::browser::run_browser(command),
         CliCommand::Completion { shell } => commands::completion::run_completion(shell),
         CliCommand::Onboarding { command } => commands::onboarding::run_onboarding(command),

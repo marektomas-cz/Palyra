@@ -36,6 +36,18 @@ pub(crate) async fn console_diagnostics_handler(
 
     let browser_payload = collect_console_browser_diagnostics(&state).await;
     let media_payload = state.channels.media_snapshot().map_err(channel_platform_error_response)?;
+    let webhook_payload = serde_json::to_value(
+        state.webhooks.diagnostics_snapshot(state.vault.as_ref()).map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to summarize webhook diagnostics: {error}"
+            )))
+        })?,
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to serialize webhook diagnostics payload: {error}"
+        )))
+    })?;
     let memory_status =
         state.runtime.memory_maintenance_status().await.map_err(runtime_status_response)?;
     let memory_runtime_config = state.runtime.memory_config_snapshot();
@@ -61,6 +73,7 @@ pub(crate) async fn console_diagnostics_handler(
         },
         "auth_profiles": auth_payload,
         "browserd": browser_payload,
+        "webhooks": webhook_payload,
         "media": media_payload,
         "deployment": deployment_payload,
         "observability": observability_payload,
@@ -1592,6 +1605,25 @@ pub(crate) fn build_capability_catalog() -> Result<control_plane::CapabilityCata
                 &["crates/palyra-daemon/tests/admin_surface.rs"],
                 &[],
                 None,
+            ),
+            capability_entry(
+                "webhooks",
+                "webhooks",
+                "integrations",
+                "Webhook integration registry and payload validation",
+                "palyrad",
+                &["backend", "cli"],
+                "direct_ui",
+                &["secrets"],
+                &[
+                    "/console/v1/webhooks",
+                    "/console/v1/webhooks/{integration_id}",
+                    "/console/v1/webhooks/{integration_id}/enabled",
+                    "/console/v1/webhooks/{integration_id}/test",
+                ],
+                &["crates/palyra-daemon/src/webhooks.rs"],
+                &["cargo run -p palyra-cli -- webhooks list --json"],
+                Some("First iteration stays backend and CLI only; it manages secret-aware integrations without provisioning a public ingress endpoint."),
             ),
             capability_entry(
                 "channel.router",

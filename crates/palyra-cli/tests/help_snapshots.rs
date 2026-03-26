@@ -124,3 +124,8 @@ fn completion_help_snapshot_matches() -> Result<()> {
         include_str!("help_snapshots/completion-help.txt"),
     )
 }
+
+#[test]
+fn webhooks_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(&["webhooks", "--help"], include_str!("help_snapshots/webhooks-help.txt"))
+}

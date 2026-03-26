@@ -2270,6 +2270,204 @@ fn console_secret_reveal_allows_sensitive_ref_via_server_side_console_flow() -> 
 }
 
 #[test]
+fn console_webhooks_support_secret_aware_lifecycle_and_diagnostics() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .context("failed to build HTTP client")?;
+    let webhook_payload = serde_json::json!({
+        "integration_id": "github_repo_a",
+        "provider": "github",
+        "display_name": "GitHub Repo A",
+        "secret_vault_ref": "global/github_repo_a",
+        "allowed_events": ["push"],
+        "allowed_sources": ["github.repo_a"],
+        "enabled": true,
+        "signature_required": true,
+        "max_payload_bytes": 8192
+    });
+
+    let unauthenticated = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/webhooks"))
+        .json(&webhook_payload)
+        .send()
+        .context("failed to call webhook create endpoint without session")?;
+    assert_eq!(
+        unauthenticated.status().as_u16(),
+        403,
+        "webhook create should reject unauthenticated console requests"
+    );
+    assert_admin_console_security_headers(unauthenticated.headers())?;
+
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+    let stored_secret = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/secrets"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "scope": "global",
+            "key": "github_repo_a",
+            "value_base64": BASE64_STANDARD.encode("test-signing-secret"),
+        }))
+        .send()
+        .context("failed to store webhook signing secret through console")?
+        .error_for_status()
+        .context("console secret set for webhook returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse webhook secret set response json")?;
+    assert_eq!(
+        stored_secret.pointer("/secret/key").and_then(Value::as_str),
+        Some("github_repo_a"),
+        "webhook signing secret should be stored in the vault before integration create"
+    );
+
+    let created = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/webhooks"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&webhook_payload)
+        .send()
+        .context("failed to create webhook integration")?
+        .error_for_status()
+        .context("webhook create returned non-success status")?;
+    assert_admin_console_security_headers(created.headers())?;
+    let created =
+        created.json::<Value>().context("failed to parse webhook create response json")?;
+    assert_eq!(
+        created.pointer("/integration/integration_id").and_then(Value::as_str),
+        Some("github_repo_a")
+    );
+    assert_eq!(
+        created.pointer("/integration/status").and_then(Value::as_str),
+        Some("ready"),
+        "webhook integration should become ready once the referenced secret exists"
+    );
+    assert_eq!(
+        created.pointer("/integration/signature_required").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let listed = client
+        .get(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/webhooks?provider=github&enabled=true"
+        ))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to list webhook integrations")?
+        .error_for_status()
+        .context("webhook list returned non-success status")?;
+    assert_admin_console_security_headers(listed.headers())?;
+    let listed = listed.json::<Value>().context("failed to parse webhook list response json")?;
+    let integrations = listed
+        .get("integrations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("webhook list response missing integrations array"))?;
+    assert_eq!(integrations.len(), 1, "webhook list should return the created integration");
+
+    let fetched = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/webhooks/github_repo_a"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to fetch webhook integration")?
+        .error_for_status()
+        .context("webhook get returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse webhook get response json")?;
+    assert_eq!(
+        fetched.pointer("/integration/allowed_sources/0").and_then(Value::as_str),
+        Some("github.repo_a")
+    );
+
+    let tested = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/webhooks/github_repo_a/test"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "payload_base64": BASE64_STANDARD.encode(build_test_webhook_payload(
+                "github.repo_a",
+                "push",
+                Some("sig:test"),
+            )),
+        }))
+        .send()
+        .context("failed to test webhook integration")?
+        .error_for_status()
+        .context("webhook test returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse webhook test response json")?;
+    assert_eq!(
+        tested.pointer("/result/valid").and_then(Value::as_bool),
+        Some(true),
+        "webhook test should accept a structurally valid payload that matches the allowlists"
+    );
+    assert_eq!(tested.pointer("/result/outcome").and_then(Value::as_str), Some("accepted"));
+    assert_eq!(
+        tested.pointer("/integration/integration_id").and_then(Value::as_str),
+        tested.pointer("/result/integration_id").and_then(Value::as_str),
+        "webhook test response should keep integration identity consistent across envelope fields"
+    );
+    assert_eq!(tested.pointer("/result/signature_present").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        tested.pointer("/integration/last_test_status").and_then(Value::as_str),
+        Some("passed"),
+        "webhook test should update last_test metadata on the integration view"
+    );
+
+    let diagnostics = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/diagnostics"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to load console diagnostics after webhook create")?
+        .error_for_status()
+        .context("console diagnostics after webhook create returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse console diagnostics response json")?;
+    assert_eq!(
+        diagnostics.pointer("/webhooks/total").and_then(Value::as_u64),
+        Some(1),
+        "diagnostics should include the registered webhook integration count"
+    );
+    assert_eq!(
+        diagnostics.pointer("/webhooks/ready").and_then(Value::as_u64),
+        Some(1),
+        "diagnostics should report the webhook integration as ready"
+    );
+
+    let deleted = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/webhooks/github_repo_a/delete"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .send()
+        .context("failed to delete webhook integration")?
+        .error_for_status()
+        .context("webhook delete returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse webhook delete response json")?;
+    assert_eq!(deleted.get("deleted").and_then(Value::as_bool), Some(true));
+
+    let post_delete_list = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/webhooks"))
+        .header("Cookie", cookie)
+        .send()
+        .context("failed to list webhook integrations after delete")?
+        .error_for_status()
+        .context("webhook list after delete returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse webhook list after delete response json")?;
+    assert_eq!(
+        post_delete_list.get("integrations").and_then(Value::as_array).map(std::vec::Vec::len),
+        Some(0),
+        "webhook integration delete should remove the registry entry"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_config_migrate_and_recover_require_session_csrf_and_keep_secrets_redacted() -> Result<()>
 {
     let config_path = unique_temp_config_path();
@@ -2840,6 +3038,34 @@ fn write_test_config(config_path: &PathBuf, contents: &str) -> Result<()> {
     fs::write(config_path, contents)
         .with_context(|| format!("failed to write test config {}", config_path.display()))?;
     Ok(())
+}
+
+fn build_test_webhook_payload(source: &str, event: &str, signature: Option<&str>) -> Vec<u8> {
+    let timestamp_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis() as u64;
+    let nonce = format!(
+        "{timestamp_unix_ms:016x}{:016x}",
+        TEMP_IDENTITY_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let signature_field =
+        signature.map(|value| format!(r#","signature":"{value}""#)).unwrap_or_default();
+    format!(
+        r#"{{
+            "v": 1,
+            "id": "{DEVICE_ID}",
+            "event": "{event}",
+            "source": "{source}",
+            "payload": {{"channel": "C123", "text": "hello"}},
+            "replay_protection": {{
+                "nonce": "{nonce}",
+                "timestamp_unix_ms": {timestamp_unix_ms}
+                {signature_field}
+            }}
+        }}"#
+    )
+    .into_bytes()
 }
 
 fn read_child_stderr(stderr: Option<ChildStderr>) -> String {

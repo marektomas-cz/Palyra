@@ -36,4 +36,5 @@ pub mod tui;
 pub mod tunnel;
 pub mod uninstall;
 pub mod update;
+pub mod webhooks;
 pub(crate) mod wizard;

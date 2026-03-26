@@ -1,0 +1,825 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use palyra_common::parse_webhook_payload;
+use palyra_control_plane as control_plane;
+use palyra_vault::{ensure_owner_only_dir, ensure_owner_only_file, Vault, VaultError, VaultRef};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+const REGISTRY_VERSION: u32 = 1;
+const REGISTRY_FILE: &str = "webhooks.toml";
+const MAX_WEBHOOK_COUNT: usize = 1_024;
+const MAX_IDENTIFIER_BYTES: usize = 64;
+const MAX_PROVIDER_BYTES: usize = 64;
+const MAX_DISPLAY_NAME_BYTES: usize = 128;
+const MAX_ALLOWED_FILTERS: usize = 64;
+const MAX_FILTER_VALUE_BYTES: usize = 128;
+const DEFAULT_MAX_PAYLOAD_BYTES: u64 = 64 * 1024;
+const MAX_WEBHOOK_PAYLOAD_BYTES: u64 = 1_048_576;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookIntegrationListFilter {
+    pub provider: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookIntegrationSetRequest {
+    pub integration_id: String,
+    pub provider: String,
+    pub display_name: Option<String>,
+    pub secret_vault_ref: String,
+    pub allowed_events: Vec<String>,
+    pub allowed_sources: Vec<String>,
+    pub enabled: bool,
+    pub signature_required: bool,
+    pub max_payload_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookIntegrationTestOutcome {
+    pub integration: control_plane::WebhookIntegrationView,
+    pub result: control_plane::WebhookIntegrationTestResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebhookIntegrationRecord {
+    integration_id: String,
+    provider: String,
+    display_name: String,
+    secret_vault_ref: String,
+    #[serde(default)]
+    allowed_events: Vec<String>,
+    #[serde(default)]
+    allowed_sources: Vec<String>,
+    enabled: bool,
+    signature_required: bool,
+    max_payload_bytes: u64,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_test_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_test_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_test_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebhookReadiness {
+    secret_status: WebhookSecretStatus,
+    secret_present: bool,
+    issues: Vec<String>,
+}
+
+impl WebhookReadiness {
+    #[must_use]
+    fn is_ready(&self) -> bool {
+        self.secret_status == WebhookSecretStatus::Present && self.issues.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebhookSecretStatus {
+    InvalidRef,
+    Missing,
+    Present,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WebhookDiagnosticsSnapshot {
+    pub total: usize,
+    pub enabled: usize,
+    pub ready: usize,
+    pub disabled: usize,
+    pub invalid_secret_ref: usize,
+    pub secret_not_found: usize,
+    pub providers: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct WebhookRegistry {
+    registry_path: PathBuf,
+    state: Mutex<RegistryDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RegistryDocument {
+    version: u32,
+    #[serde(default)]
+    webhooks: Vec<WebhookIntegrationRecord>,
+}
+
+impl Default for RegistryDocument {
+    fn default() -> Self {
+        Self { version: REGISTRY_VERSION, webhooks: Vec::new() }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum WebhookRegistryError {
+    #[error("webhook registry lock poisoned")]
+    LockPoisoned,
+    #[error("failed to read webhook registry {path}: {source}")]
+    ReadRegistry {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse webhook registry {path}: {source}")]
+    ParseRegistry {
+        path: PathBuf,
+        #[source]
+        source: Box<toml::de::Error>,
+    },
+    #[error("failed to write webhook registry {path}: {source}")]
+    WriteRegistry {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to serialize webhook registry: {0}")]
+    SerializeRegistry(#[from] toml::ser::Error),
+    #[error("unsupported webhook registry version {0}")]
+    UnsupportedVersion(u32),
+    #[error("webhook integration not found: {0}")]
+    IntegrationNotFound(String),
+    #[error("invalid {field}: {message}")]
+    InvalidField { field: &'static str, message: String },
+    #[error("too many webhook integrations configured")]
+    RegistryLimitExceeded,
+    #[error("system time before unix epoch: {0}")]
+    InvalidSystemTime(#[from] std::time::SystemTimeError),
+}
+
+impl WebhookRegistry {
+    pub fn open(state_root: &Path) -> Result<Self, WebhookRegistryError> {
+        ensure_owner_only_dir(state_root).map_err(|source| {
+            WebhookRegistryError::WriteRegistry {
+                path: state_root.to_path_buf(),
+                source: std::io::Error::other(source.to_string()),
+            }
+        })?;
+        let registry_path = state_root.join(REGISTRY_FILE);
+        let document = if registry_path.exists() {
+            let raw = fs::read_to_string(&registry_path).map_err(|source| {
+                WebhookRegistryError::ReadRegistry { path: registry_path.clone(), source }
+            })?;
+            let parsed = toml::from_str::<RegistryDocument>(&raw).map_err(|source| {
+                WebhookRegistryError::ParseRegistry {
+                    path: registry_path.clone(),
+                    source: Box::new(source),
+                }
+            })?;
+            if parsed.version != REGISTRY_VERSION {
+                return Err(WebhookRegistryError::UnsupportedVersion(parsed.version));
+            }
+            parsed
+        } else {
+            let document = RegistryDocument::default();
+            persist_registry(&registry_path, &document)?;
+            document
+        };
+        Ok(Self { registry_path, state: Mutex::new(document) })
+    }
+
+    pub fn list_views(
+        &self,
+        filter: WebhookIntegrationListFilter,
+        vault: &Vault,
+    ) -> Result<Vec<control_plane::WebhookIntegrationView>, WebhookRegistryError> {
+        let normalized_provider = filter.provider.map(normalize_provider).transpose()?;
+        let state = self.state.lock().map_err(|_| WebhookRegistryError::LockPoisoned)?;
+        state
+            .webhooks
+            .iter()
+            .filter(|record| {
+                normalized_provider
+                    .as_ref()
+                    .map(|provider| provider == &record.provider)
+                    .unwrap_or(true)
+            })
+            .filter(|record| {
+                filter.enabled.map(|enabled| enabled == record.enabled).unwrap_or(true)
+            })
+            .map(|record| self.view_from_record(record, vault))
+            .collect()
+    }
+
+    pub fn get_view(
+        &self,
+        integration_id: &str,
+        vault: &Vault,
+    ) -> Result<Option<control_plane::WebhookIntegrationView>, WebhookRegistryError> {
+        let normalized = normalize_identifier(integration_id, "integration_id")?;
+        let state = self.state.lock().map_err(|_| WebhookRegistryError::LockPoisoned)?;
+        let Some(record) = state.webhooks.iter().find(|record| record.integration_id == normalized)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.view_from_record(record, vault)?))
+    }
+
+    pub fn set_integration(
+        &self,
+        request: WebhookIntegrationSetRequest,
+        vault: &Vault,
+    ) -> Result<control_plane::WebhookIntegrationView, WebhookRegistryError> {
+        let normalized = normalize_set_request(request)?;
+        let mut state = self.state.lock().map_err(|_| WebhookRegistryError::LockPoisoned)?;
+        let now = unix_ms_now()?;
+
+        if let Some(existing) = state
+            .webhooks
+            .iter_mut()
+            .find(|record| record.integration_id == normalized.integration_id)
+        {
+            existing.provider = normalized.provider;
+            existing.display_name =
+                normalized.display_name.clone().unwrap_or_else(|| existing.integration_id.clone());
+            existing.secret_vault_ref = normalized.secret_vault_ref;
+            existing.allowed_events = normalized.allowed_events;
+            existing.allowed_sources = normalized.allowed_sources;
+            existing.enabled = normalized.enabled;
+            existing.signature_required = normalized.signature_required;
+            existing.max_payload_bytes = normalized.max_payload_bytes;
+            existing.updated_at_unix_ms = now;
+            let readiness = evaluate_readiness(existing, vault);
+            if existing.enabled && !readiness.is_ready() {
+                return Err(WebhookRegistryError::InvalidField {
+                    field: "secret_vault_ref",
+                    message: readiness.issues.first().cloned().unwrap_or_else(|| {
+                        "webhook integration is not ready to be enabled".to_owned()
+                    }),
+                });
+            }
+            let view = self.view_from_record(existing, vault)?;
+            persist_registry(&self.registry_path, &state)?;
+            return Ok(view);
+        }
+
+        if state.webhooks.len() >= MAX_WEBHOOK_COUNT {
+            return Err(WebhookRegistryError::RegistryLimitExceeded);
+        }
+
+        let record = WebhookIntegrationRecord {
+            integration_id: normalized.integration_id.clone(),
+            provider: normalized.provider,
+            display_name: normalized.display_name.unwrap_or_else(|| normalized.integration_id),
+            secret_vault_ref: normalized.secret_vault_ref,
+            allowed_events: normalized.allowed_events,
+            allowed_sources: normalized.allowed_sources,
+            enabled: normalized.enabled,
+            signature_required: normalized.signature_required,
+            max_payload_bytes: normalized.max_payload_bytes,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            last_test_status: None,
+            last_test_message: None,
+            last_test_at_unix_ms: None,
+        };
+        let readiness = evaluate_readiness(&record, vault);
+        if record.enabled && !readiness.is_ready() {
+            return Err(WebhookRegistryError::InvalidField {
+                field: "secret_vault_ref",
+                message: readiness
+                    .issues
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "webhook integration is not ready to be enabled".to_owned()),
+            });
+        }
+        let view = self.view_from_record(&record, vault)?;
+        state.webhooks.push(record);
+        state.webhooks.sort_by(|left, right| left.integration_id.cmp(&right.integration_id));
+        persist_registry(&self.registry_path, &state)?;
+        Ok(view)
+    }
+
+    pub fn set_enabled(
+        &self,
+        integration_id: &str,
+        enabled: bool,
+        vault: &Vault,
+    ) -> Result<control_plane::WebhookIntegrationView, WebhookRegistryError> {
+        let normalized = normalize_identifier(integration_id, "integration_id")?;
+        let mut state = self.state.lock().map_err(|_| WebhookRegistryError::LockPoisoned)?;
+        let record =
+            state
+                .webhooks
+                .iter_mut()
+                .find(|record| record.integration_id == normalized)
+                .ok_or_else(|| WebhookRegistryError::IntegrationNotFound(normalized.clone()))?;
+        if enabled {
+            let readiness = evaluate_readiness(record, vault);
+            if !readiness.is_ready() {
+                return Err(WebhookRegistryError::InvalidField {
+                    field: "secret_vault_ref",
+                    message: readiness.issues.first().cloned().unwrap_or_else(|| {
+                        "webhook integration is not ready to be enabled".to_owned()
+                    }),
+                });
+            }
+        }
+        record.enabled = enabled;
+        record.updated_at_unix_ms = unix_ms_now()?;
+        let view = self.view_from_record(record, vault)?;
+        persist_registry(&self.registry_path, &state)?;
+        Ok(view)
+    }
+
+    pub fn delete_integration(&self, integration_id: &str) -> Result<bool, WebhookRegistryError> {
+        let normalized = normalize_identifier(integration_id, "integration_id")?;
+        let mut state = self.state.lock().map_err(|_| WebhookRegistryError::LockPoisoned)?;
+        let before_len = state.webhooks.len();
+        state.webhooks.retain(|record| record.integration_id != normalized);
+        let deleted = state.webhooks.len() != before_len;
+        if deleted {
+            persist_registry(&self.registry_path, &state)?;
+        }
+        Ok(deleted)
+    }
+
+    pub fn test_integration(
+        &self,
+        integration_id: &str,
+        payload_bytes: &[u8],
+        vault: &Vault,
+    ) -> Result<WebhookIntegrationTestOutcome, WebhookRegistryError> {
+        let normalized = normalize_identifier(integration_id, "integration_id")?;
+        let mut state = self.state.lock().map_err(|_| WebhookRegistryError::LockPoisoned)?;
+        let record =
+            state
+                .webhooks
+                .iter_mut()
+                .find(|record| record.integration_id == normalized)
+                .ok_or_else(|| WebhookRegistryError::IntegrationNotFound(normalized.clone()))?;
+        let readiness = evaluate_readiness(record, vault);
+        let mut issues = Vec::<String>::new();
+        if !record.enabled {
+            issues.push("integration is disabled".to_owned());
+        }
+
+        let result = match parse_webhook_payload(payload_bytes) {
+            Ok(envelope) => {
+                let signature_present = envelope.replay_protection.signature.is_some();
+                let source_allowed = record.allowed_sources.is_empty()
+                    || record.allowed_sources.iter().any(|entry| entry == &envelope.source);
+                if !source_allowed {
+                    issues.push(format!(
+                        "payload source '{}' is not in the configured allowlist",
+                        envelope.source
+                    ));
+                }
+                let event_allowed = record.allowed_events.is_empty()
+                    || record.allowed_events.iter().any(|entry| entry == &envelope.event);
+                if !event_allowed {
+                    issues.push(format!(
+                        "payload event '{}' is not in the configured allowlist",
+                        envelope.event
+                    ));
+                }
+                let max_payload_ok = u64::try_from(payload_bytes.len()).unwrap_or(u64::MAX)
+                    <= record.max_payload_bytes;
+                if !max_payload_ok {
+                    issues.push(format!(
+                        "payload exceeds configured max_payload_bytes ({})",
+                        record.max_payload_bytes
+                    ));
+                }
+                if record.signature_required && !signature_present {
+                    issues.push("payload signature is required but missing".to_owned());
+                }
+                issues.extend(readiness.issues.clone());
+                let valid = record.enabled
+                    && readiness.is_ready()
+                    && source_allowed
+                    && event_allowed
+                    && max_payload_ok
+                    && (!record.signature_required || signature_present);
+                let outcome = if valid {
+                    "accepted"
+                } else if !record.enabled {
+                    "disabled"
+                } else if !readiness.is_ready() {
+                    "not_ready"
+                } else if record.signature_required && !signature_present {
+                    "signature_missing"
+                } else {
+                    "rejected"
+                };
+                let message = if issues.is_empty() {
+                    "payload passed structural and policy validation".to_owned()
+                } else {
+                    issues.join("; ")
+                };
+                control_plane::WebhookIntegrationTestResult {
+                    integration_id: record.integration_id.clone(),
+                    valid,
+                    outcome: outcome.to_owned(),
+                    message,
+                    payload_bytes: u32::try_from(payload_bytes.len()).unwrap_or(u32::MAX),
+                    event: Some(envelope.event),
+                    source: Some(envelope.source),
+                    signature_present,
+                    secret_present: readiness.secret_present,
+                }
+            }
+            Err(error) => {
+                issues.extend(readiness.issues.clone());
+                issues.push(format!("payload validation failed: {error}"));
+                control_plane::WebhookIntegrationTestResult {
+                    integration_id: record.integration_id.clone(),
+                    valid: false,
+                    outcome: "invalid_payload".to_owned(),
+                    message: issues.join("; "),
+                    payload_bytes: u32::try_from(payload_bytes.len()).unwrap_or(u32::MAX),
+                    event: None,
+                    source: None,
+                    signature_present: false,
+                    secret_present: readiness.secret_present,
+                }
+            }
+        };
+
+        let now = unix_ms_now()?;
+        record.last_test_status = Some(if result.valid { "passed" } else { "failed" }.to_owned());
+        record.last_test_message = Some(result.message.clone());
+        record.last_test_at_unix_ms = Some(now);
+        record.updated_at_unix_ms = now;
+        let integration = self.view_from_record(record, vault)?;
+        persist_registry(&self.registry_path, &state)?;
+        Ok(WebhookIntegrationTestOutcome { integration, result })
+    }
+
+    pub fn summary(
+        &self,
+        vault: &Vault,
+    ) -> Result<WebhookDiagnosticsSnapshot, WebhookRegistryError> {
+        let state = self.state.lock().map_err(|_| WebhookRegistryError::LockPoisoned)?;
+        let mut providers = Vec::<String>::new();
+        let mut enabled = 0_usize;
+        let mut ready = 0_usize;
+        let mut disabled = 0_usize;
+        let mut invalid_secret_ref = 0_usize;
+        let mut secret_not_found = 0_usize;
+        for record in &state.webhooks {
+            if !providers.contains(&record.provider) {
+                providers.push(record.provider.clone());
+            }
+            let readiness = evaluate_readiness(record, vault);
+            if record.enabled {
+                enabled = enabled.saturating_add(1);
+                match readiness.secret_status {
+                    WebhookSecretStatus::Present => ready = ready.saturating_add(1),
+                    WebhookSecretStatus::InvalidRef => {
+                        invalid_secret_ref = invalid_secret_ref.saturating_add(1)
+                    }
+                    WebhookSecretStatus::Missing => {
+                        secret_not_found = secret_not_found.saturating_add(1)
+                    }
+                }
+            } else {
+                disabled = disabled.saturating_add(1);
+            }
+        }
+        providers.sort();
+        Ok(WebhookDiagnosticsSnapshot {
+            total: state.webhooks.len(),
+            enabled,
+            ready,
+            disabled,
+            invalid_secret_ref,
+            secret_not_found,
+            providers,
+        })
+    }
+
+    pub fn diagnostics_snapshot(
+        &self,
+        vault: &Vault,
+    ) -> Result<WebhookDiagnosticsSnapshot, WebhookRegistryError> {
+        self.summary(vault)
+    }
+
+    fn view_from_record(
+        &self,
+        record: &WebhookIntegrationRecord,
+        vault: &Vault,
+    ) -> Result<control_plane::WebhookIntegrationView, WebhookRegistryError> {
+        let readiness = evaluate_readiness(record, vault);
+        Ok(control_plane::WebhookIntegrationView {
+            integration_id: record.integration_id.clone(),
+            provider: record.provider.clone(),
+            display_name: record.display_name.clone(),
+            secret_vault_ref: record.secret_vault_ref.clone(),
+            secret_present: readiness.secret_present,
+            allowed_events: record.allowed_events.clone(),
+            allowed_sources: record.allowed_sources.clone(),
+            enabled: record.enabled,
+            signature_required: record.signature_required,
+            max_payload_bytes: record.max_payload_bytes,
+            status: self.status_for(record, &readiness).to_owned(),
+            created_at_unix_ms: record.created_at_unix_ms,
+            updated_at_unix_ms: record.updated_at_unix_ms,
+            last_test_status: record.last_test_status.clone(),
+            last_test_message: record.last_test_message.clone(),
+            last_test_at_unix_ms: record.last_test_at_unix_ms,
+        })
+    }
+
+    fn status_for(
+        &self,
+        record: &WebhookIntegrationRecord,
+        readiness: &WebhookReadiness,
+    ) -> &'static str {
+        if !record.enabled {
+            "disabled"
+        } else {
+            match readiness.secret_status {
+                WebhookSecretStatus::Present => "ready",
+                WebhookSecretStatus::InvalidRef => "invalid_secret_ref",
+                WebhookSecretStatus::Missing => "secret_not_found",
+            }
+        }
+    }
+}
+
+fn evaluate_readiness(record: &WebhookIntegrationRecord, vault: &Vault) -> WebhookReadiness {
+    let parsed = match VaultRef::parse(record.secret_vault_ref.as_str()) {
+        Ok(value) => value,
+        Err(error) => {
+            return WebhookReadiness {
+                secret_status: WebhookSecretStatus::InvalidRef,
+                secret_present: false,
+                issues: vec![format!("secret_vault_ref is invalid: {error}")],
+            };
+        }
+    };
+    match vault.get_secret(&parsed.scope, parsed.key.as_str()) {
+        Ok(_) => WebhookReadiness {
+            secret_status: WebhookSecretStatus::Present,
+            secret_present: true,
+            issues: Vec::new(),
+        },
+        Err(VaultError::NotFound) => WebhookReadiness {
+            secret_status: WebhookSecretStatus::Missing,
+            secret_present: false,
+            issues: vec!["referenced signing secret was not found in the vault".to_owned()],
+        },
+        Err(error) => WebhookReadiness {
+            secret_status: WebhookSecretStatus::Missing,
+            secret_present: false,
+            issues: vec![format!("failed to read signing secret metadata: {error}")],
+        },
+    }
+}
+
+fn normalize_set_request(
+    request: WebhookIntegrationSetRequest,
+) -> Result<WebhookIntegrationSetRequest, WebhookRegistryError> {
+    let integration_id = normalize_identifier(request.integration_id, "integration_id")?;
+    let provider = normalize_provider(request.provider)?;
+    let display_name = request
+        .display_name
+        .map(normalize_display_name)
+        .transpose()?
+        .or_else(|| Some(integration_id.clone()));
+    let secret_vault_ref = normalize_secret_vault_ref(request.secret_vault_ref)?;
+    let allowed_events = normalize_allowed_values(request.allowed_events, "allowed_events")?;
+    let allowed_sources = normalize_allowed_values(request.allowed_sources, "allowed_sources")?;
+    let max_payload_bytes = if request.max_payload_bytes == 0 {
+        DEFAULT_MAX_PAYLOAD_BYTES
+    } else {
+        request.max_payload_bytes
+    };
+    if max_payload_bytes > MAX_WEBHOOK_PAYLOAD_BYTES {
+        return Err(WebhookRegistryError::InvalidField {
+            field: "max_payload_bytes",
+            message: format!("max_payload_bytes must be between 1 and {MAX_WEBHOOK_PAYLOAD_BYTES}"),
+        });
+    }
+    Ok(WebhookIntegrationSetRequest {
+        integration_id,
+        provider,
+        display_name,
+        secret_vault_ref,
+        allowed_events,
+        allowed_sources,
+        enabled: request.enabled,
+        signature_required: request.signature_required,
+        max_payload_bytes,
+    })
+}
+
+fn normalize_identifier(
+    raw: impl AsRef<str>,
+    field: &'static str,
+) -> Result<String, WebhookRegistryError> {
+    let normalized = raw.as_ref().trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(WebhookRegistryError::InvalidField {
+            field,
+            message: "value is required".to_owned(),
+        });
+    }
+    if normalized.len() > MAX_IDENTIFIER_BYTES {
+        return Err(WebhookRegistryError::InvalidField {
+            field,
+            message: format!("value must be at most {MAX_IDENTIFIER_BYTES} bytes"),
+        });
+    }
+    if !normalized
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(WebhookRegistryError::InvalidField {
+            field,
+            message: "value must contain only lowercase ASCII letters, digits, '.', '-', or '_'"
+                .to_owned(),
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_provider(raw: impl AsRef<str>) -> Result<String, WebhookRegistryError> {
+    let normalized = raw.as_ref().trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(WebhookRegistryError::InvalidField {
+            field: "provider",
+            message: "provider is required".to_owned(),
+        });
+    }
+    if normalized.len() > MAX_PROVIDER_BYTES {
+        return Err(WebhookRegistryError::InvalidField {
+            field: "provider",
+            message: format!("provider must be at most {MAX_PROVIDER_BYTES} bytes"),
+        });
+    }
+    if !normalized
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(WebhookRegistryError::InvalidField {
+            field: "provider",
+            message: "provider must contain only lowercase ASCII letters, digits, '.', '-', or '_'"
+                .to_owned(),
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_display_name(raw: String) -> Result<String, WebhookRegistryError> {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Err(WebhookRegistryError::InvalidField {
+            field: "display_name",
+            message: "display_name cannot be empty".to_owned(),
+        });
+    }
+    if normalized.len() > MAX_DISPLAY_NAME_BYTES {
+        return Err(WebhookRegistryError::InvalidField {
+            field: "display_name",
+            message: format!("display_name must be at most {MAX_DISPLAY_NAME_BYTES} bytes"),
+        });
+    }
+    Ok(normalized.to_owned())
+}
+
+fn normalize_secret_vault_ref(raw: String) -> Result<String, WebhookRegistryError> {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Err(WebhookRegistryError::InvalidField {
+            field: "secret_vault_ref",
+            message: "secret_vault_ref is required".to_owned(),
+        });
+    }
+    VaultRef::parse(normalized).map_err(|error| WebhookRegistryError::InvalidField {
+        field: "secret_vault_ref",
+        message: error.to_string(),
+    })?;
+    Ok(normalized.to_owned())
+}
+
+fn normalize_allowed_values(
+    values: Vec<String>,
+    field: &'static str,
+) -> Result<Vec<String>, WebhookRegistryError> {
+    if values.len() > MAX_ALLOWED_FILTERS {
+        return Err(WebhookRegistryError::InvalidField {
+            field,
+            message: format!("at most {MAX_ALLOWED_FILTERS} values are supported"),
+        });
+    }
+    let mut normalized = Vec::<String>::new();
+    for raw in values {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err(WebhookRegistryError::InvalidField {
+                field,
+                message: "filter entries cannot be empty".to_owned(),
+            });
+        }
+        if value.len() > MAX_FILTER_VALUE_BYTES {
+            return Err(WebhookRegistryError::InvalidField {
+                field,
+                message: format!("filter entries must be at most {MAX_FILTER_VALUE_BYTES} bytes"),
+            });
+        }
+        if !normalized.iter().any(|entry| entry == value) {
+            normalized.push(value.to_owned());
+        }
+    }
+    Ok(normalized)
+}
+
+fn persist_registry(
+    registry_path: &Path,
+    document: &RegistryDocument,
+) -> Result<(), WebhookRegistryError> {
+    if let Some(parent) = registry_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| WebhookRegistryError::WriteRegistry {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+        ensure_owner_only_dir(parent).map_err(|source| WebhookRegistryError::WriteRegistry {
+            path: parent.to_path_buf(),
+            source: std::io::Error::other(source.to_string()),
+        })?;
+    }
+    let encoded = toml::to_string_pretty(document)?;
+    fs::write(registry_path, encoded).map_err(|source| WebhookRegistryError::WriteRegistry {
+        path: registry_path.to_path_buf(),
+        source,
+    })?;
+    ensure_owner_only_file(registry_path).map_err(|source| {
+        WebhookRegistryError::WriteRegistry {
+            path: registry_path.to_path_buf(),
+            source: std::io::Error::other(source.to_string()),
+        }
+    })?;
+    Ok(())
+}
+
+fn unix_ms_now() -> Result<i64, WebhookRegistryError> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    use palyra_vault::{VaultConfig, VaultScope};
+
+    #[test]
+    fn registry_persists_and_deletes_integrations() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state");
+        let identity_root = state_root.join("identity");
+        fs::create_dir_all(&identity_root)?;
+
+        let registry = WebhookRegistry::open(&state_root)?;
+        let vault = Vault::open_with_config(VaultConfig {
+            root: Some(state_root.join("vault")),
+            identity_store_root: Some(identity_root),
+            ..VaultConfig::default()
+        })?;
+        vault.put_secret(&VaultScope::Global, "github_repo_a", b"super-secret")?;
+
+        let integration = registry.set_integration(
+            WebhookIntegrationSetRequest {
+                integration_id: "github_repo_a".to_owned(),
+                provider: "github".to_owned(),
+                display_name: Some("GitHub Repo A".to_owned()),
+                secret_vault_ref: "global/github_repo_a".to_owned(),
+                allowed_events: vec!["push".to_owned()],
+                allowed_sources: vec!["github.repo_a".to_owned()],
+                enabled: true,
+                signature_required: true,
+                max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
+            },
+            &vault,
+        )?;
+        assert_eq!(integration.integration_id, "github_repo_a");
+        assert!(integration.secret_present);
+
+        let reopened = WebhookRegistry::open(&state_root)?;
+        let listed = reopened
+            .list_views(WebhookIntegrationListFilter { provider: None, enabled: None }, &vault)?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].provider, "github");
+
+        let deleted = reopened.delete_integration("github_repo_a")?;
+        assert!(deleted);
+        assert!(reopened
+            .list_views(WebhookIntegrationListFilter { provider: None, enabled: None }, &vault)?
+            .is_empty());
+        Ok(())
+    }
+}
