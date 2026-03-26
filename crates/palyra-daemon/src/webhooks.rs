@@ -159,13 +159,7 @@ pub enum WebhookRegistryError {
 
 impl WebhookRegistry {
     pub fn open(state_root: &Path) -> Result<Self, WebhookRegistryError> {
-        ensure_owner_only_dir(state_root).map_err(|source| {
-            WebhookRegistryError::WriteRegistry {
-                path: state_root.to_path_buf(),
-                source: std::io::Error::other(source.to_string()),
-            }
-        })?;
-        let registry_path = state_root.join(REGISTRY_FILE);
+        let registry_path = resolve_registry_path(state_root)?;
         let document = if registry_path.exists() {
             let raw = fs::read_to_string(&registry_path).map_err(|source| {
                 WebhookRegistryError::ReadRegistry { path: registry_path.clone(), source }
@@ -179,6 +173,7 @@ impl WebhookRegistry {
             if parsed.version != REGISTRY_VERSION {
                 return Err(WebhookRegistryError::UnsupportedVersion(parsed.version));
             }
+            validate_registry_document(&parsed)?;
             parsed
         } else {
             let document = RegistryDocument::default();
@@ -195,20 +190,20 @@ impl WebhookRegistry {
     ) -> Result<Vec<control_plane::WebhookIntegrationView>, WebhookRegistryError> {
         let normalized_provider = filter.provider.map(normalize_provider).transpose()?;
         let state = self.state.lock().map_err(|_| WebhookRegistryError::LockPoisoned)?;
-        state
-            .webhooks
-            .iter()
-            .filter(|record| {
-                normalized_provider
-                    .as_ref()
-                    .map(|provider| provider == &record.provider)
-                    .unwrap_or(true)
-            })
-            .filter(|record| {
-                filter.enabled.map(|enabled| enabled == record.enabled).unwrap_or(true)
-            })
-            .map(|record| self.view_from_record(record, vault))
-            .collect()
+        let mut views = Vec::new();
+        for record in state.webhooks.iter().take(MAX_WEBHOOK_COUNT) {
+            let provider_matches = normalized_provider
+                .as_ref()
+                .map(|provider| provider == &record.provider)
+                .unwrap_or(true);
+            let enabled_matches =
+                filter.enabled.map(|enabled| enabled == record.enabled).unwrap_or(true);
+            if !provider_matches || !enabled_matches {
+                continue;
+            }
+            views.push(self.view_from_record(record, vault)?);
+        }
+        Ok(views)
     }
 
     pub fn get_view(
@@ -585,11 +580,25 @@ fn normalize_set_request(
 ) -> Result<WebhookIntegrationSetRequest, WebhookRegistryError> {
     let integration_id = normalize_identifier(request.integration_id, "integration_id")?;
     let provider = normalize_provider(request.provider)?;
-    let display_name = request
-        .display_name
-        .map(normalize_display_name)
-        .transpose()?
-        .or_else(|| Some(integration_id.clone()));
+    let display_name = match request.display_name {
+        Some(display_name) => {
+            let normalized = display_name.trim();
+            if normalized.is_empty() {
+                return Err(WebhookRegistryError::InvalidField {
+                    field: "display_name",
+                    message: "display_name cannot be empty".to_owned(),
+                });
+            }
+            if normalized.len() > MAX_DISPLAY_NAME_BYTES {
+                return Err(WebhookRegistryError::InvalidField {
+                    field: "display_name",
+                    message: format!("display_name must be at most {MAX_DISPLAY_NAME_BYTES} bytes"),
+                });
+            }
+            Some(normalized.to_owned())
+        }
+        None => Some(integration_id.clone()),
+    };
     let secret_vault_ref = normalize_secret_vault_ref(request.secret_vault_ref)?;
     let allowed_events = normalize_allowed_values(request.allowed_events, "allowed_events")?;
     let allowed_sources = normalize_allowed_values(request.allowed_sources, "allowed_sources")?;
@@ -674,23 +683,6 @@ fn normalize_provider(raw: impl AsRef<str>) -> Result<String, WebhookRegistryErr
     Ok(normalized)
 }
 
-fn normalize_display_name(raw: String) -> Result<String, WebhookRegistryError> {
-    let normalized = raw.trim();
-    if normalized.is_empty() {
-        return Err(WebhookRegistryError::InvalidField {
-            field: "display_name",
-            message: "display_name cannot be empty".to_owned(),
-        });
-    }
-    if normalized.len() > MAX_DISPLAY_NAME_BYTES {
-        return Err(WebhookRegistryError::InvalidField {
-            field: "display_name",
-            message: format!("display_name must be at most {MAX_DISPLAY_NAME_BYTES} bytes"),
-        });
-    }
-    Ok(normalized.to_owned())
-}
-
 fn normalize_secret_vault_ref(raw: String) -> Result<String, WebhookRegistryError> {
     let normalized = raw.trim();
     if normalized.is_empty() {
@@ -766,6 +758,36 @@ fn persist_registry(
     Ok(())
 }
 
+fn resolve_registry_path(state_root: &Path) -> Result<PathBuf, WebhookRegistryError> {
+    ensure_owner_only_dir(state_root).map_err(|source| WebhookRegistryError::WriteRegistry {
+        path: state_root.to_path_buf(),
+        source: std::io::Error::other(source.to_string()),
+    })?;
+    let canonical_state_root = fs::canonicalize(state_root).map_err(|source| {
+        WebhookRegistryError::WriteRegistry { path: state_root.to_path_buf(), source }
+    })?;
+    let registry_path = canonical_state_root.join(REGISTRY_FILE);
+    let registry_parent =
+        registry_path.parent().ok_or_else(|| WebhookRegistryError::WriteRegistry {
+            path: registry_path.clone(),
+            source: std::io::Error::other("webhook registry path has no parent"),
+        })?;
+    if registry_parent != canonical_state_root {
+        return Err(WebhookRegistryError::WriteRegistry {
+            path: registry_path,
+            source: std::io::Error::other("webhook registry path escapes the state root"),
+        });
+    }
+    Ok(registry_path)
+}
+
+fn validate_registry_document(document: &RegistryDocument) -> Result<(), WebhookRegistryError> {
+    if document.webhooks.len() > MAX_WEBHOOK_COUNT {
+        return Err(WebhookRegistryError::RegistryLimitExceeded);
+    }
+    Ok(())
+}
+
 fn unix_ms_now() -> Result<i64, WebhookRegistryError> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64)
 }
@@ -820,6 +842,43 @@ mod tests {
         assert!(reopened
             .list_views(WebhookIntegrationListFilter { provider: None, enabled: None }, &vault)?
             .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn registry_rejects_documents_that_exceed_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state");
+        fs::create_dir_all(&state_root)?;
+        let registry_path = state_root.join(REGISTRY_FILE);
+        let oversized = RegistryDocument {
+            version: REGISTRY_VERSION,
+            webhooks: (0..=MAX_WEBHOOK_COUNT)
+                .map(|index| WebhookIntegrationRecord {
+                    integration_id: format!("hook-{index}"),
+                    provider: "github".to_owned(),
+                    display_name: format!("Hook {index}"),
+                    secret_vault_ref: "global/github_repo_a".to_owned(),
+                    allowed_events: Vec::new(),
+                    allowed_sources: Vec::new(),
+                    enabled: true,
+                    signature_required: true,
+                    max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                    last_test_status: None,
+                    last_test_message: None,
+                    last_test_at_unix_ms: None,
+                })
+                .collect(),
+        };
+        fs::write(&registry_path, toml::to_string_pretty(&oversized)?)?;
+
+        let error = WebhookRegistry::open(&state_root).expect_err("oversized registry must fail");
+        assert!(
+            matches!(error, WebhookRegistryError::RegistryLimitExceeded),
+            "registry should reject documents above the configured cap: {error}"
+        );
         Ok(())
     }
 }

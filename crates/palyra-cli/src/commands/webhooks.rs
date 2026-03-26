@@ -173,9 +173,8 @@ fn emit_webhook_envelope(
         integration.max_payload_bytes
     );
     println!(
-        "webhooks.show.display_name={} secret_ref={} allowed_events={} allowed_sources={}",
+        "webhooks.show.display_name={} allowed_events={} allowed_sources={}",
         integration.display_name,
-        integration.secret_vault_ref,
         integration.allowed_events.join(","),
         integration.allowed_sources.join(",")
     );

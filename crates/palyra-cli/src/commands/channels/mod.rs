@@ -9,7 +9,7 @@ use palyra_connector_discord::{
     canonical_discord_channel_identity, canonical_discord_sender_identity,
     normalize_discord_account_id, normalize_discord_target,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{IsTerminal, Read, Write};
 
@@ -533,15 +533,14 @@ pub(crate) fn run(command: ChannelsCommand) -> Result<()> {
                 url, token, principal, device_id, channel,
             )?;
             let endpoint = format!(
-                "{}/admin/v1/channels/{}/logs",
-                request_context.base_url.trim_end_matches('/'),
-                connector_id
+                "{}/admin/v1/channels/logs/query",
+                request_context.base_url.trim_end_matches('/')
             );
             let client = channels_client::build_client()?;
-            let mut request = client.get(endpoint);
-            if let Some(limit) = limit {
-                request = request.query(&[("limit", limit)]);
-            }
+            let request = client.post(endpoint).json(&json!({
+                "connector_id": connector_id,
+                "limit": limit,
+            }));
             let response = channels_client::send_request(
                 request,
                 request_context,
@@ -1021,11 +1020,9 @@ fn emit_channel_lifecycle_disable(
         );
     } else {
         println!(
-            "channels.{} provider={} account_id={} connector_id={} disabled=true keep_credential={} credential_deleted={}",
+            "channels.{} provider={} disabled=true keep_credential={} credential_deleted={}",
             action,
             provider_label(provider),
-            account_id,
-            connector_id,
             keep_credential,
             credential_deleted
         );
@@ -1379,20 +1376,24 @@ fn post_discord_account_action(
     let request_context =
         channels_client::resolve_request_context(url, token, principal, device_id, channel)?;
     let endpoint = format!(
-        "{}/admin/v1/channels/discord/accounts/{}/{}",
+        "{}/admin/v1/channels/discord/accounts/{}",
         request_context.base_url.trim_end_matches('/'),
-        account_id,
         action
     );
+    let mut payload = match payload {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    payload.insert("account_id".to_owned(), Value::String(account_id.to_owned()));
     let client = channels_client::build_client()?;
     channels_client::send_request(
-        client.post(endpoint).json(&payload),
+        client.post(endpoint).json(&Value::Object(payload)),
         request_context,
         error_context,
     )
 }
 
-fn emit_logs(connector_id: &str, response: Value, json_output: bool) -> Result<()> {
+fn emit_logs(_connector_id: &str, response: Value, json_output: bool) -> Result<()> {
     if json_output {
         println!(
             "{}",
@@ -1407,10 +1408,7 @@ fn emit_logs(connector_id: &str, response: Value, json_output: bool) -> Result<(
             .and_then(Value::as_array)
             .map(|items| items.len())
             .unwrap_or(0);
-        println!(
-            "channels.logs connector_id={} events={} dead_letters={}",
-            connector_id, events, dead_letters
-        );
+        println!("channels.logs events={} dead_letters={}", events, dead_letters);
     }
     Ok(())
 }

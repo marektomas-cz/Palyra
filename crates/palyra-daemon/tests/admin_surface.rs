@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use reqwest::blocking::Client;
 use reqwest::Url;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const ADMIN_TOKEN: &str = "test-admin-token";
 const DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -1734,6 +1734,35 @@ fn admin_channel_health_refresh_and_dead_letter_recovery_publish_operator_state(
         .and_then(|entry| entry.get("dead_letter_id"))
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow::anyhow!("expected admin channel logs to expose a dead-letter id"))?;
+
+    let logs_after_send_query = client
+        .post(format!("http://127.0.0.1:{admin_port}/admin/v1/channels/logs/query"))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .json(&json!({
+            "connector_id": discord_connector_id,
+            "limit": 5,
+        }))
+        .send()
+        .context("failed to call admin channel logs query endpoint after dead-lettering")?
+        .error_for_status()
+        .context(
+            "admin channel logs query endpoint returned non-success status after dead-lettering",
+        )?
+        .json::<Value>()
+        .context("failed to parse admin channel logs query response json after dead-lettering")?;
+    assert_eq!(
+        logs_after_send_query
+            .get("dead_letters")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.get("dead_letter_id"))
+            .and_then(Value::as_i64),
+        Some(dead_letter_id),
+        "body-based logs query should resolve the same dead-letter record as the legacy path route"
+    );
 
     let replayed = client
         .post(format!(

@@ -369,19 +369,24 @@ pub(crate) async fn admin_channel_logs_handler(
         auth_error_response(error)
     })?;
     state.runtime.record_admin_status_request();
-    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
-    let events = state
-        .channels
-        .logs(connector_id.as_str(), query.limit)
-        .map_err(channel_platform_error_response)?;
-    let dead_letters = state
-        .channels
-        .dead_letters(connector_id.as_str(), query.limit)
-        .map_err(channel_platform_error_response)?;
-    Ok(Json(json!({
-        "events": events,
-        "dead_letters": dead_letters,
-    })))
+    admin_channel_logs_response(&state, connector_id, query.limit)
+}
+
+pub(crate) async fn admin_channel_logs_query_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ChannelLogsRequest>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let _context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    admin_channel_logs_response(&state, payload.connector_id, payload.limit)
 }
 
 pub(crate) async fn admin_channel_health_refresh_handler(
@@ -407,6 +412,27 @@ pub(crate) async fn admin_channel_health_refresh_handler(
     )
     .await?;
     Ok(Json(payload))
+}
+
+#[allow(clippy::result_large_err)]
+fn admin_channel_logs_response(
+    state: &AppState,
+    connector_id: String,
+    limit: Option<usize>,
+) -> Result<Json<Value>, Response> {
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let events = state
+        .channels
+        .logs(connector_id.as_str(), limit)
+        .map_err(channel_platform_error_response)?;
+    let dead_letters = state
+        .channels
+        .dead_letters(connector_id.as_str(), limit)
+        .map_err(channel_platform_error_response)?;
+    Ok(Json(json!({
+        "events": events,
+        "dead_letters": dead_letters,
+    })))
 }
 
 pub(crate) async fn admin_channel_queue_pause_handler(

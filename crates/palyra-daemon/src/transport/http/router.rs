@@ -24,6 +24,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/admin/v1/runs/{run_id}/cancel", post(admin::core::admin_run_cancel_handler))
         .route("/admin/v1/channels", get(admin::channels::admin_channels_list_handler))
         .route(
+            "/admin/v1/channels/logs/query",
+            post(admin::channels::admin_channel_logs_query_handler),
+        )
+        .route(
             "/admin/v1/channels/{connector_id}",
             get(admin::channels::admin_channel_status_handler),
         )
@@ -94,6 +98,14 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/admin/v1/channels/discord/onboarding/apply",
             post(admin::channels::connectors::discord::admin_discord_onboarding_apply_handler),
+        )
+        .route(
+            "/admin/v1/channels/discord/accounts/logout",
+            post(admin::channels::connectors::discord::admin_discord_account_logout_action_handler),
+        )
+        .route(
+            "/admin/v1/channels/discord/accounts/remove",
+            post(admin::channels::connectors::discord::admin_discord_account_remove_action_handler),
         )
         .route(
             "/admin/v1/channels/discord/accounts/{account_id}/logout",

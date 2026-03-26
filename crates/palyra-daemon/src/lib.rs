@@ -411,12 +411,26 @@ struct ChannelLogsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ChannelLogsRequest {
+    connector_id: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChannelEnabledRequest {
     enabled: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct DiscordAccountLifecycleRequest {
+    #[serde(default)]
+    keep_credential: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordAccountLifecycleActionRequest {
+    account_id: String,
     #[serde(default)]
     keep_credential: Option<bool>,
 }
