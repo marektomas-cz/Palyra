@@ -58,7 +58,12 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
                 app::ConnectionDefaults::USER,
             )?;
             let request = build_agent_run_input(AgentRunInputArgs {
-                session_id,
+                session_id: session_id
+                    .map(|value| {
+                        resolve_or_generate_canonical_id(Some(value))
+                            .map(|ulid| common_v1::CanonicalId { ulid })
+                    })
+                    .transpose()?,
                 session_key,
                 session_label,
                 require_existing,
@@ -138,7 +143,12 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
 
             let input_prompt = resolve_prompt_input(prompt, prompt_stdin)?;
             let request = build_agent_run_input(AgentRunInputArgs {
-                session_id,
+                session_id: session_id
+                    .map(|value| {
+                        resolve_or_generate_canonical_id(Some(value))
+                            .map(|ulid| common_v1::CanonicalId { ulid })
+                    })
+                    .transpose()?,
                 session_key,
                 session_label,
                 require_existing,
@@ -278,7 +288,7 @@ async fn run_agent_interactive_async(
         )
         .await?;
         let request = build_agent_run_input(AgentRunInputArgs {
-            session_id: resolved_session.session_id.as_ref().map(|value| value.ulid.clone()),
+            session_id: resolved_session.session_id.clone(),
             session_key: None,
             session_label: None,
             require_existing: true,

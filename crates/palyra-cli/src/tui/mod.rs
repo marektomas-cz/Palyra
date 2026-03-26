@@ -24,7 +24,7 @@ use crate::{
     *,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct LaunchOptions {
     pub(crate) connection: AgentConnection,
     pub(crate) session_id: Option<String>,
@@ -33,6 +33,23 @@ pub(crate) struct LaunchOptions {
     pub(crate) require_existing: bool,
     pub(crate) allow_sensitive_tools: bool,
     pub(crate) include_archived_sessions: bool,
+}
+
+impl std::fmt::Debug for LaunchOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchOptions")
+            .field("connection", &"<redacted>")
+            .field("session_id", &self.session_id.is_some())
+            .field("session_key", &self.session_key.as_ref().map(|value| !value.trim().is_empty()))
+            .field(
+                "session_label",
+                &self.session_label.as_ref().map(|value| !value.trim().is_empty()),
+            )
+            .field("require_existing", &self.require_existing)
+            .field("allow_sensitive_tools", &self.allow_sensitive_tools)
+            .field("include_archived_sessions", &self.include_archived_sessions)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +245,7 @@ impl App {
         app.push_entry(
             EntryKind::System,
             "Session",
-            format!("Connected to session {}.", display_session_identity(&app.session)),
+            "Connected.",
         );
         Ok(app)
     }
@@ -447,7 +464,7 @@ impl App {
         self.push_entry(EntryKind::User, "You", value.clone());
         self.status_line = "Running prompt".to_owned();
         let request = build_agent_run_input(AgentRunInputArgs {
-            session_id: self.session.session_id.as_ref().map(|value| value.ulid.clone()),
+            session_id: self.session.session_id.clone(),
             session_key: None,
             session_label: None,
             require_existing: true,
@@ -613,7 +630,7 @@ impl App {
         self.push_entry(
             EntryKind::System,
             "Session",
-            format!("Switched to {}.", display_session_identity(&self.session)),
+            "Session switched.",
         );
         self.refresh_agent_identity(None, false).await?;
         self.status_line = "Session switched".to_owned();
@@ -718,8 +735,6 @@ impl App {
                     .runtime
                     .list_sessions(None, self.include_archived_sessions, Some(100))
                     .await?;
-                let current_session_id =
-                    self.session.session_id.as_ref().map(|value| value.ulid.as_str());
                 let items = response
                     .sessions
                     .into_iter()
@@ -743,9 +758,7 @@ impl App {
                 PickerState {
                     kind,
                     title: "Session picker".to_owned(),
-                    selected: current_session_id
-                        .and_then(|id| items.iter().position(|item| item.id == id))
-                        .unwrap_or(0),
+                    selected: 0,
                     items,
                 }
             }

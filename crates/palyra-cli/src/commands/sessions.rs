@@ -60,8 +60,7 @@ pub(crate) async fn run_sessions_async(
                 );
                 for session in &response.sessions {
                     println!(
-                        "session id={} key={} label={} updated_at_unix_ms={} last_run_id={} archived_at_unix_ms={}",
-                        session_id_text(session),
+                        "session key={} label={} updated_at_unix_ms={} last_run_id={} archived_at_unix_ms={}",
                         redacted_text_or_none(!session.session_key.trim().is_empty()),
                         redacted_text_or_none(!session.session_label.trim().is_empty()),
                         session.updated_at_unix_ms,
@@ -94,8 +93,7 @@ pub(crate) async fn run_sessions_async(
                 );
             } else {
                 println!(
-                    "sessions.show id={} key={} label={} created_at_unix_ms={} updated_at_unix_ms={} last_run_id={} archived_at_unix_ms={}",
-                    session_id_text(&session),
+                    "sessions.show key={} label={} created_at_unix_ms={} updated_at_unix_ms={} last_run_id={} archived_at_unix_ms={}",
                     redacted_text_or_none(!session.session_key.trim().is_empty()),
                     redacted_text_or_none(!session.session_label.trim().is_empty()),
                     session.created_at_unix_ms,
@@ -135,8 +133,7 @@ pub(crate) async fn run_sessions_async(
                 );
             } else {
                 println!(
-                    "sessions.resolve id={} key={} label={} created={} reset_applied={} archived_at_unix_ms={}",
-                    session_id_text(&session),
+                    "sessions.resolve key={} label={} created={} reset_applied={} archived_at_unix_ms={}",
                     redacted_text_or_none(!session.session_key.trim().is_empty()),
                     redacted_text_or_none(!session.session_label.trim().is_empty()),
                     response.created,
@@ -171,8 +168,7 @@ pub(crate) async fn run_sessions_async(
                 );
             } else {
                 println!(
-                    "sessions.rename id={} label={} updated_at_unix_ms={} archived_at_unix_ms={}",
-                    session_id_text(&session),
+                    "sessions.rename label={} updated_at_unix_ms={} archived_at_unix_ms={}",
                     redacted_text_or_none(!session.session_label.trim().is_empty()),
                     session.updated_at_unix_ms,
                     optional_unix_ms_text(session.archived_at_unix_ms)
@@ -205,8 +201,7 @@ pub(crate) async fn run_sessions_async(
                 );
             } else {
                 println!(
-                    "sessions.reset id={} reset_applied={} updated_at_unix_ms={} archived_at_unix_ms={}",
-                    session_id_text(&session),
+                    "sessions.reset reset_applied={} updated_at_unix_ms={} archived_at_unix_ms={}",
                     response.reset_applied,
                     session.updated_at_unix_ms,
                     optional_unix_ms_text(session.archived_at_unix_ms)
@@ -239,8 +234,7 @@ pub(crate) async fn run_sessions_async(
                     );
                 } else {
                     println!(
-                        "sessions.cleanup.dry_run id={} key={} archived_at_unix_ms={} would_archive={}",
-                        session_id_text(&session),
+                        "sessions.cleanup.dry_run key={} archived_at_unix_ms={} would_archive={}",
                         redacted_text_or_none(!session.session_key.trim().is_empty()),
                         optional_unix_ms_text(session.archived_at_unix_ms),
                         session.archived_at_unix_ms == 0
@@ -270,8 +264,7 @@ pub(crate) async fn run_sessions_async(
                     );
                 } else {
                     println!(
-                        "sessions.cleanup id={} cleaned={} newly_archived={} previous_key={} archived_at_unix_ms={} run_count={}",
-                        session_id_text(&session),
+                        "sessions.cleanup cleaned={} newly_archived={} previous_key={} archived_at_unix_ms={} run_count={}",
                         response.cleaned,
                         response.newly_archived,
                         redacted_text_or_none(!response.previous_session_key.trim().is_empty()),
@@ -330,14 +323,6 @@ fn build_resolve_session_request(
         require_existing,
         reset_session,
     })
-}
-
-fn session_id_text(session: &gateway_v1::SessionSummary) -> String {
-    if session.session_id.is_some() {
-        REDACTED.to_owned()
-    } else {
-        "none".to_owned()
-    }
 }
 
 fn session_to_json(session: &gateway_v1::SessionSummary) -> Value {

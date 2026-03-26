@@ -2357,7 +2357,7 @@ where
     F: FnMut(&common_v1::RunStreamEvent) -> Result<()>,
 {
     let resolved = prepare_agent_run_input(client, request).await?;
-    let session_id = session_summary_id(&resolved.session)?;
+    let session_id = session_summary_reference(&resolved.session)?;
     let mut stream = client.open_run_stream(build_resolved_run_stream_request(&resolved)?).await?;
     let mut request_stream_closed = false;
     while let Some(event) = stream.next_event().await? {
@@ -2378,7 +2378,7 @@ where
             let decision = prompt_tool_approval_decision(approval)?;
             stream
                 .send_tool_approval_response(
-                    session_id.as_str(),
+                    session_id.ulid.as_str(),
                     resolved.run_id.as_str(),
                     common_v1::ToolApprovalResponse {
                         proposal_id: approval.proposal_id.clone(),
@@ -2432,7 +2432,13 @@ fn parse_acp_shim_input_line(
         anyhow::bail!("NDJSON ACP input requires `prompt` field with non-empty text");
     }
     build_agent_run_input(AgentRunInputArgs {
-        session_id: parsed.session_id,
+        session_id: parsed
+            .session_id
+            .map(|value| {
+                resolve_or_generate_canonical_id(Some(value))
+                    .map(|ulid| common_v1::CanonicalId { ulid })
+            })
+            .transpose()?,
         session_key: parsed.session_key,
         session_label: parsed.session_label,
         require_existing: parsed.require_existing.unwrap_or(false),
@@ -2471,7 +2477,7 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
 }
 
 struct AgentRunInputArgs {
-    session_id: Option<String>,
+    session_id: Option<common_v1::CanonicalId>,
     session_key: Option<String>,
     session_label: Option<String>,
     require_existing: bool,
@@ -2483,10 +2489,7 @@ struct AgentRunInputArgs {
 
 fn build_agent_run_input(input: AgentRunInputArgs) -> Result<AgentRunInput> {
     Ok(AgentRunInput {
-        session_id: input
-            .session_id
-            .map(|value| resolve_or_generate_canonical_id(Some(value)))
-            .transpose()?,
+        session_id: input.session_id,
         session_key: normalize_optional_owned_text(input.session_key),
         session_label: normalize_optional_owned_text(input.session_label),
         require_existing: input.require_existing,
@@ -2504,10 +2507,7 @@ async fn prepare_agent_run_input(
     let response = client
         .resolve_session(gateway_v1::ResolveSessionRequest {
             v: CANONICAL_PROTOCOL_MAJOR,
-            session_id: input
-                .session_id
-                .as_ref()
-                .map(|ulid| common_v1::CanonicalId { ulid: ulid.clone() }),
+            session_id: input.session_id.clone(),
             session_key: input.session_key.clone().unwrap_or_default(),
             session_label: input.session_label.clone().unwrap_or_default(),
             require_existing: input.require_existing,
@@ -2527,11 +2527,10 @@ fn normalize_optional_owned_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| empty_to_none(value.trim().to_owned()))
 }
 
-fn session_summary_id(session: &gateway_v1::SessionSummary) -> Result<String> {
+fn session_summary_reference(session: &gateway_v1::SessionSummary) -> Result<common_v1::CanonicalId> {
     session
         .session_id
-        .as_ref()
-        .map(|value| value.ulid.clone())
+        .clone()
         .context("resolved session is missing session_id")
 }
 
@@ -2628,10 +2627,10 @@ fn build_resolved_run_stream_request(
     input: &ResolvedAgentRunInput,
 ) -> Result<common_v1::RunStreamRequest> {
     let timestamp_unix_ms = now_unix_ms_i64()?;
-    let session_id = session_summary_id(&input.session)?;
+    let session_id = session_summary_reference(&input.session)?;
     Ok(common_v1::RunStreamRequest {
         v: RUN_STREAM_REQUEST_VERSION,
-        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        session_id: Some(session_id.clone()),
         run_id: Some(common_v1::CanonicalId { ulid: input.run_id.clone() }),
         input: Some(common_v1::MessageEnvelope {
             v: CANONICAL_JSON_ENVELOPE_VERSION,
@@ -2640,7 +2639,7 @@ fn build_resolved_run_stream_request(
             origin: Some(common_v1::EnvelopeOrigin {
                 r#type: common_v1::envelope_origin::OriginType::Cli as i32,
                 channel: DEFAULT_CHANNEL.to_owned(),
-                conversation_id: session_id,
+                conversation_id: REDACTED.to_owned(),
                 sender_display: "palyra-cli".to_owned(),
                 sender_handle: "cli".to_owned(),
                 sender_verified: true,
@@ -2663,10 +2662,12 @@ fn build_resolved_run_stream_request(
 
 fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStreamRequest> {
     let timestamp_unix_ms = now_unix_ms_i64()?;
-    let session_id = input.session_id.clone().unwrap_or_else(generate_canonical_ulid);
+    let session_id = input.session_id.clone().unwrap_or_else(|| common_v1::CanonicalId {
+        ulid: generate_canonical_ulid(),
+    });
     Ok(common_v1::RunStreamRequest {
         v: RUN_STREAM_REQUEST_VERSION,
-        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        session_id: Some(session_id),
         run_id: Some(common_v1::CanonicalId { ulid: input.run_id.clone() }),
         input: Some(common_v1::MessageEnvelope {
             v: CANONICAL_JSON_ENVELOPE_VERSION,
@@ -2675,7 +2676,7 @@ fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStrea
             origin: Some(common_v1::EnvelopeOrigin {
                 r#type: common_v1::envelope_origin::OriginType::Cli as i32,
                 channel: DEFAULT_CHANNEL.to_owned(),
-                conversation_id: session_id,
+                conversation_id: REDACTED.to_owned(),
                 sender_display: "palyra-cli".to_owned(),
                 sender_handle: "cli".to_owned(),
                 sender_verified: true,
@@ -3043,9 +3044,9 @@ struct AgentConnection {
     trace_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct AgentRunInput {
-    session_id: Option<String>,
+    session_id: Option<common_v1::CanonicalId>,
     session_key: Option<String>,
     session_label: Option<String>,
     require_existing: bool,
@@ -3055,7 +3056,25 @@ struct AgentRunInput {
     allow_sensitive_tools: bool,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for AgentRunInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRunInput")
+            .field("session_id", &self.session_id.is_some())
+            .field("session_key", &self.session_key.as_ref().map(|value| !value.trim().is_empty()))
+            .field(
+                "session_label",
+                &self.session_label.as_ref().map(|value| !value.trim().is_empty()),
+            )
+            .field("require_existing", &self.require_existing)
+            .field("reset_session", &self.reset_session)
+            .field("run_id", &REDACTED)
+            .field("prompt", &REDACTED)
+            .field("allow_sensitive_tools", &self.allow_sensitive_tools)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 struct ResolvedAgentRunInput {
     session: gateway_v1::SessionSummary,
     run_id: String,
@@ -3063,7 +3082,18 @@ struct ResolvedAgentRunInput {
     allow_sensitive_tools: bool,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for ResolvedAgentRunInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedAgentRunInput")
+            .field("session", &"<redacted>")
+            .field("run_id", &REDACTED)
+            .field("prompt", &REDACTED)
+            .field("allow_sensitive_tools", &self.allow_sensitive_tools)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 struct AcpShimInput {
     session_id: Option<String>,
     session_key: Option<String>,

@@ -329,7 +329,9 @@ impl PalyraAcpAgent {
         }
 
         let run_input = build_agent_run_input(AgentRunInputArgs {
-            session_id: Some(binding.gateway_session_id_ulid.clone()),
+            session_id: Some(common_v1::CanonicalId {
+                ulid: binding.gateway_session_id_ulid.clone(),
+            }),
             session_key: None,
             session_label: None,
             require_existing: false,
