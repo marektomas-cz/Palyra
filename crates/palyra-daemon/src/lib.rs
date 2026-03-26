@@ -97,7 +97,6 @@ use palyra_auth::{
     AuthProviderKind, HttpOAuthRefreshAdapter, OAuthRefreshAdapter, OAuthRefreshOutcomeKind,
     OAuthRefreshState,
 };
-use palyra_common::default_identity_store_root;
 use palyra_common::{
     build_metadata,
     config_system::{
@@ -113,6 +112,7 @@ use palyra_common::{
     },
     validate_canonical_id,
 };
+use palyra_common::{default_identity_store_root, default_state_root};
 use palyra_connector_discord::{
     discord_min_invite_permissions, discord_required_permission_labels,
     resolve_discord_intents_from_flags, DiscordPrivilegedIntentStatus,
@@ -1124,11 +1124,8 @@ pub async fn run() -> Result<()> {
         .context("failed to initialize model provider runtime")?;
     let agent_registry = agents::AgentRegistry::open(identity_runtime.store_root.as_path())
         .context("failed to initialize agent registry state")?;
-    let webhook_state_root = identity_runtime
-        .store_root
-        .parent()
-        .map(FsPath::to_path_buf)
-        .unwrap_or_else(|| identity_runtime.store_root.clone());
+    let webhook_state_root = resolve_runtime_state_root(identity_runtime.store_root.as_path())
+        .context("failed to resolve webhook registry state root")?;
     let webhook_registry = Arc::new(
         webhooks::WebhookRegistry::open(webhook_state_root.as_path())
             .context("failed to initialize webhook registry state")?,
@@ -1567,6 +1564,31 @@ struct ConsoleCronListQuery {
 struct ConsoleCronRunsQuery {
     after_run_id: Option<String>,
     limit: Option<usize>,
+}
+
+#[allow(clippy::result_large_err)]
+fn resolve_runtime_state_root(identity_store_root: &FsPath) -> Result<PathBuf> {
+    resolve_runtime_state_root_with_override(
+        std::env::var_os("PALYRA_STATE_ROOT").map(PathBuf::from),
+        identity_store_root,
+    )
+}
+
+fn resolve_runtime_state_root_with_override(
+    state_root_override: Option<PathBuf>,
+    identity_store_root: &FsPath,
+) -> Result<PathBuf> {
+    if let Some(state_root_override) = state_root_override {
+        anyhow::ensure!(
+            !state_root_override.as_os_str().is_empty(),
+            "PALYRA_STATE_ROOT must not be empty"
+        );
+        return Ok(state_root_override);
+    }
+    if let Some(parent) = identity_store_root.parent() {
+        return Ok(parent.to_path_buf());
+    }
+    default_state_root().context("failed to resolve default state root")
 }
 
 #[allow(clippy::result_large_err)]
@@ -2352,7 +2374,8 @@ mod tests {
         finalize_discord_onboarding_plan, find_hashed_secret_map_key, loopback_grpc_url,
         mint_console_relay_token, mint_console_secret_token, normalize_discord_token,
         parse_offline_env_flag, prune_console_relay_tokens, redact_console_diagnostics_value,
-        resolve_discord_intents_from_flags, resolve_model_provider_secret, runtime_status_response,
+        resolve_discord_intents_from_flags, resolve_model_provider_secret,
+        resolve_runtime_state_root_with_override, runtime_status_response,
         sanitize_http_error_message, sha256_hex, summarize_discord_inbound_monitor,
         validate_admin_auth_config, validate_canvas_http_canvas_id,
         validate_canvas_http_token_query, validate_process_runner_backend_policy,
@@ -2395,6 +2418,40 @@ mod tests {
             kind: ModelProviderKind::OpenAiCompatible,
             ..ModelProviderConfig::default()
         }
+    }
+
+    #[test]
+    fn resolve_runtime_state_root_prefers_explicit_override() {
+        let tempdir = tempfile::tempdir().expect("temporary test directory should be created");
+        let state_root = tempdir.path().join("state-root");
+        let identity_store_root = tempdir.path().join("custom").join("identity");
+
+        let resolved = resolve_runtime_state_root_with_override(
+            Some(state_root.clone()),
+            identity_store_root.as_path(),
+        )
+        .expect("state root override should be accepted");
+
+        assert_eq!(
+            resolved, state_root,
+            "explicit PALYRA_STATE_ROOT should take precedence over identity layout"
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_state_root_falls_back_to_identity_parent() {
+        let tempdir = tempfile::tempdir().expect("temporary test directory should be created");
+        let state_root = tempdir.path().join("state-root");
+        let identity_store_root = state_root.join("identity");
+
+        let resolved =
+            resolve_runtime_state_root_with_override(None, identity_store_root.as_path())
+                .expect("identity parent should provide a state root");
+
+        assert_eq!(
+            resolved, state_root,
+            "identity parent should back the daemon state root when no override is set"
+        );
     }
 
     #[test]
