@@ -294,11 +294,9 @@ pub(crate) async fn console_browser_session_create_handler(
         json!({
             "principal": principal,
             "channel": channel,
-            "session_created": envelope.session_id.is_some(),
             "downloads_enabled": envelope.downloads_enabled,
             "persistence_enabled": envelope.persistence_enabled,
             "state_restored": envelope.state_restored,
-            "profile_assigned": envelope.profile_id.is_some(),
             "private_profile": envelope.private_profile,
         }),
     )
@@ -457,7 +455,6 @@ pub(crate) async fn console_browser_click_handler(
             "error": envelope.error,
             "action_id": action_log.as_ref().map(|value| value.action_id.clone()),
             "attempts": action_log.as_ref().map(|value| value.attempts),
-            "artifact_available": envelope.artifact.is_some(),
         }),
     )
     .await?;

@@ -2545,7 +2545,11 @@ fn redact_browser_output_value(value: &mut Value, key_context: Option<&str>) {
 }
 
 fn canonical_id_text(value: Option<&common_v1::CanonicalId>, kind: &'static str) -> String {
-    redacted_browser_identifier_text(value.map(|value| value.ulid.as_str()), kind)
+    if value.is_some() {
+        format!("{kind}:redacted")
+    } else {
+        "-".to_owned()
+    }
 }
 
 fn empty_as_dash(value: &str) -> &str {
