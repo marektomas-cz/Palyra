@@ -275,7 +275,7 @@ pub(crate) async fn console_browser_session_create_handler(
         contract: contract_descriptor(),
         principal: principal.clone(),
         channel: channel.clone(),
-        session_id: maybe_canonical_id(response.session_id),
+        session_id: None,
         created_at_unix_ms: response.created_at_unix_ms,
         effective_budget: response.effective_budget.map(control_plane_browser_session_budget),
         downloads_enabled: response.downloads_enabled,
@@ -1584,7 +1584,7 @@ fn control_plane_browser_download_artifact(
 ) -> control_plane::BrowserDownloadArtifactRecord {
     control_plane::BrowserDownloadArtifactRecord {
         artifact_id: maybe_canonical_id(artifact.artifact_id),
-        session_id: maybe_canonical_id(artifact.session_id),
+        session_id: None,
         profile_id: maybe_canonical_id(artifact.profile_id),
         source_url: artifact.source_url,
         file_name: artifact.file_name,
