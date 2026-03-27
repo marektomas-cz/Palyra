@@ -46,6 +46,7 @@ Commands:
   secrets
   security
   tunnel
+  pairing
 
 Options:
   -h, --help
