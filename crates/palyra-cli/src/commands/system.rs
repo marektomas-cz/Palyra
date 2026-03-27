@@ -154,6 +154,16 @@ fn emit_system_heartbeat(payload: &Value, json_output: bool) -> Result<()> {
     let deployment = payload.get("deployment").unwrap_or(&Value::Null);
     let counters = payload.get("counters").unwrap_or(&Value::Null);
     let security = payload.get("security").unwrap_or(&Value::Null);
+    let grpc_transport = format!(
+        "{}:{}",
+        transport.get("grpc_bind_addr").and_then(Value::as_str).unwrap_or("unknown"),
+        transport.get("grpc_port").and_then(Value::as_u64).unwrap_or(0)
+    );
+    let quic_transport = format!(
+        "{}:{}",
+        transport.get("quic_bind_addr").and_then(Value::as_str).unwrap_or("unknown"),
+        transport.get("quic_port").and_then(Value::as_u64).unwrap_or(0)
+    );
     println!(
         "system.heartbeat status={} generated_at_unix_ms={} service={} version={} git_hash={} uptime_seconds={}",
         payload.get("status").and_then(Value::as_str).unwrap_or("unknown"),
@@ -165,16 +175,8 @@ fn emit_system_heartbeat(payload: &Value, json_output: bool) -> Result<()> {
     );
     println!(
         "system.heartbeat.transport grpc={} quic={} quic_enabled={}",
-        format!(
-            "{}:{}",
-            transport.get("grpc_bind_addr").and_then(Value::as_str).unwrap_or("unknown"),
-            transport.get("grpc_port").and_then(Value::as_u64).unwrap_or(0)
-        ),
-        format!(
-            "{}:{}",
-            transport.get("quic_bind_addr").and_then(Value::as_str).unwrap_or("unknown"),
-            transport.get("quic_port").and_then(Value::as_u64).unwrap_or(0)
-        ),
+        grpc_transport,
+        quic_transport,
         transport.get("quic_enabled").and_then(Value::as_bool).unwrap_or(false)
     );
     println!(

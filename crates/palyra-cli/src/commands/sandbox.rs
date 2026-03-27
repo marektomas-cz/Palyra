@@ -50,7 +50,7 @@ fn emit_sandbox_list(policy: &Value, json_output: bool) -> Result<()> {
         return output::print_json_pretty(&payload, "failed to encode sandbox list as JSON");
     }
 
-    println!("sandbox.list source=runtime recreate_supported={} runtimes={}", false, 2);
+    println!("sandbox.list source=runtime recreate_supported=false runtimes={}", 2);
     println!(
         "sandbox.runtime name=process_runner status={} tool_allowlisted={} tier={} executor={} egress_mode={} allow_interpreters={} allowed_executables={} allowed_egress_hosts={} allowed_dns_suffixes={}",
         process_runner

@@ -92,10 +92,9 @@ pub(crate) async fn run_memory_async(
                     );
                     if show_metadata {
                         let channel = item.map(|value| value.channel.as_str()).unwrap_or_default();
-                        let session_id = item
-                            .and_then(|value| value.session_id.as_ref())
-                            .map(|value| value.ulid.as_str())
-                            .unwrap_or("none");
+                        let session_scope = memory_session_scope_label(
+                            item.and_then(|value| value.session_id.as_ref()).is_some(),
+                        );
                         let tags = item
                             .map(|value| {
                                 if value.tags.is_empty() {
@@ -112,10 +111,10 @@ pub(crate) async fn run_memory_async(
                         let content_hash =
                             item.map(|value| value.content_hash.as_str()).unwrap_or_default();
                         println!(
-                            "memory.hit.meta id={} channel={} session_id={} tags={} confidence={:.3} ttl_unix_ms={} updated_at_unix_ms={} content_hash={}",
+                            "memory.hit.meta id={} channel={} session_scope={} tags={} confidence={:.3} ttl_unix_ms={} updated_at_unix_ms={} content_hash={}",
                             id,
                             channel,
-                            session_id,
+                            session_scope,
                             tags,
                             confidence,
                             ttl_unix_ms,
@@ -367,4 +366,22 @@ fn emit_memory_index(payload: &Value, json_output: bool) -> Result<()> {
         );
     }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn memory_session_scope_label(has_session_scope: bool) -> &'static str {
+    if has_session_scope {
+        "present"
+    } else {
+        "none"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory_session_scope_label;
+    #[test]
+    fn memory_session_scope_label_redacts_identifier_value() {
+        assert_eq!(memory_session_scope_label(false), "none");
+        assert_eq!(memory_session_scope_label(true), "present");
+    }
 }

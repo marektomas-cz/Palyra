@@ -226,7 +226,8 @@ pub(crate) async fn console_system_event_emit_handler(
     Json(payload): Json<ConsoleSystemEventEmitRequest>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    let name = validate_system_event_name(payload.name.as_str())?;
+    let name =
+        validate_system_event_name(payload.name.as_str()).map_err(runtime_status_response)?;
     let event = format!("system.operator.{name}");
     let summary = payload
         .summary
@@ -280,27 +281,25 @@ pub(crate) async fn console_system_event_emit_handler(
     })))
 }
 
-fn validate_system_event_name(raw: &str) -> Result<String, Response> {
+fn validate_system_event_name(raw: &str) -> Result<String, tonic::Status> {
     let trimmed = raw.trim().to_ascii_lowercase();
     if trimmed.is_empty() {
-        return Err(runtime_status_response(tonic::Status::invalid_argument(
-            "system event name cannot be empty",
-        )));
+        return Err(tonic::Status::invalid_argument("system event name cannot be empty"));
     }
     if trimmed.len() > MAX_SYSTEM_EVENT_NAME_BYTES {
-        return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+        return Err(tonic::Status::invalid_argument(format!(
             "system event name must be {} bytes or fewer",
             MAX_SYSTEM_EVENT_NAME_BYTES
-        ))));
+        )));
     }
     if !trimmed.bytes().all(|byte| {
         byte.is_ascii_lowercase()
             || byte.is_ascii_digit()
             || matches!(byte, b'.' | b'-' | b'_' | b':')
     }) {
-        return Err(runtime_status_response(tonic::Status::invalid_argument(
+        return Err(tonic::Status::invalid_argument(
             "system event name may only contain lowercase ASCII letters, digits, '.', '-', '_' or ':'",
-        )));
+        ));
     }
     Ok(trimmed)
 }
