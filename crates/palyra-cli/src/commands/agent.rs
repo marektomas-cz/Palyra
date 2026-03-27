@@ -104,72 +104,8 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
                 ndjson,
             ))
         }
-        AgentCommand::AcpShim {
-            grpc_url,
-            token,
-            principal,
-            device_id,
-            channel,
-            session_id,
-            session_key,
-            session_label,
-            require_existing,
-            reset_session,
-            run_id,
-            prompt,
-            prompt_stdin,
-            allow_sensitive_tools,
-            ndjson_stdin,
-        } => {
-            let connection = root_context.resolve_grpc_connection(
-                app::ConnectionOverrides {
-                    grpc_url,
-                    token,
-                    principal,
-                    device_id,
-                    channel,
-                    daemon_url: None,
-                },
-                app::ConnectionDefaults::USER,
-            )?;
-            if ndjson_stdin {
-                return run_acp_shim_from_stdin(connection, allow_sensitive_tools);
-            }
-
-            let input_prompt = resolve_prompt_input(prompt, prompt_stdin)?;
-            let request = build_agent_run_input(AgentRunInputArgs {
-                session_id: resolve_optional_canonical_id(session_id)?,
-                session_key,
-                session_label,
-                require_existing,
-                reset_session,
-                run_id,
-                prompt: input_prompt,
-                allow_sensitive_tools,
-            })?;
-            run_agent_stream_as_acp(connection, request)
-        }
-        AgentCommand::Acp {
-            grpc_url,
-            token,
-            principal,
-            device_id,
-            channel,
-            allow_sensitive_tools,
-        } => {
-            let connection = root_context.resolve_grpc_connection(
-                app::ConnectionOverrides {
-                    grpc_url,
-                    token,
-                    principal,
-                    device_id,
-                    channel,
-                    daemon_url: None,
-                },
-                app::ConnectionDefaults::USER,
-            )?;
-            acp_bridge::run_agent_acp_bridge(connection, allow_sensitive_tools)
-        }
+        AgentCommand::AcpShim { command } => commands::acp::run_legacy_agent_acp_shim(command),
+        AgentCommand::Acp { command } => commands::acp::run_legacy_agent_acp(command),
     }
 }
 

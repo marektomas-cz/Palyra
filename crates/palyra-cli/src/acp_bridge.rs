@@ -56,6 +56,7 @@ enum ClientBridgeRequest {
 struct PalyraAcpAgent {
     connection: AgentConnection,
     allow_sensitive_tools: bool,
+    session_defaults: AcpSessionDefaults,
     state: Arc<Mutex<BridgeState>>,
     client_request_tx: mpsc::UnboundedSender<ClientBridgeRequest>,
     default_cwd: PathBuf,
@@ -69,15 +70,31 @@ struct SessionMetaOverrides {
     require_existing: Option<bool>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub(crate) struct AcpSessionDefaults {
+    pub(crate) session_key: Option<String>,
+    pub(crate) session_label: Option<String>,
+    pub(crate) require_existing: bool,
+    pub(crate) reset_session: bool,
+}
+
 impl PalyraAcpAgent {
     fn new(
         connection: AgentConnection,
         allow_sensitive_tools: bool,
+        session_defaults: AcpSessionDefaults,
         state: Arc<Mutex<BridgeState>>,
         client_request_tx: mpsc::UnboundedSender<ClientBridgeRequest>,
         default_cwd: PathBuf,
     ) -> Self {
-        Self { connection, allow_sensitive_tools, state, client_request_tx, default_cwd }
+        Self {
+            connection,
+            allow_sensitive_tools,
+            session_defaults,
+            state,
+            client_request_tx,
+            default_cwd,
+        }
     }
 
     async fn send_session_update(
@@ -267,14 +284,22 @@ impl PalyraAcpAgent {
             }
         }
 
-        let requested_session_key =
-            overrides.session_key.clone().unwrap_or_else(|| session_id_value.clone());
+        let requested_session_key = overrides
+            .session_key
+            .clone()
+            .or_else(|| self.session_defaults.session_key.clone())
+            .unwrap_or_else(|| session_id_value.clone());
         let binding = self
             .resolve_gateway_session(
                 requested_session_key,
-                overrides.session_label.clone(),
-                overrides.require_existing.unwrap_or(default_require_existing),
-                overrides.reset_session.unwrap_or(false),
+                overrides
+                    .session_label
+                    .clone()
+                    .or_else(|| self.session_defaults.session_label.clone()),
+                overrides
+                    .require_existing
+                    .unwrap_or(default_require_existing || self.session_defaults.require_existing),
+                overrides.reset_session.unwrap_or(self.session_defaults.reset_session),
             )
             .await?;
         self.lock_state()?.sessions.insert(session_id_value, binding.clone());
@@ -497,14 +522,16 @@ impl acp::Agent for PalyraAcpAgent {
         arguments: acp::NewSessionRequest,
     ) -> acp::Result<acp::NewSessionResponse> {
         let overrides = Self::session_overrides(&arguments.meta)?;
-        let requested_session_key =
-            overrides.session_key.unwrap_or_else(|| format!("agent:main:{}", ulid::Ulid::new()));
+        let requested_session_key = format!("agent:main:{}", ulid::Ulid::new());
         let mut binding = self
             .resolve_gateway_session(
-                requested_session_key,
-                overrides.session_label,
-                overrides.require_existing.unwrap_or(false),
-                overrides.reset_session.unwrap_or(false),
+                overrides
+                    .session_key
+                    .or_else(|| self.session_defaults.session_key.clone())
+                    .unwrap_or(requested_session_key),
+                overrides.session_label.or_else(|| self.session_defaults.session_label.clone()),
+                overrides.require_existing.unwrap_or(self.session_defaults.require_existing),
+                overrides.reset_session.unwrap_or(self.session_defaults.reset_session),
             )
             .await?;
         binding.cwd = arguments.cwd;
@@ -521,10 +548,13 @@ impl acp::Agent for PalyraAcpAgent {
         let overrides = Self::session_overrides(&arguments.meta)?;
         let mut binding = self
             .resolve_gateway_session(
-                overrides.session_key.unwrap_or_else(|| arguments.session_id.0.as_ref().to_owned()),
-                overrides.session_label,
+                overrides
+                    .session_key
+                    .or_else(|| self.session_defaults.session_key.clone())
+                    .unwrap_or_else(|| arguments.session_id.0.as_ref().to_owned()),
+                overrides.session_label.or_else(|| self.session_defaults.session_label.clone()),
                 overrides.require_existing.unwrap_or(true),
-                overrides.reset_session.unwrap_or(false),
+                overrides.reset_session.unwrap_or(self.session_defaults.reset_session),
             )
             .await?;
         binding.cwd = arguments.cwd;
@@ -568,6 +598,7 @@ impl acp::Agent for PalyraAcpAgent {
 pub fn run_agent_acp_bridge(
     connection: AgentConnection,
     allow_sensitive_tools: bool,
+    session_defaults: AcpSessionDefaults,
 ) -> Result<()> {
     let runtime = build_runtime()?;
     runtime.block_on(async move {
@@ -581,6 +612,7 @@ pub fn run_agent_acp_bridge(
                 let bridge = PalyraAcpAgent::new(
                     connection,
                     allow_sensitive_tools,
+                    session_defaults,
                     state,
                     client_request_tx,
                     default_cwd,
@@ -823,8 +855,8 @@ fn non_empty(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         acp, build_tool_permission_request, map_list_sessions_response, map_permission_outcome,
-        AgentConnection, BridgeState, ClientBridgeRequest, PalyraAcpAgent, SessionBinding,
-        PERMISSION_ALLOW_ALWAYS, PERMISSION_ALLOW_ONCE, PERMISSION_REJECT_ALWAYS,
+        AcpSessionDefaults, AgentConnection, BridgeState, ClientBridgeRequest, PalyraAcpAgent,
+        SessionBinding, PERMISSION_ALLOW_ALWAYS, PERMISSION_ALLOW_ONCE, PERMISSION_REJECT_ALWAYS,
         PERMISSION_REJECT_ONCE,
     };
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
@@ -849,6 +881,7 @@ mod tests {
                 trace_id: "cli:test".to_owned(),
             },
             false,
+            AcpSessionDefaults::default(),
             Arc::new(Mutex::new(BridgeState::default())),
             client_request_tx,
             PathBuf::from("."),

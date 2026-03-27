@@ -255,6 +255,61 @@ fn agent_acp_shim_emits_ndjson_events() -> Result<()> {
 }
 
 #[test]
+fn top_level_acp_shim_emits_ndjson_events() -> Result<()> {
+    let (child, _admin_port, grpc_port) = spawn_palyrad_with_dynamic_ports()?;
+    let _daemon = ChildGuard::new(child);
+    let session_id = generate_canonical_ulid();
+    let run_id = generate_canonical_ulid();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .args([
+            "acp",
+            "shim",
+            "--grpc-url",
+            &format!("http://127.0.0.1:{grpc_port}"),
+            "--token",
+            ADMIN_TOKEN,
+            "--principal",
+            "user:ops",
+            "--device-id",
+            DEVICE_ID,
+            "--channel",
+            "cli",
+            "--session-id",
+            session_id.as_str(),
+            "--run-id",
+            run_id.as_str(),
+            "--prompt",
+            "hello from top-level ndjson",
+        ])
+        .output()
+        .context("failed to execute palyra acp shim")?;
+
+    assert!(
+        output.status.success(),
+        "top-level acp shim should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
+    let mut saw_done = false;
+    let mut saw_token = false;
+    for line in stdout.lines() {
+        let parsed: Value = serde_json::from_str(line).context("acp shim output must be NDJSON")?;
+        if parsed.get("type").and_then(Value::as_str) == Some("run.status")
+            && parsed.get("kind").and_then(Value::as_str) == Some("done")
+        {
+            saw_done = true;
+        }
+        if parsed.get("type").and_then(Value::as_str) == Some("model.token") {
+            saw_token = true;
+        }
+    }
+    assert!(saw_done, "acp shim stream should include done status line: {stdout}");
+    assert!(saw_token, "acp shim stream should include at least one token line: {stdout}");
+    Ok(())
+}
+
+#[test]
 fn agent_acp_shim_rejects_invalid_ndjson_input() -> Result<()> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_palyra"))
         .args(["agent", "acp-shim", "--grpc-url", "http://127.0.0.1:7443", "--ndjson-stdin"])

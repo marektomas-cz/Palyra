@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod agent;
 pub mod agents;
 pub mod approvals;
@@ -10,8 +11,10 @@ pub mod config;
 pub mod configure;
 pub mod cron;
 pub mod daemon;
+pub mod docs;
 pub mod doctor;
 pub mod health;
+pub mod hooks;
 pub mod init;
 pub mod logs;
 pub mod memory;
@@ -22,6 +25,7 @@ pub(crate) mod operator_wizard;
 #[cfg(not(windows))]
 pub mod pairing;
 pub mod patch;
+pub mod plugins;
 pub mod policy;
 pub mod protocol;
 pub mod reset;

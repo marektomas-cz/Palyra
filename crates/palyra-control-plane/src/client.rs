@@ -661,6 +661,187 @@ impl ControlPlaneClient {
         .await
     }
 
+    pub async fn list_plugins(
+        &self,
+        query: &PluginBindingsQuery,
+    ) -> Result<PluginBindingListEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            build_query_path(
+                "console/v1/plugins",
+                vec![("plugin_id", query.plugin_id.clone()), ("skill_id", query.skill_id.clone())],
+            ),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn get_plugin(
+        &self,
+        plugin_id: &str,
+    ) -> Result<PluginBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/plugins/{}", urlencoding(plugin_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn upsert_plugin(
+        &self,
+        request: &PluginBindingUpsertRequest,
+    ) -> Result<PluginBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::POST, "console/v1/plugins/install-or-bind", Some(request), true)
+            .await
+    }
+
+    pub async fn check_plugin(
+        &self,
+        plugin_id: &str,
+    ) -> Result<PluginBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/plugins/{}/check", urlencoding(plugin_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn enable_plugin(
+        &self,
+        plugin_id: &str,
+    ) -> Result<PluginBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/plugins/{}/enable", urlencoding(plugin_id)),
+            Some(&serde_json::json!({})),
+            true,
+        )
+        .await
+    }
+
+    pub async fn disable_plugin(
+        &self,
+        plugin_id: &str,
+    ) -> Result<PluginBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/plugins/{}/disable", urlencoding(plugin_id)),
+            Some(&serde_json::json!({})),
+            true,
+        )
+        .await
+    }
+
+    pub async fn delete_plugin(
+        &self,
+        plugin_id: &str,
+    ) -> Result<PluginBindingDeleteEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/plugins/{}/delete", urlencoding(plugin_id)),
+            None::<&Value>,
+            true,
+        )
+        .await
+    }
+
+    pub async fn list_hooks(
+        &self,
+        query: &HookBindingsQuery,
+    ) -> Result<HookBindingListEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            build_query_path(
+                "console/v1/hooks",
+                vec![
+                    ("hook_id", query.hook_id.clone()),
+                    ("plugin_id", query.plugin_id.clone()),
+                    ("event", query.event.clone()),
+                ],
+            ),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn get_hook(
+        &self,
+        hook_id: &str,
+    ) -> Result<HookBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/hooks/{}", urlencoding(hook_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn upsert_hook(
+        &self,
+        request: &HookBindingUpsertRequest,
+    ) -> Result<HookBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::POST, "console/v1/hooks/bind", Some(request), true).await
+    }
+
+    pub async fn check_hook(
+        &self,
+        hook_id: &str,
+    ) -> Result<HookBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/hooks/{}/check", urlencoding(hook_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn enable_hook(
+        &self,
+        hook_id: &str,
+    ) -> Result<HookBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/hooks/{}/enable", urlencoding(hook_id)),
+            Some(&serde_json::json!({})),
+            true,
+        )
+        .await
+    }
+
+    pub async fn disable_hook(
+        &self,
+        hook_id: &str,
+    ) -> Result<HookBindingEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/hooks/{}/disable", urlencoding(hook_id)),
+            Some(&serde_json::json!({})),
+            true,
+        )
+        .await
+    }
+
+    pub async fn delete_hook(
+        &self,
+        hook_id: &str,
+    ) -> Result<HookBindingDeleteEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/hooks/{}/delete", urlencoding(hook_id)),
+            None::<&Value>,
+            true,
+        )
+        .await
+    }
+
     pub async fn list_auth_profiles(
         &self,
         query: &str,

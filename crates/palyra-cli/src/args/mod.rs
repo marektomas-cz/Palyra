@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
+mod acp;
 mod agent;
 mod agents;
 mod approvals;
@@ -13,6 +14,8 @@ mod config;
 mod configure;
 mod cron;
 mod daemon;
+mod docs;
+mod hooks;
 mod init;
 mod memory;
 mod message;
@@ -21,6 +24,7 @@ mod onboarding;
 #[cfg(not(windows))]
 mod pairing;
 mod patch;
+mod plugins;
 mod policy;
 mod protocol;
 mod reset;
@@ -36,6 +40,10 @@ mod uninstall;
 mod update;
 mod webhooks;
 
+pub use acp::{
+    AcpBridgeArgs, AcpCommand, AcpConnectionArgs, AcpSessionDefaultsArgs, AcpShimArgs,
+    AcpSubcommand,
+};
 pub use agent::AgentCommand;
 pub use agents::AgentsCommand;
 pub use approvals::{
@@ -60,6 +68,8 @@ pub use config::ConfigCommand;
 pub use configure::ConfigureSectionArg;
 pub use cron::{CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg};
 pub use daemon::{DaemonCommand, JournalCheckpointModeArg};
+pub use docs::DocsCommand;
+pub use hooks::HooksCommand;
 pub use init::{InitModeArg, InitTlsScaffoldArg};
 pub use memory::{MemoryCommand, MemoryScopeArg, MemorySourceArg};
 pub use message::MessageCommand;
@@ -71,6 +81,7 @@ pub use onboarding::{
 #[cfg(not(windows))]
 pub use pairing::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 pub use patch::PatchCommand;
+pub use plugins::PluginsCommand;
 pub use policy::PolicyCommand;
 pub use protocol::ProtocolCommand;
 pub use reset::{ResetCommand, ResetScopeArg};
@@ -89,6 +100,8 @@ pub use webhooks::WebhooksCommand;
 const ROOT_AFTER_HELP: &str = "\
 Examples:
   palyra setup --mode local
+  palyra acp --session-key ops:triage
+  palyra docs search acp
   palyra gateway status
   palyra dashboard --open
   palyra backup create --output ./artifacts/palyra-backup.zip
@@ -101,11 +114,15 @@ Examples:
 Canonical command map:
   setup      Preferred bootstrap/init workflow (`init` remains as a compatibility alias)
   configure  Guided reconfiguration workflow for an existing installation
+  acp        Preferred ACP stdio bridge entry point (`agent acp` remains compatible)
+  docs       Local committed docs/help discovery surface
   gateway    Preferred runtime/admin family (`daemon` remains as a compatibility alias)
   dashboard  Thin operator shortcut for dashboard URL discovery/open workflows
   backup     Portable lifecycle backup/create verification surface
   system     Runtime heartbeat, presence, and recent system-event observability
   sandbox    Effective isolation/runtime policy explain surface for process and WASM tooling
+  plugins    Trusted WASM plugin binding and lifecycle surface
+  hooks      Event-driven automation bindings over trusted plugins
   reset      Destructive local recovery surface with explicit scope selection
   uninstall  Installer-aware package removal surface
   update     Package update/check orchestration surface
@@ -209,6 +226,28 @@ Examples:
 
 Discoverability:
   `webhooks` manages secret-aware webhook integrations without exposing a public ingress surface by default.";
+
+const ACP_AFTER_HELP: &str = "\
+Examples:
+  palyra acp
+  palyra acp --session-key ops:triage --session-label \"Ops Triage\"
+  palyra acp --require-existing
+  palyra acp shim --session-id 01ARZ3NDEKTSV4RRFFQ69G5FAW --prompt \"hello\"
+  palyra acp shim --ndjson-stdin
+
+Discoverability:
+  `acp` is the preferred ACP bridge entry point. `palyra agent acp` and `palyra agent acp-shim` remain compatible.
+  CLI defaults for `session_key`, `session_label`, `require_existing`, and `reset_session` seed bridge behavior; `_meta` prompt overrides still win when present.";
+
+const DOCS_AFTER_HELP: &str = "\
+Examples:
+  palyra docs list
+  palyra docs search acp
+  palyra docs show cli-v1-acp-shim
+  palyra docs show docs/architecture/browser-service-v1.md
+
+Discoverability:
+  `docs` indexes committed `docs/` markdown plus CLI help snapshots for local, offline lookup.";
 
 const BROWSER_AFTER_HELP: &str = "\
 Examples:
@@ -388,6 +427,14 @@ pub enum Command {
         #[arg(long)]
         channel: Option<String>,
     },
+    #[command(
+        about = "Run the ACP stdio bridge and legacy compatibility shim",
+        after_long_help = ACP_AFTER_HELP
+    )]
+    Acp {
+        #[command(flatten)]
+        command: AcpCommand,
+    },
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
@@ -436,6 +483,22 @@ pub enum Command {
     Webhooks {
         #[command(subcommand)]
         command: WebhooksCommand,
+    },
+    #[command(
+        about = "Discover committed docs and CLI help snapshots locally",
+        after_long_help = DOCS_AFTER_HELP
+    )]
+    Docs {
+        #[command(subcommand)]
+        command: DocsCommand,
+    },
+    Plugins {
+        #[command(subcommand)]
+        command: PluginsCommand,
+    },
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
     },
     #[command(
         about = "Operate the browser service and browser-backed automation sessions",

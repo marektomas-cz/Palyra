@@ -69,15 +69,16 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{CommandFactory, Parser};
 use cli::{
-    AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg, ApprovalsCommand,
-    AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
-    AuthScopeArg, BrowserCommand, Cli, Command as CliCommand, CompletionShell, ConfigCommand,
-    ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
-    CronScheduleTypeArg, DaemonCommand, GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg,
-    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
-    OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand,
-    ProtocolCommand, RemoteVerificationModeArg, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
-    SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
+    AcpCommand, AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg,
+    ApprovalsCommand, AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand,
+    AuthProviderArg, AuthScopeArg, BrowserCommand, Cli, Command as CliCommand, CompletionShell,
+    ConfigCommand, ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg,
+    CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, DocsCommand, GatewayBindProfileArg,
+    HooksCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
+    MemoryScopeArg, MemorySourceArg, ModelsCommand, OnboardingAuthMethodArg, OnboardingCommand,
+    OnboardingFlowArg, PatchCommand, PluginsCommand, PolicyCommand, ProtocolCommand,
+    RemoteVerificationModeArg, SandboxCommand, SandboxRuntimeArg, SecretsCommand, SecurityCommand,
+    SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
     SupportBundleCommand, SystemCommand, SystemEventCommand, SystemEventSeverityArg,
     WebhooksCommand, WizardOverridesArg,
 };
@@ -237,6 +238,7 @@ fn run_cli() -> Result<()> {
         CliCommand::Status { url, grpc_url, admin, token, principal, device_id, channel } => {
             commands::status::run_status(url, grpc_url, admin, token, principal, device_id, channel)
         }
+        CliCommand::Acp { command } => commands::acp::run_acp(command),
         CliCommand::Agent { command } => commands::agent::run_agent(command),
         CliCommand::Agents { command } => commands::agents::run_agents(command),
         CliCommand::Cron { command } => commands::cron::run_cron(command),
@@ -248,6 +250,9 @@ fn run_cli() -> Result<()> {
         CliCommand::Auth { command } => commands::auth::run_auth(command),
         CliCommand::Channels { command } => commands::channels::run(command),
         CliCommand::Webhooks { command } => commands::webhooks::run_webhooks(command),
+        CliCommand::Docs { command } => commands::docs::run_docs(command),
+        CliCommand::Plugins { command } => commands::plugins::run_plugins(command),
+        CliCommand::Hooks { command } => commands::hooks::run_hooks(command),
         CliCommand::Browser { command } => commands::browser::run_browser(command),
         CliCommand::System { command } => commands::system::run_system(command),
         CliCommand::Sandbox { command } => commands::sandbox::run_sandbox(command),

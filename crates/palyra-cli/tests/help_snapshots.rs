@@ -51,6 +51,24 @@ fn root_help_snapshot_matches() -> Result<()> {
 }
 
 #[test]
+fn acp_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(&["acp", "--help"], include_str!("help_snapshots/acp-help.txt"))
+}
+
+#[test]
+fn acp_shim_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(
+        &["acp", "shim", "--help"],
+        include_str!("help_snapshots/acp-shim-help.txt"),
+    )
+}
+
+#[test]
+fn docs_help_snapshot_matches() -> Result<()> {
+    assert_help_snapshot(&["docs", "--help"], include_str!("help_snapshots/docs-help.txt"))
+}
+
+#[test]
 fn setup_help_snapshot_matches() -> Result<()> {
     assert_help_snapshot(&["setup", "--help"], include_str!("help_snapshots/setup-help.txt"))
 }

@@ -1,6 +1,6 @@
 Palyra operator CLI for secure local and remote runtime management.
 
-Usage: palyra.exe [OPTIONS] <COMMAND>
+Usage: palyra [OPTIONS] <COMMAND>
 
 Commands:
   version         Show CLI build metadata
@@ -9,6 +9,7 @@ Commands:
   health          Run a narrow liveness/readiness probe across HTTP and gRPC gateway surfaces
   logs            Tail local gateway journal diagnostics
   status          Show transport and admin status across HTTP/gRPC surfaces
+  acp             Run the ACP stdio bridge and legacy compatibility shim
   agent
   agents
   cron
@@ -20,6 +21,9 @@ Commands:
   auth
   channels
   webhooks        Manage webhook-backed integrations
+  docs            Discover committed docs and CLI help snapshots locally
+  plugins
+  hooks
   browser         Operate the browser service and browser-backed automation sessions
   system          Inspect runtime heartbeat, subsystem presence, and recent system events
   sandbox         Inspect effective process-runner and WASM sandbox policy surfaces
@@ -71,6 +75,8 @@ Global Options:
 
 Examples:
   palyra setup --mode local
+  palyra acp --session-key ops:triage
+  palyra docs search acp
   palyra gateway status
   palyra dashboard --open
   palyra backup create --output ./artifacts/palyra-backup.zip
@@ -83,11 +89,15 @@ Examples:
 Canonical command map:
   setup      Preferred bootstrap/init workflow (`init` remains as a compatibility alias)
   configure  Guided reconfiguration workflow for an existing installation
+  acp        Preferred ACP stdio bridge entry point (`agent acp` remains compatible)
+  docs       Local committed docs/help discovery surface
   gateway    Preferred runtime/admin family (`daemon` remains as a compatibility alias)
   dashboard  Thin operator shortcut for dashboard URL discovery/open workflows
   backup     Portable lifecycle backup/create verification surface
   system     Runtime heartbeat, presence, and recent system-event observability
   sandbox    Effective isolation/runtime policy explain surface for process and WASM tooling
+  plugins    Trusted WASM plugin binding and lifecycle surface
+  hooks      Event-driven automation bindings over trusted plugins
   reset      Destructive local recovery surface with explicit scope selection
   uninstall  Installer-aware package removal surface
   update     Package update/check orchestration surface

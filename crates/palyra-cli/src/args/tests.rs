@@ -1,21 +1,23 @@
 use clap::Parser;
 
 use super::{
-    AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalDecisionScopeArg,
+    AcpBridgeArgs, AcpCommand, AcpConnectionArgs, AcpSessionDefaultsArgs, AcpShimArgs,
+    AcpSubcommand, AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalDecisionScopeArg,
     ApprovalExportFormatArg, ApprovalResolveDecisionArg, ApprovalSubjectTypeArg, ApprovalsCommand,
     AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
     AuthScopeArg, BackupCommand, BackupComponentArg, BrowserCommand, BrowserPermissionsCommand,
     BrowserSessionCommand, ChannelProviderArg, ChannelResolveEntityArg, ChannelsCommand,
     ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell, ConfigCommand,
     ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
-    CronScheduleTypeArg, DaemonCommand, GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg,
-    JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, MessageCommand,
-    ModelsCommand, OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand,
-    PolicyCommand, ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg,
-    SandboxCommand, SandboxRuntimeArg, SecretsCommand, SecretsConfigureCommand, SecurityCommand,
-    SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
-    SupportBundleCommand, SystemCommand, SystemEventCommand, SystemEventSeverityArg, TuiCommand,
-    UninstallCommand, UpdateCommand, WebhooksCommand, WizardOverridesArg,
+    CronScheduleTypeArg, DaemonCommand, DocsCommand, GatewayBindProfileArg, HooksCommand,
+    InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg,
+    MemorySourceArg, MessageCommand, ModelsCommand, OnboardingAuthMethodArg, OnboardingCommand,
+    OnboardingFlowArg, PatchCommand, PluginsCommand, PolicyCommand, ProtocolCommand,
+    RemoteVerificationModeArg, ResetCommand, ResetScopeArg, SandboxCommand, SandboxRuntimeArg,
+    SecretsCommand, SecretsConfigureCommand, SecurityCommand, SessionsCommand,
+    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    SystemCommand, SystemEventCommand, SystemEventSeverityArg, TuiCommand, UninstallCommand,
+    UpdateCommand, WebhooksCommand, WizardOverridesArg,
 };
 #[cfg(not(windows))]
 use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -375,21 +377,22 @@ fn parse_agent_acp_shim_from_ndjson_stdin() {
         parsed.command,
         Command::Agent {
             command: AgentCommand::AcpShim {
-                grpc_url: Some("http://127.0.0.1:7443".to_owned()),
-                token: None,
-                principal: None,
-                device_id: None,
-                channel: None,
-                session_id: None,
-                session_key: None,
-                session_label: None,
-                require_existing: false,
-                reset_session: false,
-                run_id: None,
-                prompt: None,
-                prompt_stdin: false,
-                allow_sensitive_tools: false,
-                ndjson_stdin: true,
+                command: AcpShimArgs {
+                    connection: AcpConnectionArgs {
+                        grpc_url: Some("http://127.0.0.1:7443".to_owned()),
+                        token: None,
+                        principal: None,
+                        device_id: None,
+                        channel: None,
+                    },
+                    session_id: None,
+                    session_defaults: AcpSessionDefaultsArgs::default(),
+                    run_id: None,
+                    prompt: None,
+                    prompt_stdin: false,
+                    allow_sensitive_tools: false,
+                    ndjson_stdin: true,
+                }
             }
         }
     );
@@ -473,13 +476,102 @@ fn parse_agent_acp_with_defaults() {
         parsed.command,
         Command::Agent {
             command: AgentCommand::Acp {
-                grpc_url: None,
-                token: None,
-                principal: None,
-                device_id: None,
-                channel: None,
-                allow_sensitive_tools: false,
+                command: AcpBridgeArgs {
+                    connection: AcpConnectionArgs::default(),
+                    session_defaults: AcpSessionDefaultsArgs::default(),
+                    allow_sensitive_tools: false,
+                }
             }
+        }
+    );
+}
+
+#[test]
+fn parse_top_level_acp_with_session_defaults() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "acp",
+        "--session-key",
+        "ops:triage",
+        "--session-label",
+        "Ops Triage",
+        "--require-existing",
+        "--reset-session",
+        "--allow-sensitive-tools",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Acp {
+            command: AcpCommand {
+                bridge: AcpBridgeArgs {
+                    connection: AcpConnectionArgs::default(),
+                    session_defaults: AcpSessionDefaultsArgs {
+                        session_key: Some("ops:triage".to_owned()),
+                        session_label: Some("Ops Triage".to_owned()),
+                        require_existing: true,
+                        reset_session: true,
+                    },
+                    allow_sensitive_tools: true,
+                },
+                subcommand: None,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_top_level_acp_shim_from_ndjson_stdin() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "acp",
+        "shim",
+        "--grpc-url",
+        "http://127.0.0.1:7443",
+        "--ndjson-stdin",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Acp {
+            command: AcpCommand {
+                bridge: AcpBridgeArgs::default(),
+                subcommand: Some(AcpSubcommand::Shim {
+                    command: AcpShimArgs {
+                        connection: AcpConnectionArgs {
+                            grpc_url: Some("http://127.0.0.1:7443".to_owned()),
+                            token: None,
+                            principal: None,
+                            device_id: None,
+                            channel: None,
+                        },
+                        session_id: None,
+                        session_defaults: AcpSessionDefaultsArgs::default(),
+                        run_id: None,
+                        prompt: None,
+                        prompt_stdin: false,
+                        allow_sensitive_tools: false,
+                        ndjson_stdin: true,
+                    }
+                }),
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_docs_search_and_show() {
+    let parsed_search = Cli::parse_from(["palyra", "docs", "search", "acp", "--limit", "5"]);
+    assert_eq!(
+        parsed_search.command,
+        Command::Docs {
+            command: DocsCommand::Search { query: "acp".to_owned(), limit: 5, json: false }
+        }
+    );
+
+    let parsed_show = Cli::parse_from(["palyra", "docs", "show", "cli-v1-acp-shim", "--json"]);
+    assert_eq!(
+        parsed_show.command,
+        Command::Docs {
+            command: DocsCommand::Show { slug_or_path: "cli-v1-acp-shim".to_owned(), json: true }
         }
     );
 }
@@ -3791,6 +3883,127 @@ fn parse_skills_audit_quarantine_and_enable() {
 }
 
 #[test]
+fn parse_plugins_and_hooks_commands() {
+    let plugins_list = Cli::parse_from([
+        "palyra",
+        "plugins",
+        "list",
+        "--plugin-id",
+        "acme-agent",
+        "--skill-id",
+        "acme.echo_http",
+        "--enabled-only",
+        "--ready-only",
+        "--json",
+    ]);
+    assert_eq!(
+        plugins_list.command,
+        Command::Plugins {
+            command: PluginsCommand::List {
+                plugin_id: Some("acme-agent".to_owned()),
+                skill_id: Some("acme.echo_http".to_owned()),
+                enabled_only: true,
+                ready_only: true,
+                json: true,
+            },
+        }
+    );
+
+    let plugin_install = Cli::parse_from([
+        "palyra",
+        "plugins",
+        "install",
+        "acme-agent",
+        "--artifact-path",
+        "dist/acme.echo_http.palyra-skill",
+        "--tool-id",
+        "acme.echo",
+        "--module-path",
+        "modules/echo.wasm",
+        "--entrypoint",
+        "run",
+        "--cap-http-host",
+        "api.example.com",
+        "--cap-secret",
+        "skill:acme.echo_http/api_token",
+        "--cap-storage-prefix",
+        "skills/cache",
+        "--cap-channel",
+        "discord",
+        "--display-name",
+        "Acme agent",
+        "--notes",
+        "prod plugin",
+        "--owner-principal",
+        "user:ops",
+        "--tag",
+        "prod",
+        "--allow-tofu",
+        "--allow-untrusted",
+        "--json",
+    ]);
+    assert_eq!(
+        plugin_install.command,
+        Command::Plugins {
+            command: PluginsCommand::Install {
+                plugin_id: "acme-agent".to_owned(),
+                skill_id: None,
+                skill_version: None,
+                artifact_path: Some("dist/acme.echo_http.palyra-skill".to_owned()),
+                tool_id: Some("acme.echo".to_owned()),
+                module_path: Some("modules/echo.wasm".to_owned()),
+                entrypoint: Some("run".to_owned()),
+                capability_http_hosts: vec!["api.example.com".to_owned()],
+                capability_secrets: vec!["skill:acme.echo_http/api_token".to_owned()],
+                capability_storage_prefixes: vec!["skills/cache".to_owned()],
+                capability_channels: vec!["discord".to_owned()],
+                display_name: Some("Acme agent".to_owned()),
+                notes: Some("prod plugin".to_owned()),
+                owner_principal: Some("user:ops".to_owned()),
+                tags: vec!["prod".to_owned()],
+                disabled: false,
+                allow_tofu: true,
+                allow_untrusted: true,
+                json: true,
+            },
+        }
+    );
+
+    let hook_bind = Cli::parse_from([
+        "palyra",
+        "hooks",
+        "bind",
+        "acme-startup",
+        "--event",
+        "gateway:startup",
+        "--plugin-id",
+        "acme-agent",
+        "--display-name",
+        "Startup hook",
+        "--notes",
+        "boot automation",
+        "--owner-principal",
+        "user:ops",
+        "--json",
+    ]);
+    assert_eq!(
+        hook_bind.command,
+        Command::Hooks {
+            command: HooksCommand::Bind {
+                hook_id: "acme-startup".to_owned(),
+                event: "gateway:startup".to_owned(),
+                plugin_id: "acme-agent".to_owned(),
+                display_name: Some("Startup hook".to_owned()),
+                notes: Some("boot automation".to_owned()),
+                owner_principal: Some("user:ops".to_owned()),
+                disabled: false,
+                json: true,
+            },
+        }
+    );
+}
+
+#[test]
 fn parse_secrets_set_with_stdin() {
     let parsed =
         Cli::parse_from(["palyra", "secrets", "set", "global", "openai_api_key", "--value-stdin"]);
@@ -4045,6 +4258,148 @@ fn parse_webhooks_verify_alias_and_payload_source_conflict() {
         "fixtures/webhook.json",
     ]);
     assert!(conflict.is_err(), "webhook test payload sources must remain mutually exclusive");
+}
+
+#[test]
+fn parse_plugins_install_and_check() {
+    let install = Cli::parse_from([
+        "palyra",
+        "plugins",
+        "install",
+        "acme.echo_http_plugin",
+        "--artifact",
+        "dist/acme.echo_http.palyra-skill",
+        "--skill-id",
+        "acme.echo_http",
+        "--skill-version",
+        "1.2.3",
+        "--tool-id",
+        "acme.echo_http",
+        "--module-path",
+        "modules/plugin.wasm",
+        "--entrypoint",
+        "run",
+        "--cap-http-host",
+        "api.example.com",
+        "--cap-secret",
+        "global/openai_api_key",
+        "--cap-storage-prefix",
+        "plugins/cache",
+        "--cap-channel",
+        "cli",
+        "--display-name",
+        "Echo HTTP",
+        "--notes",
+        "ops managed",
+        "--owner-principal",
+        "user:ops",
+        "--tag",
+        "prod",
+        "--disabled",
+        "--allow-untrusted",
+        "--json",
+    ]);
+    assert_eq!(
+        install.command,
+        Command::Plugins {
+            command: PluginsCommand::Install {
+                plugin_id: "acme.echo_http_plugin".to_owned(),
+                skill_id: Some("acme.echo_http".to_owned()),
+                skill_version: Some("1.2.3".to_owned()),
+                artifact_path: Some("dist/acme.echo_http.palyra-skill".to_owned()),
+                tool_id: Some("acme.echo_http".to_owned()),
+                module_path: Some("modules/plugin.wasm".to_owned()),
+                entrypoint: Some("run".to_owned()),
+                capability_http_hosts: vec!["api.example.com".to_owned()],
+                capability_secrets: vec!["global/openai_api_key".to_owned()],
+                capability_storage_prefixes: vec!["plugins/cache".to_owned()],
+                capability_channels: vec!["cli".to_owned()],
+                display_name: Some("Echo HTTP".to_owned()),
+                notes: Some("ops managed".to_owned()),
+                owner_principal: Some("user:ops".to_owned()),
+                tags: vec!["prod".to_owned()],
+                disabled: true,
+                allow_tofu: false,
+                allow_untrusted: true,
+                json: true,
+            },
+        }
+    );
+
+    let info = Cli::parse_from(["palyra", "plugins", "info", "acme.echo_http_plugin"]);
+    assert_eq!(
+        info.command,
+        Command::Plugins {
+            command: PluginsCommand::Info {
+                plugin_id: "acme.echo_http_plugin".to_owned(),
+                json: false,
+            },
+        }
+    );
+
+    let check = Cli::parse_from(["palyra", "plugins", "check", "acme.echo_http_plugin"]);
+    assert_eq!(
+        check.command,
+        Command::Plugins {
+            command: PluginsCommand::Check {
+                plugin_id: "acme.echo_http_plugin".to_owned(),
+                json: false,
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_hooks_bind_and_check() {
+    let bind = Cli::parse_from([
+        "palyra",
+        "hooks",
+        "bind",
+        "ops.skill_enabled",
+        "--event",
+        "skill:enabled",
+        "--plugin-id",
+        "acme.echo_http_plugin",
+        "--display-name",
+        "Skill Enabled Hook",
+        "--notes",
+        "dispatch after enabling",
+        "--owner-principal",
+        "user:ops",
+        "--disabled",
+        "--json",
+    ]);
+    assert_eq!(
+        bind.command,
+        Command::Hooks {
+            command: HooksCommand::Bind {
+                hook_id: "ops.skill_enabled".to_owned(),
+                event: "skill:enabled".to_owned(),
+                plugin_id: "acme.echo_http_plugin".to_owned(),
+                display_name: Some("Skill Enabled Hook".to_owned()),
+                notes: Some("dispatch after enabling".to_owned()),
+                owner_principal: Some("user:ops".to_owned()),
+                disabled: true,
+                json: true,
+            },
+        }
+    );
+
+    let info = Cli::parse_from(["palyra", "hooks", "info", "ops.skill_enabled"]);
+    assert_eq!(
+        info.command,
+        Command::Hooks {
+            command: HooksCommand::Info { hook_id: "ops.skill_enabled".to_owned(), json: false },
+        }
+    );
+
+    let check = Cli::parse_from(["palyra", "hooks", "check", "ops.skill_enabled"]);
+    assert_eq!(
+        check.command,
+        Command::Hooks {
+            command: HooksCommand::Check { hook_id: "ops.skill_enabled".to_owned(), json: false },
+        }
+    );
 }
 
 #[test]

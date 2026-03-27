@@ -1330,6 +1330,195 @@ pub struct WebhookIntegrationTestEnvelope {
     pub result: WebhookIntegrationTestResult,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PluginBindingsQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PluginCapabilityProfile {
+    #[serde(default)]
+    pub http_hosts: Vec<String>,
+    #[serde(default)]
+    pub secrets: Vec<String>,
+    #[serde(default)]
+    pub storage_prefixes: Vec<String>,
+    #[serde(default)]
+    pub channels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PluginOperatorMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_principal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginBindingView {
+    pub plugin_id: String,
+    pub enabled: bool,
+    pub skill_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+    #[serde(default)]
+    pub capability_profile: PluginCapabilityProfile,
+    #[serde(default)]
+    pub operator: PluginOperatorMetadata,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginBindingListEntry {
+    pub binding: PluginBindingView,
+    pub check: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginBindingListEnvelope {
+    pub contract: ContractDescriptor,
+    pub plugins_root: String,
+    pub count: usize,
+    #[serde(default)]
+    pub entries: Vec<PluginBindingListEntry>,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginBindingEnvelope {
+    pub contract: ContractDescriptor,
+    pub binding: PluginBindingView,
+    pub check: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_skill: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginBindingDeleteEnvelope {
+    pub contract: ContractDescriptor,
+    pub deleted: bool,
+    pub binding: PluginBindingView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginBindingUpsertRequest {
+    pub plugin_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_tofu: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_untrusted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_profile: Option<PluginCapabilityProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<PluginOperatorMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HookBindingsQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HookOperatorMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_principal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookBindingView {
+    pub hook_id: String,
+    pub event: String,
+    pub plugin_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub operator: HookOperatorMetadata,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookBindingListEntry {
+    pub binding: HookBindingView,
+    pub check: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookBindingListEnvelope {
+    pub contract: ContractDescriptor,
+    pub hooks_root: String,
+    pub count: usize,
+    #[serde(default)]
+    pub entries: Vec<HookBindingListEntry>,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookBindingEnvelope {
+    pub contract: ContractDescriptor,
+    pub binding: HookBindingView,
+    pub check: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookBindingDeleteEnvelope {
+    pub contract: ContractDescriptor,
+    pub deleted: bool,
+    pub binding: HookBindingView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookBindingUpsertRequest {
+    pub hook_id: String,
+    pub event: String,
+    pub plugin_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<HookOperatorMetadata>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingCodeMintRequest {
     pub channel: String,
