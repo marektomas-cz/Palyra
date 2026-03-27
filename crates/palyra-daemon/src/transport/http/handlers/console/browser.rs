@@ -1584,7 +1584,7 @@ fn control_plane_browser_download_artifact(
 ) -> control_plane::BrowserDownloadArtifactRecord {
     control_plane::BrowserDownloadArtifactRecord {
         artifact_id: maybe_canonical_id(artifact.artifact_id),
-        session_id: None,
+        session_id: maybe_canonical_id(artifact.session_id),
         profile_id: maybe_canonical_id(artifact.profile_id),
         source_url: artifact.source_url,
         file_name: artifact.file_name,
