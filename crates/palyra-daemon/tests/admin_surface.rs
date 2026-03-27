@@ -1525,6 +1525,76 @@ fn console_memory_purge_requires_session_and_csrf() -> Result<()> {
 }
 
 #[test]
+fn console_memory_status_and_index_surface_return_operator_payloads() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let status_response = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/memory/status"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to call memory status endpoint")?
+        .error_for_status()
+        .context("memory status endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse memory status response json")?;
+    assert!(
+        status_response.get("usage").is_some(),
+        "memory status response should include usage payload"
+    );
+    assert!(
+        status_response.get("embeddings").is_some(),
+        "memory status response should include embeddings payload"
+    );
+
+    let missing_csrf = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/memory/index"))
+        .header("Cookie", cookie.clone())
+        .json(&serde_json::json!({ "batch_size": 8, "until_complete": true }))
+        .send()
+        .context("failed to call memory index endpoint without csrf token")?;
+    assert_eq!(
+        missing_csrf.status().as_u16(),
+        403,
+        "memory index endpoint must enforce csrf token"
+    );
+
+    let index_response = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/memory/index"))
+        .header("Cookie", cookie)
+        .header("x-palyra-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "batch_size": 8,
+            "until_complete": true,
+            "run_maintenance": true,
+        }))
+        .send()
+        .context("failed to call memory index endpoint with csrf token")?
+        .error_for_status()
+        .context("memory index endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse memory index response json")?;
+    assert!(
+        index_response.get("index").is_some(),
+        "memory index response should include index payload"
+    );
+    assert!(
+        index_response.get("embeddings").is_some(),
+        "memory index response should include embeddings payload"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn admin_channel_queue_pause_resume_preserves_enabled_connector_state() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);

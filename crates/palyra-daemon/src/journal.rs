@@ -505,6 +505,24 @@ pub struct MemoryMaintenanceStatus {
     pub next_maintenance_run_at_unix_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEmbeddingsMode {
+    HashFallback,
+    ModelProvider,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MemoryEmbeddingsStatus {
+    pub mode: MemoryEmbeddingsMode,
+    pub target_model_id: String,
+    pub target_dims: u64,
+    pub target_version: i64,
+    pub total_count: u64,
+    pub indexed_count: u64,
+    pub pending_count: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryMaintenanceRequest {
     pub now_unix_ms: i64,
@@ -3780,6 +3798,32 @@ impl JournalStore {
             last_vacuum_at_unix_ms: state.last_vacuum_at_unix_ms,
             next_vacuum_due_at_unix_ms: state.next_vacuum_due_at_unix_ms,
             next_maintenance_run_at_unix_ms: state.next_maintenance_run_at_unix_ms,
+        })
+    }
+
+    pub fn memory_embeddings_status(&self) -> Result<MemoryEmbeddingsStatus, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let usage = query_memory_usage_snapshot(&guard)?;
+        let target_model_id = self.memory_embedding_provider.model_name().to_owned();
+        let target_dims = self.memory_embedding_provider.dimensions();
+        let pending_count = query_pending_memory_embeddings_count(
+            &guard,
+            target_model_id.as_str(),
+            target_dims,
+            CURRENT_MEMORY_EMBEDDING_VERSION,
+        )?;
+        Ok(MemoryEmbeddingsStatus {
+            mode: if target_model_id == DEFAULT_MEMORY_EMBEDDING_MODEL {
+                MemoryEmbeddingsMode::HashFallback
+            } else {
+                MemoryEmbeddingsMode::ModelProvider
+            },
+            target_model_id,
+            target_dims: target_dims as u64,
+            target_version: CURRENT_MEMORY_EMBEDDING_VERSION,
+            total_count: usage.entries,
+            indexed_count: usage.entries.saturating_sub(pending_count),
+            pending_count,
         })
     }
 

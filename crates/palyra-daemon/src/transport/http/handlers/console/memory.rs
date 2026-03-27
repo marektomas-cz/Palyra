@@ -1,3 +1,5 @@
+use crate::gateway::current_unix_ms;
+use crate::journal::MemoryRetentionPolicy;
 use crate::*;
 
 pub(crate) async fn console_memory_status_handler(
@@ -7,11 +9,14 @@ pub(crate) async fn console_memory_status_handler(
     let _session = authorize_console_session(&state, &headers, false)?;
     let maintenance_status =
         state.runtime.memory_maintenance_status().await.map_err(runtime_status_response)?;
+    let embeddings_status =
+        state.runtime.memory_embeddings_status().await.map_err(runtime_status_response)?;
     let memory_config = state.runtime.memory_config_snapshot();
     let maintenance_interval_ms =
         i64::try_from(MEMORY_MAINTENANCE_INTERVAL.as_millis()).unwrap_or(i64::MAX);
     Ok(Json(json!({
         "usage": maintenance_status.usage,
+        "embeddings": embeddings_status,
         "retention": {
             "max_entries": memory_config.retention_max_entries,
             "max_bytes": memory_config.retention_max_bytes,
@@ -25,6 +30,90 @@ pub(crate) async fn console_memory_status_handler(
             "next_vacuum_due_at_unix_ms": maintenance_status.next_vacuum_due_at_unix_ms,
             "next_run_at_unix_ms": maintenance_status.next_maintenance_run_at_unix_ms,
         }
+    })))
+}
+
+pub(crate) async fn console_memory_index_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ConsoleMemoryIndexRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let batch_size = payload.batch_size.unwrap_or(64).clamp(1, 256);
+    let until_complete = payload.until_complete.unwrap_or(false);
+    let run_maintenance = payload.run_maintenance.unwrap_or(false);
+
+    let maintenance =
+        if run_maintenance { Some(run_memory_maintenance_now(&state).await?) } else { None };
+
+    let mut outcome = state
+        .runtime
+        .run_memory_embeddings_backfill(batch_size)
+        .await
+        .map_err(runtime_status_response)?;
+    let mut batches_executed = 1_u64;
+    let mut scanned_count = outcome.scanned_count;
+    let mut updated_count = outcome.updated_count;
+    while until_complete && !outcome.is_complete() {
+        outcome = state
+            .runtime
+            .run_memory_embeddings_backfill(batch_size)
+            .await
+            .map_err(runtime_status_response)?;
+        scanned_count = scanned_count.saturating_add(outcome.scanned_count);
+        updated_count = updated_count.saturating_add(outcome.updated_count);
+        batches_executed = batches_executed.saturating_add(1);
+    }
+    let embeddings_status =
+        state.runtime.memory_embeddings_status().await.map_err(runtime_status_response)?;
+    let maintenance_payload = maintenance.as_ref().map(|outcome| {
+        json!({
+            "ran_at_unix_ms": outcome.ran_at_unix_ms,
+            "deleted_expired_count": outcome.deleted_expired_count,
+            "deleted_capacity_count": outcome.deleted_capacity_count,
+            "deleted_total_count": outcome.deleted_total_count,
+            "entries_before": outcome.entries_before,
+            "entries_after": outcome.entries_after,
+            "approx_bytes_before": outcome.approx_bytes_before,
+            "approx_bytes_after": outcome.approx_bytes_after,
+            "vacuum_performed": outcome.vacuum_performed,
+            "last_vacuum_at_unix_ms": outcome.last_vacuum_at_unix_ms,
+            "next_vacuum_due_at_unix_ms": outcome.next_vacuum_due_at_unix_ms,
+            "next_maintenance_run_at_unix_ms": outcome.next_maintenance_run_at_unix_ms,
+        })
+    });
+    let index_payload = json!({
+        "ran_at_unix_ms": outcome.ran_at_unix_ms,
+        "batch_size": outcome.batch_size,
+        "batches_executed": batches_executed,
+        "scanned_count": scanned_count,
+        "updated_count": updated_count,
+        "pending_count": outcome.pending_count,
+        "complete": outcome.is_complete(),
+        "target_model_id": outcome.target_model_id,
+        "target_dims": outcome.target_dims,
+        "target_version": outcome.target_version,
+        "until_complete": until_complete,
+    });
+    let event_details = json!({
+        "batch_size": batch_size,
+        "until_complete": until_complete,
+        "run_maintenance": run_maintenance,
+        "index": index_payload.clone(),
+        "maintenance": maintenance_payload.clone(),
+    });
+    if let Err(error) = state
+        .runtime
+        .record_console_event(&session.context, "memory.index.run", event_details)
+        .await
+    {
+        warn!(error = %error, "failed to record memory index console event");
+    }
+
+    Ok(Json(json!({
+        "maintenance": maintenance_payload,
+        "index": index_payload,
+        "embeddings": embeddings_status,
     })))
 }
 
@@ -108,4 +197,30 @@ pub(crate) async fn console_memory_purge_handler(
         .await
         .map_err(runtime_status_response)?;
     Ok(Json(json!({ "deleted_count": deleted_count })))
+}
+
+#[allow(clippy::result_large_err)]
+async fn run_memory_maintenance_now(
+    state: &AppState,
+) -> Result<crate::journal::MemoryMaintenanceOutcome, Response> {
+    let now_unix_ms = current_unix_ms();
+    let maintenance_status =
+        state.runtime.memory_maintenance_status().await.map_err(runtime_status_response)?;
+    let memory_config = state.runtime.memory_config_snapshot();
+    state
+        .runtime
+        .run_memory_maintenance(
+            now_unix_ms,
+            MemoryRetentionPolicy {
+                max_entries: memory_config.retention_max_entries,
+                max_bytes: memory_config.retention_max_bytes,
+                ttl_days: memory_config.retention_ttl_days,
+            },
+            maintenance_status.next_vacuum_due_at_unix_ms,
+            Some(now_unix_ms.saturating_add(
+                i64::try_from(MEMORY_MAINTENANCE_INTERVAL.as_millis()).unwrap_or(i64::MAX),
+            )),
+        )
+        .await
+        .map_err(runtime_status_response)
 }

@@ -6,7 +6,8 @@ use crate::agents::{
 };
 use crate::application::auth::map_auth_profile_error;
 use crate::journal::{
-    MemoryItemRecord, OrchestratorSessionCleanupOutcome, OrchestratorSessionCleanupRequest,
+    MemoryEmbeddingsStatus, MemoryItemRecord, OrchestratorSessionCleanupOutcome,
+    OrchestratorSessionCleanupRequest,
 };
 use palyra_auth::AuthHealthReport;
 use std::path::PathBuf;
@@ -3757,6 +3758,21 @@ impl GatewayRuntimeState {
         })
         .await
         .map_err(|_| Status::internal("memory maintenance status worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn memory_embeddings_status(
+        self: &Arc<Self>,
+    ) -> Result<MemoryEmbeddingsStatus, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .memory_embeddings_status()
+                .map_err(|error| map_memory_store_error("load memory embeddings status", error))
+        })
+        .await
+        .map_err(|_| Status::internal("memory embeddings status worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

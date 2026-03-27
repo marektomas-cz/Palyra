@@ -23,6 +23,162 @@ pub(crate) async fn run_cron_async(
             })?;
 
     match command {
+        CronCommand::Status { after, limit, enabled, owner, channel, json } => {
+            let list_limit = limit.unwrap_or(25).clamp(1, 100);
+            let mut request = Request::new(cron_v1::ListJobsRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                after_job_ulid: after.unwrap_or_default(),
+                limit: list_limit,
+                enabled,
+                owner_principal: owner,
+                channel,
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .list_jobs(request)
+                .await
+                .context("failed to call cron ListJobs for status")?
+                .into_inner();
+            let now_unix_ms = unix_now_ms();
+            let due_soon_window_ms = 15_i64 * 60_i64 * 1_000_i64;
+            let mut enabled_jobs = 0_u64;
+            let mut disabled_jobs = 0_u64;
+            let mut overdue_jobs = 0_u64;
+            let mut due_soon_jobs = 0_u64;
+            let mut running_jobs = 0_u64;
+            let mut succeeded_jobs = 0_u64;
+            let mut failed_jobs = 0_u64;
+            let mut skipped_jobs = 0_u64;
+            let mut denied_jobs = 0_u64;
+            let mut jobs_payload = Vec::with_capacity(response.jobs.len());
+            for job in response.jobs {
+                let recent_run =
+                    fetch_recent_cron_run(&mut client, &connection, job.job_id.as_ref()).await?;
+                let next_run_at_unix_ms = job.next_run_at_unix_ms;
+                let overdue =
+                    job.enabled && next_run_at_unix_ms > 0 && next_run_at_unix_ms <= now_unix_ms;
+                let due_soon = job.enabled
+                    && next_run_at_unix_ms > now_unix_ms
+                    && next_run_at_unix_ms.saturating_sub(now_unix_ms) <= due_soon_window_ms;
+                let late_by_ms = if overdue {
+                    Some(now_unix_ms.saturating_sub(next_run_at_unix_ms))
+                } else {
+                    None
+                };
+                if job.enabled {
+                    enabled_jobs = enabled_jobs.saturating_add(1);
+                } else {
+                    disabled_jobs = disabled_jobs.saturating_add(1);
+                }
+                if overdue {
+                    overdue_jobs = overdue_jobs.saturating_add(1);
+                }
+                if due_soon {
+                    due_soon_jobs = due_soon_jobs.saturating_add(1);
+                }
+                if let Some(run) = recent_run.as_ref() {
+                    match cron_v1::JobRunStatus::try_from(run.status)
+                        .unwrap_or(cron_v1::JobRunStatus::Unspecified)
+                    {
+                        cron_v1::JobRunStatus::Running => {
+                            running_jobs = running_jobs.saturating_add(1);
+                        }
+                        cron_v1::JobRunStatus::Succeeded => {
+                            succeeded_jobs = succeeded_jobs.saturating_add(1);
+                        }
+                        cron_v1::JobRunStatus::Failed => {
+                            failed_jobs = failed_jobs.saturating_add(1);
+                        }
+                        cron_v1::JobRunStatus::Skipped => {
+                            skipped_jobs = skipped_jobs.saturating_add(1);
+                        }
+                        cron_v1::JobRunStatus::Denied => {
+                            denied_jobs = denied_jobs.saturating_add(1);
+                        }
+                        cron_v1::JobRunStatus::Accepted | cron_v1::JobRunStatus::Unspecified => {}
+                    }
+                }
+                let last_status = recent_run.as_ref().map(cron_run_status_text);
+                jobs_payload.push(json!({
+                    "job": cron_job_to_json(&job),
+                    "recent_run": recent_run.as_ref().map(cron_run_to_json),
+                    "last_status": last_status,
+                    "overdue": overdue,
+                    "due_soon": due_soon,
+                    "late_by_ms": late_by_ms,
+                }));
+            }
+            let summary = json!({
+                "total_jobs": enabled_jobs + disabled_jobs,
+                "enabled_jobs": enabled_jobs,
+                "disabled_jobs": disabled_jobs,
+                "overdue_jobs": overdue_jobs,
+                "due_soon_jobs": due_soon_jobs,
+                "running_jobs": running_jobs,
+                "succeeded_jobs": succeeded_jobs,
+                "failed_jobs": failed_jobs,
+                "skipped_jobs": skipped_jobs,
+                "denied_jobs": denied_jobs,
+                "evaluated_at_unix_ms": now_unix_ms,
+            });
+            let json_output = output::preferred_json(json);
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "summary": summary,
+                        "jobs": jobs_payload,
+                        "next_after_job_ulid": response.next_after_job_ulid,
+                    }))
+                    .context("failed to serialize cron status JSON output")?
+                );
+            } else {
+                println!(
+                    "cron.status total_jobs={} enabled_jobs={} disabled_jobs={} overdue_jobs={} due_soon_jobs={} running_jobs={} succeeded_jobs={} failed_jobs={} skipped_jobs={} denied_jobs={}",
+                    enabled_jobs + disabled_jobs,
+                    enabled_jobs,
+                    disabled_jobs,
+                    overdue_jobs,
+                    due_soon_jobs,
+                    running_jobs,
+                    succeeded_jobs,
+                    failed_jobs,
+                    skipped_jobs,
+                    denied_jobs
+                );
+                for job in jobs_payload {
+                    let item = job.get("job");
+                    let id = item
+                        .and_then(|value| value.get("job_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let name = item
+                        .and_then(|value| value.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let enabled = item
+                        .and_then(|value| value.get("enabled"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let next_run_at_unix_ms = item
+                        .and_then(|value| value.get("next_run_at_unix_ms"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let last_status =
+                        job.get("last_status").and_then(Value::as_str).unwrap_or("none");
+                    let overdue = job.get("overdue").and_then(Value::as_bool).unwrap_or(false);
+                    let due_soon = job.get("due_soon").and_then(Value::as_bool).unwrap_or(false);
+                    let late_by_ms = job
+                        .get("late_by_ms")
+                        .and_then(Value::as_i64)
+                        .map_or("none".to_owned(), |v| v.to_string());
+                    println!(
+                        "cron.job id={} name={} enabled={} next_run_at_unix_ms={} last_status={} overdue={} due_soon={} late_by_ms={}",
+                        id, name, enabled, next_run_at_unix_ms, last_status, overdue, due_soon, late_by_ms
+                    );
+                }
+            }
+        }
         CronCommand::List { after, limit, enabled, owner, channel, json } => {
             let mut request = Request::new(cron_v1::ListJobsRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
@@ -367,4 +523,40 @@ pub(crate) async fn run_cron_async(
     }
 
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+async fn fetch_recent_cron_run(
+    client: &mut cron_v1::cron_service_client::CronServiceClient<tonic::transport::Channel>,
+    connection: &AgentConnection,
+    job_id: Option<&common_v1::CanonicalId>,
+) -> Result<Option<cron_v1::JobRun>> {
+    let Some(job_id) = job_id.cloned() else {
+        return Ok(None);
+    };
+    let mut request = Request::new(cron_v1::ListJobRunsRequest {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        job_id: Some(job_id),
+        after_run_ulid: String::new(),
+        limit: 1,
+    });
+    inject_run_stream_metadata(request.metadata_mut(), connection)?;
+    let response = client
+        .list_job_runs(request)
+        .await
+        .context("failed to call cron ListJobRuns for status inspection")?
+        .into_inner();
+    Ok(response.runs.into_iter().next())
+}
+
+fn cron_run_status_text(run: &cron_v1::JobRun) -> &'static str {
+    match cron_v1::JobRunStatus::try_from(run.status).unwrap_or(cron_v1::JobRunStatus::Unspecified)
+    {
+        cron_v1::JobRunStatus::Accepted => "accepted",
+        cron_v1::JobRunStatus::Running => "running",
+        cron_v1::JobRunStatus::Succeeded => "succeeded",
+        cron_v1::JobRunStatus::Failed => "failed",
+        cron_v1::JobRunStatus::Skipped => "skipped",
+        cron_v1::JobRunStatus::Denied => "denied",
+        cron_v1::JobRunStatus::Unspecified => "unspecified",
+    }
 }

@@ -406,6 +406,16 @@ struct ConsoleMemoryPurgeRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConsoleMemoryIndexRequest {
+    #[serde(default)]
+    batch_size: Option<usize>,
+    #[serde(default)]
+    until_complete: Option<bool>,
+    #[serde(default)]
+    run_maintenance: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChannelLogsQuery {
     limit: Option<usize>,
 }

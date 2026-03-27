@@ -475,6 +475,14 @@ impl ControlPlaneClient {
         self.request_json(Method::GET, path, None::<&Value>, false).await
     }
 
+    pub async fn post_json_value<T: serde::Serialize + ?Sized>(
+        &self,
+        path: impl AsRef<str>,
+        request: &T,
+    ) -> Result<Value, ControlPlaneClientError> {
+        self.request_json(Method::POST, path, Some(request), true).await
+    }
+
     pub async fn get_deployment_posture(
         &self,
     ) -> Result<DeploymentPostureSummary, ControlPlaneClientError> {

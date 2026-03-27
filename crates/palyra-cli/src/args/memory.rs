@@ -2,6 +2,21 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum MemoryCommand {
+    Status {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(visible_alias = "reindex")]
+    Index {
+        #[arg(long)]
+        batch_size: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        until_complete: bool,
+        #[arg(long, default_value_t = false)]
+        run_maintenance: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Search {
         query: String,
         #[arg(long, value_enum, default_value_t = MemoryScopeArg::Principal)]
@@ -20,6 +35,8 @@ pub enum MemoryCommand {
         source: Vec<MemorySourceArg>,
         #[arg(long, default_value_t = false)]
         include_score_breakdown: bool,
+        #[arg(long, default_value_t = false)]
+        show_metadata: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },

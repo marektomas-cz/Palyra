@@ -310,6 +310,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/console/v1/cron/jobs/{job_id}/runs", get(console::cron::console_cron_runs_handler))
         .route("/console/v1/memory/status", get(console::memory::console_memory_status_handler))
+        .route("/console/v1/memory/index", post(console::memory::console_memory_index_handler))
         .route("/console/v1/memory/search", get(console::memory::console_memory_search_handler))
         .route("/console/v1/memory/purge", post(console::memory::console_memory_purge_handler))
         .route("/console/v1/channels", get(console::channels::console_channels_list_handler))

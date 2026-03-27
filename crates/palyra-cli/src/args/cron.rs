@@ -2,6 +2,20 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CronCommand {
+    Status {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     List {
         #[arg(long)]
         after: Option<String>,
@@ -54,6 +68,7 @@ pub enum CronCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(visible_alias = "edit")]
     Update {
         #[arg(long)]
         id: String,
@@ -106,12 +121,14 @@ pub enum CronCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(visible_alias = "rm")]
     Delete {
         #[arg(long)]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(visible_alias = "runs")]
     Logs {
         #[arg(long)]
         id: String,

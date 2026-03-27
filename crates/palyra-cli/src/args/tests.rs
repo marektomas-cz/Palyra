@@ -1011,6 +1011,53 @@ fn parse_cron_delete() {
 }
 
 #[test]
+fn parse_cron_status() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "cron",
+        "status",
+        "--limit",
+        "10",
+        "--enabled",
+        "true",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Cron {
+            command: CronCommand::Status {
+                after: None,
+                limit: Some(10),
+                enabled: Some(true),
+                owner: None,
+                channel: None,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_cron_aliases() {
+    let edit = Cli::parse_from([
+        "palyra",
+        "cron",
+        "edit",
+        "--id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "--enabled",
+        "false",
+    ]);
+    assert!(matches!(edit.command, Command::Cron { command: CronCommand::Update { .. } }));
+
+    let runs = Cli::parse_from(["palyra", "cron", "runs", "--id", "01ARZ3NDEKTSV4RRFFQ69G5FB0"]);
+    assert!(matches!(runs.command, Command::Cron { command: CronCommand::Logs { .. } }));
+
+    let rm = Cli::parse_from(["palyra", "cron", "rm", "--id", "01ARZ3NDEKTSV4RRFFQ69G5FB0"]);
+    assert!(matches!(rm.command, Command::Cron { command: CronCommand::Delete { .. } }));
+}
+
+#[test]
 fn parse_memory_search() {
     let parsed = Cli::parse_from([
         "palyra",
@@ -1043,7 +1090,35 @@ fn parse_memory_search() {
                 tag: vec!["release".to_owned()],
                 source: vec![MemorySourceArg::Summary],
                 include_score_breakdown: true,
+                show_metadata: false,
                 json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_memory_status_and_index() {
+    let status = Cli::parse_from(["palyra", "memory", "status", "--json"]);
+    assert_eq!(status.command, Command::Memory { command: MemoryCommand::Status { json: true } });
+
+    let index = Cli::parse_from([
+        "palyra",
+        "memory",
+        "reindex",
+        "--batch-size",
+        "32",
+        "--until-complete",
+        "--run-maintenance",
+    ]);
+    assert_eq!(
+        index.command,
+        Command::Memory {
+            command: MemoryCommand::Index {
+                batch_size: Some(32),
+                until_complete: true,
+                run_maintenance: true,
+                json: false,
             }
         }
     );
