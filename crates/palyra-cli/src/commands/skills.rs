@@ -182,7 +182,41 @@ pub(crate) fn run_skills(command: SkillsCommand) -> Result<()> {
         SkillsCommand::Remove { skill_id, version, skills_dir, json } => {
             run_skills_remove(skill_id, version, skills_dir, json)
         }
-        SkillsCommand::List { skills_dir, json } => run_skills_list(skills_dir, json),
+        SkillsCommand::List {
+            skills_dir,
+            publisher,
+            current_only,
+            quarantined_only,
+            eligible_only,
+            json,
+        } => run_skills_list(
+            skills_dir,
+            publisher,
+            current_only,
+            quarantined_only,
+            eligible_only,
+            json,
+        ),
+        SkillsCommand::Info { skill_id, version, skills_dir, json } => {
+            run_skills_info(skill_id, version, skills_dir, json)
+        }
+        SkillsCommand::Check {
+            skill_id,
+            version,
+            skills_dir,
+            trust_store,
+            trusted_publishers,
+            allow_untrusted,
+            json,
+        } => run_skills_check(
+            skill_id,
+            version,
+            skills_dir,
+            trust_store,
+            trusted_publishers,
+            allow_untrusted,
+            json,
+        ),
         SkillsCommand::Update {
             registry_dir,
             registry_url,
@@ -643,34 +677,177 @@ fn run_skills_remove(
     std::io::stdout().flush().context("stdout flush failed")
 }
 
-fn run_skills_list(skills_dir: Option<String>, json_output: bool) -> Result<()> {
+fn run_skills_list(
+    skills_dir: Option<String>,
+    publisher: Option<String>,
+    current_only: bool,
+    quarantined_only: bool,
+    eligible_only: bool,
+    json_output: bool,
+) -> Result<()> {
+    let skills_root = resolve_skills_root(skills_dir.as_deref())?;
+    let mut entries = collect_installed_skill_inventory(skills_root.as_path())?;
+    if let Some(publisher) = publisher.as_deref() {
+        let publisher = publisher.trim().to_ascii_lowercase();
+        entries.retain(|entry| entry.record.publisher.to_ascii_lowercase() == publisher);
+    }
+    if current_only {
+        entries.retain(|entry| entry.record.current);
+    }
+    if quarantined_only {
+        entries.retain(|entry| entry.runtime_status.status == "quarantined");
+    }
+    if eligible_only {
+        entries.retain(|entry| entry.eligibility.eligible);
+    }
+
+    skills_output::emit_inventory_list(skills_root.as_path(), entries.as_slice(), json_output)?;
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn run_skills_info(
+    skill_id: String,
+    version: Option<String>,
+    skills_dir: Option<String>,
+    json_output: bool,
+) -> Result<()> {
     let skills_root = resolve_skills_root(skills_dir.as_deref())?;
     let mut index = load_installed_skills_index(skills_root.as_path())?;
     normalize_installed_skills_index(&mut index);
-    if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "skills_root": skills_root,
-                "count": index.entries.len(),
-                "entries": index.entries,
-            }))?
-        );
+    let record_index = find_installed_skill_record(&index, skill_id.as_str(), version.as_deref())?;
+    let record = index.entries[record_index].clone();
+    let inventory = build_skill_inventory_entry(skills_root.as_path(), &record)?;
+    let artifact_path = artifact_path_for_installed_skill(skills_root.as_path(), &record);
+    let artifact_bytes = fs::read(artifact_path.as_path()).with_context(|| {
+        format!("failed to read installed artifact {}", artifact_path.display())
+    })?;
+    let inspection = inspect_skill_artifact(artifact_bytes.as_slice())
+        .context("failed to inspect installed skill artifact")?;
+    let mut artifact_entries = inspection.entries.keys().cloned().collect::<Vec<_>>();
+    artifact_entries.sort();
+    let info = SkillInfoOutput {
+        inventory,
+        manifest: inspection.manifest,
+        signature: inspection.signature,
+        artifact_entries,
+        cached_artifact_path: artifact_path.display().to_string(),
+    };
+
+    skills_output::emit_inventory_info(&info, json_output)?;
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn run_skills_check(
+    skill_id: Option<String>,
+    version: Option<String>,
+    skills_dir: Option<String>,
+    trust_store: Option<String>,
+    trusted_publishers: Vec<String>,
+    allow_untrusted: bool,
+    json_output: bool,
+) -> Result<()> {
+    let skills_root = resolve_skills_root(skills_dir.as_deref())?;
+    let mut index = load_installed_skills_index(skills_root.as_path())?;
+    normalize_installed_skills_index(&mut index);
+
+    let selected_records = if let Some(skill_id) = skill_id.as_deref() {
+        let record_index = find_installed_skill_record(&index, skill_id, version.as_deref())?;
+        vec![index.entries[record_index].clone()]
     } else {
-        println!("skills.list root={} count={}", skills_root.display(), index.entries.len());
-        for entry in &index.entries {
-            println!(
-                "skills.entry skill_id={} version={} publisher={} current={} trust={} installed_at_unix_ms={} source={}",
-                entry.skill_id,
-                entry.version,
-                entry.publisher,
-                entry.current,
-                entry.trust_decision,
-                entry.installed_at_unix_ms,
-                entry.source.reference
-            );
+        let mut records =
+            index.entries.iter().filter(|entry| entry.current).cloned().collect::<Vec<_>>();
+        if records.is_empty() {
+            records = index.entries.clone();
         }
+        records
+    };
+
+    if selected_records.is_empty() {
+        anyhow::bail!("no installed skills matched the requested check scope");
     }
+
+    let trust_store_path = resolve_skills_trust_store_path(trust_store.as_deref())?;
+    let mut store = load_trust_store_with_integrity(trust_store_path.as_path())?;
+    for trusted in &trusted_publishers {
+        let (publisher, key) = parse_trusted_publisher_arg(trusted.as_str())?;
+        store.add_trusted_key(publisher, key)?;
+    }
+
+    let mut results = Vec::with_capacity(selected_records.len());
+    for record in selected_records {
+        let inventory = build_skill_inventory_entry(skills_root.as_path(), &record)?;
+        let artifact_path = artifact_path_for_installed_skill(skills_root.as_path(), &record);
+        let artifact_bytes = fs::read(artifact_path.as_path()).with_context(|| {
+            format!("failed to read installed artifact {}", artifact_path.display())
+        })?;
+
+        let verification =
+            verify_skill_artifact(artifact_bytes.as_slice(), &mut store, allow_untrusted);
+        let audit = audit_skill_artifact_security(
+            artifact_bytes.as_slice(),
+            &mut store,
+            allow_untrusted,
+            &SkillSecurityAuditPolicy::default(),
+        );
+
+        let mut reasons = inventory.eligibility.reasons.clone();
+        let (trust_accepted, trust_error, verification_payload) = match verification {
+            Ok(report) => (report.accepted, None, Some(report)),
+            Err(error) => {
+                reasons.push(format!("trust verification failed: {error}"));
+                (false, Some(error.to_string()), None)
+            }
+        };
+        let (audit_passed, quarantine_required, failed_checks, warning_checks, audit_payload) =
+            match audit {
+                Ok(report) => (
+                    report.passed,
+                    report.should_quarantine,
+                    report
+                        .checks
+                        .iter()
+                        .filter(|check| matches!(check.status, SkillAuditCheckStatus::Fail))
+                        .count(),
+                    report
+                        .checks
+                        .iter()
+                        .filter(|check| matches!(check.status, SkillAuditCheckStatus::Warn))
+                        .count(),
+                    Some(report),
+                ),
+                Err(error) => {
+                    reasons.push(format!("security audit failed: {error}"));
+                    (false, false, 0, 0, None)
+                }
+            };
+        if quarantine_required {
+            reasons.push("security audit requires quarantine".to_owned());
+        }
+
+        let check_status = if !trust_accepted || !audit_passed || quarantine_required {
+            "blocked".to_owned()
+        } else if inventory.eligibility.eligible {
+            "ready".to_owned()
+        } else {
+            inventory.eligibility.status.clone()
+        };
+
+        results.push(SkillCheckResult {
+            inventory,
+            check_status,
+            trust_accepted,
+            trust_error,
+            audit_passed,
+            quarantine_required,
+            failed_checks,
+            warning_checks,
+            reasons,
+            verification: verification_payload,
+            audit: audit_payload,
+        });
+    }
+
+    skills_output::emit_check_results(skills_root.as_path(), results.as_slice(), json_output)?;
     std::io::stdout().flush().context("stdout flush failed")
 }
 

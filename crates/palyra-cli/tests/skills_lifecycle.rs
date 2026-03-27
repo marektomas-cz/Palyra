@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context, Result};
+use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -11,6 +12,7 @@ fn configure_cli_env(command: &mut Command, workdir: &TempDir) {
     command
         .env("PALYRA_VAULT_DIR", workdir.path().join("vault"))
         .env("PALYRA_VAULT_BACKEND", "encrypted_file")
+        .env("PALYRA_JOURNAL_DB_PATH", workdir.path().join("journal.sqlite3"))
         .env("XDG_STATE_HOME", workdir.path().join("xdg-state"))
         .env("HOME", workdir.path().join("home"))
         .env("LOCALAPPDATA", workdir.path().join("localappdata"))
@@ -96,6 +98,82 @@ fn build_sample_artifact(workdir: &TempDir, artifact_path: &Path) -> Result<()> 
     Ok(())
 }
 
+fn seed_skill_secret(workdir: &TempDir, scope: &str, key: &str, value: &str) -> Result<()> {
+    let args = vec![
+        "secrets".to_owned(),
+        "set".to_owned(),
+        scope.to_owned(),
+        key.to_owned(),
+        "--value-stdin".to_owned(),
+    ];
+    let output = run_cli_with_stdin(workdir, args.as_slice(), format!("{value}\n").as_bytes())?;
+    assert!(
+        output.status.success(),
+        "secrets set should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+fn seed_skill_status(
+    workdir: &TempDir,
+    skill_id: &str,
+    version: &str,
+    status: &str,
+    reason: Option<&str>,
+) -> Result<()> {
+    let journal_path = workdir.path().join("journal.sqlite3");
+    let connection = Connection::open(journal_path.as_path())
+        .with_context(|| format!("failed to open journal db {}", journal_path.display()))?;
+    connection.execute_batch(
+        r#"
+            CREATE TABLE IF NOT EXISTS skill_status (
+                skill_id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                detected_at_ms INTEGER NOT NULL,
+                operator_principal TEXT NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                PRIMARY KEY(skill_id, version)
+            );
+        "#,
+    )?;
+    connection.execute(
+        r#"
+            INSERT INTO skill_status (
+                skill_id,
+                version,
+                status,
+                reason,
+                detected_at_ms,
+                operator_principal,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(skill_id, version) DO UPDATE SET
+                status = excluded.status,
+                reason = excluded.reason,
+                detected_at_ms = excluded.detected_at_ms,
+                operator_principal = excluded.operator_principal,
+                updated_at_unix_ms = excluded.updated_at_unix_ms
+        "#,
+        rusqlite::params![
+            skill_id,
+            version,
+            status,
+            reason,
+            1_730_000_000_000_i64,
+            "user:test",
+            1_730_000_000_000_i64,
+            1_730_000_000_000_i64
+        ],
+    )?;
+    Ok(())
+}
+
 #[test]
 fn skills_install_verify_remove_lifecycle_roundtrip() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
@@ -103,6 +181,7 @@ fn skills_install_verify_remove_lifecycle_roundtrip() -> Result<()> {
     let artifact_path = workdir.path().join("dist").join("acme.echo_http.palyra-skill");
 
     build_sample_artifact(&workdir, artifact_path.as_path())?;
+    seed_skill_secret(&workdir, "skill:acme.echo_http", "api_token", "test-token")?;
 
     let install_args = vec![
         "skills".to_owned(),
@@ -143,6 +222,88 @@ fn skills_install_verify_remove_lifecycle_roundtrip() -> Result<()> {
         .context("list output must include entries array")?;
     assert_eq!(entries.len(), 1, "one skill version should be installed");
     assert_eq!(entries[0].get("skill_id").and_then(Value::as_str), Some("acme.echo_http"));
+    assert_eq!(
+        entries[0]
+            .get("runtime_status")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str),
+        Some("unknown")
+    );
+
+    seed_skill_status(&workdir, "acme.echo_http", "1.0.0", "active", None)?;
+
+    let eligible_list_args = vec![
+        "skills".to_owned(),
+        "list".to_owned(),
+        "--skills-dir".to_owned(),
+        skills_dir.to_string_lossy().into_owned(),
+        "--eligible-only".to_owned(),
+        "--json".to_owned(),
+    ];
+    let eligible_list_output = run_cli(&workdir, eligible_list_args.as_slice())?;
+    assert!(
+        eligible_list_output.status.success(),
+        "eligible-only skills list should succeed: {}",
+        String::from_utf8_lossy(&eligible_list_output.stderr)
+    );
+    let eligible_list_payload: Value =
+        serde_json::from_slice(eligible_list_output.stdout.as_slice())
+            .context("eligible-only list output should be JSON")?;
+    let eligible_entries = eligible_list_payload
+        .get("entries")
+        .and_then(Value::as_array)
+        .context("eligible-only list output must include entries array")?;
+    assert_eq!(eligible_entries.len(), 1, "skill should be eligible after secret + active status");
+
+    let info_args = vec![
+        "skills".to_owned(),
+        "info".to_owned(),
+        "acme.echo_http".to_owned(),
+        "--skills-dir".to_owned(),
+        skills_dir.to_string_lossy().into_owned(),
+        "--json".to_owned(),
+    ];
+    let info_output = run_cli(&workdir, info_args.as_slice())?;
+    assert!(
+        info_output.status.success(),
+        "skills info should succeed: {}",
+        String::from_utf8_lossy(&info_output.stderr)
+    );
+    let info_payload: Value = serde_json::from_slice(info_output.stdout.as_slice())
+        .context("info output should be JSON")?;
+    assert_eq!(
+        info_payload
+            .get("inventory")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("skill_id"))
+            .and_then(Value::as_str),
+        Some("acme.echo_http")
+    );
+
+    let check_args = vec![
+        "skills".to_owned(),
+        "check".to_owned(),
+        "acme.echo_http".to_owned(),
+        "--skills-dir".to_owned(),
+        skills_dir.to_string_lossy().into_owned(),
+        "--allow-untrusted".to_owned(),
+        "--json".to_owned(),
+    ];
+    let check_output = run_cli(&workdir, check_args.as_slice())?;
+    assert!(
+        check_output.status.success(),
+        "skills check should succeed: {}",
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+    let check_payload: Value = serde_json::from_slice(check_output.stdout.as_slice())
+        .context("check output should be JSON")?;
+    let check_results = check_payload
+        .get("results")
+        .and_then(Value::as_array)
+        .context("check output must include results array")?;
+    assert_eq!(check_results.len(), 1, "one skill should be checked");
+    assert_eq!(check_results[0].get("check_status").and_then(Value::as_str), Some("ready"));
 
     let verify_args = vec![
         "skills".to_owned(),

@@ -211,6 +211,7 @@ struct OnboardingSummary {
     service_install_mode: ServiceInstallMode,
     remote_verification: Option<String>,
     ssh_target: Option<String>,
+    skills: SkillsInventorySnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -296,6 +297,7 @@ pub(crate) fn run_onboarding_wizard(request: OnboardingWizardRequest) -> Result<
         service_install_mode: plan.service_install_mode,
         remote_verification: plan.remote_verification,
         ssh_target: plan.ssh_target,
+        skills: build_default_skills_inventory_snapshot(),
     };
     emit_onboarding_summary(&summary, output::preferred_json(request.options.json))
 }
@@ -490,17 +492,24 @@ pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()
                 continue;
             }
             ConfigureSectionArg::Skills => {
+                let skills_snapshot = build_default_skills_inventory_snapshot();
                 wizard.note(WizardStep::note(
                     "configure.skills.note",
                     "Skills",
                     format!(
-                        "Skill trust management already lives under `palyra skills ...`; this wizard keeps the section as an operator checklist only. Current state: {}",
+                        "Review the installed skill inventory and trust posture before changing operators or rollout flow. Current state: {}",
                         join_section_state(before_snapshot.as_slice())
                     ),
                 ))?;
                 unchanged_sections.push("skills".to_owned());
                 warnings.push(
-                    "skills section is currently guidance-only; use `palyra skills list|install|verify` for concrete actions."
+                    format!(
+                        "skills inventory snapshot: installed={} eligible={} quarantined={} runtime_unknown={}; use `palyra skills info|check|list` for concrete actions.",
+                        skills_snapshot.installed_total,
+                        skills_snapshot.eligible_total,
+                        skills_snapshot.quarantined_total,
+                        skills_snapshot.runtime_unknown_total
+                    )
                         .to_owned(),
                 );
                 continue;
@@ -900,7 +909,7 @@ fn execute_onboarding_flow(
         plan.skipped_sections.push("skills".to_owned());
     } else {
         plan.warnings.push(
-            "skills remain guidance-only in this phase; use `palyra skills list|install|verify` for concrete actions."
+            "skills lifecycle remains CLI-driven in this phase; use `palyra skills list|info|check` for concrete actions."
                 .to_owned(),
         );
     }
@@ -1758,6 +1767,14 @@ fn emit_onboarding_summary(summary: &OnboardingSummary, json_output: bool) -> Re
             if summary.dashboard_url.is_empty() { "none" } else { "configured" },
             summary.health_status,
             summary.service_install_mode.as_str(),
+        );
+        println!(
+            "onboarding.skills installed={} eligible={} quarantined={} runtime_unknown={} missing_secrets={}",
+            summary.skills.installed_total,
+            summary.skills.eligible_total,
+            summary.skills.quarantined_total,
+            summary.skills.runtime_unknown_total,
+            summary.skills.missing_secrets_total
         );
         println!(
             "onboarding.risk_events={}",
@@ -2626,10 +2643,25 @@ fn describe_configure_section(
             ),
             "discord_setup=manual_follow_up".to_owned(),
         ]),
-        ConfigureSectionArg::Skills => Ok(vec![format!(
-            "skills_trust_store={}",
-            env::var("PALYRA_SKILLS_TRUST_STORE").unwrap_or_else(|_| "default".to_owned())
-        )]),
+        ConfigureSectionArg::Skills => Ok(vec![
+            format!(
+                "skills_trust_store={}",
+                env::var("PALYRA_SKILLS_TRUST_STORE").unwrap_or_else(|_| "default".to_owned())
+            ),
+            format!(
+                "installed_total={}",
+                build_default_skills_inventory_snapshot().installed_total
+            ),
+            format!("eligible_total={}", build_default_skills_inventory_snapshot().eligible_total),
+            format!(
+                "quarantined_total={}",
+                build_default_skills_inventory_snapshot().quarantined_total
+            ),
+            format!(
+                "missing_secrets_total={}",
+                build_default_skills_inventory_snapshot().missing_secrets_total
+            ),
+        ]),
         ConfigureSectionArg::HealthSecurity => Ok(vec![
             format!(
                 "admin_auth_required={}",
@@ -2679,7 +2711,11 @@ fn section_follow_up_checks(
         }
         ConfigureSectionArg::Channels => vec!["palyra channels discord setup".to_owned()],
         ConfigureSectionArg::Skills => {
-            vec!["palyra skills list".to_owned(), "palyra skills verify".to_owned()]
+            vec![
+                "palyra skills list --eligible-only".to_owned(),
+                "palyra skills check".to_owned(),
+                "palyra skills info <skill-id>".to_owned(),
+            ]
         }
         ConfigureSectionArg::HealthSecurity => {
             vec!["palyra doctor".to_owned(), "palyra security audit".to_owned()]

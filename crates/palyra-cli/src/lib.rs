@@ -54,7 +54,7 @@ pub mod proto {
 #[cfg(not(windows))]
 use std::sync::Arc;
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fs,
     io::{BufRead, IsTerminal, Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -111,7 +111,8 @@ use palyra_policy::{evaluate_with_config, PolicyDecision, PolicyEvaluationConfig
 use palyra_skills::{
     audit_skill_artifact_security, build_signed_skill_artifact, inspect_skill_artifact,
     parse_ed25519_signing_key, verify_skill_artifact, ArtifactFile, SkillArtifactBuildRequest,
-    SkillAuditCheckStatus, SkillSecurityAuditPolicy, SkillTrustStore, TrustDecision,
+    SkillArtifactSignature, SkillAuditCheckStatus, SkillManifest, SkillSecurityAuditPolicy,
+    SkillSecurityAuditReport, SkillTrustStore, SkillVerificationReport, TrustDecision,
 };
 use palyra_vault::{
     BackendPreference as VaultBackendPreference, Vault, VaultConfig as VaultConfigOptions,
@@ -121,7 +122,7 @@ use reqwest::blocking::Client;
 use reqwest::redirect::Policy as RedirectPolicy;
 use reqwest::tls::TlsInfo;
 use reqwest::Url;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -655,6 +656,7 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
         collect_doctor_provider_auth_snapshot(admin_payload.as_ref(), admin_error.as_deref());
     let browser = collect_doctor_browser_snapshot(admin_payload.as_ref(), admin_error.as_deref());
     let deployment = collect_doctor_deployment_snapshot();
+    let skills = build_default_skills_inventory_snapshot();
 
     let required_checks_total = checks.iter().filter(|check| check.required).count();
     let required_checks_ok = checks.iter().filter(|check| check.required && check.ok).count();
@@ -681,6 +683,7 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
         connectivity,
         provider_auth,
         browser,
+        skills,
         sandbox: DoctorSandboxSnapshot {
             tier_b_egress_allowlists_preflight_only: process_runner_tier_b_allowlist_config_ok(),
             tier_c_strict_offline_only: process_runner_tier_c_strict_offline_config_ok(),
@@ -1360,6 +1363,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
             node_status: None,
             admin_status: None,
             admin_status_error: Some("skipped (PALYRA_ADMIN_TOKEN is not set)".to_owned()),
+            skills: build_default_skills_inventory_snapshot(),
         };
     };
 
@@ -1373,6 +1377,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
                 node_status: None,
                 admin_status: None,
                 admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
+                skills: build_default_skills_inventory_snapshot(),
             };
         }
     };
@@ -1386,6 +1391,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
                 node_status: None,
                 admin_status: None,
                 admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
+                skills: build_default_skills_inventory_snapshot(),
             };
         }
     };
@@ -1411,6 +1417,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
                 node_status,
                 admin_status: Some(payload),
                 admin_status_error: None,
+                skills: build_default_skills_inventory_snapshot(),
             }
         }
         Err(error) => SupportBundleDiagnosticsSnapshot {
@@ -1420,6 +1427,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
             node_status: None,
             admin_status: None,
             admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
+            skills: build_default_skills_inventory_snapshot(),
         },
     }
 }
@@ -4147,6 +4155,87 @@ struct MissingSkillSecret {
     key: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SkillRuntimeStatusSnapshot {
+    status: String,
+    source: String,
+    quarantine_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detected_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operator_principal: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillRequirementsSnapshot {
+    required_protocol_major: u32,
+    min_palyra_version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillEligibilitySnapshot {
+    status: String,
+    eligible: bool,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillInventoryEntry {
+    #[serde(flatten)]
+    record: InstalledSkillRecord,
+    install_state: String,
+    skill_name: String,
+    tool_count: usize,
+    runtime_status: SkillRuntimeStatusSnapshot,
+    requirements: SkillRequirementsSnapshot,
+    eligibility: SkillEligibilitySnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillInfoOutput {
+    inventory: SkillInventoryEntry,
+    manifest: SkillManifest,
+    signature: SkillArtifactSignature,
+    artifact_entries: Vec<String>,
+    cached_artifact_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillCheckResult {
+    inventory: SkillInventoryEntry,
+    check_status: String,
+    trust_accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trust_error: Option<String>,
+    audit_passed: bool,
+    quarantine_required: bool,
+    failed_checks: usize,
+    warning_checks: usize,
+    reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification: Option<SkillVerificationReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audit: Option<SkillSecurityAuditReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillsInventorySnapshot {
+    skills_root: String,
+    installed_total: usize,
+    current_total: usize,
+    eligible_total: usize,
+    quarantined_total: usize,
+    disabled_total: usize,
+    runtime_unknown_total: usize,
+    missing_secrets_total: usize,
+    publishers: Vec<String>,
+    trust_decisions: BTreeMap<String, usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SkillInstallMetadata {
@@ -4315,6 +4404,271 @@ fn resolve_skills_root(raw: Option<&str>) -> Result<PathBuf> {
     let state_root =
         identity_root.parent().map(Path::to_path_buf).unwrap_or_else(|| identity_root.clone());
     Ok(state_root.join("skills"))
+}
+
+fn skill_install_state_label(record: &InstalledSkillRecord) -> String {
+    if record.current {
+        "installed_current".to_owned()
+    } else {
+        "installed_superseded".to_owned()
+    }
+}
+
+fn load_skill_runtime_status_snapshot(skill_id: &str, version: &str) -> SkillRuntimeStatusSnapshot {
+    let journal_path = match resolve_daemon_journal_db_path(None) {
+        Ok(path) => path,
+        Err(_) => {
+            return SkillRuntimeStatusSnapshot {
+                status: "unknown".to_owned(),
+                source: "unknown".to_owned(),
+                quarantine_status: "unknown".to_owned(),
+                reason: None,
+                detected_at_ms: None,
+                operator_principal: None,
+            };
+        }
+    };
+
+    if !journal_path.exists() {
+        return SkillRuntimeStatusSnapshot {
+            status: "unknown".to_owned(),
+            source: "unknown".to_owned(),
+            quarantine_status: "unknown".to_owned(),
+            reason: None,
+            detected_at_ms: None,
+            operator_principal: None,
+        };
+    }
+
+    let connection = match Connection::open(journal_path.as_path()) {
+        Ok(connection) => connection,
+        Err(_) => {
+            return SkillRuntimeStatusSnapshot {
+                status: "unknown".to_owned(),
+                source: "unknown".to_owned(),
+                quarantine_status: "unknown".to_owned(),
+                reason: None,
+                detected_at_ms: None,
+                operator_principal: None,
+            };
+        }
+    };
+
+    let query = connection.query_row(
+        r#"
+            SELECT
+                status,
+                reason,
+                detected_at_ms,
+                operator_principal
+            FROM skill_status
+            WHERE lower(skill_id) = lower(?1)
+              AND version = ?2
+            LIMIT 1
+        "#,
+        rusqlite::params![skill_id, version],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    );
+
+    match query.optional() {
+        Ok(Some((status, reason, detected_at_ms, operator_principal))) => {
+            let quarantine_status =
+                if status == "quarantined" { "quarantined" } else { "not_quarantined" };
+            SkillRuntimeStatusSnapshot {
+                status,
+                source: "journal".to_owned(),
+                quarantine_status: quarantine_status.to_owned(),
+                reason,
+                detected_at_ms: Some(detected_at_ms),
+                operator_principal: Some(operator_principal),
+            }
+        }
+        Ok(None) => SkillRuntimeStatusSnapshot {
+            status: "active".to_owned(),
+            source: "default".to_owned(),
+            quarantine_status: "not_quarantined".to_owned(),
+            reason: None,
+            detected_at_ms: None,
+            operator_principal: None,
+        },
+        Err(_) => SkillRuntimeStatusSnapshot {
+            status: "unknown".to_owned(),
+            source: "unknown".to_owned(),
+            quarantine_status: "unknown".to_owned(),
+            reason: None,
+            detected_at_ms: None,
+            operator_principal: None,
+        },
+    }
+}
+
+fn build_skill_eligibility_snapshot(
+    record: &InstalledSkillRecord,
+    requirements: &SkillRequirementsSnapshot,
+    runtime_status: &SkillRuntimeStatusSnapshot,
+) -> SkillEligibilitySnapshot {
+    let mut reasons = Vec::new();
+
+    if requirements.required_protocol_major > CANONICAL_PROTOCOL_MAJOR {
+        reasons.push(format!(
+            "requires protocol v{} but runtime exposes v{}",
+            requirements.required_protocol_major, CANONICAL_PROTOCOL_MAJOR
+        ));
+    }
+    if compare_semver_versions(requirements.min_palyra_version.as_str(), env!("CARGO_PKG_VERSION"))
+        .is_gt()
+    {
+        reasons.push(format!(
+            "requires palyra >= {} but current build is {}",
+            requirements.min_palyra_version,
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    if !record.missing_secrets.is_empty() {
+        reasons.push(format!("missing {} required secrets", record.missing_secrets.len()));
+    }
+    match runtime_status.status.as_str() {
+        "quarantined" => reasons.push("skill is quarantined".to_owned()),
+        "disabled" => reasons.push("skill is disabled".to_owned()),
+        _ => {}
+    }
+
+    if !reasons.is_empty() {
+        return SkillEligibilitySnapshot { status: "blocked".to_owned(), eligible: false, reasons };
+    }
+
+    if runtime_status.status == "unknown" {
+        return SkillEligibilitySnapshot {
+            status: "unknown".to_owned(),
+            eligible: false,
+            reasons: vec!["runtime status unavailable".to_owned()],
+        };
+    }
+
+    SkillEligibilitySnapshot { status: "eligible".to_owned(), eligible: true, reasons }
+}
+
+fn artifact_path_for_installed_skill(skills_root: &Path, record: &InstalledSkillRecord) -> PathBuf {
+    skills_root
+        .join(record.skill_id.as_str())
+        .join(record.version.as_str())
+        .join(SKILLS_ARTIFACT_FILE_NAME)
+}
+
+fn build_skill_inventory_entry(
+    skills_root: &Path,
+    record: &InstalledSkillRecord,
+) -> Result<SkillInventoryEntry> {
+    let artifact_path = artifact_path_for_installed_skill(skills_root, record);
+    let artifact_bytes = fs::read(artifact_path.as_path()).with_context(|| {
+        format!("failed to read installed artifact {}", artifact_path.display())
+    })?;
+    let inspection = inspect_skill_artifact(artifact_bytes.as_slice()).with_context(|| {
+        format!("failed to inspect installed artifact {}", artifact_path.display())
+    })?;
+    let requirements = SkillRequirementsSnapshot {
+        required_protocol_major: inspection.manifest.compat.required_protocol_major,
+        min_palyra_version: inspection.manifest.compat.min_palyra_version.clone(),
+    };
+    let runtime_status =
+        load_skill_runtime_status_snapshot(record.skill_id.as_str(), record.version.as_str());
+    let eligibility = build_skill_eligibility_snapshot(record, &requirements, &runtime_status);
+
+    Ok(SkillInventoryEntry {
+        record: record.clone(),
+        install_state: skill_install_state_label(record),
+        skill_name: inspection.manifest.name,
+        tool_count: inspection.manifest.entrypoints.tools.len(),
+        runtime_status,
+        requirements,
+        eligibility,
+    })
+}
+
+fn collect_installed_skill_inventory(skills_root: &Path) -> Result<Vec<SkillInventoryEntry>> {
+    let mut index = load_installed_skills_index(skills_root)?;
+    normalize_installed_skills_index(&mut index);
+    index.entries.iter().map(|record| build_skill_inventory_entry(skills_root, record)).collect()
+}
+
+fn build_skills_inventory_snapshot_for_root(skills_root: &Path) -> Result<SkillsInventorySnapshot> {
+    let entries = collect_installed_skill_inventory(skills_root)?;
+    let mut publishers =
+        entries.iter().map(|entry| entry.record.publisher.clone()).collect::<Vec<_>>();
+    publishers.sort();
+    publishers.dedup();
+
+    let mut trust_decisions = BTreeMap::new();
+    for entry in &entries {
+        *trust_decisions.entry(entry.record.trust_decision.clone()).or_insert(0) += 1;
+    }
+
+    Ok(SkillsInventorySnapshot {
+        skills_root: skills_root.display().to_string(),
+        installed_total: entries.len(),
+        current_total: entries.iter().filter(|entry| entry.record.current).count(),
+        eligible_total: entries.iter().filter(|entry| entry.eligibility.eligible).count(),
+        quarantined_total: entries
+            .iter()
+            .filter(|entry| entry.runtime_status.status == "quarantined")
+            .count(),
+        disabled_total: entries
+            .iter()
+            .filter(|entry| entry.runtime_status.status == "disabled")
+            .count(),
+        runtime_unknown_total: entries
+            .iter()
+            .filter(|entry| entry.runtime_status.status == "unknown")
+            .count(),
+        missing_secrets_total: entries
+            .iter()
+            .filter(|entry| !entry.record.missing_secrets.is_empty())
+            .count(),
+        publishers,
+        trust_decisions,
+        error: None,
+    })
+}
+
+fn build_default_skills_inventory_snapshot() -> SkillsInventorySnapshot {
+    match resolve_skills_root(None) {
+        Ok(skills_root) => match build_skills_inventory_snapshot_for_root(skills_root.as_path()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => SkillsInventorySnapshot {
+                skills_root: skills_root.display().to_string(),
+                installed_total: 0,
+                current_total: 0,
+                eligible_total: 0,
+                quarantined_total: 0,
+                disabled_total: 0,
+                runtime_unknown_total: 0,
+                missing_secrets_total: 0,
+                publishers: Vec::new(),
+                trust_decisions: BTreeMap::new(),
+                error: Some(error.to_string()),
+            },
+        },
+        Err(error) => SkillsInventorySnapshot {
+            skills_root: "unavailable".to_owned(),
+            installed_total: 0,
+            current_total: 0,
+            eligible_total: 0,
+            quarantined_total: 0,
+            disabled_total: 0,
+            runtime_unknown_total: 0,
+            missing_secrets_total: 0,
+            publishers: Vec::new(),
+            trust_decisions: BTreeMap::new(),
+            error: Some(error.to_string()),
+        },
+    }
 }
 
 fn load_installed_skills_index(skills_root: &Path) -> Result<InstalledSkillsIndex> {
@@ -6000,6 +6354,7 @@ struct DoctorReport {
     connectivity: DoctorConnectivitySnapshot,
     provider_auth: DoctorProviderAuthSnapshot,
     browser: DoctorBrowserSnapshot,
+    skills: SkillsInventorySnapshot,
     sandbox: DoctorSandboxSnapshot,
     deployment: DoctorDeploymentSnapshot,
 }
@@ -6171,6 +6526,7 @@ struct SupportBundleDiagnosticsSnapshot {
     admin_status: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     admin_status_error: Option<String>,
+    skills: SkillsInventorySnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -7459,12 +7815,13 @@ mod diagnostics_bundle_tests {
         DoctorBrowserSnapshot, DoctorConfigSnapshot, DoctorConnectivityProbe,
         DoctorConnectivitySnapshot, DoctorDeploymentBindSnapshot, DoctorDeploymentSnapshot,
         DoctorIdentitySnapshot, DoctorProviderAuthSnapshot, DoctorReport, DoctorSandboxSnapshot,
-        DoctorSummary, SupportBundle, SupportBundleBuildSnapshot, SupportBundleConfigSnapshot,
-        SupportBundleDiagnosticsSnapshot, SupportBundleJournalErrorRecord,
-        SupportBundleJournalSnapshot, SupportBundleObservabilitySnapshot,
-        SupportBundleTriageSnapshot,
+        DoctorSummary, SkillsInventorySnapshot, SupportBundle, SupportBundleBuildSnapshot,
+        SupportBundleConfigSnapshot, SupportBundleDiagnosticsSnapshot,
+        SupportBundleJournalErrorRecord, SupportBundleJournalSnapshot,
+        SupportBundleObservabilitySnapshot, SupportBundleTriageSnapshot,
     };
     use serde_json::{json, Value};
+    use std::collections::BTreeMap;
 
     fn minimal_doctor_report() -> DoctorReport {
         DoctorReport {
@@ -7517,6 +7874,19 @@ mod diagnostics_bundle_tests {
                 active_sessions: Some(1),
                 recent_relay_action_failures: Some(0),
                 recent_health_failures: Some(0),
+                error: None,
+            },
+            skills: SkillsInventorySnapshot {
+                skills_root: "state/skills".to_owned(),
+                installed_total: 1,
+                current_total: 1,
+                eligible_total: 1,
+                quarantined_total: 0,
+                disabled_total: 0,
+                runtime_unknown_total: 0,
+                missing_secrets_total: 0,
+                publishers: vec!["acme".to_owned()],
+                trust_decisions: BTreeMap::from([("allowlisted".to_owned(), 1)]),
                 error: None,
             },
             sandbox: DoctorSandboxSnapshot {
@@ -7621,6 +7991,19 @@ mod diagnostics_bundle_tests {
                     }
                 })),
                 admin_status_error: None,
+                skills: SkillsInventorySnapshot {
+                    skills_root: "state/skills".to_owned(),
+                    installed_total: 1,
+                    current_total: 1,
+                    eligible_total: 1,
+                    quarantined_total: 0,
+                    disabled_total: 0,
+                    runtime_unknown_total: 0,
+                    missing_secrets_total: 0,
+                    publishers: vec!["acme".to_owned()],
+                    trust_decisions: BTreeMap::from([("allowlisted".to_owned(), 1)]),
+                    error: None,
+                },
             },
             journal: SupportBundleJournalSnapshot {
                 db_path: "data/journal.sqlite3".to_owned(),

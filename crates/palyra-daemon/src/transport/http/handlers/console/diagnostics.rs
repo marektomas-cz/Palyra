@@ -35,6 +35,7 @@ pub(crate) async fn console_diagnostics_handler(
     redact_console_diagnostics_value(&mut auth_payload, None);
 
     let browser_payload = collect_console_browser_diagnostics(&state).await;
+    let skills_payload = collect_console_skills_diagnostics(&state).await;
     let media_payload = state.channels.media_snapshot().map_err(channel_platform_error_response)?;
     let webhook_payload = serde_json::to_value(
         state.webhooks.diagnostics_snapshot(state.vault.as_ref()).map_err(|error| {
@@ -73,6 +74,7 @@ pub(crate) async fn console_diagnostics_handler(
         },
         "auth_profiles": auth_payload,
         "browserd": browser_payload,
+        "skills": skills_payload,
         "webhooks": webhook_payload,
         "media": media_payload,
         "deployment": deployment_payload,
@@ -171,6 +173,88 @@ pub(crate) async fn collect_console_browser_diagnostics(state: &AppState) -> Val
     });
     redact_console_diagnostics_value(&mut payload, None);
     payload
+}
+
+pub(crate) async fn collect_console_skills_diagnostics(state: &AppState) -> Value {
+    let skills_root = match resolve_skills_root() {
+        Ok(path) => path,
+        Err(response) => {
+            return json!({
+                "skills_root": "unavailable",
+                "error": format!("failed to resolve skills root (http {})", response.status()),
+            });
+        }
+    };
+    let index = match load_installed_skills_index(skills_root.as_path()) {
+        Ok(index) => index,
+        Err(response) => {
+            return json!({
+                "skills_root": skills_root,
+                "error": format!("failed to load installed skills index (http {})", response.status()),
+            });
+        }
+    };
+
+    let mut publishers =
+        index.entries.iter().map(|entry| entry.publisher.clone()).collect::<Vec<_>>();
+    publishers.sort();
+    publishers.dedup();
+
+    let mut trust_decisions = serde_json::Map::new();
+    let mut runtime_active = 0_usize;
+    let mut runtime_default_active = 0_usize;
+    let mut runtime_quarantined = 0_usize;
+    let mut runtime_disabled = 0_usize;
+    let mut runtime_errors = Vec::new();
+    let mut missing_secrets_total = 0_usize;
+
+    for entry in &index.entries {
+        let next = trust_decisions
+            .get(entry.trust_decision.as_str())
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .saturating_add(1);
+        trust_decisions.insert(entry.trust_decision.clone(), Value::from(next));
+        if !entry.missing_secrets.is_empty() {
+            missing_secrets_total = missing_secrets_total.saturating_add(1);
+        }
+
+        match state.runtime.skill_status(entry.skill_id.clone(), entry.version.clone()).await {
+            Ok(Some(record)) => match record.status {
+                SkillExecutionStatus::Active => runtime_active = runtime_active.saturating_add(1),
+                SkillExecutionStatus::Quarantined => {
+                    runtime_quarantined = runtime_quarantined.saturating_add(1)
+                }
+                SkillExecutionStatus::Disabled => {
+                    runtime_disabled = runtime_disabled.saturating_add(1)
+                }
+            },
+            Ok(None) => runtime_default_active = runtime_default_active.saturating_add(1),
+            Err(error) => {
+                runtime_errors.push(sanitize_http_error_message(error.to_string().as_str()));
+            }
+        }
+    }
+
+    while runtime_errors.len() > 5 {
+        runtime_errors.pop();
+    }
+
+    json!({
+        "skills_root": skills_root,
+        "installed_total": index.entries.len(),
+        "current_total": index.entries.iter().filter(|entry| entry.current).count(),
+        "missing_secrets_total": missing_secrets_total,
+        "publishers": publishers,
+        "trust_decisions": Value::Object(trust_decisions),
+        "runtime": {
+            "active": runtime_active,
+            "default_active": runtime_default_active,
+            "quarantined": runtime_quarantined,
+            "disabled": runtime_disabled,
+            "errors": runtime_errors,
+        },
+    })
 }
 
 pub(crate) fn collect_console_deployment_diagnostics(state: &AppState) -> Value {

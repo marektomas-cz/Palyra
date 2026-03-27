@@ -3569,7 +3569,92 @@ fn parse_skills_remove_list_and_verify() {
         Command::Skills {
             command: SkillsCommand::List {
                 skills_dir: Some("state/skills".to_owned()),
+                publisher: None,
+                current_only: false,
+                quarantined_only: false,
+                eligible_only: false,
                 json: false,
+            },
+        }
+    );
+
+    let filtered_list = Cli::parse_from([
+        "palyra",
+        "skills",
+        "list",
+        "--skills-dir",
+        "state/skills",
+        "--publisher",
+        "acme",
+        "--current-only",
+        "--quarantined-only",
+        "--eligible-only",
+        "--json",
+    ]);
+    assert_eq!(
+        filtered_list.command,
+        Command::Skills {
+            command: SkillsCommand::List {
+                skills_dir: Some("state/skills".to_owned()),
+                publisher: Some("acme".to_owned()),
+                current_only: true,
+                quarantined_only: true,
+                eligible_only: true,
+                json: true,
+            },
+        }
+    );
+
+    let info = Cli::parse_from([
+        "palyra",
+        "skills",
+        "info",
+        "acme.echo_http",
+        "--version",
+        "1.2.3",
+        "--skills-dir",
+        "state/skills",
+        "--json",
+    ]);
+    assert_eq!(
+        info.command,
+        Command::Skills {
+            command: SkillsCommand::Info {
+                skill_id: "acme.echo_http".to_owned(),
+                version: Some("1.2.3".to_owned()),
+                skills_dir: Some("state/skills".to_owned()),
+                json: true,
+            },
+        }
+    );
+
+    let check = Cli::parse_from([
+        "palyra",
+        "skills",
+        "check",
+        "acme.echo_http",
+        "--version",
+        "1.2.3",
+        "--skills-dir",
+        "state/skills",
+        "--trust-store",
+        "state/skills-trust.json",
+        "--trusted-publisher",
+        "acme=001122",
+        "--allow-untrusted",
+        "--json",
+    ]);
+    assert_eq!(
+        check.command,
+        Command::Skills {
+            command: SkillsCommand::Check {
+                skill_id: Some("acme.echo_http".to_owned()),
+                version: Some("1.2.3".to_owned()),
+                skills_dir: Some("state/skills".to_owned()),
+                trust_store: Some("state/skills-trust.json".to_owned()),
+                trusted_publishers: vec!["acme=001122".to_owned()],
+                allow_untrusted: true,
+                json: true,
             },
         }
     );

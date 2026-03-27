@@ -44,6 +44,38 @@ pub enum SkillsCommand {
     List {
         #[arg(long)]
         skills_dir: Option<String>,
+        #[arg(long)]
+        publisher: Option<String>,
+        #[arg(long, default_value_t = false)]
+        current_only: bool,
+        #[arg(long, default_value_t = false)]
+        quarantined_only: bool,
+        #[arg(long, default_value_t = false)]
+        eligible_only: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Info {
+        skill_id: String,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        skills_dir: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Check {
+        skill_id: Option<String>,
+        #[arg(long, requires = "skill_id")]
+        version: Option<String>,
+        #[arg(long)]
+        skills_dir: Option<String>,
+        #[arg(long)]
+        trust_store: Option<String>,
+        #[arg(long = "trusted-publisher")]
+        trusted_publishers: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        allow_untrusted: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
