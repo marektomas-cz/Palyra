@@ -12,9 +12,10 @@ use super::{
     JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, MessageCommand,
     ModelsCommand, OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand,
     PolicyCommand, ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg,
-    SecretsCommand, SecretsConfigureCommand, SecurityCommand, SessionsCommand,
-    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand, TuiCommand,
-    UninstallCommand, UpdateCommand, WebhooksCommand, WizardOverridesArg,
+    SandboxCommand, SandboxRuntimeArg, SecretsCommand, SecretsConfigureCommand, SecurityCommand,
+    SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
+    SupportBundleCommand, SystemCommand, TuiCommand, UninstallCommand, UpdateCommand,
+    WebhooksCommand, WizardOverridesArg,
 };
 #[cfg(not(windows))]
 use super::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -1118,6 +1119,38 @@ fn parse_memory_status_and_index() {
                 batch_size: Some(32),
                 until_complete: true,
                 run_maintenance: true,
+                json: false,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_system_commands() {
+    let heartbeat = Cli::parse_from(["palyra", "system", "heartbeat", "--json"]);
+    assert_eq!(
+        heartbeat.command,
+        Command::System { command: SystemCommand::Heartbeat { json: true } }
+    );
+
+    let events = Cli::parse_from(["palyra", "system", "events", "--limit", "25"]);
+    assert_eq!(
+        events.command,
+        Command::System { command: SystemCommand::Event { limit: Some(25), json: false } }
+    );
+}
+
+#[test]
+fn parse_sandbox_commands() {
+    let list = Cli::parse_from(["palyra", "sandbox", "list", "--json"]);
+    assert_eq!(list.command, Command::Sandbox { command: SandboxCommand::List { json: true } });
+
+    let explain = Cli::parse_from(["palyra", "sandbox", "explain", "--runtime", "process-runner"]);
+    assert_eq!(
+        explain.command,
+        Command::Sandbox {
+            command: SandboxCommand::Explain {
+                runtime: SandboxRuntimeArg::ProcessRunner,
                 json: false,
             }
         }

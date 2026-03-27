@@ -76,9 +76,9 @@ use cli::{
     CronScheduleTypeArg, DaemonCommand, GatewayBindProfileArg, InitModeArg, InitTlsScaffoldArg,
     JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
     OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PolicyCommand,
-    ProtocolCommand, RemoteVerificationModeArg, SecretsCommand, SecurityCommand, SessionsCommand,
-    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
-    WebhooksCommand, WizardOverridesArg,
+    ProtocolCommand, RemoteVerificationModeArg, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
+    SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
+    SupportBundleCommand, SystemCommand, WebhooksCommand, WizardOverridesArg,
 };
 #[cfg(not(windows))]
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
@@ -247,6 +247,8 @@ fn run_cli() -> Result<()> {
         CliCommand::Channels { command } => commands::channels::run(command),
         CliCommand::Webhooks { command } => commands::webhooks::run_webhooks(command),
         CliCommand::Browser { command } => commands::browser::run_browser(command),
+        CliCommand::System { command } => commands::system::run_system(command),
+        CliCommand::Sandbox { command } => commands::sandbox::run_sandbox(command),
         CliCommand::Completion { shell } => commands::completion::run_completion(shell),
         CliCommand::Onboarding { command } => commands::onboarding::run_onboarding(command),
         CliCommand::Configure {

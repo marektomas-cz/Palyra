@@ -24,11 +24,13 @@ mod patch;
 mod policy;
 mod protocol;
 mod reset;
+mod sandbox;
 mod secrets;
 mod security;
 mod sessions;
 mod skills;
 mod support_bundle;
+mod system;
 mod tui;
 mod uninstall;
 mod update;
@@ -72,11 +74,13 @@ pub use patch::PatchCommand;
 pub use policy::PolicyCommand;
 pub use protocol::ProtocolCommand;
 pub use reset::{ResetCommand, ResetScopeArg};
+pub use sandbox::{SandboxCommand, SandboxRuntimeArg};
 pub use secrets::{SecretsCommand, SecretsConfigureCommand};
 pub use security::SecurityCommand;
 pub use sessions::SessionsCommand;
 pub use skills::{SkillsCommand, SkillsPackageCommand};
 pub use support_bundle::SupportBundleCommand;
+pub use system::SystemCommand;
 pub use tui::TuiCommand;
 pub use uninstall::UninstallCommand;
 pub use update::UpdateCommand;
@@ -88,6 +92,8 @@ Examples:
   palyra gateway status
   palyra dashboard --open
   palyra backup create --output ./artifacts/palyra-backup.zip
+  palyra system heartbeat
+  palyra sandbox explain --runtime process-runner
   palyra update --check
   palyra --profile staging agents list --json
   palyra --config ./palyra.toml --output-format json status --admin
@@ -98,6 +104,8 @@ Canonical command map:
   gateway    Preferred runtime/admin family (`daemon` remains as a compatibility alias)
   dashboard  Thin operator shortcut for dashboard URL discovery/open workflows
   backup     Portable lifecycle backup/create verification surface
+  system     Runtime heartbeat, presence, and recent system-event observability
+  sandbox    Effective isolation/runtime policy explain surface for process and WASM tooling
   reset      Destructive local recovery surface with explicit scope selection
   uninstall  Installer-aware package removal surface
   update     Package update/check orchestration surface
@@ -215,6 +223,24 @@ Examples:
 
 Discoverability:
   Session list/show/inspect talks directly to browserd. Mutating actions go through the control plane so policy and audit hooks stay intact.";
+
+const SYSTEM_AFTER_HELP: &str = "\
+Examples:
+  palyra system heartbeat
+  palyra system presence --json
+  palyra system event --limit 50
+
+Discoverability:
+  `system` is the top-level operator view over runtime heartbeat, subsystem presence, and recent journal events.";
+
+const SANDBOX_AFTER_HELP: &str = "\
+Examples:
+  palyra sandbox list
+  palyra sandbox explain --runtime process-runner
+  palyra sandbox explain --runtime wasm-runtime --json
+
+Discoverability:
+  `sandbox` reads the effective runtime policy snapshot from admin diagnostics. Use `palyra policy explain` for per-action Cedar decisions.";
 
 const TUI_AFTER_HELP: &str = "\
 Examples:
@@ -418,6 +444,22 @@ pub enum Command {
     Browser {
         #[command(subcommand)]
         command: BrowserCommand,
+    },
+    #[command(
+        about = "Inspect runtime heartbeat, subsystem presence, and recent system events",
+        after_long_help = SYSTEM_AFTER_HELP
+    )]
+    System {
+        #[command(subcommand)]
+        command: SystemCommand,
+    },
+    #[command(
+        about = "Inspect effective process-runner and WASM sandbox policy surfaces",
+        after_long_help = SANDBOX_AFTER_HELP
+    )]
+    Sandbox {
+        #[command(subcommand)]
+        command: SandboxCommand,
     },
     #[command(
         about = "Generate shell completion scripts",
