@@ -7,6 +7,7 @@ use std::{
 
 use palyra_common::redaction::{redact_url, REDACTED};
 use palyra_control_plane as control_plane;
+use palyra_identity::IdentityManager;
 use palyra_vault::Vault;
 use reqwest::Url;
 use serde::Serialize;
@@ -17,6 +18,7 @@ use crate::{
     channels,
     cron::CronTimezoneMode,
     gateway::{self, GatewayAuthConfig, GatewayRuntimeState},
+    node_runtime::NodeRuntimeState,
     observability::ObservabilityState,
     openai_auth::OpenAiOAuthAttemptStateRecord,
     webhooks,
@@ -26,6 +28,8 @@ use crate::{
 pub(crate) struct AppState {
     pub(crate) started_at: Instant,
     pub(crate) runtime: Arc<GatewayRuntimeState>,
+    pub(crate) node_runtime: Arc<NodeRuntimeState>,
+    pub(crate) identity_manager: Arc<Mutex<IdentityManager>>,
     pub(crate) channels: Arc<channels::ChannelPlatform>,
     pub(crate) webhooks: Arc<webhooks::WebhookRegistry>,
     pub(crate) vault: Arc<Vault>,

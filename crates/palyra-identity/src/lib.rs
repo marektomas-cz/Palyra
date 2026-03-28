@@ -16,8 +16,9 @@ pub use mtls::{
     RevocationIndex,
 };
 pub use pairing::{
-    should_rotate_certificate, DevicePairingHello, IdentityManager, PairedDevice,
-    PairingClientKind, PairingMethod, PairingResult, PairingSession, RevokedDevice,
+    build_device_pairing_hello, should_rotate_certificate, DevicePairingHello, IdentityManager,
+    PairedDevice, PairingClientKind, PairingMethod, PairingResult, PairingSession, RevokedDevice,
+    VerifiedPairing,
 };
 pub use store::{
     default_identity_storage_path, FilesystemSecretStore, InMemorySecretStore, SecretStore,

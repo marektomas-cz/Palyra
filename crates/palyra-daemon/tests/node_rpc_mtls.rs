@@ -80,13 +80,14 @@ async fn node_rpc_mtls_accepts_valid_client_certificate() -> Result<()> {
         Identity::from_pem(identity.device_certificate_pem(), identity.device_private_key_pem());
     let mut client =
         connect_node_client(node_rpc_port, identity.gateway_ca_pem(), Some(identity_tls)).await?;
-    let response = client.register_node(tonic::Request::new(sample_register_node_request())).await;
-    let status = response.expect_err("stub node RPC service should currently return unimplemented");
-    assert_eq!(
-        status.code(),
-        Code::Unimplemented,
-        "valid mTLS client should reach node RPC service implementation"
-    );
+    let response = client
+        .register_node(tonic::Request::new(sample_register_node_request()))
+        .await
+        .context("valid mTLS client should reach node RPC service implementation")?
+        .into_inner();
+    assert!(response.accepted, "valid mTLS client should be accepted");
+    assert_eq!(response.reason, "registered");
+    assert_eq!(response.device_id.as_ref().map(|value| value.ulid.as_str()), Some(DEVICE_ID));
     Ok(())
 }
 
@@ -125,14 +126,14 @@ async fn node_rpc_insecure_opt_out_accepts_clients_without_certificate() -> Resu
     wait_for_health(admin_port, daemon.child_mut()).await?;
 
     let mut client = connect_node_client(node_rpc_port, identity.gateway_ca_pem(), None).await?;
-    let response = client.register_node(tonic::Request::new(sample_register_node_request())).await;
-    let status =
-        response.expect_err("insecure node RPC opt-out should allow request to reach service");
-    assert_eq!(
-        status.code(),
-        Code::Unimplemented,
-        "without mTLS enforcement, unauthenticated client should reach node RPC handler"
-    );
+    let response = client
+        .register_node(tonic::Request::new(sample_register_node_request()))
+        .await
+        .context("without mTLS enforcement, unauthenticated client should reach node RPC handler")?
+        .into_inner();
+    assert!(response.accepted, "opt-out mode should accept register_node");
+    assert_eq!(response.reason, "registered");
+    assert_eq!(response.device_id.as_ref().map(|value| value.ulid.as_str()), Some(DEVICE_ID));
     Ok(())
 }
 

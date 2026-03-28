@@ -995,6 +995,168 @@ impl ControlPlaneClient {
         self.request_json(Method::POST, "console/v1/pairing/codes", Some(request), true).await
     }
 
+    pub async fn list_node_pairing_requests(
+        &self,
+        query: Option<&NodePairingListQuery>,
+    ) -> Result<NodePairingListEnvelope, ControlPlaneClientError> {
+        let path = if let Some(query) = query {
+            let mut pairs = Vec::new();
+            if let Some(client_kind) = query.client_kind.as_deref() {
+                pairs.push(format!("client_kind={}", urlencoding(client_kind)));
+            }
+            if let Some(state) = query.state {
+                let state = serde_json::to_string(&state)
+                    .unwrap_or_else(|_| "\"pending_approval\"".to_owned())
+                    .trim_matches('"')
+                    .to_owned();
+                pairs.push(format!("state={}", urlencoding(state.as_str())));
+            }
+            if pairs.is_empty() {
+                "console/v1/pairing/requests".to_owned()
+            } else {
+                format!("console/v1/pairing/requests?{}", pairs.join("&"))
+            }
+        } else {
+            "console/v1/pairing/requests".to_owned()
+        };
+        self.request_json(Method::GET, path, None::<&Value>, false).await
+    }
+
+    pub async fn mint_node_pairing_code(
+        &self,
+        request: &NodePairingCodeMintRequest,
+    ) -> Result<NodePairingCodeEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::POST, "console/v1/pairing/requests/code", Some(request), true)
+            .await
+    }
+
+    pub async fn approve_node_pairing_request(
+        &self,
+        request_id: &str,
+        request: &NodePairingDecisionRequest,
+    ) -> Result<NodePairingRequestEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/pairing/requests/{}/approve", urlencoding(request_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
+    pub async fn reject_node_pairing_request(
+        &self,
+        request_id: &str,
+        request: &NodePairingDecisionRequest,
+    ) -> Result<NodePairingRequestEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/pairing/requests/{}/reject", urlencoding(request_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
+    pub async fn list_devices(&self) -> Result<DeviceListEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::GET, "console/v1/devices", None::<&Value>, false).await
+    }
+
+    pub async fn get_device(
+        &self,
+        device_id: &str,
+    ) -> Result<DeviceEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/devices/{}", urlencoding(device_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn rotate_device(
+        &self,
+        device_id: &str,
+    ) -> Result<DeviceEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/devices/{}/rotate", urlencoding(device_id)),
+            None::<&Value>,
+            true,
+        )
+        .await
+    }
+
+    pub async fn revoke_device(
+        &self,
+        device_id: &str,
+        request: &DeviceActionRequest,
+    ) -> Result<DeviceEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/devices/{}/revoke", urlencoding(device_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
+    pub async fn remove_device(
+        &self,
+        device_id: &str,
+        request: &DeviceActionRequest,
+    ) -> Result<DeviceEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/devices/{}/remove", urlencoding(device_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
+    pub async fn clear_devices(
+        &self,
+        request: &DeviceClearRequest,
+    ) -> Result<DeviceClearEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::POST, "console/v1/devices/clear", Some(request), true).await
+    }
+
+    pub async fn list_nodes(&self) -> Result<NodeListEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::GET, "console/v1/nodes", None::<&Value>, false).await
+    }
+
+    pub async fn list_pending_nodes(
+        &self,
+    ) -> Result<NodePairingListEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::GET, "console/v1/nodes/pending", None::<&Value>, false).await
+    }
+
+    pub async fn get_node(&self, device_id: &str) -> Result<NodeEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/nodes/{}", urlencoding(device_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn invoke_node(
+        &self,
+        device_id: &str,
+        request: &NodeInvokeRequest,
+    ) -> Result<NodeInvokeEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/nodes/{}/invoke", urlencoding(device_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
     pub async fn list_support_bundle_jobs(
         &self,
     ) -> Result<SupportBundleJobListEnvelope, ControlPlaneClientError> {

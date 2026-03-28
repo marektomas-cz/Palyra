@@ -109,6 +109,25 @@ pub(crate) async fn console_approval_decision_handler(
             channel_router::PairingApprovalOutcome::MissingPending => "missing_pending",
             channel_router::PairingApprovalOutcome::PairingDisabled => "pairing_disabled",
         })
+    } else if matches!(resolved.subject_type, ApprovalSubjectType::DevicePairing) {
+        let outcome = state
+            .node_runtime
+            .apply_pairing_approval(
+                resolved.approval_id.as_str(),
+                matches!(resolved.decision, Some(ApprovalDecision::Allow)),
+                resolved.decision_reason.as_deref().unwrap_or("approval resolved"),
+                resolved.decision_scope_ttl_ms,
+            )
+            .map_err(runtime_status_response)?;
+        Some(if outcome.is_some() {
+            if matches!(resolved.decision, Some(ApprovalDecision::Allow)) {
+                "approved"
+            } else {
+                "denied"
+            }
+        } else {
+            "missing_pending"
+        })
     } else {
         None
     };
@@ -166,8 +185,9 @@ fn parse_console_approval_subject_type(
         "secret_access" => Ok(Some(ApprovalSubjectType::SecretAccess)),
         "browser_action" => Ok(Some(ApprovalSubjectType::BrowserAction)),
         "node_capability" => Ok(Some(ApprovalSubjectType::NodeCapability)),
+        "device_pairing" => Ok(Some(ApprovalSubjectType::DevicePairing)),
         _ => Err(runtime_status_response(tonic::Status::invalid_argument(
-            "subject_type must be one of tool|channel_send|secret_access|browser_action|node_capability",
+            "subject_type must be one of tool|channel_send|secret_access|browser_action|node_capability|device_pairing",
         ))),
     }
 }

@@ -21,17 +21,8 @@ use super::{
     models::ActivePairingSession,
     persistence::MAX_ACTIVE_PAIRING_SESSIONS,
     DevicePairingHello, IdentityManager, PairedDevice, PairingClientKind, PairingMethod,
-    PairingResult, PairingSession,
+    PairingResult, PairingSession, VerifiedPairing,
 };
-
-#[derive(Debug, Clone)]
-struct VerifiedPairingOutcome {
-    device_id: String,
-    client_kind: PairingClientKind,
-    identity_fingerprint: String,
-    signing_public_key_hex: String,
-    transcript_hash_hex: String,
-}
 
 fn build_pending_pairing_session(
     client_kind: PairingClientKind,
@@ -123,45 +114,7 @@ impl IdentityManager {
         device: &DeviceIdentity,
         proof: &str,
     ) -> IdentityResult<DevicePairingHello> {
-        validate_canonical_id(&device.device_id)
-            .map_err(|error| IdentityError::InvalidCanonicalDeviceId(error.to_string()))?;
-
-        let gateway_public = X25519PublicKey::from(session.gateway_ephemeral_public);
-        let shared_secret = device.x25519_secret().diffie_hellman(&gateway_public);
-        let transcript_context = transcript_context(
-            &session.session_id,
-            session.protocol_version,
-            device.device_id.as_str(),
-            session.client_kind,
-        );
-        let transcript_mac = derive_transcript_mac(
-            shared_secret.as_bytes(),
-            &session.challenge,
-            &transcript_context,
-        )?;
-
-        let signature_payload = pairing_signature_payload(
-            session.protocol_version,
-            &session.session_id,
-            &session.challenge,
-            &session.gateway_ephemeral_public,
-            &device.device_id,
-            session.client_kind,
-            proof,
-        );
-        let signature = device.signing_key().sign(&signature_payload);
-
-        Ok(DevicePairingHello {
-            session_id: session.session_id.clone(),
-            protocol_version: session.protocol_version,
-            device_id: device.device_id.clone(),
-            client_kind: session.client_kind,
-            proof: proof.to_owned(),
-            device_signing_public: device.signing_public_key(),
-            device_x25519_public: device.x25519_public_key(),
-            challenge_signature: signature.to_bytes(),
-            transcript_mac,
-        })
+        build_device_pairing_hello(session, device, proof)
     }
 
     pub fn complete_pairing(
@@ -169,9 +122,26 @@ impl IdentityManager {
         hello: DevicePairingHello,
         now: SystemTime,
     ) -> IdentityResult<PairingResult> {
+        let verified = self.verify_pairing(hello, now)?;
+        self.finalize_verified_pairing(verified)
+    }
+
+    pub fn verify_pairing(
+        &mut self,
+        hello: DevicePairingHello,
+        now: SystemTime,
+    ) -> IdentityResult<VerifiedPairing> {
         let _guard = self.acquire_state_mutation_guard()?;
         self.reload_persisted_state()?;
-        let verified = self.complete_pairing_inner(hello, now)?;
+        self.complete_pairing_inner(hello, now)
+    }
+
+    pub fn finalize_verified_pairing(
+        &mut self,
+        verified: VerifiedPairing,
+    ) -> IdentityResult<PairingResult> {
+        let _guard = self.acquire_state_mutation_guard()?;
+        self.reload_persisted_state()?;
         let result = self.persist_verified_pairing(verified)?;
         self.persist_identity_state_bundle()?;
         Ok(result)
@@ -181,7 +151,7 @@ impl IdentityManager {
         &mut self,
         hello: DevicePairingHello,
         now: SystemTime,
-    ) -> IdentityResult<VerifiedPairingOutcome> {
+    ) -> IdentityResult<VerifiedPairing> {
         self.prune_expired_sessions(now, Some(hello.session_id.as_str()))?;
         validate_canonical_id(&hello.device_id)
             .map_err(|error| IdentityError::InvalidCanonicalDeviceId(error.to_string()))?;
@@ -254,7 +224,7 @@ impl IdentityManager {
         let transcript_hash_hex = hex::encode(Sha256::digest(expected_mac));
         let identity_fingerprint = hex::encode(Sha256::digest(hello.device_signing_public));
         let signing_public_key_hex = hex::encode(hello.device_signing_public);
-        Ok(VerifiedPairingOutcome {
+        Ok(VerifiedPairing {
             device_id: hello.device_id,
             client_kind: hello.client_kind,
             identity_fingerprint,
@@ -265,7 +235,7 @@ impl IdentityManager {
 
     fn persist_verified_pairing(
         &mut self,
-        verified: VerifiedPairingOutcome,
+        verified: VerifiedPairing,
     ) -> IdentityResult<PairingResult> {
         let certificate = self
             .ca
@@ -291,6 +261,49 @@ impl IdentityManager {
             gateway_ca_certificate_pem: self.ca.certificate_pem.clone(),
         })
     }
+}
+
+pub fn build_device_pairing_hello(
+    session: &PairingSession,
+    device: &DeviceIdentity,
+    proof: &str,
+) -> IdentityResult<DevicePairingHello> {
+    validate_canonical_id(&device.device_id)
+        .map_err(|error| IdentityError::InvalidCanonicalDeviceId(error.to_string()))?;
+
+    let gateway_public = X25519PublicKey::from(session.gateway_ephemeral_public);
+    let shared_secret = device.x25519_secret().diffie_hellman(&gateway_public);
+    let transcript_context = transcript_context(
+        &session.session_id,
+        session.protocol_version,
+        device.device_id.as_str(),
+        session.client_kind,
+    );
+    let transcript_mac =
+        derive_transcript_mac(shared_secret.as_bytes(), &session.challenge, &transcript_context)?;
+
+    let signature_payload = pairing_signature_payload(
+        session.protocol_version,
+        &session.session_id,
+        &session.challenge,
+        &session.gateway_ephemeral_public,
+        &device.device_id,
+        session.client_kind,
+        proof,
+    );
+    let signature = device.signing_key().sign(&signature_payload);
+
+    Ok(DevicePairingHello {
+        session_id: session.session_id.clone(),
+        protocol_version: session.protocol_version,
+        device_id: device.device_id.clone(),
+        client_kind: session.client_kind,
+        proof: proof.to_owned(),
+        device_signing_public: device.signing_public_key(),
+        device_x25519_public: device.x25519_public_key(),
+        challenge_signature: signature.to_bytes(),
+        transcript_mac,
+    })
 }
 
 fn secure_random_array<const N: usize>() -> IdentityResult<[u8; N]> {

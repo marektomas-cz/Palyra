@@ -248,8 +248,46 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/console/v1/pairing", get(console::pairing::console_pairing_summary_handler))
         .route(
+            "/console/v1/pairing/requests",
+            get(console::pairing::console_node_pairing_requests_handler),
+        )
+        .route(
+            "/console/v1/pairing/requests/code",
+            post(console::pairing::console_node_pairing_code_mint_handler),
+        )
+        .route(
+            "/console/v1/pairing/requests/{request_id}/approve",
+            post(console::pairing::console_node_pairing_approve_handler),
+        )
+        .route(
+            "/console/v1/pairing/requests/{request_id}/reject",
+            post(console::pairing::console_node_pairing_reject_handler),
+        )
+        .route(
             "/console/v1/pairing/codes",
             post(console::pairing::console_pairing_code_mint_handler),
+        )
+        .route("/console/v1/devices", get(console::devices::console_devices_list_handler))
+        .route("/console/v1/devices/clear", post(console::devices::console_devices_clear_handler))
+        .route("/console/v1/devices/{device_id}", get(console::devices::console_device_get_handler))
+        .route(
+            "/console/v1/devices/{device_id}/rotate",
+            post(console::devices::console_device_rotate_handler),
+        )
+        .route(
+            "/console/v1/devices/{device_id}/revoke",
+            post(console::devices::console_device_revoke_handler),
+        )
+        .route(
+            "/console/v1/devices/{device_id}/remove",
+            post(console::devices::console_device_remove_handler),
+        )
+        .route("/console/v1/nodes", get(console::nodes::console_nodes_list_handler))
+        .route("/console/v1/nodes/pending", get(console::nodes::console_nodes_pending_handler))
+        .route("/console/v1/nodes/{device_id}", get(console::nodes::console_node_get_handler))
+        .route(
+            "/console/v1/nodes/{device_id}/invoke",
+            post(console::nodes::console_node_invoke_handler),
         )
         .route(
             "/console/v1/support-bundle/jobs",

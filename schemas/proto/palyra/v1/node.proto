@@ -7,6 +7,7 @@ import "palyra/v1/common.proto";
 service NodeService {
   rpc BeginPairingSession(BeginPairingSessionRequest) returns (BeginPairingSessionResponse);
   rpc CompletePairingSession(CompletePairingSessionRequest) returns (CompletePairingSessionResponse);
+  rpc GetPairingRequestStatus(GetPairingRequestStatusRequest) returns (GetPairingRequestStatusResponse);
   rpc RotateDeviceCertificate(RotateDeviceCertificateRequest) returns (RotateDeviceCertificateResponse);
   rpc RevokeDevicePairing(RevokeDevicePairingRequest) returns (RevokeDevicePairingResponse);
   rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
@@ -69,6 +70,30 @@ message CompletePairingSessionResponse {
   uint64 cert_expires_at_unix_ms = 9;
 
   reserved 10 to 24;
+}
+
+message GetPairingRequestStatusRequest {
+  uint32 v = 1;
+  string session_id = 2;
+  palyra.common.v1.CanonicalId device_id = 3;
+
+  reserved 4 to 12;
+}
+
+message GetPairingRequestStatusResponse {
+  uint32 v = 1;
+  string status = 2;
+  string reason = 3;
+  bool paired = 4;
+  string approval_id = 5;
+  string identity_fingerprint = 6;
+  string transcript_hash = 7;
+  string mtls_client_certificate_pem = 8;
+  string mtls_client_private_key_pem = 9;
+  string gateway_ca_certificate_pem = 10;
+  uint64 cert_expires_at_unix_ms = 11;
+
+  reserved 12 to 24;
 }
 
 message RotateDeviceCertificateRequest {
@@ -148,6 +173,16 @@ message NodeEventResponse {
   palyra.common.v1.CanonicalId event_id = 2;
   bool accepted = 3;
   string reason = 4;
+
+  reserved 5 to 12;
+  NodeCapabilityDispatch dispatch = 13;
+}
+
+message NodeCapabilityDispatch {
+  palyra.common.v1.CanonicalId request_id = 1;
+  string capability = 2;
+  bytes input_json = 3;
+  uint64 max_payload_bytes = 4;
 
   reserved 5 to 12;
 }

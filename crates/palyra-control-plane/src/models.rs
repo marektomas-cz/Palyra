@@ -402,6 +402,165 @@ pub struct PairingSummaryEnvelope {
     pub channels: Vec<PairingChannelSnapshot>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodePairingMethod {
+    Pin,
+    Qr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodePairingRequestState {
+    PendingApproval,
+    Approved,
+    Rejected,
+    Completed,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePairingCodeView {
+    pub code: String,
+    pub method: NodePairingMethod,
+    pub issued_by: String,
+    pub created_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePairingRequestView {
+    pub request_id: String,
+    pub session_id: String,
+    pub device_id: String,
+    pub client_kind: String,
+    pub method: NodePairingMethod,
+    pub code_issued_by: String,
+    pub requested_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub approval_id: String,
+    pub state: NodePairingRequestState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_scope_ttl_ms: Option<i64>,
+    pub identity_fingerprint: String,
+    pub transcript_hash_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_expires_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePairingListEnvelope {
+    pub contract: ContractDescriptor,
+    #[serde(default)]
+    pub codes: Vec<NodePairingCodeView>,
+    #[serde(default)]
+    pub requests: Vec<NodePairingRequestView>,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePairingRequestEnvelope {
+    pub contract: ContractDescriptor,
+    pub request: NodePairingRequestView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePairingCodeEnvelope {
+    pub contract: ContractDescriptor,
+    pub code: NodePairingCodeView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub device_id: String,
+    pub client_kind: String,
+    pub status: String,
+    pub paired_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    pub issued_by: String,
+    pub approval_id: String,
+    pub identity_fingerprint: String,
+    pub transcript_hash_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_certificate_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_certificate_expires_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceListEnvelope {
+    pub contract: ContractDescriptor,
+    #[serde(default)]
+    pub devices: Vec<DeviceRecord>,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceEnvelope {
+    pub contract: ContractDescriptor,
+    pub device: DeviceRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceClearEnvelope {
+    pub contract: ContractDescriptor,
+    pub deleted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCapabilityView {
+    pub name: String,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRecord {
+    pub device_id: String,
+    pub platform: String,
+    #[serde(default)]
+    pub capabilities: Vec<NodeCapabilityView>,
+    pub registered_at_unix_ms: i64,
+    pub last_seen_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeListEnvelope {
+    pub contract: ContractDescriptor,
+    #[serde(default)]
+    pub nodes: Vec<NodeRecord>,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEnvelope {
+    pub contract: ContractDescriptor,
+    pub node: NodeRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeInvokeEnvelope {
+    pub contract: ContractDescriptor,
+    pub device_id: String,
+    pub capability: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_json: Option<Value>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupportBundleJobState {
@@ -1526,6 +1685,50 @@ pub struct PairingCodeMintRequest {
     pub issued_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePairingCodeMintRequest {
+    pub method: NodePairingMethod,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NodePairingListQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<NodePairingRequestState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePairingDecisionRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceActionRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeviceClearRequest {
+    #[serde(default)]
+    pub revoked_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInvokeRequest {
+    pub capability: String,
+    #[serde(default)]
+    pub input_json: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_payload_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

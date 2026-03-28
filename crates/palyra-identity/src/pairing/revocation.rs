@@ -100,6 +100,25 @@ impl IdentityManager {
     }
 
     #[must_use]
+    pub fn paired_devices(&self) -> Vec<PairedDevice> {
+        let mut devices = self.paired_devices.values().cloned().collect::<Vec<_>>();
+        devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+        devices
+    }
+
+    #[must_use]
+    pub fn revoked_device_record(&self, device_id: &str) -> Option<&RevokedDevice> {
+        self.revoked_devices.get(device_id)
+    }
+
+    #[must_use]
+    pub fn revoked_device_records(&self) -> Vec<RevokedDevice> {
+        let mut devices = self.revoked_devices.values().cloned().collect::<Vec<_>>();
+        devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+        devices
+    }
+
+    #[must_use]
     pub fn revoked_devices(&self) -> HashSet<String> {
         self.revoked_devices.keys().cloned().collect()
     }
@@ -107,6 +126,44 @@ impl IdentityManager {
     #[must_use]
     pub fn revoked_certificate_fingerprints(&self) -> HashSet<String> {
         self.revoked_certificate_fingerprints.clone()
+    }
+
+    #[must_use]
+    pub fn is_revoked_certificate_fingerprint(&self, fingerprint: &str) -> bool {
+        self.revoked_certificate_fingerprints.contains(fingerprint)
+    }
+
+    #[must_use]
+    pub fn device_id_for_certificate_fingerprint(&self, fingerprint: &str) -> Option<String> {
+        self.paired_devices.iter().find_map(|(device_id, paired)| {
+            let current_matches =
+                certificate_fingerprint_hex(&paired.current_certificate.certificate_pem)
+                    .ok()
+                    .is_some_and(|value| value == fingerprint);
+            let historic_matches =
+                paired.certificate_fingerprints.iter().any(|value| value == fingerprint);
+            if current_matches || historic_matches {
+                Some(device_id.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn remove_paired_device(&mut self, device_id: &str) -> IdentityResult<bool> {
+        self.mutate_persisted_state(|manager| {
+            let Some(paired) = manager.paired_devices.remove(device_id) else {
+                return Ok(false);
+            };
+            manager.revoke_superseded_certificates(&paired)?;
+            Ok(true)
+        })
+    }
+
+    pub fn clear_revoked_device(&mut self, device_id: &str) -> IdentityResult<bool> {
+        self.mutate_persisted_state(|manager| {
+            Ok(manager.revoked_devices.remove(device_id).is_some())
+        })
     }
 
     pub(super) fn revoke_superseded_certificates(

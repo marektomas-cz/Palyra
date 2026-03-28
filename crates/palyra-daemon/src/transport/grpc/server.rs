@@ -16,7 +16,9 @@ use crate::{
     app::shutdown::shutdown_signal,
     config::LoadedConfig,
     gateway::{self, GatewayRuntimeState},
-    node_rpc, quic_runtime,
+    node_rpc,
+    node_runtime::NodeRuntimeState,
+    quic_runtime,
     transport::grpc::auth::GatewayAuthConfig,
 };
 
@@ -32,6 +34,7 @@ pub(crate) async fn serve(
     grpc_listener: tokio::net::TcpListener,
     node_rpc_listener: tokio::net::TcpListener,
     quic_address: Option<SocketAddr>,
+    node_runtime: Arc<NodeRuntimeState>,
     node_rpc_mtls_required: bool,
 ) -> Result<()> {
     let gateway_service = services::gateway::GatewayServiceImpl::new(runtime.clone(), auth.clone());
@@ -75,13 +78,15 @@ pub(crate) async fn serve(
     let grpc_auth_server = auth_v1::auth_service_server::AuthServiceServer::new(auth_service)
         .max_decoding_message_size(crate::GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES)
         .max_encoding_message_size(crate::GRPC_MAX_ENCODING_MESSAGE_SIZE_BYTES);
-    let canvas_service = services::canvas::CanvasServiceImpl::new(runtime, auth);
+    let canvas_service = services::canvas::CanvasServiceImpl::new(runtime.clone(), auth);
     let grpc_canvas_server =
         gateway_v1::canvas_service_server::CanvasServiceServer::new(canvas_service)
             .max_decoding_message_size(crate::GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES)
             .max_encoding_message_size(crate::GRPC_MAX_ENCODING_MESSAGE_SIZE_BYTES);
     let node_rpc_service = node_rpc::NodeRpcServiceImpl::new(
-        identity_runtime.revoked_certificate_fingerprints.clone(),
+        Arc::clone(&identity_runtime.manager),
+        Arc::clone(&node_runtime),
+        Arc::clone(&runtime),
         node_rpc_mtls_required,
     );
     let node_rpc_server =
@@ -101,12 +106,20 @@ pub(crate) async fn serve(
         .tls_config(crate::build_node_rpc_tls_config(identity_runtime, node_rpc_mtls_required))
         .context("failed to apply node RPC TLS configuration")?;
 
+    let revoked_certificate_fingerprints = identity_runtime
+        .manager
+        .lock()
+        .map_err(|_| {
+            anyhow::anyhow!("identity manager lock poisoned while building QUIC verifier")
+        })?
+        .revoked_certificate_fingerprints();
+
     let quic_client_cert_verifier = node_rpc_mtls_required
         .then(|| {
             build_revocation_aware_client_verifier(
                 &identity_runtime.gateway_ca_certificate_pem,
                 Arc::new(MemoryRevocationIndex::from_fingerprints(
-                    identity_runtime.revoked_certificate_fingerprints.clone(),
+                    revoked_certificate_fingerprints.clone(),
                 )),
             )
         })

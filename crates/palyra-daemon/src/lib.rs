@@ -15,6 +15,7 @@ mod journal;
 mod media;
 mod model_provider;
 mod node_rpc;
+mod node_runtime;
 mod observability;
 mod openai_auth;
 mod openai_surface;
@@ -29,7 +30,7 @@ mod wasm_plugin_runner;
 mod webhooks;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     convert::Infallible,
     fs,
     net::{IpAddr, SocketAddr},
@@ -1118,13 +1119,13 @@ struct PolicyExplainResponse {
     matched_policies: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct IdentityRuntime {
     store_root: PathBuf,
     revoked_certificate_count: usize,
-    revoked_certificate_fingerprints: HashSet<String>,
     gateway_ca_certificate_pem: String,
     node_server_certificate: palyra_identity::IssuedCertificate,
+    manager: Arc<Mutex<IdentityManager>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1322,16 +1323,20 @@ pub async fn run() -> Result<()> {
         .context("failed to initialize model provider runtime")?;
     let agent_registry = agents::AgentRegistry::open(identity_runtime.store_root.as_path())
         .context("failed to initialize agent registry state")?;
-    let webhook_state_root = resolve_runtime_state_root(identity_runtime.store_root.as_path())
+    let runtime_state_root = resolve_runtime_state_root(identity_runtime.store_root.as_path())
         .context("failed to resolve webhook registry state root")?;
     let webhook_registry = Arc::new(
-        webhooks::WebhookRegistry::open(webhook_state_root.as_path())
+        webhooks::WebhookRegistry::open(runtime_state_root.as_path())
             .context("failed to initialize webhook registry state")?,
     );
     let auth_runtime = Arc::new(gateway::AuthRuntimeState::new(
         Arc::clone(&auth_registry),
         Arc::new(HttpOAuthRefreshAdapter::default()) as Arc<dyn OAuthRefreshAdapter>,
     ));
+    let node_runtime = Arc::new(
+        node_runtime::NodeRuntimeState::load(runtime_state_root.as_path())
+            .context("failed to initialize node runtime state")?,
+    );
     let runtime = GatewayRuntimeState::new_with_provider(
         GatewayRuntimeConfigSnapshot {
             grpc_bind_addr: loaded.gateway.grpc_bind_addr.clone(),
@@ -1715,6 +1720,8 @@ pub async fn run() -> Result<()> {
         dangerous_remote_bind_ack_env,
         AppStateBuildContext {
             runtime: runtime.clone(),
+            node_runtime: Arc::clone(&node_runtime),
+            identity_manager: Arc::clone(&identity_runtime.manager),
             channels: Arc::clone(&channels),
             webhooks: Arc::clone(&webhook_registry),
             vault: Arc::clone(&vault),
@@ -1760,6 +1767,7 @@ pub async fn run() -> Result<()> {
         grpc_listener,
         node_rpc_listener,
         quic_address,
+        Arc::clone(&node_runtime),
         node_rpc_mtls_required,
     );
     tokio::try_join!(admin_server, grpc_transport)?;
@@ -2401,17 +2409,17 @@ fn load_identity_runtime(configured_store_root: Option<PathBuf>) -> Result<Ident
     let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(store);
     let mut manager =
         IdentityManager::with_store(store).context("failed to initialize identity manager")?;
-    let revoked_certificate_fingerprints = manager.revoked_certificate_fingerprints();
     let gateway_ca_certificate_pem = manager.gateway_ca_certificate_pem();
     let node_server_certificate = manager
         .issue_gateway_server_certificate("palyrad-node-rpc")
         .context("failed to issue node RPC gateway certificate")?;
+    let revoked_certificate_count = manager.revoked_certificate_fingerprints().len();
     Ok(IdentityRuntime {
         store_root,
-        revoked_certificate_count: revoked_certificate_fingerprints.len(),
-        revoked_certificate_fingerprints,
+        revoked_certificate_count,
         gateway_ca_certificate_pem,
         node_server_certificate,
+        manager: Arc::new(Mutex::new(manager)),
     })
 }
 

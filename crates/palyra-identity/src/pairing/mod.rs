@@ -15,10 +15,11 @@ mod revocation;
 #[cfg(test)]
 mod tests;
 
+pub use handshake::build_device_pairing_hello;
 pub use helpers::should_rotate_certificate;
 pub use models::{
     DevicePairingHello, PairedDevice, PairingClientKind, PairingMethod, PairingResult,
-    PairingSession, RevokedDevice,
+    PairingSession, RevokedDevice, VerifiedPairing,
 };
 
 pub struct IdentityManager {

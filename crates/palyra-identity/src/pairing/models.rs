@@ -119,6 +119,15 @@ pub struct PairingResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VerifiedPairing {
+    pub device_id: String,
+    pub client_kind: PairingClientKind,
+    pub identity_fingerprint: String,
+    pub signing_public_key_hex: String,
+    pub transcript_hash_hex: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RevokedDevice {
     pub device_id: String,
     pub reason: String,

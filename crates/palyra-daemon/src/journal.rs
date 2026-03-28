@@ -593,6 +593,7 @@ pub enum ApprovalSubjectType {
     SecretAccess,
     BrowserAction,
     NodeCapability,
+    DevicePairing,
 }
 
 impl ApprovalSubjectType {
@@ -604,6 +605,7 @@ impl ApprovalSubjectType {
             Self::SecretAccess => "secret_access",
             Self::BrowserAction => "browser_action",
             Self::NodeCapability => "node_capability",
+            Self::DevicePairing => "device_pairing",
         }
     }
 
@@ -614,6 +616,7 @@ impl ApprovalSubjectType {
             "secret_access" => Some(Self::SecretAccess),
             "browser_action" => Some(Self::BrowserAction),
             "node_capability" => Some(Self::NodeCapability),
+            "device_pairing" => Some(Self::DevicePairing),
             _ => None,
         }
     }
