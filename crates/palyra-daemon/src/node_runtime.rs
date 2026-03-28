@@ -641,12 +641,12 @@ mod tests {
     #[test]
     fn canonical_state_path_resolves_inside_canonical_root() {
         let tempdir = tempdir().expect("temp dir should be created");
-        let state_root = tempdir.path().join("runtime").join(".");
+        let state_root = tempdir.path().join("runtime");
+        std::fs::create_dir_all(&state_root).expect("state root should be created");
 
         let state_path =
             CanonicalNodeRuntimeStatePath::resolve(state_root.as_path()).expect("path should load");
-        let canonical_root = std::fs::canonicalize(tempdir.path().join("runtime"))
-            .expect("root should canonicalize");
+        let canonical_root = std::fs::canonicalize(&state_root).expect("root should canonicalize");
 
         assert_eq!(
             state_path.as_path(),
