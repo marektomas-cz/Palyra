@@ -948,31 +948,41 @@ fn emit_node_lifecycle_payload(payload: NodeLifecyclePayload, json_output: bool)
         );
     }
 
-    println!(
-        "node.{} installed={} paired={} running={} device_id={} grpc_url={} pid={} cert_expires_at_unix_ms={} detail={}",
+    for line in render_node_lifecycle_text(&payload) {
+        println!("{line}");
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn render_node_lifecycle_text(payload: &NodeLifecyclePayload) -> Vec<String> {
+    let mut lines = vec![format!(
+        "node.{} installed={} paired={} running={} device_configured={} grpc_configured={} identity_store_configured={} cert_present={} pid_present={} logs_present={}",
         payload.action,
         payload.installed,
         payload.paired,
         payload.running,
-        option_text(payload.device_id.as_deref()),
-        option_text(payload.grpc_url.as_deref()),
-        payload
-            .pid
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_owned()),
-        payload
-            .cert_expires_at_unix_ms
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_owned()),
-        payload.detail,
-    );
-    if let Some(stdout_log_path) = payload.stdout_log_path.as_deref() {
-        println!("node.{}.stdout_log_path={stdout_log_path}", payload.action);
+        payload.device_id.is_some(),
+        payload.grpc_url.is_some(),
+        payload.identity_store_dir.is_some(),
+        payload.cert_expires_at_unix_ms.is_some(),
+        payload.pid.is_some(),
+        payload.stdout_log_path.is_some() || payload.stderr_log_path.is_some(),
+    )];
+    if payload.installed
+        || payload.paired
+        || payload.running
+        || payload.device_id.is_some()
+        || payload.grpc_url.is_some()
+        || payload.identity_store_dir.is_some()
+        || payload.cert_expires_at_unix_ms.is_some()
+        || payload.pid.is_some()
+        || payload.stdout_log_path.is_some()
+        || payload.stderr_log_path.is_some()
+        || !payload.detail.trim().is_empty()
+    {
+        lines.push(format!("node.{}.details=available via --json", payload.action));
     }
-    if let Some(stderr_log_path) = payload.stderr_log_path.as_deref() {
-        println!("node.{}.stderr_log_path={stderr_log_path}", payload.action);
-    }
-    std::io::stdout().flush().context("stdout flush failed")
+    lines
 }
 
 fn emit_node_run_payload(payload: &NodeRunPayload, json_output: bool) -> Result<()> {
@@ -998,10 +1008,6 @@ fn required_nonempty_text(value: String, label: &str) -> Result<String> {
         anyhow::bail!("{label} is missing from pairing response");
     }
     Ok(value)
-}
-
-fn option_text(value: Option<&str>) -> &str {
-    value.filter(|inner| !inner.trim().is_empty()).unwrap_or("none")
 }
 
 fn process_is_running(pid: u32) -> bool {
@@ -1059,4 +1065,58 @@ fn now_unix_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_node_lifecycle_text, NodeLifecyclePayload};
+
+    #[test]
+    fn node_lifecycle_text_redacts_sensitive_values() {
+        let payload = NodeLifecyclePayload {
+            action: "status".to_owned(),
+            installed: true,
+            paired: true,
+            running: true,
+            device_id: Some("device-secret".to_owned()),
+            grpc_url: Some("https://gateway.example.test:7443".to_owned()),
+            identity_store_dir: Some("/private/state/identity".to_owned()),
+            cert_expires_at_unix_ms: Some(123456789),
+            pid: Some(4242),
+            stdout_log_path: Some("/private/logs/stdout.log".to_owned()),
+            stderr_log_path: Some("/private/logs/stderr.log".to_owned()),
+            detail: "sensitive internal detail".to_owned(),
+        };
+
+        let rendered = render_node_lifecycle_text(&payload).join("\n");
+
+        assert!(
+            !rendered.contains("device-secret"),
+            "rendered output must not expose device id: {rendered}"
+        );
+        assert!(
+            !rendered.contains("gateway.example.test"),
+            "rendered output must not expose grpc url: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/private/"),
+            "rendered output must not expose filesystem paths: {rendered}"
+        );
+        assert!(
+            !rendered.contains("4242"),
+            "rendered output must not expose process identifiers: {rendered}"
+        );
+        assert!(
+            !rendered.contains("123456789"),
+            "rendered output must not expose certificate timestamps: {rendered}"
+        );
+        assert!(
+            !rendered.contains("sensitive internal detail"),
+            "rendered output must not expose detail text: {rendered}"
+        );
+        assert!(
+            rendered.contains("node.status.details=available via --json"),
+            "rendered output should point operators to explicit detail mode: {rendered}"
+        );
+    }
 }
