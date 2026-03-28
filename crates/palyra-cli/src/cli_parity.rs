@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::thread;
 
 use anyhow::Result;
 use clap::{Command as ClapCommand, CommandFactory};
@@ -461,7 +460,7 @@ fn render_regression(entry: &CliParityReportEntry) -> String {
 fn build_cli_root_command_inner() -> ClapCommand {
     const CLI_HELP_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 
-    thread::Builder::new()
+    std::thread::Builder::new()
         .name("palyra-cli-parity".to_owned())
         .stack_size(CLI_HELP_STACK_SIZE_BYTES)
         .spawn(|| {

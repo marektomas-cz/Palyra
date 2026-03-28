@@ -7,16 +7,9 @@ use palyra_cli::cli_parity::{
 };
 
 const MATRIX_PATH: &str = "tests/cli_parity_matrix.toml";
+const REPORT_SNAPSHOT_PATH: &str = "tests/cli_parity_report.md";
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn repo_root() -> PathBuf {
-    crate_root()
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("palyra-cli crate should live under crates/")
-        .to_path_buf()
 }
 
 fn load_matrix() -> Result<CliParityMatrix> {
@@ -78,7 +71,7 @@ fn cli_parity_matrix_has_no_regressions() -> Result<()> {
 
 #[test]
 fn cli_parity_report_matches_committed_snapshot() -> Result<()> {
-    let expected_path = repo_root().join("docs/cli-parity-acceptance-matrix.md");
+    let expected_path = crate_root().join(REPORT_SNAPSHOT_PATH);
     let expected = fs::read_to_string(&expected_path)
         .with_context(|| format!("failed to read {}", expected_path.display()))?;
     assert_eq!(generate_report_markdown()?, expected.replace("\r\n", "\n"));
