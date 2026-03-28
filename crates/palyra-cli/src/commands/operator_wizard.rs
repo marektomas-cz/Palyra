@@ -1774,7 +1774,11 @@ fn emit_onboarding_summary(summary: &OnboardingSummary, json_output: bool) -> Re
             summary.skills.eligible_total,
             summary.skills.quarantined_total,
             summary.skills.runtime_unknown_total,
-            summary.skills.missing_secrets_total
+            if summary.skills.missing_secrets_total == 0 {
+                "none"
+            } else {
+                "present"
+            }
         );
         println!(
             "onboarding.risk_events={}",
@@ -2658,8 +2662,12 @@ fn describe_configure_section(
                 build_default_skills_inventory_snapshot().quarantined_total
             ),
             format!(
-                "missing_secrets_total={}",
-                build_default_skills_inventory_snapshot().missing_secrets_total
+                "missing_secrets={}",
+                if build_default_skills_inventory_snapshot().missing_secrets_total == 0 {
+                    "none"
+                } else {
+                    "present"
+                }
             ),
         ]),
         ConfigureSectionArg::HealthSecurity => Ok(vec![

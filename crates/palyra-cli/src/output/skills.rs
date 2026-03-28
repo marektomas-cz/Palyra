@@ -1,6 +1,14 @@
 use crate::*;
 use std::path::Path;
 
+fn missing_secret_state<T>(items: &[T]) -> &'static str {
+    if items.is_empty() {
+        "none"
+    } else {
+        "present"
+    }
+}
+
 pub(crate) fn emit_status(
     event_kind: &str,
     response: &SkillStatusResponse,
@@ -49,7 +57,7 @@ pub(crate) fn emit_inventory_list(
             entry.runtime_status.status,
             entry.record.trust_decision,
             entry.eligibility.status,
-            entry.record.missing_secrets.len(),
+            missing_secret_state(entry.record.missing_secrets.as_slice()),
             entry.tool_count,
             entry.record.source.reference
         );
@@ -80,16 +88,10 @@ pub(crate) fn emit_inventory_info(info: &SkillInfoOutput, json_output: bool) -> 
         info.inventory.tool_count,
         info.cached_artifact_path
     );
-    if !info.inventory.record.missing_secrets.is_empty() {
-        let missing = info
-            .inventory
-            .record
-            .missing_secrets
-            .iter()
-            .map(|secret| format!("{}:{}", secret.scope, secret.key))
-            .collect::<Vec<_>>();
-        println!("skills.info.missing_secrets {}", missing.join(","));
-    }
+    println!(
+        "skills.info.missing_secrets {}",
+        missing_secret_state(info.inventory.record.missing_secrets.as_slice())
+    );
     Ok(())
 }
 
@@ -121,7 +123,7 @@ pub(crate) fn emit_check_results(
             result.audit_passed,
             result.quarantine_required,
             result.inventory.eligibility.status,
-            result.inventory.record.missing_secrets.len()
+            missing_secret_state(result.inventory.record.missing_secrets.as_slice())
         );
         if !result.reasons.is_empty() {
             println!("skills.check.reasons {}", result.reasons.join(" | "));

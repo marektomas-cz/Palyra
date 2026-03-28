@@ -4537,7 +4537,7 @@ fn build_skill_eligibility_snapshot(
         ));
     }
     if !record.missing_secrets.is_empty() {
-        reasons.push(format!("missing {} required secrets", record.missing_secrets.len()));
+        reasons.push("missing required secrets".to_owned());
     }
     match runtime_status.status.as_str() {
         "quarantined" => reasons.push("skill is quarantined".to_owned()),

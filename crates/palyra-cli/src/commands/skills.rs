@@ -1,7 +1,11 @@
 use crate::{client::skills as skills_client, output::skills as skills_output, *};
 
-fn count_output_items<T>(items: &[T]) -> usize {
-    items.len()
+fn redacted_presence<T>(items: &[T]) -> &'static str {
+    if items.is_empty() {
+        "none"
+    } else {
+        "present"
+    }
 }
 
 pub(crate) fn run_skills(command: SkillsCommand) -> Result<()> {
@@ -479,7 +483,6 @@ fn run_skills_install(command: SkillsInstallCommand) -> Result<()> {
             }))?
         );
     } else {
-        let missing_input_count = count_output_items(outcome.record.missing_secrets.as_slice());
         println!(
             "{} skill_id={} version={} publisher={} trust={} source={} missing_secrets={} skills_root={} trust_store={}",
             event_kind,
@@ -488,7 +491,7 @@ fn run_skills_install(command: SkillsInstallCommand) -> Result<()> {
             outcome.record.publisher,
             outcome.record.trust_decision,
             outcome.record.source.reference,
-            missing_input_count,
+            redacted_presence(outcome.record.missing_secrets.as_slice()),
             skills_root.display(),
             trust_store_path.display()
         );
