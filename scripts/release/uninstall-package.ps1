@@ -12,16 +12,34 @@ $ErrorActionPreference = "Stop"
 $resolvedInstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $metadataPath = Join-Path $resolvedInstallRoot "install-metadata.json"
 
+function Get-MetadataPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Metadata,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $property = $Metadata.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
 $stateRoot = $null
 $cliCleanup = $null
 if (Test-Path -LiteralPath $metadataPath -PathType Leaf) {
     $metadata = Read-JsonFile -Path $metadataPath
-    if ($null -ne $metadata.state_root -and -not [string]::IsNullOrWhiteSpace([string]$metadata.state_root)) {
-        $stateRoot = [string]$metadata.state_root
+    $metadataStateRoot = Get-MetadataPropertyValue -Metadata $metadata -Name "state_root"
+    if ($null -ne $metadataStateRoot -and -not [string]::IsNullOrWhiteSpace([string]$metadataStateRoot)) {
+        $stateRoot = [string]$metadataStateRoot
     }
 
-    if ($null -ne $metadata.cli_exposure) {
-        $cliCleanup = Remove-PalyraCliExposure -CliExposure $metadata.cli_exposure
+    $metadataCliExposure = Get-MetadataPropertyValue -Metadata $metadata -Name "cli_exposure"
+    if ($null -ne $metadataCliExposure) {
+        $cliCleanup = Remove-PalyraCliExposure -CliExposure $metadataCliExposure
     }
 }
 

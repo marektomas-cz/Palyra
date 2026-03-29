@@ -66,6 +66,10 @@ if (Test-Path -LiteralPath $installRoot) {
         -RemoveStateRoot | Out-Null
 }
 
+if (Test-Path -LiteralPath $stateRoot) {
+    Remove-Item -LiteralPath $stateRoot -Recurse -Force
+}
+
 if ((Test-Path -LiteralPath $artifactsRoot) -and -not $KeepArtifacts) {
     Remove-Item -LiteralPath $artifactsRoot -Recurse -Force
 }
