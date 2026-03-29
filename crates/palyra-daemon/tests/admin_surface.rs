@@ -3264,13 +3264,20 @@ fn spawn_palyrad_with_config_and_env(
     let mut last_error: Option<anyhow::Error> = None;
     for attempt in 1..=PALYRAD_STARTUP_ATTEMPTS {
         match spawn_palyrad_with_config_and_env_once(config_toml, extra_env) {
-            Ok(started) => return Ok(started),
+            Ok((mut child, admin_port)) => match wait_for_health(admin_port, &mut child) {
+                Ok(()) => return Ok((child, admin_port)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    last_error = Some(error);
+                }
+            },
             Err(error) => {
                 last_error = Some(error);
-                if attempt < PALYRAD_STARTUP_ATTEMPTS {
-                    thread::sleep(PALYRAD_STARTUP_RETRY_DELAY);
-                }
             }
+        }
+        if attempt < PALYRAD_STARTUP_ATTEMPTS {
+            thread::sleep(PALYRAD_STARTUP_RETRY_DELAY);
         }
     }
     let Some(last_error) = last_error else {
@@ -3285,13 +3292,20 @@ fn spawn_palyrad_with_dynamic_ports_with_env(extra_env: &[(&str, &str)]) -> Resu
     let mut last_error: Option<anyhow::Error> = None;
     for attempt in 1..=PALYRAD_STARTUP_ATTEMPTS {
         match spawn_palyrad_with_dynamic_ports_once(extra_env) {
-            Ok(started) => return Ok(started),
+            Ok((mut child, admin_port)) => match wait_for_health(admin_port, &mut child) {
+                Ok(()) => return Ok((child, admin_port)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    last_error = Some(error);
+                }
+            },
             Err(error) => {
                 last_error = Some(error);
-                if attempt < PALYRAD_STARTUP_ATTEMPTS {
-                    thread::sleep(PALYRAD_STARTUP_RETRY_DELAY);
-                }
             }
+        }
+        if attempt < PALYRAD_STARTUP_ATTEMPTS {
+            thread::sleep(PALYRAD_STARTUP_RETRY_DELAY);
         }
     }
     let Some(last_error) = last_error else {
