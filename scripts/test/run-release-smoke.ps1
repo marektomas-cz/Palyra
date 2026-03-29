@@ -85,7 +85,10 @@ function Invoke-InstalledCliSmoke {
         Invoke-CommandQuiet -Command "palyra" -Arguments @("--help")
         Invoke-CommandQuiet -Command "palyra" -Arguments @("doctor", "--json")
         Invoke-CommandQuiet -Command "palyra" -Arguments @("docs", "search", "migration")
+        Invoke-CommandQuiet -Command "palyra" -Arguments @("docs", "search", "acp")
         Invoke-CommandQuiet -Command "palyra" -Arguments @("docs", "show", "release-validation-checklist")
+        Invoke-CommandQuiet -Command "palyra" -Arguments @("docs", "show", "cli-v1-acp-shim")
+        Invoke-CommandQuiet -Command "palyra" -Arguments @("docs", "show", "docs/architecture/browser-service-v1.md")
         foreach ($command in $helpCommands) {
             Invoke-CommandQuiet -Command "palyra" -Arguments $command
         }

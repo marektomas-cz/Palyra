@@ -54,6 +54,10 @@ security-artifacts/
 .palyra/
 .palyra-test-harness/
 data/
+!crates/palyra-cli/data/
+crates/palyra-cli/data/*
+!crates/palyra-cli/data/docs/
+!crates/palyra-cli/data/docs/**
 apps/desktop/src-tauri/gen/
 /roadmap/
 /oc-docs/
