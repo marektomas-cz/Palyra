@@ -25,6 +25,7 @@ fn normalize_help_text(text: &str) -> String {
 
 fn run_help(args: &[&str]) -> Result<String> {
     let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .env("COLUMNS", "200")
         .args(args)
         .output()
         .with_context(|| format!("failed to execute palyra {}", args.join(" ")))?;

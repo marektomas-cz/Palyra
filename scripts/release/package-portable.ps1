@@ -48,8 +48,9 @@ $resolvedDaemonBinary = Assert-FileExists -Path $DaemonBinaryPath -Label "Daemon
 $resolvedBrowserBinary = Assert-FileExists -Path $BrowserBinaryPath -Label "Browser service binary"
 $resolvedCliBinary = Assert-FileExists -Path $CliBinaryPath -Label "CLI binary"
 $resolvedDocsRoot = Join-Path $repoRoot "docs"
+$resolvedReleaseChecklist = Join-Path $resolvedDocsRoot "release-validation-checklist.md"
 $resolvedHelpSnapshotsRoot = Join-Path $repoRoot "crates/palyra-cli/tests/help_snapshots"
-$null = Assert-FileExists -Path (Join-Path $resolvedDocsRoot "README.md") -Label "Operator docs index"
+$null = Assert-FileExists -Path $resolvedReleaseChecklist -Label "Bundled operator release checklist"
 $null = Assert-FileExists -Path (Join-Path $resolvedHelpSnapshotsRoot "docs-help.txt") -Label "CLI help snapshot bundle"
 $resolvedWebDistPath =
     if ([string]::IsNullOrWhiteSpace($WebDistPath)) {

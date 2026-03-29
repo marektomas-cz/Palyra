@@ -41,7 +41,7 @@ try {
         Assert-FileExists -Path (Join-Path $payloadRoot $requiredFile) -Label $requiredFile | Out-Null
     }
     Assert-FileExists -Path (Join-Path $payloadRoot "web/index.html") -Label "web/index.html" | Out-Null
-    Assert-FileExists -Path (Join-Path $payloadRoot "docs/README.md") -Label "docs/README.md" | Out-Null
+    Assert-FileExists -Path (Join-Path $payloadRoot "docs/release-validation-checklist.md") -Label "docs/release-validation-checklist.md" | Out-Null
     Assert-FileExists -Path (Join-Path $payloadRoot "docs/help_snapshots/docs-help.txt") -Label "docs/help_snapshots/docs-help.txt" | Out-Null
 
     $requiredBinaries =
