@@ -77,6 +77,9 @@ run_full_profile() {
   echo "Running unit and integration tests..."
   "$CARGO_BIN" test --workspace --locked
 
+  echo "Running workflow regression matrix..."
+  bash "$ROOT_DIR/scripts/test/run-workflow-regression.sh"
+
   echo "Running protocol schema checks..."
   bash "$ROOT_DIR/scripts/protocol/validate-proto.sh"
   bash "$ROOT_DIR/scripts/protocol/generate-stubs.sh"

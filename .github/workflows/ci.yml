@@ -159,6 +159,21 @@ jobs:
       - name: Run deterministic core suite
         run: bash scripts/test/run-deterministic-core.sh
 
+  workflow-regression:
+    name: Workflow regression matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: 1.91.0
+
+      - name: Run workflow regression matrix
+        run: bash scripts/test/run-workflow-regression.sh
+
   performance-smoke:
     name: Performance smoke
     runs-on: ubuntu-latest
