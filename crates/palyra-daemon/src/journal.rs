@@ -7470,18 +7470,12 @@ mod tests {
             .expect("session should be present in scoped listing");
         assert_eq!(session.title, "Investigate daemon health posture");
         assert_eq!(session.title_source, "first_user_message");
-        assert_eq!(
-            session.title_generator_version.as_deref(),
-            Some("phase2.session_title.v1")
-        );
+        assert_eq!(session.title_generator_version.as_deref(), Some("phase2.session_title.v1"));
         assert_eq!(
             session.preview.as_deref(),
             Some("Daemon health posture looks stable after the latest restart.")
         );
-        assert_eq!(
-            session.last_intent.as_deref(),
-            Some("Investigate daemon health posture")
-        );
+        assert_eq!(session.last_intent.as_deref(), Some("Investigate daemon health posture"));
         assert_eq!(
             session.last_summary.as_deref(),
             Some("Daemon health posture looks stable after the latest restart.")
@@ -7542,10 +7536,7 @@ mod tests {
             .expect("session should exist");
         assert_eq!(session.title, "Pinned ops session");
         assert_eq!(session.title_source, "label");
-        assert_eq!(
-            session.auto_title.as_deref(),
-            Some("Draft a fresh daemon incident summary")
-        );
+        assert_eq!(session.auto_title.as_deref(), Some("Draft a fresh daemon incident summary"));
     }
 
     #[test]
