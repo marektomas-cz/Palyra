@@ -9,15 +9,15 @@ pub(crate) async fn console_chat_sessions_list_handler(
     let limit = query.limit.unwrap_or(32).clamp(1, 128);
     let (sessions, next_after_session_key) = state
         .runtime
-        .list_orchestrator_sessions(
-            query.after_session_key,
-            session.context.principal.clone(),
-            session.context.device_id.clone(),
-            session.context.channel.clone(),
-            false,
-            Some(limit),
-            None,
-        )
+        .list_orchestrator_sessions(gateway::ListOrchestratorSessionsRequest {
+            after_session_key: query.after_session_key,
+            principal: session.context.principal.clone(),
+            device_id: session.context.device_id.clone(),
+            channel: session.context.channel.clone(),
+            include_archived: false,
+            requested_limit: Some(limit),
+            search_query: None,
+        })
         .await
         .map_err(runtime_status_response)?;
     Ok(Json(json!({

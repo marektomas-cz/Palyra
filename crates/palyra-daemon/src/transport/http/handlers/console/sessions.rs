@@ -340,15 +340,15 @@ async fn load_scoped_sessions(
     loop {
         let (mut page, next_after) = state
             .runtime
-            .list_orchestrator_sessions(
-                cursor.clone(),
-                principal.to_owned(),
-                device_id.to_owned(),
-                channel.map(str::to_owned),
+            .list_orchestrator_sessions(gateway::ListOrchestratorSessionsRequest {
+                after_session_key: cursor.clone(),
+                principal: principal.to_owned(),
+                device_id: device_id.to_owned(),
+                channel: channel.map(str::to_owned),
                 include_archived,
-                Some(SESSION_CATALOG_FETCH_PAGE),
-                None,
-            )
+                requested_limit: Some(SESSION_CATALOG_FETCH_PAGE),
+                search_query: None,
+            })
             .await?;
         sessions.append(&mut page);
         let Some(next_after) = next_after else {

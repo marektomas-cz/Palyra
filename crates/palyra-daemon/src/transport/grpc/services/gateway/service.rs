@@ -30,7 +30,8 @@ use crate::{
         extract_pairing_code_command, finalize_run_failure, non_empty, normalize_agent_identifier,
         optional_canonical_id, record_agent_journal_event, record_message_router_journal_event,
         require_supported_version, security_requests_json_mode, session_summary_message,
-        GatewayRuntimeState, APPROVAL_PROMPT_TIMEOUT_SECONDS, SENSITIVE_TOOLS_DENY_REASON,
+        GatewayRuntimeState, ListOrchestratorSessionsRequest, APPROVAL_PROMPT_TIMEOUT_SECONDS,
+        SENSITIVE_TOOLS_DENY_REASON,
     },
     journal::{
         ApprovalCreateRequest, ApprovalDecisionScope, ApprovalPolicySnapshot, ApprovalPromptOption,
@@ -203,15 +204,15 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
         let requested_limit = if payload.limit == 0 { None } else { Some(payload.limit as usize) };
         let (sessions, next_after_session_key) = self
             .state
-            .list_orchestrator_sessions(
+            .list_orchestrator_sessions(ListOrchestratorSessionsRequest {
                 after_session_key,
-                context.principal.clone(),
-                context.device_id.clone(),
-                context.channel.clone(),
-                payload.include_archived,
+                principal: context.principal.clone(),
+                device_id: context.device_id.clone(),
+                channel: context.channel.clone(),
+                include_archived: payload.include_archived,
                 requested_limit,
-                non_empty(payload.q),
-            )
+                search_query: non_empty(payload.q),
+            })
             .await?;
         Ok(Response::new(gateway_v1::ListSessionsResponse {
             v: CANONICAL_PROTOCOL_MAJOR,

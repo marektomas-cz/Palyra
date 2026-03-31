@@ -34,6 +34,17 @@ pub struct GatewayRuntimeConfigSnapshot {
     pub canvas_host: CanvasHostRuntimeConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListOrchestratorSessionsRequest {
+    pub after_session_key: Option<String>,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+    pub include_archived: bool,
+    pub requested_limit: Option<usize>,
+    pub search_query: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoryRuntimeConfig {
     pub max_item_bytes: usize,
@@ -2230,32 +2241,27 @@ impl GatewayRuntimeState {
     #[allow(clippy::result_large_err)]
     fn list_orchestrator_sessions_blocking(
         &self,
-        after_session_key: Option<String>,
-        principal: String,
-        device_id: String,
-        channel: Option<String>,
-        include_archived: bool,
-        requested_limit: Option<usize>,
-        search_query: Option<String>,
+        request: &ListOrchestratorSessionsRequest,
     ) -> Result<(Vec<OrchestratorSessionRecord>, Option<String>), Status> {
-        let limit = requested_limit.unwrap_or(100).clamp(1, MAX_SESSIONS_PAGE_LIMIT);
-        let normalized_search = search_query
+        let limit = request.requested_limit.unwrap_or(100).clamp(1, MAX_SESSIONS_PAGE_LIMIT);
+        let normalized_search = request
+            .search_query
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.to_ascii_lowercase());
         let mut sessions = if let Some(search) = normalized_search.as_deref() {
             let mut matched = Vec::new();
-            let mut cursor = after_session_key.clone();
+            let mut cursor = request.after_session_key.clone();
             loop {
                 let page = self
                     .journal_store
                     .list_orchestrator_sessions(
                         cursor.as_deref(),
-                        principal.as_str(),
-                        device_id.as_str(),
-                        channel.as_deref(),
-                        include_archived,
+                        request.principal.as_str(),
+                        request.device_id.as_str(),
+                        request.channel.as_deref(),
+                        request.include_archived,
                         MAX_SESSIONS_PAGE_LIMIT,
                     )
                     .map_err(|error| {
@@ -2293,11 +2299,11 @@ impl GatewayRuntimeState {
         } else {
             self.journal_store
                 .list_orchestrator_sessions(
-                    after_session_key.as_deref(),
-                    principal.as_str(),
-                    device_id.as_str(),
-                    channel.as_deref(),
-                    include_archived,
+                    request.after_session_key.as_deref(),
+                    request.principal.as_str(),
+                    request.device_id.as_str(),
+                    request.channel.as_deref(),
+                    request.include_archived,
                     limit.saturating_add(1),
                 )
                 .map_err(|error| {
@@ -2319,26 +2325,10 @@ impl GatewayRuntimeState {
     #[allow(clippy::result_large_err)]
     pub async fn list_orchestrator_sessions(
         self: &Arc<Self>,
-        after_session_key: Option<String>,
-        principal: String,
-        device_id: String,
-        channel: Option<String>,
-        include_archived: bool,
-        requested_limit: Option<usize>,
-        search_query: Option<String>,
+        request: ListOrchestratorSessionsRequest,
     ) -> Result<(Vec<OrchestratorSessionRecord>, Option<String>), Status> {
         let state = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            state.list_orchestrator_sessions_blocking(
-                after_session_key,
-                principal,
-                device_id,
-                channel,
-                include_archived,
-                requested_limit,
-                search_query,
-            )
-        })
+        tokio::task::spawn_blocking(move || state.list_orchestrator_sessions_blocking(&request))
         .await
         .map_err(|_| Status::internal("orchestrator session list worker panicked"))?
     }
