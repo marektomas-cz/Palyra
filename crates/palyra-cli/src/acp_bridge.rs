@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn map_permission_outcome_preserves_openclaw_permission_semantics() {
+    fn map_permission_outcome_preserves_permission_option_semantics() {
         let once_scope = common_v1::ApprovalDecisionScope::Once as i32;
         let session_scope = common_v1::ApprovalDecisionScope::Session as i32;
         let cases = vec![

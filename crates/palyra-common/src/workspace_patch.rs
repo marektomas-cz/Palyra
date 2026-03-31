@@ -198,7 +198,7 @@ struct PatchExecutionError {
     rollback_performed: bool,
 }
 
-/// Applies an OpenClaw-style patch inside the provided workspace roots.
+/// Applies a workspace patch inside the provided workspace roots.
 ///
 /// The operation is fail-closed:
 /// - patch size, touched file count, and per-file size limits are enforced;
