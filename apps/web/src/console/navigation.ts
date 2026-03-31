@@ -34,6 +34,7 @@ export const CONSOLE_NAV_GROUPS: readonly NavigationGroup[] = [
     items: resolveEntries([
       "overview",
       "sessions",
+      "usage",
       "approvals",
       "cron",
       "channels",
@@ -57,6 +58,7 @@ const SECTION_PATHS: Readonly<Record<Section, string>> = {
   overview: "/control/overview",
   chat: "/chat",
   sessions: "/control/sessions",
+  usage: "/control/usage",
   approvals: "/control/approvals",
   cron: "/control/automation",
   channels: "/control/channels",
@@ -78,6 +80,7 @@ const SECTION_GROUPS: Readonly<Record<Section, NavigationGroup["id"]>> = {
   overview: "control",
   chat: "chat",
   sessions: "control",
+  usage: "control",
   approvals: "control",
   cron: "control",
   channels: "control",

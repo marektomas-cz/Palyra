@@ -988,6 +988,140 @@ fn console_session_catalog_endpoints_require_session_and_csrf() -> Result<()> {
 }
 
 #[test]
+fn console_usage_endpoints_support_empty_ranges_archived_sessions_and_export() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let no_session = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/usage/summary"))
+        .send()
+        .context("failed to call usage summary endpoint without session")?;
+    assert_eq!(no_session.status().as_u16(), 403, "usage summary endpoint must require session");
+
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let created_session = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/chat/sessions"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "session_label": "usage-empty-session",
+        }))
+        .send()
+        .context("failed to create chat session for usage test")?
+        .error_for_status()
+        .context("chat session create for usage test returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse created chat session response json")?;
+    let session_id = created_session
+        .get("session")
+        .and_then(|value| value.get("session_id"))
+        .and_then(Value::as_str)
+        .context("created chat session response should include session id")?;
+
+    let summary = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/usage/summary"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to fetch usage summary")?
+        .error_for_status()
+        .context("usage summary returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse usage summary response json")?;
+    assert_eq!(
+        summary.get("totals").and_then(|value| value.get("runs")).and_then(Value::as_u64),
+        Some(0),
+        "usage summary should stay stable when the interval contains no runs"
+    );
+    assert!(
+        summary.get("timeline").and_then(Value::as_array).is_some(),
+        "usage summary should expose timeline buckets even when empty"
+    );
+
+    let detail = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/usage/sessions/{session_id}"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to fetch usage session detail")?
+        .error_for_status()
+        .context("usage session detail returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse usage session detail response json")?;
+    assert_eq!(
+        detail.get("session").and_then(|value| value.get("session_id")).and_then(Value::as_str),
+        Some(session_id),
+        "usage detail should resolve a session even when no runs were recorded yet"
+    );
+    assert_eq!(
+        detail.get("totals").and_then(|value| value.get("runs")).and_then(Value::as_u64),
+        Some(0),
+        "usage detail should return zero totals for an empty interval"
+    );
+
+    let export = client
+        .get(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/usage/export?dataset=timeline&format=csv"
+        ))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to export usage timeline csv")?
+        .error_for_status()
+        .context("usage timeline export returned non-success status")?;
+    assert!(
+        export
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/csv")),
+        "usage export should emit CSV content type"
+    );
+
+    let archive = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/sessions/{session_id}/archive"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token)
+        .send()
+        .context("failed to archive usage session")?
+        .error_for_status()
+        .context("usage session archive returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse usage session archive response json")?;
+    assert_eq!(
+        archive.get("session").and_then(|value| value.get("archived")).and_then(Value::as_bool),
+        Some(true),
+        "usage setup archive should mark the session archived"
+    );
+
+    let archived_detail = client
+        .get(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/usage/sessions/{session_id}?include_archived=true"
+        ))
+        .header("Cookie", cookie)
+        .send()
+        .context("failed to fetch archived usage session detail")?
+        .error_for_status()
+        .context("archived usage session detail returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse archived usage session detail response json")?;
+    assert_eq!(
+        archived_detail
+            .get("session")
+            .and_then(|value| value.get("archived"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "usage detail should surface archived sessions when include_archived=true"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_cron_workflow_create_disable_and_list_runs() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
     let mut daemon = ChildGuard::new(child);

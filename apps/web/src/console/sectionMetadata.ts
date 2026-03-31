@@ -2,6 +2,7 @@ export const CONSOLE_SECTIONS = [
   { id: "overview", label: "Overview", detail: "Operational posture, risks, and next actions" },
   { id: "chat", label: "Chat", detail: "Primary operator workspace" },
   { id: "sessions", label: "Sessions", detail: "Catalog, lifecycle, and run posture" },
+  { id: "usage", label: "Usage", detail: "Capacity, tokens, latency, and cost posture" },
   { id: "approvals", label: "Approvals", detail: "Sensitive action gate" },
   { id: "cron", label: "Automation", detail: "Scheduled jobs, runs, and history" },
   { id: "channels", label: "Channels", detail: "Connectors, router, and Discord setup" },

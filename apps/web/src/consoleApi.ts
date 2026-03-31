@@ -76,6 +76,140 @@ export interface SessionCatalogDetailEnvelope {
   session: SessionCatalogRecord;
 }
 
+export interface UsageQueryEcho {
+  start_at_unix_ms: number;
+  end_at_unix_ms: number;
+  bucket: string;
+  bucket_width_ms: number;
+  include_archived: boolean;
+}
+
+export interface UsagePaginationQueryEcho extends UsageQueryEcho {
+  limit: number;
+  cursor: number;
+}
+
+export interface UsageSessionDetailQueryEcho extends UsageQueryEcho {
+  run_limit: number;
+}
+
+export interface UsageTotals {
+  runs: number;
+  session_count: number;
+  active_runs: number;
+  completed_runs: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  average_latency_ms?: number;
+  latest_started_at_unix_ms?: number;
+  estimated_cost_usd?: number | null;
+}
+
+export interface UsageTimelineBucket {
+  bucket_start_unix_ms: number;
+  bucket_end_unix_ms: number;
+  runs: number;
+  session_count: number;
+  active_runs: number;
+  completed_runs: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  average_latency_ms?: number;
+  estimated_cost_usd?: number | null;
+}
+
+export interface UsageSummaryEnvelope {
+  contract: ContractDescriptor;
+  query: UsageQueryEcho;
+  totals: UsageTotals;
+  timeline: UsageTimelineBucket[];
+  cost_tracking_available: boolean;
+}
+
+export interface UsageSessionRecord extends ChatSessionRecord {
+  runs: number;
+  active_runs: number;
+  completed_runs: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  average_latency_ms?: number;
+  latest_started_at_unix_ms?: number;
+  archived: boolean;
+  archived_at_unix_ms?: number;
+  estimated_cost_usd?: number | null;
+}
+
+export interface UsageSessionsEnvelope {
+  contract: ContractDescriptor;
+  query: UsagePaginationQueryEcho;
+  sessions: UsageSessionRecord[];
+  page: PageInfo;
+  cost_tracking_available: boolean;
+}
+
+export interface UsageSessionDetailEnvelope {
+  contract: ContractDescriptor;
+  query: UsageSessionDetailQueryEcho;
+  session: UsageSessionRecord;
+  totals: UsageTotals;
+  timeline: UsageTimelineBucket[];
+  runs: ChatRunStatusRecord[];
+  cost_tracking_available: boolean;
+}
+
+export interface UsageAgentRecord {
+  agent_id: string;
+  display_name: string;
+  binding_source: string;
+  default_model_profile?: string;
+  session_count: number;
+  runs: number;
+  active_runs: number;
+  completed_runs: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  average_latency_ms?: number;
+  latest_started_at_unix_ms?: number;
+  estimated_cost_usd?: number | null;
+}
+
+export interface UsageAgentsEnvelope {
+  contract: ContractDescriptor;
+  query: UsagePaginationQueryEcho;
+  agents: UsageAgentRecord[];
+  page: PageInfo;
+  cost_tracking_available: boolean;
+}
+
+export interface UsageModelRecord {
+  model_id: string;
+  display_name: string;
+  model_source: string;
+  agent_count: number;
+  session_count: number;
+  runs: number;
+  active_runs: number;
+  completed_runs: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  average_latency_ms?: number;
+  latest_started_at_unix_ms?: number;
+  estimated_cost_usd?: number | null;
+}
+
+export interface UsageModelsEnvelope {
+  contract: ContractDescriptor;
+  query: UsagePaginationQueryEcho;
+  models: UsageModelRecord[];
+  page: PageInfo;
+  cost_tracking_available: boolean;
+}
+
 export interface ChatRunStatusRecord {
   run_id: string;
   session_id: string;
@@ -649,6 +783,10 @@ export class ConsoleApiClient {
     private readonly fetcher: typeof fetch = fetch,
   ) {}
 
+  resolvePath(path: string): string {
+    return `${this.basePath}${path}`;
+  }
+
   async getSession(): Promise<ConsoleSession> {
     const session = await this.request<ConsoleSession>("/console/v1/auth/session");
     this.csrfToken = session.csrf_token;
@@ -1043,6 +1181,28 @@ export class ConsoleApiClient {
 
   async getSessionCatalogEntry(sessionId: string): Promise<SessionCatalogDetailEnvelope> {
     return this.request(`/console/v1/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  async getUsageSummary(params?: URLSearchParams): Promise<UsageSummaryEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/usage/summary", params));
+  }
+
+  async listUsageSessions(params?: URLSearchParams): Promise<UsageSessionsEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/usage/sessions", params));
+  }
+
+  async getUsageSessionDetail(sessionId: string, params?: URLSearchParams): Promise<UsageSessionDetailEnvelope> {
+    return this.request(
+      buildPathWithQuery(`/console/v1/usage/sessions/${encodeURIComponent(sessionId)}`, params),
+    );
+  }
+
+  async listUsageAgents(params?: URLSearchParams): Promise<UsageAgentsEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/usage/agents", params));
+  }
+
+  async listUsageModels(params?: URLSearchParams): Promise<UsageModelsEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/usage/models", params));
   }
 
   async resolveChatSession(payload: {

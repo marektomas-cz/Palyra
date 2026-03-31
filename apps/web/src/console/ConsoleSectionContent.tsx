@@ -14,6 +14,7 @@ import { SecretsSection } from "./sections/SecretsSection";
 import { SessionsSection } from "./sections/SessionsSection";
 import { SkillsSection } from "./sections/SkillsSection";
 import { SupportSection } from "./sections/SupportSection";
+import { UsageSection } from "./sections/UsageSection";
 import type { ConsoleAppState } from "./useConsoleAppState";
 
 type ConsoleSectionContentProps = {
@@ -37,6 +38,8 @@ export function ConsoleSectionContent({ app }: ConsoleSectionContentProps) {
       return (
         <SessionsSection app={{ api: app.api, setError: app.setError, setNotice: app.setNotice }} />
       );
+    case "usage":
+      return <UsageSection app={{ api: app.api, setError: app.setError, setNotice: app.setNotice }} />;
     case "approvals":
       return <ApprovalsSection app={app} />;
     case "cron":

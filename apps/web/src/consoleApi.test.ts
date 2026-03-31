@@ -380,6 +380,176 @@ describe("ConsoleApiClient", () => {
     expect(headers.get("x-palyra-csrf-token")).toBeNull();
   });
 
+  it("supports usage aggregation endpoints with read-only requests and stable export paths", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        query: {
+          start_at_unix_ms: 0,
+          end_at_unix_ms: 100,
+          bucket: "hour",
+          bucket_width_ms: 3_600_000,
+          include_archived: false,
+        },
+        totals: {
+          runs: 0,
+          session_count: 0,
+          active_runs: 0,
+          completed_runs: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+        },
+        timeline: [],
+        cost_tracking_available: false,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        query: {
+          start_at_unix_ms: 0,
+          end_at_unix_ms: 100,
+          bucket: "hour",
+          bucket_width_ms: 3_600_000,
+          include_archived: false,
+          limit: 8,
+          cursor: 0,
+        },
+        sessions: [],
+        page: { limit: 8, returned: 0, has_more: false },
+        cost_tracking_available: false,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        query: {
+          start_at_unix_ms: 0,
+          end_at_unix_ms: 100,
+          bucket: "hour",
+          bucket_width_ms: 3_600_000,
+          include_archived: false,
+          run_limit: 12,
+        },
+        session: {
+          session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          session_key: "usage-session",
+          principal: "admin:web-console",
+          device_id: "device-1",
+          created_at_unix_ms: 10,
+          updated_at_unix_ms: 20,
+          archived: false,
+          runs: 0,
+          active_runs: 0,
+          completed_runs: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+        },
+        totals: {
+          runs: 0,
+          session_count: 0,
+          active_runs: 0,
+          completed_runs: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+        },
+        timeline: [],
+        runs: [],
+        cost_tracking_available: false,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        query: {
+          start_at_unix_ms: 0,
+          end_at_unix_ms: 100,
+          bucket: "hour",
+          bucket_width_ms: 3_600_000,
+          include_archived: false,
+          limit: 8,
+          cursor: 0,
+        },
+        agents: [],
+        page: { limit: 8, returned: 0, has_more: false },
+        cost_tracking_available: false,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        query: {
+          start_at_unix_ms: 0,
+          end_at_unix_ms: 100,
+          bucket: "hour",
+          bucket_width_ms: 3_600_000,
+          include_archived: false,
+          limit: 8,
+          cursor: 0,
+        },
+        models: [],
+        page: { limit: 8, returned: 0, has_more: false },
+        cost_tracking_available: false,
+      }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+    const client = new ConsoleApiClient("/api", fetcher);
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+
+    const params = new URLSearchParams({
+      start_at_unix_ms: "0",
+      end_at_unix_ms: "100",
+      bucket: "hour",
+    });
+    await client.getUsageSummary(params);
+    await client.listUsageSessions(params);
+    await client.getUsageSessionDetail("01ARZ3NDEKTSV4RRFFQ69G5FAV", params);
+    await client.listUsageAgents(params);
+    await client.listUsageModels(params);
+
+    expect(requestUrl(calls[1]?.input)).toBe(
+      "/api/console/v1/usage/summary?start_at_unix_ms=0&end_at_unix_ms=100&bucket=hour",
+    );
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[2]?.input)).toBe(
+      "/api/console/v1/usage/sessions?start_at_unix_ms=0&end_at_unix_ms=100&bucket=hour",
+    );
+    expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[3]?.input)).toBe(
+      "/api/console/v1/usage/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV?start_at_unix_ms=0&end_at_unix_ms=100&bucket=hour",
+    );
+    expect(new Headers(calls[3]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[4]?.input)).toBe(
+      "/api/console/v1/usage/agents?start_at_unix_ms=0&end_at_unix_ms=100&bucket=hour",
+    );
+    expect(requestUrl(calls[5]?.input)).toBe(
+      "/api/console/v1/usage/models?start_at_unix_ms=0&end_at_unix_ms=100&bucket=hour",
+    );
+
+    expect(
+      client.resolvePath("/console/v1/usage/export?dataset=timeline&format=csv"),
+    ).toBe("/api/console/v1/usage/export?dataset=timeline&format=csv");
+  });
+
   it("retries safe-read GET requests once after a transport failure", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const fetcher: typeof fetch = (input, init) => {

@@ -881,6 +881,438 @@ describe("M35 web console app", () => {
     expect(requestBody(request?.body)).toContain('"extension_id":"com.palyra.extension"');
   });
 
+  it("renders usage section with server-side filters, exports, and session drilldown", async () => {
+    const openMock = vi.fn(
+      (_url?: string | URL, _target?: string, _features?: string) => null,
+    );
+    vi.stubGlobal("open", openMock);
+
+    const usageSession = {
+      session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      session_key: "usage-session",
+      session_label: "Usage session",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+      created_at_unix_ms: 100,
+      updated_at_unix_ms: 220,
+      last_run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+      archived: false,
+      runs: 3,
+      active_runs: 1,
+      completed_runs: 2,
+      prompt_tokens: 120,
+      completion_tokens: 80,
+      total_tokens: 200,
+      average_latency_ms: 2_250,
+      latest_started_at_unix_ms: 210,
+    };
+    const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestUrl(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (path === "/console/v1/auth/session" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:web-console",
+            device_id: "device-1",
+            channel: "web",
+            csrf_token: "csrf-1",
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 300,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/usage/summary" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: requestSearchParam(input, "include_archived") === "true",
+            },
+            totals: {
+              runs: 3,
+              session_count: 1,
+              active_runs: 1,
+              completed_runs: 2,
+              prompt_tokens: 120,
+              completion_tokens: 80,
+              total_tokens: 200,
+              average_latency_ms: 2_250,
+            },
+            timeline: [
+              {
+                bucket_start_unix_ms: 0,
+                bucket_end_unix_ms: 86_400_000,
+                runs: 3,
+                session_count: 1,
+                active_runs: 1,
+                completed_runs: 2,
+                prompt_tokens: 120,
+                completion_tokens: 80,
+                total_tokens: 200,
+                average_latency_ms: 2_250,
+              },
+            ],
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/usage/sessions" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: requestSearchParam(input, "include_archived") === "true",
+              limit: 8,
+              cursor: 0,
+            },
+            sessions: [usageSession],
+            page: { limit: 8, returned: 1, has_more: false },
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/usage/agents" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: requestSearchParam(input, "include_archived") === "true",
+              limit: 8,
+              cursor: 0,
+            },
+            agents: [
+              {
+                agent_id: "agent-1",
+                display_name: "Primary Agent",
+                binding_source: "session_binding",
+                default_model_profile: "gpt-5.4",
+                session_count: 1,
+                runs: 3,
+                active_runs: 1,
+                completed_runs: 2,
+                prompt_tokens: 120,
+                completion_tokens: 80,
+                total_tokens: 200,
+                average_latency_ms: 2_250,
+                latest_started_at_unix_ms: 210,
+              },
+            ],
+            page: { limit: 8, returned: 1, has_more: false },
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/usage/models" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: requestSearchParam(input, "include_archived") === "true",
+              limit: 8,
+              cursor: 0,
+            },
+            models: [
+              {
+                model_id: "gpt-5.4",
+                display_name: "gpt-5.4",
+                model_source: "agent_default_model_profile",
+                agent_count: 1,
+                session_count: 1,
+                runs: 3,
+                active_runs: 1,
+                completed_runs: 2,
+                prompt_tokens: 120,
+                completion_tokens: 80,
+                total_tokens: 200,
+                average_latency_ms: 2_250,
+                latest_started_at_unix_ms: 210,
+              },
+            ],
+            page: { limit: 8, returned: 1, has_more: false },
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      if (
+        path === "/console/v1/usage/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV" &&
+        method === "GET"
+      ) {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: requestSearchParam(input, "include_archived") === "true",
+              run_limit: 12,
+            },
+            session: usageSession,
+            totals: {
+              runs: 3,
+              session_count: 1,
+              active_runs: 1,
+              completed_runs: 2,
+              prompt_tokens: 120,
+              completion_tokens: 80,
+              total_tokens: 200,
+              average_latency_ms: 2_250,
+            },
+            timeline: [
+              {
+                bucket_start_unix_ms: 0,
+                bucket_end_unix_ms: 86_400_000,
+                runs: 3,
+                session_count: 1,
+                active_runs: 1,
+                completed_runs: 2,
+                prompt_tokens: 120,
+                completion_tokens: 80,
+                total_tokens: 200,
+                average_latency_ms: 2_250,
+              },
+            ],
+            runs: [
+              {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                session_id: usageSession.session_id,
+                state: "completed",
+                total_tokens: 200,
+                started_at_unix_ms: 100,
+                completed_at_unix_ms: 2_350,
+                updated_at_unix_ms: 2_350,
+              },
+            ],
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/sessions" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            sessions: [
+              {
+                ...usageSession,
+                title: "Usage session",
+                title_source: "label",
+                preview: "latest usage snapshot",
+                preview_state: "present",
+                last_intent: "inspect usage",
+                last_intent_state: "present",
+                last_summary: "Top usage session",
+                last_summary_state: "present",
+                branch_state: "linear",
+                last_run_state: "completed",
+                last_run_started_at_unix_ms: 210,
+                pending_approvals: 0,
+              },
+            ],
+            summary: {
+              active_sessions: 1,
+              archived_sessions: 0,
+              sessions_with_pending_approvals: 0,
+              sessions_with_active_runs: 1,
+            },
+            query: {
+              limit: 50,
+              cursor: 0,
+              include_archived: false,
+              sort: "updated_desc",
+            },
+            page: { limit: 50, returned: 1, has_more: false },
+          }),
+        );
+      }
+
+      throw new Error(`Unhandled mocked request: ${method} ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Usage and Capacity" }));
+
+    expect(await screen.findByRole("heading", { name: "Usage" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Usage session" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Open in sessions" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("switch", { name: /Show archived/i }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          (entry) =>
+            Array.isArray(entry) &&
+            requestUrl(entry[0] as RequestInfo | URL) === "/console/v1/usage/summary" &&
+            requestSearchParam(entry[0] as RequestInfo | URL, "include_archived") === "true",
+        ),
+      ).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Export timeline CSV" }));
+    expect(openMock).toHaveBeenCalled();
+    const exportUrl = openMock.mock.calls[0]?.[0];
+    expect(exportUrl).toContain("/console/v1/usage/export?");
+    expect(exportUrl).toContain("dataset=timeline");
+    expect(exportUrl).toContain("format=csv");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open in sessions" }));
+    expect(await screen.findByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+  });
+
+  it("keeps empty usage states stable and surfaces refresh errors", async () => {
+    let usageSummaryCalls = 0;
+    const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestUrl(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (path === "/console/v1/auth/session" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:web-console",
+            device_id: "device-1",
+            channel: "web",
+            csrf_token: "csrf-1",
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 300,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/usage/summary" && method === "GET") {
+        usageSummaryCalls += 1;
+        if (usageSummaryCalls > 1) {
+          return Promise.resolve(jsonResponse({ error: "usage refresh failed" }, 500));
+        }
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: false,
+            },
+            totals: {
+              runs: 0,
+              session_count: 0,
+              active_runs: 0,
+              completed_runs: 0,
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+            },
+            timeline: [],
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/usage/sessions" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: false,
+              limit: 8,
+              cursor: 0,
+            },
+            sessions: [],
+            page: { limit: 8, returned: 0, has_more: false },
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/usage/agents" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: false,
+              limit: 8,
+              cursor: 0,
+            },
+            agents: [],
+            page: { limit: 8, returned: 0, has_more: false },
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/usage/models" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            query: {
+              start_at_unix_ms: 0,
+              end_at_unix_ms: 100,
+              bucket: "day",
+              bucket_width_ms: 86_400_000,
+              include_archived: false,
+              limit: 8,
+              cursor: 0,
+            },
+            models: [],
+            page: { limit: 8, returned: 0, has_more: false },
+            cost_tracking_available: false,
+          }),
+        );
+      }
+
+      throw new Error(`Unhandled mocked request: ${method} ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Usage and Capacity" }));
+
+    expect(await screen.findByRole("heading", { name: "Usage" })).toBeInTheDocument();
+    expect(await screen.findByText("No timeline data")).toBeInTheDocument();
+    expect(await screen.findByText("No session selected")).toBeInTheDocument();
+    expect((await screen.findAllByText("No data")).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh usage" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("usage refresh failed")).toBeInTheDocument();
+    });
+  });
+
   it("loads diagnostics snapshot in dedicated diagnostics section", async () => {
     const fetchMock = createQueuedFetch([
       jsonResponse({
@@ -1233,6 +1665,16 @@ function requestUrl(input: RequestInfo | URL): string {
     return new URL(raw, "http://localhost").pathname;
   } catch {
     return raw;
+  }
+}
+
+function requestSearchParam(input: RequestInfo | URL, key: string): string | null {
+  const raw =
+    typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  try {
+    return new URL(raw, "http://localhost").searchParams.get(key);
+  } catch {
+    return null;
   }
 }
 

@@ -7,7 +7,8 @@ use crate::agents::{
 use crate::application::auth::map_auth_profile_error;
 use crate::journal::{
     MemoryEmbeddingsStatus, MemoryItemRecord, OrchestratorSessionCleanupOutcome,
-    OrchestratorSessionCleanupRequest,
+    OrchestratorSessionCleanupRequest, OrchestratorUsageQuery, OrchestratorUsageRunRecord,
+    OrchestratorUsageSessionRecord, OrchestratorUsageSummary,
 };
 use palyra_auth::AuthHealthReport;
 use std::path::PathBuf;
@@ -2283,6 +2284,77 @@ impl GatewayRuntimeState {
         })
         .await
         .map_err(|_| Status::internal("orchestrator session list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn summarize_orchestrator_usage_blocking(
+        &self,
+        query: &OrchestratorUsageQuery,
+    ) -> Result<OrchestratorUsageSummary, Status> {
+        self.journal_store
+            .summarize_orchestrator_usage(query)
+            .map_err(|error| map_orchestrator_store_error("summarize orchestrator usage", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn summarize_orchestrator_usage(
+        self: &Arc<Self>,
+        query: OrchestratorUsageQuery,
+    ) -> Result<OrchestratorUsageSummary, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.summarize_orchestrator_usage_blocking(&query))
+            .await
+            .map_err(|_| Status::internal("orchestrator usage summary worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_orchestrator_usage_sessions_blocking(
+        &self,
+        query: &OrchestratorUsageQuery,
+    ) -> Result<Vec<OrchestratorUsageSessionRecord>, Status> {
+        self.journal_store.list_orchestrator_usage_sessions(query).map_err(|error| {
+            map_orchestrator_store_error("list orchestrator usage sessions", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_orchestrator_usage_sessions(
+        self: &Arc<Self>,
+        query: OrchestratorUsageQuery,
+    ) -> Result<Vec<OrchestratorUsageSessionRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.list_orchestrator_usage_sessions_blocking(&query))
+            .await
+            .map_err(|_| Status::internal("orchestrator usage session list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn get_orchestrator_usage_session_blocking(
+        &self,
+        query: &OrchestratorUsageQuery,
+        session_id: &str,
+        run_limit: usize,
+    ) -> Result<Option<(OrchestratorUsageSessionRecord, Vec<OrchestratorUsageRunRecord>)>, Status>
+    {
+        self.journal_store
+            .get_orchestrator_usage_session(query, session_id, run_limit)
+            .map_err(|error| map_orchestrator_store_error("get orchestrator usage session", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn get_orchestrator_usage_session(
+        self: &Arc<Self>,
+        query: OrchestratorUsageQuery,
+        session_id: String,
+        run_limit: usize,
+    ) -> Result<Option<(OrchestratorUsageSessionRecord, Vec<OrchestratorUsageRunRecord>)>, Status>
+    {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.get_orchestrator_usage_session_blocking(&query, session_id.as_str(), run_limit)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator usage session detail worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

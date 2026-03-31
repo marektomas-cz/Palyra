@@ -19,4 +19,5 @@ pub(crate) mod sessions;
 pub(crate) mod skills;
 pub(crate) mod support_bundle;
 pub(crate) mod system;
+pub(crate) mod usage;
 pub(crate) mod webhooks;

@@ -307,6 +307,15 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/sessions/{session_id}",
             get(console::sessions::console_session_detail_handler),
         )
+        .route("/console/v1/usage/summary", get(console::usage::console_usage_summary_handler))
+        .route("/console/v1/usage/sessions", get(console::usage::console_usage_sessions_handler))
+        .route(
+            "/console/v1/usage/sessions/{session_id}",
+            get(console::usage::console_usage_session_detail_handler),
+        )
+        .route("/console/v1/usage/agents", get(console::usage::console_usage_agents_handler))
+        .route("/console/v1/usage/models", get(console::usage::console_usage_models_handler))
+        .route("/console/v1/usage/export", get(console::usage::console_usage_export_handler))
         .route(
             "/console/v1/sessions/{session_id}/archive",
             post(console::sessions::console_session_archive_handler),

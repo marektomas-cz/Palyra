@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt, fs,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
@@ -1090,6 +1091,110 @@ pub struct OrchestratorRunStatusSnapshot {
     pub tape_events: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorUsageQuery {
+    pub start_at_unix_ms: i64,
+    pub end_at_unix_ms: i64,
+    pub bucket_width_ms: i64,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+    pub include_archived: bool,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OrchestratorUsageTotals {
+    pub runs: u64,
+    pub session_count: u64,
+    pub active_runs: u64,
+    pub completed_runs: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_started_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OrchestratorUsageTimelineBucket {
+    pub bucket_start_unix_ms: i64,
+    pub bucket_end_unix_ms: i64,
+    pub runs: u64,
+    pub session_count: u64,
+    pub active_runs: u64,
+    pub completed_runs: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OrchestratorUsageSummary {
+    pub totals: OrchestratorUsageTotals,
+    pub timeline: Vec<OrchestratorUsageTimelineBucket>,
+    pub cost_tracking_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OrchestratorUsageSessionRecord {
+    pub session_id: String,
+    pub session_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<String>,
+    pub principal: String,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<String>,
+    pub archived: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at_unix_ms: Option<i64>,
+    pub runs: u64,
+    pub active_runs: u64,
+    pub completed_runs: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_started_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OrchestratorUsageRunRecord {
+    pub run_id: String,
+    pub state: String,
+    pub cancel_requested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub started_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_unix_ms: Option<i64>,
+    pub updated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum JournalError {
     #[error("journal db path cannot be empty")]
@@ -1569,6 +1674,18 @@ const MIGRATIONS: &[Migration] = &[
                 ON orchestrator_sessions(archived_at_unix_ms);
         "#,
     },
+    Migration {
+        version: 12,
+        name: "orchestrator_usage_indexes_v1",
+        sql: r#"
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_runs_started_at
+                ON orchestrator_runs(started_at_unix_ms);
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_runs_session_started_at
+                ON orchestrator_runs(session_ulid, started_at_unix_ms);
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_sessions_scope_lookup
+                ON orchestrator_sessions(principal, device_id, channel, archived_at_unix_ms);
+        "#,
+    },
 ];
 
 pub struct JournalStore {
@@ -2041,6 +2158,51 @@ impl JournalStore {
             include_archived,
             limit,
         )
+    }
+
+    pub fn summarize_orchestrator_usage(
+        &self,
+        query: &OrchestratorUsageQuery,
+    ) -> Result<OrchestratorUsageSummary, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let totals = load_orchestrator_usage_totals(&guard, query)?;
+        let timeline = load_orchestrator_usage_timeline(&guard, query)?;
+        Ok(OrchestratorUsageSummary { totals, timeline, cost_tracking_available: false })
+    }
+
+    pub fn list_orchestrator_usage_sessions(
+        &self,
+        query: &OrchestratorUsageQuery,
+    ) -> Result<Vec<OrchestratorUsageSessionRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_orchestrator_usage_sessions(&guard, query)
+    }
+
+    pub fn get_orchestrator_usage_session(
+        &self,
+        query: &OrchestratorUsageQuery,
+        session_id: &str,
+        run_limit: usize,
+    ) -> Result<
+        Option<(OrchestratorUsageSessionRecord, Vec<OrchestratorUsageRunRecord>)>,
+        JournalError,
+    > {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let session = load_scoped_orchestrator_session_by_id(&guard, session_id, query)?;
+        let Some(session) = session else {
+            return Ok(None);
+        };
+
+        let session_usage =
+            load_orchestrator_usage_session_row(&guard, query, session.session_id.as_str())?
+                .unwrap_or_else(|| empty_orchestrator_usage_session_record(&session));
+        let runs = load_orchestrator_usage_runs_for_session(
+            &guard,
+            query,
+            session.session_id.as_str(),
+            run_limit,
+        )?;
+        Ok(Some((session_usage, runs)))
     }
 
     pub fn cleanup_orchestrator_session(
@@ -4405,6 +4567,431 @@ fn load_orchestrator_sessions_page(
         sessions.push(map_orchestrator_session_row(row)?);
     }
     Ok(sessions)
+}
+
+fn load_scoped_orchestrator_session_by_id(
+    connection: &Connection,
+    session_id: &str,
+    query: &OrchestratorUsageQuery,
+) -> Result<Option<OrchestratorSessionRecord>, JournalError> {
+    let session = load_orchestrator_session_by_id(connection, session_id)?;
+    Ok(session.filter(|record| orchestrator_session_matches_usage_scope(record, query)))
+}
+
+fn orchestrator_session_matches_usage_scope(
+    session: &OrchestratorSessionRecord,
+    query: &OrchestratorUsageQuery,
+) -> bool {
+    session.principal == query.principal
+        && session.device_id == query.device_id
+        && session.channel == query.channel
+        && (query.include_archived || session.archived_at_unix_ms.is_none())
+}
+
+fn load_orchestrator_usage_totals(
+    connection: &Connection,
+    query: &OrchestratorUsageQuery,
+) -> Result<OrchestratorUsageTotals, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                COUNT(runs.run_ulid),
+                COUNT(DISTINCT runs.session_ulid),
+                COALESCE(SUM(CASE WHEN runs.state IN ('accepted', 'in_progress') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN runs.completed_at_unix_ms IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(runs.prompt_tokens), 0),
+                COALESCE(SUM(runs.completion_tokens), 0),
+                COALESCE(SUM(runs.total_tokens), 0),
+                AVG(
+                    CASE
+                        WHEN runs.completed_at_unix_ms IS NOT NULL
+                             AND runs.completed_at_unix_ms >= runs.started_at_unix_ms
+                        THEN runs.completed_at_unix_ms - runs.started_at_unix_ms
+                    END
+                ),
+                MAX(runs.started_at_unix_ms)
+            FROM orchestrator_runs AS runs
+            INNER JOIN orchestrator_sessions AS sessions
+                ON sessions.session_ulid = runs.session_ulid
+            WHERE runs.started_at_unix_ms >= ?1
+              AND runs.started_at_unix_ms < ?2
+              AND sessions.principal = ?3
+              AND sessions.device_id = ?4
+              AND ((sessions.channel = ?5) OR (sessions.channel IS NULL AND ?5 IS NULL))
+              AND (?6 = 1 OR sessions.archived_at_unix_ms IS NULL)
+              AND (?7 IS NULL OR runs.session_ulid = ?7)
+        "#,
+    )?;
+
+    statement
+        .query_row(
+            params![
+                query.start_at_unix_ms,
+                query.end_at_unix_ms,
+                query.principal.as_str(),
+                query.device_id.as_str(),
+                query.channel.as_deref(),
+                bool_to_sqlite(query.include_archived),
+                query.session_id.as_deref(),
+            ],
+            |row| {
+                Ok(OrchestratorUsageTotals {
+                    runs: row.get::<_, i64>(0)? as u64,
+                    session_count: row.get::<_, i64>(1)? as u64,
+                    active_runs: row.get::<_, i64>(2)? as u64,
+                    completed_runs: row.get::<_, i64>(3)? as u64,
+                    prompt_tokens: row.get::<_, i64>(4)? as u64,
+                    completion_tokens: row.get::<_, i64>(5)? as u64,
+                    total_tokens: row.get::<_, i64>(6)? as u64,
+                    average_latency_ms: average_latency_from_row(row, 7)?,
+                    latest_started_at_unix_ms: row.get(8)?,
+                    estimated_cost_usd: None,
+                })
+            },
+        )
+        .map_err(Into::into)
+}
+
+fn load_orchestrator_usage_timeline(
+    connection: &Connection,
+    query: &OrchestratorUsageQuery,
+) -> Result<Vec<OrchestratorUsageTimelineBucket>, JournalError> {
+    let bucket_count = usage_bucket_count(query);
+    let mut buckets = (0..bucket_count)
+        .map(|index| empty_usage_timeline_bucket(query, index))
+        .collect::<Vec<_>>();
+    let mut bucket_lookup = BTreeMap::new();
+    for (index, bucket) in buckets.iter().enumerate() {
+        bucket_lookup.insert(bucket.bucket_start_unix_ms, index);
+    }
+
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                ?3 + ((runs.started_at_unix_ms - ?3) / ?4) * ?4 AS bucket_start_unix_ms,
+                COUNT(runs.run_ulid),
+                COUNT(DISTINCT runs.session_ulid),
+                COALESCE(SUM(CASE WHEN runs.state IN ('accepted', 'in_progress') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN runs.completed_at_unix_ms IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(runs.prompt_tokens), 0),
+                COALESCE(SUM(runs.completion_tokens), 0),
+                COALESCE(SUM(runs.total_tokens), 0),
+                AVG(
+                    CASE
+                        WHEN runs.completed_at_unix_ms IS NOT NULL
+                             AND runs.completed_at_unix_ms >= runs.started_at_unix_ms
+                        THEN runs.completed_at_unix_ms - runs.started_at_unix_ms
+                    END
+                )
+            FROM orchestrator_runs AS runs
+            INNER JOIN orchestrator_sessions AS sessions
+                ON sessions.session_ulid = runs.session_ulid
+            WHERE runs.started_at_unix_ms >= ?1
+              AND runs.started_at_unix_ms < ?2
+              AND sessions.principal = ?5
+              AND sessions.device_id = ?6
+              AND ((sessions.channel = ?7) OR (sessions.channel IS NULL AND ?7 IS NULL))
+              AND (?8 = 1 OR sessions.archived_at_unix_ms IS NULL)
+              AND (?9 IS NULL OR runs.session_ulid = ?9)
+            GROUP BY bucket_start_unix_ms
+            ORDER BY bucket_start_unix_ms ASC
+        "#,
+    )?;
+
+    let mut rows = statement.query(params![
+        query.start_at_unix_ms,
+        query.end_at_unix_ms,
+        query.start_at_unix_ms,
+        query.bucket_width_ms,
+        query.principal.as_str(),
+        query.device_id.as_str(),
+        query.channel.as_deref(),
+        bool_to_sqlite(query.include_archived),
+        query.session_id.as_deref(),
+    ])?;
+    while let Some(row) = rows.next()? {
+        let bucket_start = row.get::<_, i64>(0)?;
+        let Some(index) = bucket_lookup.get(&bucket_start).copied() else {
+            continue;
+        };
+        buckets[index] = OrchestratorUsageTimelineBucket {
+            bucket_start_unix_ms: bucket_start,
+            bucket_end_unix_ms: bucket_start.saturating_add(query.bucket_width_ms),
+            runs: row.get::<_, i64>(1)? as u64,
+            session_count: row.get::<_, i64>(2)? as u64,
+            active_runs: row.get::<_, i64>(3)? as u64,
+            completed_runs: row.get::<_, i64>(4)? as u64,
+            prompt_tokens: row.get::<_, i64>(5)? as u64,
+            completion_tokens: row.get::<_, i64>(6)? as u64,
+            total_tokens: row.get::<_, i64>(7)? as u64,
+            average_latency_ms: average_latency_from_row(row, 8)?,
+            estimated_cost_usd: None,
+        };
+    }
+
+    Ok(buckets)
+}
+
+fn load_orchestrator_usage_sessions(
+    connection: &Connection,
+    query: &OrchestratorUsageQuery,
+) -> Result<Vec<OrchestratorUsageSessionRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                sessions.session_ulid,
+                sessions.session_key,
+                sessions.session_label,
+                sessions.principal,
+                sessions.device_id,
+                sessions.channel,
+                sessions.created_at_unix_ms,
+                sessions.updated_at_unix_ms,
+                sessions.last_run_ulid,
+                sessions.archived_at_unix_ms,
+                COUNT(runs.run_ulid),
+                COALESCE(SUM(CASE WHEN runs.state IN ('accepted', 'in_progress') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN runs.completed_at_unix_ms IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(runs.prompt_tokens), 0),
+                COALESCE(SUM(runs.completion_tokens), 0),
+                COALESCE(SUM(runs.total_tokens), 0),
+                AVG(
+                    CASE
+                        WHEN runs.completed_at_unix_ms IS NOT NULL
+                             AND runs.completed_at_unix_ms >= runs.started_at_unix_ms
+                        THEN runs.completed_at_unix_ms - runs.started_at_unix_ms
+                    END
+                ),
+                MAX(runs.started_at_unix_ms)
+            FROM orchestrator_sessions AS sessions
+            INNER JOIN orchestrator_runs AS runs
+                ON runs.session_ulid = sessions.session_ulid
+            WHERE runs.started_at_unix_ms >= ?1
+              AND runs.started_at_unix_ms < ?2
+              AND sessions.principal = ?3
+              AND sessions.device_id = ?4
+              AND ((sessions.channel = ?5) OR (sessions.channel IS NULL AND ?5 IS NULL))
+              AND (?6 = 1 OR sessions.archived_at_unix_ms IS NULL)
+              AND (?7 IS NULL OR sessions.session_ulid = ?7)
+            GROUP BY
+                sessions.session_ulid,
+                sessions.session_key,
+                sessions.session_label,
+                sessions.principal,
+                sessions.device_id,
+                sessions.channel,
+                sessions.created_at_unix_ms,
+                sessions.updated_at_unix_ms,
+                sessions.last_run_ulid,
+                sessions.archived_at_unix_ms
+            ORDER BY
+                COALESCE(SUM(runs.total_tokens), 0) DESC,
+                COUNT(runs.run_ulid) DESC,
+                MAX(runs.started_at_unix_ms) DESC,
+                sessions.session_key ASC
+        "#,
+    )?;
+
+    let mut rows = statement.query(params![
+        query.start_at_unix_ms,
+        query.end_at_unix_ms,
+        query.principal.as_str(),
+        query.device_id.as_str(),
+        query.channel.as_deref(),
+        bool_to_sqlite(query.include_archived),
+        query.session_id.as_deref(),
+    ])?;
+    let mut sessions = Vec::new();
+    while let Some(row) = rows.next()? {
+        sessions.push(map_orchestrator_usage_session_row(row)?);
+    }
+    Ok(sessions)
+}
+
+fn load_orchestrator_usage_session_row(
+    connection: &Connection,
+    query: &OrchestratorUsageQuery,
+    session_id: &str,
+) -> Result<Option<OrchestratorUsageSessionRecord>, JournalError> {
+    let mut scoped_query = query.clone();
+    scoped_query.session_id = Some(session_id.to_owned());
+    load_orchestrator_usage_sessions(connection, &scoped_query).map(|mut rows| rows.pop())
+}
+
+fn load_orchestrator_usage_runs_for_session(
+    connection: &Connection,
+    query: &OrchestratorUsageQuery,
+    session_id: &str,
+    run_limit: usize,
+) -> Result<Vec<OrchestratorUsageRunRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                runs.run_ulid,
+                runs.state,
+                runs.cancel_requested,
+                runs.cancel_reason,
+                runs.prompt_tokens,
+                runs.completion_tokens,
+                runs.total_tokens,
+                runs.started_at_unix_ms,
+                runs.completed_at_unix_ms,
+                runs.updated_at_unix_ms,
+                runs.last_error
+            FROM orchestrator_runs AS runs
+            INNER JOIN orchestrator_sessions AS sessions
+                ON sessions.session_ulid = runs.session_ulid
+            WHERE runs.session_ulid = ?1
+              AND runs.started_at_unix_ms >= ?2
+              AND runs.started_at_unix_ms < ?3
+              AND sessions.principal = ?4
+              AND sessions.device_id = ?5
+              AND ((sessions.channel = ?6) OR (sessions.channel IS NULL AND ?6 IS NULL))
+              AND (?7 = 1 OR sessions.archived_at_unix_ms IS NULL)
+            ORDER BY runs.started_at_unix_ms DESC, runs.run_ulid DESC
+            LIMIT ?8
+        "#,
+    )?;
+
+    let mut rows = statement.query(params![
+        session_id,
+        query.start_at_unix_ms,
+        query.end_at_unix_ms,
+        query.principal.as_str(),
+        query.device_id.as_str(),
+        query.channel.as_deref(),
+        bool_to_sqlite(query.include_archived),
+        run_limit.max(1) as i64,
+    ])?;
+    let mut runs = Vec::new();
+    while let Some(row) = rows.next()? {
+        let completed_at_unix_ms = row.get::<_, Option<i64>>(8)?;
+        let started_at_unix_ms = row.get::<_, i64>(7)?;
+        runs.push(OrchestratorUsageRunRecord {
+            run_id: row.get(0)?,
+            state: row.get(1)?,
+            cancel_requested: row.get::<_, i64>(2)? == 1,
+            cancel_reason: row.get(3)?,
+            prompt_tokens: row.get::<_, i64>(4)? as u64,
+            completion_tokens: row.get::<_, i64>(5)? as u64,
+            total_tokens: row.get::<_, i64>(6)? as u64,
+            started_at_unix_ms,
+            completed_at_unix_ms,
+            updated_at_unix_ms: row.get(9)?,
+            latency_ms: completed_at_unix_ms.and_then(|completed_at| {
+                completed_at.checked_sub(started_at_unix_ms).and_then(nonnegative_i64_to_u64)
+            }),
+            last_error: row.get(10)?,
+        });
+    }
+    Ok(runs)
+}
+
+fn map_orchestrator_usage_session_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<OrchestratorUsageSessionRecord, rusqlite::Error> {
+    let archived_at_unix_ms = row.get::<_, Option<i64>>(9)?;
+    Ok(OrchestratorUsageSessionRecord {
+        session_id: row.get(0)?,
+        session_key: row.get(1)?,
+        session_label: row.get(2)?,
+        principal: row.get(3)?,
+        device_id: row.get(4)?,
+        channel: row.get(5)?,
+        created_at_unix_ms: row.get(6)?,
+        updated_at_unix_ms: row.get(7)?,
+        last_run_id: row.get(8)?,
+        archived: archived_at_unix_ms.is_some(),
+        archived_at_unix_ms,
+        runs: row.get::<_, i64>(10)? as u64,
+        active_runs: row.get::<_, i64>(11)? as u64,
+        completed_runs: row.get::<_, i64>(12)? as u64,
+        prompt_tokens: row.get::<_, i64>(13)? as u64,
+        completion_tokens: row.get::<_, i64>(14)? as u64,
+        total_tokens: row.get::<_, i64>(15)? as u64,
+        average_latency_ms: average_latency_from_row(row, 16)?,
+        latest_started_at_unix_ms: row.get(17)?,
+        estimated_cost_usd: None,
+    })
+}
+
+fn empty_orchestrator_usage_session_record(
+    session: &OrchestratorSessionRecord,
+) -> OrchestratorUsageSessionRecord {
+    OrchestratorUsageSessionRecord {
+        session_id: session.session_id.clone(),
+        session_key: session.session_key.clone(),
+        session_label: session.session_label.clone(),
+        principal: session.principal.clone(),
+        device_id: session.device_id.clone(),
+        channel: session.channel.clone(),
+        created_at_unix_ms: session.created_at_unix_ms,
+        updated_at_unix_ms: session.updated_at_unix_ms,
+        last_run_id: session.last_run_id.clone(),
+        archived: session.archived_at_unix_ms.is_some(),
+        archived_at_unix_ms: session.archived_at_unix_ms,
+        runs: 0,
+        active_runs: 0,
+        completed_runs: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        average_latency_ms: None,
+        latest_started_at_unix_ms: None,
+        estimated_cost_usd: None,
+    }
+}
+
+fn empty_usage_timeline_bucket(
+    query: &OrchestratorUsageQuery,
+    index: usize,
+) -> OrchestratorUsageTimelineBucket {
+    let bucket_start_unix_ms =
+        query.start_at_unix_ms.saturating_add(query.bucket_width_ms.saturating_mul(index as i64));
+    OrchestratorUsageTimelineBucket {
+        bucket_start_unix_ms,
+        bucket_end_unix_ms: bucket_start_unix_ms.saturating_add(query.bucket_width_ms),
+        runs: 0,
+        session_count: 0,
+        active_runs: 0,
+        completed_runs: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        average_latency_ms: None,
+        estimated_cost_usd: None,
+    }
+}
+
+fn usage_bucket_count(query: &OrchestratorUsageQuery) -> usize {
+    let window =
+        query.end_at_unix_ms.saturating_sub(query.start_at_unix_ms).max(query.bucket_width_ms);
+    let quotient = window / query.bucket_width_ms;
+    if window % query.bucket_width_ms == 0 {
+        quotient as usize
+    } else {
+        quotient.saturating_add(1) as usize
+    }
+}
+
+fn average_latency_from_row(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> Result<Option<u64>, rusqlite::Error> {
+    let value = row.get::<_, Option<f64>>(index)?;
+    Ok(value.map(|latency| latency.max(0.0).round() as u64))
+}
+
+fn bool_to_sqlite(value: bool) -> i64 {
+    if value {
+        1
+    } else {
+        0
+    }
+}
+
+fn nonnegative_i64_to_u64(value: i64) -> Option<u64> {
+    (value >= 0).then_some(value as u64)
 }
 
 fn map_cron_job_row(row: &rusqlite::Row<'_>) -> Result<CronJobRecord, rusqlite::Error> {
