@@ -577,6 +577,68 @@ describe("ConsoleApiClient", () => {
     expect(requestUrl(calls[1]?.input)).toBe("/console/v1/diagnostics");
   });
 
+  it("supports the shared logs contract and export path resolution", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        query: {
+          limit: 120,
+          direction: "before",
+          source: "browserd",
+          severity: "error",
+          contains: "relay",
+          start_at_unix_ms: 0,
+          end_at_unix_ms: 100,
+        },
+        records: [],
+        page: { limit: 120, returned: 0, has_more: false },
+        newest_cursor: "100:browserd:1",
+        available_sources: ["browserd", "palyrad"],
+      }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+    const client = new ConsoleApiClient("/api", fetcher);
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+
+    const params = new URLSearchParams({
+      source: "browserd",
+      severity: "error",
+      contains: "relay",
+      start_at_unix_ms: "0",
+      end_at_unix_ms: "100",
+    });
+    await client.listLogs(params);
+
+    expect(requestUrl(calls[1]?.input)).toBe(
+      "/api/console/v1/logs?source=browserd&severity=error&contains=relay&start_at_unix_ms=0&end_at_unix_ms=100",
+    );
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+    expect(client.resolvePath("/console/v1/logs/export?format=csv")).toBe(
+      "/api/console/v1/logs/export?format=csv",
+    );
+  });
+
   it("supports M52 control-plane domains with additive CSRF behavior", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const responses = [

@@ -210,6 +210,41 @@ export interface UsageModelsEnvelope {
   cost_tracking_available: boolean;
 }
 
+export interface LogQueryEcho {
+  limit: number;
+  direction: string;
+  cursor?: string;
+  source?: string;
+  severity?: string;
+  contains?: string;
+  start_at_unix_ms?: number;
+  end_at_unix_ms?: number;
+}
+
+export interface LogRecord {
+  cursor: string;
+  source: string;
+  source_kind: string;
+  severity: string;
+  message: string;
+  timestamp_unix_ms: number;
+  session_id?: string;
+  run_id?: string;
+  device_id?: string;
+  connector_id?: string;
+  event_name?: string;
+  structured_payload?: JsonValue;
+}
+
+export interface LogListEnvelope {
+  contract: ContractDescriptor;
+  query: LogQueryEcho;
+  records: LogRecord[];
+  page: PageInfo;
+  newest_cursor?: string;
+  available_sources: string[];
+}
+
 export interface ChatRunStatusRecord {
   run_id: string;
   session_id: string;
@@ -1206,6 +1241,10 @@ export class ConsoleApiClient {
 
   async listUsageModels(params?: URLSearchParams): Promise<UsageModelsEnvelope> {
     return this.request(buildPathWithQuery("/console/v1/usage/models", params));
+  }
+
+  async listLogs(params?: URLSearchParams): Promise<LogListEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/logs", params));
   }
 
   async resolveChatSession(payload: {

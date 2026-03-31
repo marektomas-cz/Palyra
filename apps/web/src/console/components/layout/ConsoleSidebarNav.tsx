@@ -81,6 +81,8 @@ function legacyNavigationLabel(section: Section): string | null {
       return "Session Catalog";
     case "usage":
       return "Usage and Capacity";
+    case "logs":
+      return "Logs and Runtime Stream";
     case "cron":
       return "Cron";
     case "channels":
@@ -132,6 +134,15 @@ function NavigationGlyph({ section }: { section: Section }) {
           <path d="M8 18v-5" />
           <path d="M12 18V8" />
           <path d="M16 18v-8" />
+        </svg>
+      );
+    case "logs":
+      return (
+        <svg {...commonProps}>
+          <path d="M6 7h12" />
+          <path d="M6 12h8" />
+          <path d="M6 17h12" />
+          <path d="M18 10.5 20.5 12 18 13.5" />
         </svg>
       );
     case "approvals":

@@ -219,6 +219,82 @@ describe("M35 web console app", () => {
     );
   });
 
+  it("renders the shared logs page with filter controls and structured payload detail", async () => {
+    const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestUrl(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (path === "/console/v1/auth/session" && method === "GET") {
+        return jsonResponse({
+          principal: "admin:web-console",
+          device_id: "device-1",
+          channel: "web",
+          csrf_token: "csrf-1",
+          issued_at_unix_ms: 100,
+          expires_at_unix_ms: 300,
+        });
+      }
+
+      if (path.startsWith("/console/v1/logs") && method === "GET") {
+        return jsonResponse({
+          contract: { contract_version: "control-plane.v1" },
+          query: {
+            limit: 120,
+            direction: "before",
+            start_at_unix_ms: 0,
+            end_at_unix_ms: 100,
+          },
+          records: [
+            {
+              cursor: "100:browserd:relay-action-1",
+              source: "browserd",
+              source_kind: "browserd",
+              severity: "error",
+              message: "browser relay failed with token=<redacted>",
+              timestamp_unix_ms: 100,
+              session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+              run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+              event_name: "browser.relay.action",
+              structured_payload: {
+                event: "browser.relay.action",
+                error: "token=<redacted>",
+              },
+            },
+          ],
+          page: { limit: 120, returned: 1, has_more: false },
+          newest_cursor: "100:browserd:relay-action-1",
+          available_sources: ["browserd", "palyrad"],
+        });
+      }
+
+      throw new Error(`Unhandled mocked request: ${method} ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await waitFor(
+      () => {
+        expect(
+          screen.getByRole("heading", { name: "Web Dashboard Operator Surface" }),
+        ).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Logs and Runtime Stream" }));
+
+    await waitFor(
+      () => {
+        expect(screen.getByRole("heading", { name: "Logs" })).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
+    expect(screen.getByText("Auto-follow")).toBeInTheDocument();
+    expect(screen.getByText("browser relay failed with token=<redacted>")).toBeInTheDocument();
+    expect(screen.getByText("browser.relay.action")).toBeInTheDocument();
+  });
+
   it("clears operator-scoped state on sign-out before next sign-in refresh completes", async () => {
     let releaseUserBApprovals: (() => void) | undefined;
     const userBApprovalsReady = new Promise<void>((resolve) => {

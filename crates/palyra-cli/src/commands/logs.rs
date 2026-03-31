@@ -4,10 +4,12 @@ use std::{
     io::{BufRead, BufReader},
 };
 
+use palyra_control_plane as control_plane;
+
 use crate::*;
 
 #[derive(Debug, Serialize)]
-struct LogRecord {
+struct CliLogRecord {
     source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     seq: Option<i64>,
@@ -23,6 +25,20 @@ struct LogRecord {
     message: Option<String>,
 }
 
+impl From<control_plane::LogRecord> for CliLogRecord {
+    fn from(value: control_plane::LogRecord) -> Self {
+        Self {
+            source: value.source,
+            seq: None,
+            event_id: value.event_name,
+            kind: None,
+            timestamp_unix_ms: Some(value.timestamp_unix_ms),
+            line_number: None,
+            message: Some(value.message),
+        }
+    }
+}
+
 enum LogInput {
     Journal { db_path: PathBuf },
     File { source: String, path: PathBuf },
@@ -34,6 +50,11 @@ pub(crate) fn run_logs(
     follow: bool,
     poll_interval_ms: u64,
 ) -> Result<()> {
+    let runtime = build_runtime()?;
+    if let Ok(()) = runtime.block_on(run_console_logs(lines, follow, poll_interval_ms)) {
+        return Ok(());
+    }
+
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for logs command"))?;
     if root_context.prefers_json() && follow {
@@ -49,6 +70,34 @@ pub(crate) fn run_logs(
         LogInput::File { source, path } => {
             run_file_logs(source.as_str(), path.as_path(), lines, follow, poll_interval_ms)
         }
+    }
+}
+
+async fn run_console_logs(lines: usize, follow: bool, poll_interval_ms: u64) -> Result<()> {
+    let context =
+        client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
+    let mut query =
+        control_plane::LogListQuery { limit: Some(lines.clamp(1, 500)), ..Default::default() };
+    let initial = context.client.list_logs(&query).await?;
+    let records = initial.records.into_iter().map(CliLogRecord::from).collect::<Vec<_>>();
+    emit_log_records(records.as_slice())?;
+    if !follow {
+        return Ok(());
+    }
+
+    let sleep_duration = Duration::from_millis(poll_interval_ms.clamp(250, 30_000));
+    let mut cursor = initial.newest_cursor;
+    loop {
+        tokio::time::sleep(sleep_duration).await;
+        query.cursor = cursor.clone();
+        query.direction = cursor.as_ref().map(|_| "after".to_owned());
+        let response = context.client.list_logs(&query).await?;
+        if response.records.is_empty() {
+            continue;
+        }
+        cursor = response.newest_cursor.clone().or(cursor);
+        let records = response.records.into_iter().map(CliLogRecord::from).collect::<Vec<_>>();
+        emit_log_records(records.as_slice())?;
     }
 }
 
@@ -99,7 +148,7 @@ fn run_journal_logs(
     }
 }
 
-fn collect_recent_journal_records(db_path: &Path, limit: usize) -> Result<Vec<LogRecord>> {
+fn collect_recent_journal_records(db_path: &Path, limit: usize) -> Result<Vec<CliLogRecord>> {
     let connection = Connection::open(db_path)
         .with_context(|| format!("failed to open journal database {}", db_path.display()))?;
     let mut statement = connection.prepare(
@@ -117,7 +166,7 @@ fn collect_recent_journal_records(db_path: &Path, limit: usize) -> Result<Vec<Lo
     Ok(records)
 }
 
-fn collect_follow_journal_records(db_path: &Path, after_seq: i64) -> Result<Vec<LogRecord>> {
+fn collect_follow_journal_records(db_path: &Path, after_seq: i64) -> Result<Vec<CliLogRecord>> {
     let connection = Connection::open(db_path)
         .with_context(|| format!("failed to open journal database {}", db_path.display()))?;
     let mut statement = connection.prepare(
@@ -134,9 +183,9 @@ fn collect_follow_journal_records(db_path: &Path, after_seq: i64) -> Result<Vec<
     Ok(records)
 }
 
-fn read_journal_log_record(row: &rusqlite::Row<'_>) -> Result<LogRecord> {
+fn read_journal_log_record(row: &rusqlite::Row<'_>) -> Result<CliLogRecord> {
     let payload_json: String = row.get(4)?;
-    Ok(LogRecord {
+    Ok(CliLogRecord {
         source: "journal".to_owned(),
         seq: Some(row.get(0)?),
         event_id: Some(row.get(1)?),
@@ -172,7 +221,11 @@ fn run_file_logs(
     }
 }
 
-fn collect_recent_file_records(source: &str, path: &Path, limit: usize) -> Result<Vec<LogRecord>> {
+fn collect_recent_file_records(
+    source: &str,
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<CliLogRecord>> {
     let file =
         File::open(path).with_context(|| format!("failed to open log file {}", path.display()))?;
     let reader = BufReader::new(file);
@@ -182,7 +235,7 @@ fn collect_recent_file_records(source: &str, path: &Path, limit: usize) -> Resul
         if lines.len() == limit {
             lines.pop_front();
         }
-        lines.push_back(LogRecord {
+        lines.push_back(CliLogRecord {
             source: source.to_owned(),
             seq: None,
             event_id: None,
@@ -199,7 +252,7 @@ fn collect_follow_file_records(
     source: &str,
     path: &Path,
     after_line_number: usize,
-) -> Result<Vec<LogRecord>> {
+) -> Result<Vec<CliLogRecord>> {
     let file =
         File::open(path).with_context(|| format!("failed to open log file {}", path.display()))?;
     let reader = BufReader::new(file);
@@ -210,7 +263,7 @@ fn collect_follow_file_records(
             continue;
         }
         let line = line.with_context(|| format!("failed to read log file {}", path.display()))?;
-        records.push(LogRecord {
+        records.push(CliLogRecord {
             source: source.to_owned(),
             seq: None,
             event_id: None,
@@ -223,7 +276,7 @@ fn collect_follow_file_records(
     Ok(records)
 }
 
-fn emit_log_records(records: &[LogRecord]) -> Result<()> {
+fn emit_log_records(records: &[CliLogRecord]) -> Result<()> {
     if records.is_empty() {
         return Ok(());
     }
@@ -239,7 +292,7 @@ fn emit_log_records(records: &[LogRecord]) -> Result<()> {
     Ok(())
 }
 
-fn emit_log_record(record: &LogRecord) -> Result<()> {
+fn emit_log_record(record: &CliLogRecord) -> Result<()> {
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for logs command"))?;
     if root_context.prefers_ndjson() {

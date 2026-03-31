@@ -1058,6 +1058,31 @@ impl ControlPlaneClient {
         .await
     }
 
+    pub async fn list_logs(
+        &self,
+        query: &LogListQuery,
+    ) -> Result<LogListEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            build_query_path(
+                "console/v1/logs",
+                vec![
+                    ("limit", query.limit.map(|value| value.to_string())),
+                    ("cursor", query.cursor.clone()),
+                    ("direction", query.direction.clone()),
+                    ("source", query.source.clone()),
+                    ("severity", query.severity.clone()),
+                    ("contains", query.contains.clone()),
+                    ("start_at_unix_ms", query.start_at_unix_ms.map(|value| value.to_string())),
+                    ("end_at_unix_ms", query.end_at_unix_ms.map(|value| value.to_string())),
+                ],
+            ),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
     pub async fn list_devices(&self) -> Result<DeviceListEnvelope, ControlPlaneClientError> {
         self.request_json(Method::GET, "console/v1/devices", None::<&Value>, false).await
     }

@@ -3,6 +3,11 @@ export const CONSOLE_SECTIONS = [
   { id: "chat", label: "Chat", detail: "Primary operator workspace" },
   { id: "sessions", label: "Sessions", detail: "Catalog, lifecycle, and run posture" },
   { id: "usage", label: "Usage", detail: "Capacity, tokens, latency, and cost posture" },
+  {
+    id: "logs",
+    label: "Logs",
+    detail: "Unified runtime stream across palyrad, browserd, and channels",
+  },
   { id: "approvals", label: "Approvals", detail: "Sensitive action gate" },
   { id: "cron", label: "Automation", detail: "Scheduled jobs, runs, and history" },
   { id: "channels", label: "Channels", detail: "Connectors, router, and Discord setup" },

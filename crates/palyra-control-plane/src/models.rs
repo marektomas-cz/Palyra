@@ -402,6 +402,79 @@ pub struct PairingSummaryEnvelope {
     pub channels: Vec<PairingChannelSnapshot>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogListQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogQueryEcho {
+    pub limit: usize,
+    pub direction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogRecord {
+    pub cursor: String,
+    pub source: String,
+    pub source_kind: String,
+    pub severity: String,
+    pub message: String,
+    pub timestamp_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_payload: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListEnvelope {
+    pub contract: ContractDescriptor,
+    pub query: LogQueryEcho,
+    #[serde(default)]
+    pub records: Vec<LogRecord>,
+    pub page: PageInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest_cursor: Option<String>,
+    #[serde(default)]
+    pub available_sources: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePairingMethod {

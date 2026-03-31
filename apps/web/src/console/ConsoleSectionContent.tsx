@@ -8,6 +8,7 @@ import { ChannelsSection } from "./sections/ChannelsSection";
 import { ConfigSection } from "./sections/ConfigSection";
 import { CronSection } from "./sections/CronSection";
 import { MemorySection } from "./sections/MemorySection";
+import { LogsSection } from "./sections/LogsSection";
 import { OperationsSection } from "./sections/OperationsSection";
 import { OverviewSection } from "./sections/OverviewSection";
 import { SecretsSection } from "./sections/SecretsSection";
@@ -41,6 +42,17 @@ export function ConsoleSectionContent({ app }: ConsoleSectionContentProps) {
     case "usage":
       return (
         <UsageSection app={{ api: app.api, setError: app.setError, setNotice: app.setNotice }} />
+      );
+    case "logs":
+      return (
+        <LogsSection
+          app={{
+            api: app.api,
+            setError: app.setError,
+            setNotice: app.setNotice,
+            revealSensitiveValues: app.revealSensitiveValues,
+          }}
+        />
       );
     case "approvals":
       return <ApprovalsSection app={app} />;
