@@ -2329,8 +2329,8 @@ impl GatewayRuntimeState {
     ) -> Result<(Vec<OrchestratorSessionRecord>, Option<String>), Status> {
         let state = Arc::clone(self);
         tokio::task::spawn_blocking(move || state.list_orchestrator_sessions_blocking(&request))
-        .await
-        .map_err(|_| Status::internal("orchestrator session list worker panicked"))?
+            .await
+            .map_err(|_| Status::internal("orchestrator session list worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]
