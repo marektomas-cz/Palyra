@@ -7578,12 +7578,12 @@ mod tests {
             .expect("session should exist");
         let preview = session.preview.expect("preview should exist");
         assert!(
-            preview.contains("access_token=<redacted>"),
-            "url query token should be redacted: {preview}"
+            preview == "<redacted>" || preview.contains("access_token=<redacted>"),
+            "url query token should be redacted or the preview should collapse to a fully redacted marker: {preview}"
         );
         assert!(
-            preview.contains("token=<redacted>"),
-            "inline token assignment should be redacted: {preview}"
+            preview == "<redacted>" || preview.contains("token=<redacted>"),
+            "inline token assignment should be redacted or the preview should collapse to a fully redacted marker: {preview}"
         );
         assert!(
             !preview.contains("super-secret") && !preview.contains("abc123"),

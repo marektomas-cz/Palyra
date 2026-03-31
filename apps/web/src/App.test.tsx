@@ -1987,19 +1987,30 @@ type SessionCatalogTestRecord = {
   pending_approvals: number;
 };
 
-type SessionCatalogTestRecordOverrides =
-  Pick<
-    SessionCatalogTestRecord,
-    | "session_id"
-    | "session_key"
-    | "principal"
-    | "device_id"
-    | "created_at_unix_ms"
-    | "updated_at_unix_ms"
-    | "title"
-    | "title_source"
-  > &
-    Partial<Omit<SessionCatalogTestRecord, "session_id" | "session_key" | "principal" | "device_id" | "created_at_unix_ms" | "updated_at_unix_ms" | "title" | "title_source">>;
+type SessionCatalogTestRecordOverrides = Pick<
+  SessionCatalogTestRecord,
+  | "session_id"
+  | "session_key"
+  | "principal"
+  | "device_id"
+  | "created_at_unix_ms"
+  | "updated_at_unix_ms"
+  | "title"
+  | "title_source"
+> &
+  Partial<
+    Omit<
+      SessionCatalogTestRecord,
+      | "session_id"
+      | "session_key"
+      | "principal"
+      | "device_id"
+      | "created_at_unix_ms"
+      | "updated_at_unix_ms"
+      | "title"
+      | "title_source"
+    >
+  >;
 
 function buildSessionCatalogRecord(
   overrides: SessionCatalogTestRecordOverrides,
@@ -2032,8 +2043,7 @@ function buildSessionCatalogListEnvelope(sessions: SessionCatalogTestRecord[]) {
       active_sessions: sessions.filter((session) => session.archived !== true).length,
       archived_sessions: sessions.filter((session) => session.archived === true).length,
       sessions_with_pending_approvals: sessions.filter(
-        (session) =>
-          typeof session.pending_approvals === "number" && session.pending_approvals > 0,
+        (session) => typeof session.pending_approvals === "number" && session.pending_approvals > 0,
       ).length,
       sessions_with_active_runs: sessions.filter((session) => {
         const state = typeof session.last_run_state === "string" ? session.last_run_state : "";

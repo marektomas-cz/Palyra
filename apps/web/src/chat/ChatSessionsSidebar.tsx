@@ -97,8 +97,7 @@ export function ChatSessionsSidebar({
           <h3>{selectedSession?.title ?? "None"}</h3>
           {selectedSession !== null && (
             <p className="chat-muted">
-              {selectedSession.title_source} ·{" "}
-              {selectedSession.archived ? "archived" : "active"} ·{" "}
+              {selectedSession.title_source} · {selectedSession.archived ? "archived" : "active"} ·{" "}
               {shortId(selectedSession.session_id)}
             </p>
           )}
