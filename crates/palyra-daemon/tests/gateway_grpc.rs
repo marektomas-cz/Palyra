@@ -7910,6 +7910,10 @@ fn sample_run_stream_request_with_ids(
         reset_session: false,
         require_existing: false,
         tool_approval_response: None,
+        origin_kind: String::new(),
+        origin_run_id: None,
+        parameter_delta_json: Vec::new(),
+        queued_input_id: None,
     }
 }
 
@@ -7970,6 +7974,10 @@ fn sample_tool_approval_response_request_for_run_with_scope(
             decision_scope,
             decision_scope_ttl_ms,
         }),
+        origin_kind: String::new(),
+        origin_run_id: None,
+        parameter_delta_json: Vec::new(),
+        queued_input_id: None,
     }
 }
 
