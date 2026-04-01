@@ -1,4 +1,4 @@
-import { Button } from "@heroui/react";
+import { Button, Chip } from "@heroui/react";
 
 import {
   ActionButton,
@@ -9,7 +9,7 @@ import {
 } from "../console/components/ui";
 import type { SessionCatalogRecord } from "../consoleApi";
 
-import { shortId } from "./chatShared";
+import { buildSessionLineageHint, describeBranchState, shortId } from "./chatShared";
 
 type ChatSessionsSidebarProps = {
   sessionsBusy: boolean;
@@ -101,9 +101,24 @@ export function ChatSessionsSidebar({
               {shortId(selectedSession.session_id)}
             </p>
           )}
+          {selectedSession !== null ? (
+            <div className="workspace-chip-row">
+              <Chip size="sm" variant="secondary">
+                {describeBranchState(selectedSession.branch_state)}
+              </Chip>
+              {selectedSession.last_run_state !== undefined ? (
+                <Chip size="sm" variant="secondary">
+                  Last run {selectedSession.last_run_state}
+                </Chip>
+              ) : null}
+            </div>
+          ) : null}
           {selectedSession?.preview !== undefined && (
             <p className="chat-muted">{selectedSession.preview}</p>
           )}
+          {selectedSession !== null ? (
+            <p className="chat-muted">{buildSessionLineageHint(selectedSession)}</p>
+          ) : null}
         </div>
         <TextInputField
           disabled={selectedSession === null || sessionsBusy}
@@ -163,6 +178,17 @@ export function ChatSessionsSidebar({
                 <span className="flex w-full flex-col items-start gap-1 text-left">
                   <span className="chat-session-item__title">{session.title}</span>
                   {session.preview !== undefined && <small>{session.preview}</small>}
+                  <span className="chat-session-item__meta">
+                    <Chip size="sm" variant="secondary">
+                      {describeBranchState(session.branch_state)}
+                    </Chip>
+                    {session.pending_approvals > 0 ? (
+                      <Chip color="warning" size="sm" variant="soft">
+                        {session.pending_approvals} approval
+                        {session.pending_approvals === 1 ? "" : "s"}
+                      </Chip>
+                    ) : null}
+                  </span>
                   <small>
                     Updated {new Date(session.updated_at_unix_ms).toLocaleTimeString()} ·{" "}
                     {session.archived ? "archived" : session.title_source} ·{" "}

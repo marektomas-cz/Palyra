@@ -11,7 +11,14 @@ import {
   TextArea,
   TextField,
 } from "@heroui/react";
-import type { FormEvent, HTMLAttributes, ReactNode } from "react";
+import type {
+  ClipboardEventHandler,
+  DragEventHandler,
+  FormEvent,
+  HTMLAttributes,
+  ReactNode,
+  Ref,
+} from "react";
 
 import { joinClassNames } from "./utils";
 
@@ -31,6 +38,12 @@ type TextInputFieldProps = {
 
 type TextAreaFieldProps = Omit<TextInputFieldProps, "type"> & {
   rows?: number;
+  textareaRef?: Ref<HTMLTextAreaElement>;
+  onPaste?: ClipboardEventHandler<HTMLTextAreaElement>;
+  onDrop?: DragEventHandler<HTMLTextAreaElement>;
+  onDragOver?: DragEventHandler<HTMLTextAreaElement>;
+  onDragEnter?: DragEventHandler<HTMLTextAreaElement>;
+  onDragLeave?: DragEventHandler<HTMLTextAreaElement>;
 };
 
 type SelectFieldOption = {
@@ -118,18 +131,30 @@ export function TextAreaField({
   autoComplete,
   name,
   rows = 4,
+  textareaRef,
+  onPaste,
+  onDrop,
+  onDragOver,
+  onDragEnter,
+  onDragLeave,
 }: TextAreaFieldProps) {
   return (
     <TextField className="workspace-field" isDisabled={disabled} isRequired={required} name={name}>
       <Label>{label}</Label>
       <TextArea
         autoComplete={autoComplete}
+        ref={textareaRef}
         placeholder={placeholder}
         readOnly={readOnly}
         rows={rows}
         variant="secondary"
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
+        onDragEnter={onDragEnter}
+        onDragLeave={onDragLeave}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        onPaste={onPaste}
       />
       {description !== undefined && <Description>{description}</Description>}
     </TextField>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ConsoleApiClient, SessionCatalogRecord } from "../consoleApi";
 
@@ -26,7 +26,9 @@ type UseChatSessionsResult = {
   includeArchived: boolean;
   setIncludeArchived: (value: boolean) => void;
   refreshSessions: (ensureSession: boolean) => Promise<void>;
+  upsertSession: (session: SessionCatalogRecord, options?: { select?: boolean }) => void;
   createSession: () => Promise<void>;
+  createSessionWithLabel: (sessionLabel?: string) => Promise<string | null>;
   renameSession: () => Promise<void>;
   resetSession: () => Promise<boolean>;
   archiveSession: () => Promise<boolean>;
@@ -81,7 +83,7 @@ export function useChatSessions({
     void refreshSessions(false);
   }, [includeArchived, searchQuery]);
 
-  async function refreshSessions(ensureSession: boolean): Promise<void> {
+  const refreshSessions = useCallback(async (ensureSession: boolean): Promise<void> => {
     setSessionsBusy(true);
     try {
       const params = new URLSearchParams();
@@ -134,15 +136,15 @@ export function useChatSessions({
     } finally {
       setSessionsBusy(false);
     }
-  }
+  }, [api, includeArchived, newSessionLabel, preferredSessionId, searchQuery, setError, setNotice]);
 
-  async function createSession(): Promise<void> {
+  const createSessionWithLabel = useCallback(async (sessionLabel?: string): Promise<string | null> => {
     setError(null);
     setNotice(null);
     setSessionsBusy(true);
     try {
       const response = await api.resolveChatSession({
-        session_label: emptyToUndefined(newSessionLabel),
+        session_label: emptyToUndefined(sessionLabel ?? newSessionLabel),
       });
       const createdRecord = await api.getSessionCatalogEntry(response.session.session_id);
       setSessions((previous) => {
@@ -154,14 +156,33 @@ export function useChatSessions({
       setActiveSessionId(createdRecord.session.session_id);
       setNewSessionLabel("");
       setNotice("Chat session created.");
+      return createdRecord.session.session_id;
     } catch (error) {
       setError(toErrorMessage(error));
+      return null;
     } finally {
       setSessionsBusy(false);
     }
-  }
+  }, [api, newSessionLabel, setError, setNotice]);
 
-  async function renameSession(): Promise<void> {
+  const createSession = useCallback(async (): Promise<void> => {
+    await createSessionWithLabel(newSessionLabel);
+  }, [createSessionWithLabel, newSessionLabel]);
+
+  const upsertSession = useCallback((
+    session: SessionCatalogRecord,
+    options?: { select?: boolean },
+  ): void => {
+    setSessions((previous) => {
+      const without = previous.filter((entry) => entry.session_id !== session.session_id);
+      return [session, ...without];
+    });
+    if (options?.select) {
+      setActiveSessionId(session.session_id);
+    }
+  }, []);
+
+  const renameSession = useCallback(async (): Promise<void> => {
     if (activeSessionId.trim().length === 0) {
       setError("Select a session first.");
       return;
@@ -192,9 +213,9 @@ export function useChatSessions({
     } finally {
       setSessionsBusy(false);
     }
-  }
+  }, [activeSessionId, api, sessionLabelDraft, setError, setNotice]);
 
-  async function resetSession(): Promise<boolean> {
+  const resetSession = useCallback(async (): Promise<boolean> => {
     if (activeSessionId.trim().length === 0) {
       setError("Select a session first.");
       return false;
@@ -221,9 +242,9 @@ export function useChatSessions({
     } finally {
       setSessionsBusy(false);
     }
-  }
+  }, [activeSessionId, api, setError, setNotice]);
 
-  async function archiveSession(): Promise<boolean> {
+  const archiveSession = useCallback(async (): Promise<boolean> => {
     if (activeSessionId.trim().length === 0) {
       setError("Select a session first.");
       return false;
@@ -243,7 +264,7 @@ export function useChatSessions({
     } finally {
       setSessionsBusy(false);
     }
-  }
+  }, [activeSessionId, api, setError, setNotice]);
 
   return {
     sessionsBusy,
@@ -260,7 +281,9 @@ export function useChatSessions({
     includeArchived,
     setIncludeArchived,
     refreshSessions,
+    upsertSession,
     createSession,
+    createSessionWithLabel,
     renameSession,
     resetSession,
     archiveSession,

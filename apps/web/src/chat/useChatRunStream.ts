@@ -33,6 +33,7 @@ import {
   retainTranscriptWindow,
   toErrorMessage,
   type ApprovalDraft,
+  type TranscriptAttachmentSummary,
   type TranscriptEntry,
 } from "./chatShared";
 
@@ -42,6 +43,17 @@ type UseChatRunStreamArgs = {
   sessionLabelDraft: string;
   setError: (next: string | null) => void;
   setNotice: (next: string | null) => void;
+};
+
+export type ChatSendRequest = {
+  text?: string;
+  origin_kind?: string;
+  origin_run_id?: string;
+  parameter_delta?: JsonValue;
+  queued_input_id?: string;
+  attachments?: Array<{ artifact_id: string }>;
+  attachment_summaries?: TranscriptAttachmentSummary[];
+  clearComposer?: boolean;
 };
 
 type UseChatRunStreamResult = {
@@ -62,13 +74,17 @@ type UseChatRunStreamResult = {
   runIds: string[];
   hiddenTranscriptItems: number;
   visibleTranscript: TranscriptEntry[];
-  sendMessage: (onStreamComplete: () => Promise<void>) => Promise<void>;
+  sendMessage: (
+    onStreamComplete: () => Promise<void>,
+    request?: ChatSendRequest,
+  ) => Promise<boolean>;
   cancelStreaming: () => void;
   clearTranscriptState: () => void;
   openRunDetails: (runId: string) => void;
   closeRunDrawer: () => void;
   refreshRunDetails: () => void;
   setRunDrawerId: (runId: string) => void;
+  appendLocalEntry: (entry: Omit<TranscriptEntry, "id" | "created_at_unix_ms">) => void;
   updateApprovalDraftValue: (approvalId: string, next: ApprovalDraft) => void;
   decideInlineApproval: (approvalId: string, approved: boolean) => Promise<void>;
   dispose: () => void;
@@ -174,31 +190,40 @@ export function useChatRunStream({
     setApprovalDrafts({});
   }
 
-  async function sendMessage(onStreamComplete: () => Promise<void>): Promise<void> {
+  async function sendMessage(
+    onStreamComplete: () => Promise<void>,
+    request?: ChatSendRequest,
+  ): Promise<boolean> {
     if (activeSessionId.trim().length === 0) {
       setError("Select or create a chat session before sending a message.");
-      return;
+      return false;
     }
-    const trimmed = composerText.trim();
+    const trimmed = (request?.text ?? composerText).trim();
     if (trimmed.length === 0) {
       setError("Message cannot be empty.");
-      return;
+      return false;
     }
     if (streaming) {
       setError("A stream is already active. Cancel it first.");
-      return;
+      return false;
     }
 
     setError(null);
     setNotice(null);
-    setComposerText("");
+    if (request?.clearComposer !== false) {
+      setComposerText("");
+    }
     appendTranscriptEntry({
       id: `user-${Date.now()}`,
       kind: "user",
       created_at_unix_ms: Date.now(),
       session_id: activeSessionId,
-      title: "You",
+      title:
+        request?.attachment_summaries !== undefined && request.attachment_summaries.length > 0
+          ? `You · ${request.attachment_summaries.length} attachment${request.attachment_summaries.length === 1 ? "" : "s"}`
+          : "You",
       text: trimmed,
+      attachments: request?.attachment_summaries,
     });
 
     const controller = new AbortController();
@@ -211,6 +236,11 @@ export function useChatRunStream({
           text: trimmed,
           allow_sensitive_tools: allowSensitiveTools,
           session_label: emptyToUndefined(sessionLabelDraft),
+          origin_kind: request?.origin_kind,
+          origin_run_id: request?.origin_run_id,
+          parameter_delta: request?.parameter_delta,
+          queued_input_id: request?.queued_input_id,
+          attachments: request?.attachments,
         },
         {
           signal: controller.signal,
@@ -219,6 +249,7 @@ export function useChatRunStream({
       );
       flushPendingStreamUpdates();
       await onStreamComplete();
+      return true;
     } catch (error) {
       flushPendingStreamUpdates();
       if (isAbortError(error)) {
@@ -226,6 +257,7 @@ export function useChatRunStream({
       } else {
         setError(toErrorMessage(error));
       }
+      return false;
     } finally {
       if (streamAbortRef.current === controller) {
         streamAbortRef.current = null;
@@ -567,6 +599,14 @@ export function useChatRunStream({
     setTranscript(nextTranscript);
   }
 
+  function appendLocalEntry(entry: Omit<TranscriptEntry, "id" | "created_at_unix_ms">): void {
+    appendTranscriptEntry({
+      ...entry,
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      created_at_unix_ms: Date.now(),
+    });
+  }
+
   function updateApprovalDraft(
     approvalId: string,
     mutator: (draft: ApprovalDraft) => ApprovalDraft,
@@ -686,6 +726,7 @@ export function useChatRunStream({
     closeRunDrawer,
     refreshRunDetails,
     setRunDrawerId,
+    appendLocalEntry,
     updateApprovalDraftValue,
     decideInlineApproval,
     dispose,

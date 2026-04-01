@@ -1,12 +1,16 @@
 import { Chip } from "@heroui/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import type { ConsoleApiClient } from "../consoleApi";
+import type {
+  ChatPinRecord,
+  ChatQueuedInputRecord,
+  ChatTranscriptRecord,
+  ConsoleApiClient,
+  JsonValue,
+} from "../consoleApi";
 import {
   ActionButton,
-  EmptyState,
-  KeyValueList,
   PageHeader,
   SectionCard,
   StatusChip,
@@ -14,10 +18,33 @@ import {
 } from "../console/components/ui";
 
 import { ChatComposer } from "./ChatComposer";
-import { ChatRunDrawer } from "./ChatRunDrawer";
+import {
+  ChatInspectorColumn,
+  type DetailPanelState,
+  type TranscriptSearchMatch,
+} from "./ChatInspectorColumn";
 import { ChatSessionsSidebar } from "./ChatSessionsSidebar";
 import { ChatTranscript } from "./ChatTranscript";
-import { shortId } from "./chatShared";
+import {
+  buildDetailFromLiveEntry,
+  buildDetailFromSearchMatch,
+  buildDetailFromTranscriptRecord,
+  downloadTextFile,
+  uploadComposerAttachments,
+} from "./chatConsoleUtils";
+import {
+  CHAT_SLASH_COMMANDS,
+  buildContextBudgetSummary,
+  buildSessionLineageHint,
+  describeBranchState,
+  emptyToUndefined,
+  parseSlashCommand,
+  prettifyEventType,
+  shortId,
+  toErrorMessage,
+  type ComposerAttachment,
+  type TranscriptEntry,
+} from "./chatShared";
 import { useChatRunStream } from "./useChatRunStream";
 import { useChatSessions } from "./useChatSessions";
 
@@ -38,7 +65,27 @@ export function ChatConsolePanel({
   const preferredSessionId = searchParams.get("sessionId");
   const preferredRunId = searchParams.get("runId");
   const deepLinkedRunRef = useRef<string | null>(null);
+  const sessionSwitchRef = useRef<string>("");
+  const transcriptRequestSeqRef = useRef(0);
+  const transcriptSearchSeqRef = useRef(0);
+
   const [runActionBusy, setRunActionBusy] = useState(false);
+  const [commandBusy, setCommandBusy] = useState<string | null>(null);
+  const [transcriptBusy, setTranscriptBusy] = useState(false);
+  const [transcriptRecords, setTranscriptRecords] = useState<ChatTranscriptRecord[]>([]);
+  const [sessionPins, setSessionPins] = useState<ChatPinRecord[]>([]);
+  const [queuedInputs, setQueuedInputs] = useState<ChatQueuedInputRecord[]>([]);
+  const [transcriptSearchQuery, setTranscriptSearchQuery] = useState("");
+  const [transcriptSearchBusy, setTranscriptSearchBusy] = useState(false);
+  const [transcriptSearchResults, setTranscriptSearchResults] = useState<TranscriptSearchMatch[]>(
+    [],
+  );
+  const [detailPanel, setDetailPanel] = useState<DetailPanelState | null>(null);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [exportBusy, setExportBusy] = useState<"json" | "markdown" | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+
   const sessions = useChatSessions({
     api,
     setError,
@@ -71,6 +118,7 @@ export function ChatConsolePanel({
     closeRunDrawer,
     refreshRunDetails,
     setRunDrawerId,
+    appendLocalEntry,
     updateApprovalDraftValue,
     decideInlineApproval,
     dispose,
@@ -83,16 +131,38 @@ export function ChatConsolePanel({
   });
 
   const pendingApprovalCount = useMemo(
-    () =>
-      visibleTranscript.filter(
-        (entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string",
-      ).length,
+    () => visibleTranscript.filter((entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string").length,
     [visibleTranscript],
   );
   const a2uiSurfaces = useMemo(() => Object.keys(a2uiDocuments), [a2uiDocuments]);
   const inspectorVisible = runDrawerOpen || runIds.length > 0;
   const actionableRunId =
     activeRunId ?? (runDrawerId.trim().length > 0 ? runDrawerId.trim() : null) ?? runIds[0] ?? null;
+  const toolPayloadCount = useMemo(() => visibleTranscript.filter((entry) => entry.payload !== undefined).length, [visibleTranscript]);
+  const recentTranscriptRecords = useMemo(() => [...transcriptRecords].slice(-8).reverse(), [transcriptRecords]);
+  const deferredComposerText = useDeferredValue(composerText);
+  const deferredSearchQuery = useDeferredValue(transcriptSearchQuery);
+  const parsedSlashCommand = useMemo(() => parseSlashCommand(deferredComposerText), [deferredComposerText]);
+  const showSlashPalette = deferredComposerText.trim().startsWith("/");
+  const slashQuery = useMemo(() => {
+    if (!showSlashPalette) {
+      return "";
+    }
+    return deferredComposerText.trim().slice(1).trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+  }, [deferredComposerText, showSlashPalette]);
+  const slashCommandMatches = useMemo(
+    () => (slashQuery.length === 0 || slashQuery === "help" ? CHAT_SLASH_COMMANDS : CHAT_SLASH_COMMANDS.filter((command) => command.name.includes(slashQuery))),
+    [slashQuery],
+  );
+  const selectedSessionLineage = useMemo(() => buildSessionLineageHint(sessions.selectedSession), [sessions.selectedSession]);
+  const contextBudget = useMemo(
+    () => buildContextBudgetSummary({
+      baseline_tokens: Math.max(sessions.selectedSession?.total_tokens ?? 0, runStatus?.total_tokens ?? 0),
+      draft_text: composerText,
+      attachments,
+    }),
+    [attachments, composerText, runStatus?.total_tokens, sessions.selectedSession?.total_tokens],
+  );
 
   useEffect(() => {
     void sessions.refreshSessions(true);
@@ -123,12 +193,69 @@ export function ChatConsolePanel({
     openRunDetails(preferredRunId);
   }, [openRunDetails, preferredRunId, preferredSessionId, sessions.activeSessionId]);
 
+  const refreshSessionTranscript = useCallback(async () => {
+    const sessionId = sessions.activeSessionId.trim();
+    transcriptRequestSeqRef.current += 1;
+    const requestSeq = transcriptRequestSeqRef.current;
+
+    if (sessionId.length === 0) {
+      setTranscriptRecords([]);
+      setSessionPins([]);
+      setQueuedInputs([]);
+      return;
+    }
+
+    setTranscriptBusy(true);
+    try {
+      const response = await api.getSessionTranscript(sessionId);
+      if (requestSeq !== transcriptRequestSeqRef.current) {
+        return;
+      }
+      sessions.upsertSession(response.session);
+      setTranscriptRecords(response.records);
+      setSessionPins(response.pins);
+      setQueuedInputs(response.queued_inputs);
+    } catch (error) {
+      if (requestSeq === transcriptRequestSeqRef.current) {
+        setError(toErrorMessage(error));
+      }
+    } finally {
+      if (requestSeq === transcriptRequestSeqRef.current) {
+        setTranscriptBusy(false);
+      }
+    }
+  }, [api, sessions.activeSessionId, sessions.upsertSession, setError]);
+
+  useEffect(() => {
+    const sessionId = sessions.activeSessionId.trim();
+    if (sessionId.length === 0) {
+      sessionSwitchRef.current = "";
+      setTranscriptRecords([]);
+      setSessionPins([]);
+      setQueuedInputs([]);
+      setTranscriptSearchResults([]);
+      setDetailPanel(null);
+      setAttachments([]);
+      return;
+    }
+
+    if (sessionSwitchRef.current.length > 0 && sessionSwitchRef.current !== sessionId) {
+      clearTranscriptState();
+      setDetailPanel(null);
+      setTranscriptSearchResults([]);
+      setAttachments([]);
+    }
+    sessionSwitchRef.current = sessionId;
+    void refreshSessionTranscript();
+  }, [clearTranscriptState, refreshSessionTranscript, sessions.activeSessionId]);
+
   async function resetSessionAndTranscript(): Promise<void> {
     const resetApplied = await sessions.resetSession();
     if (!resetApplied) {
       return;
     }
-    clearTranscriptState();
+    clearTranscriptState(); setDetailPanel(null); setTranscriptSearchResults([]); setAttachments([]);
+    void refreshSessionTranscript();
     setNotice("Session reset applied. Local transcript cleared.");
   }
 
@@ -137,7 +264,7 @@ export function ChatConsolePanel({
     if (!archived) {
       return;
     }
-    clearTranscriptState();
+    clearTranscriptState(); setDetailPanel(null); setTranscriptSearchResults([]); setAttachments([]);
     setNotice("Session archived. Local transcript cleared.");
   }
 
@@ -159,6 +286,7 @@ export function ChatConsolePanel({
       if (runDrawerOpen && runDrawerId.trim() === targetRunId) {
         refreshRunDetails();
       }
+      void refreshSessionTranscript();
     } catch (error) {
       setError(error instanceof Error ? error.message : "Unexpected failure.");
     } finally {
@@ -166,8 +294,419 @@ export function ChatConsolePanel({
     }
   }
 
+  async function handleComposerSubmit(): Promise<void> {
+    const command = parseSlashCommand(composerText);
+    if (command !== null) {
+      await executeSlashCommand(command);
+      return;
+    }
+
+    const didSend = await sendMessage(
+      async () => {
+        await Promise.all([sessions.refreshSessions(false), refreshSessionTranscript()]);
+      },
+      {
+        attachments: attachments.map((attachment) => ({ artifact_id: attachment.artifact_id })),
+        attachment_summaries: attachments.map((attachment) => ({
+          id: attachment.local_id,
+          filename: attachment.filename,
+          kind: attachment.kind,
+          size_bytes: attachment.size_bytes,
+          budget_tokens: attachment.budget_tokens,
+          preview_url: attachment.preview_url,
+        })),
+      },
+    );
+
+    if (didSend) {
+      setAttachments([]);
+    }
+  }
+
+  async function executeSlashCommand(command: NonNullable<ReturnType<typeof parseSlashCommand>>) {
+    if (commandBusy !== null) {
+      setError("Another chat command is already running.");
+      return;
+    }
+
+    switch (command.name) {
+      case "help":
+        setComposerText("/");
+        setNotice("Slash command help is open in the composer.");
+        return;
+      case "new":
+        await createNewSession(command.args);
+        return;
+      case "reset":
+        await resetSessionAndTranscript();
+        return;
+      case "retry":
+        await retryLatestTurn();
+        return;
+      case "branch":
+        await branchCurrentSession(command.args);
+        return;
+      case "queue":
+        if (command.args.length === 0) {
+          setError("Provide queued text after /queue.");
+          return;
+        }
+        await queueFollowUpText(command.args);
+        return;
+      case "history":
+        sessions.setSearchQuery(command.args);
+        setNotice(
+          command.args.trim().length > 0
+            ? `Session history filtered by "${command.args.trim()}".`
+            : "Session history filter cleared.",
+        );
+        return;
+      case "resume":
+        await resumeSession(command.args);
+        return;
+      case "attach":
+        if (sessions.activeSessionId.trim().length === 0) {
+          setError("Select or create a session before attaching files.");
+          return;
+        }
+        attachmentInputRef.current?.click();
+        setNotice("Attachment picker opened for the active session.");
+        return;
+      case "usage":
+        setNotice(
+          `Estimated context ${contextBudget.label}; branch ${describeBranchState(sessions.selectedSession?.branch_state ?? "missing")}; ${transcriptRecords.length} persisted transcript record${transcriptRecords.length === 1 ? "" : "s"}.`,
+        );
+        return;
+      case "compact":
+        setNotice(
+          "Compaction lands in a later phase. In Phase 2, use retry, branch, search, or export to keep long sessions manageable.",
+        );
+        return;
+      case "search":
+        if (command.args.length === 0) {
+          setError("Provide a search term after /search.");
+          return;
+        }
+        setTranscriptSearchQuery(command.args);
+        await searchTranscript(command.args);
+        return;
+      case "export":
+        await exportTranscript(
+          command.args.trim().toLowerCase() === "markdown" || command.args.trim().toLowerCase() === "md"
+            ? "markdown"
+            : "json",
+        );
+        return;
+      default:
+        setError("Unsupported slash command.");
+    }
+  }
+
+  async function createNewSession(requestedLabel?: string): Promise<void> {
+    setError(null);
+    setNotice(null);
+    const createdSessionId = await sessions.createSessionWithLabel(requestedLabel);
+    if (createdSessionId === null) {
+      return;
+    }
+    clearTranscriptState();
+    setDetailPanel(null);
+    setTranscriptSearchResults([]);
+    setAttachments([]);
+    setComposerText("");
+    setNotice(
+      requestedLabel !== undefined && requestedLabel.trim().length > 0
+        ? `Created a fresh session: ${requestedLabel.trim()}.`
+        : "Created a fresh session.",
+    );
+  }
+
+  async function resumeSession(rawTarget: string): Promise<void> {
+    const target = rawTarget.trim();
+    if (target.length === 0) {
+      setError("Usage: /resume <session-id-or-key>");
+      return;
+    }
+    const matchedSession =
+      sessions.sortedSessions.find((session) => session.session_id === target) ??
+      sessions.sortedSessions.find((session) => session.session_key === target) ??
+      sessions.sortedSessions.find((session) => session.title.toLowerCase() === target.toLowerCase()) ??
+      null;
+    if (matchedSession === null) {
+      setError(`No loaded session matches "${target}". Use /history first if needed.`);
+      return;
+    }
+    sessions.setActiveSessionId(matchedSession.session_id);
+    setComposerText("");
+    setNotice(`Resumed session ${matchedSession.title}.`);
+  }
+
+  async function retryLatestTurn(): Promise<void> {
+    const sessionId = sessions.activeSessionId.trim();
+    if (sessionId.length === 0) {
+      setError("Select a session before retrying.");
+      return;
+    }
+
+    setCommandBusy("retry");
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await api.prepareRetry(sessionId);
+      const didSend = await sendMessage(
+        async () => {
+          await Promise.all([sessions.refreshSessions(false), refreshSessionTranscript()]);
+        },
+        {
+          text: response.text,
+          origin_kind: response.origin_kind,
+          origin_run_id: response.origin_run_id,
+          parameter_delta: response.parameter_delta,
+        },
+      );
+      if (didSend) {
+        appendLocalEntry({
+          kind: "status",
+          session_id: sessionId,
+          run_id: response.origin_run_id,
+          title: "Retry requested",
+          text: `Replayed the latest user turn from ${shortId(response.origin_run_id)}.`,
+          payload: response.parameter_delta,
+        });
+      }
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setCommandBusy(null);
+    }
+  }
+
+  async function branchCurrentSession(requestedLabel?: string): Promise<void> {
+    const sessionId = sessions.activeSessionId.trim();
+    if (sessionId.length === 0) {
+      setError("Select a session before branching.");
+      return;
+    }
+
+    setCommandBusy("branch");
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await api.branchSession(sessionId, {
+        session_label: emptyToUndefined(requestedLabel ?? ""),
+      });
+      sessions.upsertSession(response.session, { select: true });
+      clearTranscriptState();
+      setDetailPanel(null);
+      setAttachments([]);
+      setComposerText("");
+      await Promise.all([sessions.refreshSessions(false), refreshSessionTranscript()]);
+      setNotice(
+        `Branch ready: ${response.session.title} from run ${shortId(response.source_run_id)}.`,
+      );
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setCommandBusy(null);
+    }
+  }
+
+  async function queueFollowUpText(text: string): Promise<void> {
+    const targetRunId = actionableRunId;
+    if (targetRunId === null || targetRunId.trim().length === 0) {
+      setError("No active run is available for queued follow-up.");
+      return;
+    }
+
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      setError("Queued follow-up cannot be empty.");
+      return;
+    }
+
+    setCommandBusy("queue");
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await api.queueFollowUp(targetRunId, { text: trimmed });
+      appendLocalEntry({
+        kind: "status",
+        run_id: targetRunId,
+        session_id: sessions.activeSessionId,
+        title: "Queued follow-up",
+        text: `Queued input ${shortId(response.queued_input.queued_input_id)} for ${shortId(targetRunId)}.`,
+        payload: response.queued_input as unknown as JsonValue,
+        status: "queued",
+      });
+      setComposerText("");
+      await refreshSessionTranscript();
+      setNotice("Queued follow-up stored.");
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setCommandBusy(null);
+    }
+  }
+
+  async function searchTranscript(query = transcriptSearchQuery): Promise<void> {
+    const sessionId = sessions.activeSessionId.trim();
+    const trimmed = query.trim();
+    if (sessionId.length === 0) {
+      setError("Select a session before searching the transcript.");
+      return;
+    }
+    if (trimmed.length === 0) {
+      setTranscriptSearchResults([]);
+      return;
+    }
+
+    transcriptSearchSeqRef.current += 1;
+    const requestSeq = transcriptSearchSeqRef.current;
+    setTranscriptSearchBusy(true);
+    setError(null);
+    try {
+      const response = await api.searchSessionTranscript(sessionId, trimmed);
+      if (requestSeq !== transcriptSearchSeqRef.current) {
+        return;
+      }
+      sessions.upsertSession(response.session);
+      setTranscriptSearchResults(response.matches);
+    } catch (error) {
+      if (requestSeq === transcriptSearchSeqRef.current) {
+        setError(toErrorMessage(error));
+      }
+    } finally {
+      if (requestSeq === transcriptSearchSeqRef.current) {
+        setTranscriptSearchBusy(false);
+      }
+    }
+  }
+
+  async function exportTranscript(format: "json" | "markdown"): Promise<void> {
+    const sessionId = sessions.activeSessionId.trim();
+    if (sessionId.length === 0) {
+      setError("Select a session before exporting.");
+      return;
+    }
+
+    setExportBusy(format);
+    setError(null);
+    try {
+      const response = await api.exportSessionTranscript(sessionId, format);
+      const extension = format === "json" ? "json" : "md";
+      const mimeType = format === "json" ? "application/json" : "text/markdown";
+      const content =
+        typeof response.content === "string"
+          ? response.content
+          : JSON.stringify(response.content, null, 2);
+      downloadTextFile(
+        `chat-${sessions.selectedSession?.session_label ?? shortId(sessionId)}.${extension}`,
+        content,
+        mimeType,
+      );
+      setNotice(`Transcript export ready: ${format}.`);
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setExportBusy(null);
+    }
+  }
+
+  async function pinTranscriptRecord(record: ChatTranscriptRecord): Promise<void> {
+    const sessionId = sessions.activeSessionId.trim();
+    if (sessionId.length === 0) {
+      setError("Select a session before pinning transcript events.");
+      return;
+    }
+
+    setCommandBusy("pin");
+    try {
+      await api.createSessionPin(sessionId, {
+        run_id: record.run_id,
+        tape_seq: record.seq,
+        title: `${prettifyEventType(record.event_type)} #${record.seq}`,
+        note: `Pinned from ${record.origin_kind} at ${new Date(record.created_at_unix_ms).toLocaleString()}.`,
+      });
+      await refreshSessionTranscript();
+      setNotice(`Pinned event #${record.seq}.`);
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setCommandBusy(null);
+    }
+  }
+
+  async function deletePin(pinId: string): Promise<void> {
+    const sessionId = sessions.activeSessionId.trim();
+    if (sessionId.length === 0) {
+      setError("Select a session before deleting pins.");
+      return;
+    }
+
+    setCommandBusy("delete-pin");
+    try {
+      await api.deleteSessionPin(sessionId, pinId);
+      await refreshSessionTranscript();
+      setNotice("Pin deleted.");
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setCommandBusy(null);
+    }
+  }
+
+  async function handleAttachmentFiles(files: readonly File[]): Promise<void> {
+    const sessionId = sessions.activeSessionId.trim();
+    if (sessionId.length === 0) {
+      setError("Select a session before uploading attachments.");
+      return;
+    }
+    if (files.length === 0) {
+      return;
+    }
+
+    setAttachmentBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const nextAttachments = await uploadComposerAttachments(api, sessionId, files);
+      setAttachments((previous) => [...previous, ...nextAttachments]);
+      setNotice(
+        `${nextAttachments.length} attachment${nextAttachments.length === 1 ? "" : "s"} ready for the next message.`,
+      );
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setAttachmentBusy(false);
+      if (attachmentInputRef.current !== null) {
+        attachmentInputRef.current.value = "";
+      }
+    }
+  }
+
+  function inspectLiveEntry(entry: TranscriptEntry): void { setDetailPanel(buildDetailFromLiveEntry(entry)); }
+  function inspectTranscriptRecord(record: ChatTranscriptRecord): void { setDetailPanel(buildDetailFromTranscriptRecord(record)); }
+  function inspectSearchMatch(match: TranscriptSearchMatch): void {
+    const matchingRecord = transcriptRecords.find(
+      (record) => record.run_id === match.run_id && record.seq === match.seq,
+    );
+    if (matchingRecord !== undefined) {
+      inspectTranscriptRecord(matchingRecord); return;
+    }
+    setDetailPanel(buildDetailFromSearchMatch(match));
+  }
+
   return (
     <main className="workspace-page chat-workspace">
+      <input
+        ref={attachmentInputRef}
+        hidden
+        multiple
+        type="file"
+        onChange={(event) => {
+          void handleAttachmentFiles(Array.from(event.currentTarget.files ?? []));
+        }}
+      />
       <PageHeader
         eyebrow="Chat"
         title={
@@ -176,20 +715,16 @@ export function ChatConsolePanel({
             ? shortId(sessions.selectedSession.session_id)
             : "Operator workspace")
         }
-        description="Sessions, transcript, approvals, and run inspection stay on one operator surface without duplicate hero headers or consumer chat chrome."
+        description="Sessions, retries, branches, transcript operations, and payload inspection stay on one operator surface without dumping raw tool JSON into the main conversation."
         status={
           <>
             <StatusChip tone={streaming ? "warning" : "success"}>
               {streaming ? "Streaming" : "Idle"}
             </StatusChip>
-            <StatusChip tone={pendingApprovalCount > 0 ? "warning" : "default"}>
-              {pendingApprovalCount} pending approval{pendingApprovalCount === 1 ? "" : "s"}
-            </StatusChip>
-            <StatusChip tone={runIds.length > 0 ? "accent" : "default"}>
-              {runIds.length} known run{runIds.length === 1 ? "" : "s"}
-            </StatusChip>
+            <StatusChip tone={pendingApprovalCount > 0 ? "warning" : "default"}>{pendingApprovalCount} pending approval{pendingApprovalCount === 1 ? "" : "s"}</StatusChip>
+            <StatusChip tone={toolPayloadCount > 0 ? "accent" : "default"}>{toolPayloadCount} payload{toolPayloadCount === 1 ? "" : "s"} in sidebar</StatusChip>
             <Chip size="sm" variant="secondary">
-              {a2uiSurfaces.length} A2UI surface{a2uiSurfaces.length === 1 ? "" : "s"}
+              {describeBranchState(sessions.selectedSession?.branch_state ?? "missing")}
             </Chip>
           </>
         }
@@ -197,17 +732,19 @@ export function ChatConsolePanel({
           <div className="workspace-inline-actions">
             <SwitchField
               checked={allowSensitiveTools}
-              description="Applies to the next run only."
+              description="Applies to the next streamed run only."
               label="Allow sensitive tools"
               onChange={setAllowSensitiveTools}
             />
             <ActionButton
-              isDisabled={sessions.sessionsBusy}
+              isDisabled={sessions.sessionsBusy || transcriptBusy}
               type="button"
               variant="secondary"
-              onPress={() => void sessions.refreshSessions(false)}
+              onPress={() => {
+                void Promise.all([sessions.refreshSessions(false), refreshSessionTranscript()]);
+              }}
             >
-              {sessions.sessionsBusy ? "Refreshing..." : "Refresh sessions"}
+              {sessions.sessionsBusy || transcriptBusy ? "Refreshing..." : "Refresh"}
             </ActionButton>
             <ActionButton
               isDisabled={(activeRunId ?? runIds[0] ?? null) === null}
@@ -238,181 +775,123 @@ export function ChatConsolePanel({
       <section className="chat-workspace__layout">
         <SectionCard
           className="chat-panel"
-          description="Create, rename, reset, and switch sessions without leaving the active conversation."
+          description="Create, rename, branch-aware inspect, reset, and switch sessions without leaving the active conversation."
           title="Sessions"
-          actions={
-            <StatusChip tone={sessions.selectedSession ? "success" : "warning"}>
-              {sessions.selectedSession ? "Active session" : "No session"}
-            </StatusChip>
-          }
+          actions={<StatusChip tone={sessions.selectedSession ? "success" : "warning"}>{sessions.selectedSession ? "Active session" : "No session"}</StatusChip>}
         >
           <ChatSessionsSidebar
-            sessionsBusy={sessions.sessionsBusy}
-            newSessionLabel={sessions.newSessionLabel}
-            setNewSessionLabel={sessions.setNewSessionLabel}
-            createSession={() => {
-              void sessions.createSession();
-            }}
-            searchQuery={sessions.searchQuery}
-            setSearchQuery={sessions.setSearchQuery}
-            includeArchived={sessions.includeArchived}
-            setIncludeArchived={sessions.setIncludeArchived}
-            sessionLabelDraft={sessions.sessionLabelDraft}
-            setSessionLabelDraft={sessions.setSessionLabelDraft}
-            selectedSession={sessions.selectedSession}
-            renameSession={() => {
-              void sessions.renameSession();
-            }}
-            resetSession={() => {
-              void resetSessionAndTranscript();
-            }}
-            archiveSession={() => {
-              void archiveSessionAndTranscript();
-            }}
-            sortedSessions={sessions.sortedSessions}
-            activeSessionId={sessions.activeSessionId}
+            sessionsBusy={sessions.sessionsBusy} newSessionLabel={sessions.newSessionLabel}
+            setNewSessionLabel={sessions.setNewSessionLabel} searchQuery={sessions.searchQuery}
+            setSearchQuery={sessions.setSearchQuery} includeArchived={sessions.includeArchived}
+            setIncludeArchived={sessions.setIncludeArchived} sessionLabelDraft={sessions.sessionLabelDraft}
+            setSessionLabelDraft={sessions.setSessionLabelDraft} selectedSession={sessions.selectedSession}
+            sortedSessions={sessions.sortedSessions} activeSessionId={sessions.activeSessionId}
             setActiveSessionId={sessions.setActiveSessionId}
+            createSession={() => { void sessions.createSession(); }}
+            renameSession={() => { void sessions.renameSession(); }}
+            resetSession={() => { void resetSessionAndTranscript(); }}
+            archiveSession={() => { void archiveSessionAndTranscript(); }}
           />
         </SectionCard>
 
         <SectionCard
           className="chat-panel chat-panel--conversation"
-          description="Transcript, approvals, and composer for the current working session."
+          description="Transcript stays readable, tool payloads move to the side panel, and slash commands stay close to the composer."
           title="Conversation"
           actions={
             <div className="workspace-inline-actions">
               <StatusChip tone={streaming ? "warning" : "success"}>
                 {streaming ? "Streaming" : "Idle"}
               </StatusChip>
-              <StatusChip tone={pendingApprovalCount > 0 ? "warning" : "default"}>
-                {pendingApprovalCount} approval{pendingApprovalCount === 1 ? "" : "s"}
-              </StatusChip>
-              <Chip variant="secondary">
-                {activeRunId === null ? "No active run" : `Active run: ${activeRunId}`}
-              </Chip>
+              <StatusChip tone={contextBudget.tone === "danger" ? "danger" : contextBudget.tone === "warning" ? "warning" : "default"}>{contextBudget.label}</StatusChip>
+              <Chip variant="secondary">{selectedSessionLineage}</Chip>
             </div>
           }
         >
           <div className="chat-panel__body">
             <ChatTranscript
-              visibleTranscript={visibleTranscript}
-              hiddenTranscriptItems={hiddenTranscriptItems}
-              transcriptBoxRef={transcriptBoxRef}
-              approvalDrafts={approvalDrafts}
-              a2uiDocuments={a2uiDocuments}
-              revealSensitiveValues={revealSensitiveValues}
+              visibleTranscript={visibleTranscript} hiddenTranscriptItems={hiddenTranscriptItems}
+              transcriptBoxRef={transcriptBoxRef} approvalDrafts={approvalDrafts}
+              a2uiDocuments={a2uiDocuments} selectedDetailId={detailPanel?.id ?? null}
               updateApprovalDraft={updateApprovalDraftValue}
               decideInlineApproval={(approvalId, approved) => {
                 void decideInlineApproval(approvalId, approved);
               }}
-              openRunDetails={openRunDetails}
+              openRunDetails={openRunDetails} inspectPayload={inspectLiveEntry}
             />
-
             <ChatComposer
-              composerText={composerText}
-              setComposerText={setComposerText}
-              streaming={streaming}
-              activeSessionId={sessions.activeSessionId}
+              composerText={composerText} setComposerText={setComposerText} streaming={streaming}
+              activeSessionId={sessions.activeSessionId} attachments={attachments}
+              attachmentBusy={attachmentBusy} canQueueFollowUp={actionableRunId !== null}
               submitMessage={() => {
-                void sendMessage(() => sessions.refreshSessions(false));
+                void handleComposerSubmit();
               }}
+              retryLast={() => {
+                void retryLatestTurn();
+              }}
+              branchSession={() => {
+                void branchCurrentSession();
+              }}
+              queueFollowUp={() => { void queueFollowUpText(composerText); }}
               cancelStreaming={cancelStreaming}
               clearTranscript={() => {
                 clearTranscriptState();
+                setDetailPanel(null);
+                setAttachments([]);
                 setNotice("Local transcript cleared.");
               }}
+              openAttachmentPicker={() => attachmentInputRef.current?.click()}
+              removeAttachment={(localId) => {
+                setAttachments((previous) =>
+                  previous.filter((attachment) => attachment.local_id !== localId),
+                );
+              }}
+              attachFiles={(files) => { void handleAttachmentFiles(files); }}
+              showSlashPalette={showSlashPalette} parsedSlashCommand={parsedSlashCommand}
+              slashCommandMatches={slashCommandMatches} useSlashCommand={(command) => setComposerText(command.example)}
+              contextBudget={contextBudget}
             />
           </div>
         </SectionCard>
-
-        <div className="chat-inspector-column">
-          <SectionCard
-            className="chat-panel chat-panel--sticky"
-            description="Approval backlog, surface count, and run inventory stay visible without turning the chat into a dashboard."
-            title="Workspace signals"
-          >
-            <div className="workspace-tag-row">
-              <Chip color={pendingApprovalCount > 0 ? "warning" : "success"} variant="soft">
-                {pendingApprovalCount} approval{pendingApprovalCount === 1 ? "" : "s"}
-              </Chip>
-              <Chip variant="secondary">
-                {a2uiSurfaces.length} A2UI surface{a2uiSurfaces.length === 1 ? "" : "s"}
-              </Chip>
-              <Chip variant="secondary">
-                {runIds.length} known run{runIds.length === 1 ? "" : "s"}
-              </Chip>
-            </div>
-            <KeyValueList
-              items={[
-                {
-                  label: "Session",
-                  value:
-                    sessions.selectedSession?.title ||
-                    (sessions.selectedSession
-                      ? shortId(sessions.selectedSession.session_id)
-                      : "none"),
-                },
-                {
-                  label: "Preview",
-                  value: sessions.selectedSession?.preview ?? "n/a",
-                },
-                {
-                  label: "Updated",
-                  value: sessions.selectedSession
-                    ? new Date(sessions.selectedSession.updated_at_unix_ms).toLocaleString()
-                    : "n/a",
-                },
-                { label: "Visible transcript", value: visibleTranscript.length },
-              ]}
-            />
-            {a2uiSurfaces.length === 0 ? (
-              <EmptyState
-                compact
-                description="No A2UI documents published for this session yet."
-                title="No A2UI surfaces"
-              />
-            ) : (
-              <ul className="workspace-bullet-list">
-                {a2uiSurfaces.map((surface) => (
-                  <li key={surface}>{surface}</li>
-                ))}
-              </ul>
-            )}
-          </SectionCard>
-
-          {inspectorVisible ? (
-            <SectionCard
-              className="chat-panel"
-              description="Status, tape, and token usage stay secondary to the transcript but available on demand."
-              title="Run inspector"
-            >
-              <ChatRunDrawer
-                open
-                runIds={runIds}
-                runDrawerId={runDrawerId}
-                setRunDrawerId={setRunDrawerId}
-                runDrawerBusy={runDrawerBusy}
-                runStatus={runStatus}
-                runTape={runTape}
-                revealSensitiveValues={revealSensitiveValues}
-                refreshRun={refreshRunDetails}
-                close={closeRunDrawer}
-              />
-            </SectionCard>
-          ) : (
-            <SectionCard
-              className="chat-panel"
-              description="Run details become available after the first streamed response."
-              title="Run inspector"
-            >
-              <EmptyState
-                compact
-                description="Open a run after the first streamed response to inspect status, tape, and token usage."
-                title="Run details will appear here"
-              />
-            </SectionCard>
-          )}
-        </div>
+        <ChatInspectorColumn
+          pendingApprovalCount={pendingApprovalCount} a2uiSurfaces={a2uiSurfaces} runIds={runIds}
+          selectedSession={sessions.selectedSession}
+          selectedSessionLineage={selectedSessionLineage}
+          contextBudgetEstimatedTokens={contextBudget.estimated_total_tokens}
+          transcriptBusy={transcriptBusy} transcriptSearchQuery={transcriptSearchQuery}
+          setTranscriptSearchQuery={setTranscriptSearchQuery}
+          transcriptSearchBusy={transcriptSearchBusy} canSearchTranscript={deferredSearchQuery.trim().length > 0}
+          pinnedRecordKeys={new Set(sessionPins.map((pin) => `${pin.run_id}:${pin.tape_seq}`))}
+          searchResults={transcriptSearchResults}
+          searchTranscript={() => {
+            void searchTranscript();
+          }}
+          inspectSearchMatch={inspectSearchMatch}
+          exportBusy={exportBusy}
+          exportTranscript={(format) => {
+            void exportTranscript(format);
+          }}
+          recentTranscriptRecords={recentTranscriptRecords}
+          inspectTranscriptRecord={inspectTranscriptRecord}
+          pinTranscriptRecord={(record) => {
+            void pinTranscriptRecord(record);
+          }}
+          sessionPins={sessionPins}
+          deletePin={(pinId) => {
+            void deletePin(pinId);
+          }}
+          queuedInputs={queuedInputs}
+          detailPanel={detailPanel}
+          revealSensitiveValues={revealSensitiveValues}
+          inspectorVisible={inspectorVisible}
+          runDrawerId={runDrawerId}
+          setRunDrawerId={setRunDrawerId}
+          runDrawerBusy={runDrawerBusy}
+          runStatus={runStatus}
+          runTape={runTape}
+          refreshRunDetails={refreshRunDetails}
+          closeRunDrawer={closeRunDrawer}
+        />
       </section>
     </main>
   );

@@ -741,6 +741,13 @@ pre {
   font-weight: 600;
 }
 
+.chat-session-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .chat-transcript {
   display: grid;
   gap: 0.85rem;
@@ -793,9 +800,57 @@ pre {
   line-height: 1.7;
 }
 
+.chat-entry__attachment-list,
+.chat-composer__slash-list,
+.chat-attachment-list,
+.chat-ops-list,
+.chat-detail-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.chat-entry__attachment-list {
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+}
+
+.chat-entry__attachment-pill,
+.chat-ops-card,
+.chat-command-card,
+.chat-composer__budget,
+.chat-entry__detail-callout {
+  border: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
+  border-radius: var(--field-radius);
+  background: color-mix(in oklab, var(--surface-secondary) 88%, transparent);
+}
+
+.chat-entry__attachment-pill {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.chat-entry__attachment-pill small,
+.chat-entry__detail-callout p,
+.chat-command-card span,
+.chat-command-card code,
+.chat-ops-card__copy span,
+.chat-ops-card__copy p {
+  color: var(--muted);
+}
+
+.chat-entry__detail-callout {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.85rem 0.95rem;
+}
+
 .chat-entry-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 0.6rem;
 }
 
 .chat-composer {
@@ -803,6 +858,96 @@ pre {
   gap: 0.9rem;
   border-top: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
   padding-top: 1rem;
+}
+
+.chat-composer--dragging {
+  border-top-color: color-mix(in oklab, var(--accent) 48%, var(--border));
+}
+
+.chat-composer__budget {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+}
+
+.chat-composer__budget[data-tone="warning"] {
+  border-color: color-mix(in oklab, var(--warning) 42%, var(--border));
+  background: color-mix(in oklab, var(--warning) 10%, var(--surface));
+}
+
+.chat-composer__budget[data-tone="danger"] {
+  border-color: color-mix(in oklab, var(--danger) 42%, var(--border));
+  background: color-mix(in oklab, var(--danger) 10%, var(--surface));
+}
+
+.chat-composer__budget-value {
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.chat-composer__slash,
+.chat-composer__attachments {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.chat-composer__drop-hint {
+  border: 1px dashed color-mix(in oklab, var(--accent) 48%, var(--border));
+  border-radius: var(--field-radius);
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  color: var(--muted);
+  padding: 0.8rem 0.95rem;
+}
+
+.chat-command-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem;
+  text-align: left;
+}
+
+.chat-command-card code {
+  font-size: 0.82rem;
+}
+
+.chat-attachment-list {
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+}
+
+.chat-attachment-card {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
+  border-radius: var(--field-radius);
+  background: color-mix(in oklab, var(--surface-secondary) 90%, transparent);
+  padding: 0.9rem;
+}
+
+.chat-attachment-card__preview,
+.chat-attachment-card__icon {
+  width: 100%;
+  min-height: 7rem;
+  border-radius: calc(var(--field-radius) - 0.125rem);
+  background: color-mix(in oklab, var(--surface-tertiary) 88%, transparent);
+}
+
+.chat-attachment-card__preview {
+  object-fit: cover;
+}
+
+.chat-attachment-card__icon {
+  display: grid;
+  place-items: center;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.chat-attachment-card__copy {
+  display: grid;
+  gap: 0.2rem;
 }
 
 .chat-canvas-frame {
@@ -836,6 +981,37 @@ pre {
   gap: 0.75rem;
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.chat-transcript-tools__actions,
+.chat-ops-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.chat-transcript-tools__actions {
+  align-items: end;
+}
+
+.chat-ops-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+}
+
+.chat-ops-card__copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.chat-detail-panel__payload {
+  min-height: 10rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .a2ui-component {
@@ -948,5 +1124,11 @@ pre {
   .chat-entry-header {
     flex-direction: column;
     gap: 0.2rem;
+  }
+
+  .chat-entry__detail-callout,
+  .chat-composer__budget,
+  .chat-ops-card {
+    flex-direction: column;
   }
 }

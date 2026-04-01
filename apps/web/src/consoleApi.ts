@@ -262,6 +262,10 @@ export interface ChatRunStatusRecord {
   completed_at_unix_ms?: number;
   updated_at_unix_ms: number;
   last_error?: string;
+  origin_kind: string;
+  origin_run_id?: string;
+  triggered_by_principal?: string;
+  parameter_delta_json?: string;
   tape_events: number;
 }
 
@@ -279,6 +283,51 @@ export interface ChatRunTapeSnapshot {
   returned_bytes: number;
   next_after_seq?: number;
   events: ChatRunTapeRecord[];
+}
+
+export interface ChatTranscriptRecord {
+  session_id: string;
+  run_id: string;
+  seq: number;
+  event_type: string;
+  payload_json: string;
+  created_at_unix_ms: number;
+  origin_kind: string;
+  origin_run_id?: string;
+}
+
+export interface ChatQueuedInputRecord {
+  queued_input_id: string;
+  run_id: string;
+  session_id: string;
+  state: string;
+  text: string;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+  origin_run_id?: string;
+}
+
+export interface ChatPinRecord {
+  pin_id: string;
+  session_id: string;
+  run_id: string;
+  tape_seq: number;
+  title: string;
+  note?: string;
+  created_at_unix_ms: number;
+}
+
+export interface ChatAttachmentRecord {
+  artifact_id: string;
+  attachment_id: string;
+  filename: string;
+  declared_content_type: string;
+  content_hash: string;
+  size_bytes: number;
+  width_px?: number;
+  height_px?: number;
+  kind: "image" | "file" | "audio" | "video";
+  budget_tokens: number;
 }
 
 export interface ChatStreamMetaLine {
@@ -1543,6 +1592,11 @@ export class ConsoleApiClient {
       text: string;
       allow_sensitive_tools?: boolean;
       session_label?: string;
+      origin_kind?: string;
+      origin_run_id?: string;
+      parameter_delta?: JsonValue;
+      queued_input_id?: string;
+      attachments?: Array<{ artifact_id: string }>;
     },
     options: {
       signal?: AbortSignal;
@@ -1583,6 +1637,153 @@ export class ConsoleApiClient {
     }
     buffered += decoder.decode();
     flushNdjsonBuffer(buffered, options.onLine, true);
+  }
+
+  async prepareRetry(
+    sessionId: string,
+    payload: { parameter_delta?: JsonValue } = {},
+  ): Promise<{
+    session: SessionCatalogRecord;
+    text: string;
+    origin_kind: string;
+    origin_run_id: string;
+    parameter_delta?: JsonValue;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/retry`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async branchSession(
+    sessionId: string,
+    payload: { session_label?: string } = {},
+  ): Promise<{
+    session: SessionCatalogRecord;
+    source_run_id: string;
+    action: string;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/branch`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async queueFollowUp(
+    runId: string,
+    payload: { text: string },
+  ): Promise<{ queued_input: ChatQueuedInputRecord; contract: ContractDescriptor }> {
+    return this.request(
+      `/console/v1/chat/runs/${encodeURIComponent(runId)}/queue`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async getSessionTranscript(
+    sessionId: string,
+  ): Promise<{
+    session: SessionCatalogRecord;
+    records: ChatTranscriptRecord[];
+    pins: ChatPinRecord[];
+    queued_inputs: ChatQueuedInputRecord[];
+    contract: ContractDescriptor;
+  }> {
+    return this.request(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/transcript`);
+  }
+
+  async searchSessionTranscript(
+    sessionId: string,
+    query: string,
+  ): Promise<{
+    session: SessionCatalogRecord;
+    query: string;
+    matches: Array<{
+      session_id: string;
+      run_id: string;
+      seq: number;
+      event_type: string;
+      created_at_unix_ms: number;
+      origin_kind: string;
+      origin_run_id?: string;
+      snippet: string;
+    }>;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      buildPathWithQuery(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/transcript/search`, new URLSearchParams([["q", query]])),
+    );
+  }
+
+  async exportSessionTranscript(
+    sessionId: string,
+    format: "json" | "markdown" = "json",
+  ): Promise<{ format: string; content: JsonValue; contract: ContractDescriptor }> {
+    return this.request(
+      buildPathWithQuery(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/export`, new URLSearchParams([["format", format]])),
+    );
+  }
+
+  async listSessionPins(
+    sessionId: string,
+  ): Promise<{ session: SessionCatalogRecord; pins: ChatPinRecord[]; contract: ContractDescriptor }> {
+    return this.request(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/pins`);
+  }
+
+  async createSessionPin(
+    sessionId: string,
+    payload: { run_id: string; tape_seq: number; title: string; note?: string },
+  ): Promise<{ pin: ChatPinRecord; contract: ContractDescriptor }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/pins`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async deleteSessionPin(
+    sessionId: string,
+    pinId: string,
+  ): Promise<{ deleted: boolean; contract: ContractDescriptor }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/pins/${encodeURIComponent(pinId)}`,
+      { method: "POST" },
+      { csrf: true },
+    );
+  }
+
+  async uploadChatAttachment(
+    sessionId: string,
+    payload: {
+      filename: string;
+      content_type: string;
+      bytes_base64: string;
+    },
+  ): Promise<{ attachment: ChatAttachmentRecord; contract: ContractDescriptor }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/attachments`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
   }
 
   async getApproval(approvalId: string): Promise<{ approval: JsonValue }> {

@@ -8,7 +8,7 @@ import {
   SelectField,
   TextInputField,
 } from "../console/components/ui";
-import type { JsonValue } from "../consoleApi";
+import type { JsonValue, SessionCatalogRecord } from "../consoleApi";
 
 const SENSITIVE_KEY_PATTERN =
   /(secret|token|password|cookie|authorization|credential|api[-_]?key|private[-_]?key|vault[-_]?ref)/i;
@@ -19,7 +19,138 @@ export const MAX_TRANSCRIPT_RETENTION = 800;
 export const MAX_RENDERED_TRANSCRIPT = 120;
 export const DEFAULT_APPROVAL_SCOPE = "once" as const;
 export const DEFAULT_APPROVAL_TTL_MS = "300000";
+export const CONTEXT_BUDGET_SOFT_LIMIT = 12_000;
+export const CONTEXT_BUDGET_HARD_LIMIT = 16_000;
 const CANVAS_FRAME_PATH_SEGMENTS = ["canvas", "v1", "frame"] as const;
+
+export interface TranscriptAttachmentSummary {
+  readonly id: string;
+  readonly filename: string;
+  readonly kind: string;
+  readonly size_bytes: number;
+  readonly budget_tokens?: number;
+  readonly preview_url?: string;
+}
+
+export interface ComposerAttachment {
+  readonly local_id: string;
+  readonly artifact_id: string;
+  readonly attachment_id: string;
+  readonly filename: string;
+  readonly declared_content_type: string;
+  readonly content_hash: string;
+  readonly size_bytes: number;
+  readonly width_px?: number;
+  readonly height_px?: number;
+  readonly kind: "image" | "file" | "audio" | "video";
+  readonly budget_tokens: number;
+  readonly preview_url?: string;
+}
+
+export interface ContextBudgetSummary {
+  readonly baseline_tokens: number;
+  readonly draft_tokens: number;
+  readonly attachment_tokens: number;
+  readonly estimated_total_tokens: number;
+  readonly limit_tokens: number;
+  readonly ratio: number;
+  readonly tone: "default" | "warning" | "danger";
+  readonly label: string;
+  readonly warning?: string;
+}
+
+export interface SlashCommandDefinition {
+  readonly name: string;
+  readonly synopsis: string;
+  readonly description: string;
+  readonly example: string;
+}
+
+export const CHAT_SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
+  {
+    name: "help",
+    synopsis: "/help",
+    description: "Show the slash command palette and quick usage hints.",
+    example: "/help",
+  },
+  {
+    name: "new",
+    synopsis: "/new [label]",
+    description: "Create a fresh session and optionally apply a label immediately.",
+    example: "/new Incident follow-up",
+  },
+  {
+    name: "reset",
+    synopsis: "/reset",
+    description: "Reset the active session without archiving it.",
+    example: "/reset",
+  },
+  {
+    name: "retry",
+    synopsis: "/retry",
+    description: "Retry the last user turn in the current session.",
+    example: "/retry",
+  },
+  {
+    name: "branch",
+    synopsis: "/branch [label]",
+    description: "Create a child session from the latest run. Optional text becomes the new label.",
+    example: "/branch Incident follow-up",
+  },
+  {
+    name: "queue",
+    synopsis: "/queue <text>",
+    description: "Queue a follow-up message for the active run without interrupting it.",
+    example: "/queue After the deploy check the error budget delta.",
+  },
+  {
+    name: "history",
+    synopsis: "/history [query]",
+    description: "Filter the session rail to find older sessions quickly.",
+    example: "/history deploy rollback",
+  },
+  {
+    name: "resume",
+    synopsis: "/resume <session-id-or-key>",
+    description: "Switch the active workspace to a known session id or key.",
+    example: "/resume 01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  },
+  {
+    name: "attach",
+    synopsis: "/attach",
+    description: "Open the attachment picker for the current session.",
+    example: "/attach",
+  },
+  {
+    name: "usage",
+    synopsis: "/usage",
+    description: "Summarize the current budget, branch state, and transcript load.",
+    example: "/usage",
+  },
+  {
+    name: "compact",
+    synopsis: "/compact",
+    description: "Explain the current compaction path and the best available fallback in Phase 2.",
+    example: "/compact",
+  },
+  {
+    name: "search",
+    synopsis: "/search <query>",
+    description: "Search the persisted transcript for the current session.",
+    example: "/search approval denied",
+  },
+  {
+    name: "export",
+    synopsis: "/export [json|markdown]",
+    description: "Export the current session transcript as JSON or Markdown.",
+    example: "/export markdown",
+  },
+] as const;
+
+export interface ParsedSlashCommand {
+  readonly name: (typeof CHAT_SLASH_COMMANDS)[number]["name"];
+  readonly args: string;
+}
 
 export type ApprovalScope = "once" | "session" | "timeboxed";
 export type TranscriptEntryKind =
@@ -53,6 +184,7 @@ export interface TranscriptEntry {
   readonly canvas_url?: string;
   readonly status?: string;
   readonly is_final?: boolean;
+  readonly attachments?: TranscriptAttachmentSummary[];
 }
 
 export interface ApprovalDraft {
@@ -309,6 +441,111 @@ export function shortId(value: string): string {
     return value;
   }
   return `${value.slice(0, 6)}…${value.slice(-4)}`;
+}
+
+export function describeBranchState(branchState: string): string {
+  const normalized = branchState.trim().toLowerCase();
+  if (normalized === "root") {
+    return "Root session";
+  }
+  if (normalized === "branched") {
+    return "Child branch";
+  }
+  if (normalized === "missing") {
+    return "No lineage";
+  }
+  return branchState;
+}
+
+export function buildSessionLineageHint(session: SessionCatalogRecord | null): string {
+  if (session === null) {
+    return "Select a session to inspect lineage.";
+  }
+  const branchLabel = describeBranchState(session.branch_state);
+  if (session.parent_session_id !== undefined && session.parent_session_id.length > 0) {
+    return `${branchLabel} from ${shortId(session.parent_session_id)}.`;
+  }
+  return `${branchLabel}.`;
+}
+
+export function estimateTextTokens(text: string): number {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return 0;
+  }
+  return Math.max(1, Math.ceil(trimmed.length / 4));
+}
+
+export function formatApproxTokens(value: number): string {
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`;
+  }
+  return value.toLocaleString();
+}
+
+export function buildContextBudgetSummary(args: {
+  baseline_tokens: number;
+  draft_text: string;
+  attachments: readonly ComposerAttachment[];
+}): ContextBudgetSummary {
+  const draft_tokens = estimateTextTokens(args.draft_text);
+  const attachment_tokens = args.attachments.reduce(
+    (sum, attachment) => sum + attachment.budget_tokens,
+    0,
+  );
+  const estimated_total_tokens = args.baseline_tokens + draft_tokens + attachment_tokens;
+  const ratio = estimated_total_tokens / CONTEXT_BUDGET_HARD_LIMIT;
+  const tone =
+    estimated_total_tokens >= CONTEXT_BUDGET_HARD_LIMIT
+      ? "danger"
+      : estimated_total_tokens >= CONTEXT_BUDGET_SOFT_LIMIT
+        ? "warning"
+        : "default";
+  const warning =
+    tone === "danger"
+      ? "Estimated context is above the safe working budget. Consider branching or exporting before another large turn."
+      : tone === "warning"
+        ? "Estimated context is approaching the budget. Compact prompts or branch soon."
+        : undefined;
+
+  return {
+    baseline_tokens: args.baseline_tokens,
+    draft_tokens,
+    attachment_tokens,
+    estimated_total_tokens,
+    limit_tokens: CONTEXT_BUDGET_HARD_LIMIT,
+    ratio,
+    tone,
+    label: `${formatApproxTokens(estimated_total_tokens)} / ${formatApproxTokens(CONTEXT_BUDGET_HARD_LIMIT)} est.`,
+    warning,
+  };
+}
+
+export function parseSlashCommand(raw: string): ParsedSlashCommand | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("/")) {
+    return null;
+  }
+  const withoutPrefix = trimmed.slice(1).trim();
+  if (withoutPrefix.length === 0) {
+    return {
+      name: "help",
+      args: "",
+    };
+  }
+
+  const firstSpace = withoutPrefix.indexOf(" ");
+  const name = (firstSpace === -1 ? withoutPrefix : withoutPrefix.slice(0, firstSpace)).toLowerCase();
+  const args = firstSpace === -1 ? "" : withoutPrefix.slice(firstSpace + 1).trim();
+
+  if (CHAT_SLASH_COMMANDS.some((command) => command.name === name)) {
+    return {
+      name: name as ParsedSlashCommand["name"],
+      args,
+    };
+  }
+
+  return null;
 }
 
 export function prettifyEventType(value: string): string {

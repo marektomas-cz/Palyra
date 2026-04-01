@@ -10,7 +10,7 @@ import {
 import type { ChatRunStatusRecord, ChatRunTapeSnapshot } from "../consoleApi";
 import { Tabs } from "@heroui/react";
 
-import { parseTapePayload, toPrettyJson } from "./chatShared";
+import { PrettyJsonBlock, parseTapePayload, shortId, toPrettyJson } from "./chatShared";
 
 type ChatRunDrawerProps = {
   open: boolean;
@@ -99,6 +99,18 @@ export function ChatRunDrawer({
                   <KeyValueList
                     items={[
                       { label: "State", value: runStatus.state },
+                      { label: "Origin", value: runStatus.origin_kind },
+                      {
+                        label: "Origin run",
+                        value:
+                          runStatus.origin_run_id !== undefined
+                            ? shortId(runStatus.origin_run_id)
+                            : "none",
+                      },
+                      {
+                        label: "Triggered by",
+                        value: runStatus.triggered_by_principal ?? "n/a",
+                      },
                       { label: "Prompt tokens", value: runStatus.prompt_tokens },
                       { label: "Completion tokens", value: runStatus.completion_tokens },
                       { label: "Total tokens", value: runStatus.total_tokens },
@@ -109,6 +121,19 @@ export function ChatRunDrawer({
                       },
                     ]}
                   />
+                  {runStatus.parameter_delta_json !== undefined &&
+                  runStatus.parameter_delta_json.length > 0 ? (
+                    <SectionCard
+                      description="Retry and branch runs can carry deltas from the parent execution."
+                      title="Parameter delta"
+                      variant="transparent"
+                    >
+                      <PrettyJsonBlock
+                        revealSensitiveValues={revealSensitiveValues}
+                        value={parseTapePayload(runStatus.parameter_delta_json)}
+                      />
+                    </SectionCard>
+                  ) : null}
                   {runStatus.last_error !== undefined && runStatus.last_error.length > 0 ? (
                     <InlineNotice title="Run error" tone="danger">
                       {runStatus.last_error}
