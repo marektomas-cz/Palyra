@@ -11,6 +11,8 @@ import {
 
 afterEach(() => {
   cleanup();
+  window.history.replaceState(null, "", "/");
+  window.localStorage.clear();
   vi.unstubAllGlobals();
 });
 

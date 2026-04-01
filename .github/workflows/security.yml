@@ -103,10 +103,24 @@ jobs:
           mkdir -p security-artifacts
           osv-scanner scan --config osv-scanner.toml -L Cargo.lock --format json --output security-artifacts/osv-results.json
 
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION="v8.30.1"
+          GITLEAKS_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 --retry 5 --retry-connrefused --location --silent --show-error --fail \
+            "https://github.com/gitleaks/gitleaks/releases/download/${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION#v}_linux_x64.tar.gz" \
+            -o /tmp/gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum --check -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp
+          install -m 0755 /tmp/gitleaks "$HOME/.local/bin/gitleaks"
+          "$HOME/.local/bin/gitleaks" version
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Gitleaks scan
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p security-artifacts
+          gitleaks detect --source . --report-format sarif --report-path security-artifacts/gitleaks-results.sarif
 
       - name: Runtime artifact hygiene
         run: bash scripts/check-runtime-artifacts.sh

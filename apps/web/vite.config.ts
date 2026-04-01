@@ -28,6 +28,8 @@ export default defineConfig({
     globals: true,
     setupFiles: "./vitest.setup.ts",
     testTimeout: isCi ? 20_000 : 5_000,
+    pool: isCi ? "threads" : "forks",
+    maxWorkers: isCi ? 2 : undefined,
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 });

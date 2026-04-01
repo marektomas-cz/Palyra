@@ -83,25 +83,21 @@ function shouldRetryBootstrapSession(
   return error.status === 401 || error.status === 403 || error.status === 429;
 }
 
-async function waitForBootstrapRetry(attempt: number): Promise<void> {
-  const delayMs = BOOTSTRAP_SESSION_RETRY_DELAY_MS * attempt;
-  await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-}
-
-async function waitForDesktopSessionRecovery(attempt: number): Promise<void> {
-  const delayMs = DESKTOP_SESSION_RECOVERY_DELAY_MS * attempt;
-  await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-}
-
-async function loadBootstrapSession(api: ConsoleApiClient): Promise<ConsoleSession> {
+async function loadBootstrapSession(
+  api: ConsoleApiClient,
+  signal?: AbortSignal,
+): Promise<ConsoleSession> {
   for (let attempt = 1; attempt <= BOOTSTRAP_SESSION_RETRY_ATTEMPTS; attempt += 1) {
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
     try {
       return await api.getSession();
     } catch (error) {
       if (!shouldRetryBootstrapSession(error, attempt, BOOTSTRAP_SESSION_RETRY_ATTEMPTS)) {
         throw error;
       }
-      await waitForBootstrapRetry(attempt);
+      await waitForDelay(BOOTSTRAP_SESSION_RETRY_DELAY_MS * attempt, signal);
     }
   }
 
@@ -111,12 +107,13 @@ async function loadBootstrapSession(api: ConsoleApiClient): Promise<ConsoleSessi
 async function loadDesktopHandoffSession(
   api: ConsoleApiClient,
   desktopHandoffToken: string,
+  signal?: AbortSignal,
 ): Promise<ConsoleSession> {
   try {
     return await api.consumeDesktopHandoff(desktopHandoffToken);
   } catch (handoffError) {
     try {
-      return await loadBootstrapSession(api);
+      return await loadBootstrapSession(api, signal);
     } catch {
       throw handoffError;
     }
@@ -125,6 +122,9 @@ async function loadDesktopHandoffSession(
 
 function shouldAttemptDesktopSessionRecovery(): boolean {
   if (typeof window === "undefined") {
+    return false;
+  }
+  if (isJsdomRuntime()) {
     return false;
   }
   const hostname = window.location.hostname.trim().toLowerCase();
@@ -561,6 +561,7 @@ export function useConsoleAppState() {
 
   useEffect(() => {
     let cancelled = false;
+    const abortController = new AbortController();
     const bootstrap = async () => {
       setBooting(true);
       setError(null);
@@ -568,7 +569,11 @@ export function useConsoleAppState() {
         const desktopHandoffToken = readDesktopHandoffToken();
         if (desktopHandoffToken !== null) {
           try {
-            const current = await loadDesktopHandoffSession(api, desktopHandoffToken);
+            const current = await loadDesktopHandoffSession(
+              api,
+              desktopHandoffToken,
+              abortController.signal,
+            );
             if (cancelled) {
               return;
             }
@@ -580,14 +585,14 @@ export function useConsoleAppState() {
             clearDesktopHandoffTokenFromAddressBar();
           }
         }
-        const current = await loadBootstrapSession(api);
+        const current = await loadBootstrapSession(api, abortController.signal);
         if (cancelled) {
           return;
         }
         desktopSessionRecoveryAttemptedRef.current = true;
         applyConsoleSession(current);
       } catch (failure) {
-        if (!cancelled) {
+        if (!cancelled && !isAbortError(failure)) {
           setSession(null);
           setError(toErrorMessage(failure));
         }
@@ -600,6 +605,7 @@ export function useConsoleAppState() {
     void bootstrap();
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [api]);
 
@@ -617,8 +623,12 @@ export function useConsoleAppState() {
 
     desktopSessionRecoveryAttemptedRef.current = true;
     let cancelled = false;
+    const abortController = new AbortController();
     const recoverDesktopSession = async () => {
       for (let attempt = 1; attempt <= DESKTOP_SESSION_RECOVERY_ATTEMPTS; attempt += 1) {
+        if (abortController.signal.aborted) {
+          return;
+        }
         try {
           const current = await api.getSession();
           if (cancelled) {
@@ -634,7 +644,7 @@ export function useConsoleAppState() {
           if (attempt >= DESKTOP_SESSION_RECOVERY_ATTEMPTS) {
             return;
           }
-          await waitForDesktopSessionRecovery(attempt);
+          await waitForDelay(DESKTOP_SESSION_RECOVERY_DELAY_MS * attempt, abortController.signal);
         }
       }
     };
@@ -642,6 +652,7 @@ export function useConsoleAppState() {
     void recoverDesktopSession();
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [api, booting, loginBusy, logoutBusy, session]);
 
@@ -1723,8 +1734,41 @@ function shouldConfirmBrowserDeletion(): boolean {
   if (typeof window === "undefined" || typeof window.confirm !== "function") {
     return false;
   }
-  if (typeof navigator === "undefined") {
-    return true;
+  if (isJsdomRuntime()) {
+    return false;
   }
-  return !navigator.userAgent.toLowerCase().includes("jsdom");
+  return true;
+}
+
+function isJsdomRuntime(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+  return navigator.userAgent.toLowerCase().includes("jsdom");
+}
+
+function waitForDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(createAbortError());
+  }
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(createAbortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function createAbortError(): Error {
+  return new Error("console app effect aborted");
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.message === "console app effect aborted";
 }

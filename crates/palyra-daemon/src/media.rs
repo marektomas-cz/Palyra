@@ -1,7 +1,7 @@
 use std::{
     fs,
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -494,7 +494,11 @@ impl MediaArtifactStore {
             return Ok(None);
         };
         drop(guard);
-        let storage_path = self.content_root.join(record.storage_rel_path.as_str());
+        let storage_path = resolve_content_storage_path(
+            self.content_root.as_path(),
+            record.storage_rel_path.as_str(),
+            record.sha256.as_str(),
+        )?;
         let bytes = fs::read(storage_path.as_path()).map_err(|error| {
             MediaStoreError::Io(format!(
                 "failed to read media artifact '{}' from '{}' : {error}",
@@ -567,7 +571,11 @@ impl MediaArtifactStore {
         let sha256 = sha256_hex(request.bytes);
         let artifact_id = ulid::Ulid::new().to_string();
         let relative_path = content_relative_path(sha256.as_str());
-        let storage_path = self.content_root.join(relative_path.as_str());
+        let storage_path = resolve_content_storage_path(
+            self.content_root.as_path(),
+            relative_path.as_str(),
+            sha256.as_str(),
+        )?;
         if let Some(parent) = storage_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 MediaStoreError::Io(format!(
@@ -987,7 +995,11 @@ impl MediaArtifactStore {
         let sha256 = sha256_hex(body.as_slice());
         let artifact_id = ulid::Ulid::new().to_string();
         let relative_path = content_relative_path(sha256.as_str());
-        let storage_path = self.content_root.join(relative_path.as_str());
+        let storage_path = resolve_content_storage_path(
+            self.content_root.as_path(),
+            relative_path.as_str(),
+            sha256.as_str(),
+        )?;
         if let Some(parent) = storage_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 MediaStoreError::Io(format!(
@@ -1337,10 +1349,14 @@ fn remove_artifact_locked(
             |row| row.get::<_, String>(0),
         )
         .optional()?;
+    let resolved_storage_path = storage_rel_path
+        .as_deref()
+        .map(|path| resolve_content_storage_path(content_root, path, content_sha256))
+        .transpose()?;
     connection
         .execute("DELETE FROM media_contents WHERE content_sha256 = ?1", params![content_sha256])?;
-    if let Some(storage_rel_path) = storage_rel_path {
-        let _ = fs::remove_file(content_root.join(storage_rel_path.as_str()));
+    if let Some(storage_path) = resolved_storage_path {
+        let _ = fs::remove_file(storage_path);
     }
     Ok(())
 }
@@ -1677,6 +1693,30 @@ fn content_relative_path(sha256: &str) -> String {
     format!("{prefix}/{sha256}")
 }
 
+fn resolve_content_storage_path(
+    content_root: &Path,
+    storage_rel_path: &str,
+    expected_sha256: &str,
+) -> Result<PathBuf, MediaStoreError> {
+    let expected_rel_path = content_relative_path(expected_sha256);
+    if storage_rel_path != expected_rel_path {
+        return Err(MediaStoreError::Io(format!(
+            "media content storage path '{}' does not match digest '{}'",
+            storage_rel_path, expected_sha256
+        )));
+    }
+    let relative_path = Path::new(storage_rel_path);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(MediaStoreError::Io(format!(
+            "media content storage path '{}' is invalid",
+            storage_rel_path
+        )));
+    }
+    Ok(content_root.join(relative_path))
+}
+
 fn attachment_kind_for_content_type(content_type: &str) -> AttachmentKind {
     if content_type.starts_with("image/") {
         AttachmentKind::Image
@@ -1765,6 +1805,7 @@ mod tests {
     use std::sync::Arc;
 
     use palyra_connectors::{AttachmentKind, AttachmentRef};
+    use rusqlite::params;
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -1772,9 +1813,10 @@ mod tests {
     };
 
     use super::{
-        read_response_body_with_limit, should_prune_retention_after_ingest, sniff_content,
-        InboundAttachmentIngestRequest, MediaArtifactStore, MediaMaintenanceState,
-        MediaRuntimeConfig, RETENTION_PRUNE_MAX_DEFERRED_INGESTS, RETENTION_PRUNE_MIN_INTERVAL_MS,
+        content_relative_path, read_response_body_with_limit, resolve_content_storage_path,
+        should_prune_retention_after_ingest, sniff_content, InboundAttachmentIngestRequest,
+        MediaArtifactStore, MediaMaintenanceState, MediaRuntimeConfig,
+        RETENTION_PRUNE_MAX_DEFERRED_INGESTS, RETENTION_PRUNE_MIN_INTERVAL_MS,
     };
 
     #[test]
@@ -1849,6 +1891,68 @@ mod tests {
             store.build_connector_snapshot("discord:default").expect("snapshot should succeed");
         assert_eq!(snapshot.usage.artifact_count, 0);
         assert_eq!(snapshot.policy.max_attachments_per_message, 4);
+    }
+
+    #[test]
+    fn resolve_content_storage_path_rejects_digest_mismatch() {
+        let tempdir = TempDir::new().expect("tempdir should build");
+        let error = resolve_content_storage_path(
+            tempdir.path(),
+            "aa/not-the-real-digest",
+            "bb1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd",
+        )
+        .expect_err("digest mismatch should be rejected before joining filesystem paths");
+        assert!(
+            error.to_string().contains("does not match digest"),
+            "digest mismatches should produce a clear validation error"
+        );
+    }
+
+    #[test]
+    fn load_console_attachment_rejects_tampered_storage_path() {
+        let tempdir = TempDir::new().expect("tempdir should build");
+        let store = MediaArtifactStore::open(
+            tempdir.path().join("media.sqlite3"),
+            tempdir.path().join("media"),
+            MediaRuntimeConfig { outbound_upload_enabled: true, ..MediaRuntimeConfig::default() },
+        )
+        .expect("media store should initialize");
+        let payload = store
+            .store_console_attachment(super::ConsoleAttachmentStoreRequest {
+                connector_id: "discord:default",
+                session_id: "session-1",
+                principal: "operator",
+                device_id: "device-1",
+                channel: Some("discord:channel:test"),
+                attachment_id: "attachment-1",
+                filename: "notes.txt",
+                declared_content_type: "text/plain",
+                bytes: b"hello world",
+            })
+            .expect("console attachment should store successfully");
+        let tampered_path = "../outside.txt";
+        let expected_path = content_relative_path(payload.sha256.as_str());
+        {
+            let guard = store.connection.lock().expect("db lock should succeed in test");
+            guard
+                .execute(
+                    "UPDATE media_contents SET storage_rel_path = ?1 WHERE content_sha256 = ?2",
+                    params![tampered_path, payload.sha256.as_str()],
+                )
+                .expect("test should be able to tamper storage path");
+        }
+
+        let error = store
+            .load_artifact_payload(payload.artifact_id.as_str())
+            .expect_err("tampered storage path should be rejected before filesystem access");
+        assert!(
+            error.to_string().contains("does not match digest"),
+            "tampered storage path should fail explicit digest validation"
+        );
+        assert_ne!(
+            expected_path, tampered_path,
+            "test should prove the tampered path differs from the canonical layout"
+        );
     }
 
     #[tokio::test]
