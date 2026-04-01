@@ -7605,6 +7605,10 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("orchestrator run should start");
         store
@@ -7681,6 +7685,10 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("run start should succeed");
         for seq in 0..5 {
@@ -7717,6 +7725,10 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("run start should succeed");
 
@@ -7758,6 +7770,10 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("run start should succeed");
 
@@ -7881,6 +7897,10 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("run should start");
         store
@@ -7949,6 +7969,10 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("run should start");
         store
@@ -7997,6 +8021,10 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB3".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB2".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("run should start");
         store
@@ -8049,12 +8077,20 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("first run start should succeed");
         let duplicate_run = store
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect_err("duplicate run IDs must be rejected");
         assert!(matches!(
@@ -8097,6 +8133,10 @@ mod tests {
             .start_orchestrator_run(&OrchestratorRunStartRequest {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
             })
             .expect("run start should succeed");
         assert!(

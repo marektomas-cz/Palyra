@@ -9,12 +9,7 @@ import type {
   SessionCatalogRecord,
   JsonValue,
 } from "../consoleApi";
-import {
-  ActionButton,
-  EmptyState,
-  KeyValueList,
-  SectionCard,
-} from "../console/components/ui";
+import { ActionButton, EmptyState, KeyValueList, SectionCard } from "../console/components/ui";
 
 import { ChatRunDrawer } from "./ChatRunDrawer";
 import {

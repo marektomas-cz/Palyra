@@ -83,104 +83,112 @@ export function useChatSessions({
     void refreshSessions(false);
   }, [includeArchived, searchQuery]);
 
-  const refreshSessions = useCallback(async (ensureSession: boolean): Promise<void> => {
-    setSessionsBusy(true);
-    try {
-      const params = new URLSearchParams();
-      params.set("limit", "50");
-      params.set("sort", "updated_desc");
-      if (searchQuery.trim().length > 0) {
-        params.set("q", searchQuery.trim());
-      }
-      if (includeArchived) {
-        params.set("include_archived", "true");
-      }
-      const response = await api.listSessionCatalog(params);
-      const nextSessions = [...response.sessions].sort(
-        (left, right) => right.updated_at_unix_ms - left.updated_at_unix_ms,
-      );
-      if (nextSessions.length === 0 && ensureSession) {
-        const created = await api.resolveChatSession({
-          session_label: emptyToUndefined(newSessionLabel),
-        });
-        const createdRecord = await api.getSessionCatalogEntry(created.session.session_id);
-        setSessions([createdRecord.session]);
-        setActiveSessionId(created.session.session_id);
-        setNewSessionLabel("");
-        setNotice("New chat session created.");
-        return;
-      }
-      setSessions(nextSessions);
-      if (nextSessions.length === 0) {
-        setActiveSessionId("");
-        return;
-      }
-      setActiveSessionId((previous) => {
-        if (
-          previous.length > 0 &&
-          nextSessions.some((session) => session.session_id === previous)
-        ) {
-          return previous;
+  const refreshSessions = useCallback(
+    async (ensureSession: boolean): Promise<void> => {
+      setSessionsBusy(true);
+      try {
+        const params = new URLSearchParams();
+        params.set("limit", "50");
+        params.set("sort", "updated_desc");
+        if (searchQuery.trim().length > 0) {
+          params.set("q", searchQuery.trim());
         }
-        const preferred = preferredSessionId?.trim() ?? "";
-        if (preferred.length > 0) {
-          const preferredSession = nextSessions.find((session) => session.session_id === preferred);
-          if (preferredSession !== undefined) {
-            return preferredSession.session_id;
-          }
+        if (includeArchived) {
+          params.set("include_archived", "true");
         }
-        return nextSessions[0].session_id;
-      });
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setSessionsBusy(false);
-    }
-  }, [api, includeArchived, newSessionLabel, preferredSessionId, searchQuery, setError, setNotice]);
-
-  const createSessionWithLabel = useCallback(async (sessionLabel?: string): Promise<string | null> => {
-    setError(null);
-    setNotice(null);
-    setSessionsBusy(true);
-    try {
-      const response = await api.resolveChatSession({
-        session_label: emptyToUndefined(sessionLabel ?? newSessionLabel),
-      });
-      const createdRecord = await api.getSessionCatalogEntry(response.session.session_id);
-      setSessions((previous) => {
-        const without = previous.filter(
-          (entry) => entry.session_id !== createdRecord.session.session_id,
+        const response = await api.listSessionCatalog(params);
+        const nextSessions = [...response.sessions].sort(
+          (left, right) => right.updated_at_unix_ms - left.updated_at_unix_ms,
         );
-        return [createdRecord.session, ...without];
-      });
-      setActiveSessionId(createdRecord.session.session_id);
-      setNewSessionLabel("");
-      setNotice("Chat session created.");
-      return createdRecord.session.session_id;
-    } catch (error) {
-      setError(toErrorMessage(error));
-      return null;
-    } finally {
-      setSessionsBusy(false);
-    }
-  }, [api, newSessionLabel, setError, setNotice]);
+        if (nextSessions.length === 0 && ensureSession) {
+          const created = await api.resolveChatSession({
+            session_label: emptyToUndefined(newSessionLabel),
+          });
+          const createdRecord = await api.getSessionCatalogEntry(created.session.session_id);
+          setSessions([createdRecord.session]);
+          setActiveSessionId(created.session.session_id);
+          setNewSessionLabel("");
+          setNotice("New chat session created.");
+          return;
+        }
+        setSessions(nextSessions);
+        if (nextSessions.length === 0) {
+          setActiveSessionId("");
+          return;
+        }
+        setActiveSessionId((previous) => {
+          if (
+            previous.length > 0 &&
+            nextSessions.some((session) => session.session_id === previous)
+          ) {
+            return previous;
+          }
+          const preferred = preferredSessionId?.trim() ?? "";
+          if (preferred.length > 0) {
+            const preferredSession = nextSessions.find(
+              (session) => session.session_id === preferred,
+            );
+            if (preferredSession !== undefined) {
+              return preferredSession.session_id;
+            }
+          }
+          return nextSessions[0].session_id;
+        });
+      } catch (error) {
+        setError(toErrorMessage(error));
+      } finally {
+        setSessionsBusy(false);
+      }
+    },
+    [api, includeArchived, newSessionLabel, preferredSessionId, searchQuery, setError, setNotice],
+  );
+
+  const createSessionWithLabel = useCallback(
+    async (sessionLabel?: string): Promise<string | null> => {
+      setError(null);
+      setNotice(null);
+      setSessionsBusy(true);
+      try {
+        const response = await api.resolveChatSession({
+          session_label: emptyToUndefined(sessionLabel ?? newSessionLabel),
+        });
+        const createdRecord = await api.getSessionCatalogEntry(response.session.session_id);
+        setSessions((previous) => {
+          const without = previous.filter(
+            (entry) => entry.session_id !== createdRecord.session.session_id,
+          );
+          return [createdRecord.session, ...without];
+        });
+        setActiveSessionId(createdRecord.session.session_id);
+        setNewSessionLabel("");
+        setNotice("Chat session created.");
+        return createdRecord.session.session_id;
+      } catch (error) {
+        setError(toErrorMessage(error));
+        return null;
+      } finally {
+        setSessionsBusy(false);
+      }
+    },
+    [api, newSessionLabel, setError, setNotice],
+  );
 
   const createSession = useCallback(async (): Promise<void> => {
     await createSessionWithLabel(newSessionLabel);
   }, [createSessionWithLabel, newSessionLabel]);
 
-  const upsertSession = useCallback((
-    session: SessionCatalogRecord,
-    options?: { select?: boolean },
-  ): void => {
-    setSessions((previous) => {
-      const without = previous.filter((entry) => entry.session_id !== session.session_id);
-      return [session, ...without];
-    });
-    if (options?.select) {
-      setActiveSessionId(session.session_id);
-    }
-  }, []);
+  const upsertSession = useCallback(
+    (session: SessionCatalogRecord, options?: { select?: boolean }): void => {
+      setSessions((previous) => {
+        const without = previous.filter((entry) => entry.session_id !== session.session_id);
+        return [session, ...without];
+      });
+      if (options?.select) {
+        setActiveSessionId(session.session_id);
+      }
+    },
+    [],
+  );
 
   const renameSession = useCallback(async (): Promise<void> => {
     if (activeSessionId.trim().length === 0) {

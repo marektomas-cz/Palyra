@@ -131,18 +131,30 @@ export function ChatConsolePanel({
   });
 
   const pendingApprovalCount = useMemo(
-    () => visibleTranscript.filter((entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string").length,
+    () =>
+      visibleTranscript.filter(
+        (entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string",
+      ).length,
     [visibleTranscript],
   );
   const a2uiSurfaces = useMemo(() => Object.keys(a2uiDocuments), [a2uiDocuments]);
   const inspectorVisible = runDrawerOpen || runIds.length > 0;
   const actionableRunId =
     activeRunId ?? (runDrawerId.trim().length > 0 ? runDrawerId.trim() : null) ?? runIds[0] ?? null;
-  const toolPayloadCount = useMemo(() => visibleTranscript.filter((entry) => entry.payload !== undefined).length, [visibleTranscript]);
-  const recentTranscriptRecords = useMemo(() => [...transcriptRecords].slice(-8).reverse(), [transcriptRecords]);
+  const toolPayloadCount = useMemo(
+    () => visibleTranscript.filter((entry) => entry.payload !== undefined).length,
+    [visibleTranscript],
+  );
+  const recentTranscriptRecords = useMemo(
+    () => [...transcriptRecords].slice(-8).reverse(),
+    [transcriptRecords],
+  );
   const deferredComposerText = useDeferredValue(composerText);
   const deferredSearchQuery = useDeferredValue(transcriptSearchQuery);
-  const parsedSlashCommand = useMemo(() => parseSlashCommand(deferredComposerText), [deferredComposerText]);
+  const parsedSlashCommand = useMemo(
+    () => parseSlashCommand(deferredComposerText),
+    [deferredComposerText],
+  );
   const showSlashPalette = deferredComposerText.trim().startsWith("/");
   const slashQuery = useMemo(() => {
     if (!showSlashPalette) {
@@ -151,16 +163,26 @@ export function ChatConsolePanel({
     return deferredComposerText.trim().slice(1).trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
   }, [deferredComposerText, showSlashPalette]);
   const slashCommandMatches = useMemo(
-    () => (slashQuery.length === 0 || slashQuery === "help" ? CHAT_SLASH_COMMANDS : CHAT_SLASH_COMMANDS.filter((command) => command.name.includes(slashQuery))),
+    () =>
+      slashQuery.length === 0 || slashQuery === "help"
+        ? CHAT_SLASH_COMMANDS
+        : CHAT_SLASH_COMMANDS.filter((command) => command.name.includes(slashQuery)),
     [slashQuery],
   );
-  const selectedSessionLineage = useMemo(() => buildSessionLineageHint(sessions.selectedSession), [sessions.selectedSession]);
+  const selectedSessionLineage = useMemo(
+    () => buildSessionLineageHint(sessions.selectedSession),
+    [sessions.selectedSession],
+  );
   const contextBudget = useMemo(
-    () => buildContextBudgetSummary({
-      baseline_tokens: Math.max(sessions.selectedSession?.total_tokens ?? 0, runStatus?.total_tokens ?? 0),
-      draft_text: composerText,
-      attachments,
-    }),
+    () =>
+      buildContextBudgetSummary({
+        baseline_tokens: Math.max(
+          sessions.selectedSession?.total_tokens ?? 0,
+          runStatus?.total_tokens ?? 0,
+        ),
+        draft_text: composerText,
+        attachments,
+      }),
     [attachments, composerText, runStatus?.total_tokens, sessions.selectedSession?.total_tokens],
   );
 
@@ -254,7 +276,10 @@ export function ChatConsolePanel({
     if (!resetApplied) {
       return;
     }
-    clearTranscriptState(); setDetailPanel(null); setTranscriptSearchResults([]); setAttachments([]);
+    clearTranscriptState();
+    setDetailPanel(null);
+    setTranscriptSearchResults([]);
+    setAttachments([]);
     void refreshSessionTranscript();
     setNotice("Session reset applied. Local transcript cleared.");
   }
@@ -264,7 +289,10 @@ export function ChatConsolePanel({
     if (!archived) {
       return;
     }
-    clearTranscriptState(); setDetailPanel(null); setTranscriptSearchResults([]); setAttachments([]);
+    clearTranscriptState();
+    setDetailPanel(null);
+    setTranscriptSearchResults([]);
+    setAttachments([]);
     setNotice("Session archived. Local transcript cleared.");
   }
 
@@ -392,7 +420,8 @@ export function ChatConsolePanel({
         return;
       case "export":
         await exportTranscript(
-          command.args.trim().toLowerCase() === "markdown" || command.args.trim().toLowerCase() === "md"
+          command.args.trim().toLowerCase() === "markdown" ||
+            command.args.trim().toLowerCase() === "md"
             ? "markdown"
             : "json",
         );
@@ -430,7 +459,9 @@ export function ChatConsolePanel({
     const matchedSession =
       sessions.sortedSessions.find((session) => session.session_id === target) ??
       sessions.sortedSessions.find((session) => session.session_key === target) ??
-      sessions.sortedSessions.find((session) => session.title.toLowerCase() === target.toLowerCase()) ??
+      sessions.sortedSessions.find(
+        (session) => session.title.toLowerCase() === target.toLowerCase(),
+      ) ??
       null;
     if (matchedSession === null) {
       setError(`No loaded session matches "${target}". Use /history first if needed.`);
@@ -684,14 +715,19 @@ export function ChatConsolePanel({
     }
   }
 
-  function inspectLiveEntry(entry: TranscriptEntry): void { setDetailPanel(buildDetailFromLiveEntry(entry)); }
-  function inspectTranscriptRecord(record: ChatTranscriptRecord): void { setDetailPanel(buildDetailFromTranscriptRecord(record)); }
+  function inspectLiveEntry(entry: TranscriptEntry): void {
+    setDetailPanel(buildDetailFromLiveEntry(entry));
+  }
+  function inspectTranscriptRecord(record: ChatTranscriptRecord): void {
+    setDetailPanel(buildDetailFromTranscriptRecord(record));
+  }
   function inspectSearchMatch(match: TranscriptSearchMatch): void {
     const matchingRecord = transcriptRecords.find(
       (record) => record.run_id === match.run_id && record.seq === match.seq,
     );
     if (matchingRecord !== undefined) {
-      inspectTranscriptRecord(matchingRecord); return;
+      inspectTranscriptRecord(matchingRecord);
+      return;
     }
     setDetailPanel(buildDetailFromSearchMatch(match));
   }
@@ -721,8 +757,12 @@ export function ChatConsolePanel({
             <StatusChip tone={streaming ? "warning" : "success"}>
               {streaming ? "Streaming" : "Idle"}
             </StatusChip>
-            <StatusChip tone={pendingApprovalCount > 0 ? "warning" : "default"}>{pendingApprovalCount} pending approval{pendingApprovalCount === 1 ? "" : "s"}</StatusChip>
-            <StatusChip tone={toolPayloadCount > 0 ? "accent" : "default"}>{toolPayloadCount} payload{toolPayloadCount === 1 ? "" : "s"} in sidebar</StatusChip>
+            <StatusChip tone={pendingApprovalCount > 0 ? "warning" : "default"}>
+              {pendingApprovalCount} pending approval{pendingApprovalCount === 1 ? "" : "s"}
+            </StatusChip>
+            <StatusChip tone={toolPayloadCount > 0 ? "accent" : "default"}>
+              {toolPayloadCount} payload{toolPayloadCount === 1 ? "" : "s"} in sidebar
+            </StatusChip>
             <Chip size="sm" variant="secondary">
               {describeBranchState(sessions.selectedSession?.branch_state ?? "missing")}
             </Chip>
@@ -777,20 +817,38 @@ export function ChatConsolePanel({
           className="chat-panel"
           description="Create, rename, branch-aware inspect, reset, and switch sessions without leaving the active conversation."
           title="Sessions"
-          actions={<StatusChip tone={sessions.selectedSession ? "success" : "warning"}>{sessions.selectedSession ? "Active session" : "No session"}</StatusChip>}
+          actions={
+            <StatusChip tone={sessions.selectedSession ? "success" : "warning"}>
+              {sessions.selectedSession ? "Active session" : "No session"}
+            </StatusChip>
+          }
         >
           <ChatSessionsSidebar
-            sessionsBusy={sessions.sessionsBusy} newSessionLabel={sessions.newSessionLabel}
-            setNewSessionLabel={sessions.setNewSessionLabel} searchQuery={sessions.searchQuery}
-            setSearchQuery={sessions.setSearchQuery} includeArchived={sessions.includeArchived}
-            setIncludeArchived={sessions.setIncludeArchived} sessionLabelDraft={sessions.sessionLabelDraft}
-            setSessionLabelDraft={sessions.setSessionLabelDraft} selectedSession={sessions.selectedSession}
-            sortedSessions={sessions.sortedSessions} activeSessionId={sessions.activeSessionId}
+            sessionsBusy={sessions.sessionsBusy}
+            newSessionLabel={sessions.newSessionLabel}
+            setNewSessionLabel={sessions.setNewSessionLabel}
+            searchQuery={sessions.searchQuery}
+            setSearchQuery={sessions.setSearchQuery}
+            includeArchived={sessions.includeArchived}
+            setIncludeArchived={sessions.setIncludeArchived}
+            sessionLabelDraft={sessions.sessionLabelDraft}
+            setSessionLabelDraft={sessions.setSessionLabelDraft}
+            selectedSession={sessions.selectedSession}
+            sortedSessions={sessions.sortedSessions}
+            activeSessionId={sessions.activeSessionId}
             setActiveSessionId={sessions.setActiveSessionId}
-            createSession={() => { void sessions.createSession(); }}
-            renameSession={() => { void sessions.renameSession(); }}
-            resetSession={() => { void resetSessionAndTranscript(); }}
-            archiveSession={() => { void archiveSessionAndTranscript(); }}
+            createSession={() => {
+              void sessions.createSession();
+            }}
+            renameSession={() => {
+              void sessions.renameSession();
+            }}
+            resetSession={() => {
+              void resetSessionAndTranscript();
+            }}
+            archiveSession={() => {
+              void archiveSessionAndTranscript();
+            }}
           />
         </SectionCard>
 
@@ -803,26 +861,44 @@ export function ChatConsolePanel({
               <StatusChip tone={streaming ? "warning" : "success"}>
                 {streaming ? "Streaming" : "Idle"}
               </StatusChip>
-              <StatusChip tone={contextBudget.tone === "danger" ? "danger" : contextBudget.tone === "warning" ? "warning" : "default"}>{contextBudget.label}</StatusChip>
+              <StatusChip
+                tone={
+                  contextBudget.tone === "danger"
+                    ? "danger"
+                    : contextBudget.tone === "warning"
+                      ? "warning"
+                      : "default"
+                }
+              >
+                {contextBudget.label}
+              </StatusChip>
               <Chip variant="secondary">{selectedSessionLineage}</Chip>
             </div>
           }
         >
           <div className="chat-panel__body">
             <ChatTranscript
-              visibleTranscript={visibleTranscript} hiddenTranscriptItems={hiddenTranscriptItems}
-              transcriptBoxRef={transcriptBoxRef} approvalDrafts={approvalDrafts}
-              a2uiDocuments={a2uiDocuments} selectedDetailId={detailPanel?.id ?? null}
+              visibleTranscript={visibleTranscript}
+              hiddenTranscriptItems={hiddenTranscriptItems}
+              transcriptBoxRef={transcriptBoxRef}
+              approvalDrafts={approvalDrafts}
+              a2uiDocuments={a2uiDocuments}
+              selectedDetailId={detailPanel?.id ?? null}
               updateApprovalDraft={updateApprovalDraftValue}
               decideInlineApproval={(approvalId, approved) => {
                 void decideInlineApproval(approvalId, approved);
               }}
-              openRunDetails={openRunDetails} inspectPayload={inspectLiveEntry}
+              openRunDetails={openRunDetails}
+              inspectPayload={inspectLiveEntry}
             />
             <ChatComposer
-              composerText={composerText} setComposerText={setComposerText} streaming={streaming}
-              activeSessionId={sessions.activeSessionId} attachments={attachments}
-              attachmentBusy={attachmentBusy} canQueueFollowUp={actionableRunId !== null}
+              composerText={composerText}
+              setComposerText={setComposerText}
+              streaming={streaming}
+              activeSessionId={sessions.activeSessionId}
+              attachments={attachments}
+              attachmentBusy={attachmentBusy}
+              canQueueFollowUp={actionableRunId !== null}
               submitMessage={() => {
                 void handleComposerSubmit();
               }}
@@ -832,7 +908,9 @@ export function ChatConsolePanel({
               branchSession={() => {
                 void branchCurrentSession();
               }}
-              queueFollowUp={() => { void queueFollowUpText(composerText); }}
+              queueFollowUp={() => {
+                void queueFollowUpText(composerText);
+              }}
               cancelStreaming={cancelStreaming}
               clearTranscript={() => {
                 clearTranscriptState();
@@ -846,21 +924,29 @@ export function ChatConsolePanel({
                   previous.filter((attachment) => attachment.local_id !== localId),
                 );
               }}
-              attachFiles={(files) => { void handleAttachmentFiles(files); }}
-              showSlashPalette={showSlashPalette} parsedSlashCommand={parsedSlashCommand}
-              slashCommandMatches={slashCommandMatches} useSlashCommand={(command) => setComposerText(command.example)}
+              attachFiles={(files) => {
+                void handleAttachmentFiles(files);
+              }}
+              showSlashPalette={showSlashPalette}
+              parsedSlashCommand={parsedSlashCommand}
+              slashCommandMatches={slashCommandMatches}
+              useSlashCommand={(command) => setComposerText(command.example)}
               contextBudget={contextBudget}
             />
           </div>
         </SectionCard>
         <ChatInspectorColumn
-          pendingApprovalCount={pendingApprovalCount} a2uiSurfaces={a2uiSurfaces} runIds={runIds}
+          pendingApprovalCount={pendingApprovalCount}
+          a2uiSurfaces={a2uiSurfaces}
+          runIds={runIds}
           selectedSession={sessions.selectedSession}
           selectedSessionLineage={selectedSessionLineage}
           contextBudgetEstimatedTokens={contextBudget.estimated_total_tokens}
-          transcriptBusy={transcriptBusy} transcriptSearchQuery={transcriptSearchQuery}
+          transcriptBusy={transcriptBusy}
+          transcriptSearchQuery={transcriptSearchQuery}
           setTranscriptSearchQuery={setTranscriptSearchQuery}
-          transcriptSearchBusy={transcriptSearchBusy} canSearchTranscript={deferredSearchQuery.trim().length > 0}
+          transcriptSearchBusy={transcriptSearchBusy}
+          canSearchTranscript={deferredSearchQuery.trim().length > 0}
           pinnedRecordKeys={new Set(sessionPins.map((pin) => `${pin.run_id}:${pin.tape_seq}`))}
           searchResults={transcriptSearchResults}
           searchTranscript={() => {

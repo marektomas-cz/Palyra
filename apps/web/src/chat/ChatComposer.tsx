@@ -65,8 +65,11 @@ export function ChatComposer({
   const [dragActive, setDragActive] = useState(false);
   const dragDepthRef = useRef(0);
   const composerDisabled = activeSessionId.trim().length === 0;
-  const sendLabel =
-    streaming ? "Streaming..." : showSlashPalette && parsedSlashCommand !== null ? "Run command" : "Send";
+  const sendLabel = streaming
+    ? "Streaming..."
+    : showSlashPalette && parsedSlashCommand !== null
+      ? "Run command"
+      : "Send";
 
   function pushFiles(files: FileList | readonly File[] | null | undefined): void {
     if (files === null || files === undefined) {

@@ -535,7 +535,9 @@ export function parseSlashCommand(raw: string): ParsedSlashCommand | null {
   }
 
   const firstSpace = withoutPrefix.indexOf(" ");
-  const name = (firstSpace === -1 ? withoutPrefix : withoutPrefix.slice(0, firstSpace)).toLowerCase();
+  const name = (
+    firstSpace === -1 ? withoutPrefix : withoutPrefix.slice(0, firstSpace)
+  ).toLowerCase();
   const args = firstSpace === -1 ? "" : withoutPrefix.slice(firstSpace + 1).trim();
 
   if (CHAT_SLASH_COMMANDS.some((command) => command.name === name)) {

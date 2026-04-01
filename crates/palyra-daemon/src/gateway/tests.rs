@@ -858,6 +858,10 @@ async fn build_previous_run_context_prompt_includes_recent_turns_when_available(
         .start_orchestrator_run(&OrchestratorRunStartRequest {
             run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
             session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+            origin_kind: String::new(),
+            origin_run_id: None,
+            triggered_by_principal: None,
+            parameter_delta_json: None,
         })
         .expect("previous run should start");
     state
@@ -1988,6 +1992,10 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_pending_record_acros
         .start_orchestrator_run(OrchestratorRunStartRequest {
             run_id: run_id_first.clone(),
             session_id: session_id.clone(),
+            origin_kind: String::new(),
+            origin_run_id: None,
+            triggered_by_principal: None,
+            parameter_delta_json: None,
         })
         .await
         .expect("first run should be started for route approval test");
@@ -1995,6 +2003,10 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_pending_record_acros
         .start_orchestrator_run(OrchestratorRunStartRequest {
             run_id: run_id_second.clone(),
             session_id: session_id.clone(),
+            origin_kind: String::new(),
+            origin_run_id: None,
+            triggered_by_principal: None,
+            parameter_delta_json: None,
         })
         .await
         .expect("second run should be started for route approval test");
@@ -2140,6 +2152,10 @@ async fn resolve_route_tool_approval_outcome_does_not_rehydrate_resolved_record_
         .start_orchestrator_run(OrchestratorRunStartRequest {
             run_id: run_id.clone(),
             session_id: session_id.clone(),
+            origin_kind: String::new(),
+            origin_run_id: None,
+            triggered_by_principal: None,
+            parameter_delta_json: None,
         })
         .await
         .expect("run should be started for resolved route approval test");
@@ -2235,6 +2251,10 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_once_scope_record() 
         .start_orchestrator_run(OrchestratorRunStartRequest {
             run_id: run_id.clone(),
             session_id: session_id.clone(),
+            origin_kind: String::new(),
+            origin_run_id: None,
+            triggered_by_principal: None,
+            parameter_delta_json: None,
         })
         .await
         .expect("run should be started for route approval once test");
@@ -2397,6 +2417,10 @@ fn orchestrator_tape_snapshot_paginates_and_redacts_payloads() {
         .start_orchestrator_run(&OrchestratorRunStartRequest {
             run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
             session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+            origin_kind: String::new(),
+            origin_run_id: None,
+            triggered_by_principal: None,
+            parameter_delta_json: None,
         })
         .expect("orchestrator run should start");
     state
@@ -2483,6 +2507,10 @@ async fn model_token_tape_compaction_stub_emits_marker_event() {
         .start_orchestrator_run(&OrchestratorRunStartRequest {
             run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
             session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+            origin_kind: String::new(),
+            origin_run_id: None,
+            triggered_by_principal: None,
+            parameter_delta_json: None,
         })
         .expect("orchestrator run should start");
 

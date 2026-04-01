@@ -1,11 +1,7 @@
 import { ActionButton, EmptyState, StatusChip } from "../console/components/ui";
 import { A2uiRenderer, type A2uiDocument } from "../a2ui";
 
-import {
-  ApprovalRequestControls,
-  type ApprovalDraft,
-  type TranscriptEntry,
-} from "./chatShared";
+import { ApprovalRequestControls, type ApprovalDraft, type TranscriptEntry } from "./chatShared";
 
 type ChatTranscriptProps = {
   visibleTranscript: TranscriptEntry[];

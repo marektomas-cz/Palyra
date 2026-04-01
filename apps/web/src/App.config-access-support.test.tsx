@@ -144,9 +144,7 @@ describe("M56 config, access, and support surfaces", () => {
     },
   );
 
-  it(
-    "surfaces access CLI handoffs and support bundle recovery workflows",
-    async () => {
+  it("surfaces access CLI handoffs and support bundle recovery workflows", async () => {
     let pairingSummary = pairingSummaryFixture();
     const supportJobs = supportBundleJobsFixture().jobs.slice();
 
@@ -235,9 +233,7 @@ describe("M56 config, access, and support surfaces", () => {
         "Remote gateway exposure requires explicit verification and operator acknowledgement.",
       );
     });
-    },
-    20_000,
-  );
+  }, 20_000);
 
   it("renders every published CLI handoff from the capability catalog without fake direct actions", async () => {
     const fetchMock = createFetchRouter((request) => routeOverviewRequests(request));

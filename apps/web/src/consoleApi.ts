@@ -1693,9 +1693,7 @@ export class ConsoleApiClient {
     );
   }
 
-  async getSessionTranscript(
-    sessionId: string,
-  ): Promise<{
+  async getSessionTranscript(sessionId: string): Promise<{
     session: SessionCatalogRecord;
     records: ChatTranscriptRecord[];
     pins: ChatPinRecord[];
@@ -1724,7 +1722,10 @@ export class ConsoleApiClient {
     contract: ContractDescriptor;
   }> {
     return this.request(
-      buildPathWithQuery(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/transcript/search`, new URLSearchParams([["q", query]])),
+      buildPathWithQuery(
+        `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/transcript/search`,
+        new URLSearchParams([["q", query]]),
+      ),
     );
   }
 
@@ -1733,13 +1734,18 @@ export class ConsoleApiClient {
     format: "json" | "markdown" = "json",
   ): Promise<{ format: string; content: JsonValue; contract: ContractDescriptor }> {
     return this.request(
-      buildPathWithQuery(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/export`, new URLSearchParams([["format", format]])),
+      buildPathWithQuery(
+        `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/export`,
+        new URLSearchParams([["format", format]]),
+      ),
     );
   }
 
-  async listSessionPins(
-    sessionId: string,
-  ): Promise<{ session: SessionCatalogRecord; pins: ChatPinRecord[]; contract: ContractDescriptor }> {
+  async listSessionPins(sessionId: string): Promise<{
+    session: SessionCatalogRecord;
+    pins: ChatPinRecord[];
+    contract: ContractDescriptor;
+  }> {
     return this.request(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/pins`);
   }
 

@@ -2,13 +2,17 @@ Usage: palyra sessions [OPTIONS] <COMMAND>
 
 Commands:
   list
-  history  [aliases: search]
-  show     [aliases: resume]
+  history            [aliases: search]
+  show               [aliases: resume]
   resolve
   rename
   reset
   cleanup
   abort
+  retry
+  branch
+  transcript-search
+  export
 
 Options:
   -h, --help  Print help
