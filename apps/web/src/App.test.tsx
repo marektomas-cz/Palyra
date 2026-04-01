@@ -225,7 +225,6 @@ describe("M35 web console app", () => {
     const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
       const path = requestUrl(input);
       const method = (init?.method ?? "GET").toUpperCase();
-      console.log("chat-stream-test: request", method, path);
 
       if (path === "/console/v1/auth/session" && method === "GET") {
         return jsonResponse({
