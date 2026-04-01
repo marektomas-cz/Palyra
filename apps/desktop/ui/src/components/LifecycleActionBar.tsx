@@ -22,7 +22,7 @@ export function LifecycleActionBar({
       <CardContent className="desktop-action-bar">
         <div className="desktop-action-bar__cluster">
           <p className="desktop-label">Lifecycle</p>
-          <ButtonGroup className="desktop-action-group" hideSeparator>
+          <ButtonGroup className="desktop-action-group">
             <Button isDisabled={isBusy} variant="primary" onPress={() => onAction("start")}>
               {actionLabel(actionState, "start", "Start Palyra", "Starting Palyra...")}
             </Button>
@@ -45,7 +45,7 @@ export function LifecycleActionBar({
 
         <div className="desktop-action-bar__cluster desktop-action-bar__cluster--end">
           <p className="desktop-label">Handoff</p>
-          <ButtonGroup className="desktop-action-group" hideSeparator>
+          <ButtonGroup className="desktop-action-group">
             <Button isDisabled={isBusy} variant="ghost" onPress={() => onAction("dashboard")}>
               {actionLabel(actionState, "dashboard", "Open Dashboard", "Opening Dashboard...")}
             </Button>
