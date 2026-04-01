@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -494,23 +495,11 @@ impl MediaArtifactStore {
             return Ok(None);
         };
         drop(guard);
-        let sha256 = record.sha256.as_str();
-        if !is_valid_sha256_hex(sha256)
-            || sha256.contains("..")
-            || sha256.contains('/')
-            || sha256.contains('\\')
-        {
-            return Err(MediaStoreError::Io(format!("media content digest '{sha256}' is invalid")));
-        }
-        let prefix = &sha256[..2];
-        let expected_rel_path = format!("{prefix}/{sha256}");
-        if record.storage_rel_path != expected_rel_path {
-            return Err(MediaStoreError::Io(format!(
-                "media content storage path '{}' does not match digest '{}'",
-                record.storage_rel_path, sha256
-            )));
-        }
-        let storage_path = self.content_root.join(prefix).join(sha256);
+        let storage_path = resolve_content_storage_path(
+            self.content_root.as_path(),
+            record.storage_rel_path.as_str(),
+            record.sha256.as_str(),
+        )?;
         let bytes = fs::read(storage_path.as_path()).map_err(|error| {
             MediaStoreError::Io(format!(
                 "failed to read media artifact '{}' from '{}' : {error}",
@@ -582,34 +571,24 @@ impl MediaArtifactStore {
         let now = current_unix_ms();
         let sha256 = sha256_hex(request.bytes);
         let artifact_id = ulid::Ulid::new().to_string();
-        let sha256_value = sha256.as_str();
-        if !is_valid_sha256_hex(sha256_value)
-            || sha256_value.contains("..")
-            || sha256_value.contains('/')
-            || sha256_value.contains('\\')
-        {
-            return Err(MediaStoreError::Io(format!(
-                "media content digest '{sha256_value}' is invalid"
-            )));
-        }
-        let prefix = &sha256_value[..2];
-        let relative_path = format!("{prefix}/{sha256_value}");
-        let storage_path = self.content_root.join(prefix).join(sha256_value);
-        if let Some(parent) = storage_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                MediaStoreError::Io(format!(
-                    "failed to create media artifact parent '{}' : {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        if !storage_path.exists() {
-            fs::write(storage_path.as_path(), request.bytes).map_err(|error| {
-                MediaStoreError::Io(format!(
+        let (storage_path, relative_path) =
+            prepare_content_storage_path(self.content_root.as_path(), sha256.as_str())?;
+        match fs::OpenOptions::new().write(true).create_new(true).open(storage_path.as_path()) {
+            Ok(mut file) => {
+                file.write_all(request.bytes).map_err(|error| {
+                    MediaStoreError::Io(format!(
+                        "failed to persist media artifact '{}' : {error}",
+                        storage_path.display()
+                    ))
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(MediaStoreError::Io(format!(
                     "failed to persist media artifact '{}' : {error}",
                     storage_path.display()
-                ))
-            })?;
+                )));
+            }
         }
 
         let filename = sanitize_filename(request.filename, sniffed.content_type.as_str());
@@ -1013,34 +992,24 @@ impl MediaArtifactStore {
         let size_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
         let sha256 = sha256_hex(body.as_slice());
         let artifact_id = ulid::Ulid::new().to_string();
-        let sha256_value = sha256.as_str();
-        if !is_valid_sha256_hex(sha256_value)
-            || sha256_value.contains("..")
-            || sha256_value.contains('/')
-            || sha256_value.contains('\\')
-        {
-            return Err(MediaStoreError::Io(format!(
-                "media content digest '{sha256_value}' is invalid"
-            )));
-        }
-        let prefix = &sha256_value[..2];
-        let relative_path = format!("{prefix}/{sha256_value}");
-        let storage_path = self.content_root.join(prefix).join(sha256_value);
-        if let Some(parent) = storage_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                MediaStoreError::Io(format!(
-                    "failed to create media artifact parent '{}' : {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        if !storage_path.exists() {
-            fs::write(storage_path.as_path(), body.as_slice()).map_err(|error| {
-                MediaStoreError::Io(format!(
+        let (storage_path, relative_path) =
+            prepare_content_storage_path(self.content_root.as_path(), sha256.as_str())?;
+        match fs::OpenOptions::new().write(true).create_new(true).open(storage_path.as_path()) {
+            Ok(mut file) => {
+                file.write_all(body.as_slice()).map_err(|error| {
+                    MediaStoreError::Io(format!(
+                        "failed to persist media artifact '{}' : {error}",
+                        storage_path.display()
+                    ))
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(MediaStoreError::Io(format!(
                     "failed to persist media artifact '{}' : {error}",
                     storage_path.display()
-                ))
-            })?;
+                )));
+            }
         }
         let now = current_unix_ms();
         let record = StoredArtifactRecord {
@@ -1375,31 +1344,13 @@ fn remove_artifact_locked(
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    if !is_valid_sha256_hex(content_sha256)
-        || content_sha256.contains("..")
-        || content_sha256.contains('/')
-        || content_sha256.contains('\\')
-    {
-        return Err(MediaStoreError::Io(format!(
-            "media content digest '{content_sha256}' is invalid"
-        )));
-    }
-    let prefix = &content_sha256[..2];
-    let expected_rel_path = format!("{prefix}/{content_sha256}");
-    if let Some(path) = storage_rel_path.as_deref() {
-        if path != expected_rel_path {
-            return Err(MediaStoreError::Io(format!(
-                "media content storage path '{}' does not match digest '{}'",
-                path, content_sha256
-            )));
-        }
-    }
-    let resolved_storage_path =
-        storage_rel_path.as_ref().map(|_| content_root.join(prefix).join(content_sha256));
+    let resolved_storage_path = storage_rel_path
+        .as_ref()
+        .map(|path| resolve_content_storage_path(content_root, path.as_str(), content_sha256));
     connection
         .execute("DELETE FROM media_contents WHERE content_sha256 = ?1", params![content_sha256])?;
     if let Some(storage_path) = resolved_storage_path {
-        let _ = fs::remove_file(storage_path);
+        let _ = fs::remove_file(storage_path?);
     }
     Ok(())
 }
@@ -1731,7 +1682,6 @@ fn looks_like_text(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes).ok().is_some_and(|text| !text.chars().any(|ch| ch == '\u{0000}'))
 }
 
-#[cfg(test)]
 fn content_relative_path(sha256: &str) -> String {
     let prefix = &sha256[..2.min(sha256.len())];
     format!("{prefix}/{sha256}")
@@ -1741,12 +1691,7 @@ fn is_valid_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[cfg(test)]
-fn resolve_content_storage_path(
-    content_root: &Path,
-    storage_rel_path: &str,
-    expected_sha256: &str,
-) -> Result<PathBuf, MediaStoreError> {
+fn validate_content_digest(expected_sha256: &str) -> Result<(), MediaStoreError> {
     if !is_valid_sha256_hex(expected_sha256)
         || expected_sha256.contains("..")
         || expected_sha256.contains('/')
@@ -1756,7 +1701,69 @@ fn resolve_content_storage_path(
             "media content digest '{expected_sha256}' is invalid"
         )));
     }
-    let prefix = &expected_sha256[..2];
+    Ok(())
+}
+
+fn canonical_content_root(content_root: &Path) -> Result<PathBuf, MediaStoreError> {
+    fs::canonicalize(content_root).map_err(|error| {
+        MediaStoreError::Io(format!(
+            "failed to canonicalize media content root '{}' : {error}",
+            content_root.display()
+        ))
+    })
+}
+
+fn prepare_content_storage_path(
+    content_root: &Path,
+    expected_sha256: &str,
+) -> Result<(PathBuf, String), MediaStoreError> {
+    validate_content_digest(expected_sha256)?;
+    let normalized_root = canonical_content_root(content_root)?;
+    let relative_path = content_relative_path(expected_sha256);
+    let storage_path = normalized_root.join(Path::new(relative_path.as_str()));
+    let parent = storage_path.parent().ok_or_else(|| {
+        MediaStoreError::Io(format!(
+            "media content path '{}' is missing a parent directory",
+            storage_path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        MediaStoreError::Io(format!(
+            "failed to create media artifact parent '{}' : {error}",
+            parent.display()
+        ))
+    })?;
+    let normalized_parent = fs::canonicalize(parent).map_err(|error| {
+        MediaStoreError::Io(format!(
+            "failed to canonicalize media artifact parent '{}' : {error}",
+            parent.display()
+        ))
+    })?;
+    if !normalized_parent.starts_with(normalized_root.as_path()) {
+        return Err(MediaStoreError::Io(format!(
+            "media artifact parent '{}' escapes '{}'",
+            normalized_parent.display(),
+            normalized_root.display()
+        )));
+    }
+    let normalized_storage_path = normalized_parent.join(expected_sha256);
+    if !normalized_storage_path.starts_with(normalized_root.as_path()) {
+        return Err(MediaStoreError::Io(format!(
+            "media artifact path '{}' escapes '{}'",
+            normalized_storage_path.display(),
+            normalized_root.display()
+        )));
+    }
+    Ok((normalized_storage_path, relative_path))
+}
+
+fn resolve_content_storage_path(
+    content_root: &Path,
+    storage_rel_path: &str,
+    expected_sha256: &str,
+) -> Result<PathBuf, MediaStoreError> {
+    validate_content_digest(expected_sha256)?;
+    let normalized_root = canonical_content_root(content_root)?;
     let expected_rel_path = content_relative_path(expected_sha256);
     if storage_rel_path != expected_rel_path {
         return Err(MediaStoreError::Io(format!(
@@ -1764,7 +1771,21 @@ fn resolve_content_storage_path(
             storage_rel_path, expected_sha256
         )));
     }
-    Ok(content_root.join(prefix).join(expected_sha256))
+    let normalized_storage_path =
+        fs::canonicalize(normalized_root.join(Path::new(storage_rel_path))).map_err(|error| {
+            MediaStoreError::Io(format!(
+                "failed to canonicalize media artifact '{}' : {error}",
+                storage_rel_path
+            ))
+        })?;
+    if !normalized_storage_path.starts_with(normalized_root.as_path()) {
+        return Err(MediaStoreError::Io(format!(
+            "media artifact path '{}' escapes '{}'",
+            normalized_storage_path.display(),
+            normalized_root.display()
+        )));
+    }
+    Ok(normalized_storage_path)
 }
 
 fn attachment_kind_for_content_type(content_type: &str) -> AttachmentKind {
