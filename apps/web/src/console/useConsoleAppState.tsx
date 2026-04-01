@@ -642,10 +642,7 @@ export function useConsoleAppState() {
             if (attempt >= DESKTOP_SESSION_RECOVERY_ATTEMPTS) {
               return;
             }
-            await waitForDelay(
-              DESKTOP_SESSION_RECOVERY_DELAY_MS * attempt,
-              abortController.signal,
-            );
+            await waitForDelay(DESKTOP_SESSION_RECOVERY_DELAY_MS * attempt, abortController.signal);
           }
         }
       } catch (failure) {

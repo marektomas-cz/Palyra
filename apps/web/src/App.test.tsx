@@ -1655,7 +1655,6 @@ describe("M35 web console app", () => {
       expect(rendered).not.toContain("browser-secret");
     });
   });
-
 });
 
 function createQueuedFetch(responses: Response[]) {
