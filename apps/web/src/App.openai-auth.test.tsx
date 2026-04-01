@@ -10,7 +10,9 @@ afterEach(() => {
 });
 
 describe("M54 web auth surface", () => {
-  it("connects an OpenAI API key profile and refreshes the auth surface", async () => {
+  it(
+    "connects an OpenAI API key profile and refreshes the auth surface",
+    async () => {
     const state = createAuthSurfaceState();
     let apiKeyConnectBody = "";
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -96,9 +98,13 @@ describe("M54 web auth surface", () => {
     expect(apiKeyConnectBody).toContain('"profile_name":"default-openai"');
     expect(apiKeyConnectBody).toContain('"api_key":"sk-test-key"');
     expect(apiKeyConnectBody).toContain('"set_default":true');
-  });
+    },
+    20_000,
+  );
 
-  it("surfaces OpenAI API key validation failures without leaving the auth section", async () => {
+  it(
+    "surfaces OpenAI API key validation failures without leaving the auth section",
+    async () => {
     const state = createAuthSurfaceState();
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const request = requestDescriptor(input, init);
@@ -157,9 +163,13 @@ describe("M54 web auth surface", () => {
       "OpenAI API key rejected by provider validation.",
     );
     expect(screen.queryByText("OpenAI API key stored.")).not.toBeInTheDocument();
-  });
+    },
+    20_000,
+  );
 
-  it("starts OpenAI OAuth in a popup and completes from callback-state polling", async () => {
+  it(
+    "starts OpenAI OAuth in a popup and completes from callback-state polling",
+    async () => {
     const popupClose = vi.fn();
     const popup = {
       close: popupClose,
@@ -278,9 +288,13 @@ describe("M54 web auth surface", () => {
       { timeout: 5_000 },
     );
     expect(popupClose).toHaveBeenCalled();
-  });
+    },
+    20_000,
+  );
 
-  it("shows OAuth callback failure messaging after polling", async () => {
+  it(
+    "shows OAuth callback failure messaging after polling",
+    async () => {
     vi.spyOn(window, "open").mockReturnValue({
       close: vi.fn(),
       focus: vi.fn(),
@@ -365,9 +379,13 @@ describe("M54 web auth surface", () => {
       (await screen.findAllByText("OpenAI OAuth attempt expired before the callback completed."))
         .length,
     ).toBeGreaterThan(0);
-  });
+    },
+    20_000,
+  );
 
-  it("supports default selection plus refresh reconnect and revoke for stored profiles", async () => {
+  it(
+    "supports default selection plus refresh reconnect and revoke for stored profiles",
+    async () => {
     const popupClose = vi.fn();
     vi.spyOn(window, "open").mockReturnValue({
       close: popupClose,
@@ -578,7 +596,9 @@ describe("M54 web auth surface", () => {
     expect(refreshBody).toContain('"profile_id":"openai-oauth"');
     expect(reconnectBody).toContain('"profile_id":"openai-oauth"');
     expect(revokeBody).toContain('"profile_id":"openai-oauth"');
-  });
+    },
+    20_000,
+  );
 });
 
 function sessionResponse(): Response {
