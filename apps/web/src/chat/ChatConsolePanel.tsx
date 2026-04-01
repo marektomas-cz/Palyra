@@ -1,4 +1,3 @@
-import { Chip } from "@heroui/react";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -10,21 +9,10 @@ import type {
   JsonValue,
 } from "../consoleApi";
 import {
-  ActionButton,
-  PageHeader,
-  SectionCard,
-  StatusChip,
-  SwitchField,
-} from "../console/components/ui";
-
-import { ChatComposer } from "./ChatComposer";
-import {
-  ChatInspectorColumn,
   type DetailPanelState,
   type TranscriptSearchMatch,
 } from "./ChatInspectorColumn";
-import { ChatSessionsSidebar } from "./ChatSessionsSidebar";
-import { ChatTranscript } from "./ChatTranscript";
+import { ChatConsoleWorkspaceView } from "./ChatConsoleWorkspaceView";
 import {
   buildDetailFromLiveEntry,
   buildDetailFromSearchMatch,
@@ -743,242 +731,169 @@ export function ChatConsolePanel({
           void handleAttachmentFiles(Array.from(event.currentTarget.files ?? []));
         }}
       />
-      <PageHeader
-        eyebrow="Chat"
-        title={
+      <ChatConsoleWorkspaceView
+        allowSensitiveTools={allowSensitiveTools}
+        canAbortRun={actionableRunId !== null}
+        canInspectRun={(activeRunId ?? runIds[0] ?? null) !== null}
+        composerProps={{
+          composerText,
+          setComposerText,
+          streaming,
+          activeSessionId: sessions.activeSessionId,
+          attachments,
+          attachmentBusy,
+          canQueueFollowUp: actionableRunId !== null,
+          submitMessage: () => {
+            void handleComposerSubmit();
+          },
+          retryLast: () => {
+            void retryLatestTurn();
+          },
+          branchSession: () => {
+            void branchCurrentSession();
+          },
+          queueFollowUp: () => {
+            void queueFollowUpText(composerText);
+          },
+          cancelStreaming,
+          clearTranscript: () => {
+            clearTranscriptState();
+            setDetailPanel(null);
+            setAttachments([]);
+            setNotice("Local transcript cleared.");
+          },
+          openAttachmentPicker: () => attachmentInputRef.current?.click(),
+          removeAttachment: (localId) => {
+            setAttachments((previous) =>
+              previous.filter((attachment) => attachment.local_id !== localId),
+            );
+          },
+          attachFiles: (files) => {
+            void handleAttachmentFiles(files);
+          },
+          showSlashPalette,
+          parsedSlashCommand,
+          slashCommandMatches,
+          useSlashCommand: (command) => setComposerText(command.example),
+          contextBudget,
+        }}
+        contextBudget={contextBudget}
+        inspectorProps={{
+          pendingApprovalCount,
+          a2uiSurfaces,
+          runIds,
+          selectedSession: sessions.selectedSession,
+          selectedSessionLineage,
+          contextBudgetEstimatedTokens: contextBudget.estimated_total_tokens,
+          transcriptBusy,
+          transcriptSearchQuery,
+          setTranscriptSearchQuery,
+          transcriptSearchBusy,
+          canSearchTranscript: deferredSearchQuery.trim().length > 0,
+          pinnedRecordKeys: new Set(sessionPins.map((pin) => `${pin.run_id}:${pin.tape_seq}`)),
+          searchResults: transcriptSearchResults,
+          searchTranscript: () => {
+            void searchTranscript();
+          },
+          inspectSearchMatch,
+          exportBusy,
+          exportTranscript: (format) => {
+            void exportTranscript(format);
+          },
+          recentTranscriptRecords,
+          inspectTranscriptRecord,
+          pinTranscriptRecord: (record) => {
+            void pinTranscriptRecord(record);
+          },
+          sessionPins,
+          deletePin: (pinId) => {
+            void deletePin(pinId);
+          },
+          queuedInputs,
+          detailPanel,
+          revealSensitiveValues,
+          inspectorVisible,
+          runDrawerId,
+          setRunDrawerId,
+          runDrawerBusy,
+          runStatus,
+          runTape,
+          refreshRunDetails,
+          closeRunDrawer,
+        }}
+        onAbortRun={() => {
+          void abortCurrentRun();
+        }}
+        onOpenRunDetails={() => {
+          const targetRunId = activeRunId ?? runIds[0] ?? null;
+          if (targetRunId === null) {
+            setError("No run is available for inspection.");
+            return;
+          }
+          openRunDetails(targetRunId);
+        }}
+        onRefresh={() => {
+          void Promise.all([sessions.refreshSessions(false), refreshSessionTranscript()]);
+        }}
+        onSetAllowSensitiveTools={setAllowSensitiveTools}
+        pendingApprovalCount={pendingApprovalCount}
+        runActionBusy={runActionBusy}
+        selectedSessionBranchState={describeBranchState(
+          sessions.selectedSession?.branch_state ?? "missing",
+        )}
+        selectedSessionLineage={selectedSessionLineage}
+        selectedSessionTitle={
           sessions.selectedSession?.title ??
           (sessions.selectedSession
             ? shortId(sessions.selectedSession.session_id)
             : "Operator workspace")
         }
-        description="Sessions, retries, branches, transcript operations, and payload inspection stay on one operator surface without dumping raw tool JSON into the main conversation."
-        status={
-          <>
-            <StatusChip tone={streaming ? "warning" : "success"}>
-              {streaming ? "Streaming" : "Idle"}
-            </StatusChip>
-            <StatusChip tone={pendingApprovalCount > 0 ? "warning" : "default"}>
-              {pendingApprovalCount} pending approval{pendingApprovalCount === 1 ? "" : "s"}
-            </StatusChip>
-            <StatusChip tone={toolPayloadCount > 0 ? "accent" : "default"}>
-              {toolPayloadCount} payload{toolPayloadCount === 1 ? "" : "s"} in sidebar
-            </StatusChip>
-            <Chip size="sm" variant="secondary">
-              {describeBranchState(sessions.selectedSession?.branch_state ?? "missing")}
-            </Chip>
-          </>
-        }
-        actions={
-          <div className="workspace-inline-actions">
-            <SwitchField
-              checked={allowSensitiveTools}
-              description="Applies to the next streamed run only."
-              label="Allow sensitive tools"
-              onChange={setAllowSensitiveTools}
-            />
-            <ActionButton
-              isDisabled={sessions.sessionsBusy || transcriptBusy}
-              type="button"
-              variant="secondary"
-              onPress={() => {
-                void Promise.all([sessions.refreshSessions(false), refreshSessionTranscript()]);
-              }}
-            >
-              {sessions.sessionsBusy || transcriptBusy ? "Refreshing..." : "Refresh"}
-            </ActionButton>
-            <ActionButton
-              isDisabled={(activeRunId ?? runIds[0] ?? null) === null}
-              type="button"
-              onPress={() => {
-                const targetRunId = activeRunId ?? runIds[0] ?? null;
-                if (targetRunId === null) {
-                  setError("No run is available for inspection.");
-                  return;
-                }
-                openRunDetails(targetRunId);
-              }}
-            >
-              Run details
-            </ActionButton>
-            <ActionButton
-              isDisabled={runActionBusy || actionableRunId === null}
-              type="button"
-              variant="ghost"
-              onPress={() => void abortCurrentRun()}
-            >
-              {runActionBusy ? "Aborting..." : "Abort run"}
-            </ActionButton>
-          </div>
-        }
+        sessionsBusy={sessions.sessionsBusy}
+        sessionsSidebarProps={{
+          sessionsBusy: sessions.sessionsBusy,
+          newSessionLabel: sessions.newSessionLabel,
+          setNewSessionLabel: sessions.setNewSessionLabel,
+          searchQuery: sessions.searchQuery,
+          setSearchQuery: sessions.setSearchQuery,
+          includeArchived: sessions.includeArchived,
+          setIncludeArchived: sessions.setIncludeArchived,
+          sessionLabelDraft: sessions.sessionLabelDraft,
+          setSessionLabelDraft: sessions.setSessionLabelDraft,
+          selectedSession: sessions.selectedSession,
+          sortedSessions: sessions.sortedSessions,
+          activeSessionId: sessions.activeSessionId,
+          setActiveSessionId: sessions.setActiveSessionId,
+          createSession: () => {
+            void sessions.createSession();
+          },
+          renameSession: () => {
+            void sessions.renameSession();
+          },
+          resetSession: () => {
+            void resetSessionAndTranscript();
+          },
+          archiveSession: () => {
+            void archiveSessionAndTranscript();
+          },
+        }}
+        streaming={streaming}
+        toolPayloadCount={toolPayloadCount}
+        transcriptBusy={transcriptBusy}
+        transcriptProps={{
+          visibleTranscript,
+          hiddenTranscriptItems,
+          transcriptBoxRef,
+          approvalDrafts,
+          a2uiDocuments,
+          selectedDetailId: detailPanel?.id ?? null,
+          updateApprovalDraft: updateApprovalDraftValue,
+          decideInlineApproval: (approvalId, approved) => {
+            void decideInlineApproval(approvalId, approved);
+          },
+          openRunDetails,
+          inspectPayload: inspectLiveEntry,
+        }}
       />
-
-      <section className="chat-workspace__layout">
-        <SectionCard
-          className="chat-panel"
-          description="Create, rename, branch-aware inspect, reset, and switch sessions without leaving the active conversation."
-          title="Sessions"
-          actions={
-            <StatusChip tone={sessions.selectedSession ? "success" : "warning"}>
-              {sessions.selectedSession ? "Active session" : "No session"}
-            </StatusChip>
-          }
-        >
-          <ChatSessionsSidebar
-            sessionsBusy={sessions.sessionsBusy}
-            newSessionLabel={sessions.newSessionLabel}
-            setNewSessionLabel={sessions.setNewSessionLabel}
-            searchQuery={sessions.searchQuery}
-            setSearchQuery={sessions.setSearchQuery}
-            includeArchived={sessions.includeArchived}
-            setIncludeArchived={sessions.setIncludeArchived}
-            sessionLabelDraft={sessions.sessionLabelDraft}
-            setSessionLabelDraft={sessions.setSessionLabelDraft}
-            selectedSession={sessions.selectedSession}
-            sortedSessions={sessions.sortedSessions}
-            activeSessionId={sessions.activeSessionId}
-            setActiveSessionId={sessions.setActiveSessionId}
-            createSession={() => {
-              void sessions.createSession();
-            }}
-            renameSession={() => {
-              void sessions.renameSession();
-            }}
-            resetSession={() => {
-              void resetSessionAndTranscript();
-            }}
-            archiveSession={() => {
-              void archiveSessionAndTranscript();
-            }}
-          />
-        </SectionCard>
-
-        <SectionCard
-          className="chat-panel chat-panel--conversation"
-          description="Transcript stays readable, tool payloads move to the side panel, and slash commands stay close to the composer."
-          title="Conversation"
-          actions={
-            <div className="workspace-inline-actions">
-              <StatusChip tone={streaming ? "warning" : "success"}>
-                {streaming ? "Streaming" : "Idle"}
-              </StatusChip>
-              <StatusChip
-                tone={
-                  contextBudget.tone === "danger"
-                    ? "danger"
-                    : contextBudget.tone === "warning"
-                      ? "warning"
-                      : "default"
-                }
-              >
-                {contextBudget.label}
-              </StatusChip>
-              <Chip variant="secondary">{selectedSessionLineage}</Chip>
-            </div>
-          }
-        >
-          <div className="chat-panel__body">
-            <ChatTranscript
-              visibleTranscript={visibleTranscript}
-              hiddenTranscriptItems={hiddenTranscriptItems}
-              transcriptBoxRef={transcriptBoxRef}
-              approvalDrafts={approvalDrafts}
-              a2uiDocuments={a2uiDocuments}
-              selectedDetailId={detailPanel?.id ?? null}
-              updateApprovalDraft={updateApprovalDraftValue}
-              decideInlineApproval={(approvalId, approved) => {
-                void decideInlineApproval(approvalId, approved);
-              }}
-              openRunDetails={openRunDetails}
-              inspectPayload={inspectLiveEntry}
-            />
-            <ChatComposer
-              composerText={composerText}
-              setComposerText={setComposerText}
-              streaming={streaming}
-              activeSessionId={sessions.activeSessionId}
-              attachments={attachments}
-              attachmentBusy={attachmentBusy}
-              canQueueFollowUp={actionableRunId !== null}
-              submitMessage={() => {
-                void handleComposerSubmit();
-              }}
-              retryLast={() => {
-                void retryLatestTurn();
-              }}
-              branchSession={() => {
-                void branchCurrentSession();
-              }}
-              queueFollowUp={() => {
-                void queueFollowUpText(composerText);
-              }}
-              cancelStreaming={cancelStreaming}
-              clearTranscript={() => {
-                clearTranscriptState();
-                setDetailPanel(null);
-                setAttachments([]);
-                setNotice("Local transcript cleared.");
-              }}
-              openAttachmentPicker={() => attachmentInputRef.current?.click()}
-              removeAttachment={(localId) => {
-                setAttachments((previous) =>
-                  previous.filter((attachment) => attachment.local_id !== localId),
-                );
-              }}
-              attachFiles={(files) => {
-                void handleAttachmentFiles(files);
-              }}
-              showSlashPalette={showSlashPalette}
-              parsedSlashCommand={parsedSlashCommand}
-              slashCommandMatches={slashCommandMatches}
-              useSlashCommand={(command) => setComposerText(command.example)}
-              contextBudget={contextBudget}
-            />
-          </div>
-        </SectionCard>
-        <ChatInspectorColumn
-          pendingApprovalCount={pendingApprovalCount}
-          a2uiSurfaces={a2uiSurfaces}
-          runIds={runIds}
-          selectedSession={sessions.selectedSession}
-          selectedSessionLineage={selectedSessionLineage}
-          contextBudgetEstimatedTokens={contextBudget.estimated_total_tokens}
-          transcriptBusy={transcriptBusy}
-          transcriptSearchQuery={transcriptSearchQuery}
-          setTranscriptSearchQuery={setTranscriptSearchQuery}
-          transcriptSearchBusy={transcriptSearchBusy}
-          canSearchTranscript={deferredSearchQuery.trim().length > 0}
-          pinnedRecordKeys={new Set(sessionPins.map((pin) => `${pin.run_id}:${pin.tape_seq}`))}
-          searchResults={transcriptSearchResults}
-          searchTranscript={() => {
-            void searchTranscript();
-          }}
-          inspectSearchMatch={inspectSearchMatch}
-          exportBusy={exportBusy}
-          exportTranscript={(format) => {
-            void exportTranscript(format);
-          }}
-          recentTranscriptRecords={recentTranscriptRecords}
-          inspectTranscriptRecord={inspectTranscriptRecord}
-          pinTranscriptRecord={(record) => {
-            void pinTranscriptRecord(record);
-          }}
-          sessionPins={sessionPins}
-          deletePin={(pinId) => {
-            void deletePin(pinId);
-          }}
-          queuedInputs={queuedInputs}
-          detailPanel={detailPanel}
-          revealSensitiveValues={revealSensitiveValues}
-          inspectorVisible={inspectorVisible}
-          runDrawerId={runDrawerId}
-          setRunDrawerId={setRunDrawerId}
-          runDrawerBusy={runDrawerBusy}
-          runStatus={runStatus}
-          runTape={runTape}
-          refreshRunDetails={refreshRunDetails}
-          closeRunDrawer={closeRunDrawer}
-        />
-      </section>
     </main>
   );
 }
