@@ -217,7 +217,7 @@ jobs:
           if-no-files-found: error
 
       - name: Attest desktop bundle
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-path: |
             ${{ steps.package.outputs.archive_path }}
@@ -314,7 +314,7 @@ jobs:
           if-no-files-found: error
 
       - name: Attest headless bundle
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-path: |
             ${{ steps.package.outputs.archive_path }}
