@@ -1701,6 +1701,21 @@ describe("M35 web console app", () => {
         );
       }
 
+      if (
+        path === "/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/transcript" &&
+        method === "GET"
+      ) {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            session: sessions[0] ?? baseCatalogRecord,
+            records: [],
+            pins: [],
+            queued_inputs: [],
+          }),
+        );
+      }
+
       if (path === "/console/v1/chat/sessions" && method === "POST") {
         sessions = [baseCatalogRecord];
         return Promise.resolve(
@@ -1861,6 +1876,21 @@ describe("M35 web console app", () => {
 
       if (path === "/console/v1/sessions" && method === "GET") {
         return Promise.resolve(jsonResponse(buildSessionCatalogListEnvelope([catalogRecord])));
+      }
+
+      if (
+        path === "/console/v1/chat/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/transcript" &&
+        method === "GET"
+      ) {
+        return Promise.resolve(
+          jsonResponse({
+            contract: { contract_version: "control-plane.v1" },
+            session: catalogRecord,
+            records: [],
+            pins: [],
+            queued_inputs: [],
+          }),
+        );
       }
 
       if (
