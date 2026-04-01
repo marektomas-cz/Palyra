@@ -8,10 +8,7 @@ import type {
   ConsoleApiClient,
   JsonValue,
 } from "../consoleApi";
-import {
-  type DetailPanelState,
-  type TranscriptSearchMatch,
-} from "./ChatInspectorColumn";
+import { type DetailPanelState, type TranscriptSearchMatch } from "./ChatInspectorColumn";
 import { ChatConsoleWorkspaceView } from "./ChatConsoleWorkspaceView";
 import {
   buildDetailFromLiveEntry,
