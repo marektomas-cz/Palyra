@@ -3042,7 +3042,7 @@ allowed_channels = []
     assert_eq!(
         bound_plugin.pointer("/check/ready").and_then(Value::as_bool),
         Some(true),
-        "plugin check should resolve the installed signed skill artifact"
+        "plugin check should resolve the installed signed skill artifact: {bound_plugin}"
     );
 
     let listed_plugins = client
@@ -3680,11 +3680,16 @@ fn spawn_palyrad_with_config_and_env_once(
     let journal_db_path = unique_temp_journal_db_path();
     let identity_store_dir = state_root_dir.join("identity");
     let vault_dir = state_root_dir.join("vault");
+    let skills_trust_store_path = state_root_dir.join("skills").join("trust-store.json");
     let default_config_path = unique_temp_config_path();
     let admin_port = reserve_loopback_port()?;
     fs::create_dir_all(&identity_store_dir).with_context(|| {
         format!("failed to create test identity dir {}", identity_store_dir.display())
     })?;
+    if let Some(parent) = skills_trust_store_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create test skills dir {}", parent.display()))?;
+    }
     prepare_test_vault_dir(&vault_dir)?;
     write_test_config(&default_config_path, config_toml)?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
@@ -3707,6 +3712,15 @@ fn spawn_palyrad_with_config_and_env_once(
         .env("PALYRA_JOURNAL_DB_PATH", journal_db_path.to_string_lossy().to_string())
         .env("PALYRA_GATEWAY_IDENTITY_STORE_DIR", identity_store_dir.to_string_lossy().to_string())
         .env("PALYRA_VAULT_DIR", vault_dir.to_string_lossy().to_string())
+        .env("PALYRA_SKILLS_TRUST_STORE", skills_trust_store_path.to_string_lossy().to_string())
+        .env_remove("PALYRA_SKILL_REAUDIT_INTERVAL_MS")
+        .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_API_KEY")
+        .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_API_KEY_VAULT_REF")
+        .env_remove("PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL")
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("ALL_PROXY")
+        .env_remove("NO_PROXY")
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

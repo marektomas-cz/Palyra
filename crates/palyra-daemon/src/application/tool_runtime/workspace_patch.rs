@@ -286,7 +286,7 @@ fn workspace_patch_tool_execution_outcome(
     hasher.update((error.len() as u64).to_be_bytes());
     hasher.update(error.as_bytes());
     hasher.update(executed_at_unix_ms.to_be_bytes());
-    let execution_sha256 = format!("{:x}", hasher.finalize());
+    let execution_sha256 = hex::encode(hasher.finalize());
 
     ToolExecutionOutcome {
         success,

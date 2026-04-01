@@ -521,6 +521,9 @@ async fn snapshot_keeps_launcher_status_stable_when_optional_diagnostics_fetch_f
                 }
                 Err(error) => panic!("listener should accept request: {error}"),
             };
+            stream
+                .set_nonblocking(false)
+                .expect("accepted stream should switch back to blocking mode");
             let mut buffer = [0_u8; 8192];
             let read = stream.read(&mut buffer).expect("request should be readable");
             let request = String::from_utf8_lossy(&buffer[..read]);
@@ -1044,6 +1047,9 @@ async fn snapshot_build_reuses_console_session_until_expiry() {
                 }
                 Err(error) => panic!("listener should accept request: {error}"),
             };
+            stream
+                .set_nonblocking(false)
+                .expect("accepted stream should switch back to blocking mode");
             let mut buffer = [0_u8; 4096];
             let read = stream.read(&mut buffer).expect("request should be readable");
             let request = String::from_utf8_lossy(&buffer[..read]);
@@ -1322,6 +1328,9 @@ async fn snapshot_build_redacts_console_and_connector_diagnostics() {
                 }
                 Err(error) => panic!("listener should accept request: {error}"),
             };
+            stream
+                .set_nonblocking(false)
+                .expect("accepted stream should switch back to blocking mode");
             let mut buffer = [0_u8; 4096];
             let read = stream.read(&mut buffer).expect("request should be readable");
             let request = String::from_utf8_lossy(&buffer[..read]);

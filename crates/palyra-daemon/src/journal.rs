@@ -6655,7 +6655,7 @@ fn memory_snippet(content: &str, query: &str) -> String {
 fn sha256_hex(payload: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(payload);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn hash_embed_text(text: &str, dims: usize) -> Vec<f32> {
@@ -6961,7 +6961,7 @@ fn compute_hash(
     }
     hasher.update(b"|");
     hasher.update(payload_json.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn current_unix_ms() -> Result<i64, JournalError> {

@@ -363,7 +363,7 @@ fn compute_payload_hash_hex<'a>(
         hash_len_prefixed(&mut hasher, path.as_bytes());
         hash_len_prefixed(&mut hasher, payload.as_slice());
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn hash_len_prefixed(hasher: &mut Sha256, value: &[u8]) {
@@ -394,7 +394,7 @@ fn key_id_for(key: &VerifyingKey) -> String {
 }
 
 fn sha256_hex(payload: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(payload))
+    hex::encode(Sha256::digest(payload))
 }
 
 pub(crate) fn now_unix_ms() -> i64 {

@@ -306,7 +306,7 @@ pub(crate) fn compute_canvas_bundle_sha256(assets: &HashMap<String, CanvasAssetR
         hasher.update(asset.body.as_slice());
         hasher.update(b"\n--\n");
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 #[allow(clippy::result_large_err)]

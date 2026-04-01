@@ -265,7 +265,7 @@ pub fn apply_workspace_patch(
 pub fn compute_patch_sha256(patch: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(patch.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Produces a redacted, size-capped preview of the patch payload.
@@ -1111,7 +1111,7 @@ fn rollback_from_backups(backups: &HashMap<PathBuf, Option<Vec<u8>>>) -> bool {
 fn sha256_hex(value: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn unique_suffix() -> String {

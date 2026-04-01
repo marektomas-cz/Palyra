@@ -894,7 +894,7 @@ fn compute_execution_hash(
     hash_len_prefixed_str(&mut hasher, executor);
     hash_len_prefixed_str(&mut hasher, sandbox_enforcement);
     hasher.update(executed_at_unix_ms.to_be_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn hash_len_prefixed_str(hasher: &mut Sha256, value: &str) {

@@ -10,7 +10,7 @@ use std::{
 };
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
-use palyra_common::default_identity_store_root;
+use palyra_common::{default_identity_store_root, default_state_root};
 use palyra_policy::{
     evaluate_with_context, PolicyDecision, PolicyEvaluationConfig, PolicyRequest,
     PolicyRequestContext,
@@ -510,11 +510,30 @@ fn parse_skill_reaudit_interval(raw: Option<&str>) -> Result<Option<Duration>, S
 
 #[allow(clippy::result_large_err)]
 fn default_skills_root() -> Result<PathBuf, Status> {
-    let identity_root = default_identity_store_root().map_err(|error| {
-        Status::internal(format!("failed to resolve default identity store root: {error}"))
-    })?;
-    let state_root =
-        identity_root.parent().map(Path::to_path_buf).unwrap_or_else(|| identity_root.clone());
+    let identity_root = match std::env::var_os("PALYRA_GATEWAY_IDENTITY_STORE_DIR") {
+        Some(raw) if raw.is_empty() => {
+            return Err(Status::invalid_argument(
+                "PALYRA_GATEWAY_IDENTITY_STORE_DIR must not be empty",
+            ));
+        }
+        Some(raw) => PathBuf::from(raw),
+        None => default_identity_store_root().map_err(|error| {
+            Status::internal(format!("failed to resolve default identity store root: {error}"))
+        })?,
+    };
+    let state_root = match std::env::var_os("PALYRA_STATE_ROOT") {
+        Some(raw) if raw.is_empty() => {
+            return Err(Status::invalid_argument("PALYRA_STATE_ROOT must not be empty"));
+        }
+        Some(raw) => PathBuf::from(raw),
+        None => identity_root
+            .parent()
+            .map(Path::to_path_buf)
+            .or_else(|| default_state_root().ok())
+            .ok_or_else(|| {
+                Status::internal("failed to resolve default state root for skills".to_owned())
+            })?,
+    };
     Ok(state_root.join("skills"))
 }
 

@@ -665,7 +665,7 @@ fn http_fetch_tool_execution_outcome(
     hasher.update((error.len() as u64).to_be_bytes());
     hasher.update(error.as_bytes());
     hasher.update(executed_at_unix_ms.to_be_bytes());
-    let execution_sha256 = format!("{:x}", hasher.finalize());
+    let execution_sha256 = hex::encode(hasher.finalize());
 
     ToolExecutionOutcome {
         success,
@@ -685,5 +685,5 @@ fn http_fetch_tool_execution_outcome(
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }

@@ -5619,7 +5619,7 @@ async fn grpc_approvals_service_persists_and_exports_denied_tool_approval() -> R
                     .context("failed to serialize exported approval record payload bytes")?;
                 let mut record_hasher = Sha256::new();
                 record_hasher.update(record_payload_bytes.as_slice());
-                let expected_record_checksum = format!("{:x}", record_hasher.finalize());
+                let expected_record_checksum = hex::encode(record_hasher.finalize());
                 let record_checksum = envelope
                     .get("record_checksum_sha256")
                     .and_then(Value::as_str)
@@ -5636,7 +5636,7 @@ async fn grpc_approvals_service_persists_and_exports_denied_tool_approval() -> R
                 chain_hasher.update(prev_checksum.as_bytes());
                 chain_hasher.update(b"\n");
                 chain_hasher.update(record_checksum.as_bytes());
-                let expected_chain_checksum = format!("{:x}", chain_hasher.finalize());
+                let expected_chain_checksum = hex::encode(chain_hasher.finalize());
                 let chain_checksum = envelope
                     .get("chain_checksum_sha256")
                     .and_then(Value::as_str)
@@ -8162,12 +8162,13 @@ fn spawn_palyrad_with_dynamic_ports_options(
     max_journal_payload_bytes: Option<usize>,
     canvas_host_enabled: bool,
 ) -> Result<(Child, u16, u16, PathBuf)> {
+    let config_path = write_base_daemon_config()?;
     let journal_db_path = unique_temp_journal_db_path();
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
-    command
+    apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8204,10 +8205,12 @@ fn spawn_palyrad_with_dynamic_ports_options(
 }
 
 fn spawn_palyrad_with_existing_journal(journal_db_path: PathBuf) -> Result<(Child, u16, u16)> {
+    let config_path = write_base_daemon_config()?;
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8239,6 +8242,7 @@ fn spawn_palyrad_with_existing_journal_and_agents_registry(
     journal_db_path: &Path,
     agents_registry_path: &Path,
 ) -> Result<(Child, u16, u16)> {
+    let config_path = write_base_daemon_config()?;
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
@@ -8250,7 +8254,8 @@ fn spawn_palyrad_with_existing_journal_and_agents_registry(
             )
         })?;
     }
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8293,11 +8298,13 @@ fn spawn_palyrad_with_openai_provider_and_tool_policy(
     max_calls_per_run: u32,
     execution_timeout_ms: u64,
 ) -> Result<(Child, u16, u16, PathBuf)> {
+    let config_path = write_base_daemon_config()?;
     let journal_db_path = unique_temp_journal_db_path();
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8347,7 +8354,8 @@ fn spawn_palyrad_with_openai_provider_and_channel_router(
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8358,7 +8366,6 @@ fn spawn_palyrad_with_openai_provider_and_channel_router(
             "--grpc-port",
             "0",
         ])
-        .env("PALYRA_CONFIG", config_path.to_string_lossy().to_string())
         .env("PALYRA_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("PALYRA_GATEWAY_QUIC_BIND_ADDR", "127.0.0.1")
         .env("PALYRA_GATEWAY_QUIC_PORT", "0")
@@ -8396,7 +8403,8 @@ fn spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy(
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8407,7 +8415,6 @@ fn spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy(
             "--grpc-port",
             "0",
         ])
-        .env("PALYRA_CONFIG", config_path.to_string_lossy().to_string())
         .env("PALYRA_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("PALYRA_GATEWAY_QUIC_BIND_ADDR", "127.0.0.1")
         .env("PALYRA_GATEWAY_QUIC_PORT", "0")
@@ -8446,7 +8453,8 @@ fn spawn_palyrad_with_openai_provider_and_channel_router_with_memory_auto_inject
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8457,7 +8465,6 @@ fn spawn_palyrad_with_openai_provider_and_channel_router_with_memory_auto_inject
             "--grpc-port",
             "0",
         ])
-        .env("PALYRA_CONFIG", config_path.to_string_lossy().to_string())
         .env("PALYRA_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("PALYRA_GATEWAY_QUIC_BIND_ADDR", "127.0.0.1")
         .env("PALYRA_GATEWAY_QUIC_PORT", "0")
@@ -8493,11 +8500,13 @@ fn spawn_palyrad_with_openai_provider_tool_policy_and_memory_auto_inject(
     execution_timeout_ms: u64,
     auto_inject_max_items: u32,
 ) -> Result<(Child, u16, u16, PathBuf)> {
+    let config_path = write_base_daemon_config()?;
     let journal_db_path = unique_temp_journal_db_path();
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8566,7 +8575,8 @@ fn spawn_palyrad_with_openai_provider_tool_policy_and_process_runner(
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8577,7 +8587,6 @@ fn spawn_palyrad_with_openai_provider_tool_policy_and_process_runner(
             "--grpc-port",
             "0",
         ])
-        .env("PALYRA_CONFIG", config_path.to_string_lossy().to_string())
         .env("PALYRA_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("PALYRA_GATEWAY_QUIC_BIND_ADDR", "127.0.0.1")
         .env("PALYRA_GATEWAY_QUIC_PORT", "0")
@@ -8631,7 +8640,8 @@ fn spawn_palyrad_with_openai_provider_tool_policy_and_wasm_runtime(
     let identity_store_dir = unique_temp_identity_store_dir();
     let vault_dir = unique_temp_vault_dir();
     prepare_test_vault_dir(&vault_dir)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_palyrad"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyrad"));
+    let mut child = apply_isolated_daemon_test_env(&mut command, &config_path)
         .args([
             "--bind",
             "127.0.0.1",
@@ -8642,7 +8652,6 @@ fn spawn_palyrad_with_openai_provider_tool_policy_and_wasm_runtime(
             "--grpc-port",
             "0",
         ])
-        .env("PALYRA_CONFIG", config_path.to_string_lossy().to_string())
         .env("PALYRA_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("PALYRA_GATEWAY_QUIC_BIND_ADDR", "127.0.0.1")
         .env("PALYRA_GATEWAY_QUIC_PORT", "0")
@@ -8701,6 +8710,44 @@ max_output_bytes = 65536
         format!("failed to write process runner test config at {}", config_path.display())
     })?;
     Ok(config_path)
+}
+
+fn write_base_daemon_config() -> Result<PathBuf> {
+    let config_path = unique_temp_daemon_config_path();
+    fs::write(&config_path, "version = 1\n").with_context(|| {
+        format!("failed to write base daemon test config at {}", config_path.display())
+    })?;
+    Ok(config_path)
+}
+
+fn apply_isolated_daemon_test_env<'a>(
+    command: &'a mut Command,
+    config_path: &Path,
+) -> &'a mut Command {
+    command
+        .env("PALYRA_CONFIG", config_path.to_string_lossy().to_string())
+        .env_remove("PALYRA_MODEL_PROVIDER_KIND")
+        .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_BASE_URL")
+        .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_MODEL")
+        .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_API_KEY")
+        .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_API_KEY_VAULT_REF")
+        .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_EMBEDDINGS_MODEL")
+        .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_EMBEDDINGS_DIMS")
+        .env_remove("PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL")
+        .env_remove("PALYRA_MODEL_PROVIDER_AUTH_PROFILE_ID")
+        .env_remove("PALYRA_MODEL_PROVIDER_AUTH_PROVIDER")
+        .env_remove("PALYRA_MODEL_PROVIDER_MAX_RETRIES")
+        .env_remove("PALYRA_MODEL_PROVIDER_RETRY_BACKOFF_MS")
+        .env_remove("PALYRA_MODEL_PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD")
+        .env_remove("PALYRA_MODEL_PROVIDER_CIRCUIT_BREAKER_COOLDOWN_MS")
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("NO_PROXY")
+        .env_remove("ALL_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
+        .env_remove("no_proxy")
+        .env_remove("all_proxy")
 }
 
 fn write_wasm_runtime_config(config: &WasmRuntimeSpawnConfig<'_>) -> Result<PathBuf> {

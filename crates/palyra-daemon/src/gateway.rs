@@ -748,7 +748,7 @@ pub(crate) fn build_tool_policy_snapshot(
     let policy_snapshot_json = serde_json::to_vec(&snapshot).unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(policy_snapshot_json.as_slice());
-    let policy_hash = format!("{:x}", hasher.finalize());
+    let policy_hash = hex::encode(hasher.finalize());
     ApprovalPolicySnapshot {
         policy_id: APPROVAL_POLICY_ID.to_owned(),
         policy_hash,

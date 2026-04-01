@@ -32,7 +32,7 @@ tokio = { workspace = true, features = ["io-util", "net", "sync"] }
 x509-parser = "0.18.1"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.171"
+libc = "0.2.184"
 
 [[bench]]
 name = "pairing_handshake"

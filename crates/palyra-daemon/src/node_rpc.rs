@@ -237,7 +237,7 @@ impl NodeRpcServiceImpl {
         };
         let policy_snapshot = ApprovalPolicySnapshot {
             policy_id: "node_pairing.approval.v1".to_owned(),
-            policy_hash: format!("{:x}", Sha256::digest(prompt.details_json.as_bytes())),
+            policy_hash: hex::encode(Sha256::digest(prompt.details_json.as_bytes())),
             evaluation_summary: "action=device.pair approval_required=true deny_by_default=true"
                 .to_owned(),
         };

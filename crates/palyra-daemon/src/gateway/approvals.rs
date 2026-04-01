@@ -3,7 +3,7 @@ use super::*;
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn approval_export_chain_checksum(
@@ -19,7 +19,7 @@ fn approval_export_chain_checksum(
     hasher.update(previous_chain_checksum_sha256.as_bytes());
     hasher.update(b"\n");
     hasher.update(record_checksum_sha256.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 #[allow(clippy::result_large_err)]

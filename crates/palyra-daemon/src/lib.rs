@@ -1873,13 +1873,24 @@ fn resolve_runtime_state_root_with_override(
 
 #[allow(clippy::result_large_err)]
 fn resolve_skills_root() -> Result<PathBuf, Response> {
-    let identity_root = default_identity_store_root().map_err(|error| {
+    let identity_root = match std::env::var_os("PALYRA_GATEWAY_IDENTITY_STORE_DIR") {
+        Some(raw) if raw.is_empty() => {
+            return Err(runtime_status_response(tonic::Status::internal(
+                "PALYRA_GATEWAY_IDENTITY_STORE_DIR must not be empty",
+            )));
+        }
+        Some(raw) => PathBuf::from(raw),
+        None => default_identity_store_root().map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to resolve default identity root: {error}"
+            )))
+        })?,
+    };
+    let state_root = resolve_runtime_state_root(identity_root.as_path()).map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
-            "failed to resolve default identity root: {error}"
+            "failed to resolve runtime state root for skills: {error}"
         )))
     })?;
-    let state_root =
-        identity_root.parent().map(FsPath::to_path_buf).unwrap_or_else(|| identity_root.clone());
     Ok(state_root.join("skills"))
 }
 
