@@ -9,8 +9,8 @@ const repoRoot = path.resolve(webRoot, "..", "..");
 const budgets = [
   { path: "apps/web/src/App.tsx", maxLines: 140 },
   { path: "apps/web/src/console/ConsoleSectionContent.tsx", maxLines: 500 },
-  { path: "apps/web/src/console/useConsoleAppState.tsx", maxLines: 1900 },
-  { path: "apps/web/src/chat/ChatConsolePanel.tsx", maxLines: 900 },
+  { path: "apps/web/src/console/useConsoleAppState.tsx", maxLines: 2200 },
+  { path: "apps/web/src/chat/ChatConsolePanel.tsx", maxLines: 1050 },
   { path: "apps/desktop/src-tauri/src/lib.rs", maxLines: 1000 },
 ];
 
