@@ -37,6 +37,7 @@ export interface SessionCatalogRecord extends ChatSessionRecord {
   last_summary_state: string;
   branch_state: string;
   parent_session_id?: string;
+  branch_origin_run_id?: string;
   last_run_state?: string;
   last_run_started_at_unix_ms?: number;
   prompt_tokens: number;
@@ -315,6 +316,94 @@ export interface ChatPinRecord {
   title: string;
   note?: string;
   created_at_unix_ms: number;
+}
+
+export interface ChatCompactionPreview {
+  eligible: boolean;
+  strategy: string;
+  compressor_version: string;
+  trigger_reason: string;
+  trigger_policy?: string;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  token_delta: number;
+  source_event_count: number;
+  protected_event_count: number;
+  condensed_event_count: number;
+  omitted_event_count: number;
+  summary_text: string;
+  summary_preview: string;
+  source_records: JsonValue;
+  summary: JsonValue;
+}
+
+export interface ChatCompactionArtifactRecord {
+  artifact_id: string;
+  session_id: string;
+  run_id?: string;
+  mode: string;
+  strategy: string;
+  compressor_version: string;
+  trigger_reason: string;
+  trigger_policy?: string;
+  trigger_inputs_json?: string;
+  summary_text: string;
+  summary_preview: string;
+  source_event_count: number;
+  protected_event_count: number;
+  condensed_event_count: number;
+  omitted_event_count: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  source_records_json: string;
+  summary_json: string;
+  created_by_principal: string;
+  created_at_unix_ms: number;
+}
+
+export interface ChatCheckpointRecord {
+  checkpoint_id: string;
+  session_id: string;
+  run_id?: string;
+  name: string;
+  tags_json: string;
+  note?: string;
+  branch_state: string;
+  parent_session_id?: string;
+  referenced_compaction_ids_json: string;
+  workspace_paths_json: string;
+  created_by_principal: string;
+  created_at_unix_ms: number;
+  restore_count: number;
+  last_restored_at_unix_ms?: number;
+}
+
+export interface ChatBackgroundTaskRecord {
+  task_id: string;
+  task_kind: string;
+  session_id: string;
+  parent_run_id?: string;
+  target_run_id?: string;
+  queued_input_id?: string;
+  owner_principal: string;
+  device_id: string;
+  channel?: string;
+  state: string;
+  priority: number;
+  attempt_count: number;
+  max_attempts: number;
+  budget_tokens: number;
+  not_before_unix_ms?: number;
+  expires_at_unix_ms?: number;
+  notification_target_json?: string;
+  input_text?: string;
+  payload_json?: string;
+  last_error?: string;
+  result_json?: string;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+  started_at_unix_ms?: number;
+  completed_at_unix_ms?: number;
 }
 
 export interface ChatAttachmentRecord {
@@ -1789,10 +1878,204 @@ export class ConsoleApiClient {
     session: SessionCatalogRecord;
     records: ChatTranscriptRecord[];
     pins: ChatPinRecord[];
+    compactions: ChatCompactionArtifactRecord[];
+    checkpoints: ChatCheckpointRecord[];
     queued_inputs: ChatQueuedInputRecord[];
+    background_tasks: ChatBackgroundTaskRecord[];
     contract: ContractDescriptor;
   }> {
     return this.request(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/transcript`);
+  }
+
+  async previewSessionCompaction(
+    sessionId: string,
+    payload: { trigger_reason?: string; trigger_policy?: string } = {},
+  ): Promise<{
+    session: SessionCatalogRecord;
+    preview: ChatCompactionPreview;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/compactions/preview`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async applySessionCompaction(
+    sessionId: string,
+    payload: { trigger_reason?: string; trigger_policy?: string } = {},
+  ): Promise<{
+    session: SessionCatalogRecord;
+    artifact: ChatCompactionArtifactRecord;
+    preview: ChatCompactionPreview;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/compactions`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async getSessionCompactionArtifact(artifactId: string): Promise<{
+    session: SessionCatalogRecord;
+    artifact: ChatCompactionArtifactRecord;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(`/console/v1/chat/compactions/${encodeURIComponent(artifactId)}`);
+  }
+
+  async createSessionCheckpoint(
+    sessionId: string,
+    payload: { name: string; tags?: string[]; note?: string },
+  ): Promise<{
+    session: SessionCatalogRecord;
+    checkpoint: ChatCheckpointRecord;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/checkpoints`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async getSessionCheckpoint(checkpointId: string): Promise<{
+    session: SessionCatalogRecord;
+    checkpoint: ChatCheckpointRecord;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(`/console/v1/chat/checkpoints/${encodeURIComponent(checkpointId)}`);
+  }
+
+  async restoreSessionCheckpoint(
+    checkpointId: string,
+    payload: { session_label?: string } = {},
+  ): Promise<{
+    session: SessionCatalogRecord;
+    checkpoint: ChatCheckpointRecord;
+    action: string;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/checkpoints/${encodeURIComponent(checkpointId)}/restore`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async listBackgroundTasks(params?: {
+    session_id?: string;
+    include_completed?: boolean;
+    limit?: number;
+  }): Promise<{ tasks: ChatBackgroundTaskRecord[]; contract: ContractDescriptor }> {
+    const query = new URLSearchParams();
+    if (params?.session_id?.trim()) {
+      query.set("session_id", params.session_id.trim());
+    }
+    if (params?.include_completed !== undefined) {
+      query.set("include_completed", String(params.include_completed));
+    }
+    if (params?.limit !== undefined) {
+      query.set("limit", String(params.limit));
+    }
+    return this.request(buildPathWithQuery("/console/v1/chat/background-tasks", query));
+  }
+
+  async createBackgroundTask(
+    sessionId: string,
+    payload: {
+      text: string;
+      priority?: number;
+      max_attempts?: number;
+      budget_tokens?: number;
+      not_before_unix_ms?: number;
+      expires_at_unix_ms?: number;
+      notification_target?: JsonValue;
+      parameter_delta?: JsonValue;
+    },
+  ): Promise<{
+    session: SessionCatalogRecord;
+    task: ChatBackgroundTaskRecord;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/background-tasks`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async getBackgroundTask(taskId: string): Promise<{
+    task: ChatBackgroundTaskRecord;
+    run?: ChatRunStatusRecord;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(`/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}`);
+  }
+
+  async pauseBackgroundTask(taskId: string): Promise<{
+    task: ChatBackgroundTaskRecord;
+    action: string;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}/pause`,
+      { method: "POST" },
+      { csrf: true },
+    );
+  }
+
+  async resumeBackgroundTask(taskId: string): Promise<{
+    task: ChatBackgroundTaskRecord;
+    action: string;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}/resume`,
+      { method: "POST" },
+      { csrf: true },
+    );
+  }
+
+  async retryBackgroundTask(taskId: string): Promise<{
+    task: ChatBackgroundTaskRecord;
+    action: string;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}/retry`,
+      { method: "POST" },
+      { csrf: true },
+    );
+  }
+
+  async cancelBackgroundTask(taskId: string): Promise<{
+    task: ChatBackgroundTaskRecord;
+    action: string;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}/cancel`,
+      { method: "POST" },
+      { csrf: true },
+    );
   }
 
   async searchSessionTranscript(

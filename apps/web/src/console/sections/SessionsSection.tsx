@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Chip } from "@heroui/react";
 import { useNavigate } from "react-router-dom";
 
+import { buildSessionLineageHint, describeBranchState } from "../../chat/chatShared";
 import { getSectionPath } from "../navigation";
 import { ActionButton, SelectField, SwitchField, TextInputField } from "../components/ui";
 import {
@@ -27,6 +29,31 @@ export function SessionsSection({ app }: SessionsSectionProps) {
   const navigate = useNavigate();
   const catalog = useSessionCatalogDomain(app);
   const selected = catalog.selectedSession;
+  const [phase4Busy, setPhase4Busy] = useState<"checkpoint" | null>(null);
+  const selectedLineage = buildSessionLineageHint(selected);
+
+  async function createCheckpoint(): Promise<void> {
+    if (selected === null) {
+      app.setError("Select a session first.");
+      return;
+    }
+    setPhase4Busy("checkpoint");
+    app.setError(null);
+    app.setNotice(null);
+    try {
+      const label = selected.session_label?.trim() || selected.title.trim() || "Session";
+      const response = await app.api.createSessionCheckpoint(selected.session_id, {
+        name: `${label} checkpoint`,
+        note: `Created from the Sessions console on ${new Date().toLocaleString()}.`,
+        tags: ["web-console", "sessions-section"],
+      });
+      app.setNotice(`Checkpoint created: ${response.checkpoint.name}.`);
+    } catch (error) {
+      app.setError(error instanceof Error ? error.message : "Unexpected failure.");
+    } finally {
+      setPhase4Busy(null);
+    }
+  }
 
   return (
     <main className="workspace-page">
@@ -233,6 +260,14 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                 >
                   Abort run
                 </ActionButton>
+                <ActionButton
+                  isDisabled={catalog.busy || phase4Busy !== null}
+                  type="button"
+                  variant="secondary"
+                  onPress={() => void createCheckpoint()}
+                >
+                  {phase4Busy === "checkpoint" ? "Checkpointing..." : "Create checkpoint"}
+                </ActionButton>
               </div>
 
               <ActionButton
@@ -275,6 +310,14 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                 <div>
                   <dt>Run state</dt>
                   <dd>{selected.last_run_state ?? "none"}</dd>
+                </div>
+                <div>
+                  <dt>Branch state</dt>
+                  <dd>{describeBranchState(selected.branch_state)}</dd>
+                </div>
+                <div>
+                  <dt>Lineage</dt>
+                  <dd>{selectedLineage}</dd>
                 </div>
                 <div>
                   <dt>Total tokens</dt>

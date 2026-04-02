@@ -66,6 +66,8 @@ export interface SlashCommandDefinition {
   readonly example: string;
 }
 
+export type CompactCommandMode = "preview" | "apply";
+
 export const CHAT_SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   {
     name: "help",
@@ -129,9 +131,10 @@ export const CHAT_SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   },
   {
     name: "compact",
-    synopsis: "/compact",
-    description: "Explain the current compaction path and the best available fallback in Phase 2.",
-    example: "/compact",
+    synopsis: "/compact [preview|apply]",
+    description:
+      "Preview or apply a transcript compaction so long-running sessions keep a smaller working set.",
+    example: "/compact apply",
   },
   {
     name: "search",
@@ -448,8 +451,11 @@ export function describeBranchState(branchState: string): string {
   if (normalized === "root") {
     return "Root session";
   }
-  if (normalized === "branched") {
-    return "Child branch";
+  if (normalized === "branched" || normalized === "active_branch") {
+    return "Active branch";
+  }
+  if (normalized === "branch_source") {
+    return "Branch source";
   }
   if (normalized === "missing") {
     return "No lineage";
@@ -461,11 +467,41 @@ export function buildSessionLineageHint(session: SessionCatalogRecord | null): s
   if (session === null) {
     return "Select a session to inspect lineage.";
   }
-  const branchLabel = describeBranchState(session.branch_state);
-  if (session.parent_session_id !== undefined && session.parent_session_id.length > 0) {
-    return `${branchLabel} from ${shortId(session.parent_session_id)}.`;
+  const normalized = session.branch_state.trim().toLowerCase();
+  const parent = session.parent_session_id?.trim();
+  const originRunId = session.branch_origin_run_id?.trim();
+  if (normalized === "root") {
+    return originRunId ? `Root session anchored at run ${shortId(originRunId)}.` : "Root session.";
   }
-  return `${branchLabel}.`;
+  if (normalized === "branched" || normalized === "active_branch") {
+    if (parent !== undefined && parent.length > 0) {
+      return originRunId !== undefined && originRunId.length > 0
+        ? `Active branch from ${shortId(parent)} at run ${shortId(originRunId)}.`
+        : `Active branch from ${shortId(parent)}.`;
+    }
+    return originRunId !== undefined && originRunId.length > 0
+      ? `Active branch anchored at run ${shortId(originRunId)}.`
+      : "Active branch.";
+  }
+  if (normalized === "branch_source") {
+    if (parent !== undefined && parent.length > 0) {
+      return originRunId !== undefined && originRunId.length > 0
+        ? `Branch source with upstream ${shortId(parent)} at run ${shortId(originRunId)}.`
+        : `Branch source with upstream ${shortId(parent)}.`;
+    }
+    return originRunId !== undefined && originRunId.length > 0
+      ? `Branch source anchored at run ${shortId(originRunId)}.`
+      : "Branch source.";
+  }
+  const branchLabel = describeBranchState(session.branch_state);
+  return parent !== undefined && parent.length > 0
+    ? `${branchLabel} from ${shortId(parent)}.`
+    : `${branchLabel}.`;
+}
+
+export function parseCompactCommandMode(raw: string): CompactCommandMode {
+  const firstToken = raw.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+  return firstToken === "apply" ? "apply" : "preview";
 }
 
 export function estimateTextTokens(text: string): number {

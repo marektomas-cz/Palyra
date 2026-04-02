@@ -1217,6 +1217,278 @@ describe("ConsoleApiClient", () => {
     expect(lines[2]).toMatchObject({ type: "complete", status: "done" });
   });
 
+  it("supports compaction and checkpoint chat endpoints with the expected CSRF posture", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({
+        session: { session_id: "session-1", title: "Phase 4 Session" },
+        preview: {
+          eligible: true,
+          strategy: "head_tail_v1",
+          compressor_version: "v1",
+          trigger_reason: "manual_preview",
+          estimated_input_tokens: 1000,
+          estimated_output_tokens: 700,
+          token_delta: 300,
+          source_event_count: 20,
+          protected_event_count: 5,
+          condensed_event_count: 12,
+          omitted_event_count: 3,
+          summary_text: "summary",
+          summary_preview: "summary",
+          source_records: [],
+          summary: {},
+        },
+        contract: { contract_version: "control-plane.v1" },
+      }),
+      jsonResponse({
+        session: { session_id: "session-1", title: "Phase 4 Session" },
+        artifact: {
+          artifact_id: "artifact-1",
+          session_id: "session-1",
+          mode: "manual",
+          strategy: "head_tail_v1",
+          compressor_version: "v1",
+          trigger_reason: "manual_apply",
+          summary_text: "summary",
+          summary_preview: "summary",
+          source_event_count: 20,
+          protected_event_count: 5,
+          condensed_event_count: 12,
+          omitted_event_count: 3,
+          estimated_input_tokens: 1000,
+          estimated_output_tokens: 700,
+          source_records_json: "[]",
+          summary_json: "{}",
+          created_by_principal: "admin:web-console",
+          created_at_unix_ms: 100,
+        },
+        preview: {
+          eligible: true,
+          strategy: "head_tail_v1",
+          compressor_version: "v1",
+          trigger_reason: "manual_apply",
+          estimated_input_tokens: 1000,
+          estimated_output_tokens: 700,
+          token_delta: 300,
+          source_event_count: 20,
+          protected_event_count: 5,
+          condensed_event_count: 12,
+          omitted_event_count: 3,
+          summary_text: "summary",
+          summary_preview: "summary",
+          source_records: [],
+          summary: {},
+        },
+        contract: { contract_version: "control-plane.v1" },
+      }),
+      jsonResponse({
+        session: { session_id: "session-1", title: "Phase 4 Session" },
+        artifact: {
+          artifact_id: "artifact-1",
+          session_id: "session-1",
+          mode: "manual",
+          strategy: "head_tail_v1",
+          compressor_version: "v1",
+          trigger_reason: "manual_apply",
+          summary_text: "summary",
+          summary_preview: "summary",
+          source_event_count: 20,
+          protected_event_count: 5,
+          condensed_event_count: 12,
+          omitted_event_count: 3,
+          estimated_input_tokens: 1000,
+          estimated_output_tokens: 700,
+          source_records_json: "[]",
+          summary_json: "{}",
+          created_by_principal: "admin:web-console",
+          created_at_unix_ms: 100,
+        },
+        contract: { contract_version: "control-plane.v1" },
+      }),
+      jsonResponse({
+        session: { session_id: "session-1", title: "Phase 4 Session" },
+        checkpoint: {
+          checkpoint_id: "checkpoint-1",
+          session_id: "session-1",
+          name: "Checkpoint 1",
+          tags_json: "[]",
+          branch_state: "active_branch",
+          referenced_compaction_ids_json: "[]",
+          workspace_paths_json: "[]",
+          created_by_principal: "admin:web-console",
+          created_at_unix_ms: 100,
+          restore_count: 0,
+        },
+        contract: { contract_version: "control-plane.v1" },
+      }),
+      jsonResponse({
+        session: { session_id: "session-1", title: "Phase 4 Session" },
+        checkpoint: {
+          checkpoint_id: "checkpoint-1",
+          session_id: "session-1",
+          name: "Checkpoint 1",
+          tags_json: "[]",
+          branch_state: "active_branch",
+          referenced_compaction_ids_json: "[]",
+          workspace_paths_json: "[]",
+          created_by_principal: "admin:web-console",
+          created_at_unix_ms: 100,
+          restore_count: 0,
+        },
+        contract: { contract_version: "control-plane.v1" },
+      }),
+      jsonResponse({
+        session: { session_id: "session-2", title: "Checkpoint restore" },
+        checkpoint: {
+          checkpoint_id: "checkpoint-1",
+          session_id: "session-1",
+          name: "Checkpoint 1",
+          tags_json: "[]",
+          branch_state: "active_branch",
+          referenced_compaction_ids_json: "[]",
+          workspace_paths_json: "[]",
+          created_by_principal: "admin:web-console",
+          created_at_unix_ms: 100,
+          restore_count: 1,
+        },
+        action: "restored",
+        contract: { contract_version: "control-plane.v1" },
+      }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+    const client = new ConsoleApiClient("", fetcher);
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    await client.previewSessionCompaction("session-1", { trigger_reason: "manual_preview" });
+    await client.applySessionCompaction("session-1", { trigger_reason: "manual_apply" });
+    await client.getSessionCompactionArtifact("artifact-1");
+    await client.createSessionCheckpoint("session-1", { name: "Checkpoint 1" });
+    await client.getSessionCheckpoint("checkpoint-1");
+    await client.restoreSessionCheckpoint("checkpoint-1", { session_label: "Checkpoint restore" });
+
+    expect(requestUrl(calls[1]?.input)).toBe("/console/v1/chat/sessions/session-1/compactions/preview");
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[2]?.input)).toBe("/console/v1/chat/sessions/session-1/compactions");
+    expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[3]?.input)).toBe("/console/v1/chat/compactions/artifact-1");
+    expect(new Headers(calls[3]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[4]?.input)).toBe("/console/v1/chat/sessions/session-1/checkpoints");
+    expect(new Headers(calls[4]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[5]?.input)).toBe("/console/v1/chat/checkpoints/checkpoint-1");
+    expect(new Headers(calls[5]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[6]?.input)).toBe("/console/v1/chat/checkpoints/checkpoint-1/restore");
+    expect(new Headers(calls[6]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+  });
+
+  it("supports background task chat endpoints with the expected CSRF posture", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const task = {
+      task_id: "task-1",
+      task_kind: "chat_followup",
+      session_id: "session-1",
+      owner_principal: "admin:web-console",
+      device_id: "device-1",
+      state: "queued",
+      priority: 50,
+      attempt_count: 0,
+      max_attempts: 3,
+      budget_tokens: 512,
+      created_at_unix_ms: 100,
+      updated_at_unix_ms: 100,
+    };
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({ tasks: [task], contract: { contract_version: "control-plane.v1" } }),
+      jsonResponse({
+        session: { session_id: "session-1", title: "Phase 4 Session" },
+        task,
+        contract: { contract_version: "control-plane.v1" },
+      }),
+      jsonResponse({ task, run: undefined, contract: { contract_version: "control-plane.v1" } }),
+      jsonResponse({ task: { ...task, state: "paused" }, action: "paused", contract: { contract_version: "control-plane.v1" } }),
+      jsonResponse({ task, action: "resumed", contract: { contract_version: "control-plane.v1" } }),
+      jsonResponse({ task, action: "retried", contract: { contract_version: "control-plane.v1" } }),
+      jsonResponse({ task: { ...task, state: "cancelled" }, action: "cancelled", contract: { contract_version: "control-plane.v1" } }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+    const client = new ConsoleApiClient("", fetcher);
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    await client.listBackgroundTasks({ session_id: "session-1", include_completed: false, limit: 5 });
+    await client.createBackgroundTask("session-1", { text: "follow up later" });
+    await client.getBackgroundTask("task-1");
+    await client.pauseBackgroundTask("task-1");
+    await client.resumeBackgroundTask("task-1");
+    await client.retryBackgroundTask("task-1");
+    await client.cancelBackgroundTask("task-1");
+
+    expect(requestUrl(calls[1]?.input)).toBe(
+      "/console/v1/chat/background-tasks?session_id=session-1&include_completed=false&limit=5",
+    );
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[2]?.input)).toBe("/console/v1/chat/sessions/session-1/background-tasks");
+    expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[3]?.input)).toBe("/console/v1/chat/background-tasks/task-1");
+    expect(new Headers(calls[3]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[4]?.input)).toBe("/console/v1/chat/background-tasks/task-1/pause");
+    expect(new Headers(calls[4]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[5]?.input)).toBe("/console/v1/chat/background-tasks/task-1/resume");
+    expect(new Headers(calls[5]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[6]?.input)).toBe("/console/v1/chat/background-tasks/task-1/retry");
+    expect(new Headers(calls[6]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[7]?.input)).toBe("/console/v1/chat/background-tasks/task-1/cancel");
+    expect(new Headers(calls[7]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+  });
+
   it("submits approval decisions with CSRF protection", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const responses = [

@@ -1,13 +1,16 @@
 import { Chip } from "@heroui/react";
 
 import type {
+  ChatBackgroundTaskRecord,
   ChatPinRecord,
   ChatQueuedInputRecord,
+  ChatCheckpointRecord,
+  ChatCompactionArtifactRecord,
   ChatRunStatusRecord,
   ChatRunTapeSnapshot,
   ChatTranscriptRecord,
-  SessionCatalogRecord,
   JsonValue,
+  SessionCatalogRecord,
 } from "../consoleApi";
 import { ActionButton, EmptyState, KeyValueList, SectionCard } from "../console/components/ui";
 
@@ -62,10 +65,23 @@ type ChatInspectorColumnProps = {
   pinTranscriptRecord: (record: ChatTranscriptRecord) => void;
   sessionPins: ChatPinRecord[];
   deletePin: (pinId: string) => void;
+  compactions: ChatCompactionArtifactRecord[];
+  inspectCompaction: (artifactId: string) => void;
+  checkpoints: ChatCheckpointRecord[];
+  inspectCheckpoint: (checkpointId: string) => void;
+  restoreCheckpoint: (checkpointId: string) => void;
   queuedInputs: ChatQueuedInputRecord[];
+  backgroundTasks: ChatBackgroundTaskRecord[];
+  inspectBackgroundTask: (taskId: string) => void;
+  runBackgroundTaskAction: (
+    taskId: string,
+    action: "pause" | "resume" | "retry" | "cancel",
+  ) => void;
   detailPanel: DetailPanelState | null;
   revealSensitiveValues: boolean;
   inspectorVisible: boolean;
+  openRunDetails: (runId: string) => void;
+  phase4BusyKey: string | null;
   runDrawerId: string;
   setRunDrawerId: (runId: string) => void;
   runDrawerBusy: boolean;
@@ -98,10 +114,20 @@ export function ChatInspectorColumn({
   pinTranscriptRecord,
   sessionPins,
   deletePin,
+  compactions,
+  inspectCompaction,
+  checkpoints,
+  inspectCheckpoint,
+  restoreCheckpoint,
   queuedInputs,
+  backgroundTasks,
+  inspectBackgroundTask,
+  runBackgroundTaskAction,
   detailPanel,
   revealSensitiveValues,
   inspectorVisible,
+  openRunDetails,
+  phase4BusyKey,
   runDrawerId,
   setRunDrawerId,
   runDrawerBusy,
@@ -110,6 +136,8 @@ export function ChatInspectorColumn({
   refreshRunDetails,
   closeRunDrawer,
 }: ChatInspectorColumnProps) {
+  const phase4Busy = phase4BusyKey !== null;
+
   return (
     <div className="chat-inspector-column">
       <SectionCard
@@ -126,6 +154,12 @@ export function ChatInspectorColumn({
           </Chip>
           <Chip variant="secondary">
             {runIds.length} known run{runIds.length === 1 ? "" : "s"}
+          </Chip>
+          <Chip variant="secondary">
+            {compactions.length} compaction{compactions.length === 1 ? "" : "s"}
+          </Chip>
+          <Chip variant="secondary">
+            {backgroundTasks.length} background task{backgroundTasks.length === 1 ? "" : "s"}
           </Chip>
         </div>
         <KeyValueList
@@ -335,6 +369,119 @@ export function ChatInspectorColumn({
 
         <div className="chat-ops-list">
           <div className="workspace-panel__intro">
+            <p className="workspace-kicker">Compactions</p>
+            <h3>{compactions.length}</h3>
+          </div>
+          {compactions.length === 0 ? (
+            <p className="chat-muted">No compaction artifacts have been stored for this session.</p>
+          ) : (
+            [...compactions].reverse().map((artifact) => {
+              const tokenDelta = Math.max(
+                0,
+                artifact.estimated_input_tokens - artifact.estimated_output_tokens,
+              );
+              const artifactRunId = artifact.run_id;
+              return (
+                <article key={artifact.artifact_id} className="chat-ops-card">
+                  <div className="chat-ops-card__copy">
+                    <strong>{artifact.mode}</strong>
+                    <span>
+                      {formatApproxTokens(tokenDelta)} saved · {artifact.condensed_event_count} condensed
+                    </span>
+                    <p>{artifact.summary_preview}</p>
+                  </div>
+                  <div className="chat-ops-card__actions">
+                    {artifactRunId !== undefined ? (
+                      <ActionButton
+                        isDisabled={phase4Busy}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                        onPress={() => openRunDetails(artifactRunId)}
+                      >
+                        Open run
+                      </ActionButton>
+                    ) : null}
+                    <ActionButton
+                      isDisabled={phase4Busy}
+                      size="sm"
+                      type="button"
+                      variant="secondary"
+                      onPress={() => inspectCompaction(artifact.artifact_id)}
+                    >
+                      {phase4BusyKey === `inspect-compaction:${artifact.artifact_id}`
+                        ? "Loading..."
+                        : "Inspect"}
+                    </ActionButton>
+                  </div>
+                </article>
+              );
+            })
+          )}
+        </div>
+
+        <div className="chat-ops-list">
+          <div className="workspace-panel__intro">
+            <p className="workspace-kicker">Checkpoints</p>
+            <h3>{checkpoints.length}</h3>
+          </div>
+          {checkpoints.length === 0 ? (
+            <p className="chat-muted">No checkpoints are stored for this session yet.</p>
+          ) : (
+            [...checkpoints].reverse().map((checkpoint) => {
+              const checkpointRunId = checkpoint.run_id;
+              return (
+                <article key={checkpoint.checkpoint_id} className="chat-ops-card">
+                  <div className="chat-ops-card__copy">
+                    <strong>{checkpoint.name}</strong>
+                    <span>
+                      {describeBranchState(checkpoint.branch_state)} · restores {checkpoint.restore_count}
+                    </span>
+                    <p>{checkpoint.note ?? "No note recorded for this checkpoint."}</p>
+                  </div>
+                  <div className="chat-ops-card__actions">
+                    {checkpointRunId !== undefined ? (
+                      <ActionButton
+                        isDisabled={phase4Busy}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                        onPress={() => openRunDetails(checkpointRunId)}
+                      >
+                        Open run
+                      </ActionButton>
+                    ) : null}
+                    <ActionButton
+                      isDisabled={phase4Busy}
+                      size="sm"
+                      type="button"
+                      variant="secondary"
+                      onPress={() => inspectCheckpoint(checkpoint.checkpoint_id)}
+                    >
+                      {phase4BusyKey === `inspect-checkpoint:${checkpoint.checkpoint_id}`
+                        ? "Loading..."
+                        : "Inspect"}
+                    </ActionButton>
+                    <ActionButton
+                      isDisabled={phase4Busy}
+                      size="sm"
+                      type="button"
+                      variant="primary"
+                      onPress={() => restoreCheckpoint(checkpoint.checkpoint_id)}
+                    >
+                      {phase4BusyKey === `restore-checkpoint:${checkpoint.checkpoint_id}`
+                        ? "Restoring..."
+                        : "Restore"}
+                    </ActionButton>
+                  </div>
+                </article>
+              );
+            })
+          )}
+        </div>
+
+        <div className="chat-ops-list">
+          <div className="workspace-panel__intro">
             <p className="workspace-kicker">Queued follow-ups</p>
             <h3>{queuedInputs.length}</h3>
           </div>
@@ -352,6 +499,111 @@ export function ChatInspectorColumn({
                 </div>
               </article>
             ))
+          )}
+        </div>
+
+        <div className="chat-ops-list">
+          <div className="workspace-panel__intro">
+            <p className="workspace-kicker">Background tasks</p>
+            <h3>{backgroundTasks.length}</h3>
+          </div>
+          {backgroundTasks.length === 0 ? (
+            <p className="chat-muted">No background tasks are tracked for this session.</p>
+          ) : (
+            [...backgroundTasks].reverse().map((task) => {
+              const targetRunId = task.target_run_id;
+              return (
+                <article key={task.task_id} className="chat-ops-card">
+                  <div className="chat-ops-card__copy">
+                    <strong>{task.state}</strong>
+                    <span>
+                      {task.task_kind} · {task.attempt_count}/{task.max_attempts} attempts
+                    </span>
+                    <p>{task.input_text ?? task.last_error ?? "No task text or error recorded."}</p>
+                  </div>
+                  <div className="chat-ops-card__actions">
+                    {targetRunId !== undefined ? (
+                      <ActionButton
+                        isDisabled={phase4Busy}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                        onPress={() => openRunDetails(targetRunId)}
+                      >
+                        Open run
+                      </ActionButton>
+                    ) : null}
+                    <ActionButton
+                      isDisabled={phase4Busy}
+                      size="sm"
+                      type="button"
+                      variant="secondary"
+                      onPress={() => inspectBackgroundTask(task.task_id)}
+                    >
+                      {phase4BusyKey === `inspect-background-task:${task.task_id}`
+                        ? "Loading..."
+                        : "Inspect"}
+                    </ActionButton>
+                    {(task.state === "queued" || task.state === "failed") && (
+                      <ActionButton
+                        isDisabled={phase4Busy}
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                        onPress={() => runBackgroundTaskAction(task.task_id, "pause")}
+                      >
+                        {phase4BusyKey === `background-pause:${task.task_id}`
+                          ? "Pausing..."
+                          : "Pause"}
+                      </ActionButton>
+                    )}
+                    {task.state === "paused" && (
+                      <ActionButton
+                        isDisabled={phase4Busy}
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                        onPress={() => runBackgroundTaskAction(task.task_id, "resume")}
+                      >
+                        {phase4BusyKey === `background-resume:${task.task_id}`
+                          ? "Resuming..."
+                          : "Resume"}
+                      </ActionButton>
+                    )}
+                    {(task.state === "failed" ||
+                      task.state === "cancelled" ||
+                      task.state === "expired") && (
+                      <ActionButton
+                        isDisabled={phase4Busy}
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                        onPress={() => runBackgroundTaskAction(task.task_id, "retry")}
+                      >
+                        {phase4BusyKey === `background-retry:${task.task_id}`
+                          ? "Retrying..."
+                          : "Retry"}
+                      </ActionButton>
+                    )}
+                    {task.state !== "succeeded" &&
+                    task.state !== "cancelled" &&
+                    task.state !== "expired" ? (
+                      <ActionButton
+                        isDisabled={phase4Busy}
+                        size="sm"
+                        type="button"
+                        variant="danger"
+                        onPress={() => runBackgroundTaskAction(task.task_id, "cancel")}
+                      >
+                        {phase4BusyKey === `background-cancel:${task.task_id}`
+                          ? "Canceling..."
+                          : "Cancel"}
+                      </ActionButton>
+                    ) : null}
+                  </div>
+                </article>
+              );
+            })
           )}
         </div>
       </SectionCard>

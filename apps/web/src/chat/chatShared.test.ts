@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildContextBudgetSummary,
   buildSessionLineageHint,
+  describeBranchState,
+  parseCompactCommandMode,
   parseSlashCommand,
 } from "./chatShared";
 
@@ -12,10 +14,20 @@ describe("chatShared helpers", () => {
       name: "branch",
       args: "Incident follow-up",
     });
+    expect(parseSlashCommand("/compact apply")).toEqual({
+      name: "compact",
+      args: "apply",
+    });
     expect(parseSlashCommand("/help")).toEqual({
       name: "help",
       args: "",
     });
+  });
+
+  it("resolves compact slash subcommands with preview as the safe default", () => {
+    expect(parseCompactCommandMode("")).toBe("preview");
+    expect(parseCompactCommandMode("preview")).toBe("preview");
+    expect(parseCompactCommandMode("apply now")).toBe("apply");
   });
 
   it("builds context budget warnings from draft and attachment estimates", () => {
@@ -41,7 +53,9 @@ describe("chatShared helpers", () => {
     expect(summary.warning).toMatch(/above the safe working budget/i);
   });
 
-  it("renders session lineage hints for child branches", () => {
+  it("renders branch labels and lineage hints for current branch terminology", () => {
+    expect(describeBranchState("active_branch")).toBe("Active branch");
+    expect(describeBranchState("branch_source")).toBe("Branch source");
     expect(
       buildSessionLineageHint({
         session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -51,8 +65,9 @@ describe("chatShared helpers", () => {
         preview_state: "computed",
         last_intent_state: "computed",
         last_summary_state: "computed",
-        branch_state: "branched",
+        branch_state: "active_branch",
         parent_session_id: "01ARZ3NDEKTSV4RRFFQ69G5FA0",
+        branch_origin_run_id: "01ARZ3NDEKTSV4RRFFQ69G5FA1",
         principal: "admin:web-console",
         device_id: "device-1",
         created_at_unix_ms: 100,
@@ -63,6 +78,6 @@ describe("chatShared helpers", () => {
         archived: false,
         pending_approvals: 0,
       }),
-    ).toMatch(/Child branch/i);
+    ).toMatch(/Active branch from .* at run/i);
   });
 });

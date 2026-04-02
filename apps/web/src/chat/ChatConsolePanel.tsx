@@ -2,11 +2,13 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 import { useSearchParams } from "react-router-dom";
 
 import type {
+  ChatBackgroundTaskRecord,
+  ChatCheckpointRecord,
+  ChatCompactionArtifactRecord,
   ChatPinRecord,
   ChatQueuedInputRecord,
   ChatTranscriptRecord,
   ConsoleApiClient,
-  JsonValue,
   RecallPreviewEnvelope,
 } from "../consoleApi";
 import { type DetailPanelState, type TranscriptSearchMatch } from "./ChatInspectorColumn";
@@ -15,9 +17,15 @@ import {
   buildDetailFromLiveEntry,
   buildDetailFromSearchMatch,
   buildDetailFromTranscriptRecord,
-  downloadTextFile,
-  uploadComposerAttachments,
 } from "./chatConsoleUtils";
+import {
+  inspectBackgroundTaskAction,
+  inspectCheckpointAction,
+  inspectCompactionAction,
+  restoreCheckpointAction,
+  runBackgroundTaskActionRequest,
+  runCompactionFlowAction,
+} from "./chatPhase4Actions";
 import {
   CHAT_SLASH_COMMANDS,
   buildContextBudgetSummary,
@@ -25,12 +33,24 @@ import {
   describeBranchState,
   emptyToUndefined,
   parseSlashCommand,
-  prettifyEventType,
+  parseCompactCommandMode,
   shortId,
   toErrorMessage,
   type ComposerAttachment,
   type TranscriptEntry,
 } from "./chatShared";
+import {
+  abortCurrentRunAction,
+  branchCurrentSessionAction,
+  createNewSessionAction,
+  deletePinAction,
+  exportTranscriptAction,
+  handleAttachmentFilesAction,
+  pinTranscriptRecordAction,
+  queueFollowUpTextAction,
+  resumeSessionAction,
+  retryLatestTurnAction,
+} from "./chatSessionActions";
 import { useChatRunStream } from "./useChatRunStream";
 import { useChatSessions } from "./useChatSessions";
 
@@ -61,7 +81,10 @@ export function ChatConsolePanel({
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [transcriptRecords, setTranscriptRecords] = useState<ChatTranscriptRecord[]>([]);
   const [sessionPins, setSessionPins] = useState<ChatPinRecord[]>([]);
+  const [compactions, setCompactions] = useState<ChatCompactionArtifactRecord[]>([]);
+  const [checkpoints, setCheckpoints] = useState<ChatCheckpointRecord[]>([]);
   const [queuedInputs, setQueuedInputs] = useState<ChatQueuedInputRecord[]>([]);
+  const [backgroundTasks, setBackgroundTasks] = useState<ChatBackgroundTaskRecord[]>([]);
   const [transcriptSearchQuery, setTranscriptSearchQuery] = useState("");
   const [transcriptSearchBusy, setTranscriptSearchBusy] = useState(false);
   const [transcriptSearchResults, setTranscriptSearchResults] = useState<TranscriptSearchMatch[]>(
@@ -71,6 +94,7 @@ export function ChatConsolePanel({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState<"json" | "markdown" | null>(null);
+  const [phase4BusyKey, setPhase4BusyKey] = useState<string | null>(null);
   const [recallPreviewBusy, setRecallPreviewBusy] = useState(false);
   const [recallPreview, setRecallPreview] = useState<RecallPreviewEnvelope | null>(null);
   const [recallPreviewQuery, setRecallPreviewQuery] = useState("");
@@ -221,7 +245,10 @@ export function ChatConsolePanel({
     if (sessionId.length === 0) {
       setTranscriptRecords([]);
       setSessionPins([]);
+      setCompactions([]);
+      setCheckpoints([]);
       setQueuedInputs([]);
+      setBackgroundTasks([]);
       return;
     }
 
@@ -234,7 +261,10 @@ export function ChatConsolePanel({
       sessions.upsertSession(response.session);
       setTranscriptRecords(response.records);
       setSessionPins(response.pins);
+      setCompactions(response.compactions);
+      setCheckpoints(response.checkpoints);
       setQueuedInputs(response.queued_inputs);
+      setBackgroundTasks(response.background_tasks);
     } catch (error) {
       if (requestSeq === transcriptRequestSeqRef.current) {
         setError(toErrorMessage(error));
@@ -320,10 +350,14 @@ export function ChatConsolePanel({
       sessionSwitchRef.current = "";
       setTranscriptRecords([]);
       setSessionPins([]);
+      setCompactions([]);
+      setCheckpoints([]);
       setQueuedInputs([]);
+      setBackgroundTasks([]);
       setTranscriptSearchResults([]);
       setDetailPanel(null);
       setAttachments([]);
+      setPhase4BusyKey(null);
       resetRecallPreview();
       return;
     }
@@ -333,6 +367,7 @@ export function ChatConsolePanel({
       setDetailPanel(null);
       setTranscriptSearchResults([]);
       setAttachments([]);
+      setPhase4BusyKey(null);
       resetRecallPreview();
     }
     sessionSwitchRef.current = sessionId;
@@ -387,29 +422,18 @@ export function ChatConsolePanel({
   }
 
   async function abortCurrentRun(): Promise<void> {
-    const targetRunId = actionableRunId;
-    if (targetRunId === null || targetRunId.trim().length === 0) {
-      setError("No run is available for cancellation.");
-      return;
-    }
-    setRunActionBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const response = await api.abortSessionRun(targetRunId);
-      setNotice(
-        response.cancel_requested ? "Run cancellation requested." : "Run was already idle.",
-      );
-      await sessions.refreshSessions(false);
-      if (runDrawerOpen && runDrawerId.trim() === targetRunId) {
-        refreshRunDetails();
-      }
-      void refreshSessionTranscript();
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Unexpected failure.");
-    } finally {
-      setRunActionBusy(false);
-    }
+    await abortCurrentRunAction({
+      api,
+      targetRunId: actionableRunId,
+      runDrawerOpen,
+      runDrawerId,
+      refreshRunDetails,
+      refreshSessions: sessions.refreshSessions,
+      refreshSessionTranscript,
+      setRunActionBusy,
+      setError,
+      setNotice,
+    });
   }
 
   async function handleComposerSubmit(): Promise<void> {
@@ -499,9 +523,7 @@ export function ChatConsolePanel({
         );
         return;
       case "compact":
-        setNotice(
-          "Compaction lands in a later phase. In Phase 2, use retry, branch, search, or export to keep long sessions manageable.",
-        );
+        await runCompactionFlow(parseCompactCommandMode(command.args));
         return;
       case "search":
         if (command.args.length === 0) {
@@ -524,152 +546,103 @@ export function ChatConsolePanel({
     }
   }
 
-  async function createNewSession(requestedLabel?: string): Promise<void> {
-    setError(null);
-    setNotice(null);
-    const createdSessionId = await sessions.createSessionWithLabel(requestedLabel);
-    if (createdSessionId === null) {
+  async function runCompactionFlow(mode: "preview" | "apply"): Promise<void> {
+    const sessionId = sessions.activeSessionId.trim();
+    if (sessionId.length === 0) {
+      setError("Select a session before compacting.");
       return;
     }
-    clearTranscriptState();
-    setDetailPanel(null);
-    setTranscriptSearchResults([]);
-    setAttachments([]);
-    setComposerText("");
-    setNotice(
-      requestedLabel !== undefined && requestedLabel.trim().length > 0
-        ? `Created a fresh session: ${requestedLabel.trim()}.`
-        : "Created a fresh session.",
-    );
+
+    setCommandBusy(mode === "apply" ? "compact-apply" : "compact-preview");
+    setError(null);
+    setNotice(null);
+    try {
+      await runCompactionFlowAction({
+        mode,
+        api,
+        sessionId,
+        upsertSession: sessions.upsertSession,
+        refreshSessionTranscript,
+        setDetailPanel,
+        appendLocalEntry,
+        setNotice,
+      });
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setCommandBusy(null);
+    }
+  }
+  async function createNewSession(requestedLabel?: string): Promise<void> {
+    await createNewSessionAction({
+      requestedLabel,
+      createSessionWithLabel: sessions.createSessionWithLabel,
+      clearTranscriptState,
+      setDetailPanel,
+      setTranscriptSearchResults,
+      setAttachments,
+      setComposerText,
+      setError,
+      setNotice,
+    });
   }
 
   async function resumeSession(rawTarget: string): Promise<void> {
-    const target = rawTarget.trim();
-    if (target.length === 0) {
-      setError("Usage: /resume <session-id-or-key>");
-      return;
-    }
-    const matchedSession =
-      sessions.sortedSessions.find((session) => session.session_id === target) ??
-      sessions.sortedSessions.find((session) => session.session_key === target) ??
-      sessions.sortedSessions.find(
-        (session) => session.title.toLowerCase() === target.toLowerCase(),
-      ) ??
-      null;
-    if (matchedSession === null) {
-      setError(`No loaded session matches "${target}". Use /history first if needed.`);
-      return;
-    }
-    sessions.setActiveSessionId(matchedSession.session_id);
-    setComposerText("");
-    setNotice(`Resumed session ${matchedSession.title}.`);
+    resumeSessionAction({
+      rawTarget,
+      sortedSessions: sessions.sortedSessions,
+      setActiveSessionId: sessions.setActiveSessionId,
+      setComposerText,
+      setError,
+      setNotice,
+    });
   }
 
   async function retryLatestTurn(): Promise<void> {
-    const sessionId = sessions.activeSessionId.trim();
-    if (sessionId.length === 0) {
-      setError("Select a session before retrying.");
-      return;
-    }
-
-    setCommandBusy("retry");
-    setError(null);
-    setNotice(null);
-    try {
-      const response = await api.prepareRetry(sessionId);
-      const didSend = await sendMessage(
-        async () => {
-          await Promise.all([sessions.refreshSessions(false), refreshSessionTranscript()]);
-        },
-        {
-          text: response.text,
-          origin_kind: response.origin_kind,
-          origin_run_id: response.origin_run_id,
-          parameter_delta: response.parameter_delta,
-        },
-      );
-      if (didSend) {
-        appendLocalEntry({
-          kind: "status",
-          session_id: sessionId,
-          run_id: response.origin_run_id,
-          title: "Retry requested",
-          text: `Replayed the latest user turn from ${shortId(response.origin_run_id)}.`,
-          payload: response.parameter_delta,
-        });
-      }
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setCommandBusy(null);
-    }
+    await retryLatestTurnAction({
+      api,
+      sessionId: sessions.activeSessionId.trim(),
+      refreshSessions: sessions.refreshSessions,
+      refreshSessionTranscript,
+      sendMessage,
+      appendLocalEntry,
+      setCommandBusy,
+      setError,
+      setNotice,
+    });
   }
 
   async function branchCurrentSession(requestedLabel?: string): Promise<void> {
-    const sessionId = sessions.activeSessionId.trim();
-    if (sessionId.length === 0) {
-      setError("Select a session before branching.");
-      return;
-    }
-
-    setCommandBusy("branch");
-    setError(null);
-    setNotice(null);
-    try {
-      const response = await api.branchSession(sessionId, {
-        session_label: emptyToUndefined(requestedLabel ?? ""),
-      });
-      sessions.upsertSession(response.session, { select: true });
-      clearTranscriptState();
-      setDetailPanel(null);
-      setAttachments([]);
-      setComposerText("");
-      await Promise.all([sessions.refreshSessions(false), refreshSessionTranscript()]);
-      setNotice(
-        `Branch ready: ${response.session.title} from run ${shortId(response.source_run_id)}.`,
-      );
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setCommandBusy(null);
-    }
+    await branchCurrentSessionAction({
+      api,
+      sessionId: sessions.activeSessionId.trim(),
+      requestedLabel,
+      upsertSession: sessions.upsertSession,
+      clearTranscriptState,
+      setDetailPanel,
+      setAttachments,
+      setComposerText,
+      refreshSessions: sessions.refreshSessions,
+      refreshSessionTranscript,
+      setCommandBusy,
+      setError,
+      setNotice,
+    });
   }
 
   async function queueFollowUpText(text: string): Promise<void> {
-    const targetRunId = actionableRunId;
-    if (targetRunId === null || targetRunId.trim().length === 0) {
-      setError("No active run is available for queued follow-up.");
-      return;
-    }
-
-    const trimmed = text.trim();
-    if (trimmed.length === 0) {
-      setError("Queued follow-up cannot be empty.");
-      return;
-    }
-
-    setCommandBusy("queue");
-    setError(null);
-    setNotice(null);
-    try {
-      const response = await api.queueFollowUp(targetRunId, { text: trimmed });
-      appendLocalEntry({
-        kind: "status",
-        run_id: targetRunId,
-        session_id: sessions.activeSessionId,
-        title: "Queued follow-up",
-        text: `Queued input ${shortId(response.queued_input.queued_input_id)} for ${shortId(targetRunId)}.`,
-        payload: response.queued_input as unknown as JsonValue,
-        status: "queued",
-      });
-      setComposerText("");
-      await refreshSessionTranscript();
-      setNotice("Queued follow-up stored.");
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setCommandBusy(null);
-    }
+    await queueFollowUpTextAction({
+      api,
+      targetRunId: actionableRunId,
+      text,
+      sessionId: sessions.activeSessionId,
+      appendLocalEntry,
+      refreshSessionTranscript,
+      setComposerText,
+      setCommandBusy,
+      setError,
+      setNotice,
+    });
   }
 
   async function searchTranscript(query = transcriptSearchQuery): Promise<void> {
@@ -707,105 +680,151 @@ export function ChatConsolePanel({
   }
 
   async function exportTranscript(format: "json" | "markdown"): Promise<void> {
-    const sessionId = sessions.activeSessionId.trim();
-    if (sessionId.length === 0) {
-      setError("Select a session before exporting.");
-      return;
-    }
-
-    setExportBusy(format);
-    setError(null);
-    try {
-      const response = await api.exportSessionTranscript(sessionId, format);
-      const extension = format === "json" ? "json" : "md";
-      const mimeType = format === "json" ? "application/json" : "text/markdown";
-      const content =
-        typeof response.content === "string"
-          ? response.content
-          : JSON.stringify(response.content, null, 2);
-      downloadTextFile(
-        `chat-${sessions.selectedSession?.session_label ?? shortId(sessionId)}.${extension}`,
-        content,
-        mimeType,
-      );
-      setNotice(`Transcript export ready: ${format}.`);
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setExportBusy(null);
-    }
+    await exportTranscriptAction({
+      api,
+      sessionId: sessions.activeSessionId.trim(),
+      sessionLabel: sessions.selectedSession?.session_label,
+      format,
+      setExportBusy,
+      setError,
+      setNotice,
+    });
   }
 
   async function pinTranscriptRecord(record: ChatTranscriptRecord): Promise<void> {
-    const sessionId = sessions.activeSessionId.trim();
-    if (sessionId.length === 0) {
-      setError("Select a session before pinning transcript events.");
-      return;
-    }
-
-    setCommandBusy("pin");
-    try {
-      await api.createSessionPin(sessionId, {
-        run_id: record.run_id,
-        tape_seq: record.seq,
-        title: `${prettifyEventType(record.event_type)} #${record.seq}`,
-        note: `Pinned from ${record.origin_kind} at ${new Date(record.created_at_unix_ms).toLocaleString()}.`,
-      });
-      await refreshSessionTranscript();
-      setNotice(`Pinned event #${record.seq}.`);
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setCommandBusy(null);
-    }
+    await pinTranscriptRecordAction({
+      api,
+      sessionId: sessions.activeSessionId.trim(),
+      record,
+      refreshSessionTranscript,
+      setCommandBusy,
+      setError,
+      setNotice,
+    });
   }
 
   async function deletePin(pinId: string): Promise<void> {
-    const sessionId = sessions.activeSessionId.trim();
-    if (sessionId.length === 0) {
-      setError("Select a session before deleting pins.");
-      return;
-    }
-
-    setCommandBusy("delete-pin");
+    await deletePinAction({
+      api,
+      sessionId: sessions.activeSessionId.trim(),
+      pinId,
+      refreshSessionTranscript,
+      setCommandBusy,
+      setError,
+      setNotice,
+    });
+  }
+  async function inspectCompaction(artifactId: string): Promise<void> {
+    setPhase4BusyKey(`inspect-compaction:${artifactId}`);
+    setError(null);
     try {
-      await api.deleteSessionPin(sessionId, pinId);
-      await refreshSessionTranscript();
-      setNotice("Pin deleted.");
+      await inspectCompactionAction({
+        api,
+        artifactId,
+        upsertSession: sessions.upsertSession,
+        setDetailPanel,
+      });
     } catch (error) {
       setError(toErrorMessage(error));
     } finally {
-      setCommandBusy(null);
+      setPhase4BusyKey(null);
+    }
+  }
+
+  async function inspectCheckpoint(checkpointId: string): Promise<void> {
+    setPhase4BusyKey(`inspect-checkpoint:${checkpointId}`);
+    setError(null);
+    try {
+      await inspectCheckpointAction({
+        api,
+        checkpointId,
+        upsertSession: sessions.upsertSession,
+        setDetailPanel,
+      });
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setPhase4BusyKey(null);
+    }
+  }
+
+  async function restoreCheckpoint(checkpointId: string): Promise<void> {
+    setPhase4BusyKey(`restore-checkpoint:${checkpointId}`);
+    setError(null);
+    setNotice(null);
+    try {
+      await restoreCheckpointAction({
+        api,
+        checkpointId,
+        selectedSession: sessions.selectedSession,
+        upsertSession: sessions.upsertSession,
+        clearTranscriptState,
+        setAttachments,
+        refreshSessions: sessions.refreshSessions,
+        refreshSessionTranscript,
+        setDetailPanel,
+        setNotice,
+      });
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setPhase4BusyKey(null);
+    }
+  }
+
+  async function inspectBackgroundTask(taskId: string): Promise<void> {
+    setPhase4BusyKey(`inspect-background-task:${taskId}`);
+    setError(null);
+    try {
+      await inspectBackgroundTaskAction({
+        api,
+        taskId,
+        setDetailPanel,
+      });
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setPhase4BusyKey(null);
+    }
+  }
+
+  async function runBackgroundTaskAction(
+    taskId: string,
+    action: "pause" | "resume" | "retry" | "cancel",
+  ): Promise<void> {
+    setPhase4BusyKey(`background-${action}:${taskId}`);
+    setError(null);
+    setNotice(null);
+    try {
+      await runBackgroundTaskActionRequest({
+        api,
+        taskId,
+        action,
+        refreshSessionTranscript,
+        setNotice,
+      });
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setPhase4BusyKey(null);
     }
   }
 
   async function handleAttachmentFiles(files: readonly File[]): Promise<void> {
-    const sessionId = sessions.activeSessionId.trim();
-    if (sessionId.length === 0) {
-      setError("Select a session before uploading attachments.");
-      return;
-    }
-    if (files.length === 0) {
-      return;
-    }
-
-    setAttachmentBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const nextAttachments = await uploadComposerAttachments(api, sessionId, files);
-      setAttachments((previous) => [...previous, ...nextAttachments]);
-      setNotice(
-        `${nextAttachments.length} attachment${nextAttachments.length === 1 ? "" : "s"} ready for the next message.`,
-      );
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setAttachmentBusy(false);
-      if (attachmentInputRef.current !== null) {
-        attachmentInputRef.current.value = "";
-      }
-    }
+    await handleAttachmentFilesAction({
+      api,
+      sessionId: sessions.activeSessionId.trim(),
+      files,
+      setAttachments,
+      setAttachmentBusy,
+      setError,
+      setNotice,
+      clearAttachmentInput: () => {
+        if (attachmentInputRef.current !== null) {
+          attachmentInputRef.current.value = "";
+        }
+      },
+    });
   }
 
   function inspectLiveEntry(entry: TranscriptEntry): void {
@@ -920,10 +939,30 @@ export function ChatConsolePanel({
           deletePin: (pinId) => {
             void deletePin(pinId);
           },
+          compactions,
+          inspectCompaction: (artifactId) => {
+            void inspectCompaction(artifactId);
+          },
+          checkpoints,
+          inspectCheckpoint: (checkpointId) => {
+            void inspectCheckpoint(checkpointId);
+          },
+          restoreCheckpoint: (checkpointId) => {
+            void restoreCheckpoint(checkpointId);
+          },
           queuedInputs,
+          backgroundTasks,
+          inspectBackgroundTask: (taskId) => {
+            void inspectBackgroundTask(taskId);
+          },
+          runBackgroundTaskAction: (taskId, action) => {
+            void runBackgroundTaskAction(taskId, action);
+          },
           detailPanel,
           revealSensitiveValues,
           inspectorVisible,
+          openRunDetails,
+          phase4BusyKey,
           runDrawerId,
           setRunDrawerId,
           runDrawerBusy,

@@ -1,4 +1,12 @@
-import type { ChatTranscriptRecord, ConsoleApiClient } from "../consoleApi";
+import type {
+  ChatBackgroundTaskRecord,
+  ChatCheckpointRecord,
+  ChatCompactionArtifactRecord,
+  ChatRunStatusRecord,
+  ChatTranscriptRecord,
+  ConsoleApiClient,
+  JsonValue,
+} from "../consoleApi";
 
 import type { DetailPanelState, TranscriptSearchMatch } from "./ChatInspectorColumn";
 import {
@@ -34,6 +42,73 @@ export function buildDetailFromSearchMatch(match: TranscriptSearchMatch): Detail
     title: `${prettifyEventType(match.event_type)} #${match.seq}`,
     subtitle: `${new Date(match.created_at_unix_ms).toLocaleString()} · ${match.origin_kind}`,
     body: match.snippet,
+  };
+}
+
+export function buildDetailFromCompactionArtifact(
+  artifact: ChatCompactionArtifactRecord,
+): DetailPanelState {
+  return {
+    id: `compaction-${artifact.artifact_id}`,
+    title: `Compaction ${shortId(artifact.artifact_id)}`,
+    subtitle: `${new Date(artifact.created_at_unix_ms).toLocaleString()} · ${artifact.mode} · ${artifact.strategy}`,
+    body: artifact.summary_preview,
+    payload: {
+      artifact: {
+        ...artifact,
+        source_records_json: safeParseJsonString(artifact.source_records_json),
+        summary_json: safeParseJsonString(artifact.summary_json),
+        trigger_inputs_json:
+          artifact.trigger_inputs_json === undefined
+            ? undefined
+            : safeParseJsonString(artifact.trigger_inputs_json),
+      } as unknown as JsonValue,
+    },
+  };
+}
+
+export function buildDetailFromCheckpointRecord(
+  checkpoint: ChatCheckpointRecord,
+): DetailPanelState {
+  return {
+    id: `checkpoint-${checkpoint.checkpoint_id}`,
+    title: checkpoint.name,
+    subtitle: `${new Date(checkpoint.created_at_unix_ms).toLocaleString()} · ${checkpoint.branch_state}`,
+    body: checkpoint.note,
+    payload: {
+      checkpoint: {
+        ...checkpoint,
+        tags_json: safeParseJsonString(checkpoint.tags_json),
+        referenced_compaction_ids_json: safeParseJsonString(
+          checkpoint.referenced_compaction_ids_json,
+        ),
+        workspace_paths_json: safeParseJsonString(checkpoint.workspace_paths_json),
+      } as unknown as JsonValue,
+    },
+  };
+}
+
+export function buildDetailFromBackgroundTask(
+  task: ChatBackgroundTaskRecord,
+  run?: ChatRunStatusRecord,
+): DetailPanelState {
+  return {
+    id: `background-task-${task.task_id}`,
+    title: `Background task ${shortId(task.task_id)}`,
+    subtitle: `${task.state} · ${task.task_kind} · ${new Date(task.updated_at_unix_ms).toLocaleString()}`,
+    body: task.input_text ?? task.last_error,
+    payload: {
+      task: {
+        ...task,
+        payload_json: task.payload_json === undefined ? undefined : safeParseJsonString(task.payload_json),
+        notification_target_json:
+          task.notification_target_json === undefined
+            ? undefined
+            : safeParseJsonString(task.notification_target_json),
+        result_json: task.result_json === undefined ? undefined : safeParseJsonString(task.result_json),
+      } as unknown as JsonValue,
+      run: run as unknown as JsonValue,
+    },
   };
 }
 
@@ -83,4 +158,12 @@ export async function uploadComposerAttachments(
     });
   }
   return nextAttachments;
+}
+
+function safeParseJsonString(value: string): JsonValue {
+  try {
+    return JSON.parse(value) as JsonValue;
+  } catch {
+    return value;
+  }
 }
