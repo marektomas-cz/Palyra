@@ -1,0 +1,29 @@
+name: Setup Vite+ Safe
+description: Install Vite+ via the pinned upstream action and guarantee a working vp CLI on PATH.
+
+inputs:
+  node-version-file:
+    description: Path to the Node version file.
+    required: false
+  cache:
+    description: Whether to enable setup-vp caching.
+    required: false
+    default: "true"
+  run-install:
+    description: Whether setup-vp should run install automatically.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Vite+
+      uses: voidzero-dev/setup-vp@e34774bccb4e7d7f2e23514ca980177a71425e43
+      with:
+        node-version-file: ${{ inputs.node-version-file }}
+        cache: ${{ inputs.cache }}
+        run-install: ${{ inputs.run-install }}
+
+    - name: Ensure Vite+ CLI
+      shell: pwsh
+      run: ./scripts/ci/ensure-vp.ps1

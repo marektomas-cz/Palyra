@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@e34774bccb4e7d7f2e23514ca980177a71425e43
+        uses: ./.github/actions/setup-vp-safe
         with:
           node-version-file: .node-version
           cache: true
