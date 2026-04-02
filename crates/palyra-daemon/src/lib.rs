@@ -3,6 +3,7 @@
 mod agents;
 pub mod app;
 pub mod application;
+mod background_queue;
 mod channel_router;
 mod channels;
 mod config;
@@ -1233,6 +1234,29 @@ struct ConsoleChatBranchRequest {
     session_label: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct ConsoleChatCompactionRequest {
+    #[serde(default)]
+    trigger_reason: Option<String>,
+    #[serde(default)]
+    trigger_policy: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleChatCheckpointRequest {
+    name: String,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ConsoleChatCheckpointRestoreRequest {
+    #[serde(default)]
+    session_label: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ConsoleChatPinRequest {
     run_id: String,
@@ -1250,6 +1274,35 @@ struct ConsoleChatTranscriptSearchQuery {
 #[derive(Debug, Deserialize)]
 struct ConsoleChatTranscriptExportQuery {
     format: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleChatBackgroundTasksQuery {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    include_completed: Option<bool>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ConsoleChatBackgroundTaskCreateRequest {
+    text: String,
+    #[serde(default)]
+    priority: Option<i64>,
+    #[serde(default)]
+    max_attempts: Option<u64>,
+    #[serde(default)]
+    budget_tokens: Option<u64>,
+    #[serde(default)]
+    not_before_unix_ms: Option<i64>,
+    #[serde(default)]
+    expires_at_unix_ms: Option<i64>,
+    #[serde(default)]
+    notification_target: Option<Value>,
+    #[serde(default)]
+    parameter_delta: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1975,6 +2028,11 @@ pub async fn run() -> Result<()> {
     let _channel_worker_task = Arc::clone(&channels).spawn_worker();
     let _hook_runtime_task =
         hooks::spawn_hook_runtime(runtime.clone(), hook_runtime_policy, hook_execution_timeout);
+    let _background_queue_task = background_queue::spawn_background_queue_loop(
+        runtime.clone(),
+        auth.clone(),
+        grpc_url.clone(),
+    );
 
     let admin_server = async move {
         axum::serve(admin_listener, app.into_make_service_with_connect_info::<SocketAddr>())

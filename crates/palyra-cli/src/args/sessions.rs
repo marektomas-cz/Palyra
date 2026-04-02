@@ -109,4 +109,102 @@ pub enum SessionsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    CompactPreview {
+        session_id: String,
+        #[arg(long)]
+        trigger_reason: Option<String>,
+        #[arg(long)]
+        trigger_policy: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    CompactApply {
+        session_id: String,
+        #[arg(long)]
+        trigger_reason: Option<String>,
+        #[arg(long)]
+        trigger_policy: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    CompactionShow {
+        artifact_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    CheckpointCreate {
+        session_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    CheckpointShow {
+        checkpoint_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    CheckpointRestore {
+        checkpoint_id: String,
+        #[arg(long)]
+        session_label: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    BackgroundEnqueue {
+        session_id: String,
+        #[arg(long)]
+        text: String,
+        #[arg(long)]
+        priority: Option<i64>,
+        #[arg(long)]
+        max_attempts: Option<u64>,
+        #[arg(long)]
+        budget_tokens: Option<u64>,
+        #[arg(long)]
+        not_before_unix_ms: Option<i64>,
+        #[arg(long)]
+        expires_at_unix_ms: Option<i64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    BackgroundList {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long, default_value_t = false)]
+        include_completed: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    BackgroundShow {
+        task_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    BackgroundPause {
+        task_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    BackgroundResume {
+        task_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    BackgroundRetry {
+        task_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    BackgroundCancel {
+        task_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }

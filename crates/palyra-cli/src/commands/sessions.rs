@@ -27,7 +27,20 @@ pub(crate) async fn run_sessions_async(
         | SessionsCommand::Retry { json, .. }
         | SessionsCommand::Branch { json, .. }
         | SessionsCommand::TranscriptSearch { json, .. }
-        | SessionsCommand::Export { json, .. } => output::preferred_json(*json),
+        | SessionsCommand::Export { json, .. }
+        | SessionsCommand::CompactPreview { json, .. }
+        | SessionsCommand::CompactApply { json, .. }
+        | SessionsCommand::CompactionShow { json, .. }
+        | SessionsCommand::CheckpointCreate { json, .. }
+        | SessionsCommand::CheckpointShow { json, .. }
+        | SessionsCommand::CheckpointRestore { json, .. }
+        | SessionsCommand::BackgroundEnqueue { json, .. }
+        | SessionsCommand::BackgroundList { json, .. }
+        | SessionsCommand::BackgroundShow { json, .. }
+        | SessionsCommand::BackgroundPause { json, .. }
+        | SessionsCommand::BackgroundResume { json, .. }
+        | SessionsCommand::BackgroundRetry { json, .. }
+        | SessionsCommand::BackgroundCancel { json, .. } => output::preferred_json(*json),
     };
     let runtime = client::operator::OperatorRuntime::new(connection.clone());
 
@@ -545,6 +558,299 @@ pub(crate) async fn run_sessions_async(
                 println!("{}", serde_json::to_string_pretty(content)?);
             }
         }
+        SessionsCommand::CompactPreview { session_id, trigger_reason, trigger_policy, json: _ } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let payload = context
+                .client
+                .post_json_value(
+                    format!(
+                        "console/v1/chat/sessions/{}/compactions/preview",
+                        percent_encode_component(session_id.as_str())
+                    ),
+                    &json!({
+                        "trigger_reason": trigger_reason,
+                        "trigger_policy": trigger_policy,
+                    }),
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let preview =
+                    payload.pointer("/preview").context("compaction preview is missing")?;
+                println!(
+                    "sessions.compact.preview eligible={} source_events={} protected={} condensed={} token_delta={} preview={}",
+                    preview.pointer("/eligible").and_then(Value::as_bool).unwrap_or(false),
+                    preview.pointer("/source_event_count").and_then(Value::as_u64).unwrap_or_default(),
+                    preview.pointer("/protected_event_count").and_then(Value::as_u64).unwrap_or_default(),
+                    preview.pointer("/condensed_event_count").and_then(Value::as_u64).unwrap_or_default(),
+                    preview.pointer("/token_delta").and_then(Value::as_u64).unwrap_or_default(),
+                    json_optional_string_in(preview, "/summary_preview").unwrap_or_else(|| "none".to_owned())
+                );
+            }
+        }
+        SessionsCommand::CompactApply { session_id, trigger_reason, trigger_policy, json: _ } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let payload = context
+                .client
+                .post_json_value(
+                    format!(
+                        "console/v1/chat/sessions/{}/compactions",
+                        percent_encode_component(session_id.as_str())
+                    ),
+                    &json!({
+                        "trigger_reason": trigger_reason,
+                        "trigger_policy": trigger_policy,
+                    }),
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let artifact =
+                    payload.pointer("/artifact").context("compaction artifact is missing")?;
+                println!(
+                    "sessions.compact.apply artifact_id={} mode={} strategy={} input_tokens={} output_tokens={}",
+                    redacted_optional_identifier_for_output(artifact.pointer("/artifact_id").and_then(Value::as_str)),
+                    json_optional_string_in(artifact, "/mode").unwrap_or_else(|| "unknown".to_owned()),
+                    json_optional_string_in(artifact, "/strategy").unwrap_or_else(|| "unknown".to_owned()),
+                    artifact.pointer("/estimated_input_tokens").and_then(Value::as_u64).unwrap_or_default(),
+                    artifact.pointer("/estimated_output_tokens").and_then(Value::as_u64).unwrap_or_default(),
+                );
+            }
+        }
+        SessionsCommand::CompactionShow { artifact_id, json: _ } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let payload = context
+                .client
+                .get_json_value(format!(
+                    "console/v1/chat/compactions/{}",
+                    percent_encode_component(artifact_id.as_str())
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let artifact =
+                    payload.pointer("/artifact").context("compaction artifact is missing")?;
+                println!(
+                    "sessions.compaction.show artifact_id={} mode={} trigger_reason={} preview={}",
+                    redacted_optional_identifier_for_output(
+                        artifact.pointer("/artifact_id").and_then(Value::as_str)
+                    ),
+                    json_optional_string_in(artifact, "/mode")
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    json_optional_string_in(artifact, "/trigger_reason")
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    json_optional_string_in(artifact, "/summary_preview")
+                        .unwrap_or_else(|| "none".to_owned())
+                );
+            }
+        }
+        SessionsCommand::CheckpointCreate { session_id, name, note, tags, json: _ } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let payload = context
+                .client
+                .post_json_value(
+                    format!(
+                        "console/v1/chat/sessions/{}/checkpoints",
+                        percent_encode_component(session_id.as_str())
+                    ),
+                    &json!({
+                        "name": name,
+                        "note": note,
+                        "tags": tags,
+                    }),
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let checkpoint =
+                    payload.pointer("/checkpoint").context("checkpoint payload is missing")?;
+                println!(
+                    "sessions.checkpoint.create checkpoint_id={} name={} restore_count={} branch_state={}",
+                    redacted_optional_identifier_for_output(checkpoint.pointer("/checkpoint_id").and_then(Value::as_str)),
+                    json_optional_string_in(checkpoint, "/name").unwrap_or_else(|| "unknown".to_owned()),
+                    checkpoint.pointer("/restore_count").and_then(Value::as_u64).unwrap_or_default(),
+                    json_optional_string_in(checkpoint, "/branch_state").unwrap_or_else(|| "unknown".to_owned())
+                );
+            }
+        }
+        SessionsCommand::CheckpointShow { checkpoint_id, json: _ } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let payload = context
+                .client
+                .get_json_value(format!(
+                    "console/v1/chat/checkpoints/{}",
+                    percent_encode_component(checkpoint_id.as_str())
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let checkpoint =
+                    payload.pointer("/checkpoint").context("checkpoint payload is missing")?;
+                println!(
+                    "sessions.checkpoint.show checkpoint_id={} name={} restore_count={} last_restored_at_unix_ms={}",
+                    redacted_optional_identifier_for_output(checkpoint.pointer("/checkpoint_id").and_then(Value::as_str)),
+                    json_optional_string_in(checkpoint, "/name").unwrap_or_else(|| "unknown".to_owned()),
+                    checkpoint.pointer("/restore_count").and_then(Value::as_u64).unwrap_or_default(),
+                    checkpoint.pointer("/last_restored_at_unix_ms").and_then(Value::as_i64).map(|value| value.to_string()).unwrap_or_else(|| "none".to_owned())
+                );
+            }
+        }
+        SessionsCommand::CheckpointRestore { checkpoint_id, session_label, json: _ } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let payload = context
+                .client
+                .post_json_value(
+                    format!(
+                        "console/v1/chat/checkpoints/{}/restore",
+                        percent_encode_component(checkpoint_id.as_str())
+                    ),
+                    &json!({
+                        "session_label": session_label,
+                    }),
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let session =
+                    payload.pointer("/session").context("restored session payload is missing")?;
+                println!(
+                    "sessions.checkpoint.restore session_id={} branch_state={} parent_session_id={}",
+                    redacted_optional_identifier_for_output(session.pointer("/session_id").and_then(Value::as_str)),
+                    json_optional_string_in(session, "/branch_state").unwrap_or_else(|| "unknown".to_owned()),
+                    redacted_optional_identifier_for_output(session.pointer("/parent_session_id").and_then(Value::as_str))
+                );
+            }
+        }
+        SessionsCommand::BackgroundEnqueue {
+            session_id,
+            text,
+            priority,
+            max_attempts,
+            budget_tokens,
+            not_before_unix_ms,
+            expires_at_unix_ms,
+            json: _,
+        } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let payload = context
+                .client
+                .post_json_value(
+                    format!(
+                        "console/v1/chat/sessions/{}/background-tasks",
+                        percent_encode_component(session_id.as_str())
+                    ),
+                    &json!({
+                        "text": text,
+                        "priority": priority,
+                        "max_attempts": max_attempts,
+                        "budget_tokens": budget_tokens,
+                        "not_before_unix_ms": not_before_unix_ms,
+                        "expires_at_unix_ms": expires_at_unix_ms,
+                    }),
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let task =
+                    payload.pointer("/task").context("background task payload is missing")?;
+                println!(
+                    "sessions.background.enqueue task_id={} state={} priority={} max_attempts={}",
+                    redacted_optional_identifier_for_output(
+                        task.pointer("/task_id").and_then(Value::as_str)
+                    ),
+                    json_optional_string_in(task, "/state").unwrap_or_else(|| "unknown".to_owned()),
+                    task.pointer("/priority").and_then(Value::as_i64).unwrap_or_default(),
+                    task.pointer("/max_attempts").and_then(Value::as_u64).unwrap_or_default()
+                );
+            }
+        }
+        SessionsCommand::BackgroundList { session_id, include_completed, limit, json: _ } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let mut path =
+                format!("console/v1/chat/background-tasks?include_completed={include_completed}");
+            if let Some(session_id) = session_id {
+                path.push_str("&session_id=");
+                path.push_str(percent_encode_component(session_id.as_str()).as_str());
+            }
+            if let Some(limit) = limit {
+                path.push_str("&limit=");
+                path.push_str(limit.to_string().as_str());
+            }
+            let payload = context.client.get_json_value(path).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let tasks = payload
+                    .pointer("/tasks")
+                    .and_then(Value::as_array)
+                    .context("background tasks array is missing")?;
+                println!(
+                    "sessions.background.list count={} include_completed={}",
+                    tasks.len(),
+                    include_completed
+                );
+                for task in tasks {
+                    println!(
+                        "task task_id={} state={} priority={} run_id={} created_at_unix_ms={}",
+                        redacted_optional_identifier_for_output(
+                            task.pointer("/task_id").and_then(Value::as_str)
+                        ),
+                        json_optional_string_in(task, "/state")
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        task.pointer("/priority").and_then(Value::as_i64).unwrap_or_default(),
+                        redacted_optional_identifier_for_output(
+                            task.pointer("/target_run_id").and_then(Value::as_str)
+                        ),
+                        task.pointer("/created_at_unix_ms")
+                            .and_then(Value::as_i64)
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+        SessionsCommand::BackgroundShow { task_id, json: _ } => {
+            let context = connect_sessions_admin_console(&connection).await?;
+            let payload = context
+                .client
+                .get_json_value(format!(
+                    "console/v1/chat/background-tasks/{}",
+                    percent_encode_component(task_id.as_str())
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let task =
+                    payload.pointer("/task").context("background task payload is missing")?;
+                println!(
+                    "sessions.background.show task_id={} state={} attempt_count={} max_attempts={} run_id={}",
+                    redacted_optional_identifier_for_output(task.pointer("/task_id").and_then(Value::as_str)),
+                    json_optional_string_in(task, "/state").unwrap_or_else(|| "unknown".to_owned()),
+                    task.pointer("/attempt_count").and_then(Value::as_u64).unwrap_or_default(),
+                    task.pointer("/max_attempts").and_then(Value::as_u64).unwrap_or_default(),
+                    redacted_optional_identifier_for_output(task.pointer("/target_run_id").and_then(Value::as_str))
+                );
+            }
+        }
+        SessionsCommand::BackgroundPause { task_id, json: _ } => {
+            handle_background_task_action(&connection, task_id, "pause", json).await?;
+        }
+        SessionsCommand::BackgroundResume { task_id, json: _ } => {
+            handle_background_task_action(&connection, task_id, "resume", json).await?;
+        }
+        SessionsCommand::BackgroundRetry { task_id, json: _ } => {
+            handle_background_task_action(&connection, task_id, "retry", json).await?;
+        }
+        SessionsCommand::BackgroundCancel { task_id, json: _ } => {
+            handle_background_task_action(&connection, task_id, "cancel", json).await?;
+        }
     }
 
     std::io::stdout().flush().context("stdout flush failed")
@@ -685,6 +991,40 @@ async fn connect_sessions_admin_console(
         channel: Some(connection.channel.clone()),
     })
     .await
+}
+
+async fn handle_background_task_action(
+    connection: &AgentConnection,
+    task_id: String,
+    action: &str,
+    json_output: bool,
+) -> Result<()> {
+    let context = connect_sessions_admin_console(connection).await?;
+    let payload = context
+        .client
+        .post_json_value(
+            format!(
+                "console/v1/chat/background-tasks/{}/{}",
+                percent_encode_component(task_id.as_str()),
+                action
+            ),
+            &json!({}),
+        )
+        .await?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        let task = payload.pointer("/task").context("background task payload is missing")?;
+        println!(
+            "sessions.background.{} task_id={} state={}",
+            action,
+            redacted_optional_identifier_for_output(
+                task.pointer("/task_id").and_then(Value::as_str)
+            ),
+            json_optional_string_in(task, "/state").unwrap_or_else(|| "unknown".to_owned())
+        );
+    }
+    Ok(())
 }
 
 fn json_required_string(payload: &Value, pointer: &str) -> Result<String> {

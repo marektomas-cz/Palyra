@@ -361,6 +361,58 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(console::chat::console_chat_branch_handler),
         )
         .route(
+            "/console/v1/chat/sessions/{session_id}/compactions/preview",
+            post(console::chat::console_chat_compaction_preview_handler),
+        )
+        .route(
+            "/console/v1/chat/sessions/{session_id}/compactions",
+            post(console::chat::console_chat_compaction_apply_handler),
+        )
+        .route(
+            "/console/v1/chat/compactions/{artifact_id}",
+            get(console::chat::console_chat_compaction_detail_handler),
+        )
+        .route(
+            "/console/v1/chat/sessions/{session_id}/checkpoints",
+            post(console::chat::console_chat_checkpoint_create_handler),
+        )
+        .route(
+            "/console/v1/chat/checkpoints/{checkpoint_id}",
+            get(console::chat::console_chat_checkpoint_detail_handler),
+        )
+        .route(
+            "/console/v1/chat/checkpoints/{checkpoint_id}/restore",
+            post(console::chat::console_chat_checkpoint_restore_handler),
+        )
+        .route(
+            "/console/v1/chat/background-tasks",
+            get(console::chat::console_chat_background_tasks_list_handler),
+        )
+        .route(
+            "/console/v1/chat/sessions/{session_id}/background-tasks",
+            post(console::chat::console_chat_background_task_create_handler),
+        )
+        .route(
+            "/console/v1/chat/background-tasks/{task_id}",
+            get(console::chat::console_chat_background_task_detail_handler),
+        )
+        .route(
+            "/console/v1/chat/background-tasks/{task_id}/pause",
+            post(console::chat::console_chat_background_task_pause_handler),
+        )
+        .route(
+            "/console/v1/chat/background-tasks/{task_id}/resume",
+            post(console::chat::console_chat_background_task_resume_handler),
+        )
+        .route(
+            "/console/v1/chat/background-tasks/{task_id}/retry",
+            post(console::chat::console_chat_background_task_retry_handler),
+        )
+        .route(
+            "/console/v1/chat/background-tasks/{task_id}/cancel",
+            post(console::chat::console_chat_background_task_cancel_handler),
+        )
+        .route(
             "/console/v1/chat/sessions/{session_id}/transcript",
             get(console::chat::console_chat_transcript_handler),
         )

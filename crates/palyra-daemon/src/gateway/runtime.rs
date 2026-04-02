@@ -6,16 +6,20 @@ use crate::agents::{
 };
 use crate::application::auth::map_auth_profile_error;
 use crate::journal::{
-    MemoryEmbeddingsStatus, MemoryItemRecord, OrchestratorQueuedInputCreateRequest,
-    OrchestratorQueuedInputRecord, OrchestratorQueuedInputUpdateRequest,
-    OrchestratorSessionCleanupOutcome, OrchestratorSessionCleanupRequest,
-    OrchestratorSessionLineageUpdateRequest, OrchestratorSessionPinCreateRequest,
-    OrchestratorSessionPinRecord, OrchestratorSessionTranscriptRecord, OrchestratorUsageQuery,
-    OrchestratorUsageRunRecord, OrchestratorUsageSessionRecord, OrchestratorUsageSummary,
-    WorkspaceBootstrapOutcome, WorkspaceBootstrapRequest, WorkspaceDocumentDeleteRequest,
-    WorkspaceDocumentListFilter, WorkspaceDocumentMoveRequest, WorkspaceDocumentRecord,
-    WorkspaceDocumentVersionRecord, WorkspaceDocumentWriteRequest, WorkspaceSearchHit,
-    WorkspaceSearchRequest,
+    MemoryEmbeddingsStatus, MemoryItemRecord, OrchestratorBackgroundTaskCreateRequest,
+    OrchestratorBackgroundTaskListFilter, OrchestratorBackgroundTaskRecord,
+    OrchestratorBackgroundTaskUpdateRequest, OrchestratorCheckpointCreateRequest,
+    OrchestratorCheckpointRecord, OrchestratorCheckpointRestoreMarkRequest,
+    OrchestratorCompactionArtifactCreateRequest, OrchestratorCompactionArtifactRecord,
+    OrchestratorQueuedInputCreateRequest, OrchestratorQueuedInputRecord,
+    OrchestratorQueuedInputUpdateRequest, OrchestratorSessionCleanupOutcome,
+    OrchestratorSessionCleanupRequest, OrchestratorSessionLineageUpdateRequest,
+    OrchestratorSessionPinCreateRequest, OrchestratorSessionPinRecord,
+    OrchestratorSessionTranscriptRecord, OrchestratorUsageQuery, OrchestratorUsageRunRecord,
+    OrchestratorUsageSessionRecord, OrchestratorUsageSummary, WorkspaceBootstrapOutcome,
+    WorkspaceBootstrapRequest, WorkspaceDocumentDeleteRequest, WorkspaceDocumentListFilter,
+    WorkspaceDocumentMoveRequest, WorkspaceDocumentRecord, WorkspaceDocumentVersionRecord,
+    WorkspaceDocumentWriteRequest, WorkspaceSearchHit, WorkspaceSearchRequest,
 };
 use palyra_auth::AuthHealthReport;
 use std::path::PathBuf;
@@ -3049,6 +3053,257 @@ impl GatewayRuntimeState {
         })
         .await
         .map_err(|_| Status::internal("orchestrator session pin delete worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn create_orchestrator_compaction_artifact_blocking(
+        &self,
+        request: &OrchestratorCompactionArtifactCreateRequest,
+    ) -> Result<OrchestratorCompactionArtifactRecord, Status> {
+        self.journal_store.create_orchestrator_compaction_artifact(request).map_err(|error| {
+            map_orchestrator_store_error("create orchestrator compaction artifact", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn create_orchestrator_compaction_artifact(
+        self: &Arc<Self>,
+        request: OrchestratorCompactionArtifactCreateRequest,
+    ) -> Result<OrchestratorCompactionArtifactRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.create_orchestrator_compaction_artifact_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator compaction artifact worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_orchestrator_compaction_artifacts_blocking(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<OrchestratorCompactionArtifactRecord>, Status> {
+        self.journal_store.list_orchestrator_compaction_artifacts(session_id).map_err(|error| {
+            map_orchestrator_store_error("list orchestrator compaction artifacts", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_orchestrator_compaction_artifacts(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<Vec<OrchestratorCompactionArtifactRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.list_orchestrator_compaction_artifacts_blocking(session_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator compaction artifact list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn get_orchestrator_compaction_artifact_blocking(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<OrchestratorCompactionArtifactRecord>, Status> {
+        self.journal_store.get_orchestrator_compaction_artifact(artifact_id).map_err(|error| {
+            map_orchestrator_store_error("load orchestrator compaction artifact", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn get_orchestrator_compaction_artifact(
+        self: &Arc<Self>,
+        artifact_id: String,
+    ) -> Result<Option<OrchestratorCompactionArtifactRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.get_orchestrator_compaction_artifact_blocking(artifact_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator compaction artifact detail worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn create_orchestrator_checkpoint_blocking(
+        &self,
+        request: &OrchestratorCheckpointCreateRequest,
+    ) -> Result<OrchestratorCheckpointRecord, Status> {
+        self.journal_store
+            .create_orchestrator_checkpoint(request)
+            .map_err(|error| map_orchestrator_store_error("create orchestrator checkpoint", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn create_orchestrator_checkpoint(
+        self: &Arc<Self>,
+        request: OrchestratorCheckpointCreateRequest,
+    ) -> Result<OrchestratorCheckpointRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.create_orchestrator_checkpoint_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("orchestrator checkpoint worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_orchestrator_checkpoints_blocking(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<OrchestratorCheckpointRecord>, Status> {
+        self.journal_store
+            .list_orchestrator_checkpoints(session_id)
+            .map_err(|error| map_orchestrator_store_error("list orchestrator checkpoints", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_orchestrator_checkpoints(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<Vec<OrchestratorCheckpointRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.list_orchestrator_checkpoints_blocking(session_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator checkpoint list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn get_orchestrator_checkpoint_blocking(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Option<OrchestratorCheckpointRecord>, Status> {
+        self.journal_store
+            .get_orchestrator_checkpoint(checkpoint_id)
+            .map_err(|error| map_orchestrator_store_error("load orchestrator checkpoint", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn get_orchestrator_checkpoint(
+        self: &Arc<Self>,
+        checkpoint_id: String,
+    ) -> Result<Option<OrchestratorCheckpointRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.get_orchestrator_checkpoint_blocking(checkpoint_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator checkpoint detail worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn mark_orchestrator_checkpoint_restored_blocking(
+        &self,
+        request: &OrchestratorCheckpointRestoreMarkRequest,
+    ) -> Result<(), Status> {
+        self.journal_store.mark_orchestrator_checkpoint_restored(request).map_err(|error| {
+            map_orchestrator_store_error("mark orchestrator checkpoint restored", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn mark_orchestrator_checkpoint_restored(
+        self: &Arc<Self>,
+        request: OrchestratorCheckpointRestoreMarkRequest,
+    ) -> Result<(), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.mark_orchestrator_checkpoint_restored_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator checkpoint restore worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn create_orchestrator_background_task_blocking(
+        &self,
+        request: &OrchestratorBackgroundTaskCreateRequest,
+    ) -> Result<OrchestratorBackgroundTaskRecord, Status> {
+        self.journal_store.create_orchestrator_background_task(request).map_err(|error| {
+            map_orchestrator_store_error("create orchestrator background task", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn create_orchestrator_background_task(
+        self: &Arc<Self>,
+        request: OrchestratorBackgroundTaskCreateRequest,
+    ) -> Result<OrchestratorBackgroundTaskRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.create_orchestrator_background_task_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator background task worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn update_orchestrator_background_task_blocking(
+        &self,
+        request: &OrchestratorBackgroundTaskUpdateRequest,
+    ) -> Result<(), Status> {
+        self.journal_store.update_orchestrator_background_task(request).map_err(|error| {
+            map_orchestrator_store_error("update orchestrator background task", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn update_orchestrator_background_task(
+        self: &Arc<Self>,
+        request: OrchestratorBackgroundTaskUpdateRequest,
+    ) -> Result<(), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.update_orchestrator_background_task_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator background task update worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_orchestrator_background_tasks_blocking(
+        &self,
+        filter: &OrchestratorBackgroundTaskListFilter,
+    ) -> Result<Vec<OrchestratorBackgroundTaskRecord>, Status> {
+        self.journal_store.list_orchestrator_background_tasks(filter).map_err(|error| {
+            map_orchestrator_store_error("list orchestrator background tasks", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_orchestrator_background_tasks(
+        self: &Arc<Self>,
+        filter: OrchestratorBackgroundTaskListFilter,
+    ) -> Result<Vec<OrchestratorBackgroundTaskRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.list_orchestrator_background_tasks_blocking(&filter)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator background task list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn get_orchestrator_background_task_blocking(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<OrchestratorBackgroundTaskRecord>, Status> {
+        self.journal_store.get_orchestrator_background_task(task_id).map_err(|error| {
+            map_orchestrator_store_error("load orchestrator background task", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn get_orchestrator_background_task(
+        self: &Arc<Self>,
+        task_id: String,
+    ) -> Result<Option<OrchestratorBackgroundTaskRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.get_orchestrator_background_task_blocking(task_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator background task detail worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

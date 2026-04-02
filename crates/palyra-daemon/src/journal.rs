@@ -1300,6 +1300,186 @@ pub struct OrchestratorQueuedInputRecord {
     pub origin_run_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OrchestratorCompactionArtifactRecord {
+    pub artifact_id: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub mode: String,
+    pub strategy: String,
+    pub compressor_version: String,
+    pub trigger_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_inputs_json: Option<String>,
+    pub summary_text: String,
+    pub summary_preview: String,
+    pub source_event_count: u64,
+    pub protected_event_count: u64,
+    pub condensed_event_count: u64,
+    pub omitted_event_count: u64,
+    pub estimated_input_tokens: u64,
+    pub estimated_output_tokens: u64,
+    pub source_records_json: String,
+    pub summary_json: String,
+    pub created_by_principal: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorCompactionArtifactCreateRequest {
+    pub artifact_id: String,
+    pub session_id: String,
+    pub run_id: Option<String>,
+    pub mode: String,
+    pub strategy: String,
+    pub compressor_version: String,
+    pub trigger_reason: String,
+    pub trigger_policy: Option<String>,
+    pub trigger_inputs_json: Option<String>,
+    pub summary_text: String,
+    pub summary_preview: String,
+    pub source_event_count: u64,
+    pub protected_event_count: u64,
+    pub condensed_event_count: u64,
+    pub omitted_event_count: u64,
+    pub estimated_input_tokens: u64,
+    pub estimated_output_tokens: u64,
+    pub source_records_json: String,
+    pub summary_json: String,
+    pub created_by_principal: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OrchestratorCheckpointRecord {
+    pub checkpoint_id: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub name: String,
+    pub tags_json: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub branch_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    pub referenced_compaction_ids_json: String,
+    pub workspace_paths_json: String,
+    pub created_by_principal: String,
+    pub created_at_unix_ms: i64,
+    pub restore_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_restored_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorCheckpointCreateRequest {
+    pub checkpoint_id: String,
+    pub session_id: String,
+    pub run_id: Option<String>,
+    pub name: String,
+    pub tags_json: String,
+    pub note: Option<String>,
+    pub branch_state: String,
+    pub parent_session_id: Option<String>,
+    pub referenced_compaction_ids_json: String,
+    pub workspace_paths_json: String,
+    pub created_by_principal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorCheckpointRestoreMarkRequest {
+    pub checkpoint_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OrchestratorBackgroundTaskRecord {
+    pub task_id: String,
+    pub task_kind: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_input_id: Option<String>,
+    pub owner_principal: String,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    pub state: String,
+    pub priority: i64,
+    pub attempt_count: u64,
+    pub max_attempts: u64,
+    pub budget_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_before_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_target_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_json: Option<String>,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorBackgroundTaskCreateRequest {
+    pub task_id: String,
+    pub task_kind: String,
+    pub session_id: String,
+    pub parent_run_id: Option<String>,
+    pub target_run_id: Option<String>,
+    pub queued_input_id: Option<String>,
+    pub owner_principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+    pub state: String,
+    pub priority: i64,
+    pub max_attempts: u64,
+    pub budget_tokens: u64,
+    pub not_before_unix_ms: Option<i64>,
+    pub expires_at_unix_ms: Option<i64>,
+    pub notification_target_json: Option<String>,
+    pub input_text: Option<String>,
+    pub payload_json: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OrchestratorBackgroundTaskUpdateRequest {
+    pub task_id: String,
+    pub state: Option<String>,
+    pub target_run_id: Option<Option<String>>,
+    pub increment_attempt_count: bool,
+    pub last_error: Option<Option<String>>,
+    pub result_json: Option<Option<String>>,
+    pub started_at_unix_ms: Option<Option<i64>>,
+    pub completed_at_unix_ms: Option<Option<i64>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorBackgroundTaskListFilter {
+    pub owner_principal: Option<String>,
+    pub device_id: Option<String>,
+    pub channel: Option<String>,
+    pub session_id: Option<String>,
+    pub include_completed: bool,
+    pub limit: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrchestratorQueuedInputCreateRequest {
     pub queued_input_id: String,
@@ -2161,6 +2341,100 @@ const MIGRATIONS: &[Migration] = &[
             );
             CREATE INDEX IF NOT EXISTS idx_workspace_document_chunk_vectors_model
                 ON workspace_document_chunk_vectors(embedding_model_id, embedding_version);
+        "#,
+    },
+    Migration {
+        version: 17,
+        name: "orchestrator_phase4_artifacts_and_background_tasks",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS orchestrator_compaction_artifacts (
+                artifact_ulid TEXT PRIMARY KEY,
+                session_ulid TEXT NOT NULL,
+                run_ulid TEXT,
+                mode TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                compressor_version TEXT NOT NULL,
+                trigger_reason TEXT NOT NULL,
+                trigger_policy TEXT,
+                trigger_inputs_json TEXT,
+                summary_text TEXT NOT NULL,
+                summary_preview TEXT NOT NULL,
+                source_event_count INTEGER NOT NULL,
+                protected_event_count INTEGER NOT NULL,
+                condensed_event_count INTEGER NOT NULL,
+                omitted_event_count INTEGER NOT NULL,
+                estimated_input_tokens INTEGER NOT NULL,
+                estimated_output_tokens INTEGER NOT NULL,
+                source_records_json TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                created_by_principal TEXT NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(session_ulid) REFERENCES orchestrator_sessions(session_ulid),
+                FOREIGN KEY(run_ulid) REFERENCES orchestrator_runs(run_ulid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_compaction_artifacts_session
+                ON orchestrator_compaction_artifacts(session_ulid, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_compaction_artifacts_run
+                ON orchestrator_compaction_artifacts(run_ulid, created_at_unix_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS orchestrator_checkpoints (
+                checkpoint_ulid TEXT PRIMARY KEY,
+                session_ulid TEXT NOT NULL,
+                run_ulid TEXT,
+                name TEXT NOT NULL,
+                tags_json TEXT NOT NULL,
+                note TEXT,
+                branch_state TEXT NOT NULL,
+                parent_session_ulid TEXT,
+                referenced_compaction_ids_json TEXT NOT NULL,
+                workspace_paths_json TEXT NOT NULL,
+                created_by_principal TEXT NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL,
+                restore_count INTEGER NOT NULL DEFAULT 0,
+                last_restored_at_unix_ms INTEGER,
+                FOREIGN KEY(session_ulid) REFERENCES orchestrator_sessions(session_ulid),
+                FOREIGN KEY(run_ulid) REFERENCES orchestrator_runs(run_ulid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_checkpoints_session
+                ON orchestrator_checkpoints(session_ulid, created_at_unix_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS orchestrator_background_tasks (
+                task_ulid TEXT PRIMARY KEY,
+                task_kind TEXT NOT NULL,
+                session_ulid TEXT NOT NULL,
+                parent_run_ulid TEXT,
+                target_run_ulid TEXT,
+                queued_input_ulid TEXT,
+                owner_principal TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                channel TEXT,
+                state TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 3,
+                budget_tokens INTEGER NOT NULL DEFAULT 0,
+                not_before_unix_ms INTEGER,
+                expires_at_unix_ms INTEGER,
+                notification_target_json TEXT,
+                input_text TEXT,
+                payload_json TEXT,
+                last_error TEXT,
+                result_json TEXT,
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                started_at_unix_ms INTEGER,
+                completed_at_unix_ms INTEGER,
+                FOREIGN KEY(session_ulid) REFERENCES orchestrator_sessions(session_ulid),
+                FOREIGN KEY(parent_run_ulid) REFERENCES orchestrator_runs(run_ulid),
+                FOREIGN KEY(target_run_ulid) REFERENCES orchestrator_runs(run_ulid),
+                FOREIGN KEY(queued_input_ulid) REFERENCES orchestrator_queued_inputs(queued_input_ulid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_background_tasks_owner
+                ON orchestrator_background_tasks(owner_principal, device_id, channel, state, priority DESC, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_background_tasks_session
+                ON orchestrator_background_tasks(session_ulid, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_background_tasks_parent_run
+                ON orchestrator_background_tasks(parent_run_ulid, state, created_at_unix_ms ASC);
         "#,
     },
 ];
@@ -3373,6 +3647,740 @@ impl JournalStore {
             "DELETE FROM orchestrator_session_pins WHERE pin_ulid = ?1",
             params![pin_id],
         )? > 0)
+    }
+
+    pub fn create_orchestrator_compaction_artifact(
+        &self,
+        request: &OrchestratorCompactionArtifactCreateRequest,
+    ) -> Result<OrchestratorCompactionArtifactRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let source_event_count = u64_to_sqlite(request.source_event_count, "source_event_count")?;
+        let protected_event_count =
+            u64_to_sqlite(request.protected_event_count, "protected_event_count")?;
+        let condensed_event_count =
+            u64_to_sqlite(request.condensed_event_count, "condensed_event_count")?;
+        let omitted_event_count =
+            u64_to_sqlite(request.omitted_event_count, "omitted_event_count")?;
+        let estimated_input_tokens =
+            u64_to_sqlite(request.estimated_input_tokens, "estimated_input_tokens")?;
+        let estimated_output_tokens =
+            u64_to_sqlite(request.estimated_output_tokens, "estimated_output_tokens")?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard.execute(
+            r#"
+                INSERT INTO orchestrator_compaction_artifacts (
+                    artifact_ulid,
+                    session_ulid,
+                    run_ulid,
+                    mode,
+                    strategy,
+                    compressor_version,
+                    trigger_reason,
+                    trigger_policy,
+                    trigger_inputs_json,
+                    summary_text,
+                    summary_preview,
+                    source_event_count,
+                    protected_event_count,
+                    condensed_event_count,
+                    omitted_event_count,
+                    estimated_input_tokens,
+                    estimated_output_tokens,
+                    source_records_json,
+                    summary_json,
+                    created_by_principal,
+                    created_at_unix_ms
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                )
+            "#,
+            params![
+                request.artifact_id,
+                request.session_id,
+                request.run_id,
+                request.mode,
+                request.strategy,
+                request.compressor_version,
+                request.trigger_reason,
+                request.trigger_policy,
+                request.trigger_inputs_json,
+                request.summary_text,
+                request.summary_preview,
+                source_event_count,
+                protected_event_count,
+                condensed_event_count,
+                omitted_event_count,
+                estimated_input_tokens,
+                estimated_output_tokens,
+                request.source_records_json,
+                request.summary_json,
+                request.created_by_principal,
+                now,
+            ],
+        )?;
+        Ok(OrchestratorCompactionArtifactRecord {
+            artifact_id: request.artifact_id.clone(),
+            session_id: request.session_id.clone(),
+            run_id: request.run_id.clone(),
+            mode: request.mode.clone(),
+            strategy: request.strategy.clone(),
+            compressor_version: request.compressor_version.clone(),
+            trigger_reason: request.trigger_reason.clone(),
+            trigger_policy: request.trigger_policy.clone(),
+            trigger_inputs_json: request.trigger_inputs_json.clone(),
+            summary_text: request.summary_text.clone(),
+            summary_preview: request.summary_preview.clone(),
+            source_event_count: request.source_event_count,
+            protected_event_count: request.protected_event_count,
+            condensed_event_count: request.condensed_event_count,
+            omitted_event_count: request.omitted_event_count,
+            estimated_input_tokens: request.estimated_input_tokens,
+            estimated_output_tokens: request.estimated_output_tokens,
+            source_records_json: request.source_records_json.clone(),
+            summary_json: request.summary_json.clone(),
+            created_by_principal: request.created_by_principal.clone(),
+            created_at_unix_ms: now,
+        })
+    }
+
+    pub fn list_orchestrator_compaction_artifacts(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<OrchestratorCompactionArtifactRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    artifact_ulid,
+                    session_ulid,
+                    run_ulid,
+                    mode,
+                    strategy,
+                    compressor_version,
+                    trigger_reason,
+                    trigger_policy,
+                    trigger_inputs_json,
+                    summary_text,
+                    summary_preview,
+                    source_event_count,
+                    protected_event_count,
+                    condensed_event_count,
+                    omitted_event_count,
+                    estimated_input_tokens,
+                    estimated_output_tokens,
+                    source_records_json,
+                    summary_json,
+                    created_by_principal,
+                    created_at_unix_ms
+                FROM orchestrator_compaction_artifacts
+                WHERE session_ulid = ?1
+                ORDER BY created_at_unix_ms DESC
+            "#,
+        )?;
+        let mut rows = statement.query(params![session_id])?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            records.push(OrchestratorCompactionArtifactRecord {
+                artifact_id: row.get(0)?,
+                session_id: row.get(1)?,
+                run_id: row.get(2)?,
+                mode: row.get(3)?,
+                strategy: row.get(4)?,
+                compressor_version: row.get(5)?,
+                trigger_reason: row.get(6)?,
+                trigger_policy: row.get(7)?,
+                trigger_inputs_json: row.get(8)?,
+                summary_text: row.get(9)?,
+                summary_preview: row.get(10)?,
+                source_event_count: row.get::<_, i64>(11)?.max(0) as u64,
+                protected_event_count: row.get::<_, i64>(12)?.max(0) as u64,
+                condensed_event_count: row.get::<_, i64>(13)?.max(0) as u64,
+                omitted_event_count: row.get::<_, i64>(14)?.max(0) as u64,
+                estimated_input_tokens: row.get::<_, i64>(15)?.max(0) as u64,
+                estimated_output_tokens: row.get::<_, i64>(16)?.max(0) as u64,
+                source_records_json: row.get(17)?,
+                summary_json: row.get(18)?,
+                created_by_principal: row.get(19)?,
+                created_at_unix_ms: row.get(20)?,
+            });
+        }
+        Ok(records)
+    }
+
+    pub fn get_orchestrator_compaction_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<OrchestratorCompactionArtifactRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard
+            .query_row(
+                r#"
+                    SELECT
+                        artifact_ulid,
+                        session_ulid,
+                        run_ulid,
+                        mode,
+                        strategy,
+                        compressor_version,
+                        trigger_reason,
+                        trigger_policy,
+                        trigger_inputs_json,
+                        summary_text,
+                        summary_preview,
+                        source_event_count,
+                        protected_event_count,
+                        condensed_event_count,
+                        omitted_event_count,
+                        estimated_input_tokens,
+                        estimated_output_tokens,
+                        source_records_json,
+                        summary_json,
+                        created_by_principal,
+                        created_at_unix_ms
+                    FROM orchestrator_compaction_artifacts
+                    WHERE artifact_ulid = ?1
+                "#,
+                params![artifact_id],
+                |row| {
+                    Ok(OrchestratorCompactionArtifactRecord {
+                        artifact_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        run_id: row.get(2)?,
+                        mode: row.get(3)?,
+                        strategy: row.get(4)?,
+                        compressor_version: row.get(5)?,
+                        trigger_reason: row.get(6)?,
+                        trigger_policy: row.get(7)?,
+                        trigger_inputs_json: row.get(8)?,
+                        summary_text: row.get(9)?,
+                        summary_preview: row.get(10)?,
+                        source_event_count: row.get::<_, i64>(11)?.max(0) as u64,
+                        protected_event_count: row.get::<_, i64>(12)?.max(0) as u64,
+                        condensed_event_count: row.get::<_, i64>(13)?.max(0) as u64,
+                        omitted_event_count: row.get::<_, i64>(14)?.max(0) as u64,
+                        estimated_input_tokens: row.get::<_, i64>(15)?.max(0) as u64,
+                        estimated_output_tokens: row.get::<_, i64>(16)?.max(0) as u64,
+                        source_records_json: row.get(17)?,
+                        summary_json: row.get(18)?,
+                        created_by_principal: row.get(19)?,
+                        created_at_unix_ms: row.get(20)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(JournalError::from)
+    }
+
+    pub fn create_orchestrator_checkpoint(
+        &self,
+        request: &OrchestratorCheckpointCreateRequest,
+    ) -> Result<OrchestratorCheckpointRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard.execute(
+            r#"
+                INSERT INTO orchestrator_checkpoints (
+                    checkpoint_ulid,
+                    session_ulid,
+                    run_ulid,
+                    name,
+                    tags_json,
+                    note,
+                    branch_state,
+                    parent_session_ulid,
+                    referenced_compaction_ids_json,
+                    workspace_paths_json,
+                    created_by_principal,
+                    created_at_unix_ms,
+                    restore_count,
+                    last_restored_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, NULL)
+            "#,
+            params![
+                request.checkpoint_id,
+                request.session_id,
+                request.run_id,
+                request.name,
+                request.tags_json,
+                request.note,
+                request.branch_state,
+                request.parent_session_id,
+                request.referenced_compaction_ids_json,
+                request.workspace_paths_json,
+                request.created_by_principal,
+                now,
+            ],
+        )?;
+        Ok(OrchestratorCheckpointRecord {
+            checkpoint_id: request.checkpoint_id.clone(),
+            session_id: request.session_id.clone(),
+            run_id: request.run_id.clone(),
+            name: request.name.clone(),
+            tags_json: request.tags_json.clone(),
+            note: request.note.clone(),
+            branch_state: request.branch_state.clone(),
+            parent_session_id: request.parent_session_id.clone(),
+            referenced_compaction_ids_json: request.referenced_compaction_ids_json.clone(),
+            workspace_paths_json: request.workspace_paths_json.clone(),
+            created_by_principal: request.created_by_principal.clone(),
+            created_at_unix_ms: now,
+            restore_count: 0,
+            last_restored_at_unix_ms: None,
+        })
+    }
+
+    pub fn list_orchestrator_checkpoints(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<OrchestratorCheckpointRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    checkpoint_ulid,
+                    session_ulid,
+                    run_ulid,
+                    name,
+                    tags_json,
+                    note,
+                    branch_state,
+                    parent_session_ulid,
+                    referenced_compaction_ids_json,
+                    workspace_paths_json,
+                    created_by_principal,
+                    created_at_unix_ms,
+                    restore_count,
+                    last_restored_at_unix_ms
+                FROM orchestrator_checkpoints
+                WHERE session_ulid = ?1
+                ORDER BY created_at_unix_ms DESC
+            "#,
+        )?;
+        let mut rows = statement.query(params![session_id])?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            records.push(OrchestratorCheckpointRecord {
+                checkpoint_id: row.get(0)?,
+                session_id: row.get(1)?,
+                run_id: row.get(2)?,
+                name: row.get(3)?,
+                tags_json: row.get(4)?,
+                note: row.get(5)?,
+                branch_state: row.get(6)?,
+                parent_session_id: row.get(7)?,
+                referenced_compaction_ids_json: row.get(8)?,
+                workspace_paths_json: row.get(9)?,
+                created_by_principal: row.get(10)?,
+                created_at_unix_ms: row.get(11)?,
+                restore_count: row.get::<_, i64>(12)?.max(0) as u64,
+                last_restored_at_unix_ms: row.get(13)?,
+            });
+        }
+        Ok(records)
+    }
+
+    pub fn get_orchestrator_checkpoint(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Option<OrchestratorCheckpointRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard
+            .query_row(
+                r#"
+                    SELECT
+                        checkpoint_ulid,
+                        session_ulid,
+                        run_ulid,
+                        name,
+                        tags_json,
+                        note,
+                        branch_state,
+                        parent_session_ulid,
+                        referenced_compaction_ids_json,
+                        workspace_paths_json,
+                        created_by_principal,
+                        created_at_unix_ms,
+                        restore_count,
+                        last_restored_at_unix_ms
+                    FROM orchestrator_checkpoints
+                    WHERE checkpoint_ulid = ?1
+                "#,
+                params![checkpoint_id],
+                |row| {
+                    Ok(OrchestratorCheckpointRecord {
+                        checkpoint_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        run_id: row.get(2)?,
+                        name: row.get(3)?,
+                        tags_json: row.get(4)?,
+                        note: row.get(5)?,
+                        branch_state: row.get(6)?,
+                        parent_session_id: row.get(7)?,
+                        referenced_compaction_ids_json: row.get(8)?,
+                        workspace_paths_json: row.get(9)?,
+                        created_by_principal: row.get(10)?,
+                        created_at_unix_ms: row.get(11)?,
+                        restore_count: row.get::<_, i64>(12)?.max(0) as u64,
+                        last_restored_at_unix_ms: row.get(13)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(JournalError::from)
+    }
+
+    pub fn mark_orchestrator_checkpoint_restored(
+        &self,
+        request: &OrchestratorCheckpointRestoreMarkRequest,
+    ) -> Result<(), JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let updated = guard.execute(
+            r#"
+                UPDATE orchestrator_checkpoints
+                SET
+                    restore_count = restore_count + 1,
+                    last_restored_at_unix_ms = ?2
+                WHERE checkpoint_ulid = ?1
+            "#,
+            params![request.checkpoint_id, now],
+        )?;
+        if updated == 0 {
+            return Err(JournalError::SessionNotFound { selector: request.checkpoint_id.clone() });
+        }
+        Ok(())
+    }
+
+    pub fn create_orchestrator_background_task(
+        &self,
+        request: &OrchestratorBackgroundTaskCreateRequest,
+    ) -> Result<OrchestratorBackgroundTaskRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let max_attempts = u64_to_sqlite(request.max_attempts, "max_attempts")?;
+        let budget_tokens = u64_to_sqlite(request.budget_tokens, "budget_tokens")?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard.execute(
+            r#"
+                INSERT INTO orchestrator_background_tasks (
+                    task_ulid,
+                    task_kind,
+                    session_ulid,
+                    parent_run_ulid,
+                    target_run_ulid,
+                    queued_input_ulid,
+                    owner_principal,
+                    device_id,
+                    channel,
+                    state,
+                    priority,
+                    attempt_count,
+                    max_attempts,
+                    budget_tokens,
+                    not_before_unix_ms,
+                    expires_at_unix_ms,
+                    notification_target_json,
+                    input_text,
+                    payload_json,
+                    last_error,
+                    result_json,
+                    created_at_unix_ms,
+                    updated_at_unix_ms,
+                    started_at_unix_ms,
+                    completed_at_unix_ms
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?14, ?15, ?16, ?17, ?18, NULL, NULL, ?19, ?19, NULL, NULL
+                )
+            "#,
+            params![
+                request.task_id,
+                request.task_kind,
+                request.session_id,
+                request.parent_run_id,
+                request.target_run_id,
+                request.queued_input_id,
+                request.owner_principal,
+                request.device_id,
+                request.channel,
+                request.state,
+                request.priority,
+                max_attempts,
+                budget_tokens,
+                request.not_before_unix_ms,
+                request.expires_at_unix_ms,
+                request.notification_target_json,
+                request.input_text,
+                request.payload_json,
+                now,
+            ],
+        )?;
+        Ok(OrchestratorBackgroundTaskRecord {
+            task_id: request.task_id.clone(),
+            task_kind: request.task_kind.clone(),
+            session_id: request.session_id.clone(),
+            parent_run_id: request.parent_run_id.clone(),
+            target_run_id: request.target_run_id.clone(),
+            queued_input_id: request.queued_input_id.clone(),
+            owner_principal: request.owner_principal.clone(),
+            device_id: request.device_id.clone(),
+            channel: request.channel.clone(),
+            state: request.state.clone(),
+            priority: request.priority,
+            attempt_count: 0,
+            max_attempts: request.max_attempts,
+            budget_tokens: request.budget_tokens,
+            not_before_unix_ms: request.not_before_unix_ms,
+            expires_at_unix_ms: request.expires_at_unix_ms,
+            notification_target_json: request.notification_target_json.clone(),
+            input_text: request.input_text.clone(),
+            payload_json: request.payload_json.clone(),
+            last_error: None,
+            result_json: None,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            started_at_unix_ms: None,
+            completed_at_unix_ms: None,
+        })
+    }
+
+    pub fn update_orchestrator_background_task(
+        &self,
+        request: &OrchestratorBackgroundTaskUpdateRequest,
+    ) -> Result<(), JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let state = request.state.clone();
+        let last_error = request.last_error.clone().flatten();
+        let clear_last_error = request.last_error.is_some() && last_error.is_none();
+        let result_json = request.result_json.clone().flatten();
+        let clear_result_json = request.result_json.is_some() && result_json.is_none();
+        let started_at_unix_ms = request.started_at_unix_ms.flatten();
+        let clear_started_at_unix_ms =
+            request.started_at_unix_ms.is_some() && started_at_unix_ms.is_none();
+        let completed_at_unix_ms = request.completed_at_unix_ms.flatten();
+        let clear_completed_at_unix_ms =
+            request.completed_at_unix_ms.is_some() && completed_at_unix_ms.is_none();
+        let target_run_id = request.target_run_id.clone().flatten();
+        let clear_target_run_id = request.target_run_id.is_some() && target_run_id.is_none();
+
+        let updated = guard.execute(
+            r#"
+                UPDATE orchestrator_background_tasks
+                SET
+                    state = COALESCE(?2, state),
+                    target_run_ulid = CASE
+                        WHEN ?3 = 1 THEN NULL
+                        ELSE COALESCE(?4, target_run_ulid)
+                    END,
+                    attempt_count = attempt_count + ?5,
+                    last_error = CASE
+                        WHEN ?6 = 1 THEN NULL
+                        ELSE COALESCE(?7, last_error)
+                    END,
+                    result_json = CASE
+                        WHEN ?8 = 1 THEN NULL
+                        ELSE COALESCE(?9, result_json)
+                    END,
+                    started_at_unix_ms = CASE
+                        WHEN ?10 = 1 THEN NULL
+                        ELSE COALESCE(?11, started_at_unix_ms)
+                    END,
+                    completed_at_unix_ms = CASE
+                        WHEN ?12 = 1 THEN NULL
+                        ELSE COALESCE(?13, completed_at_unix_ms)
+                    END,
+                    updated_at_unix_ms = ?14
+                WHERE task_ulid = ?1
+            "#,
+            params![
+                request.task_id,
+                state,
+                if clear_target_run_id { 1_i64 } else { 0_i64 },
+                target_run_id,
+                if request.increment_attempt_count { 1_i64 } else { 0_i64 },
+                if clear_last_error { 1_i64 } else { 0_i64 },
+                last_error,
+                if clear_result_json { 1_i64 } else { 0_i64 },
+                result_json,
+                if clear_started_at_unix_ms { 1_i64 } else { 0_i64 },
+                started_at_unix_ms,
+                if clear_completed_at_unix_ms { 1_i64 } else { 0_i64 },
+                completed_at_unix_ms,
+                now,
+            ],
+        )?;
+        if updated == 0 {
+            return Err(JournalError::SessionNotFound { selector: request.task_id.clone() });
+        }
+        Ok(())
+    }
+
+    pub fn list_orchestrator_background_tasks(
+        &self,
+        filter: &OrchestratorBackgroundTaskListFilter,
+    ) -> Result<Vec<OrchestratorBackgroundTaskRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let limit = filter.limit.clamp(1, 256) as i64;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    task_ulid,
+                    task_kind,
+                    session_ulid,
+                    parent_run_ulid,
+                    target_run_ulid,
+                    queued_input_ulid,
+                    owner_principal,
+                    device_id,
+                    channel,
+                    state,
+                    priority,
+                    attempt_count,
+                    max_attempts,
+                    budget_tokens,
+                    not_before_unix_ms,
+                    expires_at_unix_ms,
+                    notification_target_json,
+                    input_text,
+                    payload_json,
+                    last_error,
+                    result_json,
+                    created_at_unix_ms,
+                    updated_at_unix_ms,
+                    started_at_unix_ms,
+                    completed_at_unix_ms
+                FROM orchestrator_background_tasks
+                WHERE (?1 IS NULL OR owner_principal = ?1)
+                  AND (?2 IS NULL OR device_id = ?2)
+                  AND (?3 IS NULL OR COALESCE(channel, '') = COALESCE(?3, ''))
+                  AND (?4 = 1 OR completed_at_unix_ms IS NULL)
+                  AND (?5 IS NULL OR session_ulid = ?5)
+                ORDER BY
+                    CASE state
+                        WHEN 'running' THEN 0
+                        WHEN 'queued' THEN 1
+                        WHEN 'paused' THEN 2
+                        WHEN 'failed' THEN 3
+                        WHEN 'succeeded' THEN 4
+                        WHEN 'cancelled' THEN 5
+                        WHEN 'expired' THEN 6
+                        ELSE 7
+                    END,
+                    priority DESC,
+                    created_at_unix_ms DESC
+                LIMIT ?6
+            "#,
+        )?;
+        let mut rows = statement.query(params![
+            filter.owner_principal,
+            filter.device_id,
+            filter.channel,
+            if filter.include_completed { 1_i64 } else { 0_i64 },
+            filter.session_id,
+            limit,
+        ])?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            records.push(OrchestratorBackgroundTaskRecord {
+                task_id: row.get(0)?,
+                task_kind: row.get(1)?,
+                session_id: row.get(2)?,
+                parent_run_id: row.get(3)?,
+                target_run_id: row.get(4)?,
+                queued_input_id: row.get(5)?,
+                owner_principal: row.get(6)?,
+                device_id: row.get(7)?,
+                channel: row.get(8)?,
+                state: row.get(9)?,
+                priority: row.get(10)?,
+                attempt_count: row.get::<_, i64>(11)?.max(0) as u64,
+                max_attempts: row.get::<_, i64>(12)?.max(0) as u64,
+                budget_tokens: row.get::<_, i64>(13)?.max(0) as u64,
+                not_before_unix_ms: row.get(14)?,
+                expires_at_unix_ms: row.get(15)?,
+                notification_target_json: row.get(16)?,
+                input_text: row.get(17)?,
+                payload_json: row.get(18)?,
+                last_error: row.get(19)?,
+                result_json: row.get(20)?,
+                created_at_unix_ms: row.get(21)?,
+                updated_at_unix_ms: row.get(22)?,
+                started_at_unix_ms: row.get(23)?,
+                completed_at_unix_ms: row.get(24)?,
+            });
+        }
+        Ok(records)
+    }
+
+    pub fn get_orchestrator_background_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<OrchestratorBackgroundTaskRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard
+            .query_row(
+                r#"
+                    SELECT
+                        task_ulid,
+                        task_kind,
+                        session_ulid,
+                        parent_run_ulid,
+                        target_run_ulid,
+                        queued_input_ulid,
+                        owner_principal,
+                        device_id,
+                        channel,
+                        state,
+                        priority,
+                        attempt_count,
+                        max_attempts,
+                        budget_tokens,
+                        not_before_unix_ms,
+                        expires_at_unix_ms,
+                        notification_target_json,
+                        input_text,
+                        payload_json,
+                        last_error,
+                        result_json,
+                        created_at_unix_ms,
+                        updated_at_unix_ms,
+                        started_at_unix_ms,
+                        completed_at_unix_ms
+                    FROM orchestrator_background_tasks
+                    WHERE task_ulid = ?1
+                "#,
+                params![task_id],
+                |row| {
+                    Ok(OrchestratorBackgroundTaskRecord {
+                        task_id: row.get(0)?,
+                        task_kind: row.get(1)?,
+                        session_id: row.get(2)?,
+                        parent_run_id: row.get(3)?,
+                        target_run_id: row.get(4)?,
+                        queued_input_id: row.get(5)?,
+                        owner_principal: row.get(6)?,
+                        device_id: row.get(7)?,
+                        channel: row.get(8)?,
+                        state: row.get(9)?,
+                        priority: row.get(10)?,
+                        attempt_count: row.get::<_, i64>(11)?.max(0) as u64,
+                        max_attempts: row.get::<_, i64>(12)?.max(0) as u64,
+                        budget_tokens: row.get::<_, i64>(13)?.max(0) as u64,
+                        not_before_unix_ms: row.get(14)?,
+                        expires_at_unix_ms: row.get(15)?,
+                        notification_target_json: row.get(16)?,
+                        input_text: row.get(17)?,
+                        payload_json: row.get(18)?,
+                        last_error: row.get(19)?,
+                        result_json: row.get(20)?,
+                        created_at_unix_ms: row.get(21)?,
+                        updated_at_unix_ms: row.get(22)?,
+                        started_at_unix_ms: row.get(23)?,
+                        completed_at_unix_ms: row.get(24)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(JournalError::from)
     }
 
     pub fn create_cron_job(
@@ -7190,6 +8198,16 @@ fn bool_to_sqlite(value: bool) -> i64 {
     } else {
         0
     }
+}
+
+fn u64_to_sqlite(value: u64, field_name: &'static str) -> Result<i64, JournalError> {
+    i64::try_from(value).map_err(|_| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{field_name} exceeds sqlite INTEGER range"),
+        )))
+        .into()
+    })
 }
 
 fn nonnegative_i64_to_u64(value: i64) -> Option<u64> {

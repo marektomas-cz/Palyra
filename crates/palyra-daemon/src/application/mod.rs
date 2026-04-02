@@ -4,6 +4,7 @@ pub mod memory;
 pub mod provider_events;
 pub mod provider_input;
 pub mod service_authorization;
+pub mod session_compaction;
 pub mod tool_runtime;
 pub mod tool_security;
 

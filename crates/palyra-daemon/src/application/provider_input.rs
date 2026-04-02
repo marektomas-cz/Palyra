@@ -8,19 +8,31 @@ use tracing::warn;
 
 use crate::{
     application::service_authorization::authorize_memory_action,
+    application::session_compaction::{
+        build_session_compaction_plan, render_compaction_prompt_block, SESSION_COMPACTION_STRATEGY,
+        SESSION_COMPACTION_VERSION,
+    },
     gateway::{
         ingest_memory_best_effort, non_empty, truncate_with_ellipsis, GatewayRuntimeState,
         MAX_PREVIOUS_RUN_CONTEXT_ENTRY_CHARS, MAX_PREVIOUS_RUN_CONTEXT_TAPE_EVENTS,
         MAX_PREVIOUS_RUN_CONTEXT_TURNS, MEMORY_AUTO_INJECT_MIN_SCORE,
     },
     journal::{
-        MemorySearchHit, MemorySearchRequest, MemorySource, OrchestratorTapeAppendRequest,
-        OrchestratorTapeRecord, WorkspaceSearchHit, WorkspaceSearchRequest,
+        MemorySearchHit, MemorySearchRequest, MemorySource,
+        OrchestratorCompactionArtifactCreateRequest, OrchestratorCompactionArtifactRecord,
+        OrchestratorSessionResolveRequest, OrchestratorTapeAppendRequest, OrchestratorTapeRecord,
+        WorkspaceSearchHit, WorkspaceSearchRequest,
     },
     media::MediaRuntimeConfig,
     model_provider::ProviderImageInput,
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
 };
+
+const AUTO_SESSION_COMPACTION_ENABLED_ENV: &str = "PALYRA_SESSION_AUTO_COMPACTION_ENABLED";
+const AUTO_SESSION_COMPACTION_DRY_RUN_ENV: &str = "PALYRA_SESSION_AUTO_COMPACTION_DRY_RUN";
+const AUTO_SESSION_COMPACTION_MIN_INPUT_TOKENS: u64 = 480;
+const AUTO_SESSION_COMPACTION_MIN_TOKEN_DELTA: u64 = 120;
+const AUTO_SESSION_COMPACTION_COOLDOWN_MS: i64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedModelProviderInput {
@@ -390,6 +402,182 @@ pub(crate) async fn build_previous_run_context_prompt(
     Ok(format!("{block}\n\n{input_text}"))
 }
 
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn maybe_apply_automatic_session_compaction(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: &RequestContext,
+    run_id: &str,
+    tape_seq: &mut i64,
+    session_id: &str,
+) -> Result<Option<OrchestratorCompactionArtifactRecord>, Status> {
+    if !env_flag_enabled(AUTO_SESSION_COMPACTION_ENABLED_ENV, true) {
+        return Ok(None);
+    }
+
+    let session = runtime_state
+        .resolve_orchestrator_session(OrchestratorSessionResolveRequest {
+            session_id: Some(session_id.to_owned()),
+            session_key: None,
+            session_label: None,
+            principal: context.principal.clone(),
+            device_id: context.device_id.clone(),
+            channel: context.channel.clone(),
+            require_existing: true,
+            reset_session: false,
+        })
+        .await?
+        .session;
+    let transcript =
+        runtime_state.list_orchestrator_session_transcript(session_id.to_owned()).await?;
+    let pins = runtime_state.list_orchestrator_session_pins(session_id.to_owned()).await?;
+    let plan = build_session_compaction_plan(
+        &session,
+        transcript.as_slice(),
+        pins.as_slice(),
+        Some("automatic_compaction_policy"),
+        Some("budget_guard_v1"),
+    );
+    let token_delta = plan.estimated_input_tokens.saturating_sub(plan.estimated_output_tokens);
+    if !plan.eligible
+        || plan.estimated_input_tokens < AUTO_SESSION_COMPACTION_MIN_INPUT_TOKENS
+        || token_delta < AUTO_SESSION_COMPACTION_MIN_TOKEN_DELTA
+    {
+        return Ok(None);
+    }
+
+    let existing =
+        runtime_state.list_orchestrator_compaction_artifacts(session_id.to_owned()).await?;
+    if let Some(latest) = existing.first() {
+        let same_policy = latest.mode == "automatic"
+            && latest.trigger_policy.as_deref() == Some("budget_guard_v1");
+        let in_cooldown =
+            latest.created_at_unix_ms.saturating_add(AUTO_SESSION_COMPACTION_COOLDOWN_MS)
+                > crate::gateway::current_unix_ms();
+        if same_policy && in_cooldown {
+            return Ok(Some(latest.clone()));
+        }
+    }
+
+    let dry_run = env_flag_enabled(AUTO_SESSION_COMPACTION_DRY_RUN_ENV, false);
+    let preview_payload = json!({
+        "event": "session.compaction.auto_preview",
+        "session_id": session_id,
+        "policy": "budget_guard_v1",
+        "eligible": plan.eligible,
+        "estimated_input_tokens": plan.estimated_input_tokens,
+        "estimated_output_tokens": plan.estimated_output_tokens,
+        "token_delta": token_delta,
+        "source_event_count": plan.source_event_count,
+        "protected_event_count": plan.protected_event_count,
+        "condensed_event_count": plan.condensed_event_count,
+        "dry_run": dry_run,
+    })
+    .to_string();
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "session.compaction.auto_preview".to_owned(),
+            payload_json: preview_payload,
+        })
+        .await?;
+    *tape_seq = tape_seq.saturating_add(1);
+    if dry_run {
+        return Ok(existing.into_iter().next());
+    }
+
+    let artifact = runtime_state
+        .create_orchestrator_compaction_artifact(OrchestratorCompactionArtifactCreateRequest {
+            artifact_id: ulid::Ulid::new().to_string(),
+            session_id: session_id.to_owned(),
+            run_id: Some(run_id.to_owned()),
+            mode: "automatic".to_owned(),
+            strategy: SESSION_COMPACTION_STRATEGY.to_owned(),
+            compressor_version: SESSION_COMPACTION_VERSION.to_owned(),
+            trigger_reason: plan.trigger_reason.clone(),
+            trigger_policy: plan.trigger_policy.clone(),
+            trigger_inputs_json: Some(plan.trigger_inputs_json.clone()),
+            summary_text: plan.summary_text.clone(),
+            summary_preview: plan.summary_preview.clone(),
+            source_event_count: plan.source_event_count,
+            protected_event_count: plan.protected_event_count,
+            condensed_event_count: plan.condensed_event_count,
+            omitted_event_count: plan.omitted_event_count,
+            estimated_input_tokens: plan.estimated_input_tokens,
+            estimated_output_tokens: plan.estimated_output_tokens,
+            source_records_json: plan.source_records_json.clone(),
+            summary_json: plan.summary_json.clone(),
+            created_by_principal: context.principal.clone(),
+        })
+        .await?;
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "session.compaction.auto_created".to_owned(),
+            payload_json: json!({
+                "event": "session.compaction.auto_created",
+                "artifact_id": artifact.artifact_id,
+                "session_id": session_id,
+                "policy": "budget_guard_v1",
+                "estimated_input_tokens": artifact.estimated_input_tokens,
+                "estimated_output_tokens": artifact.estimated_output_tokens,
+            })
+            .to_string(),
+        })
+        .await?;
+    *tape_seq = tape_seq.saturating_add(1);
+    Ok(Some(artifact))
+}
+
+#[allow(clippy::result_large_err)]
+async fn load_session_compaction_prompt(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: &RequestContext,
+    run_id: &str,
+    tape_seq: &mut i64,
+    session_id: &str,
+    prompt_input_text: &str,
+) -> Result<String, Status> {
+    let latest = match maybe_apply_automatic_session_compaction(
+        runtime_state,
+        context,
+        run_id,
+        tape_seq,
+        session_id,
+    )
+    .await?
+    {
+        Some(artifact) => Some(artifact),
+        None => runtime_state
+            .list_orchestrator_compaction_artifacts(session_id.to_owned())
+            .await?
+            .into_iter()
+            .next(),
+    };
+    let Some(artifact) = latest else {
+        return Ok(prompt_input_text.to_owned());
+    };
+    let block = render_compaction_prompt_block(
+        artifact.artifact_id.as_str(),
+        artifact.mode.as_str(),
+        artifact.trigger_reason.as_str(),
+        artifact.summary_text.as_str(),
+    );
+    Ok(format!("{block}\n\n{prompt_input_text}"))
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn prepare_model_provider_input(
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -437,6 +625,15 @@ pub(crate) async fn prepare_model_provider_input(
                 input_text.to_owned()
             }
         };
+    let input_with_compaction = load_session_compaction_prompt(
+        runtime_state,
+        context,
+        run_id,
+        tape_seq,
+        session_id,
+        input_with_recent_context.as_str(),
+    )
+    .await?;
     if let Some(provider_input_text) = build_explicit_recall_prompt(
         runtime_state,
         context,
@@ -444,7 +641,7 @@ pub(crate) async fn prepare_model_provider_input(
         tape_seq,
         session_id,
         parameter_delta_json,
-        input_with_recent_context.as_str(),
+        input_with_compaction.as_str(),
     )
     .await?
     {
@@ -460,7 +657,7 @@ pub(crate) async fn prepare_model_provider_input(
         tape_seq,
         session_id,
         input_text,
-        input_with_recent_context.as_str(),
+        input_with_compaction.as_str(),
     )
     .await
     {
@@ -477,7 +674,7 @@ pub(crate) async fn prepare_model_provider_input(
                     status_message = %error.message(),
                     "{warn_message}"
                 );
-                input_text.to_owned()
+                input_with_compaction
             }
         },
     };

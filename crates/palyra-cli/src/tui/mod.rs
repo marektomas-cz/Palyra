@@ -548,6 +548,14 @@ impl App {
                 let queued_text = normalize_optional_text(parts.collect::<Vec<_>>().join(" "));
                 self.queue_follow_up(queued_text).await?;
             }
+            "checkpoint" => {
+                let arguments = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+                self.handle_checkpoint_command(arguments).await?;
+            }
+            "background" => {
+                let arguments = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+                self.handle_background_command(arguments).await?;
+            }
             "abort" => {
                 let explicit = parts.next().map(ToOwned::to_owned);
                 self.abort_run(explicit).await?;
@@ -561,12 +569,8 @@ impl App {
                 self.status_line = "Usage summary is not embedded in the TUI yet".to_owned();
             }
             "compact" => {
-                self.push_entry(
-                    EntryKind::System,
-                    "Compaction",
-                    "Compaction flows are not available in this phase; use reset, retry, or branch instead.",
-                );
-                self.status_line = "Compaction is not available in the TUI".to_owned();
+                let arguments = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+                self.handle_compaction_command(arguments).await?;
             }
             "attach" => {
                 self.push_entry(
@@ -881,6 +885,331 @@ impl App {
             format!("Queued follow-up {} for the active run.", shorten_id(queued_input_id)),
         );
         self.status_line = "Queued follow-up recorded".to_owned();
+        Ok(())
+    }
+
+    async fn connect_admin_console(&self) -> Result<client::control_plane::AdminConsoleContext> {
+        client::control_plane::connect_admin_console(app::ConnectionOverrides {
+            grpc_url: Some(self.runtime.connection().grpc_url.clone()),
+            daemon_url: None,
+            token: self.runtime.connection().token.clone(),
+            principal: Some(self.runtime.connection().principal.clone()),
+            device_id: Some(self.runtime.connection().device_id.clone()),
+            channel: Some(self.runtime.connection().channel.clone()),
+        })
+        .await
+    }
+
+    fn active_session_id(&self) -> Result<String> {
+        self.session
+            .session_id
+            .as_ref()
+            .map(|value| value.ulid.clone())
+            .context("active TUI session is missing a session_id")
+    }
+
+    async fn handle_compaction_command(&mut self, arguments: Vec<String>) -> Result<()> {
+        let session_id = self.active_session_id()?;
+        let apply = matches!(arguments.first().map(String::as_str), Some("apply"));
+        let context = self.connect_admin_console().await?;
+        let path = if apply {
+            format!(
+                "console/v1/chat/sessions/{}/compactions",
+                percent_encode_component(session_id.as_str())
+            )
+        } else {
+            format!(
+                "console/v1/chat/sessions/{}/compactions/preview",
+                percent_encode_component(session_id.as_str())
+            )
+        };
+        let payload = context.client.post_json_value(path, &serde_json::json!({})).await?;
+        let preview = payload.pointer("/preview").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let summary_preview = preview
+            .pointer("/summary_preview")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("No compaction preview available.");
+        let token_delta =
+            preview.pointer("/token_delta").and_then(serde_json::Value::as_u64).unwrap_or_default();
+        if apply {
+            let artifact_id = payload
+                .pointer("/artifact/artifact_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            self.push_entry(
+                EntryKind::System,
+                "Compaction",
+                format!(
+                    "Created compaction artifact {} with estimated token delta {}.\n{}",
+                    shorten_id(artifact_id),
+                    token_delta,
+                    summary_preview
+                ),
+            );
+            self.status_line = "Compaction artifact created".to_owned();
+        } else {
+            self.push_entry(
+                EntryKind::System,
+                "Compaction preview",
+                format!("Estimated token delta {}.\n{}", token_delta, summary_preview),
+            );
+            self.status_line = "Compaction preview loaded".to_owned();
+        }
+        Ok(())
+    }
+
+    async fn handle_checkpoint_command(&mut self, arguments: Vec<String>) -> Result<()> {
+        let Some(action) = arguments.first().map(String::as_str) else {
+            self.status_line =
+                "Usage: /checkpoint save <name> | list | restore <checkpoint_id>".to_owned();
+            return Ok(());
+        };
+        let context = self.connect_admin_console().await?;
+        match action {
+            "save" => {
+                let name = normalize_optional_text(
+                    arguments.iter().skip(1).cloned().collect::<Vec<_>>().join(" "),
+                );
+                let Some(name) = name else {
+                    self.status_line = "Usage: /checkpoint save <name>".to_owned();
+                    return Ok(());
+                };
+                let session_id = self.active_session_id()?;
+                let payload = context
+                    .client
+                    .post_json_value(
+                        format!(
+                            "console/v1/chat/sessions/{}/checkpoints",
+                            percent_encode_component(session_id.as_str())
+                        ),
+                        &serde_json::json!({
+                            "name": name,
+                            "tags": Vec::<String>::new(),
+                        }),
+                    )
+                    .await?;
+                let checkpoint_id = payload
+                    .pointer("/checkpoint/checkpoint_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                self.push_entry(
+                    EntryKind::System,
+                    "Checkpoint",
+                    format!("Saved checkpoint {}.", shorten_id(checkpoint_id)),
+                );
+                self.status_line = "Checkpoint created".to_owned();
+            }
+            "list" => {
+                let session_id = self.active_session_id()?;
+                let payload = context
+                    .client
+                    .get_json_value(format!(
+                        "console/v1/chat/sessions/{}/transcript",
+                        percent_encode_component(session_id.as_str())
+                    ))
+                    .await?;
+                let checkpoints = payload
+                    .pointer("/checkpoints")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if checkpoints.is_empty() {
+                    self.push_entry(
+                        EntryKind::System,
+                        "Checkpoint",
+                        "No checkpoints stored for this session.",
+                    );
+                } else {
+                    let body = checkpoints
+                        .iter()
+                        .map(|checkpoint| {
+                            format!(
+                                "{} · {}",
+                                checkpoint
+                                    .pointer("/checkpoint_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(shorten_id)
+                                    .unwrap_or_else(|| "unknown".to_owned()),
+                                checkpoint
+                                    .pointer("/name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("unnamed")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.push_entry(EntryKind::System, "Checkpoint list", body);
+                }
+                self.status_line = "Checkpoint list refreshed".to_owned();
+            }
+            "restore" => {
+                let Some(checkpoint_id) = arguments.get(1) else {
+                    self.status_line = "Usage: /checkpoint restore <checkpoint_id>".to_owned();
+                    return Ok(());
+                };
+                let payload = context
+                    .client
+                    .post_json_value(
+                        format!(
+                            "console/v1/chat/checkpoints/{}/restore",
+                            percent_encode_component(checkpoint_id.as_str())
+                        ),
+                        &serde_json::json!({}),
+                    )
+                    .await?;
+                let restored_session_id = payload
+                    .pointer("/session/session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .context("checkpoint restore response is missing session_id")?
+                    .to_owned();
+                self.switch_session(restored_session_id).await?;
+                self.push_entry(
+                    EntryKind::System,
+                    "Checkpoint restore",
+                    format!("Restored checkpoint {} as a new branch.", shorten_id(checkpoint_id)),
+                );
+                self.status_line = "Checkpoint restored into a new session".to_owned();
+            }
+            _ => {
+                self.status_line =
+                    "Usage: /checkpoint save <name> | list | restore <checkpoint_id>".to_owned();
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_background_command(&mut self, arguments: Vec<String>) -> Result<()> {
+        let Some(action) = arguments.first().map(String::as_str) else {
+            self.status_line =
+                "Usage: /background list | add <text> | show|pause|resume|retry|cancel <task_id>"
+                    .to_owned();
+            return Ok(());
+        };
+        let context = self.connect_admin_console().await?;
+        match action {
+            "list" => {
+                let session_id = self.active_session_id()?;
+                let payload = context
+                    .client
+                    .get_json_value(format!(
+                        "console/v1/chat/background-tasks?session_id={}&include_completed=true",
+                        percent_encode_component(session_id.as_str())
+                    ))
+                    .await?;
+                let tasks = payload
+                    .pointer("/tasks")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if tasks.is_empty() {
+                    self.push_entry(
+                        EntryKind::System,
+                        "Background",
+                        "No background tasks recorded.",
+                    );
+                } else {
+                    let body = tasks
+                        .iter()
+                        .map(|task| {
+                            format!(
+                                "{} · {} · {}",
+                                task.pointer("/task_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(shorten_id)
+                                    .unwrap_or_else(|| "unknown".to_owned()),
+                                task.pointer("/state")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("unknown"),
+                                task.pointer("/input_text")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.push_entry(EntryKind::System, "Background list", body);
+                }
+                self.status_line = "Background tasks refreshed".to_owned();
+            }
+            "add" => {
+                let text = normalize_optional_text(
+                    arguments.iter().skip(1).cloned().collect::<Vec<_>>().join(" "),
+                );
+                let Some(text) = text else {
+                    self.status_line = "Usage: /background add <text>".to_owned();
+                    return Ok(());
+                };
+                let session_id = self.active_session_id()?;
+                let payload = context
+                    .client
+                    .post_json_value(
+                        format!(
+                            "console/v1/chat/sessions/{}/background-tasks",
+                            percent_encode_component(session_id.as_str())
+                        ),
+                        &serde_json::json!({ "text": text }),
+                    )
+                    .await?;
+                let task_id = payload
+                    .pointer("/task/task_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                self.push_entry(
+                    EntryKind::System,
+                    "Background task",
+                    format!("Queued background task {}.", shorten_id(task_id)),
+                );
+                self.status_line = "Background task queued".to_owned();
+            }
+            "show" | "pause" | "resume" | "retry" | "cancel" => {
+                let Some(task_id) = arguments.get(1) else {
+                    self.status_line = format!("Usage: /background {action} <task_id>");
+                    return Ok(());
+                };
+                if action == "show" {
+                    let payload = context
+                        .client
+                        .get_json_value(format!(
+                            "console/v1/chat/background-tasks/{}",
+                            percent_encode_component(task_id.as_str())
+                        ))
+                        .await?;
+                    self.push_entry(
+                        EntryKind::System,
+                        "Background task",
+                        serde_json::to_string_pretty(&payload)?,
+                    );
+                    self.status_line = "Background task detail loaded".to_owned();
+                } else {
+                    let payload = context
+                        .client
+                        .post_json_value(
+                            format!(
+                                "console/v1/chat/background-tasks/{}/{}",
+                                percent_encode_component(task_id.as_str()),
+                                action
+                            ),
+                            &serde_json::json!({}),
+                        )
+                        .await?;
+                    let state = payload
+                        .pointer("/task/state")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    self.push_entry(
+                        EntryKind::System,
+                        "Background task",
+                        format!("Action {action} applied to {} -> {state}.", shorten_id(task_id)),
+                    );
+                    self.status_line = format!("Background task {action} queued");
+                }
+            }
+            _ => {
+                self.status_line =
+                    "Usage: /background list | add <text> | show|pause|resume|retry|cancel <task_id>"
+                        .to_owned();
+            }
+        }
         Ok(())
     }
 
@@ -1391,7 +1720,10 @@ fn render_help_popup(frame: &mut Frame<'_>, area: Rect) {
         Line::from(
             "  /resume [/id-or-key] /model [/id] /reset /retry /branch [label] /queue <text>",
         ),
-        Line::from("  /abort [run_id] /usage /compact /attach /settings"),
+        Line::from(
+            "  /checkpoint save|list|restore  /background list|add|show|pause|resume|retry|cancel",
+        ),
+        Line::from("  /abort [run_id] /usage /compact [apply] /attach /settings"),
         Line::from("  /tools on|off /thinking on|off /shell on|off /exit"),
         Line::default(),
         Line::from("Pickers"),
@@ -1401,7 +1733,9 @@ fn render_help_popup(frame: &mut Frame<'_>, area: Rect) {
         Line::from("Controls"),
         Line::from("  Tab focus  Enter submit/select  Esc close overlay  q quit"),
         Line::default(),
-        Line::from("Retry, branch, and queue reuse the same HTTP contracts as the web console."),
+        Line::from(
+            "Retry, branch, compaction, checkpoints, and background tasks reuse the console HTTP contracts.",
+        ),
     ]);
     frame.render_widget(Clear, popup);
     frame.render_widget(

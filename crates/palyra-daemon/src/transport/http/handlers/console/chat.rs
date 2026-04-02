@@ -1,4 +1,9 @@
-use crate::*;
+use crate::{
+    application::session_compaction::{
+        build_session_compaction_plan, SESSION_COMPACTION_STRATEGY, SESSION_COMPACTION_VERSION,
+    },
+    *,
+};
 use base64::Engine as _;
 
 pub(crate) async fn console_chat_sessions_list_handler(
@@ -623,6 +628,613 @@ pub(crate) async fn console_chat_branch_handler(
     })))
 }
 
+pub(crate) async fn console_chat_compaction_preview_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleChatCompactionRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let session_record =
+        load_console_chat_session(&state, &session.context, session_id.as_str(), true).await?;
+    let transcript = state
+        .runtime
+        .list_orchestrator_session_transcript(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let pins = state
+        .runtime
+        .list_orchestrator_session_pins(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let plan = build_session_compaction_plan(
+        &session_record,
+        transcript.as_slice(),
+        pins.as_slice(),
+        payload.trigger_reason.as_deref(),
+        payload.trigger_policy.as_deref(),
+    );
+    Ok(Json(json!({
+        "session": session_record,
+        "preview": plan.to_response_json(),
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_compaction_apply_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleChatCompactionRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let session_record =
+        load_console_chat_session(&state, &session.context, session_id.as_str(), true).await?;
+    let transcript = state
+        .runtime
+        .list_orchestrator_session_transcript(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let pins = state
+        .runtime
+        .list_orchestrator_session_pins(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let plan = build_session_compaction_plan(
+        &session_record,
+        transcript.as_slice(),
+        pins.as_slice(),
+        payload.trigger_reason.as_deref(),
+        payload.trigger_policy.as_deref(),
+    );
+    if !plan.eligible {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "session does not currently have enough older transcript material to compact",
+        )));
+    }
+    let artifact = state
+        .runtime
+        .create_orchestrator_compaction_artifact(
+            journal::OrchestratorCompactionArtifactCreateRequest {
+                artifact_id: Ulid::new().to_string(),
+                session_id: session_record.session_id.clone(),
+                run_id: session_record.last_run_id.clone(),
+                mode: "manual".to_owned(),
+                strategy: SESSION_COMPACTION_STRATEGY.to_owned(),
+                compressor_version: SESSION_COMPACTION_VERSION.to_owned(),
+                trigger_reason: plan.trigger_reason.clone(),
+                trigger_policy: plan.trigger_policy.clone(),
+                trigger_inputs_json: Some(plan.trigger_inputs_json.clone()),
+                summary_text: plan.summary_text.clone(),
+                summary_preview: plan.summary_preview.clone(),
+                source_event_count: plan.source_event_count,
+                protected_event_count: plan.protected_event_count,
+                condensed_event_count: plan.condensed_event_count,
+                omitted_event_count: plan.omitted_event_count,
+                estimated_input_tokens: plan.estimated_input_tokens,
+                estimated_output_tokens: plan.estimated_output_tokens,
+                source_records_json: plan.source_records_json.clone(),
+                summary_json: plan.summary_json.clone(),
+                created_by_principal: session.context.principal.clone(),
+            },
+        )
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "session": session_record,
+        "artifact": artifact,
+        "preview": plan.to_response_json(),
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_compaction_detail_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(artifact_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let artifact = state
+        .runtime
+        .get_orchestrator_compaction_artifact(artifact_id.clone())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "compaction artifact not found: {artifact_id}"
+            )))
+        })?;
+    let session_record =
+        load_console_chat_session(&state, &session.context, artifact.session_id.as_str(), false)
+            .await?;
+    Ok(Json(json!({
+        "session": session_record,
+        "artifact": artifact,
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_checkpoint_create_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleChatCheckpointRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let session_record =
+        load_console_chat_session(&state, &session.context, session_id.as_str(), true).await?;
+    let name = trim_to_option(payload.name).ok_or_else(|| {
+        runtime_status_response(tonic::Status::invalid_argument("checkpoint name cannot be empty"))
+    })?;
+    let compactions = state
+        .runtime
+        .list_orchestrator_compaction_artifacts(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let workspace_documents = state
+        .runtime
+        .list_workspace_documents(journal::WorkspaceDocumentListFilter {
+            principal: session.context.principal.clone(),
+            channel: session.context.channel.clone(),
+            agent_id: None,
+            prefix: None,
+            include_deleted: false,
+            limit: 64,
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let workspace_paths = workspace_documents
+        .into_iter()
+        .filter(|document| {
+            document.latest_session_id.as_deref() == Some(session_record.session_id.as_str())
+                || document.pinned
+        })
+        .map(|document| document.path)
+        .collect::<Vec<_>>();
+    let checkpoint = state
+        .runtime
+        .create_orchestrator_checkpoint(journal::OrchestratorCheckpointCreateRequest {
+            checkpoint_id: Ulid::new().to_string(),
+            session_id: session_record.session_id.clone(),
+            run_id: session_record
+                .last_run_id
+                .clone()
+                .or(session_record.branch_origin_run_id.clone()),
+            name,
+            tags_json: serde_json::to_string(&normalize_checkpoint_tags(payload.tags.as_slice()))
+                .map_err(|error| {
+                runtime_status_response(tonic::Status::internal(format!(
+                    "failed to encode checkpoint tags: {error}"
+                )))
+            })?,
+            note: payload.note.and_then(trim_to_option),
+            branch_state: session_record.branch_state.clone(),
+            parent_session_id: session_record.parent_session_id.clone(),
+            referenced_compaction_ids_json: serde_json::to_string(
+                &compactions
+                    .iter()
+                    .take(8)
+                    .map(|artifact| artifact.artifact_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| {
+                runtime_status_response(tonic::Status::internal(format!(
+                    "failed to encode checkpoint compaction references: {error}"
+                )))
+            })?,
+            workspace_paths_json: serde_json::to_string(&workspace_paths).map_err(|error| {
+                runtime_status_response(tonic::Status::internal(format!(
+                    "failed to encode checkpoint workspace paths: {error}"
+                )))
+            })?,
+            created_by_principal: session.context.principal.clone(),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "session": session_record,
+        "checkpoint": checkpoint,
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_checkpoint_detail_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(checkpoint_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let checkpoint = state
+        .runtime
+        .get_orchestrator_checkpoint(checkpoint_id.clone())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "checkpoint not found: {checkpoint_id}"
+            )))
+        })?;
+    let session_record =
+        load_console_chat_session(&state, &session.context, checkpoint.session_id.as_str(), false)
+            .await?;
+    Ok(Json(json!({
+        "session": session_record,
+        "checkpoint": checkpoint,
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_checkpoint_restore_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(checkpoint_id): Path<String>,
+    Json(payload): Json<ConsoleChatCheckpointRestoreRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let checkpoint = state
+        .runtime
+        .get_orchestrator_checkpoint(checkpoint_id.clone())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "checkpoint not found: {checkpoint_id}"
+            )))
+        })?;
+    let source_session =
+        load_console_chat_session(&state, &session.context, checkpoint.session_id.as_str(), true)
+            .await?;
+    let restored = state
+        .runtime
+        .resolve_orchestrator_session(journal::OrchestratorSessionResolveRequest {
+            session_id: None,
+            session_key: None,
+            session_label: payload.session_label.and_then(trim_to_option),
+            principal: session.context.principal.clone(),
+            device_id: session.context.device_id.clone(),
+            channel: session.context.channel.clone(),
+            require_existing: false,
+            reset_session: false,
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    state
+        .runtime
+        .update_orchestrator_session_lineage(journal::OrchestratorSessionLineageUpdateRequest {
+            session_id: restored.session.session_id.clone(),
+            branch_state: "active_branch".to_owned(),
+            parent_session_id: Some(source_session.session_id.clone()),
+            branch_origin_run_id: checkpoint.run_id.clone().or(source_session.last_run_id.clone()),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    state
+        .runtime
+        .update_orchestrator_session_lineage(journal::OrchestratorSessionLineageUpdateRequest {
+            session_id: source_session.session_id.clone(),
+            branch_state: "branch_source".to_owned(),
+            parent_session_id: source_session.parent_session_id.clone(),
+            branch_origin_run_id: source_session.branch_origin_run_id.clone(),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    if let Some(run_id) = checkpoint.run_id.clone().or(source_session.last_run_id.clone()) {
+        let run = state
+            .runtime
+            .orchestrator_run_status_snapshot(run_id.clone())
+            .await
+            .map_err(runtime_status_response)?
+            .ok_or_else(|| {
+                runtime_status_response(tonic::Status::not_found(format!(
+                    "checkpoint anchor run not found: {run_id}"
+                )))
+            })?;
+        state
+            .runtime
+            .append_orchestrator_tape_event(journal::OrchestratorTapeAppendRequest {
+                run_id: run_id.clone(),
+                seq: run.tape_events as i64,
+                event_type: "checkpoint.restore".to_owned(),
+                payload_json: json!({
+                    "event": "checkpoint.restore",
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "source_session_id": source_session.session_id,
+                    "restored_session_id": restored.session.session_id,
+                    "anchor_run_id": run_id,
+                    "actor_principal": session.context.principal,
+                })
+                .to_string(),
+            })
+            .await
+            .map_err(runtime_status_response)?;
+    }
+    state
+        .runtime
+        .mark_orchestrator_checkpoint_restored(journal::OrchestratorCheckpointRestoreMarkRequest {
+            checkpoint_id: checkpoint.checkpoint_id.clone(),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let restored_session = load_console_chat_session(
+        &state,
+        &session.context,
+        restored.session.session_id.as_str(),
+        true,
+    )
+    .await?;
+    let checkpoint = state
+        .runtime
+        .get_orchestrator_checkpoint(checkpoint.checkpoint_id.clone())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(
+                "checkpoint disappeared after restore",
+            ))
+        })?;
+    Ok(Json(json!({
+        "session": restored_session,
+        "checkpoint": checkpoint,
+        "action": "checkpoint_restore",
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_background_task_create_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleChatBackgroundTaskCreateRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let session_record =
+        load_console_chat_session(&state, &session.context, session_id.as_str(), true).await?;
+    let text = trim_to_option(payload.text).ok_or_else(|| {
+        runtime_status_response(tonic::Status::invalid_argument("text cannot be empty"))
+    })?;
+    let task = state
+        .runtime
+        .create_orchestrator_background_task(journal::OrchestratorBackgroundTaskCreateRequest {
+            task_id: Ulid::new().to_string(),
+            task_kind: "background_prompt".to_owned(),
+            session_id: session_record.session_id.clone(),
+            parent_run_id: session_record.last_run_id.clone(),
+            target_run_id: None,
+            queued_input_id: None,
+            owner_principal: session.context.principal.clone(),
+            device_id: session.context.device_id.clone(),
+            channel: session.context.channel.clone(),
+            state: "queued".to_owned(),
+            priority: payload.priority.unwrap_or(0).clamp(-10, 10),
+            max_attempts: payload.max_attempts.unwrap_or(3).clamp(1, 16),
+            budget_tokens: payload
+                .budget_tokens
+                .unwrap_or_else(|| crate::orchestrator::estimate_token_count(text.as_str())),
+            not_before_unix_ms: payload.not_before_unix_ms,
+            expires_at_unix_ms: payload.expires_at_unix_ms,
+            notification_target_json: payload
+                .notification_target
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| {
+                    runtime_status_response(tonic::Status::internal(format!(
+                        "failed to encode background notification target: {error}"
+                    )))
+                })?,
+            input_text: Some(text),
+            payload_json: payload
+                .parameter_delta
+                .as_ref()
+                .map(|parameter_delta| json!({ "parameter_delta": parameter_delta }).to_string()),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "session": session_record,
+        "task": task,
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_background_tasks_list_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ConsoleChatBackgroundTasksQuery>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let tasks = state
+        .runtime
+        .list_orchestrator_background_tasks(journal::OrchestratorBackgroundTaskListFilter {
+            owner_principal: Some(session.context.principal.clone()),
+            device_id: Some(session.context.device_id.clone()),
+            channel: session.context.channel.clone(),
+            session_id: query.session_id.and_then(trim_to_option),
+            include_completed: query.include_completed.unwrap_or(false),
+            limit: query.limit.unwrap_or(32).clamp(1, 128),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "tasks": tasks,
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_background_task_detail_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
+    let run = if let Some(target_run_id) = task.target_run_id.clone() {
+        state
+            .runtime
+            .orchestrator_run_status_snapshot(target_run_id)
+            .await
+            .map_err(runtime_status_response)?
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "task": task,
+        "run": run,
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_background_task_pause_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
+    if task.state != "queued" && task.state != "failed" {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "only queued or failed background tasks can be paused",
+        )));
+    }
+    state
+        .runtime
+        .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
+            task_id: task.task_id.clone(),
+            state: Some("paused".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let task =
+        load_console_background_task(&state, &session.context, task.task_id.as_str()).await?;
+    Ok(Json(json!({
+        "task": task,
+        "action": "pause",
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_background_task_resume_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
+    if task.state != "paused" {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "only paused background tasks can be resumed",
+        )));
+    }
+    state
+        .runtime
+        .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
+            task_id: task.task_id.clone(),
+            state: Some("queued".to_owned()),
+            completed_at_unix_ms: Some(None),
+            ..Default::default()
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let task =
+        load_console_background_task(&state, &session.context, task.task_id.as_str()).await?;
+    Ok(Json(json!({
+        "task": task,
+        "action": "resume",
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_background_task_retry_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
+    if task.state != "failed" && task.state != "cancelled" && task.state != "expired" {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "only failed, cancelled, or expired background tasks can be retried",
+        )));
+    }
+    state
+        .runtime
+        .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
+            task_id: task.task_id.clone(),
+            state: Some("queued".to_owned()),
+            target_run_id: Some(None),
+            last_error: Some(None),
+            result_json: Some(None),
+            started_at_unix_ms: Some(None),
+            completed_at_unix_ms: Some(None),
+            ..Default::default()
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let task =
+        load_console_background_task(&state, &session.context, task.task_id.as_str()).await?;
+    Ok(Json(json!({
+        "task": task,
+        "action": "retry",
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_background_task_cancel_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
+    if task.state == "running" {
+        if let Some(target_run_id) = task.target_run_id.clone() {
+            state
+                .runtime
+                .request_orchestrator_cancel(journal::OrchestratorCancelRequest {
+                    run_id: target_run_id,
+                    reason: "background_task_cancelled_by_operator".to_owned(),
+                })
+                .await
+                .map_err(runtime_status_response)?;
+            state
+                .runtime
+                .update_orchestrator_background_task(
+                    journal::OrchestratorBackgroundTaskUpdateRequest {
+                        task_id: task.task_id.clone(),
+                        state: Some("cancel_requested".to_owned()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(runtime_status_response)?;
+        } else {
+            return Err(runtime_status_response(tonic::Status::failed_precondition(
+                "running background task is missing target_run_id",
+            )));
+        }
+    } else {
+        state
+            .runtime
+            .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
+                task_id: task.task_id.clone(),
+                state: Some("cancelled".to_owned()),
+                completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
+                last_error: Some(Some("cancelled_by_operator".to_owned())),
+                ..Default::default()
+            })
+            .await
+            .map_err(runtime_status_response)?;
+    }
+    let task =
+        load_console_background_task(&state, &session.context, task.task_id.as_str()).await?;
+    Ok(Json(json!({
+        "task": task,
+        "action": "cancel",
+        "contract": contract_descriptor(),
+    })))
+}
+
 pub(crate) async fn console_chat_queue_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -735,16 +1347,41 @@ pub(crate) async fn console_chat_transcript_handler(
         .list_orchestrator_session_pins(session_record.session_id.clone())
         .await
         .map_err(runtime_status_response)?;
+    let compactions = state
+        .runtime
+        .list_orchestrator_compaction_artifacts(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let checkpoints = state
+        .runtime
+        .list_orchestrator_checkpoints(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
     let queued_inputs = state
         .runtime
         .list_orchestrator_queued_inputs(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let background_tasks = state
+        .runtime
+        .list_orchestrator_background_tasks(journal::OrchestratorBackgroundTaskListFilter {
+            owner_principal: Some(session.context.principal.clone()),
+            device_id: Some(session.context.device_id.clone()),
+            channel: session.context.channel.clone(),
+            session_id: Some(session_record.session_id.clone()),
+            include_completed: true,
+            limit: 64,
+        })
         .await
         .map_err(runtime_status_response)?;
     Ok(Json(json!({
         "session": session_record,
         "records": transcript,
         "pins": pins,
+        "compactions": compactions,
+        "checkpoints": checkpoints,
         "queued_inputs": queued_inputs,
+        "background_tasks": background_tasks,
         "contract": contract_descriptor(),
     })))
 }
@@ -819,16 +1456,57 @@ pub(crate) async fn console_chat_export_handler(
     if format.eq_ignore_ascii_case("markdown") {
         return Ok(Json(json!({
             "format": "markdown",
-            "content": render_session_export_markdown(&session_record, transcript.as_slice(), pins.as_slice()),
+            "content": render_session_export_markdown(
+                &session_record,
+                transcript.as_slice(),
+                pins.as_slice(),
+                state
+                    .runtime
+                    .list_orchestrator_compaction_artifacts(session_record.session_id.clone())
+                    .await
+                    .map_err(runtime_status_response)?
+                    .as_slice(),
+                state
+                    .runtime
+                    .list_orchestrator_checkpoints(session_record.session_id.clone())
+                    .await
+                    .map_err(runtime_status_response)?
+                    .as_slice(),
+            ),
             "contract": contract_descriptor(),
         })));
     }
+    let compactions = state
+        .runtime
+        .list_orchestrator_compaction_artifacts(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let checkpoints = state
+        .runtime
+        .list_orchestrator_checkpoints(session_record.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let background_tasks = state
+        .runtime
+        .list_orchestrator_background_tasks(journal::OrchestratorBackgroundTaskListFilter {
+            owner_principal: Some(session.context.principal.clone()),
+            device_id: Some(session.context.device_id.clone()),
+            channel: session.context.channel.clone(),
+            session_id: Some(session_record.session_id.clone()),
+            include_completed: true,
+            limit: 64,
+        })
+        .await
+        .map_err(runtime_status_response)?;
     Ok(Json(json!({
         "format": "json",
         "content": {
             "session": session_record,
             "records": transcript,
             "pins": pins,
+            "compactions": compactions,
+            "checkpoints": checkpoints,
+            "background_tasks": background_tasks,
         },
         "contract": contract_descriptor(),
     })))
@@ -1002,6 +1680,32 @@ async fn load_console_chat_session(
     Ok(response.session)
 }
 
+async fn load_console_background_task(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    task_id: &str,
+) -> Result<journal::OrchestratorBackgroundTaskRecord, Response> {
+    let task = state
+        .runtime
+        .get_orchestrator_background_task(task_id.to_owned())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "background task not found: {task_id}"
+            )))
+        })?;
+    let same_principal = task.owner_principal == context.principal;
+    let same_device = task.device_id == context.device_id;
+    let same_channel = task.channel == context.channel;
+    if !same_principal || !same_device || !same_channel {
+        return Err(runtime_status_response(tonic::Status::not_found(
+            "background task not found for current console context",
+        )));
+    }
+    Ok(task)
+}
+
 fn is_terminal_run_state(state: &str) -> bool {
     matches!(state, "done" | "failed" | "cancelled")
 }
@@ -1056,6 +1760,8 @@ fn render_session_export_markdown(
     session: &journal::OrchestratorSessionRecord,
     transcript: &[journal::OrchestratorSessionTranscriptRecord],
     pins: &[journal::OrchestratorSessionPinRecord],
+    compactions: &[journal::OrchestratorCompactionArtifactRecord],
+    checkpoints: &[journal::OrchestratorCheckpointRecord],
 ) -> String {
     let mut document = String::new();
     let title = if !session.title.trim().is_empty() {
@@ -1089,6 +1795,32 @@ fn render_session_export_markdown(
             document.push('\n');
         }
     }
+    if !compactions.is_empty() {
+        document.push_str("\n## Compactions\n\n");
+        for artifact in compactions {
+            document.push_str("- ");
+            document.push_str(artifact.summary_preview.as_str());
+            document.push_str(" (`");
+            document.push_str(artifact.mode.as_str());
+            document.push_str("`, tokens ");
+            document.push_str(artifact.estimated_input_tokens.to_string().as_str());
+            document.push_str(" -> ");
+            document.push_str(artifact.estimated_output_tokens.to_string().as_str());
+            document.push_str(")\n");
+        }
+    }
+    if !checkpoints.is_empty() {
+        document.push_str("\n## Checkpoints\n\n");
+        for checkpoint in checkpoints {
+            document.push_str("- ");
+            document.push_str(checkpoint.name.as_str());
+            if let Some(note) = checkpoint.note.as_deref() {
+                document.push_str(" — ");
+                document.push_str(note);
+            }
+            document.push('\n');
+        }
+    }
     document.push_str("\n## Transcript\n\n");
     for record in transcript {
         if let Some(text) = extract_transcript_search_text(record) {
@@ -1100,6 +1832,17 @@ fn render_session_export_markdown(
         }
     }
     document
+}
+
+fn normalize_checkpoint_tags(tags: &[String]) -> Vec<String> {
+    let mut normalized = tags
+        .iter()
+        .map(|tag| tag.trim().to_ascii_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 async fn send_console_chat_line(
