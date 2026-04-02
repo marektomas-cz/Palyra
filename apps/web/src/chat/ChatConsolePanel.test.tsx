@@ -291,10 +291,7 @@ describe("Chat web UX primitives", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Purge" }));
-    expect(runDerivedArtifactAction).toHaveBeenCalledWith(
-      "01ARZ3NDEKTSV4RRFFQ69G5FZZ",
-      "purge",
-    );
+    expect(runDerivedArtifactAction).toHaveBeenCalledWith("01ARZ3NDEKTSV4RRFFQ69G5FZZ", "purge");
   });
 });
 

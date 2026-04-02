@@ -16,19 +16,21 @@ import type {
 import { type DetailPanelState, type TranscriptSearchMatch } from "./ChatInspectorColumn";
 import { ChatConsoleWorkspaceView } from "./ChatConsoleWorkspaceView";
 import {
-  buildDetailFromDerivedArtifact,
-  buildDetailFromLiveEntry,
-  buildDetailFromSearchMatch,
-  buildDetailFromTranscriptRecord,
-} from "./chatConsoleUtils";
-import {
-  inspectBackgroundTaskAction,
   inspectCheckpointAction,
   inspectCompactionAction,
   restoreCheckpointAction,
-  runBackgroundTaskActionRequest,
   runCompactionFlowAction,
 } from "./chatPhase4Actions";
+import {
+  inspectBackgroundTaskDetail,
+  inspectDerivedArtifactDetail,
+  inspectLiveEntryDetail,
+  inspectSearchMatchDetail,
+  inspectTranscriptRecordDetail,
+  runBackgroundTaskLifecycleAction,
+  runDerivedArtifactLifecycleAction,
+  useChatAttachmentUploadHandler,
+} from "./chatInspectorActions";
 import {
   CHAT_SLASH_COMMANDS,
   buildContextBudgetSummary,
@@ -40,7 +42,6 @@ import {
   shortId,
   toErrorMessage,
   type ComposerAttachment,
-  type TranscriptEntry,
 } from "./chatShared";
 import {
   abortCurrentRunAction,
@@ -48,7 +49,6 @@ import {
   createNewSessionAction,
   deletePinAction,
   exportTranscriptAction,
-  handleAttachmentFilesAction,
   pinTranscriptRecordAction,
   queueFollowUpTextAction,
   resumeSessionAction,
@@ -78,7 +78,6 @@ export function ChatConsolePanel({
   const transcriptRequestSeqRef = useRef(0);
   const transcriptSearchSeqRef = useRef(0);
   const recallPreviewRequestSeqRef = useRef(0);
-
   const [runActionBusy, setRunActionBusy] = useState(false);
   const [commandBusy, setCommandBusy] = useState<string | null>(null);
   const [transcriptBusy, setTranscriptBusy] = useState(false);
@@ -162,10 +161,9 @@ export function ChatConsolePanel({
   const inspectorVisible = runDrawerOpen || runIds.length > 0;
   const actionableRunId =
     activeRunId ?? (runDrawerId.trim().length > 0 ? runDrawerId.trim() : null) ?? runIds[0] ?? null;
-  const toolPayloadCount = useMemo(
-    () => visibleTranscript.filter((entry) => entry.payload !== undefined).length,
-    [visibleTranscript],
-  );
+  const toolPayloadCount = useMemo(() => {
+    return visibleTranscript.filter((entry) => entry.payload !== undefined).length;
+  }, [visibleTranscript]);
   const recentTranscriptRecords = useMemo(
     () => [...transcriptRecords].slice(-8).reverse(),
     [transcriptRecords],
@@ -214,6 +212,15 @@ export function ChatConsolePanel({
     }
     return recallPreview !== null && recallPreviewQuery !== trimmed;
   }, [composerText, recallPreview, recallPreviewQuery]);
+  const attachSelectedFiles = useChatAttachmentUploadHandler({
+    api,
+    sessionId: sessions.activeSessionId.trim(),
+    attachmentInputRef,
+    setAttachments,
+    setAttachmentBusy,
+    setError,
+    setNotice,
+  });
 
   useEffect(() => {
     void sessions.refreshSessions(true);
@@ -791,125 +798,6 @@ export function ChatConsolePanel({
     }
   }
 
-  async function inspectBackgroundTask(taskId: string): Promise<void> {
-    setPhase4BusyKey(`inspect-background-task:${taskId}`);
-    setError(null);
-    try {
-      await inspectBackgroundTaskAction({
-        api,
-        taskId,
-        setDetailPanel,
-      });
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setPhase4BusyKey(null);
-    }
-  }
-
-  async function runBackgroundTaskAction(
-    taskId: string,
-    action: "pause" | "resume" | "retry" | "cancel",
-  ): Promise<void> {
-    setPhase4BusyKey(`background-${action}:${taskId}`);
-    setError(null);
-    setNotice(null);
-    try {
-      await runBackgroundTaskActionRequest({
-        api,
-        taskId,
-        action,
-        refreshSessionTranscript,
-        setNotice,
-      });
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setPhase4BusyKey(null);
-    }
-  }
-
-  async function handleAttachmentFiles(files: readonly File[]): Promise<void> {
-    await handleAttachmentFilesAction({
-      api,
-      sessionId: sessions.activeSessionId.trim(),
-      files,
-      setAttachments,
-      setAttachmentBusy,
-      setError,
-      setNotice,
-      clearAttachmentInput: () => {
-        if (attachmentInputRef.current !== null) {
-          attachmentInputRef.current.value = "";
-        }
-      },
-    });
-  }
-
-  function inspectLiveEntry(entry: TranscriptEntry): void {
-    setDetailPanel(buildDetailFromLiveEntry(entry));
-  }
-  function inspectTranscriptRecord(record: ChatTranscriptRecord): void {
-    setDetailPanel(buildDetailFromTranscriptRecord(record));
-  }
-  function inspectSearchMatch(match: TranscriptSearchMatch): void {
-    const matchingRecord = transcriptRecords.find(
-      (record) => record.run_id === match.run_id && record.seq === match.seq,
-    );
-    if (matchingRecord !== undefined) {
-      inspectTranscriptRecord(matchingRecord);
-      return;
-    }
-    setDetailPanel(buildDetailFromSearchMatch(match));
-  }
-
-  function inspectDerivedArtifact(derivedArtifactId: string): void {
-    const derivedArtifact = sessionDerivedArtifacts.find(
-      (record) => record.derived_artifact_id === derivedArtifactId,
-    );
-    if (derivedArtifact === undefined) {
-      setError("Derived artifact is no longer available.");
-      return;
-    }
-    const attachment = sessionAttachments.find(
-      (record) => record.artifact_id === derivedArtifact.source_artifact_id,
-    );
-    setDetailPanel(buildDetailFromDerivedArtifact(derivedArtifact, attachment));
-  }
-
-  async function runDerivedArtifactAction(
-    derivedArtifactId: string,
-    action: "recompute" | "quarantine" | "release" | "purge",
-  ): Promise<void> {
-    setPhase4BusyKey(`derived:${action}:${derivedArtifactId}`);
-    setError(null);
-    setNotice(null);
-    try {
-      switch (action) {
-        case "recompute":
-          await api.recomputeDerivedArtifact(derivedArtifactId);
-          break;
-        case "quarantine":
-          await api.quarantineDerivedArtifact(derivedArtifactId, {
-            reason: "Quarantined from chat session surface.",
-          });
-          break;
-        case "release":
-          await api.releaseDerivedArtifact(derivedArtifactId);
-          break;
-        case "purge":
-          await api.purgeDerivedArtifact(derivedArtifactId);
-          break;
-      }
-      await refreshSessionTranscript();
-      setNotice(`Derived artifact action applied: ${action}.`);
-    } catch (error) {
-      setError(toErrorMessage(error));
-    } finally {
-      setPhase4BusyKey(null);
-    }
-  }
-
   return (
     <main className="workspace-page chat-workspace">
       <input
@@ -918,7 +806,7 @@ export function ChatConsolePanel({
         multiple
         type="file"
         onChange={(event) => {
-          void handleAttachmentFiles(Array.from(event.currentTarget.files ?? []));
+          attachSelectedFiles(Array.from(event.currentTarget.files ?? []));
         }}
       />
       <ChatConsoleWorkspaceView
@@ -959,7 +847,7 @@ export function ChatConsolePanel({
             );
           },
           attachFiles: (files) => {
-            void handleAttachmentFiles(files);
+            attachSelectedFiles(files);
           },
           showSlashPalette,
           parsedSlashCommand,
@@ -991,13 +879,21 @@ export function ChatConsolePanel({
           searchTranscript: () => {
             void searchTranscript();
           },
-          inspectSearchMatch,
+          inspectSearchMatch: (match) => {
+            inspectSearchMatchDetail({
+              match,
+              transcriptRecords,
+              setDetailPanel,
+            });
+          },
           exportBusy,
           exportTranscript: (format) => {
             void exportTranscript(format);
           },
           recentTranscriptRecords,
-          inspectTranscriptRecord,
+          inspectTranscriptRecord: (record) => {
+            inspectTranscriptRecordDetail(record, setDetailPanel);
+          },
           pinTranscriptRecord: (record) => {
             void pinTranscriptRecord(record);
           },
@@ -1019,10 +915,24 @@ export function ChatConsolePanel({
           queuedInputs,
           backgroundTasks,
           inspectBackgroundTask: (taskId) => {
-            void inspectBackgroundTask(taskId);
+            void inspectBackgroundTaskDetail({
+              api,
+              taskId,
+              setDetailPanel,
+              setError,
+              setPhase4BusyKey,
+            });
           },
           runBackgroundTaskAction: (taskId, action) => {
-            void runBackgroundTaskAction(taskId, action);
+            void runBackgroundTaskLifecycleAction({
+              api,
+              taskId,
+              action,
+              refreshSessionTranscript,
+              setError,
+              setNotice,
+              setPhase4BusyKey,
+            });
           },
           detailPanel,
           revealSensitiveValues,
@@ -1109,10 +1019,28 @@ export function ChatConsolePanel({
             void decideInlineApproval(approvalId, approved);
           },
           openRunDetails,
-          inspectPayload: inspectLiveEntry,
-          inspectDerivedArtifact,
+          inspectPayload: (entry) => {
+            inspectLiveEntryDetail(entry, setDetailPanel);
+          },
+          inspectDerivedArtifact: (derivedArtifactId) => {
+            inspectDerivedArtifactDetail({
+              derivedArtifactId,
+              sessionDerivedArtifacts,
+              sessionAttachments,
+              setDetailPanel,
+              setError,
+            });
+          },
           runDerivedArtifactAction: (derivedArtifactId, action) => {
-            void runDerivedArtifactAction(derivedArtifactId, action);
+            void runDerivedArtifactLifecycleAction({
+              api,
+              derivedArtifactId,
+              action,
+              refreshSessionTranscript,
+              setError,
+              setNotice,
+              setPhase4BusyKey,
+            });
           },
         }}
       />

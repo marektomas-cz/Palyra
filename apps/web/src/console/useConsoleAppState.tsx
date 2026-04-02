@@ -1187,7 +1187,9 @@ export function useConsoleAppState() {
         workspace_document_id: trimmed,
         limit: 24,
       });
-      setMemoryDerivedArtifacts(toJsonObjectArray(response.derived_artifacts as unknown as JsonValue[]));
+      setMemoryDerivedArtifacts(
+        toJsonObjectArray(response.derived_artifacts as unknown as JsonValue[]),
+      );
     } catch (failure) {
       setError(toErrorMessage(failure));
     }

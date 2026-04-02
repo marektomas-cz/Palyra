@@ -80,7 +80,10 @@ export function ChatTranscript({
                 </div>
                 <div className="chat-entry-actions">
                   {derivedArtifacts.map((derivedArtifact) => (
-                    <div key={derivedArtifact.derived_artifact_id} className="workspace-inline-actions">
+                    <div
+                      key={derivedArtifact.derived_artifact_id}
+                      className="workspace-inline-actions"
+                    >
                       <ActionButton
                         size="sm"
                         type="button"

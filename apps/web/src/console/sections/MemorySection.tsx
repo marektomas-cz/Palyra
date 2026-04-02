@@ -462,7 +462,10 @@ export function MemorySection({ app }: MemorySectionProps) {
                       <p className="workspace-kicker">Anchors</p>
                       <h3>Structured provenance</h3>
                     </div>
-                    <WorkspaceTable ariaLabel="Derived artifact anchors" columns={["Label", "Kind", "Locator"]}>
+                    <WorkspaceTable
+                      ariaLabel="Derived artifact anchors"
+                      columns={["Label", "Kind", "Locator"]}
+                    >
                       {selectedDerivedAnchors.map((anchor, index) => (
                         <tr key={readString(anchor, "label") ?? `anchor-${index}`}>
                           <td>{readString(anchor, "label") ?? `Anchor ${index + 1}`}</td>
