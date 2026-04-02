@@ -2208,9 +2208,11 @@ export class ConsoleApiClient {
     return this.request("/console/v1/memory/status");
   }
 
-  async listWorkspaceDocuments(
-    params?: URLSearchParams,
-  ): Promise<{ documents: WorkspaceDocumentRecord[]; roots: string[]; contract: ContractDescriptor }> {
+  async listWorkspaceDocuments(params?: URLSearchParams): Promise<{
+    documents: WorkspaceDocumentRecord[];
+    roots: string[];
+    contract: ContractDescriptor;
+  }> {
     return this.request(buildPathWithQuery("/console/v1/memory/workspace/documents", params));
   }
 
@@ -2293,14 +2295,14 @@ export class ConsoleApiClient {
     );
   }
 
-  async getWorkspaceDocumentVersions(
-    params: URLSearchParams,
-  ): Promise<{
+  async getWorkspaceDocumentVersions(params: URLSearchParams): Promise<{
     document: WorkspaceDocumentRecord;
     versions: WorkspaceDocumentVersionRecord[];
     contract: ContractDescriptor;
   }> {
-    return this.request(buildPathWithQuery("/console/v1/memory/workspace/document/versions", params));
+    return this.request(
+      buildPathWithQuery("/console/v1/memory/workspace/document/versions", params),
+    );
   }
 
   async bootstrapWorkspace(payload: {
@@ -2308,7 +2310,11 @@ export class ConsoleApiClient {
     agent_id?: string;
     session_id?: string;
     force_repair?: boolean;
-  }): Promise<{ bootstrap: WorkspaceBootstrapOutcome; roots: string[]; contract: ContractDescriptor }> {
+  }): Promise<{
+    bootstrap: WorkspaceBootstrapOutcome;
+    roots: string[];
+    contract: ContractDescriptor;
+  }> {
     return this.request(
       "/console/v1/memory/workspace/bootstrap",
       {

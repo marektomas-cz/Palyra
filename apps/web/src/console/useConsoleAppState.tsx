@@ -152,7 +152,10 @@ function clearDesktopHandoffTokenFromAddressBar(): void {
 }
 
 function toWorkspaceSlug(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-");
   const slug = normalized.replace(/^-+|-+$/g, "");
   return slug.length > 0 ? slug : "promoted-memory";
 }
@@ -1249,8 +1252,7 @@ export function useConsoleAppState() {
   function promoteMemoryHitToWorkspaceDraft(hit: JsonObject): void {
     const item = readObject(hit, "item") ?? {};
     const memoryId = readString(hit, "memory_id") ?? readString(item, "memory_id");
-    const sourceChannel =
-      readString(hit, "channel") ?? readString(item, "channel") ?? "memory";
+    const sourceChannel = readString(hit, "channel") ?? readString(item, "channel") ?? "memory";
     const content =
       readString(hit, "snippet") ??
       readString(hit, "content") ??

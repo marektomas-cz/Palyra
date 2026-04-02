@@ -14,13 +14,7 @@ import {
   WorkspaceTable,
   workspaceToneForState,
 } from "../components/workspace/WorkspacePatterns";
-import {
-  formatUnixMs,
-  readNumber,
-  readObject,
-  readString,
-  type JsonObject,
-} from "../shared";
+import { formatUnixMs, readNumber, readObject, readString, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
 type MemorySectionProps = {
@@ -112,11 +106,13 @@ export function MemorySection({ app }: MemorySectionProps) {
     readNumber(app.memoryWorkspaceVersions[0] ?? EMPTY_OBJECT, "version") ??
     0;
   const recallWorkspaceHits = readObjectArray(app.memoryRecallPreview, "workspace_hits");
-  const unifiedGroups = readObject(app.memorySearchAllResults ?? EMPTY_OBJECT, "groups") ?? EMPTY_OBJECT;
+  const unifiedGroups =
+    readObject(app.memorySearchAllResults ?? EMPTY_OBJECT, "groups") ?? EMPTY_OBJECT;
   const unifiedSessionHits = readObjectArray(unifiedGroups, "sessions");
   const unifiedWorkspaceHits = readObjectArray(unifiedGroups, "workspace");
   const unifiedMemoryHits = readObjectArray(unifiedGroups, "memory");
-  const unifiedCounts = readObject(app.memorySearchAllResults ?? EMPTY_OBJECT, "counts") ?? EMPTY_OBJECT;
+  const unifiedCounts =
+    readObject(app.memorySearchAllResults ?? EMPTY_OBJECT, "counts") ?? EMPTY_OBJECT;
 
   return (
     <main className="workspace-page">
@@ -136,7 +132,8 @@ export function MemorySection({ app }: MemorySectionProps) {
             </WorkspaceStatusChip>
             <WorkspaceStatusChip
               tone={
-                unifiedSessionHits.length + unifiedWorkspaceHits.length + unifiedMemoryHits.length > 0
+                unifiedSessionHits.length + unifiedWorkspaceHits.length + unifiedMemoryHits.length >
+                0
                   ? "success"
                   : "default"
               }
@@ -222,8 +219,9 @@ export function MemorySection({ app }: MemorySectionProps) {
               <p className="workspace-kicker">Scope</p>
               <h3>Workspace roots and curated starting points</h3>
               <p className="chat-muted">
-                Roots: {workspaceRoots.length > 0 ? workspaceRoots.join(", ") : "No roots returned"}.
-                Curated: {curatedPaths.length > 0 ? curatedPaths.join(", ") : "No curated paths returned"}.
+                Roots: {workspaceRoots.length > 0 ? workspaceRoots.join(", ") : "No roots returned"}
+                . Curated:{" "}
+                {curatedPaths.length > 0 ? curatedPaths.join(", ") : "No curated paths returned"}.
               </p>
             </div>
 
@@ -240,7 +238,9 @@ export function MemorySection({ app }: MemorySectionProps) {
                   const pinned = readBoolean(document, "pinned");
                   const documentState = readString(document, "state") ?? "draft";
                   const updatedAt = formatUnixMs(readNumber(document, "updated_at_unix_ms"));
-                  const lastRecalledAt = formatUnixMs(readNumber(document, "last_recalled_at_unix_ms"));
+                  const lastRecalledAt = formatUnixMs(
+                    readNumber(document, "last_recalled_at_unix_ms"),
+                  );
 
                   return (
                     <article key={path} className="chat-ops-card">
@@ -416,7 +416,9 @@ export function MemorySection({ app }: MemorySectionProps) {
               </div>
               <div>
                 <dt>Last recalled</dt>
-                <dd>{formatUnixMs(readNumber(selectedDocumentRecord, "last_recalled_at_unix_ms"))}</dd>
+                <dd>
+                  {formatUnixMs(readNumber(selectedDocumentRecord, "last_recalled_at_unix_ms"))}
+                </dd>
               </div>
               <div>
                 <dt>Risk reasons</dt>
@@ -543,9 +545,7 @@ export function MemorySection({ app }: MemorySectionProps) {
                 <WorkspaceStatusChip tone={app.memoryHits.length > 0 ? "success" : "default"}>
                   {app.memoryHits.length} memory refs
                 </WorkspaceStatusChip>
-                <WorkspaceStatusChip
-                  tone={recallWorkspaceHits.length > 0 ? "accent" : "default"}
-                >
+                <WorkspaceStatusChip tone={recallWorkspaceHits.length > 0 ? "accent" : "default"}>
                   {recallWorkspaceHits.length} workspace refs
                 </WorkspaceStatusChip>
               </div>
@@ -603,9 +603,7 @@ export function MemorySection({ app }: MemorySectionProps) {
                         </p>
                       </div>
                       <div className="chat-ops-card__actions">
-                        <WorkspaceStatusChip tone="success">
-                          {formatScore(hit)}
-                        </WorkspaceStatusChip>
+                        <WorkspaceStatusChip tone="success">{formatScore(hit)}</WorkspaceStatusChip>
                         <ActionButton
                           size="sm"
                           type="button"
@@ -664,8 +662,11 @@ export function MemorySection({ app }: MemorySectionProps) {
                   <WorkspaceStatusChip tone={unifiedSessionHits.length > 0 ? "success" : "default"}>
                     Sessions {readNumber(unifiedCounts, "sessions") ?? unifiedSessionHits.length}
                   </WorkspaceStatusChip>
-                  <WorkspaceStatusChip tone={unifiedWorkspaceHits.length > 0 ? "accent" : "default"}>
-                    Workspace {readNumber(unifiedCounts, "workspace") ?? unifiedWorkspaceHits.length}
+                  <WorkspaceStatusChip
+                    tone={unifiedWorkspaceHits.length > 0 ? "accent" : "default"}
+                  >
+                    Workspace{" "}
+                    {readNumber(unifiedCounts, "workspace") ?? unifiedWorkspaceHits.length}
                   </WorkspaceStatusChip>
                   <WorkspaceStatusChip tone={unifiedMemoryHits.length > 0 ? "warning" : "default"}>
                     Memory {readNumber(unifiedCounts, "memory") ?? unifiedMemoryHits.length}

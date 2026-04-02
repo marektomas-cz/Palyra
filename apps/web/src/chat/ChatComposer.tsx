@@ -81,9 +81,7 @@ export function ChatComposer({
       ? "Run command"
       : "Send";
   const previewVisible =
-    activeSessionId.trim().length > 0 &&
-    composerText.trim().length > 0 &&
-    !showSlashPalette;
+    activeSessionId.trim().length > 0 && composerText.trim().length > 0 && !showSlashPalette;
   const previewWorkspaceHits = recallPreview?.workspace_hits.slice(0, 2) ?? [];
   const previewMemoryHits: Record<string, unknown>[] = [];
   for (const hit of recallPreview?.memory_hits ?? []) {
@@ -138,8 +136,8 @@ export function ChatComposer({
             <p className="workspace-kicker">Recall preview</p>
             <h3>Context that will be attached to the next prompt</h3>
             <p className="chat-muted">
-              Inspect retrieved workspace docs and memory before send. Refresh if you want to
-              force a fresh preview for the current draft.
+              Inspect retrieved workspace docs and memory before send. Refresh if you want to force
+              a fresh preview for the current draft.
             </p>
           </div>
           <div className="workspace-inline-actions">
@@ -166,7 +164,9 @@ export function ChatComposer({
           </div>
 
           {recallPreview === null ? (
-            <p className="chat-muted">Recall preview will appear once the current draft is evaluated.</p>
+            <p className="chat-muted">
+              Recall preview will appear once the current draft is evaluated.
+            </p>
           ) : (
             <>
               <div className="chat-ops-list">
@@ -198,16 +198,12 @@ export function ChatComposer({
                       </p>
                     </div>
                     <div className="chat-ops-card__actions">
-                      <StatusChip tone="success">
-                        {formatPreviewScore(hit)}
-                      </StatusChip>
+                      <StatusChip tone="success">{formatPreviewScore(hit)}</StatusChip>
                     </div>
                   </article>
                 ))}
               </div>
-              <pre className="chat-composer__recall-preview">
-                {recallPreview.prompt_preview}
-              </pre>
+              <pre className="chat-composer__recall-preview">{recallPreview.prompt_preview}</pre>
             </>
           )}
         </div>
@@ -389,12 +385,18 @@ function readRecord(
   return isRecord(value) ? value : undefined;
 }
 
-function readStringValue(source: Record<string, unknown> | undefined, key: string): string | undefined {
+function readStringValue(
+  source: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
   const value = source?.[key];
   return typeof value === "string" ? value : undefined;
 }
 
-function readNumberValue(source: Record<string, unknown> | undefined, key: string): number | undefined {
+function readNumberValue(
+  source: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
   const value = source?.[key];
   return typeof value === "number" ? value : undefined;
 }

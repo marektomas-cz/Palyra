@@ -293,19 +293,26 @@ export function ChatConsolePanel({
         }
       }
     },
-    [api, resetRecallPreview, sessions.activeSessionId, sessions.selectedSession?.channel, setError],
+    [
+      api,
+      resetRecallPreview,
+      sessions.activeSessionId,
+      sessions.selectedSession?.channel,
+      setError,
+    ],
   );
 
-  const ensureRecallPreviewForCurrentDraft = useCallback(async (): Promise<RecallPreviewEnvelope | null> => {
-    const trimmed = composerText.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("/")) {
-      return null;
-    }
-    if (recallPreview !== null && recallPreviewQuery === trimmed) {
-      return recallPreview;
-    }
-    return loadRecallPreview(trimmed, { reportError: true });
-  }, [composerText, loadRecallPreview, recallPreview, recallPreviewQuery]);
+  const ensureRecallPreviewForCurrentDraft =
+    useCallback(async (): Promise<RecallPreviewEnvelope | null> => {
+      const trimmed = composerText.trim();
+      if (trimmed.length === 0 || trimmed.startsWith("/")) {
+        return null;
+      }
+      if (recallPreview !== null && recallPreviewQuery === trimmed) {
+        return recallPreview;
+      }
+      return loadRecallPreview(trimmed, { reportError: true });
+    }, [composerText, loadRecallPreview, recallPreview, recallPreviewQuery]);
 
   useEffect(() => {
     const sessionId = sessions.activeSessionId.trim();
@@ -330,7 +337,12 @@ export function ChatConsolePanel({
     }
     sessionSwitchRef.current = sessionId;
     void refreshSessionTranscript();
-  }, [clearTranscriptState, refreshSessionTranscript, resetRecallPreview, sessions.activeSessionId]);
+  }, [
+    clearTranscriptState,
+    refreshSessionTranscript,
+    resetRecallPreview,
+    sessions.activeSessionId,
+  ]);
 
   useEffect(() => {
     const sessionId = sessions.activeSessionId.trim();
