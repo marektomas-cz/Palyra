@@ -23,9 +23,7 @@ struct InstallSmokeContext {
 
 fn install_smoke_context() -> Result<Option<InstallSmokeContext>> {
     if std::env::var_os("PALYRA_BIN_UNDER_TEST").is_none() {
-        eprintln!(
-            "skipping installed smoke test because PALYRA_BIN_UNDER_TEST is not configured"
-        );
+        eprintln!("skipping installed smoke test because PALYRA_BIN_UNDER_TEST is not configured");
         return Ok(None);
     }
 
