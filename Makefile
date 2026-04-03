@@ -97,11 +97,31 @@ desktop-ui-ready:
 deterministic-core:
 	bash scripts/test/run-deterministic-core.sh
 
+cli-test:
+	cargo test -p palyra-cli --locked
+
+cli-regression:
+	bash scripts/test/run-workflow-regression.sh
+
+cli-install-smoke:
+	pwsh -NoLogo -File scripts/test/run-cli-install-smoke.ps1
+
+cli-install-smoke-sh:
+	bash scripts/test/run-cli-install-smoke.sh
+
 workflow-regression:
 	bash scripts/test/run-workflow-regression.sh
 
+main-preflight:
+	cargo test --workspace --locked
+	pwsh -NoLogo -File scripts/test/run-workflow-regression.ps1
+	pwsh -NoLogo -File scripts/test/run-cli-install-smoke.ps1
+
 release-smoke:
 	pwsh -NoLogo -File scripts/test/run-release-smoke.ps1
+
+release-smoke-sh:
+	bash scripts/test/run-release-smoke.sh
 
 push-gate-fast:
 	bash scripts/run-pre-push-checks.sh
