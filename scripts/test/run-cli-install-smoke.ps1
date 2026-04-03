@@ -163,13 +163,15 @@ function Invoke-TranscriptCommand {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     [void]$process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     if ($PSBoundParameters.ContainsKey("StdinText")) {
         $process.StandardInput.Write($StdinText)
     }
     $process.StandardInput.Close()
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
+    [void]$process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     $exitCode = $process.ExitCode
 
     $transcript = @(
