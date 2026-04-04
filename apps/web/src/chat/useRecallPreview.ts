@@ -95,16 +95,17 @@ export function useRecallPreview({
     [activeSessionId, api, resetRecallPreview, selectedChannel, setError],
   );
 
-  const ensureRecallPreviewForCurrentDraft = useCallback(async (): Promise<RecallPreviewEnvelope | null> => {
-    const trimmed = composerText.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("/")) {
-      return null;
-    }
-    if (recallPreview !== null && recallPreviewQuery === trimmed) {
-      return recallPreview;
-    }
-    return loadRecallPreview(trimmed, { reportError: true });
-  }, [composerText, loadRecallPreview, recallPreview, recallPreviewQuery]);
+  const ensureRecallPreviewForCurrentDraft =
+    useCallback(async (): Promise<RecallPreviewEnvelope | null> => {
+      const trimmed = composerText.trim();
+      if (trimmed.length === 0 || trimmed.startsWith("/")) {
+        return null;
+      }
+      if (recallPreview !== null && recallPreviewQuery === trimmed) {
+        return recallPreview;
+      }
+      return loadRecallPreview(trimmed, { reportError: true });
+    }, [composerText, loadRecallPreview, recallPreview, recallPreviewQuery]);
 
   useEffect(() => {
     const sessionId = activeSessionId.trim();

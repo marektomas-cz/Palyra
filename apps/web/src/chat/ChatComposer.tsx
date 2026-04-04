@@ -8,10 +8,7 @@ import {
   StatusChip,
   TextAreaField,
 } from "../console/components/ui";
-import type {
-  ContextReferencePreviewEnvelope,
-  RecallPreviewEnvelope,
-} from "../consoleApi";
+import type { ContextReferencePreviewEnvelope, RecallPreviewEnvelope } from "../consoleApi";
 
 import type {
   ComposerAttachment,
@@ -165,9 +162,7 @@ export function ChatComposer({
               {contextReferencePreviewBusy ? "Resolving..." : "Resolved"}
             </StatusChip>
             <StatusChip
-              tone={
-                (contextReferencePreview?.references.length ?? 0) > 0 ? "accent" : "default"
-              }
+              tone={(contextReferencePreview?.references.length ?? 0) > 0 ? "accent" : "default"}
             >
               {contextReferencePreview?.references.length ?? 0} references
             </StatusChip>
@@ -222,9 +217,7 @@ export function ChatComposer({
                   </strong>
                   <span>{reference.provenance.map((item) => item.note).join(" ")}</span>
                   <p>{reference.preview_text}</p>
-                  {reference.warnings.length > 0 ? (
-                    <p>{reference.warnings.join(" ")}</p>
-                  ) : null}
+                  {reference.warnings.length > 0 ? <p>{reference.warnings.join(" ")}</p> : null}
                 </div>
                 <div className="chat-ops-card__actions">
                   <StatusChip tone="accent">
