@@ -251,6 +251,7 @@ fn build_paired_device_record(
             .map(|record| record.verified_pairing.transcript_hash_hex.clone())
             .unwrap_or_default(),
         current_certificate_fingerprint: paired.certificate_fingerprints.last().cloned(),
+        certificate_fingerprint_history: paired.certificate_fingerprints.clone(),
         current_certificate_expires_at_unix_ms: Some(certificate_expires_at_unix_ms),
         revoked_reason: None,
         revoked_at_unix_ms: None,
@@ -283,6 +284,7 @@ fn build_revoked_device_record(
             .map(|record| record.verified_pairing.transcript_hash_hex.clone())
             .unwrap_or_default(),
         current_certificate_fingerprint: None,
+        certificate_fingerprint_history: Vec::new(),
         current_certificate_expires_at_unix_ms: None,
         revoked_reason: Some(revoked.reason.clone()),
         revoked_at_unix_ms: Some(i64::try_from(revoked.revoked_at_unix_ms).unwrap_or(i64::MAX)),

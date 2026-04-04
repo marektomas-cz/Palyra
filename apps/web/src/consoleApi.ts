@@ -1241,6 +1241,15 @@ export type NodePairingRequestState =
   | "rejected"
   | "completed"
   | "expired";
+export type NodePairingMethod = "pin" | "qr";
+
+export interface NodePairingCodeView {
+  code: string;
+  method: NodePairingMethod;
+  issued_by: string;
+  created_at_unix_ms: number;
+  expires_at_unix_ms: number;
+}
 
 export interface NodeCapabilityView {
   name: string;
@@ -1265,7 +1274,7 @@ export interface NodePairingRequestView {
   session_id: string;
   device_id: string;
   client_kind: string;
-  method: "pin" | "qr";
+  method: NodePairingMethod;
   code_issued_by: string;
   requested_at_unix_ms: number;
   expires_at_unix_ms: number;
@@ -1276,6 +1285,23 @@ export interface NodePairingRequestView {
   identity_fingerprint: string;
   transcript_hash_hex: string;
   cert_expires_at_unix_ms?: number;
+}
+
+export interface NodePairingListEnvelope {
+  contract: ContractDescriptor;
+  codes: NodePairingCodeView[];
+  requests: NodePairingRequestView[];
+  page: PageInfo;
+}
+
+export interface NodePairingRequestEnvelope {
+  contract: ContractDescriptor;
+  request: NodePairingRequestView;
+}
+
+export interface NodePairingCodeEnvelope {
+  contract: ContractDescriptor;
+  code: NodePairingCodeView;
 }
 
 export interface InventoryDeviceRecord {
@@ -1295,6 +1321,8 @@ export interface InventoryDeviceRecord {
   approval_id: string;
   identity_fingerprint: string;
   transcript_hash_hex: string;
+  current_certificate_fingerprint?: string;
+  certificate_fingerprint_history: string[];
   platform?: string;
   capabilities: NodeCapabilityView[];
   capability_summary: InventoryCapabilitySummary;
@@ -1828,6 +1856,63 @@ export class ConsoleApiClient {
 
   async getPairingSummary(): Promise<PairingSummaryEnvelope> {
     return this.request("/console/v1/pairing");
+  }
+
+  async listNodePairingRequests(params?: {
+    client_kind?: string;
+    state?: NodePairingRequestState;
+  }): Promise<NodePairingListEnvelope> {
+    const query = new URLSearchParams();
+    if (params?.client_kind !== undefined) {
+      query.set("client_kind", params.client_kind);
+    }
+    if (params?.state !== undefined) {
+      query.set("state", params.state);
+    }
+    return this.request(buildPathWithQuery("/console/v1/pairing/requests", query));
+  }
+
+  async mintNodePairingCode(payload: {
+    method: NodePairingMethod;
+    issued_by?: string;
+    ttl_ms?: number;
+  }): Promise<NodePairingCodeEnvelope> {
+    return this.request(
+      "/console/v1/pairing/requests/code",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async approveNodePairingRequest(
+    requestId: string,
+    payload: { reason?: string } = {},
+  ): Promise<NodePairingRequestEnvelope> {
+    return this.request(
+      `/console/v1/pairing/requests/${encodeURIComponent(requestId)}/approve`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async rejectNodePairingRequest(
+    requestId: string,
+    payload: { reason?: string } = {},
+  ): Promise<NodePairingRequestEnvelope> {
+    return this.request(
+      `/console/v1/pairing/requests/${encodeURIComponent(requestId)}/reject`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
   }
 
   async listInventory(): Promise<InventoryListEnvelope> {

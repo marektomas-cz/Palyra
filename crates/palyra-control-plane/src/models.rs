@@ -639,6 +639,8 @@ pub struct DeviceRecord {
     pub transcript_hash_hex: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_certificate_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub certificate_fingerprint_history: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_certificate_expires_at_unix_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -772,6 +774,10 @@ pub struct InventoryDeviceRecord {
     pub approval_id: String,
     pub identity_fingerprint: String,
     pub transcript_hash_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_certificate_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub certificate_fingerprint_history: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
     #[serde(default)]

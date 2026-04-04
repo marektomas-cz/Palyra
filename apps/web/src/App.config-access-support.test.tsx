@@ -6,6 +6,9 @@ import {
   auditEventsFixture,
   capabilityCatalogFixture,
   deploymentPostureFixture,
+  inventoryDeviceDetailFixture,
+  inventoryListFixture,
+  nodePairingListFixture,
   pairingSummaryFixture,
   supportBundleJobFixture,
   supportBundleJobsFixture,
@@ -146,6 +149,8 @@ describe("M56 config, access, and support surfaces", () => {
 
   it("surfaces access CLI handoffs and support bundle recovery workflows", async () => {
     let pairingSummary = pairingSummaryFixture();
+    let nodePairings: ReturnType<typeof nodePairingListFixture> = nodePairingListFixture();
+    let inventory = inventoryListFixture();
     const supportJobs = supportBundleJobsFixture().jobs.slice();
 
     const fetchMock = createFetchRouter(
@@ -177,6 +182,71 @@ describe("M56 config, access, and support surfaces", () => {
           };
           return jsonResponse(pairingSummary);
         }
+        if (request.path === "/console/v1/pairing/requests" && request.method === "GET") {
+          return jsonResponse(nodePairings);
+        }
+        if (request.path === "/console/v1/pairing/requests/code" && request.method === "POST") {
+          nodePairings = {
+            ...nodePairings,
+            codes: [
+              {
+                code: "889900",
+                method: "pin",
+                issued_by: "admin:web-console",
+                created_at_unix_ms: 1700000004500,
+                expires_at_unix_ms: 1700000604500,
+              },
+              ...nodePairings.codes,
+            ],
+          };
+          return jsonResponse({
+            contract: nodePairings.contract,
+            code: nodePairings.codes[0],
+          });
+        }
+        if (
+          request.path === "/console/v1/pairing/requests/pair-req-pending/approve" &&
+          request.method === "POST"
+        ) {
+          nodePairings = {
+            ...nodePairings,
+            requests: nodePairings.requests.map((record) => {
+              if (record.request_id !== "pair-req-pending") {
+                return record;
+              }
+              return {
+                ...record,
+                state: "approved" as const,
+                decision_reason: "operator confirmed trust",
+              };
+            }) as ReturnType<typeof nodePairingListFixture>["requests"],
+          };
+          return jsonResponse({
+            contract: nodePairings.contract,
+            request: nodePairings.requests.find((record) => record.request_id === "pair-req-pending"),
+          });
+        }
+        if (request.path === "/console/v1/inventory" && request.method === "GET") {
+          return jsonResponse(inventory);
+        }
+        if (
+          request.path === "/console/v1/inventory/01ARZ3NDEKTSV4RRFFQ69G5FAZ" &&
+          request.method === "GET"
+        ) {
+          return jsonResponse(inventoryDeviceDetailFixture("01ARZ3NDEKTSV4RRFFQ69G5FAZ"));
+        }
+        if (
+          request.path === "/console/v1/inventory/01ARZ3NDEKTSV4RRFFQ69G5FBZ" &&
+          request.method === "GET"
+        ) {
+          return jsonResponse(inventoryDeviceDetailFixture("01ARZ3NDEKTSV4RRFFQ69G5FBZ"));
+        }
+        if (
+          request.path === "/console/v1/inventory/01ARZ3NDEKTSV4RRFFQ69G5FCZ" &&
+          request.method === "GET"
+        ) {
+          return jsonResponse(inventoryDeviceDetailFixture("01ARZ3NDEKTSV4RRFFQ69G5FCZ"));
+        }
         if (request.path === "/console/v1/support-bundle/jobs" && request.method === "POST") {
           supportJobs.unshift({
             job_id: "support-job-2",
@@ -201,13 +271,32 @@ describe("M56 config, access, and support surfaces", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Access" }));
     expect(await screen.findByRole("heading", { name: "Access" })).toBeInTheDocument();
-    expect(document.body).toHaveTextContent("dashboard --verify-remote");
+    expect(document.body).toHaveTextContent("daemon dashboard-url --verify-remote --json");
     expect(document.body).toHaveTextContent("tunnel --ssh");
+    expect(document.body).toHaveTextContent("sha256:remote-admin-1");
+    expect(document.body).toHaveTextContent("Expired before the client finished bootstrap.");
+    expect(document.body).toHaveTextContent("operator rejected test device");
 
-    fireEvent.click(await screen.findByRole("button", { name: "Mint pairing code" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Mint node pairing code" }));
     await waitFor(() => {
-      expect(screen.getByText("Pairing code minted.")).toBeInTheDocument();
+      expect(screen.getByText("Node pairing code 889900 minted.")).toBeInTheDocument();
     });
+    expect(document.body).toHaveTextContent("--pairing-code 889900");
+
+    fireEvent.change(screen.getByLabelText("Approval / rejection reason"), {
+      target: { value: "operator confirmed trust" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    const approveDialog = await screen.findByRole("alertdialog", {
+      name: "Approve pairing request",
+    });
+    fireEvent.click(within(approveDialog).getByRole("button", { name: "Approve pairing request" }));
+    await waitFor(() => {
+      expect(screen.getByText("Pairing request pair-req-pending approved.")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(document.body).toHaveTextContent("heartbeat stale");
+    expect(document.body).toHaveTextContent("sha256:cert-pending-2");
 
     fireEvent.click(screen.getByRole("button", { name: "Support and Recovery" }));
     expect(
@@ -246,9 +335,9 @@ describe("M56 config, access, and support surfaces", () => {
     );
     fireEvent.click(await screen.findByRole("button", { name: "Access" }));
     await waitFor(() => {
-      expect(screen.getByText(cliHandoffs[0].cli_handoff_commands[0])).toBeInTheDocument();
+      expect(screen.getAllByText(cliHandoffs[0].cli_handoff_commands[0]).length).toBeGreaterThan(0);
     });
-    expect(screen.getByText(cliHandoffs[1].cli_handoff_commands[0])).toBeInTheDocument();
+    expect(screen.getAllByText(cliHandoffs[1].cli_handoff_commands[0]).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
     expect(await screen.findByText(cliHandoffs[2].cli_handoff_commands[0])).toBeInTheDocument();

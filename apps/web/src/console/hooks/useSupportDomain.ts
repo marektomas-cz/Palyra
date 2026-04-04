@@ -1,6 +1,12 @@
 import { useState } from "react";
 
-import type { ConsoleApiClient, JsonValue } from "../../consoleApi";
+import type {
+  ConsoleApiClient,
+  JsonValue,
+  NodePairingCodeView,
+  NodePairingMethod,
+  NodePairingRequestView,
+} from "../../consoleApi";
 import type { JsonObject } from "../shared";
 import {
   emptyToUndefined,
@@ -24,9 +30,18 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
   const [supportDiagnosticsSnapshot, setSupportDiagnosticsSnapshot] = useState<JsonObject | null>(
     null,
   );
+  const [supportNodePairingMethod, setSupportNodePairingMethod] =
+    useState<NodePairingMethod>("pin");
   const [supportPairingChannel, setSupportPairingChannel] = useState("discord:default");
   const [supportPairingIssuedBy, setSupportPairingIssuedBy] = useState("");
   const [supportPairingTtlMs, setSupportPairingTtlMs] = useState("600000");
+  const [supportNodePairingCodes, setSupportNodePairingCodes] = useState<NodePairingCodeView[]>(
+    [],
+  );
+  const [supportNodePairingRequests, setSupportNodePairingRequests] = useState<
+    NodePairingRequestView[]
+  >([]);
+  const [supportPairingDecisionReason, setSupportPairingDecisionReason] = useState("");
   const [supportBundleRetainJobs, setSupportBundleRetainJobs] = useState("16");
   const [supportBundleJobs, setSupportBundleJobs] = useState<JsonObject[]>([]);
   const [supportSelectedBundleJobId, setSupportSelectedBundleJobId] = useState("");
@@ -36,9 +51,10 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     setSupportBusy(true);
     setError(null);
     try {
-      const [pairingResponse, jobsResponse, deploymentResponse, diagnosticsResponse] =
+      const [pairingResponse, nodePairingResponse, jobsResponse, deploymentResponse, diagnosticsResponse] =
         await Promise.all([
           api.getPairingSummary(),
+          api.listNodePairingRequests(),
           api.listSupportBundleJobs(),
           api.getDeploymentPosture(),
           api.getDiagnostics(),
@@ -48,6 +64,8 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
           ? (pairingResponse as unknown as JsonObject)
           : null,
       );
+      setSupportNodePairingCodes(nodePairingResponse.codes);
+      setSupportNodePairingRequests(nodePairingResponse.requests);
       setSupportBundleJobs(toJsonObjectArray(jobsResponse.jobs as unknown as JsonValue[]));
       setSupportDeployment(
         isJsonObject(deploymentResponse as unknown as JsonValue)
@@ -76,10 +94,6 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
   }
 
   async function mintSupportPairingCode(): Promise<void> {
-    if (supportPairingChannel.trim().length === 0) {
-      setError("Pairing channel cannot be empty.");
-      return;
-    }
     const ttlMs = parseInteger(supportPairingTtlMs);
     if (ttlMs === null || ttlMs <= 0) {
       setError("Pairing TTL must be a positive integer.");
@@ -89,15 +103,56 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     setError(null);
     setNotice(null);
     try {
-      const response = await api.mintPairingCode({
-        channel: supportPairingChannel.trim(),
+      const response = await api.mintNodePairingCode({
+        method: supportNodePairingMethod,
         issued_by: emptyToUndefined(supportPairingIssuedBy),
         ttl_ms: ttlMs,
       });
-      setSupportPairingSummary(
-        isJsonObject(response as unknown as JsonValue) ? (response as unknown as JsonObject) : null,
-      );
-      setNotice("Pairing code minted.");
+      setSupportNodePairingCodes((previous) => [response.code, ...previous]);
+      setNotice(`Node pairing code ${response.code.code} minted.`);
+      await refreshSupport();
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setSupportBusy(false);
+    }
+  }
+
+  async function approveSupportPairingRequest(requestId: string): Promise<void> {
+    if (requestId.trim().length === 0) {
+      setError("Pairing request ID cannot be empty.");
+      return;
+    }
+    setSupportBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await api.approveNodePairingRequest(requestId.trim(), {
+        reason: emptyToUndefined(supportPairingDecisionReason),
+      });
+      setNotice(`Pairing request ${response.request.request_id} approved.`);
+      await refreshSupport();
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setSupportBusy(false);
+    }
+  }
+
+  async function rejectSupportPairingRequest(requestId: string): Promise<void> {
+    if (requestId.trim().length === 0) {
+      setError("Pairing request ID cannot be empty.");
+      return;
+    }
+    setSupportBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await api.rejectNodePairingRequest(requestId.trim(), {
+        reason: emptyToUndefined(supportPairingDecisionReason),
+      });
+      setNotice(`Pairing request ${response.request.request_id} rejected.`);
+      await refreshSupport();
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -160,9 +215,13 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     setSupportPairingSummary(null);
     setSupportDeployment(null);
     setSupportDiagnosticsSnapshot(null);
+    setSupportNodePairingMethod("pin");
     setSupportPairingChannel("discord:default");
     setSupportPairingIssuedBy("");
     setSupportPairingTtlMs("600000");
+    setSupportNodePairingCodes([]);
+    setSupportNodePairingRequests([]);
+    setSupportPairingDecisionReason("");
     setSupportBundleRetainJobs("16");
     setSupportBundleJobs([]);
     setSupportSelectedBundleJobId("");
@@ -174,12 +233,18 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     supportPairingSummary,
     supportDeployment,
     supportDiagnosticsSnapshot,
+    supportNodePairingMethod,
+    setSupportNodePairingMethod,
     supportPairingChannel,
     setSupportPairingChannel,
     supportPairingIssuedBy,
     setSupportPairingIssuedBy,
     supportPairingTtlMs,
     setSupportPairingTtlMs,
+    supportNodePairingCodes,
+    supportNodePairingRequests,
+    supportPairingDecisionReason,
+    setSupportPairingDecisionReason,
     supportBundleRetainJobs,
     setSupportBundleRetainJobs,
     supportBundleJobs,
@@ -188,6 +253,8 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     supportSelectedBundleJob,
     refreshSupport,
     mintSupportPairingCode,
+    approveSupportPairingRequest,
+    rejectSupportPairingRequest,
     createSupportBundle,
     loadSupportBundleJob,
     resetSupportDomain,

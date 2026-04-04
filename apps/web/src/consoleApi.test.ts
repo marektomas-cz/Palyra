@@ -735,6 +735,8 @@ describe("ConsoleApiClient", () => {
           approval_id: "approval-1",
           identity_fingerprint: "fingerprint-1",
           transcript_hash_hex: "hash-1",
+          current_certificate_fingerprint: "cert-1",
+          certificate_fingerprint_history: ["cert-0", "cert-1"],
           capabilities: [{ name: "ping", available: true }],
           capability_summary: { total: 1, available: 1, unavailable: 0 },
           warnings: [],
@@ -759,6 +761,8 @@ describe("ConsoleApiClient", () => {
           approval_id: "approval-1",
           identity_fingerprint: "fingerprint-1",
           transcript_hash_hex: "hash-1",
+          current_certificate_fingerprint: "cert-1",
+          certificate_fingerprint_history: ["cert-0", "cert-1"],
         },
       }),
       jsonResponse({
@@ -773,6 +777,7 @@ describe("ConsoleApiClient", () => {
           approval_id: "approval-1",
           identity_fingerprint: "fingerprint-1",
           transcript_hash_hex: "hash-1",
+          certificate_fingerprint_history: [],
         },
       }),
       jsonResponse({
@@ -787,6 +792,7 @@ describe("ConsoleApiClient", () => {
           approval_id: "approval-1",
           identity_fingerprint: "fingerprint-1",
           transcript_hash_hex: "hash-1",
+          certificate_fingerprint_history: [],
         },
       }),
       jsonResponse({
@@ -847,6 +853,103 @@ describe("ConsoleApiClient", () => {
 
     expect(requestUrl(calls[6]?.input)).toBe("/console/v1/nodes/01ARZ3NDEKTSV4RRFFQ69G5FAZ/invoke");
     expect(new Headers(calls[6]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+  });
+
+  it("supports phase 9 node pairing lifecycle endpoints with additive CSRF behavior", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        codes: [],
+        requests: [],
+        page: { limit: 20, returned: 0, has_more: false },
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        code: {
+          code: "112233",
+          method: "pin",
+          issued_by: "admin:web-console",
+          created_at_unix_ms: 100,
+          expires_at_unix_ms: 200,
+        },
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        request: {
+          request_id: "pair-req-1",
+          session_id: "session-1",
+          device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+          client_kind: "node",
+          method: "pin",
+          code_issued_by: "admin:web-console",
+          requested_at_unix_ms: 100,
+          expires_at_unix_ms: 200,
+          approval_id: "approval-1",
+          state: "approved",
+          identity_fingerprint: "fingerprint-1",
+          transcript_hash_hex: "hash-1",
+        },
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        request: {
+          request_id: "pair-req-1",
+          session_id: "session-1",
+          device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+          client_kind: "node",
+          method: "pin",
+          code_issued_by: "admin:web-console",
+          requested_at_unix_ms: 100,
+          expires_at_unix_ms: 200,
+          approval_id: "approval-1",
+          state: "rejected",
+          identity_fingerprint: "fingerprint-1",
+          transcript_hash_hex: "hash-1",
+        },
+      }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+    const client = new ConsoleApiClient("", fetcher);
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    await client.listNodePairingRequests({ state: "pending_approval", client_kind: "node" });
+    await client.mintNodePairingCode({ method: "pin", issued_by: "admin:web-console", ttl_ms: 600000 });
+    await client.approveNodePairingRequest("pair-req-1", { reason: "looks good" });
+    await client.rejectNodePairingRequest("pair-req-1", { reason: "second pass reject" });
+
+    expect(requestUrl(calls[1]?.input)).toBe(
+      "/console/v1/pairing/requests?client_kind=node&state=pending_approval",
+    );
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[2]?.input)).toBe("/console/v1/pairing/requests/code");
+    expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[3]?.input)).toBe("/console/v1/pairing/requests/pair-req-1/approve");
+    expect(new Headers(calls[3]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[4]?.input)).toBe("/console/v1/pairing/requests/pair-req-1/reject");
+    expect(new Headers(calls[4]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
   });
 
   it("supports M52 control-plane domains with additive CSRF behavior", async () => {

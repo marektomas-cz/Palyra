@@ -208,6 +208,18 @@ export function InventorySection({ app }: InventorySectionProps) {
                   <dt>Certificate expiry</dt>
                   <dd>{formatUnixMs(selected.current_certificate_expires_at_unix_ms)}</dd>
                 </div>
+                <div>
+                  <dt>Identity fingerprint</dt>
+                  <dd>
+                    <code>{selected.identity_fingerprint || "n/a"}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Current cert fingerprint</dt>
+                  <dd>
+                    <code>{selected.current_certificate_fingerprint ?? "n/a"}</code>
+                  </dd>
+                </div>
               </dl>
 
               {selected.warnings.length > 0 ? (
@@ -327,14 +339,16 @@ export function InventorySection({ app }: InventorySectionProps) {
                 ) : (
                   <WorkspaceTable
                     ariaLabel="Device pairing history"
-                    columns={["Requested", "State", "Session", "Approval"]}
+                    columns={["Requested", "State", "Session", "Fingerprint"]}
                   >
                     {inventory.selectedPairings.map((record) => (
                       <tr key={record.request_id}>
                         <td>{formatUnixMs(record.requested_at_unix_ms)}</td>
                         <td>{record.state}</td>
                         <td>{record.session_id}</td>
-                        <td>{record.approval_id || "n/a"}</td>
+                        <td>
+                          <code>{record.identity_fingerprint || "n/a"}</code>
+                        </td>
                       </tr>
                     ))}
                   </WorkspaceTable>
