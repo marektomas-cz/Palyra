@@ -20,6 +20,7 @@ type OverviewSectionProps = {
     | "overviewDeployment"
     | "overviewApprovals"
     | "overviewDiagnostics"
+    | "overviewUsageInsights"
     | "overviewSupportJobs"
     | "refreshOverview"
     | "setSection"
@@ -29,6 +30,7 @@ type OverviewSectionProps = {
 export function OverviewSection({ app }: OverviewSectionProps) {
   const deployment = app.overviewDeployment;
   const diagnostics = app.overviewDiagnostics;
+  const usageInsights = app.overviewUsageInsights;
   const observability = readObject(diagnostics ?? {}, "observability");
   const connector = readObject(observability ?? {}, "connector");
   const providerAuth = readObject(observability ?? {}, "provider_auth");
@@ -51,6 +53,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     failedSupportJobs,
     connectorDegraded,
     providerState,
+    alertCount: usageInsights?.alerts.length ?? 0,
   });
 
   return (
@@ -93,6 +96,16 @@ export function OverviewSection({ app }: OverviewSectionProps) {
           label="Access posture"
           tone={warnings.length > 0 ? "warning" : "default"}
           value={`${readString(deployment ?? {}, "mode") ?? "unknown"} / ${readString(deployment ?? {}, "bind_profile") ?? "n/a"}`}
+        />
+        <WorkspaceMetricCard
+          detail={
+            usageInsights === null
+              ? "Refresh overview to load routing posture and active alerts."
+              : `${usageInsights.routing.default_mode} default mode with ${usageInsights.alerts.length} active alerts.`
+          }
+          label="Routing posture"
+          tone={(usageInsights?.alerts.length ?? 0) > 0 ? "warning" : "default"}
+          value={usageInsights?.routing.default_mode ?? "suggest"}
         />
         <WorkspaceMetricCard
           detail={
@@ -190,6 +203,10 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                 <dd>{providerState}</dd>
               </div>
               <div>
+                <dt>Usage alerts</dt>
+                <dd>{usageInsights?.alerts.length ?? 0}</dd>
+              </div>
+              <div>
                 <dt>Degraded connectors</dt>
                 <dd>{connectorDegraded}</dd>
               </div>
@@ -232,17 +249,20 @@ function buildAttentionItems({
   failedSupportJobs,
   connectorDegraded,
   providerState,
+  alertCount,
 }: {
   warnings: string[];
   pendingApprovals: number;
   failedSupportJobs: number;
   connectorDegraded: number;
   providerState: string;
+  alertCount: number;
 }): string[] {
   const items = [...warnings];
   if (pendingApprovals > 0) items.push(`${pendingApprovals} approvals waiting for review.`);
   if (failedSupportJobs > 0) items.push(`${failedSupportJobs} support bundle jobs failed.`);
   if (connectorDegraded > 0) items.push(`${connectorDegraded} connectors are degraded.`);
+  if (alertCount > 0) items.push(`${alertCount} usage governance alerts are active.`);
   if (providerState === "degraded" || providerState === "expired" || providerState === "missing") {
     items.push(`Provider auth state is ${providerState}.`);
   }

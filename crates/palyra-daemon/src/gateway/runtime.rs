@@ -21,6 +21,7 @@ use crate::journal::{
     WorkspaceDocumentMoveRequest, WorkspaceDocumentRecord, WorkspaceDocumentVersionRecord,
     WorkspaceDocumentWriteRequest, WorkspaceSearchHit, WorkspaceSearchRequest,
 };
+use crate::usage_governance::SmartRoutingRuntimeConfig;
 use palyra_auth::AuthHealthReport;
 use std::path::PathBuf;
 
@@ -43,6 +44,7 @@ pub struct GatewayRuntimeConfigSnapshot {
     pub http_fetch: HttpFetchRuntimeConfig,
     pub browser_service: BrowserServiceRuntimeConfig,
     pub canvas_host: CanvasHostRuntimeConfig,
+    pub smart_routing: SmartRoutingRuntimeConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -410,6 +412,8 @@ pub struct SecuritySnapshot {
     pub orchestrator_runloop_v1_enabled: bool,
     pub node_rpc_mtls_required: bool,
     pub revoked_certificate_count: usize,
+    pub smart_routing_enabled: bool,
+    pub smart_routing_default_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2134,6 +2138,8 @@ impl GatewayRuntimeState {
                 orchestrator_runloop_v1_enabled: self.config.orchestrator_runloop_v1_enabled,
                 node_rpc_mtls_required: self.config.node_rpc_mtls_required,
                 revoked_certificate_count: self.revoked_certificate_count,
+                smart_routing_enabled: self.config.smart_routing.enabled,
+                smart_routing_default_mode: self.config.smart_routing.default_mode.clone(),
             },
             storage: StorageSnapshot {
                 journal_db_path: self.journal_config.db_path.to_string_lossy().into_owned(),
@@ -2194,6 +2200,11 @@ impl GatewayRuntimeState {
     #[must_use]
     pub const fn is_orchestrator_runloop_enabled(&self) -> bool {
         self.config.orchestrator_runloop_v1_enabled
+    }
+
+    #[must_use]
+    pub fn model_provider_status_snapshot(&self) -> ProviderStatusSnapshot {
+        self.model_provider.status_snapshot()
     }
 
     #[allow(clippy::result_large_err)]
@@ -2811,6 +2822,220 @@ impl GatewayRuntimeState {
         tokio::task::spawn_blocking(move || state.add_orchestrator_usage_blocking(&delta))
             .await
             .map_err(|_| Status::internal("orchestrator usage worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_orchestrator_usage_runs_blocking(
+        &self,
+        query: &OrchestratorUsageQuery,
+        limit: usize,
+    ) -> Result<Vec<crate::journal::OrchestratorUsageInsightsRunRecord>, Status> {
+        self.journal_store
+            .list_orchestrator_usage_runs(query, limit)
+            .map_err(|error| map_orchestrator_store_error("list orchestrator usage runs", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_orchestrator_usage_runs(
+        self: &Arc<Self>,
+        query: OrchestratorUsageQuery,
+        limit: usize,
+    ) -> Result<Vec<crate::journal::OrchestratorUsageInsightsRunRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.list_orchestrator_usage_runs_blocking(&query, limit)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator usage runs worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_usage_pricing_records_blocking(
+        &self,
+    ) -> Result<Vec<crate::journal::UsagePricingRecord>, Status> {
+        self.journal_store
+            .list_usage_pricing_records()
+            .map_err(|error| map_orchestrator_store_error("list usage pricing records", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_usage_pricing_records(
+        self: &Arc<Self>,
+    ) -> Result<Vec<crate::journal::UsagePricingRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.list_usage_pricing_records_blocking())
+            .await
+            .map_err(|_| Status::internal("usage pricing list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn upsert_usage_pricing_record_blocking(
+        &self,
+        request: &crate::journal::UsagePricingUpsertRequest,
+    ) -> Result<crate::journal::UsagePricingRecord, Status> {
+        self.journal_store
+            .upsert_usage_pricing_record(request)
+            .map_err(|error| map_orchestrator_store_error("upsert usage pricing record", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn upsert_usage_pricing_record(
+        self: &Arc<Self>,
+        request: crate::journal::UsagePricingUpsertRequest,
+    ) -> Result<crate::journal::UsagePricingRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.upsert_usage_pricing_record_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("usage pricing upsert worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn upsert_usage_budget_policy_blocking(
+        &self,
+        request: &crate::journal::UsageBudgetPolicyUpsertRequest,
+    ) -> Result<crate::journal::UsageBudgetPolicyRecord, Status> {
+        self.journal_store
+            .upsert_usage_budget_policy(request)
+            .map_err(|error| map_orchestrator_store_error("upsert usage budget policy", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn upsert_usage_budget_policy(
+        self: &Arc<Self>,
+        request: crate::journal::UsageBudgetPolicyUpsertRequest,
+    ) -> Result<crate::journal::UsageBudgetPolicyRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.upsert_usage_budget_policy_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("usage budget upsert worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_usage_budget_policies_blocking(
+        &self,
+        filter: &crate::journal::UsageBudgetPoliciesFilter,
+    ) -> Result<Vec<crate::journal::UsageBudgetPolicyRecord>, Status> {
+        self.journal_store
+            .list_usage_budget_policies(filter)
+            .map_err(|error| map_orchestrator_store_error("list usage budget policies", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_usage_budget_policies(
+        self: &Arc<Self>,
+        filter: crate::journal::UsageBudgetPoliciesFilter,
+    ) -> Result<Vec<crate::journal::UsageBudgetPolicyRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.list_usage_budget_policies_blocking(&filter))
+            .await
+            .map_err(|_| Status::internal("usage budget list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn create_usage_routing_decision_blocking(
+        &self,
+        request: &crate::journal::UsageRoutingDecisionCreateRequest,
+    ) -> Result<crate::journal::UsageRoutingDecisionRecord, Status> {
+        self.journal_store
+            .create_usage_routing_decision(request)
+            .map_err(|error| map_orchestrator_store_error("create usage routing decision", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn create_usage_routing_decision(
+        self: &Arc<Self>,
+        request: crate::journal::UsageRoutingDecisionCreateRequest,
+    ) -> Result<crate::journal::UsageRoutingDecisionRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.create_usage_routing_decision_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("usage routing decision worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_usage_routing_decisions_blocking(
+        &self,
+        filter: &crate::journal::UsageRoutingDecisionsFilter,
+    ) -> Result<Vec<crate::journal::UsageRoutingDecisionRecord>, Status> {
+        self.journal_store
+            .list_usage_routing_decisions(filter)
+            .map_err(|error| map_orchestrator_store_error("list usage routing decisions", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_usage_routing_decisions(
+        self: &Arc<Self>,
+        filter: crate::journal::UsageRoutingDecisionsFilter,
+    ) -> Result<Vec<crate::journal::UsageRoutingDecisionRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.list_usage_routing_decisions_blocking(&filter))
+            .await
+            .map_err(|_| Status::internal("usage routing decision list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn upsert_usage_alert_blocking(
+        &self,
+        request: &crate::journal::UsageAlertUpsertRequest,
+    ) -> Result<crate::journal::UsageAlertRecord, Status> {
+        self.journal_store
+            .upsert_usage_alert(request)
+            .map_err(|error| map_orchestrator_store_error("upsert usage alert", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn upsert_usage_alert(
+        self: &Arc<Self>,
+        request: crate::journal::UsageAlertUpsertRequest,
+    ) -> Result<crate::journal::UsageAlertRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.upsert_usage_alert_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("usage alert upsert worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_usage_alerts_blocking(
+        &self,
+        filter: &crate::journal::UsageAlertsFilter,
+    ) -> Result<Vec<crate::journal::UsageAlertRecord>, Status> {
+        self.journal_store
+            .list_usage_alerts(filter)
+            .map_err(|error| map_orchestrator_store_error("list usage alerts", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_usage_alerts(
+        self: &Arc<Self>,
+        filter: crate::journal::UsageAlertsFilter,
+    ) -> Result<Vec<crate::journal::UsageAlertRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.list_usage_alerts_blocking(&filter))
+            .await
+            .map_err(|_| Status::internal("usage alerts list worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn latest_approval_by_subject_blocking(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<crate::journal::ApprovalRecord>, Status> {
+        self.journal_store
+            .latest_approval_by_subject(subject_id)
+            .map_err(|error| map_orchestrator_store_error("load latest approval by subject", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn latest_approval_by_subject(
+        self: &Arc<Self>,
+        subject_id: String,
+    ) -> Result<Option<crate::journal::ApprovalRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.latest_approval_by_subject_blocking(subject_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("usage approval lookup worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

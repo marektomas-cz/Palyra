@@ -1195,58 +1195,182 @@ fn build_gateway_usage_cost_value(db_path: Option<String>, days: u32) -> Result<
         .with_context(|| format!("failed to open journal database {}", db_path.display()))?;
     let lookback_ms =
         now_unix_ms_i64()?.saturating_sub(i64::from(days).saturating_mul(24 * 60 * 60 * 1000));
+    let smart_routing_enabled = std::env::var("PALYRA_SMART_ROUTING_ENABLED")
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true);
+    let smart_routing_default_mode = std::env::var("PALYRA_SMART_ROUTING_MODE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "suggest".to_owned());
 
-    let totals = connection
+    let mut pricing_map = std::collections::HashMap::<String, (Option<f64>, Option<f64>)>::new();
+    let mut pricing_statement = connection.prepare(
+        "SELECT model_id, input_cost_per_million_usd, output_cost_per_million_usd
+         FROM usage_pricing_catalog
+         ORDER BY effective_from_unix_ms DESC",
+    )?;
+    let mut pricing_rows = pricing_statement.query([])?;
+    while let Some(row) = pricing_rows.next()? {
+        let model_id = row.get::<_, String>(0)?;
+        pricing_map.entry(model_id).or_insert((row.get(1)?, row.get(2)?));
+    }
+    let pricing_entries = pricing_map.len() as i64;
+
+    let mut routing_map = std::collections::HashMap::<String, String>::new();
+    let mut routing_suggest_runs = 0_i64;
+    let mut routing_dry_run_runs = 0_i64;
+    let mut routing_enforced_runs = 0_i64;
+    let mut routing_overrides = 0_i64;
+    let mut routing_statement = connection.prepare(
+        "SELECT run_ulid, mode, default_model_id, actual_model_id
+         FROM usage_routing_decisions
+         WHERE created_at_unix_ms >= ?1
+         ORDER BY created_at_unix_ms DESC",
+    )?;
+    let mut routing_rows = routing_statement.query([lookback_ms])?;
+    while let Some(row) = routing_rows.next()? {
+        let run_id = row.get::<_, String>(0)?;
+        let mode = row.get::<_, String>(1)?;
+        let default_model_id = row.get::<_, String>(2)?;
+        let actual_model_id = row.get::<_, String>(3)?;
+        match mode.as_str() {
+            "suggest" => routing_suggest_runs += 1,
+            "dry_run" => routing_dry_run_runs += 1,
+            "enforced" => routing_enforced_runs += 1,
+            _ => {}
+        }
+        if actual_model_id != default_model_id {
+            routing_overrides += 1;
+        }
+        routing_map.entry(run_id).or_insert(actual_model_id);
+    }
+    let active_alerts = connection
         .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(total_tokens), 0)
-             FROM orchestrator_runs
-             WHERE started_at_unix_ms >= ?1",
+            "SELECT COUNT(*) FROM usage_alerts WHERE resolved_at_unix_ms IS NULL AND last_observed_at_unix_ms >= ?1",
             [lookback_ms],
-            |row| {
-                Ok(json!({
-                    "runs": row.get::<_, i64>(0)?,
-                    "prompt_tokens": row.get::<_, i64>(1)?,
-                    "completion_tokens": row.get::<_, i64>(2)?,
-                    "total_tokens": row.get::<_, i64>(3)?,
-                }))
-            },
+            |row| row.get::<_, i64>(0),
         )
-        .context("failed to summarize orchestrator usage from journal database")?;
+        .context("failed to count active usage alerts")?;
 
-    let mut statement = connection.prepare(
-        "SELECT date(started_at_unix_ms / 1000, 'unixepoch') AS run_date,
-                COUNT(*),
-                COALESCE(SUM(prompt_tokens), 0),
-                COALESCE(SUM(completion_tokens), 0),
-                COALESCE(SUM(total_tokens), 0)
+    let mut runs_statement = connection.prepare(
+        "SELECT run_ulid, started_at_unix_ms, prompt_tokens, completion_tokens, total_tokens
          FROM orchestrator_runs
          WHERE started_at_unix_ms >= ?1
-         GROUP BY run_date
-         ORDER BY run_date ASC",
+         ORDER BY started_at_unix_ms ASC",
     )?;
-    let mut rows = statement.query([lookback_ms])?;
+    let mut rows = runs_statement.query([lookback_ms])?;
+    let mut totals_runs = 0_i64;
+    let mut totals_prompt = 0_i64;
+    let mut totals_completion = 0_i64;
+    let mut totals_total = 0_i64;
+    let mut totals_estimated_cost = 0.0_f64;
+    let mut total_estimated_runs = 0_i64;
+    let mut daily_map =
+        std::collections::BTreeMap::<String, (i64, i64, i64, i64, f64, i64)>::new();
     let mut daily = Vec::new();
     while let Some(row) = rows.next()? {
+        let run_id = row.get::<_, String>(0)?;
+        let started_at_unix_ms = row.get::<_, i64>(1)?;
+        let prompt_tokens = row.get::<_, i64>(2)?;
+        let completion_tokens = row.get::<_, i64>(3)?;
+        let total_tokens = row.get::<_, i64>(4)?;
+        totals_runs += 1;
+        totals_prompt += prompt_tokens;
+        totals_completion += completion_tokens;
+        totals_total += total_tokens;
+        let run_date = connection
+            .query_row(
+                "SELECT date(?1 / 1000, 'unixepoch')",
+                [started_at_unix_ms],
+                |date_row| date_row.get::<_, String>(0),
+            )
+            .context("failed to derive run date for usage-cost output")?;
+        let mut estimated_cost = Value::Null;
+        let mut estimated_cost_raw = 0.0_f64;
+        let mut estimated_count = 0_i64;
+        if let Some(model_id) = routing_map.get(run_id.as_str()) {
+            if let Some((input_rate, output_rate)) = pricing_map.get(model_id.as_str()) {
+                let cost = input_rate.unwrap_or(0.0) * (prompt_tokens as f64 / 1_000_000.0)
+                    + output_rate.unwrap_or(0.0) * (completion_tokens as f64 / 1_000_000.0);
+                estimated_cost_raw = cost;
+                estimated_cost = json!(cost);
+                totals_estimated_cost += cost;
+                total_estimated_runs += 1;
+                estimated_count = 1;
+            }
+        }
+        let entry = daily_map.entry(run_date).or_insert((0, 0, 0, 0, 0.0, 0));
+        entry.0 += 1;
+        entry.1 += prompt_tokens;
+        entry.2 += completion_tokens;
+        entry.3 += total_tokens;
+        entry.4 += estimated_cost_raw;
+        entry.5 += estimated_count;
         daily.push(json!({
-            "date": row.get::<_, String>(0)?,
-            "runs": row.get::<_, i64>(1)?,
-            "prompt_tokens": row.get::<_, i64>(2)?,
-            "completion_tokens": row.get::<_, i64>(3)?,
-            "total_tokens": row.get::<_, i64>(4)?,
-            "estimated_cost_usd": Value::Null,
+            "date": connection
+                .query_row("SELECT date(?1 / 1000, 'unixepoch')", [started_at_unix_ms], |date_row| {
+                    date_row.get::<_, String>(0)
+                })?,
+            "runs": 1,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": estimated_cost,
         }));
     }
+    daily = daily_map
+        .into_iter()
+        .map(|(date, (runs, prompt_tokens, completion_tokens, total_tokens, estimated_cost, estimated_runs))| {
+            json!({
+                "date": date,
+                "runs": runs,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "estimated_cost_usd": if estimated_runs > 0 { Some(estimated_cost) } else { None::<f64> },
+                "estimated_runs": estimated_runs,
+            })
+        })
+        .collect::<Vec<_>>();
 
     Ok(json!({
         "db_path": db_path.display().to_string(),
         "days": days,
-        "cost_tracking_available": false,
-        "estimated_cost_usd": Value::Null,
-        "totals": totals,
+        "cost_tracking_available": total_estimated_runs > 0,
+        "estimated_cost_usd": if total_estimated_runs > 0 { Some(totals_estimated_cost) } else { None::<f64> },
+        "smart_routing": {
+            "enabled": smart_routing_enabled,
+            "default_mode": smart_routing_default_mode,
+        },
+        "pricing_catalog": {
+            "entries": pricing_entries,
+            "models": pricing_map.len(),
+        },
+        "routing": {
+            "suggest_runs": routing_suggest_runs,
+            "dry_run_runs": routing_dry_run_runs,
+            "enforced_runs": routing_enforced_runs,
+            "overrides": routing_overrides,
+        },
+        "alerts": {
+            "active": active_alerts,
+        },
+        "totals": {
+            "runs": totals_runs,
+            "prompt_tokens": totals_prompt,
+            "completion_tokens": totals_completion,
+            "total_tokens": totals_total,
+            "estimated_runs": total_estimated_runs,
+        },
         "daily": daily,
         "notes": [
-            "Palyra currently persists token usage in orchestrator_runs but does not persist provider pricing metadata.",
-            "Use this command as a practical usage summary; cost fields remain null until pricing accounting lands."
+            "Cost estimates reuse the shared Phase 7 pricing catalog stored in usage_pricing_catalog.",
+            "Runs without a recorded routing decision stay excluded from estimated_cost_usd to avoid pretending certainty."
         ],
     }))
 }
@@ -1268,13 +1392,33 @@ fn run_gateway_usage_cost(db_path: Option<String>, days: u32) -> Result<()> {
     }
 
     println!(
-        "gateway.usage_cost days={} db_path={} runs={} prompt_tokens={} completion_tokens={} total_tokens={} estimated_cost_usd=unavailable",
+        "gateway.usage_cost days={} db_path={} runs={} prompt_tokens={} completion_tokens={} total_tokens={} estimated_cost_usd={} smart_routing_enabled={} smart_routing_mode={} pricing_entries={} active_alerts={}",
         payload.get("days").and_then(Value::as_u64).unwrap_or(0),
         payload.get("db_path").and_then(Value::as_str).unwrap_or("none"),
         payload.pointer("/totals/runs").and_then(Value::as_i64).unwrap_or(0),
         payload.pointer("/totals/prompt_tokens").and_then(Value::as_i64).unwrap_or(0),
         payload.pointer("/totals/completion_tokens").and_then(Value::as_i64).unwrap_or(0),
         payload.pointer("/totals/total_tokens").and_then(Value::as_i64).unwrap_or(0),
+        payload
+            .get("estimated_cost_usd")
+            .map_or_else(|| "unavailable".to_owned(), Value::to_string),
+        payload
+            .pointer("/smart_routing/enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        payload
+            .pointer("/smart_routing/default_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("suggest"),
+        payload.pointer("/pricing_catalog/entries").and_then(Value::as_i64).unwrap_or(0),
+        payload.pointer("/alerts/active").and_then(Value::as_i64).unwrap_or(0),
+    );
+    println!(
+        "gateway.usage_cost.routing suggest_runs={} dry_run_runs={} enforced_runs={} overrides={}",
+        payload.pointer("/routing/suggest_runs").and_then(Value::as_i64).unwrap_or(0),
+        payload.pointer("/routing/dry_run_runs").and_then(Value::as_i64).unwrap_or(0),
+        payload.pointer("/routing/enforced_runs").and_then(Value::as_i64).unwrap_or(0),
+        payload.pointer("/routing/overrides").and_then(Value::as_i64).unwrap_or(0),
     );
     if let Some(last_day) =
         payload.get("daily").and_then(Value::as_array).and_then(|entries| entries.last())

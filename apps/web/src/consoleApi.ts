@@ -211,6 +211,155 @@ export interface UsageModelsEnvelope {
   cost_tracking_available: boolean;
 }
 
+export interface UsageInsightsPricingSummary {
+  known_entries: number;
+  estimated_models: number;
+  estimate_only: boolean;
+}
+
+export interface UsageInsightsHealthSummary {
+  provider_state: string;
+  provider_kind: string;
+  error_rate_bps: number;
+  circuit_open: boolean;
+  cooldown_ms: number;
+  avg_latency_ms: number;
+  recent_routing_overrides: number;
+}
+
+export interface UsageBudgetEvaluation {
+  policy_id: string;
+  scope_kind: string;
+  scope_id: string;
+  metric_kind: string;
+  interval_kind: string;
+  action: string;
+  status: string;
+  consumed_value?: number;
+  projected_value?: number;
+  soft_limit_value?: number;
+  hard_limit_value?: number;
+  message: string;
+}
+
+export interface UsageBudgetPolicyRecord {
+  policy_id: string;
+  scope_kind: string;
+  scope_id: string;
+  metric_kind: string;
+  interval_kind: string;
+  soft_limit_value?: number;
+  hard_limit_value?: number;
+  action: string;
+  routing_mode_override?: string;
+  enabled: boolean;
+  created_by_principal: string;
+  updated_by_principal: string;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
+export interface UsageRoutingDecisionRecord {
+  decision_id: string;
+  run_id: string;
+  session_id: string;
+  principal: string;
+  device_id: string;
+  channel?: string;
+  scope_kind: string;
+  scope_id: string;
+  mode: string;
+  default_model_id: string;
+  recommended_model_id: string;
+  actual_model_id: string;
+  provider_id: string;
+  provider_kind: string;
+  complexity_score: number;
+  health_state: string;
+  explanation_json: string;
+  estimated_cost_lower_usd?: number;
+  estimated_cost_upper_usd?: number;
+  budget_outcome?: string;
+  created_at_unix_ms: number;
+}
+
+export interface UsageAlertRecord {
+  alert_id: string;
+  alert_kind: string;
+  severity: string;
+  scope_kind: string;
+  scope_id: string;
+  summary: string;
+  reason: string;
+  recommended_action: string;
+  source: string;
+  dedupe_key: string;
+  payload_json: string;
+  first_observed_at_unix_ms: number;
+  last_observed_at_unix_ms: number;
+  occurrence_count: number;
+  acknowledged_at_unix_ms?: number;
+  resolved_at_unix_ms?: number;
+}
+
+export interface UsageInsightsRoutingSummary {
+  default_mode: string;
+  suggest_runs: number;
+  dry_run_runs: number;
+  enforced_runs: number;
+  overrides: number;
+  recent_decisions: UsageRoutingDecisionRecord[];
+}
+
+export interface UsageInsightsBudgetsEnvelope {
+  policies: UsageBudgetPolicyRecord[];
+  evaluations: UsageBudgetEvaluation[];
+}
+
+export interface UsageInsightsEnvelope {
+  contract: ContractDescriptor;
+  query: UsageQueryEcho;
+  totals: UsageTotals;
+  timeline: UsageTimelineBucket[];
+  pricing: UsageInsightsPricingSummary;
+  health: UsageInsightsHealthSummary;
+  routing: UsageInsightsRoutingSummary;
+  budgets: UsageInsightsBudgetsEnvelope;
+  alerts: UsageAlertRecord[];
+  model_mix: Array<{
+    model_id: string;
+    provider_kind: string;
+    runs: number;
+    total_tokens: number;
+    estimated_cost_usd?: number;
+    source: string;
+  }>;
+  scope_mix: Array<{
+    scope: string;
+    runs: number;
+    total_tokens: number;
+    estimated_cost_usd?: number;
+  }>;
+  tool_mix: Array<{
+    tool_name: string;
+    proposals: number;
+  }>;
+  cost_tracking_available: boolean;
+}
+
+export interface UsageBudgetOverrideRequestEnvelope {
+  contract: ContractDescriptor;
+  operator_principal: string;
+  policy: UsageBudgetPolicyRecord;
+  approval: {
+    approval_id: string;
+    subject_id: string;
+    request_summary: string;
+    decision?: string;
+    decision_scope?: string;
+  };
+}
+
 export interface LogQueryEcho {
   limit: number;
   direction: string;
@@ -1726,6 +1875,24 @@ export class ConsoleApiClient {
 
   async listUsageModels(params?: URLSearchParams): Promise<UsageModelsEnvelope> {
     return this.request(buildPathWithQuery("/console/v1/usage/models", params));
+  }
+
+  async getUsageInsights(params?: URLSearchParams): Promise<UsageInsightsEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/usage/insights", params));
+  }
+
+  async requestUsageBudgetOverride(
+    policyId: string,
+    payload: { reason?: string } = {},
+  ): Promise<UsageBudgetOverrideRequestEnvelope> {
+    return this.request(
+      `/console/v1/usage/budgets/${encodeURIComponent(policyId)}/override-request`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
   }
 
   async listLogs(params?: URLSearchParams): Promise<LogListEnvelope> {

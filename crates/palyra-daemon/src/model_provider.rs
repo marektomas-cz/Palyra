@@ -177,6 +177,7 @@ pub struct ProviderRequest {
     pub input_text: String,
     pub json_mode: bool,
     pub vision_inputs: Vec<ProviderImageInput>,
+    pub model_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1061,7 +1062,10 @@ impl OpenAiCompatibleProvider {
         request: &ProviderRequest,
     ) -> Result<ProviderResponse, AttemptError> {
         let mut body = json!({
-            "model": self.config.openai_model,
+            "model": request
+                .model_override
+                .clone()
+                .unwrap_or_else(|| self.config.openai_model.clone()),
             "messages": [{"role":"user","content": build_openai_chat_content(request)}],
             "stream": false,
         });
@@ -1765,6 +1769,7 @@ mod tests {
             input_text: (0..64).map(|index| format!("token{index}")).collect::<Vec<_>>().join(" "),
             json_mode: false,
             vision_inputs: Vec::new(),
+            model_override: None,
         };
         let response =
             provider.complete(request).await.expect("deterministic provider should succeed");
@@ -1788,6 +1793,7 @@ mod tests {
                 input_text: "measure deterministic metrics".to_owned(),
                 json_mode: false,
                 vision_inputs: Vec::new(),
+                model_override: None,
             })
             .await
             .expect("deterministic provider should succeed");
@@ -1803,6 +1809,7 @@ mod tests {
                     height_px: Some(1),
                     artifact_id: None,
                 }],
+                model_override: None,
             })
             .await;
         assert!(matches!(failed, Err(ProviderError::VisionUnsupported { .. })));
@@ -1841,6 +1848,7 @@ mod tests {
                 input_text: "hello".to_owned(),
                 json_mode: false,
                 vision_inputs: Vec::new(),
+                model_override: None,
             })
             .await
             .expect("provider should succeed after retry");
@@ -2015,6 +2023,7 @@ mod tests {
                 input_text: "hello".to_owned(),
                 json_mode: false,
                 vision_inputs: Vec::new(),
+                model_override: None,
             })
             .await;
         assert!(matches!(first, Err(ProviderError::RequestFailed { .. })));
@@ -2023,6 +2032,7 @@ mod tests {
                 input_text: "hello again".to_owned(),
                 json_mode: false,
                 vision_inputs: Vec::new(),
+                model_override: None,
             })
             .await;
         assert!(
@@ -2250,6 +2260,7 @@ mod tests {
                 input_text: "hello".to_owned(),
                 json_mode: false,
                 vision_inputs: Vec::new(),
+                model_override: None,
             })
             .await;
 

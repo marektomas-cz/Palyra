@@ -48,14 +48,20 @@ export function UsageSection({ app }: UsageSectionProps) {
               {usage.busy ? "Refreshing" : "Aggregates ready"}
             </WorkspaceStatusChip>
             <WorkspaceStatusChip
-              tone={usage.summary?.cost_tracking_available ? "success" : "default"}
+              tone={usage.insights?.cost_tracking_available ? "success" : "default"}
             >
-              {usage.summary?.cost_tracking_available ? "Cost tracking live" : "Cost unavailable"}
+              {usage.insights?.cost_tracking_available ? "Cost estimates live" : "Cost unavailable"}
             </WorkspaceStatusChip>
             <WorkspaceStatusChip
-              tone={(usage.summary?.totals.active_runs ?? 0) > 0 ? "accent" : "default"}
+              tone={
+                usage.insights?.health.provider_state === "ok"
+                  ? "success"
+                  : (usage.insights?.alerts.length ?? 0) > 0
+                    ? "warning"
+                    : "default"
+              }
             >
-              {usage.summary?.totals.active_runs ?? 0} active runs
+              {usage.insights?.health.provider_state ?? "unknown"} provider
             </WorkspaceStatusChip>
           </>
         }
@@ -83,9 +89,9 @@ export function UsageSection({ app }: UsageSectionProps) {
           value={usage.summary?.totals.runs ?? 0}
         />
         <WorkspaceMetricCard
-          detail="Distinct sessions with activity in the selected window."
-          label="Active sessions"
-          value={usage.summary?.totals.session_count ?? 0}
+          detail="Estimated cost is always marked as an estimate and never pretends to be exact."
+          label="Estimated cost"
+          value={formatUsd(usage.insights?.model_mix.reduce((total, row) => total + (row.estimated_cost_usd ?? 0), 0))}
         />
         <WorkspaceMetricCard
           detail="Average completed-run latency. In-progress runs stay excluded."
@@ -146,6 +152,99 @@ export function UsageSection({ app }: UsageSectionProps) {
           />
         </div>
       </WorkspaceSectionCard>
+
+      {usage.insights !== null ? (
+        <section className="workspace-two-column">
+          <WorkspaceSectionCard
+            title="Routing and budgets"
+            description="Phase 7 turns usage into governance: routing posture, budget evaluations, and overrides now share one backend contract."
+          >
+            <dl className="workspace-key-value-grid">
+              <div>
+                <dt>Default mode</dt>
+                <dd>{usage.insights.routing.default_mode}</dd>
+              </div>
+              <div>
+                <dt>Overrides</dt>
+                <dd>{usage.insights.routing.overrides}</dd>
+              </div>
+              <div>
+                <dt>Provider health</dt>
+                <dd>{usage.insights.health.provider_state}</dd>
+              </div>
+              <div>
+                <dt>Budget signals</dt>
+                <dd>
+                  {usage.insights.budgets.evaluations.filter((entry) => entry.status !== "ok").length}
+                </dd>
+              </div>
+            </dl>
+            {usage.insights.budgets.evaluations.length === 0 ? (
+              <WorkspaceEmptyState
+                compact
+                title="No budget policies loaded"
+                description="Budget governance is active only where policies are configured."
+              />
+            ) : (
+              <EntityTable
+                ariaLabel="Budget evaluations"
+                columns={[
+                  { key: "policy", label: "Policy", render: (row) => row.policy_id },
+                  { key: "scope", label: "Scope", render: (row) => `${row.scope_kind}:${row.scope_id}` },
+                  { key: "status", label: "Status", render: (row) => row.status },
+                  { key: "message", label: "Message", render: (row) => row.message },
+                  {
+                    key: "action",
+                    label: "Action",
+                    render: (row) =>
+                      canRequestBudgetOverride(row.status) ? (
+                        <ActionButton
+                          type="button"
+                          variant="secondary"
+                          isDisabled={usage.busy}
+                          onPress={() => void usage.requestBudgetOverride(row.policy_id)}
+                        >
+                          Request override
+                        </ActionButton>
+                      ) : row.status === "override_applied" ? (
+                        "Approved"
+                      ) : (
+                        "None"
+                      ),
+                  },
+                ]}
+                getRowId={(row) => row.policy_id}
+                rows={usage.insights.budgets.evaluations}
+              />
+            )}
+          </WorkspaceSectionCard>
+
+          <WorkspaceSectionCard
+            title="Alerts"
+            description="Anomalies stay actionable: every alert keeps a reason, a scope, and the next operator move."
+          >
+            {usage.insights.alerts.length === 0 ? (
+              <WorkspaceEmptyState
+                compact
+                title="No active alerts"
+                description="The selected window did not produce a budget, routing, or cost anomaly."
+              />
+            ) : (
+              <EntityTable
+                ariaLabel="Usage alerts"
+                columns={[
+                  { key: "kind", label: "Kind", render: (row) => row.alert_kind },
+                  { key: "severity", label: "Severity", render: (row) => row.severity },
+                  { key: "scope", label: "Scope", render: (row) => `${row.scope_kind}:${row.scope_id}` },
+                  { key: "summary", label: "Summary", render: (row) => row.summary },
+                ]}
+                getRowId={(row) => row.alert_id}
+                rows={usage.insights.alerts}
+              />
+            )}
+          </WorkspaceSectionCard>
+        </section>
+      ) : null}
 
       <section className="workspace-two-column">
         <WorkspaceSectionCard
@@ -257,14 +356,14 @@ export function UsageSection({ app }: UsageSectionProps) {
                 </div>
               </dl>
 
-              {detail.cost_tracking_available ? null : (
-                <WorkspaceInlineNotice title="Cost placeholder" tone="default">
+              {usage.insights?.pricing.estimate_only ? (
+                <WorkspaceInlineNotice title="Estimate only" tone="default">
                   <p>
-                    Pricing metadata is not persisted yet, so cost fields remain unavailable by
-                    contract.
+                    Pricing uses the shared Phase 7 catalog and is intentionally marked as an
+                    estimate-only surface.
                   </p>
                 </WorkspaceInlineNotice>
-              )}
+              ) : null}
 
               <EntityTable
                 ariaLabel="Recent usage runs"
@@ -381,6 +480,86 @@ export function UsageSection({ app }: UsageSectionProps) {
           getRowId={(row) => row.model_id}
         />
       </section>
+
+      {usage.insights !== null ? (
+        <section className="workspace-two-column">
+          <UsageTableCard
+            description="Model mix now includes estimate-only cost so routing drift is visible before it hurts the bill."
+            rows={usage.insights.model_mix}
+            title="Model mix"
+            onExportCsv={() => usage.exportDataset("models", "csv")}
+            onExportJson={() => usage.exportDataset("models", "json")}
+            columns={[
+              { key: "model", label: "Model", render: (row) => row.model_id },
+              { key: "source", label: "Source", render: (row) => row.source },
+              { key: "runs", label: "Runs", render: (row) => row.runs },
+              { key: "cost", label: "Est. cost", render: (row) => formatUsd(row.estimated_cost_usd) },
+            ]}
+            getRowId={(row) => `${row.model_id}-${row.source}`}
+          />
+
+          <UsageTableCard
+            description="Foreground vs. background usage stays explicit so routines and queue work do not disappear inside aggregate totals."
+            rows={usage.insights.scope_mix}
+            title="Foreground / background"
+            onExportCsv={() => usage.exportDataset("timeline", "csv")}
+            onExportJson={() => usage.exportDataset("timeline", "json")}
+            columns={[
+              { key: "scope", label: "Scope", render: (row) => row.scope },
+              { key: "runs", label: "Runs", render: (row) => row.runs },
+              { key: "tokens", label: "Tokens", render: (row) => row.total_tokens },
+              { key: "cost", label: "Est. cost", render: (row) => formatUsd(row.estimated_cost_usd) },
+            ]}
+            getRowId={(row) => row.scope}
+          />
+        </section>
+      ) : null}
+
+      {usage.insights !== null ? (
+        <section className="workspace-two-column">
+          <UsageTableCard
+            description="Tool proposal volume is reconstructed from run transcripts so automation-heavy paths stay visible alongside model and scope mix."
+            rows={usage.insights.tool_mix}
+            title="Tool mix"
+            onExportCsv={() => usage.exportDataset("timeline", "csv")}
+            onExportJson={() => usage.exportDataset("timeline", "json")}
+            columns={[
+              { key: "tool", label: "Tool", render: (row) => row.tool_name },
+              { key: "proposals", label: "Proposals", render: (row) => row.proposals },
+            ]}
+            getRowId={(row) => row.tool_name}
+          />
+
+          <WorkspaceSectionCard
+            title="Recent routing decisions"
+            description="Stored routing decisions keep the selected model and budget outcome visible without opening raw audit records."
+          >
+            {usage.insights.routing.recent_decisions.length === 0 ? (
+              <WorkspaceEmptyState
+                compact
+                title="No routing decisions loaded"
+                description="The selected window did not produce stored routing decisions yet."
+              />
+            ) : (
+              <EntityTable
+                ariaLabel="Recent routing decisions"
+                columns={[
+                  { key: "run", label: "Run", render: (row) => row.run_id },
+                  { key: "mode", label: "Mode", render: (row) => row.mode },
+                  {
+                    key: "model",
+                    label: "Model",
+                    render: (row) => `${row.actual_model_id} (${row.default_model_id})`,
+                  },
+                  { key: "budget", label: "Budget", render: (row) => row.budget_outcome ?? "ok" },
+                ]}
+                getRowId={(row) => row.decision_id}
+                rows={usage.insights.routing.recent_decisions.slice(0, 8)}
+              />
+            )}
+          </WorkspaceSectionCard>
+        </section>
+      ) : null}
     </main>
   );
 }
@@ -440,4 +619,15 @@ function formatLatency(value: number | undefined): string {
     return `${Math.round(value)} ms`;
   }
   return `${(value / 1000).toFixed(1)} s`;
+}
+
+function formatUsd(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) {
+    return "n/a";
+  }
+  return `$${value.toFixed(2)}`;
+}
+
+function canRequestBudgetOverride(status: string): boolean {
+  return status === "approval_required" || status === "blocked" || status === "hard_limit";
 }

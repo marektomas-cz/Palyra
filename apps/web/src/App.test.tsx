@@ -1877,6 +1877,59 @@ function routeM56BaselineRequest(
   if (path === "/console/v1/audit/events") {
     return jsonResponse(auditEventsFixture());
   }
+  if (path === "/console/v1/usage/insights") {
+    return jsonResponse({
+      contract: { contract_version: "control-plane.v1" },
+      query: {
+        start_at_unix_ms: 0,
+        end_at_unix_ms: 100,
+        bucket: "day",
+        bucket_width_ms: 86_400_000,
+        include_archived: false,
+      },
+      totals: {
+        runs: 0,
+        session_count: 0,
+        active_runs: 0,
+        completed_runs: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+      },
+      timeline: [],
+      pricing: {
+        known_entries: 1,
+        estimated_models: 1,
+        estimate_only: true,
+      },
+      health: {
+        provider_state: "ok",
+        provider_kind: "deterministic",
+        error_rate_bps: 0,
+        circuit_open: false,
+        cooldown_ms: 0,
+        avg_latency_ms: 0,
+        recent_routing_overrides: 0,
+      },
+      routing: {
+        default_mode: "suggest",
+        suggest_runs: 0,
+        dry_run_runs: 0,
+        enforced_runs: 0,
+        overrides: 0,
+        recent_decisions: [],
+      },
+      budgets: {
+        policies: [],
+        evaluations: [],
+      },
+      alerts: [],
+      model_mix: [],
+      scope_mix: [],
+      tool_mix: [],
+      cost_tracking_available: false,
+    });
+  }
   return undefined;
 }
 

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   ConsoleApiClient,
   UsageAgentRecord,
+  UsageInsightsEnvelope,
   UsageModelRecord,
   UsageSessionDetailEnvelope,
   UsageSessionRecord,
@@ -25,6 +26,7 @@ export function useUsageDomain({ api, setError, setNotice }: UseUsageDomainArgs)
   const [bucket, setBucket] = useState<UsageBucketKey>("auto");
   const [includeArchived, setIncludeArchived] = useState(false);
   const [summary, setSummary] = useState<UsageSummaryEnvelope | null>(null);
+  const [insights, setInsights] = useState<UsageInsightsEnvelope | null>(null);
   const [sessions, setSessions] = useState<UsageSessionRecord[]>([]);
   const [agents, setAgents] = useState<UsageAgentRecord[]>([]);
   const [models, setModels] = useState<UsageModelRecord[]>([]);
@@ -67,13 +69,15 @@ export function useUsageDomain({ api, setError, setNotice }: UseUsageDomainArgs)
     setBusy(true);
     setError(null);
     try {
-      const [nextSummary, nextSessions, nextAgents, nextModels] = await Promise.all([
+      const [nextSummary, nextInsights, nextSessions, nextAgents, nextModels] = await Promise.all([
         api.getUsageSummary(params),
+        api.getUsageInsights(params),
         api.listUsageSessions(topParams),
         api.listUsageAgents(topParams),
         api.listUsageModels(topParams),
       ]);
       setSummary(nextSummary);
+      setInsights(nextInsights);
       setSessions(nextSessions.sessions);
       setAgents(nextAgents.agents);
       setModels(nextModels.models);
@@ -125,6 +129,20 @@ export function useUsageDomain({ api, setError, setNotice }: UseUsageDomainArgs)
     setNotice(`Export started for ${dataset} (${format.toUpperCase()}).`);
   }
 
+  async function requestBudgetOverride(policyId: string): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await api.requestUsageBudgetOverride(policyId);
+      setNotice(`Budget override requested for ${response.policy.policy_id}.`);
+      await refreshUsage();
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return {
     busy,
     windowKey,
@@ -134,6 +152,7 @@ export function useUsageDomain({ api, setError, setNotice }: UseUsageDomainArgs)
     includeArchived,
     setIncludeArchived,
     summary,
+    insights,
     sessions,
     agents,
     models,
@@ -143,6 +162,7 @@ export function useUsageDomain({ api, setError, setNotice }: UseUsageDomainArgs)
     selectedSessionDetail,
     refreshUsage,
     exportDataset,
+    requestBudgetOverride,
   };
 }
 

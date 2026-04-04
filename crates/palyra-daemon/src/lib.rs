@@ -29,6 +29,7 @@ mod sandbox_runner;
 pub mod support;
 mod tool_protocol;
 pub mod transport;
+mod usage_governance;
 mod wasm_plugin_runner;
 mod webhooks;
 
@@ -218,6 +219,26 @@ const DISCORD_ONBOARDING_HTTP_TIMEOUT_MS: u64 = 5_000;
 const DISCORD_ONBOARDING_CONFIG_BACKUPS: usize = 2;
 const DISCORD_ONBOARDING_INBOUND_RECENT_WINDOW_MS: i64 = 15 * 60 * 1_000;
 const DISCORD_ONBOARDING_MONITOR_WAIT_TIMEOUT_MS: u64 = 5_000;
+const SMART_ROUTING_ENABLED_ENV: &str = "PALYRA_SMART_ROUTING_ENABLED";
+const SMART_ROUTING_MODE_ENV: &str = "PALYRA_SMART_ROUTING_MODE";
+
+fn load_smart_routing_runtime_config() -> usage_governance::SmartRoutingRuntimeConfig {
+    let enabled = std::env::var(SMART_ROUTING_ENABLED_ENV)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true);
+    let default_mode = std::env::var(SMART_ROUTING_MODE_ENV)
+        .ok()
+        .and_then(|value| {
+            usage_governance::RoutingMode::parse(value.as_str()).map(|mode| mode.as_str().to_owned())
+        })
+        .unwrap_or_else(|| usage_governance::RoutingMode::Suggest.as_str().to_owned());
+    usage_governance::SmartRoutingRuntimeConfig { enabled, default_mode }
+}
 const DISCORD_ONBOARDING_MONITOR_WAIT_POLL_MS: u64 = 250;
 const CONSOLE_SESSION_COOKIE_NAME: &str = "palyra_console_session";
 const CONSOLE_CSRF_HEADER_NAME: &str = "x-palyra-csrf-token";
@@ -1760,6 +1781,7 @@ pub async fn run() -> Result<()> {
                 max_updates_per_minute: usize::try_from(loaded.canvas_host.max_updates_per_minute)
                     .unwrap_or(usize::MAX),
             },
+            smart_routing: load_smart_routing_runtime_config(),
         },
         GatewayJournalConfigSnapshot {
             db_path: loaded.storage.journal_db_path.clone(),

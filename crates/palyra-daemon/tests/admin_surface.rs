@@ -1128,6 +1128,103 @@ fn console_usage_endpoints_support_empty_ranges_archived_sessions_and_export() -
 }
 
 #[test]
+fn console_usage_insights_expose_budget_governance_and_override_requests() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let policy_response = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/usage/budgets"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "policy_id": "ops-default-budget",
+            "scope_kind": "environment",
+            "scope_id": "default",
+            "metric_kind": "estimated_cost_usd",
+            "interval_kind": "rolling_30d",
+            "soft_limit_value": 0.05,
+            "hard_limit_value": 0.10,
+            "action": "approval_required",
+            "enabled": true,
+        }))
+        .send()
+        .context("failed to create usage budget policy")?
+        .error_for_status()
+        .context("usage budget policy upsert returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse usage budget policy response json")?;
+    assert_eq!(
+        policy_response
+            .get("policy")
+            .and_then(|value| value.get("policy_id"))
+            .and_then(Value::as_str),
+        Some("ops-default-budget"),
+        "budget policy upsert should persist the requested policy id"
+    );
+
+    let insights = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/usage/insights"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to fetch usage insights")?
+        .error_for_status()
+        .context("usage insights returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse usage insights response json")?;
+    assert_eq!(
+        insights
+            .get("routing")
+            .and_then(|value| value.get("default_mode"))
+            .and_then(Value::as_str),
+        Some("suggest"),
+        "usage insights should surface the runtime default routing mode"
+    );
+    assert_eq!(
+        insights
+            .get("budgets")
+            .and_then(|value| value.get("policies"))
+            .and_then(Value::as_array)
+            .map(std::vec::Vec::len),
+        Some(1),
+        "usage insights should include the persisted budget policy"
+    );
+
+    let override_request = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/usage/budgets/ops-default-budget/override-request"
+        ))
+        .header("Cookie", cookie)
+        .header("x-palyra-csrf-token", csrf_token)
+        .json(&serde_json::json!({
+            "reason": "operator validating elevated usage path",
+        }))
+        .send()
+        .context("failed to request usage budget override")?
+        .error_for_status()
+        .context("usage budget override request returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse usage budget override response json")?;
+    assert_eq!(
+        override_request
+            .get("approval")
+            .and_then(|value| value.get("subject_id"))
+            .and_then(Value::as_str),
+        Some("usage-budget:ops-default-budget"),
+        "budget override request should create an approval bound to the usage-budget subject"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_cron_workflow_create_disable_and_list_runs() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
     let mut daemon = ChildGuard::new(child);

@@ -251,6 +251,10 @@ fn build_test_runtime_state_with_http_fetch_private_targets(
                 max_assets_per_bundle: 32,
                 max_updates_per_minute: 120,
             },
+            smart_routing: crate::usage_governance::SmartRoutingRuntimeConfig {
+                enabled: true,
+                default_mode: "suggest".to_owned(),
+            },
         },
         GatewayJournalConfigSnapshot { db_path, hash_chain_enabled },
         journal_store,
@@ -1683,6 +1687,7 @@ async fn status_snapshot_surfaces_model_provider_runtime_aggregates() {
             input_text: "status snapshot provider metrics".to_owned(),
             json_mode: false,
             vision_inputs: Vec::new(),
+            model_override: None,
         })
         .await
         .expect("deterministic provider request should succeed");
@@ -1698,6 +1703,7 @@ async fn status_snapshot_surfaces_model_provider_runtime_aggregates() {
                 height_px: Some(1),
                 artifact_id: None,
             }],
+            model_override: None,
         })
         .await;
     assert!(

@@ -38,6 +38,7 @@ type OperationsSectionProps = {
     | "diagnosticsBusy"
     | "diagnosticsSnapshot"
     | "refreshDiagnostics"
+    | "overviewUsageInsights"
     | "overviewCatalog"
     | "revealSensitiveValues"
   >;
@@ -47,6 +48,7 @@ export function OperationsSection({ app }: OperationsSectionProps) {
   const catalog = readCapabilityCatalog(app.overviewCatalog);
   const groupedCapabilities = capabilitiesByMode(capabilitiesForSection(catalog, "operations"));
   const diagnostics = app.diagnosticsSnapshot;
+  const usageInsights = app.overviewUsageInsights;
   const observability = readObject(diagnostics ?? {}, "observability");
   const modelProvider = readObject(diagnostics ?? {}, "model_provider");
   const authProfiles = readObject(diagnostics ?? {}, "auth_profiles");
@@ -123,6 +125,12 @@ export function OperationsSection({ app }: OperationsSectionProps) {
           detail={`${browserFailureSamples.length} browser relay failure samples published.`}
           tone={recentFailures.length > 0 ? "warning" : "default"}
         />
+        <WorkspaceMetricCard
+          label="Usage alerts"
+          value={usageInsights?.alerts.length ?? 0}
+          detail={usageInsights?.routing.default_mode ?? "No routing posture loaded."}
+          tone={(usageInsights?.alerts.length ?? 0) > 0 ? "warning" : "default"}
+        />
       </section>
 
       {recentFailures.length > 0 ? (
@@ -181,6 +189,40 @@ export function OperationsSection({ app }: OperationsSectionProps) {
         </div>
 
         <div className="workspace-stack">
+          <WorkspaceSectionCard
+            title="Routing and budget telemetry"
+            description="Phase 7 keeps routing recommendations, enforced overrides, and alerting visible from the diagnostics surface."
+          >
+            {usageInsights === null ? (
+              <WorkspaceEmptyState
+                compact
+                title="No governance snapshot loaded"
+                description="Refresh overview to load routing decisions, budget evaluations, and active alerts."
+              />
+            ) : (
+              <WorkspaceTable
+                ariaLabel="Routing telemetry"
+                columns={["Metric", "Value", "Detail"]}
+              >
+                <tr>
+                  <td>Default routing mode</td>
+                  <td>{usageInsights.routing.default_mode}</td>
+                  <td>{usageInsights.routing.overrides} recent overrides</td>
+                </tr>
+                <tr>
+                  <td>Provider health</td>
+                  <td>{usageInsights.health.provider_state}</td>
+                  <td>{usageInsights.health.error_rate_bps} bps error rate</td>
+                </tr>
+                <tr>
+                  <td>Budget evaluations</td>
+                  <td>{usageInsights.budgets.evaluations.length}</td>
+                  <td>{usageInsights.alerts.length} active alerts</td>
+                </tr>
+              </WorkspaceTable>
+            )}
+          </WorkspaceSectionCard>
+
           <WorkspaceSectionCard
             title="CLI handoffs"
             description="Deeper troubleshooting remains explicit instead of hiding behind undocumented operator steps."

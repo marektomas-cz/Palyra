@@ -10,6 +10,12 @@ use serde_json::json;
 use super::diagnostics::{build_page_info, contract_descriptor};
 use crate::agents::{AgentBindingQuery, AgentRecord, SessionAgentBinding};
 use crate::journal::{self, OrchestratorUsageQuery};
+use crate::usage_governance::{
+    build_alert_candidates, build_model_mix, build_scope_mix, build_tool_mix,
+    estimate_cost_for_model, evaluate_budget_policies, load_budget_override_approvals,
+    request_usage_budget_override, PricingEstimate, UsageBudgetEvaluation, UsageModelMixRecord,
+    UsageScopeMixRecord, UsageToolMixRecord,
+};
 use crate::*;
 
 const DEFAULT_USAGE_LOOKBACK_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
@@ -75,6 +81,51 @@ pub(crate) struct ConsoleUsageExportQuery {
     bucket: Option<String>,
     #[serde(default)]
     include_archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConsoleUsagePricingUpsertRequest {
+    pricing_id: String,
+    provider_id: String,
+    provider_kind: String,
+    model_id: String,
+    effective_from_unix_ms: i64,
+    #[serde(default)]
+    effective_to_unix_ms: Option<i64>,
+    #[serde(default)]
+    input_cost_per_million_usd: Option<f64>,
+    #[serde(default)]
+    output_cost_per_million_usd: Option<f64>,
+    #[serde(default)]
+    fixed_request_cost_usd: Option<f64>,
+    source: String,
+    precision: String,
+    #[serde(default = "default_usage_currency")]
+    currency: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConsoleUsageBudgetPolicyUpsertRequest {
+    policy_id: String,
+    scope_kind: String,
+    scope_id: String,
+    metric_kind: String,
+    interval_kind: String,
+    #[serde(default)]
+    soft_limit_value: Option<f64>,
+    #[serde(default)]
+    hard_limit_value: Option<f64>,
+    action: String,
+    #[serde(default)]
+    routing_mode_override: Option<String>,
+    #[serde(default = "default_usage_policy_enabled")]
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConsoleUsageBudgetOverrideRequest {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,6 +248,57 @@ pub(crate) struct UsageModelsEnvelope {
     cost_tracking_available: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct UsageInsightsPricingSummary {
+    known_entries: usize,
+    estimated_models: usize,
+    estimate_only: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UsageInsightsHealthSummary {
+    provider_state: String,
+    provider_kind: String,
+    error_rate_bps: u32,
+    circuit_open: bool,
+    cooldown_ms: u64,
+    avg_latency_ms: u64,
+    recent_routing_overrides: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UsageInsightsRoutingSummary {
+    default_mode: String,
+    suggest_runs: usize,
+    dry_run_runs: usize,
+    enforced_runs: usize,
+    overrides: usize,
+    recent_decisions: Vec<journal::UsageRoutingDecisionRecord>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UsageInsightsBudgetsEnvelope {
+    policies: Vec<journal::UsageBudgetPolicyRecord>,
+    evaluations: Vec<UsageBudgetEvaluation>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UsageInsightsEnvelope {
+    contract: control_plane::ContractDescriptor,
+    query: UsageQueryEcho,
+    totals: journal::OrchestratorUsageTotals,
+    timeline: Vec<journal::OrchestratorUsageTimelineBucket>,
+    pricing: UsageInsightsPricingSummary,
+    health: UsageInsightsHealthSummary,
+    routing: UsageInsightsRoutingSummary,
+    budgets: UsageInsightsBudgetsEnvelope,
+    alerts: Vec<journal::UsageAlertRecord>,
+    model_mix: Vec<UsageModelMixRecord>,
+    scope_mix: Vec<UsageScopeMixRecord>,
+    tool_mix: Vec<UsageToolMixRecord>,
+    cost_tracking_available: bool,
+}
+
 pub(crate) async fn console_usage_summary_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -252,6 +354,8 @@ pub(crate) async fn console_usage_sessions_handler(
     let page =
         build_page_info(limit, sessions.len().saturating_sub(cursor).min(limit), next_cursor);
     let sessions = sessions.into_iter().skip(cursor).take(limit).collect::<Vec<_>>();
+    let cost_tracking_available =
+        sessions.iter().any(|entry| entry.estimated_cost_usd.is_some());
 
     Ok(Json(UsageSessionsEnvelope {
         contract: contract_descriptor(),
@@ -266,7 +370,7 @@ pub(crate) async fn console_usage_sessions_handler(
         },
         sessions,
         page,
-        cost_tracking_available: false,
+        cost_tracking_available,
     }))
 }
 
@@ -352,6 +456,7 @@ pub(crate) async fn console_usage_agents_handler(
         (cursor.saturating_add(limit) < rows.len()).then(|| (cursor + limit).to_string());
     let page = build_page_info(limit, rows.len().saturating_sub(cursor).min(limit), next_cursor);
     let agents = rows.into_iter().skip(cursor).take(limit).collect::<Vec<_>>();
+    let cost_tracking_available = agents.iter().any(|entry| entry.estimated_cost_usd.is_some());
 
     Ok(Json(UsageAgentsEnvelope {
         contract: contract_descriptor(),
@@ -366,7 +471,7 @@ pub(crate) async fn console_usage_agents_handler(
         },
         agents,
         page,
-        cost_tracking_available: false,
+        cost_tracking_available,
     }))
 }
 
@@ -398,6 +503,7 @@ pub(crate) async fn console_usage_models_handler(
         (cursor.saturating_add(limit) < rows.len()).then(|| (cursor + limit).to_string());
     let page = build_page_info(limit, rows.len().saturating_sub(cursor).min(limit), next_cursor);
     let models = rows.into_iter().skip(cursor).take(limit).collect::<Vec<_>>();
+    let cost_tracking_available = models.iter().any(|entry| entry.estimated_cost_usd.is_some());
 
     Ok(Json(UsageModelsEnvelope {
         contract: contract_descriptor(),
@@ -412,8 +518,332 @@ pub(crate) async fn console_usage_models_handler(
         },
         models,
         page,
-        cost_tracking_available: false,
+        cost_tracking_available,
     }))
+}
+
+pub(crate) async fn console_usage_insights_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ConsoleUsageSummaryQuery>,
+) -> Result<Json<UsageInsightsEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let resolved = resolve_usage_query(
+        query.start_at_unix_ms,
+        query.end_at_unix_ms,
+        query.bucket.as_deref(),
+        query.include_archived.unwrap_or(false),
+        &session.context,
+        None,
+    )?;
+    let summary = state
+        .runtime
+        .summarize_orchestrator_usage(resolved.query.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let runs = state
+        .runtime
+        .list_orchestrator_usage_runs(resolved.query.clone(), 500)
+        .await
+        .map_err(runtime_status_response)?;
+    let pricing = state
+        .runtime
+        .list_usage_pricing_records()
+        .await
+        .map_err(runtime_status_response)?;
+    let routing_decisions = state
+        .runtime
+        .list_usage_routing_decisions(journal::UsageRoutingDecisionsFilter {
+            since_unix_ms: Some(resolved.query.start_at_unix_ms),
+            until_unix_ms: Some(resolved.query.end_at_unix_ms),
+            session_id: None,
+            run_id: None,
+            limit: 50,
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let routing_summary_recent_decisions = routing_decisions.clone();
+    let budget_policies = state
+        .runtime
+        .list_usage_budget_policies(journal::UsageBudgetPoliciesFilter {
+            enabled_only: false,
+            scope_kind: None,
+            scope_id: None,
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let status_snapshot = state
+        .runtime
+        .status_snapshot_async(session.context.clone(), state.auth.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let provider_kind = status_snapshot.model_provider.kind.clone();
+    let provider_id = if provider_kind == "openai_compatible" {
+        "openai".to_owned()
+    } else {
+        "palyra".to_owned()
+    };
+    let default_model_id = status_snapshot
+        .model_provider
+        .openai_model
+        .clone()
+        .unwrap_or_else(|| "deterministic".to_owned());
+
+    let routing_by_run = routing_decisions
+        .iter()
+        .map(|record| (record.run_id.clone(), record))
+        .collect::<HashMap<_, _>>();
+    let enriched_runs = runs
+        .iter()
+        .map(|run| {
+            let routing = routing_by_run.get(run.run_id.as_str()).copied();
+            let model_id = routing
+                .map(|record| record.actual_model_id.as_str())
+                .unwrap_or(default_model_id.as_str());
+            let provider_kind_value = routing
+                .map(|record| record.provider_kind.as_str())
+                .unwrap_or(provider_kind.as_str());
+            let provider_id_value = routing
+                .map(|record| record.provider_id.as_str())
+                .unwrap_or(provider_id.as_str());
+            let cost_estimate = estimate_cost_for_model(
+                pricing.as_slice(),
+                provider_kind_value,
+                provider_id_value,
+                model_id,
+                run.started_at_unix_ms,
+                run.prompt_tokens,
+                run.completion_tokens,
+            );
+            crate::usage_governance::UsageEnrichedRun {
+                run,
+                routing,
+                inferred_model_id: model_id,
+                inferred_provider_kind: provider_kind_value,
+                cost_estimate,
+            }
+        })
+        .collect::<Vec<_>>();
+    let approved_subjects =
+        load_budget_override_approvals(&state.runtime, budget_policies.as_slice()).await;
+    let total_estimated_cost = enriched_runs
+        .iter()
+        .filter_map(|entry| entry.cost_estimate.upper_usd)
+        .sum::<f64>();
+    let cost_projection = PricingEstimate {
+        lower_usd: Some(total_estimated_cost),
+        upper_usd: Some(total_estimated_cost),
+        estimate_only: true,
+        source: "usage_window".to_owned(),
+        precision: "estimate_only".to_owned(),
+    };
+    let budget_evaluations = evaluate_budget_policies(
+        budget_policies.as_slice(),
+        enriched_runs.as_slice(),
+        summary.totals.total_tokens,
+        &cost_projection,
+        &approved_subjects,
+    );
+    let model_mix = build_model_mix(enriched_runs.as_slice());
+    let scope_mix = build_scope_mix(enriched_runs.as_slice());
+    let tool_mix = load_usage_tool_mix(&state, runs.as_slice()).await;
+    let alert_candidates = build_alert_candidates(
+        enriched_runs.as_slice(),
+        routing_decisions.as_slice(),
+        budget_evaluations.as_slice(),
+        model_mix.as_slice(),
+        model_provider_health_state(&status_snapshot.model_provider),
+    );
+    for (index, candidate) in alert_candidates.iter().enumerate() {
+        let _ = state
+            .runtime
+            .upsert_usage_alert(journal::UsageAlertUpsertRequest {
+                alert_id: format!("{}-{index}", Ulid::new()),
+                alert_kind: candidate.alert_kind.clone(),
+                severity: candidate.severity.clone(),
+                scope_kind: candidate.scope_kind.clone(),
+                scope_id: candidate.scope_id.clone(),
+                summary: candidate.summary.clone(),
+                reason: candidate.reason.clone(),
+                recommended_action: candidate.recommended_action.clone(),
+                source: "usage_insights".to_owned(),
+                dedupe_key: candidate.dedupe_key.clone(),
+                payload_json: candidate.payload.to_string(),
+                observed_at_unix_ms: resolved.query.end_at_unix_ms,
+                resolved: false,
+            })
+            .await;
+    }
+    let alerts = state
+        .runtime
+        .list_usage_alerts(journal::UsageAlertsFilter {
+            active_only: true,
+            limit: 12,
+            scope_kind: None,
+            scope_id: None,
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let routing_summary = UsageInsightsRoutingSummary {
+        default_mode: if state.runtime.config.smart_routing.enabled {
+            state.runtime.config.smart_routing.default_mode.clone()
+        } else {
+            "disabled".to_owned()
+        },
+        suggest_runs: routing_decisions.iter().filter(|entry| entry.mode == "suggest").count(),
+        dry_run_runs: routing_decisions.iter().filter(|entry| entry.mode == "dry_run").count(),
+        enforced_runs: routing_decisions.iter().filter(|entry| entry.mode == "enforced").count(),
+        overrides: routing_decisions
+            .iter()
+            .filter(|entry| entry.actual_model_id != entry.default_model_id)
+            .count(),
+        recent_decisions: routing_summary_recent_decisions,
+    };
+    let cost_tracking_available =
+        enriched_runs.iter().any(|entry| entry.cost_estimate.upper_usd.is_some());
+
+    Ok(Json(UsageInsightsEnvelope {
+        contract: contract_descriptor(),
+        query: resolved.echo,
+        totals: summary.totals,
+        timeline: summary.timeline,
+        pricing: UsageInsightsPricingSummary {
+            known_entries: pricing.len(),
+            estimated_models: pricing.iter().map(|entry| entry.model_id.as_str()).collect::<HashSet<_>>().len(),
+            estimate_only: pricing.iter().any(|entry| entry.precision != "exact"),
+        },
+        health: UsageInsightsHealthSummary {
+            provider_state: model_provider_health_state(&status_snapshot.model_provider).to_owned(),
+            provider_kind,
+            error_rate_bps: status_snapshot.model_provider.runtime_metrics.error_rate_bps,
+            circuit_open: status_snapshot.model_provider.circuit_breaker.open,
+            cooldown_ms: status_snapshot.model_provider.circuit_breaker.cooldown_ms,
+            avg_latency_ms: status_snapshot.model_provider.runtime_metrics.avg_latency_ms,
+            recent_routing_overrides: routing_summary.overrides,
+        },
+        routing: routing_summary,
+        budgets: UsageInsightsBudgetsEnvelope {
+            policies: budget_policies,
+            evaluations: budget_evaluations,
+        },
+        alerts,
+        model_mix,
+        scope_mix,
+        tool_mix,
+        cost_tracking_available,
+    }))
+}
+
+pub(crate) async fn console_usage_pricing_upsert_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ConsoleUsagePricingUpsertRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let record = state
+        .runtime
+        .upsert_usage_pricing_record(journal::UsagePricingUpsertRequest {
+            pricing_id: payload.pricing_id,
+            provider_id: payload.provider_id,
+            provider_kind: payload.provider_kind,
+            model_id: payload.model_id,
+            effective_from_unix_ms: payload.effective_from_unix_ms,
+            effective_to_unix_ms: payload.effective_to_unix_ms,
+            input_cost_per_million_usd: payload.input_cost_per_million_usd,
+            output_cost_per_million_usd: payload.output_cost_per_million_usd,
+            fixed_request_cost_usd: payload.fixed_request_cost_usd,
+            source: payload.source,
+            precision: payload.precision,
+            currency: payload.currency,
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "contract": contract_descriptor(),
+        "operator_principal": session.context.principal,
+        "pricing": record,
+    })))
+}
+
+pub(crate) async fn console_usage_budget_policy_upsert_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ConsoleUsageBudgetPolicyUpsertRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let record = state
+        .runtime
+        .upsert_usage_budget_policy(journal::UsageBudgetPolicyUpsertRequest {
+            policy_id: payload.policy_id,
+            scope_kind: payload.scope_kind,
+            scope_id: payload.scope_id,
+            metric_kind: payload.metric_kind,
+            interval_kind: payload.interval_kind,
+            soft_limit_value: payload.soft_limit_value,
+            hard_limit_value: payload.hard_limit_value,
+            action: payload.action,
+            routing_mode_override: payload.routing_mode_override,
+            enabled: payload.enabled,
+            operator_principal: session.context.principal.clone(),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "contract": contract_descriptor(),
+        "operator_principal": session.context.principal,
+        "policy": record,
+    })))
+}
+
+pub(crate) async fn console_usage_budget_override_request_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(policy_id): Path<String>,
+    Json(payload): Json<ConsoleUsageBudgetOverrideRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let policy = state
+        .runtime
+        .list_usage_budget_policies(journal::UsageBudgetPoliciesFilter {
+            enabled_only: false,
+            scope_kind: None,
+            scope_id: None,
+        })
+        .await
+        .map_err(runtime_status_response)?
+        .into_iter()
+        .find(|entry| entry.policy_id == policy_id)
+        .ok_or_else(|| runtime_status_response(tonic::Status::not_found("budget policy was not found")))?;
+    let approval = request_usage_budget_override(
+        &state.runtime,
+        &session.context,
+        &policy,
+        None,
+        None,
+        None,
+        payload.reason.as_deref(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let _ = state
+        .runtime
+        .record_console_event(
+            &session.context,
+            "usage_budget_override.requested",
+            json!({
+                "policy_id": policy.policy_id,
+                "scope_kind": policy.scope_kind,
+                "scope_id": policy.scope_id,
+                "approval_id": approval.approval_id,
+            }),
+        )
+        .await;
+    Ok(Json(json!({
+        "contract": contract_descriptor(),
+        "operator_principal": session.context.principal,
+        "policy": policy,
+        "approval": approval,
+    })))
 }
 
 pub(crate) async fn console_usage_export_handler(
@@ -469,7 +899,9 @@ pub(crate) async fn console_usage_export_handler(
                         "contract": contract_descriptor(),
                         "query": resolved.echo,
                         "rows": sessions,
-                        "cost_tracking_available": false,
+                        "cost_tracking_available": sessions
+                            .iter()
+                            .any(|entry| entry.estimated_cost_usd.is_some()),
                     }),
                 )?,
                 UsageExportFormat::Csv => {
@@ -492,7 +924,9 @@ pub(crate) async fn console_usage_export_handler(
                         "contract": contract_descriptor(),
                         "query": resolved.echo,
                         "rows": agents,
-                        "cost_tracking_available": false,
+                        "cost_tracking_available": agents
+                            .iter()
+                            .any(|entry| entry.estimated_cost_usd.is_some()),
                     }),
                 )?,
                 UsageExportFormat::Csv => {
@@ -515,7 +949,9 @@ pub(crate) async fn console_usage_export_handler(
                         "contract": contract_descriptor(),
                         "query": resolved.echo,
                         "rows": models,
-                        "cost_tracking_available": false,
+                        "cost_tracking_available": models
+                            .iter()
+                            .any(|entry| entry.estimated_cost_usd.is_some()),
                     }),
                 )?,
                 UsageExportFormat::Csv => {
@@ -552,6 +988,67 @@ enum UsageExportDataset {
 enum UsageExportFormat {
     Json,
     Csv,
+}
+
+const fn default_usage_policy_enabled() -> bool {
+    true
+}
+
+fn default_usage_currency() -> String {
+    "USD".to_owned()
+}
+
+fn model_provider_health_state(snapshot: &crate::model_provider::ProviderStatusSnapshot) -> &'static str {
+    if snapshot.circuit_breaker.open || snapshot.runtime_metrics.error_count > 0 {
+        "degraded"
+    } else if snapshot.api_key_configured || snapshot.auth_profile_id.is_some() {
+        "ok"
+    } else {
+        "missing_auth"
+    }
+}
+
+async fn load_usage_tool_mix(
+    state: &AppState,
+    runs: &[journal::OrchestratorUsageInsightsRunRecord],
+) -> Vec<UsageToolMixRecord> {
+    let mut run_ids_by_session = HashMap::<String, HashSet<String>>::new();
+    for run in runs {
+        run_ids_by_session
+            .entry(run.session_id.clone())
+            .or_default()
+            .insert(run.run_id.clone());
+    }
+
+    let mut tool_counts = HashMap::<String, u64>::new();
+    for (session_id, run_ids) in run_ids_by_session {
+        let transcript = match state.runtime.list_orchestrator_session_transcript(session_id).await {
+            Ok(records) => records,
+            Err(_) => continue,
+        };
+        for record in transcript {
+            if !run_ids.contains(record.run_id.as_str()) {
+                continue;
+            }
+            if !matches!(record.event_type.as_str(), "tool_proposal" | "tool.executed") {
+                continue;
+            }
+            let tool_name = serde_json::from_str::<Value>(record.payload_json.as_str())
+                .ok()
+                .and_then(|payload| {
+                    payload
+                        .get("tool_name")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                });
+            let Some(tool_name) = tool_name else {
+                continue;
+            };
+            *tool_counts.entry(tool_name).or_default() += 1;
+        }
+    }
+
+    build_tool_mix(&tool_counts)
 }
 
 #[allow(clippy::result_large_err)]

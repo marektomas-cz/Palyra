@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { ConsoleApiClient, JsonValue } from "../../consoleApi";
+import type { ConsoleApiClient, JsonValue, UsageInsightsEnvelope } from "../../consoleApi";
 import { isJsonObject, toErrorMessage, toJsonObjectArray, type JsonObject } from "../shared";
 
 type UseOverviewDomainArgs = {
@@ -14,16 +14,18 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
   const [overviewDeployment, setOverviewDeployment] = useState<JsonObject | null>(null);
   const [overviewApprovals, setOverviewApprovals] = useState<JsonObject[]>([]);
   const [overviewDiagnostics, setOverviewDiagnostics] = useState<JsonObject | null>(null);
+  const [overviewUsageInsights, setOverviewUsageInsights] = useState<UsageInsightsEnvelope | null>(null);
   const [overviewSupportJobs, setOverviewSupportJobs] = useState<JsonObject[]>([]);
 
   async function refreshOverview(): Promise<void> {
     setOverviewBusy(true);
     setError(null);
-    const [catalog, deployment, approvals, diagnostics, jobs] = await Promise.allSettled([
+    const [catalog, deployment, approvals, diagnostics, usageInsights, jobs] = await Promise.allSettled([
       api.getCapabilityCatalog(),
       api.getDeploymentPosture(),
       api.listApprovals(),
       api.getDiagnostics(),
+      api.getUsageInsights(),
       api.listSupportBundleJobs(),
     ]);
 
@@ -55,6 +57,9 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
           : null,
       );
     }
+    if (usageInsights.status === "fulfilled") {
+      setOverviewUsageInsights(usageInsights.value);
+    }
     if (jobs.status === "fulfilled") {
       setOverviewSupportJobs(
         toJsonObjectArray(
@@ -76,6 +81,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     setOverviewDeployment(null);
     setOverviewApprovals([]);
     setOverviewDiagnostics(null);
+    setOverviewUsageInsights(null);
     setOverviewSupportJobs([]);
   }
 
@@ -85,6 +91,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     overviewDeployment,
     overviewApprovals,
     overviewDiagnostics,
+    overviewUsageInsights,
     overviewSupportJobs,
     refreshOverview,
     resetOverviewDomain,

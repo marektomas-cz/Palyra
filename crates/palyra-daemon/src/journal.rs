@@ -1642,6 +1642,227 @@ pub struct OrchestratorUsageRunRecord {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OrchestratorUsageInsightsRunRecord {
+    pub run_id: String,
+    pub session_id: String,
+    pub session_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<String>,
+    pub principal: String,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    pub state: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub started_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_unix_ms: Option<i64>,
+    pub updated_at_unix_ms: i64,
+    pub origin_kind: String,
+    pub branch_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routine_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct UsagePricingRecord {
+    pub pricing_id: String,
+    pub provider_id: String,
+    pub provider_kind: String,
+    pub model_id: String,
+    pub effective_from_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_to_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_cost_per_million_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_cost_per_million_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed_request_cost_usd: Option<f64>,
+    pub source: String,
+    pub precision: String,
+    pub currency: String,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsagePricingUpsertRequest {
+    pub pricing_id: String,
+    pub provider_id: String,
+    pub provider_kind: String,
+    pub model_id: String,
+    pub effective_from_unix_ms: i64,
+    pub effective_to_unix_ms: Option<i64>,
+    pub input_cost_per_million_usd: Option<f64>,
+    pub output_cost_per_million_usd: Option<f64>,
+    pub fixed_request_cost_usd: Option<f64>,
+    pub source: String,
+    pub precision: String,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct UsageRoutingDecisionRecord {
+    pub decision_id: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub principal: String,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub mode: String,
+    pub default_model_id: String,
+    pub recommended_model_id: String,
+    pub actual_model_id: String,
+    pub provider_id: String,
+    pub provider_kind: String,
+    pub complexity_score: f64,
+    pub health_state: String,
+    pub explanation_json: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_lower_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_upper_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_outcome: Option<String>,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageRoutingDecisionCreateRequest {
+    pub decision_id: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub mode: String,
+    pub default_model_id: String,
+    pub recommended_model_id: String,
+    pub actual_model_id: String,
+    pub provider_id: String,
+    pub provider_kind: String,
+    pub complexity_score: f64,
+    pub health_state: String,
+    pub explanation_json: String,
+    pub estimated_cost_lower_usd: Option<f64>,
+    pub estimated_cost_upper_usd: Option<f64>,
+    pub budget_outcome: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageRoutingDecisionsFilter {
+    pub since_unix_ms: Option<i64>,
+    pub until_unix_ms: Option<i64>,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct UsageBudgetPolicyRecord {
+    pub policy_id: String,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub metric_kind: String,
+    pub interval_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soft_limit_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hard_limit_value: Option<f64>,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing_mode_override: Option<String>,
+    pub enabled: bool,
+    pub created_by_principal: String,
+    pub updated_by_principal: String,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageBudgetPolicyUpsertRequest {
+    pub policy_id: String,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub metric_kind: String,
+    pub interval_kind: String,
+    pub soft_limit_value: Option<f64>,
+    pub hard_limit_value: Option<f64>,
+    pub action: String,
+    pub routing_mode_override: Option<String>,
+    pub enabled: bool,
+    pub operator_principal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageBudgetPoliciesFilter {
+    pub enabled_only: bool,
+    pub scope_kind: Option<String>,
+    pub scope_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct UsageAlertRecord {
+    pub alert_id: String,
+    pub alert_kind: String,
+    pub severity: String,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub summary: String,
+    pub reason: String,
+    pub recommended_action: String,
+    pub source: String,
+    pub dedupe_key: String,
+    pub payload_json: String,
+    pub first_observed_at_unix_ms: i64,
+    pub last_observed_at_unix_ms: i64,
+    pub occurrence_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acknowledged_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageAlertUpsertRequest {
+    pub alert_id: String,
+    pub alert_kind: String,
+    pub severity: String,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub summary: String,
+    pub reason: String,
+    pub recommended_action: String,
+    pub source: String,
+    pub dedupe_key: String,
+    pub payload_json: String,
+    pub observed_at_unix_ms: i64,
+    pub resolved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageAlertsFilter {
+    pub active_only: bool,
+    pub limit: usize,
+    pub scope_kind: Option<String>,
+    pub scope_id: Option<String>,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum JournalError {
     #[error("journal db path cannot be empty")]
@@ -2437,6 +2658,104 @@ const MIGRATIONS: &[Migration] = &[
                 ON orchestrator_background_tasks(parent_run_ulid, state, created_at_unix_ms ASC);
         "#,
     },
+    Migration {
+        version: 18,
+        name: "usage_governance_phase7",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS usage_pricing_catalog (
+                pricing_ulid TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                provider_kind TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                effective_from_unix_ms INTEGER NOT NULL,
+                effective_to_unix_ms INTEGER,
+                input_cost_per_million_usd REAL,
+                output_cost_per_million_usd REAL,
+                fixed_request_cost_usd REAL,
+                source TEXT NOT NULL,
+                precision TEXT NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'USD',
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_pricing_lookup
+                ON usage_pricing_catalog(provider_kind, provider_id, model_id, effective_from_unix_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS usage_routing_decisions (
+                decision_ulid TEXT PRIMARY KEY,
+                run_ulid TEXT NOT NULL,
+                session_ulid TEXT NOT NULL,
+                principal TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                channel TEXT,
+                scope_kind TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                default_model_id TEXT NOT NULL,
+                recommended_model_id TEXT NOT NULL,
+                actual_model_id TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                provider_kind TEXT NOT NULL,
+                complexity_score REAL NOT NULL,
+                health_state TEXT NOT NULL,
+                explanation_json TEXT NOT NULL,
+                estimated_cost_lower_usd REAL,
+                estimated_cost_upper_usd REAL,
+                budget_outcome TEXT,
+                created_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(run_ulid) REFERENCES orchestrator_runs(run_ulid),
+                FOREIGN KEY(session_ulid) REFERENCES orchestrator_sessions(session_ulid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_routing_decisions_run
+                ON usage_routing_decisions(run_ulid, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_usage_routing_decisions_session
+                ON usage_routing_decisions(session_ulid, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_usage_routing_decisions_scope
+                ON usage_routing_decisions(scope_kind, scope_id, created_at_unix_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS usage_budget_policies (
+                policy_ulid TEXT PRIMARY KEY,
+                scope_kind TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                metric_kind TEXT NOT NULL,
+                interval_kind TEXT NOT NULL,
+                soft_limit_value REAL,
+                hard_limit_value REAL,
+                action TEXT NOT NULL,
+                routing_mode_override TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_by_principal TEXT NOT NULL,
+                updated_by_principal TEXT NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_budget_policies_scope
+                ON usage_budget_policies(scope_kind, scope_id, enabled, updated_at_unix_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS usage_alerts (
+                alert_ulid TEXT PRIMARY KEY,
+                alert_kind TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                recommended_action TEXT NOT NULL,
+                source TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                payload_json TEXT NOT NULL,
+                first_observed_at_unix_ms INTEGER NOT NULL,
+                last_observed_at_unix_ms INTEGER NOT NULL,
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                acknowledged_at_unix_ms INTEGER,
+                resolved_at_unix_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_alerts_active
+                ON usage_alerts(resolved_at_unix_ms, severity, last_observed_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_usage_alerts_scope
+                ON usage_alerts(scope_kind, scope_id, last_observed_at_unix_ms DESC);
+        "#,
+    },
 ];
 
 pub struct JournalStore {
@@ -2506,6 +2825,7 @@ impl JournalStore {
         )?;
 
         apply_migrations(&mut connection)?;
+        seed_usage_pricing_catalog(&mut connection)?;
         Ok(Self { config, connection: Mutex::new(connection), memory_embedding_provider })
     }
 
@@ -2974,6 +3294,319 @@ impl JournalStore {
             run_limit,
         )?;
         Ok(Some((session_usage, runs)))
+    }
+
+    pub fn list_orchestrator_usage_runs(
+        &self,
+        query: &OrchestratorUsageQuery,
+        limit: usize,
+    ) -> Result<Vec<OrchestratorUsageInsightsRunRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_orchestrator_usage_insights_runs(&guard, query, limit)
+    }
+
+    pub fn list_usage_pricing_records(&self) -> Result<Vec<UsagePricingRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_usage_pricing_records(&guard)
+    }
+
+    pub fn upsert_usage_pricing_record(
+        &self,
+        request: &UsagePricingUpsertRequest,
+    ) -> Result<UsagePricingRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard.execute(
+            r#"
+                INSERT INTO usage_pricing_catalog (
+                    pricing_ulid,
+                    provider_id,
+                    provider_kind,
+                    model_id,
+                    effective_from_unix_ms,
+                    effective_to_unix_ms,
+                    input_cost_per_million_usd,
+                    output_cost_per_million_usd,
+                    fixed_request_cost_usd,
+                    source,
+                    precision,
+                    currency,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+                ON CONFLICT(pricing_ulid) DO UPDATE SET
+                    provider_id = excluded.provider_id,
+                    provider_kind = excluded.provider_kind,
+                    model_id = excluded.model_id,
+                    effective_from_unix_ms = excluded.effective_from_unix_ms,
+                    effective_to_unix_ms = excluded.effective_to_unix_ms,
+                    input_cost_per_million_usd = excluded.input_cost_per_million_usd,
+                    output_cost_per_million_usd = excluded.output_cost_per_million_usd,
+                    fixed_request_cost_usd = excluded.fixed_request_cost_usd,
+                    source = excluded.source,
+                    precision = excluded.precision,
+                    currency = excluded.currency,
+                    updated_at_unix_ms = excluded.updated_at_unix_ms
+            "#,
+            params![
+                request.pricing_id,
+                request.provider_id,
+                request.provider_kind,
+                request.model_id,
+                request.effective_from_unix_ms,
+                request.effective_to_unix_ms,
+                request.input_cost_per_million_usd,
+                request.output_cost_per_million_usd,
+                request.fixed_request_cost_usd,
+                request.source,
+                request.precision,
+                request.currency,
+                now,
+            ],
+        )?;
+        load_usage_pricing_record_by_id(&guard, request.pricing_id.as_str())?.ok_or_else(|| {
+            JournalError::Sqlite(rusqlite::Error::QueryReturnedNoRows)
+        })
+    }
+
+    pub fn create_usage_routing_decision(
+        &self,
+        request: &UsageRoutingDecisionCreateRequest,
+    ) -> Result<UsageRoutingDecisionRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard.execute(
+            r#"
+                INSERT INTO usage_routing_decisions (
+                    decision_ulid,
+                    run_ulid,
+                    session_ulid,
+                    principal,
+                    device_id,
+                    channel,
+                    scope_kind,
+                    scope_id,
+                    mode,
+                    default_model_id,
+                    recommended_model_id,
+                    actual_model_id,
+                    provider_id,
+                    provider_kind,
+                    complexity_score,
+                    health_state,
+                    explanation_json,
+                    estimated_cost_lower_usd,
+                    estimated_cost_upper_usd,
+                    budget_outcome,
+                    created_at_unix_ms
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                )
+            "#,
+            params![
+                request.decision_id,
+                request.run_id,
+                request.session_id,
+                request.principal,
+                request.device_id,
+                request.channel,
+                request.scope_kind,
+                request.scope_id,
+                request.mode,
+                request.default_model_id,
+                request.recommended_model_id,
+                request.actual_model_id,
+                request.provider_id,
+                request.provider_kind,
+                request.complexity_score,
+                request.health_state,
+                request.explanation_json,
+                request.estimated_cost_lower_usd,
+                request.estimated_cost_upper_usd,
+                request.budget_outcome,
+                now,
+            ],
+        )?;
+        load_usage_routing_decision_by_id(&guard, request.decision_id.as_str())?.ok_or_else(|| {
+            JournalError::Sqlite(rusqlite::Error::QueryReturnedNoRows)
+        })
+    }
+
+    pub fn list_usage_routing_decisions(
+        &self,
+        filter: &UsageRoutingDecisionsFilter,
+    ) -> Result<Vec<UsageRoutingDecisionRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_usage_routing_decisions(&guard, filter)
+    }
+
+    pub fn upsert_usage_budget_policy(
+        &self,
+        request: &UsageBudgetPolicyUpsertRequest,
+    ) -> Result<UsageBudgetPolicyRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard.execute(
+            r#"
+                INSERT INTO usage_budget_policies (
+                    policy_ulid,
+                    scope_kind,
+                    scope_id,
+                    metric_kind,
+                    interval_kind,
+                    soft_limit_value,
+                    hard_limit_value,
+                    action,
+                    routing_mode_override,
+                    enabled,
+                    created_by_principal,
+                    updated_by_principal,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?12)
+                ON CONFLICT(policy_ulid) DO UPDATE SET
+                    scope_kind = excluded.scope_kind,
+                    scope_id = excluded.scope_id,
+                    metric_kind = excluded.metric_kind,
+                    interval_kind = excluded.interval_kind,
+                    soft_limit_value = excluded.soft_limit_value,
+                    hard_limit_value = excluded.hard_limit_value,
+                    action = excluded.action,
+                    routing_mode_override = excluded.routing_mode_override,
+                    enabled = excluded.enabled,
+                    updated_by_principal = excluded.updated_by_principal,
+                    updated_at_unix_ms = excluded.updated_at_unix_ms
+            "#,
+            params![
+                request.policy_id,
+                request.scope_kind,
+                request.scope_id,
+                request.metric_kind,
+                request.interval_kind,
+                request.soft_limit_value,
+                request.hard_limit_value,
+                request.action,
+                request.routing_mode_override,
+                request.enabled as i64,
+                request.operator_principal,
+                now,
+            ],
+        )?;
+        load_usage_budget_policy_by_id(&guard, request.policy_id.as_str())?.ok_or_else(|| {
+            JournalError::Sqlite(rusqlite::Error::QueryReturnedNoRows)
+        })
+    }
+
+    pub fn list_usage_budget_policies(
+        &self,
+        filter: &UsageBudgetPoliciesFilter,
+    ) -> Result<Vec<UsageBudgetPolicyRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_usage_budget_policies(&guard, filter)
+    }
+
+    pub fn upsert_usage_alert(
+        &self,
+        request: &UsageAlertUpsertRequest,
+    ) -> Result<UsageAlertRecord, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let existing = load_usage_alert_by_dedupe_key(&guard, request.dedupe_key.as_str())?;
+        match existing {
+            Some(record) => {
+                let next_occurrence_count = record.occurrence_count.saturating_add(1);
+                guard.execute(
+                    r#"
+                        UPDATE usage_alerts
+                        SET
+                            alert_kind = ?2,
+                            severity = ?3,
+                            scope_kind = ?4,
+                            scope_id = ?5,
+                            summary = ?6,
+                            reason = ?7,
+                            recommended_action = ?8,
+                            source = ?9,
+                            payload_json = ?10,
+                            last_observed_at_unix_ms = ?11,
+                            occurrence_count = ?12,
+                            resolved_at_unix_ms = ?13
+                        WHERE dedupe_key = ?1
+                    "#,
+                    params![
+                        request.dedupe_key,
+                        request.alert_kind,
+                        request.severity,
+                        request.scope_kind,
+                        request.scope_id,
+                        request.summary,
+                        request.reason,
+                        request.recommended_action,
+                        request.source,
+                        request.payload_json,
+                        request.observed_at_unix_ms,
+                        next_occurrence_count as i64,
+                        request.resolved.then_some(request.observed_at_unix_ms),
+                    ],
+                )?;
+            }
+            None => {
+                guard.execute(
+                    r#"
+                        INSERT INTO usage_alerts (
+                            alert_ulid,
+                            alert_kind,
+                            severity,
+                            scope_kind,
+                            scope_id,
+                            summary,
+                            reason,
+                            recommended_action,
+                            source,
+                            dedupe_key,
+                            payload_json,
+                            first_observed_at_unix_ms,
+                            last_observed_at_unix_ms,
+                            occurrence_count,
+                            resolved_at_unix_ms
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, 1, ?13)
+                    "#,
+                    params![
+                        request.alert_id,
+                        request.alert_kind,
+                        request.severity,
+                        request.scope_kind,
+                        request.scope_id,
+                        request.summary,
+                        request.reason,
+                        request.recommended_action,
+                        request.source,
+                        request.dedupe_key,
+                        request.payload_json,
+                        request.observed_at_unix_ms,
+                        request.resolved.then_some(request.observed_at_unix_ms),
+                    ],
+                )?;
+            }
+        }
+        load_usage_alert_by_dedupe_key(&guard, request.dedupe_key.as_str())?.ok_or_else(|| {
+            JournalError::Sqlite(rusqlite::Error::QueryReturnedNoRows)
+        })
+    }
+
+    pub fn list_usage_alerts(
+        &self,
+        filter: &UsageAlertsFilter,
+    ) -> Result<Vec<UsageAlertRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_usage_alerts(&guard, filter)
+    }
+
+    pub fn latest_approval_by_subject(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<ApprovalRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_latest_approval_by_subject(&guard, subject_id)
     }
 
     pub fn cleanup_orchestrator_session(
@@ -8152,6 +8785,525 @@ fn empty_orchestrator_usage_session_record(
     }
 }
 
+fn load_orchestrator_usage_insights_runs(
+    connection: &Connection,
+    query: &OrchestratorUsageQuery,
+    limit: usize,
+) -> Result<Vec<OrchestratorUsageInsightsRunRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                runs.run_ulid,
+                sessions.session_ulid,
+                sessions.session_key,
+                sessions.session_label,
+                sessions.principal,
+                sessions.device_id,
+                sessions.channel,
+                runs.state,
+                runs.prompt_tokens,
+                runs.completion_tokens,
+                runs.total_tokens,
+                runs.started_at_unix_ms,
+                runs.completed_at_unix_ms,
+                runs.updated_at_unix_ms,
+                runs.origin_kind,
+                sessions.branch_state,
+                sessions.parent_session_ulid,
+                (
+                    SELECT job_ulid
+                    FROM cron_runs
+                    WHERE orchestrator_run_ulid = runs.run_ulid
+                    ORDER BY started_at_unix_ms DESC
+                    LIMIT 1
+                ) AS routine_job_ulid,
+                (
+                    SELECT task_ulid
+                    FROM orchestrator_background_tasks
+                    WHERE target_run_ulid = runs.run_ulid
+                    ORDER BY created_at_unix_ms DESC
+                    LIMIT 1
+                ) AS background_task_ulid,
+                runs.last_error
+            FROM orchestrator_runs AS runs
+            INNER JOIN orchestrator_sessions AS sessions
+                ON sessions.session_ulid = runs.session_ulid
+            WHERE runs.started_at_unix_ms >= ?1
+              AND runs.started_at_unix_ms < ?2
+              AND sessions.principal = ?3
+              AND sessions.device_id = ?4
+              AND ((sessions.channel = ?5) OR (sessions.channel IS NULL AND ?5 IS NULL))
+              AND (?6 = 1 OR sessions.archived_at_unix_ms IS NULL)
+              AND (?7 IS NULL OR runs.session_ulid = ?7)
+            ORDER BY runs.started_at_unix_ms DESC, runs.run_ulid DESC
+            LIMIT ?8
+        "#,
+    )?;
+    let mut rows = statement.query(params![
+        query.start_at_unix_ms,
+        query.end_at_unix_ms,
+        query.principal.as_str(),
+        query.device_id.as_str(),
+        query.channel.as_deref(),
+        bool_to_sqlite(query.include_archived),
+        query.session_id.as_deref(),
+        limit.max(1) as i64,
+    ])?;
+    let mut records = Vec::new();
+    while let Some(row) = rows.next()? {
+        records.push(OrchestratorUsageInsightsRunRecord {
+            run_id: row.get(0)?,
+            session_id: row.get(1)?,
+            session_key: row.get(2)?,
+            session_label: row.get(3)?,
+            principal: row.get(4)?,
+            device_id: row.get(5)?,
+            channel: row.get(6)?,
+            state: row.get(7)?,
+            prompt_tokens: row.get::<_, i64>(8)? as u64,
+            completion_tokens: row.get::<_, i64>(9)? as u64,
+            total_tokens: row.get::<_, i64>(10)? as u64,
+            started_at_unix_ms: row.get(11)?,
+            completed_at_unix_ms: row.get(12)?,
+            updated_at_unix_ms: row.get(13)?,
+            origin_kind: row.get(14)?,
+            branch_state: row.get(15)?,
+            parent_session_id: row.get(16)?,
+            routine_id: row.get(17)?,
+            background_task_id: row.get(18)?,
+            last_error: row.get(19)?,
+        });
+    }
+    Ok(records)
+}
+
+fn load_usage_pricing_record_by_id(
+    connection: &Connection,
+    pricing_id: &str,
+) -> Result<Option<UsagePricingRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                pricing_ulid,
+                provider_id,
+                provider_kind,
+                model_id,
+                effective_from_unix_ms,
+                effective_to_unix_ms,
+                input_cost_per_million_usd,
+                output_cost_per_million_usd,
+                fixed_request_cost_usd,
+                source,
+                precision,
+                currency,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM usage_pricing_catalog
+            WHERE pricing_ulid = ?1
+        "#,
+    )?;
+    statement
+        .query_row(params![pricing_id], map_usage_pricing_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+fn load_usage_pricing_records(
+    connection: &Connection,
+) -> Result<Vec<UsagePricingRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                pricing_ulid,
+                provider_id,
+                provider_kind,
+                model_id,
+                effective_from_unix_ms,
+                effective_to_unix_ms,
+                input_cost_per_million_usd,
+                output_cost_per_million_usd,
+                fixed_request_cost_usd,
+                source,
+                precision,
+                currency,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM usage_pricing_catalog
+            ORDER BY provider_kind ASC, provider_id ASC, model_id ASC, effective_from_unix_ms DESC
+        "#,
+    )?;
+    let mut rows = statement.query([])?;
+    let mut records = Vec::new();
+    while let Some(row) = rows.next()? {
+        records.push(map_usage_pricing_row(row)?);
+    }
+    Ok(records)
+}
+
+fn map_usage_pricing_row(row: &rusqlite::Row<'_>) -> Result<UsagePricingRecord, rusqlite::Error> {
+    Ok(UsagePricingRecord {
+        pricing_id: row.get(0)?,
+        provider_id: row.get(1)?,
+        provider_kind: row.get(2)?,
+        model_id: row.get(3)?,
+        effective_from_unix_ms: row.get(4)?,
+        effective_to_unix_ms: row.get(5)?,
+        input_cost_per_million_usd: row.get(6)?,
+        output_cost_per_million_usd: row.get(7)?,
+        fixed_request_cost_usd: row.get(8)?,
+        source: row.get(9)?,
+        precision: row.get(10)?,
+        currency: row.get(11)?,
+        created_at_unix_ms: row.get(12)?,
+        updated_at_unix_ms: row.get(13)?,
+    })
+}
+
+fn load_usage_routing_decision_by_id(
+    connection: &Connection,
+    decision_id: &str,
+) -> Result<Option<UsageRoutingDecisionRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                decision_ulid,
+                run_ulid,
+                session_ulid,
+                principal,
+                device_id,
+                channel,
+                scope_kind,
+                scope_id,
+                mode,
+                default_model_id,
+                recommended_model_id,
+                actual_model_id,
+                provider_id,
+                provider_kind,
+                complexity_score,
+                health_state,
+                explanation_json,
+                estimated_cost_lower_usd,
+                estimated_cost_upper_usd,
+                budget_outcome,
+                created_at_unix_ms
+            FROM usage_routing_decisions
+            WHERE decision_ulid = ?1
+        "#,
+    )?;
+    statement
+        .query_row(params![decision_id], map_usage_routing_decision_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+fn load_usage_routing_decisions(
+    connection: &Connection,
+    filter: &UsageRoutingDecisionsFilter,
+) -> Result<Vec<UsageRoutingDecisionRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                decision_ulid,
+                run_ulid,
+                session_ulid,
+                principal,
+                device_id,
+                channel,
+                scope_kind,
+                scope_id,
+                mode,
+                default_model_id,
+                recommended_model_id,
+                actual_model_id,
+                provider_id,
+                provider_kind,
+                complexity_score,
+                health_state,
+                explanation_json,
+                estimated_cost_lower_usd,
+                estimated_cost_upper_usd,
+                budget_outcome,
+                created_at_unix_ms
+            FROM usage_routing_decisions
+            WHERE (?1 IS NULL OR created_at_unix_ms >= ?1)
+              AND (?2 IS NULL OR created_at_unix_ms < ?2)
+              AND (?3 IS NULL OR session_ulid = ?3)
+              AND (?4 IS NULL OR run_ulid = ?4)
+            ORDER BY created_at_unix_ms DESC, decision_ulid DESC
+            LIMIT ?5
+        "#,
+    )?;
+    let mut rows = statement.query(params![
+        filter.since_unix_ms,
+        filter.until_unix_ms,
+        filter.session_id.as_deref(),
+        filter.run_id.as_deref(),
+        filter.limit.max(1) as i64,
+    ])?;
+    let mut records = Vec::new();
+    while let Some(row) = rows.next()? {
+        records.push(map_usage_routing_decision_row(row)?);
+    }
+    Ok(records)
+}
+
+fn map_usage_routing_decision_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<UsageRoutingDecisionRecord, rusqlite::Error> {
+    Ok(UsageRoutingDecisionRecord {
+        decision_id: row.get(0)?,
+        run_id: row.get(1)?,
+        session_id: row.get(2)?,
+        principal: row.get(3)?,
+        device_id: row.get(4)?,
+        channel: row.get(5)?,
+        scope_kind: row.get(6)?,
+        scope_id: row.get(7)?,
+        mode: row.get(8)?,
+        default_model_id: row.get(9)?,
+        recommended_model_id: row.get(10)?,
+        actual_model_id: row.get(11)?,
+        provider_id: row.get(12)?,
+        provider_kind: row.get(13)?,
+        complexity_score: row.get(14)?,
+        health_state: row.get(15)?,
+        explanation_json: row.get(16)?,
+        estimated_cost_lower_usd: row.get(17)?,
+        estimated_cost_upper_usd: row.get(18)?,
+        budget_outcome: row.get(19)?,
+        created_at_unix_ms: row.get(20)?,
+    })
+}
+
+fn load_usage_budget_policy_by_id(
+    connection: &Connection,
+    policy_id: &str,
+) -> Result<Option<UsageBudgetPolicyRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                policy_ulid,
+                scope_kind,
+                scope_id,
+                metric_kind,
+                interval_kind,
+                soft_limit_value,
+                hard_limit_value,
+                action,
+                routing_mode_override,
+                enabled,
+                created_by_principal,
+                updated_by_principal,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM usage_budget_policies
+            WHERE policy_ulid = ?1
+        "#,
+    )?;
+    statement
+        .query_row(params![policy_id], map_usage_budget_policy_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+fn load_usage_budget_policies(
+    connection: &Connection,
+    filter: &UsageBudgetPoliciesFilter,
+) -> Result<Vec<UsageBudgetPolicyRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                policy_ulid,
+                scope_kind,
+                scope_id,
+                metric_kind,
+                interval_kind,
+                soft_limit_value,
+                hard_limit_value,
+                action,
+                routing_mode_override,
+                enabled,
+                created_by_principal,
+                updated_by_principal,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM usage_budget_policies
+            WHERE (?1 = 0 OR enabled = 1)
+              AND (?2 IS NULL OR scope_kind = ?2)
+              AND (?3 IS NULL OR scope_id = ?3)
+            ORDER BY enabled DESC, updated_at_unix_ms DESC, policy_ulid ASC
+        "#,
+    )?;
+    let mut rows = statement.query(params![
+        bool_to_sqlite(filter.enabled_only),
+        filter.scope_kind.as_deref(),
+        filter.scope_id.as_deref(),
+    ])?;
+    let mut records = Vec::new();
+    while let Some(row) = rows.next()? {
+        records.push(map_usage_budget_policy_row(row)?);
+    }
+    Ok(records)
+}
+
+fn map_usage_budget_policy_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<UsageBudgetPolicyRecord, rusqlite::Error> {
+    Ok(UsageBudgetPolicyRecord {
+        policy_id: row.get(0)?,
+        scope_kind: row.get(1)?,
+        scope_id: row.get(2)?,
+        metric_kind: row.get(3)?,
+        interval_kind: row.get(4)?,
+        soft_limit_value: row.get(5)?,
+        hard_limit_value: row.get(6)?,
+        action: row.get(7)?,
+        routing_mode_override: row.get(8)?,
+        enabled: row.get::<_, i64>(9)? == 1,
+        created_by_principal: row.get(10)?,
+        updated_by_principal: row.get(11)?,
+        created_at_unix_ms: row.get(12)?,
+        updated_at_unix_ms: row.get(13)?,
+    })
+}
+
+fn load_usage_alert_by_dedupe_key(
+    connection: &Connection,
+    dedupe_key: &str,
+) -> Result<Option<UsageAlertRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                alert_ulid,
+                alert_kind,
+                severity,
+                scope_kind,
+                scope_id,
+                summary,
+                reason,
+                recommended_action,
+                source,
+                dedupe_key,
+                payload_json,
+                first_observed_at_unix_ms,
+                last_observed_at_unix_ms,
+                occurrence_count,
+                acknowledged_at_unix_ms,
+                resolved_at_unix_ms
+            FROM usage_alerts
+            WHERE dedupe_key = ?1
+        "#,
+    )?;
+    statement
+        .query_row(params![dedupe_key], map_usage_alert_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+fn load_usage_alerts(
+    connection: &Connection,
+    filter: &UsageAlertsFilter,
+) -> Result<Vec<UsageAlertRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                alert_ulid,
+                alert_kind,
+                severity,
+                scope_kind,
+                scope_id,
+                summary,
+                reason,
+                recommended_action,
+                source,
+                dedupe_key,
+                payload_json,
+                first_observed_at_unix_ms,
+                last_observed_at_unix_ms,
+                occurrence_count,
+                acknowledged_at_unix_ms,
+                resolved_at_unix_ms
+            FROM usage_alerts
+            WHERE (?1 = 0 OR resolved_at_unix_ms IS NULL)
+              AND (?2 IS NULL OR scope_kind = ?2)
+              AND (?3 IS NULL OR scope_id = ?3)
+            ORDER BY resolved_at_unix_ms IS NULL DESC, last_observed_at_unix_ms DESC, alert_ulid DESC
+            LIMIT ?4
+        "#,
+    )?;
+    let mut rows = statement.query(params![
+        bool_to_sqlite(filter.active_only),
+        filter.scope_kind.as_deref(),
+        filter.scope_id.as_deref(),
+        filter.limit.max(1) as i64,
+    ])?;
+    let mut records = Vec::new();
+    while let Some(row) = rows.next()? {
+        records.push(map_usage_alert_row(row)?);
+    }
+    Ok(records)
+}
+
+fn map_usage_alert_row(row: &rusqlite::Row<'_>) -> Result<UsageAlertRecord, rusqlite::Error> {
+    Ok(UsageAlertRecord {
+        alert_id: row.get(0)?,
+        alert_kind: row.get(1)?,
+        severity: row.get(2)?,
+        scope_kind: row.get(3)?,
+        scope_id: row.get(4)?,
+        summary: row.get(5)?,
+        reason: row.get(6)?,
+        recommended_action: row.get(7)?,
+        source: row.get(8)?,
+        dedupe_key: row.get(9)?,
+        payload_json: row.get(10)?,
+        first_observed_at_unix_ms: row.get(11)?,
+        last_observed_at_unix_ms: row.get(12)?,
+        occurrence_count: row.get::<_, i64>(13)? as u64,
+        acknowledged_at_unix_ms: row.get(14)?,
+        resolved_at_unix_ms: row.get(15)?,
+    })
+}
+
+fn load_latest_approval_by_subject(
+    connection: &Connection,
+    subject_id: &str,
+) -> Result<Option<ApprovalRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                approval_ulid,
+                session_ulid,
+                run_ulid,
+                principal,
+                device_id,
+                channel,
+                requested_at_unix_ms,
+                resolved_at_unix_ms,
+                subject_type,
+                subject_id,
+                request_summary,
+                decision,
+                decision_scope,
+                decision_reason,
+                decision_scope_ttl_ms,
+                policy_snapshot_json,
+                prompt_json,
+                created_at_unix_ms,
+                updated_at_unix_ms
+            FROM approvals
+            WHERE subject_id = ?1
+            ORDER BY requested_at_unix_ms DESC, approval_ulid DESC
+            LIMIT 1
+        "#,
+    )?;
+    statement
+        .query_row(params![subject_id], map_approval_row)
+        .optional()
+        .map_err(Into::into)
+}
+
 fn empty_usage_timeline_bucket(
     query: &OrchestratorUsageQuery,
     index: usize,
@@ -8212,6 +9364,99 @@ fn u64_to_sqlite(value: u64, field_name: &'static str) -> Result<i64, JournalErr
 
 fn nonnegative_i64_to_u64(value: i64) -> Option<u64> {
     (value >= 0).then_some(value as u64)
+}
+
+fn seed_usage_pricing_catalog(connection: &mut Connection) -> Result<(), JournalError> {
+    let existing_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM usage_pricing_catalog", [], |row| row.get(0))?;
+    if existing_count > 0 {
+        return Ok(());
+    }
+
+    let now = current_unix_ms()?;
+    let transaction = connection.transaction()?;
+    for (pricing_id, provider_id, provider_kind, model_id, input_cost, output_cost) in [
+        (
+            "01HZ7ZP1CATALOG000000000001",
+            "openai",
+            "openai_compatible",
+            "gpt-4o-mini",
+            Some(0.15_f64),
+            Some(0.60_f64),
+        ),
+        (
+            "01HZ7ZP1CATALOG000000000002",
+            "openai",
+            "openai_compatible",
+            "gpt-4.1-mini",
+            Some(0.40_f64),
+            Some(1.60_f64),
+        ),
+        (
+            "01HZ7ZP1CATALOG000000000003",
+            "openai",
+            "openai_compatible",
+            "gpt-4.1",
+            Some(2.00_f64),
+            Some(8.00_f64),
+        ),
+        (
+            "01HZ7ZP1CATALOG000000000004",
+            "openai",
+            "openai_compatible",
+            "gpt-4o",
+            Some(2.50_f64),
+            Some(10.00_f64),
+        ),
+        (
+            "01HZ7ZP1CATALOG000000000005",
+            "openai",
+            "openai_compatible",
+            "gpt-5.4-mini",
+            Some(0.60_f64),
+            Some(2.40_f64),
+        ),
+        (
+            "01HZ7ZP1CATALOG000000000006",
+            "openai",
+            "openai_compatible",
+            "gpt-5.4",
+            Some(3.00_f64),
+            Some(12.00_f64),
+        ),
+        (
+            "01HZ7ZP1CATALOG000000000007",
+            "palyra",
+            "deterministic",
+            "deterministic",
+            Some(0.0_f64),
+            Some(0.0_f64),
+        ),
+    ] {
+        transaction.execute(
+            r#"
+                INSERT OR IGNORE INTO usage_pricing_catalog (
+                    pricing_ulid,
+                    provider_id,
+                    provider_kind,
+                    model_id,
+                    effective_from_unix_ms,
+                    effective_to_unix_ms,
+                    input_cost_per_million_usd,
+                    output_cost_per_million_usd,
+                    fixed_request_cost_usd,
+                    source,
+                    precision,
+                    currency,
+                    created_at_unix_ms,
+                    updated_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, 0, NULL, ?5, ?6, NULL, 'local_estimate', 'estimate_only', 'USD', ?7, ?7)
+            "#,
+            params![pricing_id, provider_id, provider_kind, model_id, input_cost, output_cost, now],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn map_cron_job_row(row: &rusqlite::Row<'_>) -> Result<CronJobRecord, rusqlite::Error> {
