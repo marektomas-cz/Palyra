@@ -693,6 +693,43 @@ export interface RecallPreviewEnvelope {
   contract: ContractDescriptor;
 }
 
+export interface ContextReferenceProvenance {
+  kind: string;
+  location: string;
+  note: string;
+}
+
+export interface ContextReferenceResolvedRecord {
+  reference_id: string;
+  kind: "file" | "folder" | "diff" | "staged" | "url" | "memory";
+  raw_text: string;
+  target?: string;
+  display_target: string;
+  start_offset: number;
+  end_offset: number;
+  estimated_tokens: number;
+  warnings: string[];
+  provenance: ContextReferenceProvenance[];
+  preview_text: string;
+  resolved_text: string;
+}
+
+export interface ContextReferenceParseError {
+  raw_text: string;
+  message: string;
+  start_offset: number;
+  end_offset: number;
+}
+
+export interface ContextReferencePreviewEnvelope {
+  clean_prompt: string;
+  references: ContextReferenceResolvedRecord[];
+  total_estimated_tokens: number;
+  warnings: string[];
+  errors: ContextReferenceParseError[];
+  contract: ContractDescriptor;
+}
+
 export interface UnifiedSearchEnvelope {
   query: string;
   groups: {
@@ -2037,6 +2074,20 @@ export class ConsoleApiClient {
     } finally {
       reader.releaseLock();
     }
+  }
+
+  async previewChatContextReferences(
+    sessionId: string,
+    payload: { text: string },
+  ): Promise<ContextReferencePreviewEnvelope> {
+    return this.request(
+      `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/references/preview`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
   }
 
   async prepareRetry(

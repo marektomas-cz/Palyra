@@ -1456,6 +1456,47 @@ describe("ConsoleApiClient", () => {
     expect(new Headers(calls[6]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
   });
 
+  it("posts chat context reference preview requests with CSRF protection", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const client = new ConsoleApiClient("", (input, init) => {
+      calls.push({ input, init });
+      if (calls.length === 1) {
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:web-console",
+            device_id: "device-1",
+            csrf_token: "csrf-1",
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 200,
+          }),
+        );
+      }
+      return Promise.resolve(
+        jsonResponse({
+          clean_prompt: "Summarize",
+          references: [],
+          total_estimated_tokens: 0,
+          warnings: [],
+          errors: [],
+          contract: { contract_version: "control-plane.v1" },
+        }),
+      );
+    });
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+
+    await client.previewChatContextReferences("session-1", { text: "Summarize @file:README.md" });
+
+    expect(requestUrl(calls[1]?.input)).toBe(
+      "/console/v1/chat/sessions/session-1/references/preview",
+    );
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+  });
+
   it("supports background task chat endpoints with the expected CSRF posture", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const task = {

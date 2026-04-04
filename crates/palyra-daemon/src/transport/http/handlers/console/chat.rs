@@ -165,6 +165,15 @@ pub(crate) async fn console_chat_message_stream_handler(
         attachments.as_slice(),
     )
     .map_err(|response| *response)?;
+    let parameter_delta = build_console_context_reference_parameter_delta(
+        &state,
+        &session.context,
+        session_id.as_str(),
+        text.as_str(),
+        parameter_delta,
+    )
+    .await
+    .map_err(runtime_status_response)?;
     let timestamp_unix_ms = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
@@ -379,6 +388,39 @@ pub(crate) async fn console_chat_message_stream_handler(
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/x-ndjson; charset=utf-8"));
     response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
+}
+
+pub(crate) async fn console_chat_context_reference_preview_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleChatContextReferencePreviewRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let text = trim_to_option(payload.text).ok_or_else(|| {
+        runtime_status_response(tonic::Status::invalid_argument("text cannot be empty"))
+    })?;
+    let preview = crate::application::context_references::preview_context_references(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+        text.as_str(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "clean_prompt": preview.clean_prompt,
+        "references": preview.references,
+        "total_estimated_tokens": preview.total_estimated_tokens,
+        "warnings": preview.warnings,
+        "errors": preview.errors,
+        "contract": contract_descriptor(),
+    })))
 }
 
 pub(crate) async fn console_chat_attachment_upload_handler(
@@ -2189,6 +2231,36 @@ fn build_console_attachment_parameter_delta(
                 "chunks": selected_chunks,
             }),
         );
+    }
+    Ok(Some(next_delta))
+}
+
+async fn build_console_context_reference_parameter_delta(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    session_id: &str,
+    text: &str,
+    parameter_delta: Option<Value>,
+) -> Result<Option<Value>, tonic::Status> {
+    let preview = crate::application::context_references::preview_context_references(
+        &state.runtime,
+        context,
+        session_id,
+        text,
+    )
+    .await?;
+    if !preview.errors.is_empty() {
+        return Err(tonic::Status::invalid_argument(preview.errors[0].message.clone()));
+    }
+    if preview.references.is_empty() {
+        return Ok(parameter_delta);
+    }
+    let mut next_delta = parameter_delta.unwrap_or_else(|| json!({}));
+    if !next_delta.is_object() {
+        next_delta = json!({ "prior_parameter_delta": next_delta });
+    }
+    if let Some(object) = next_delta.as_object_mut() {
+        object.insert("context_references".to_owned(), json!(preview));
     }
     Ok(Some(next_delta))
 }

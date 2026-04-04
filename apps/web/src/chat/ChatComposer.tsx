@@ -8,7 +8,10 @@ import {
   StatusChip,
   TextAreaField,
 } from "../console/components/ui";
-import type { RecallPreviewEnvelope } from "../consoleApi";
+import type {
+  ContextReferencePreviewEnvelope,
+  RecallPreviewEnvelope,
+} from "../consoleApi";
 
 import type {
   ComposerAttachment,
@@ -39,6 +42,11 @@ type ChatComposerProps = {
   slashCommandMatches: readonly SlashCommandDefinition[];
   useSlashCommand: (command: SlashCommandDefinition) => void;
   contextBudget: ContextBudgetSummary;
+  contextReferencePreview: ContextReferencePreviewEnvelope | null;
+  contextReferencePreviewBusy: boolean;
+  contextReferencePreviewStale: boolean;
+  refreshContextReferencePreview: () => void;
+  removeContextReference: (referenceId: string) => void;
   recallPreview: RecallPreviewEnvelope | null;
   recallPreviewBusy: boolean;
   recallPreviewStale: boolean;
@@ -67,6 +75,11 @@ export function ChatComposer({
   slashCommandMatches,
   useSlashCommand,
   contextBudget,
+  contextReferencePreview,
+  contextReferencePreviewBusy,
+  contextReferencePreviewStale,
+  refreshContextReferencePreview,
+  removeContextReference,
   recallPreview,
   recallPreviewBusy,
   recallPreviewStale,
@@ -82,6 +95,12 @@ export function ChatComposer({
       : "Send";
   const previewVisible =
     activeSessionId.trim().length > 0 && composerText.trim().length > 0 && !showSlashPalette;
+  const referencePreviewVisible =
+    previewVisible &&
+    contextReferencePreview !== null &&
+    (contextReferencePreview.references.length > 0 ||
+      contextReferencePreview.errors.length > 0 ||
+      contextReferencePreview.warnings.length > 0);
   const previewWorkspaceHits = recallPreview?.workspace_hits.slice(0, 2) ?? [];
   const previewMemoryHits: Record<string, unknown>[] = [];
   for (const hit of recallPreview?.memory_hits ?? []) {
@@ -117,7 +136,8 @@ export function ChatComposer({
           <strong>Context budget</strong>
           <p className="chat-muted">
             Baseline {contextBudget.baseline_tokens.toLocaleString()} tokens, draft{" "}
-            {contextBudget.draft_tokens.toLocaleString()}, attachments{" "}
+            {contextBudget.draft_tokens.toLocaleString()}, references{" "}
+            {contextBudget.reference_tokens.toLocaleString()}, attachments{" "}
             {contextBudget.attachment_tokens.toLocaleString()}.
           </p>
         </div>
@@ -128,6 +148,101 @@ export function ChatComposer({
         <InlineNotice tone={contextBudget.tone === "danger" ? "danger" : "warning"}>
           {contextBudget.warning}
         </InlineNotice>
+      ) : null}
+
+      {referencePreviewVisible ? (
+        <div className="chat-composer__recall">
+          <div className="workspace-panel__intro">
+            <p className="workspace-kicker">Context references</p>
+            <h3>Resolved references for the current draft</h3>
+            <p className="chat-muted">
+              References are parsed and resolved on the server before send so the same syntax works
+              in web, CLI, and TUI.
+            </p>
+          </div>
+          <div className="workspace-inline-actions">
+            <StatusChip tone={contextReferencePreviewBusy ? "warning" : "default"}>
+              {contextReferencePreviewBusy ? "Resolving..." : "Resolved"}
+            </StatusChip>
+            <StatusChip
+              tone={
+                (contextReferencePreview?.references.length ?? 0) > 0 ? "accent" : "default"
+              }
+            >
+              {contextReferencePreview?.references.length ?? 0} references
+            </StatusChip>
+            <StatusChip
+              tone={
+                (contextReferencePreview?.total_estimated_tokens ?? 0) > 0 ? "success" : "default"
+              }
+            >
+              {(contextReferencePreview?.total_estimated_tokens ?? 0).toLocaleString()} est. tokens
+            </StatusChip>
+            <StatusChip tone={contextReferencePreviewStale ? "warning" : "default"}>
+              {contextReferencePreviewStale ? "Draft changed" : "In sync"}
+            </StatusChip>
+            <ActionButton
+              isDisabled={contextReferencePreviewBusy}
+              type="button"
+              variant="secondary"
+              onPress={refreshContextReferencePreview}
+            >
+              {contextReferencePreviewBusy ? "Resolving..." : "Refresh references"}
+            </ActionButton>
+          </div>
+
+          {contextReferencePreview?.errors.map((error) => (
+            <InlineNotice key={`${error.start_offset}-${error.end_offset}`} tone="danger">
+              {error.message}
+            </InlineNotice>
+          ))}
+          {contextReferencePreview?.warnings.map((warning, index) => (
+            <InlineNotice key={`context-reference-warning-${index}`} tone="warning">
+              {warning}
+            </InlineNotice>
+          ))}
+
+          <div className="workspace-inline-actions">
+            {contextReferencePreview?.references.map((reference) => (
+              <StatusChip
+                key={reference.reference_id}
+                tone={reference.warnings.length > 0 ? "warning" : "accent"}
+              >
+                {reference.raw_text} · {reference.estimated_tokens.toLocaleString()} tok
+              </StatusChip>
+            ))}
+          </div>
+
+          <div className="chat-ops-list">
+            {contextReferencePreview?.references.map((reference) => (
+              <article key={reference.reference_id} className="chat-ops-card">
+                <div className="chat-ops-card__copy">
+                  <strong>
+                    @{reference.kind}:{reference.display_target}
+                  </strong>
+                  <span>{reference.provenance.map((item) => item.note).join(" ")}</span>
+                  <p>{reference.preview_text}</p>
+                  {reference.warnings.length > 0 ? (
+                    <p>{reference.warnings.join(" ")}</p>
+                  ) : null}
+                </div>
+                <div className="chat-ops-card__actions">
+                  <StatusChip tone="accent">
+                    {reference.estimated_tokens.toLocaleString()} tok
+                  </StatusChip>
+                  <ActionButton
+                    size="sm"
+                    type="button"
+                    variant="secondary"
+                    onPress={() => removeContextReference(reference.reference_id)}
+                  >
+                    Remove
+                  </ActionButton>
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
       ) : null}
 
       {previewVisible ? (

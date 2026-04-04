@@ -1726,6 +1726,12 @@ fn render_help_popup(frame: &mut Frame<'_>, area: Rect) {
         Line::from("  /abort [run_id] /usage /compact [apply] /attach /settings"),
         Line::from("  /tools on|off /thinking on|off /shell on|off /exit"),
         Line::default(),
+        Line::from("Context references"),
+        Line::from(
+            "  @file:PATH @folder:PATH @diff[:PATH] @staged[:PATH] @url:URL @memory:\"query\"",
+        ),
+        Line::from("  Escape a literal at-sign with @@"),
+        Line::default(),
         Line::from("Pickers"),
         Line::from("  F2 agent  F3 session  F4 model"),
         Line::from("  F5 settings  Ctrl+R reload runtime state"),

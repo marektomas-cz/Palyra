@@ -146,7 +146,9 @@ async fn run_agent_interactive_async(
             break;
         }
         if prompt.eq_ignore_ascii_case("/help") {
-            eprintln!("agent.interactive.commands /help /session /reset /abort [run_id] /exit");
+            eprintln!(
+                "agent.interactive.commands /help /session /reset /abort [run_id] /exit | context refs: @file:PATH @folder:PATH @diff[:PATH] @staged[:PATH] @url:URL @memory:\"query\" escape with @@"
+            );
             std::io::stderr().flush().context("stderr flush failed")?;
             continue;
         }

@@ -1236,6 +1236,11 @@ struct ConsoleChatMessageRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConsoleChatContextReferencePreviewRequest {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ConsoleChatRunEventsQuery {
     after_seq: Option<i64>,
     limit: Option<usize>,

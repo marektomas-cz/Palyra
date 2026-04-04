@@ -11,7 +11,6 @@ import type {
   ChatQueuedInputRecord,
   ChatTranscriptRecord,
   ConsoleApiClient,
-  RecallPreviewEnvelope,
 } from "../consoleApi";
 import { type DetailPanelState, type TranscriptSearchMatch } from "./ChatInspectorColumn";
 import { ChatConsoleWorkspaceView } from "./ChatConsoleWorkspaceView";
@@ -36,7 +35,6 @@ import {
   buildContextBudgetSummary,
   buildSessionLineageHint,
   describeBranchState,
-  emptyToUndefined,
   parseSlashCommand,
   parseCompactCommandMode,
   shortId,
@@ -54,6 +52,8 @@ import {
   resumeSessionAction,
   retryLatestTurnAction,
 } from "./chatSessionActions";
+import { useContextReferencePreview } from "./useContextReferencePreview";
+import { useRecallPreview } from "./useRecallPreview";
 import { useChatRunStream } from "./useChatRunStream";
 import { useChatSessions } from "./useChatSessions";
 
@@ -77,7 +77,6 @@ export function ChatConsolePanel({
   const sessionSwitchRef = useRef<string>("");
   const transcriptRequestSeqRef = useRef(0);
   const transcriptSearchSeqRef = useRef(0);
-  const recallPreviewRequestSeqRef = useRef(0);
   const [runActionBusy, setRunActionBusy] = useState(false);
   const [commandBusy, setCommandBusy] = useState<string | null>(null);
   const [transcriptBusy, setTranscriptBusy] = useState(false);
@@ -101,9 +100,6 @@ export function ChatConsolePanel({
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState<"json" | "markdown" | null>(null);
   const [phase4BusyKey, setPhase4BusyKey] = useState<string | null>(null);
-  const [recallPreviewBusy, setRecallPreviewBusy] = useState(false);
-  const [recallPreview, setRecallPreview] = useState<RecallPreviewEnvelope | null>(null);
-  const [recallPreviewQuery, setRecallPreviewQuery] = useState("");
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   const sessions = useChatSessions({
@@ -170,7 +166,6 @@ export function ChatConsolePanel({
   );
   const deferredComposerText = useDeferredValue(composerText);
   const deferredSearchQuery = useDeferredValue(transcriptSearchQuery);
-  const deferredRecallQuery = useDeferredValue(composerText);
   const parsedSlashCommand = useMemo(
     () => parseSlashCommand(deferredComposerText),
     [deferredComposerText],
@@ -193,25 +188,6 @@ export function ChatConsolePanel({
     () => buildSessionLineageHint(sessions.selectedSession),
     [sessions.selectedSession],
   );
-  const contextBudget = useMemo(
-    () =>
-      buildContextBudgetSummary({
-        baseline_tokens: Math.max(
-          sessions.selectedSession?.total_tokens ?? 0,
-          runStatus?.total_tokens ?? 0,
-        ),
-        draft_text: composerText,
-        attachments,
-      }),
-    [attachments, composerText, runStatus?.total_tokens, sessions.selectedSession?.total_tokens],
-  );
-  const recallPreviewStale = useMemo(() => {
-    const trimmed = composerText.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("/")) {
-      return false;
-    }
-    return recallPreview !== null && recallPreviewQuery !== trimmed;
-  }, [composerText, recallPreview, recallPreviewQuery]);
   const attachSelectedFiles = useChatAttachmentUploadHandler({
     api,
     sessionId: sessions.activeSessionId.trim(),
@@ -221,6 +197,58 @@ export function ChatConsolePanel({
     setError,
     setNotice,
   });
+  const {
+    recallPreview,
+    recallPreviewBusy,
+    recallPreviewStale,
+    loadRecallPreview,
+    ensureRecallPreviewForCurrentDraft,
+    resetRecallPreview,
+  } = useRecallPreview({
+    api,
+    activeSessionId: sessions.activeSessionId,
+    composerText,
+    selectedChannel: sessions.selectedSession?.channel,
+    setError,
+  });
+  const {
+    contextReferencePreview,
+    contextReferencePreviewBusy,
+    contextReferencePreviewStale,
+    loadContextReferencePreview,
+    ensureContextReferencePreviewForCurrentDraft,
+    resetContextReferencePreview,
+    removeContextReference,
+  } = useContextReferencePreview({
+    api,
+    activeSessionId: sessions.activeSessionId,
+    composerText,
+    setComposerText,
+    setError,
+  });
+  const contextBudget = useMemo(
+    () =>
+      buildContextBudgetSummary({
+        baseline_tokens: Math.max(
+          sessions.selectedSession?.total_tokens ?? 0,
+          runStatus?.total_tokens ?? 0,
+        ),
+        draft_text: composerText,
+        attachments,
+        reference_tokens:
+          contextReferencePreview !== null && !contextReferencePreviewStale
+            ? contextReferencePreview.total_estimated_tokens
+            : 0,
+      }),
+    [
+      attachments,
+      composerText,
+      contextReferencePreview,
+      contextReferencePreviewStale,
+      runStatus?.total_tokens,
+      sessions.selectedSession?.total_tokens,
+    ],
+  );
 
   useEffect(() => {
     void sessions.refreshSessions(true);
@@ -294,74 +322,6 @@ export function ChatConsolePanel({
     }
   }, [api, sessions.activeSessionId, sessions.upsertSession, setError]);
 
-  const resetRecallPreview = useCallback(() => {
-    recallPreviewRequestSeqRef.current += 1;
-    setRecallPreviewBusy(false);
-    setRecallPreview(null);
-    setRecallPreviewQuery("");
-  }, []);
-
-  const loadRecallPreview = useCallback(
-    async (
-      query: string,
-      options: { reportError?: boolean } = {},
-    ): Promise<RecallPreviewEnvelope | null> => {
-      const trimmed = query.trim();
-      const sessionId = sessions.activeSessionId.trim();
-      if (trimmed.length === 0 || trimmed.startsWith("/") || sessionId.length === 0) {
-        resetRecallPreview();
-        return null;
-      }
-
-      recallPreviewRequestSeqRef.current += 1;
-      const requestSeq = recallPreviewRequestSeqRef.current;
-      setRecallPreviewBusy(true);
-      try {
-        const response = await api.previewRecall({
-          query: trimmed,
-          channel: emptyToUndefined(sessions.selectedSession?.channel ?? ""),
-          session_id: sessionId,
-          memory_top_k: 4,
-          workspace_top_k: 4,
-        });
-        if (requestSeq !== recallPreviewRequestSeqRef.current) {
-          return null;
-        }
-        setRecallPreview(response);
-        setRecallPreviewQuery(trimmed);
-        return response;
-      } catch (error) {
-        if (requestSeq === recallPreviewRequestSeqRef.current && options.reportError !== false) {
-          setError(toErrorMessage(error));
-        }
-        return null;
-      } finally {
-        if (requestSeq === recallPreviewRequestSeqRef.current) {
-          setRecallPreviewBusy(false);
-        }
-      }
-    },
-    [
-      api,
-      resetRecallPreview,
-      sessions.activeSessionId,
-      sessions.selectedSession?.channel,
-      setError,
-    ],
-  );
-
-  const ensureRecallPreviewForCurrentDraft =
-    useCallback(async (): Promise<RecallPreviewEnvelope | null> => {
-      const trimmed = composerText.trim();
-      if (trimmed.length === 0 || trimmed.startsWith("/")) {
-        return null;
-      }
-      if (recallPreview !== null && recallPreviewQuery === trimmed) {
-        return recallPreview;
-      }
-      return loadRecallPreview(trimmed, { reportError: true });
-    }, [composerText, loadRecallPreview, recallPreview, recallPreviewQuery]);
-
   useEffect(() => {
     const sessionId = sessions.activeSessionId.trim();
     if (sessionId.length === 0) {
@@ -379,6 +339,7 @@ export function ChatConsolePanel({
       setAttachments([]);
       setPhase4BusyKey(null);
       resetRecallPreview();
+      resetContextReferencePreview();
       return;
     }
 
@@ -391,32 +352,17 @@ export function ChatConsolePanel({
       setSessionDerivedArtifacts([]);
       setPhase4BusyKey(null);
       resetRecallPreview();
+      resetContextReferencePreview();
     }
     sessionSwitchRef.current = sessionId;
     void refreshSessionTranscript();
   }, [
     clearTranscriptState,
     refreshSessionTranscript,
+    resetContextReferencePreview,
     resetRecallPreview,
     sessions.activeSessionId,
   ]);
-
-  useEffect(() => {
-    const sessionId = sessions.activeSessionId.trim();
-    const trimmed = deferredRecallQuery.trim();
-    if (sessionId.length === 0 || trimmed.length === 0 || trimmed.startsWith("/")) {
-      resetRecallPreview();
-      return;
-    }
-
-    const timeoutHandle = window.setTimeout(() => {
-      void loadRecallPreview(trimmed, { reportError: false });
-    }, 350);
-
-    return () => {
-      window.clearTimeout(timeoutHandle);
-    };
-  }, [deferredRecallQuery, loadRecallPreview, resetRecallPreview, sessions.activeSessionId]);
 
   async function resetSessionAndTranscript(): Promise<void> {
     const resetApplied = await sessions.resetSession();
@@ -469,6 +415,11 @@ export function ChatConsolePanel({
       return;
     }
 
+    const effectiveContextReferencePreview = await ensureContextReferencePreviewForCurrentDraft();
+    if (effectiveContextReferencePreview?.errors.length) {
+      setError(effectiveContextReferencePreview.errors[0]?.message ?? "Invalid context reference.");
+      return;
+    }
     const effectiveRecallPreview = await ensureRecallPreviewForCurrentDraft();
 
     const didSend = await sendMessage(
@@ -854,6 +805,13 @@ export function ChatConsolePanel({
           slashCommandMatches,
           useSlashCommand: (command) => setComposerText(command.example),
           contextBudget,
+          contextReferencePreview,
+          contextReferencePreviewBusy,
+          contextReferencePreviewStale,
+          refreshContextReferencePreview: () => {
+            void loadContextReferencePreview(composerText, { reportError: true });
+          },
+          removeContextReference,
           recallPreview,
           recallPreviewBusy,
           recallPreviewStale,

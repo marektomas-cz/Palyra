@@ -398,6 +398,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(console::chat::console_chat_message_stream_handler),
         )
         .route(
+            "/console/v1/chat/sessions/{session_id}/references/preview",
+            post(console::chat::console_chat_context_reference_preview_handler),
+        )
+        .route(
             "/console/v1/chat/sessions/{session_id}/retry",
             post(console::chat::console_chat_retry_prepare_handler),
         )

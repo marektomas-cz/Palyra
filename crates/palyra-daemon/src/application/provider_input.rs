@@ -7,6 +7,9 @@ use tonic::Status;
 use tracing::warn;
 
 use crate::{
+    application::context_references::{
+        render_context_reference_prompt, ContextReferencePreviewEnvelope,
+    },
     application::service_authorization::authorize_memory_action,
     application::session_compaction::{
         build_session_compaction_plan, render_compaction_prompt_block, SESSION_COMPACTION_STRATEGY,
@@ -89,6 +92,8 @@ struct ParameterDeltaEnvelope {
     explicit_recall: Option<ExplicitRecallSelection>,
     #[serde(default)]
     attachment_recall: Option<AttachmentRecallSelection>,
+    #[serde(default)]
+    context_references: Option<ContextReferencePreviewEnvelope>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -361,6 +366,62 @@ fn parse_attachment_recall_selection(
     serde_json::from_str::<ParameterDeltaEnvelope>(raw)
         .ok()
         .and_then(|value| value.attachment_recall)
+}
+
+fn parse_context_reference_preview(
+    parameter_delta_json: Option<&str>,
+) -> Option<ContextReferencePreviewEnvelope> {
+    let raw = parameter_delta_json?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<ParameterDeltaEnvelope>(raw)
+        .ok()
+        .and_then(|value| value.context_references)
+}
+
+#[allow(clippy::result_large_err)]
+async fn build_context_reference_prompt(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    parameter_delta_json: Option<&str>,
+    fallback_prompt: &str,
+) -> Result<Option<String>, Status> {
+    let Some(preview) = parse_context_reference_preview(parameter_delta_json) else {
+        return Ok(None);
+    };
+    if preview.references.is_empty() {
+        return Ok(None);
+    }
+
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "context_references".to_owned(),
+            payload_json: json!({
+                "clean_prompt": preview.clean_prompt,
+                "total_estimated_tokens": preview.total_estimated_tokens,
+                "warnings": preview.warnings,
+                "errors": preview.errors,
+                "references": preview.references.iter().map(|reference| {
+                    json!({
+                        "reference_id": reference.reference_id,
+                        "kind": reference.kind.as_str(),
+                        "target": reference.display_target,
+                        "estimated_tokens": reference.estimated_tokens,
+                        "warnings": reference.warnings,
+                        "provenance": reference.provenance,
+                    })
+                }).collect::<Vec<_>>(),
+            })
+            .to_string(),
+        })
+        .await?;
+    *tape_seq = tape_seq.saturating_add(1);
+
+    Ok(render_context_reference_prompt(&preview, fallback_prompt))
 }
 
 #[allow(clippy::result_large_err)]
@@ -654,35 +715,46 @@ pub(crate) async fn prepare_model_provider_input(
         memory_prompt_failure_mode,
         channel_for_log,
     } = request;
+    let context_reference_preview = parse_context_reference_preview(parameter_delta_json);
+    let normalized_input_text = context_reference_preview
+        .as_ref()
+        .map(|preview| preview.clean_prompt.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(input_text);
     ingest_memory_best_effort(
         runtime_state,
         context.principal.as_str(),
         context.channel.as_deref(),
         Some(session_id),
         MemorySource::TapeUserMessage,
-        input_text,
+        normalized_input_text,
         Vec::new(),
         Some(0.9),
         memory_ingest_reason,
     )
     .await;
-    let input_with_recent_context =
-        match build_previous_run_context_prompt(runtime_state, previous_run_id, input_text).await {
-            Ok(value) => value,
-            Err(error) => {
-                warn!(
-                    run_id,
-                    principal = %context.principal,
-                    session_id,
-                    previous_run_id = %previous_run_id.unwrap_or("n/a"),
-                    channel = channel_for_log,
-                    status_code = ?error.code(),
-                    status_message = %error.message(),
-                    "failed to enrich prompt with previous-run context; continuing with raw input"
-                );
-                input_text.to_owned()
-            }
-        };
+    let input_with_recent_context = match build_previous_run_context_prompt(
+        runtime_state,
+        previous_run_id,
+        normalized_input_text,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(
+                run_id,
+                principal = %context.principal,
+                session_id,
+                previous_run_id = %previous_run_id.unwrap_or("n/a"),
+                channel = channel_for_log,
+                status_code = ?error.code(),
+                status_message = %error.message(),
+                "failed to enrich prompt with previous-run context; continuing with raw input"
+            );
+            normalized_input_text.to_owned()
+        }
+    };
     let input_with_compaction = load_session_compaction_prompt(
         runtime_state,
         context,
@@ -715,19 +787,44 @@ pub(crate) async fn prepare_model_provider_input(
     )
     .await?
     {
+        let provider_input_text = match build_context_reference_prompt(
+            runtime_state,
+            run_id,
+            tape_seq,
+            parameter_delta_json,
+            provider_input_text.as_str(),
+        )
+        .await?
+        {
+            Some(value) => value,
+            None => provider_input_text,
+        };
         return Ok(PreparedModelProviderInput {
             provider_input_text,
             vision_inputs: build_provider_image_inputs(attachments, &runtime_state.config.media),
         });
     }
+    let provider_input_text = match build_context_reference_prompt(
+        runtime_state,
+        run_id,
+        tape_seq,
+        parameter_delta_json,
+        input_with_attachment_recall.as_str(),
+    )
+    .await?
+    {
+        Some(value) => value,
+        None => input_with_attachment_recall.clone(),
+    };
+    let provider_input_text_before_memory = provider_input_text.clone();
     let provider_input_text = match build_memory_augmented_prompt(
         runtime_state,
         context,
         run_id,
         tape_seq,
         session_id,
-        input_text,
-        input_with_attachment_recall.as_str(),
+        normalized_input_text,
+        provider_input_text.as_str(),
     )
     .await
     {
@@ -744,7 +841,7 @@ pub(crate) async fn prepare_model_provider_input(
                     status_message = %error.message(),
                     "{warn_message}"
                 );
-                input_with_attachment_recall
+                provider_input_text_before_memory
             }
         },
     };
