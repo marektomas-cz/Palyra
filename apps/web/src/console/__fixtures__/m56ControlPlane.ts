@@ -332,10 +332,7 @@ export function inventoryListFixture() {
         identity_fingerprint: "sha256:pending-node-fingerprint",
         transcript_hash_hex: "pending-transcript-hash",
         current_certificate_fingerprint: "sha256:cert-pending-2",
-        certificate_fingerprint_history: [
-          "sha256:cert-pending-1",
-          "sha256:cert-pending-2",
-        ],
+        certificate_fingerprint_history: ["sha256:cert-pending-1", "sha256:cert-pending-2"],
         platform: "windows",
         capabilities: [{ name: "ping", available: true }],
         capability_summary: { total: 1, available: 1, unavailable: 0 },
@@ -431,7 +428,8 @@ export function inventoryDeviceDetailFixture(deviceId = "01ARZ3NDEKTSV4RRFFQ69G5
   return {
     contract: controlPlaneContract(),
     generated_at_unix_ms: inventory.generated_at_unix_ms,
-    device: inventory.devices.find((record) => record.device_id === deviceId) ?? inventory.devices[0],
+    device:
+      inventory.devices.find((record) => record.device_id === deviceId) ?? inventory.devices[0],
     pairings: nodePairingListFixture().requests.filter((record) => record.device_id === deviceId),
   };
 }

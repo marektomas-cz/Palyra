@@ -933,7 +933,11 @@ describe("ConsoleApiClient", () => {
       channel: "web",
     });
     await client.listNodePairingRequests({ state: "pending_approval", client_kind: "node" });
-    await client.mintNodePairingCode({ method: "pin", issued_by: "admin:web-console", ttl_ms: 600000 });
+    await client.mintNodePairingCode({
+      method: "pin",
+      issued_by: "admin:web-console",
+      ttl_ms: 600000,
+    });
     await client.approveNodePairingRequest("pair-req-1", { reason: "looks good" });
     await client.rejectNodePairingRequest("pair-req-1", { reason: "second pass reject" });
 

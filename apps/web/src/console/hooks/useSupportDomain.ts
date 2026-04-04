@@ -35,9 +35,7 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
   const [supportPairingChannel, setSupportPairingChannel] = useState("discord:default");
   const [supportPairingIssuedBy, setSupportPairingIssuedBy] = useState("");
   const [supportPairingTtlMs, setSupportPairingTtlMs] = useState("600000");
-  const [supportNodePairingCodes, setSupportNodePairingCodes] = useState<NodePairingCodeView[]>(
-    [],
-  );
+  const [supportNodePairingCodes, setSupportNodePairingCodes] = useState<NodePairingCodeView[]>([]);
   const [supportNodePairingRequests, setSupportNodePairingRequests] = useState<
     NodePairingRequestView[]
   >([]);
@@ -51,14 +49,19 @@ export function useSupportDomain({ api, setError, setNotice }: UseSupportDomainA
     setSupportBusy(true);
     setError(null);
     try {
-      const [pairingResponse, nodePairingResponse, jobsResponse, deploymentResponse, diagnosticsResponse] =
-        await Promise.all([
-          api.getPairingSummary(),
-          api.listNodePairingRequests(),
-          api.listSupportBundleJobs(),
-          api.getDeploymentPosture(),
-          api.getDiagnostics(),
-        ]);
+      const [
+        pairingResponse,
+        nodePairingResponse,
+        jobsResponse,
+        deploymentResponse,
+        diagnosticsResponse,
+      ] = await Promise.all([
+        api.getPairingSummary(),
+        api.listNodePairingRequests(),
+        api.listSupportBundleJobs(),
+        api.getDeploymentPosture(),
+        api.getDiagnostics(),
+      ]);
       setSupportPairingSummary(
         isJsonObject(pairingResponse as unknown as JsonValue)
           ? (pairingResponse as unknown as JsonObject)

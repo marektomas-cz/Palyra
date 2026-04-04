@@ -223,7 +223,9 @@ describe("M56 config, access, and support surfaces", () => {
           };
           return jsonResponse({
             contract: nodePairings.contract,
-            request: nodePairings.requests.find((record) => record.request_id === "pair-req-pending"),
+            request: nodePairings.requests.find(
+              (record) => record.request_id === "pair-req-pending",
+            ),
           });
         }
         if (request.path === "/console/v1/inventory" && request.method === "GET") {

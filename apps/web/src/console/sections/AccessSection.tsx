@@ -108,7 +108,10 @@ export function AccessSection({ app }: AccessSectionProps) {
   );
 
   async function refreshAccess(): Promise<void> {
-    await Promise.all([app.refreshSupport(), inventory.refreshInventory(inventory.selectedDeviceId)]);
+    await Promise.all([
+      app.refreshSupport(),
+      inventory.refreshInventory(inventory.selectedDeviceId),
+    ]);
   }
 
   async function confirmDecision(): Promise<void> {
@@ -162,19 +165,41 @@ export function AccessSection({ app }: AccessSectionProps) {
       />
 
       <section className="workspace-metric-grid workspace-metric-grid--compact">
-        <WorkspaceMetricCard label="Devices" value={inventory.summary?.devices ?? inventory.devices.length} detail="Nodes and devices currently visible through the inventory trust surface." />
-        <WorkspaceMetricCard label="Pending requests" value={pendingRequests.length} tone={pendingRequests.length > 0 ? "warning" : "default"} detail="Node pairing requests still waiting on operator approval." />
-        <WorkspaceMetricCard label="Active codes" value={app.supportNodePairingCodes.length} tone={app.supportNodePairingCodes.length > 0 ? "success" : "default"} detail="Pairing codes that can still bootstrap a node or companion." />
-        <WorkspaceMetricCard label="Trust attention" value={trustAttentionCount} tone={trustAttentionCount > 0 ? "warning" : "default"} detail="Devices that are stale, offline, revoked, or otherwise outside the trusted happy path." />
+        <WorkspaceMetricCard
+          label="Devices"
+          value={inventory.summary?.devices ?? inventory.devices.length}
+          detail="Nodes and devices currently visible through the inventory trust surface."
+        />
+        <WorkspaceMetricCard
+          label="Pending requests"
+          value={pendingRequests.length}
+          tone={pendingRequests.length > 0 ? "warning" : "default"}
+          detail="Node pairing requests still waiting on operator approval."
+        />
+        <WorkspaceMetricCard
+          label="Active codes"
+          value={app.supportNodePairingCodes.length}
+          tone={app.supportNodePairingCodes.length > 0 ? "success" : "default"}
+          detail="Pairing codes that can still bootstrap a node or companion."
+        />
+        <WorkspaceMetricCard
+          label="Trust attention"
+          value={trustAttentionCount}
+          tone={trustAttentionCount > 0 ? "warning" : "default"}
+          detail="Devices that are stale, offline, revoked, or otherwise outside the trusted happy path."
+        />
       </section>
 
       {(postureWarnings.length > 0 || stalePendingCount > 0) && (
         <WorkspaceInlineNotice title="Guidance" tone="warning">
           <ul className="console-compact-list">
-            {postureWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+            {postureWarnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
             {stalePendingCount > 0 && (
               <li>
-                {stalePendingCount} pending request{stalePendingCount === 1 ? "" : "s"} map to devices that are already stale, degraded, or offline.
+                {stalePendingCount} pending request{stalePendingCount === 1 ? "" : "s"} map to
+                devices that are already stale, degraded, or offline.
               </li>
             )}
           </ul>
@@ -226,21 +251,41 @@ export function AccessSection({ app }: AccessSectionProps) {
             description="Published capability metadata still advertises the remaining CLI-only seams so operators know when the browser intentionally stops."
             title="Published handoffs"
           >
-            <CapabilityCardList emptyMessage="No CLI handoffs are currently published for access." entries={groupedCapabilities.cli_handoff} />
-            <CapabilityCardList emptyMessage="No direct dashboard actions are currently published for access." entries={groupedCapabilities.direct_action} />
+            <CapabilityCardList
+              emptyMessage="No CLI handoffs are currently published for access."
+              entries={groupedCapabilities.cli_handoff}
+            />
+            <CapabilityCardList
+              emptyMessage="No direct dashboard actions are currently published for access."
+              entries={groupedCapabilities.direct_action}
+            />
           </WorkspaceSectionCard>
         </div>
       </section>
 
       <WorkspaceConfirmDialog
-        confirmLabel={pendingDecision?.action === "reject" ? "Reject pairing request" : "Approve pairing request"}
+        confirmLabel={
+          pendingDecision?.action === "reject"
+            ? "Reject pairing request"
+            : "Approve pairing request"
+        }
         confirmTone={pendingDecision?.action === "reject" ? "danger" : "accent"}
-        description={pendingDecision === null ? "" : pendingDecision.action === "reject" ? `Reject ${pendingDecision.request.device_id} and keep the request out of the trusted inventory path.` : `Approve ${pendingDecision.request.device_id} and publish its trust material into the paired inventory surface.`}
+        description={
+          pendingDecision === null
+            ? ""
+            : pendingDecision.action === "reject"
+              ? `Reject ${pendingDecision.request.device_id} and keep the request out of the trusted inventory path.`
+              : `Approve ${pendingDecision.request.device_id} and publish its trust material into the paired inventory surface.`
+        }
         isBusy={accessBusy}
         isOpen={pendingDecision !== null}
         onConfirm={() => void confirmDecision()}
         onOpenChange={(isOpen) => !isOpen && setPendingDecision(null)}
-        title={pendingDecision?.action === "reject" ? "Reject pairing request" : "Approve pairing request"}
+        title={
+          pendingDecision?.action === "reject"
+            ? "Reject pairing request"
+            : "Approve pairing request"
+        }
       />
 
       <WorkspaceConfirmDialog
@@ -395,7 +440,9 @@ function PendingApprovalsCard({
             columns={["Device", "State", "Trust material", "Expiry", "Action"]}
           >
             {requests.map((request) => {
-              const relatedDevice = devices.find((record) => record.device_id === request.device_id);
+              const relatedDevice = devices.find(
+                (record) => record.device_id === request.device_id,
+              );
               const pending = request.state === "pending_approval";
               return (
                 <tr key={request.request_id}>
@@ -820,7 +867,10 @@ function trustActionLabel(action: TrustAction | null): string {
   return "Confirm trust action";
 }
 
-function describeTrustAction(action: TrustAction | null, device: InventoryDeviceRecord | null): string {
+function describeTrustAction(
+  action: TrustAction | null,
+  device: InventoryDeviceRecord | null,
+): string {
   if (device === null) return "";
   if (action === "rotate") {
     return `Rotate the active certificate for ${device.device_id} and append a new fingerprint to the trust history.`;
@@ -873,13 +923,17 @@ function buildRemoteChecklist(
       status: deployment?.last_remote_admin_access_attempt?.remote_ip_fingerprint
         ? "captured"
         : "not seen",
-      detail: "Use the latest remote fingerprint as a hint before accepting new remote access paths.",
-      tone: deployment?.last_remote_admin_access_attempt?.remote_ip_fingerprint ? "accent" : "warning",
+      detail:
+        "Use the latest remote fingerprint as a hint before accepting new remote access paths.",
+      tone: deployment?.last_remote_admin_access_attempt?.remote_ip_fingerprint
+        ? "accent"
+        : "warning",
     },
     {
       label: "Related nodes",
       status: staleDevices > 0 ? `${staleDevices} stale/offline` : "healthy",
-      detail: "Stale or offline nodes can make a remote verify flow look broken when the real issue is device reachability.",
+      detail:
+        "Stale or offline nodes can make a remote verify flow look broken when the real issue is device reachability.",
       tone: staleDevices > 0 ? "warning" : "success",
     },
   ];
