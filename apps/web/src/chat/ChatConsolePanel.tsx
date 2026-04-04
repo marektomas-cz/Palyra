@@ -179,16 +179,10 @@ export function ChatConsolePanel({
   const toolPayloadCount = useMemo(() => {
     return visibleTranscript.filter((entry) => entry.payload !== undefined).length;
   }, [visibleTranscript]);
-  const recentTranscriptRecords = useMemo(
-    () => [...transcriptRecords].slice(-8).reverse(),
-    [transcriptRecords],
-  );
+  const recentTranscriptRecords = [...transcriptRecords].slice(-8).reverse();
   const deferredComposerText = useDeferredValue(composerText);
   const deferredSearchQuery = useDeferredValue(transcriptSearchQuery);
-  const parsedSlashCommand = useMemo(
-    () => parseSlashCommand(deferredComposerText),
-    [deferredComposerText],
-  );
+  const parsedSlashCommand = parseSlashCommand(deferredComposerText);
   const showSlashPalette = deferredComposerText.trim().startsWith("/");
   const slashQuery = useMemo(() => {
     if (!showSlashPalette) {

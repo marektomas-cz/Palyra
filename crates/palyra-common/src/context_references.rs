@@ -126,9 +126,7 @@ fn parse_reference_at(
     }
 
     let kind_text = &input[start_offset + 1..cursor];
-    let Some(kind) = ContextReferenceKind::parse(kind_text) else {
-        return None;
-    };
+    let kind = ContextReferenceKind::parse(kind_text)?;
 
     if cursor >= bytes.len() || bytes[cursor].is_ascii_whitespace() {
         if kind.requires_target() {

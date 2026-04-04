@@ -23,7 +23,7 @@
     "web:dev": "vp run @palyra/web#dev",
     "web:lint": "vp run @palyra/web#lint",
     "web:typecheck": "vp run @palyra/web#typecheck",
-    "web:test": "vp run @palyra/web#test:run",
+    "web:test": "npm --prefix apps/web run test:run",
     "web:perf-smoke": "vp run @palyra/web#perf:smoke",
     "web:ci": "vp run web:lint && vp run web:typecheck && vp run web:test && vp run web:build",
     "desktop-ui:build": "vp run @palyra/desktop-ui#build",

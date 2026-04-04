@@ -3306,6 +3306,7 @@ fn approval_scope_to_proto(scope: Option<ApprovalDecisionScope>) -> i32 {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn build_console_background_task_payload_json(
     parameter_delta: Option<&Value>,
     delegation: Option<&crate::delegation::DelegationSnapshot>,

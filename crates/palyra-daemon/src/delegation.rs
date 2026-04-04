@@ -178,6 +178,7 @@ pub struct DelegationParentContext {
     pub parent_budget_tokens: Option<u64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn profile_definition(
     profile_id: &str,
     display_name: &str,
