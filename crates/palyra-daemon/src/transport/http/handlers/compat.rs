@@ -768,6 +768,7 @@ fn build_compat_models(provider: model_provider::ProviderStatusSnapshot) -> Vec<
     models
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_compat_requested_model(
     provider: &model_provider::ProviderStatusSnapshot,
     requested_model: Option<&str>,
@@ -792,6 +793,7 @@ fn validate_compat_requested_model(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn render_compat_messages_prompt(messages: &[CompatChatMessage]) -> Result<String, Response> {
     if messages.is_empty() {
         return Err(compat_error_response(
@@ -853,6 +855,7 @@ fn render_compat_message_content(content: &CompatMessageContent) -> String {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_compat_request_overrides(
     metadata: Option<&Value>,
 ) -> Result<CompatRequestOverrides, Response> {
@@ -936,6 +939,7 @@ fn build_compat_message_envelope(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn authorize_compat_api_token(
     state: &AppState,
     headers: &HeaderMap,
@@ -955,6 +959,7 @@ fn authorize_compat_api_token(
         .map_err(access_registry_to_compat_response)
 }
 
+#[allow(clippy::result_large_err)]
 fn extract_bearer_token(headers: &HeaderMap) -> Result<String, Response> {
     headers
         .get(AUTHORIZATION)
@@ -971,6 +976,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> Result<String, Response> {
         })
 }
 
+#[allow(clippy::result_large_err)]
 fn enforce_compat_rate_limit(
     state: &AppState,
     token_id: &str,

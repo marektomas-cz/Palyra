@@ -1599,6 +1599,7 @@ impl AccessRegistry {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_telemetry(
         &mut self,
         feature_key: &str,
@@ -2158,7 +2159,7 @@ mod tests {
             registry.run_backfill("user:ops", false, 100).expect("backfill should succeed");
         assert_eq!(report.changed_records, 0, "second repair pass should be idempotent");
         let snapshot = registry.snapshot("user:ops");
-        assert_eq!(snapshot.rollout.external_api_safe_mode, true);
+        assert!(snapshot.rollout.external_api_safe_mode);
         assert!(
             snapshot.feature_flags.iter().any(|flag| flag.key == FEATURE_STAGED_ROLLOUT),
             "backfill should restore missing rollout package flags"
