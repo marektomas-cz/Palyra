@@ -13,6 +13,7 @@ import { getSectionPath } from "../navigation";
 import { useInventoryDomain } from "../hooks/useInventoryDomain";
 import { ActionButton, SelectField, TextInputField } from "../components/ui";
 import { CapabilityCardList } from "../components/CapabilityCards";
+import { AccessControlWorkspace } from "./access/AccessControlWorkspace";
 import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
@@ -189,6 +190,8 @@ export function AccessSection({ app }: AccessSectionProps) {
           detail="Devices that are stale, offline, revoked, or otherwise outside the trusted happy path."
         />
       </section>
+
+      <AccessControlWorkspace api={app.api} setError={app.setError} setNotice={app.setNotice} />
 
       {(postureWarnings.length > 0 || stalePendingCount > 0) && (
         <WorkspaceInlineNotice title="Guidance" tone="warning">

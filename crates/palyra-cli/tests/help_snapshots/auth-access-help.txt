@@ -1,9 +1,19 @@
-Usage: palyra auth [OPTIONS] <COMMAND>
+Usage: palyra auth access [OPTIONS] <COMMAND>
 
 Commands:
-  profiles
-  access
-  openai
+  status
+  backfill
+  feature
+  token-list
+  token-create
+  token-rotate
+  token-revoke
+  workspace-create
+  invite-create
+  invite-accept
+  membership-role
+  membership-remove
+  share-upsert
 
 Options:
   -h, --help  Print help

@@ -887,6 +887,164 @@ export interface ContractDescriptor {
   contract_version: string;
 }
 
+export interface AccessFeatureFlagRecord {
+  key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  stage: string;
+  depends_on: string[];
+  updated_at_unix_ms: number;
+  updated_by_principal: string;
+}
+
+export interface AccessApiTokenView {
+  token_id: string;
+  label: string;
+  token_prefix: string;
+  scopes: string[];
+  principal: string;
+  workspace_id?: string;
+  role: string;
+  rate_limit_per_minute: number;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+  expires_at_unix_ms?: number;
+  revoked_at_unix_ms?: number;
+  last_used_at_unix_ms?: number;
+  rotated_from_token_id?: string;
+  status: string;
+}
+
+export interface AccessTeamRecord {
+  team_id: string;
+  slug: string;
+  display_name: string;
+  created_by_principal: string;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
+export interface AccessWorkspaceRecord {
+  workspace_id: string;
+  team_id: string;
+  slug: string;
+  display_name: string;
+  runtime_principal: string;
+  runtime_device_id: string;
+  created_by_principal: string;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
+export interface AccessMembershipView {
+  membership_id: string;
+  workspace_id: string;
+  workspace_name: string;
+  team_id: string;
+  team_name: string;
+  principal: string;
+  role: string;
+  permissions: string[];
+  created_by_principal: string;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
+export interface AccessInvitationRecord {
+  invitation_id: string;
+  workspace_id: string;
+  invited_identity: string;
+  role: string;
+  issued_by_principal: string;
+  created_at_unix_ms: number;
+  expires_at_unix_ms: number;
+  accepted_by_principal?: string;
+  accepted_at_unix_ms?: number;
+}
+
+export interface AccessShareRecord {
+  share_id: string;
+  resource_kind: string;
+  resource_id: string;
+  workspace_id: string;
+  access_level: string;
+  created_by_principal: string;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
+export interface AccessTelemetrySummary {
+  feature_key: string;
+  total_events: number;
+  success_events: number;
+  error_events: number;
+  latest_at_unix_ms?: number;
+}
+
+export interface AccessMigrationCheck {
+  key: string;
+  state: string;
+  detail: string;
+  remediation: string;
+}
+
+export interface AccessMigrationStatus {
+  registry_path: string;
+  version: number;
+  backfill_required: boolean;
+  blocking_issues: number;
+  warning_issues: number;
+  last_backfill_at_unix_ms?: number;
+  checks: AccessMigrationCheck[];
+}
+
+export interface AccessBackfillReport {
+  dry_run: boolean;
+  changed_records: number;
+  feature_flags_added: number;
+  teams_repaired: number;
+  workspaces_repaired: number;
+  api_tokens_repaired: number;
+  memberships_repaired: number;
+  telemetry_trimmed: number;
+  notes: string[];
+}
+
+export interface AccessRolloutPackageStatus {
+  feature_key: string;
+  label: string;
+  enabled: boolean;
+  stage: string;
+  depends_on: string[];
+  dependency_blockers: string[];
+  safe_mode_when_disabled: boolean;
+  kill_switch_command: string;
+}
+
+export interface AccessRolloutStatus {
+  staged_rollout_enabled: boolean;
+  external_api_safe_mode: boolean;
+  team_mode_safe_mode: boolean;
+  telemetry_events_retained: number;
+  packages: AccessRolloutPackageStatus[];
+  operator_notes: string[];
+}
+
+export interface AccessRegistrySnapshot {
+  version: number;
+  feature_flags: AccessFeatureFlagRecord[];
+  api_tokens: AccessApiTokenView[];
+  teams: AccessTeamRecord[];
+  workspaces: AccessWorkspaceRecord[];
+  memberships: AccessMembershipView[];
+  invitations: AccessInvitationRecord[];
+  shares: AccessShareRecord[];
+  telemetry: AccessTelemetrySummary[];
+  migration: AccessMigrationStatus;
+  rollout: AccessRolloutStatus;
+}
+
 export interface PageInfo {
   limit: number;
   returned: number;
@@ -1723,6 +1881,190 @@ export class ConsoleApiClient {
   ): Promise<ProviderAuthActionEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/default-profile",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async getAccessSnapshot(): Promise<{
+    contract: ContractDescriptor;
+    snapshot: AccessRegistrySnapshot;
+  }> {
+    return this.request("/console/v1/access");
+  }
+
+  async runAccessBackfill(payload: { dry_run?: boolean }): Promise<{
+    contract: ContractDescriptor;
+    backfill: AccessBackfillReport;
+    snapshot: AccessRegistrySnapshot;
+  }> {
+    return this.request(
+      "/console/v1/access/backfill",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async setAccessFeatureFlag(payload: {
+    feature_key: string;
+    enabled: boolean;
+    stage?: string;
+  }): Promise<{ contract: ContractDescriptor; feature_flag: AccessFeatureFlagRecord }> {
+    return this.request(
+      `/console/v1/access/features/${encodeURIComponent(payload.feature_key)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          enabled: payload.enabled,
+          stage: payload.stage,
+        }),
+      },
+      { csrf: true },
+    );
+  }
+
+  async createAccessApiToken(payload: {
+    label: string;
+    principal: string;
+    workspace_id?: string;
+    role: string;
+    scopes: string[];
+    expires_at_unix_ms?: number;
+    rate_limit_per_minute?: number;
+  }): Promise<{
+    contract: ContractDescriptor;
+    created: { token: string; token_record: AccessApiTokenView };
+  }> {
+    return this.request(
+      "/console/v1/access/api-tokens",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async rotateAccessApiToken(tokenId: string): Promise<{
+    contract: ContractDescriptor;
+    rotated: { token: string; token_record: AccessApiTokenView };
+  }> {
+    return this.request(
+      `/console/v1/access/api-tokens/${encodeURIComponent(tokenId)}/rotate`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+      { csrf: true },
+    );
+  }
+
+  async revokeAccessApiToken(
+    tokenId: string,
+  ): Promise<{ contract: ContractDescriptor; revoked: AccessApiTokenView }> {
+    return this.request(
+      `/console/v1/access/api-tokens/${encodeURIComponent(tokenId)}/revoke`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+      { csrf: true },
+    );
+  }
+
+  async createAccessWorkspace(payload: { team_name: string; workspace_name: string }): Promise<{
+    contract: ContractDescriptor;
+    created: {
+      team: AccessTeamRecord;
+      workspace: AccessWorkspaceRecord;
+      membership: AccessMembershipView;
+    };
+  }> {
+    return this.request(
+      "/console/v1/access/workspaces",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async createAccessInvitation(payload: {
+    workspace_id: string;
+    invited_identity: string;
+    role: string;
+    expires_at_unix_ms: number;
+  }): Promise<{
+    contract: ContractDescriptor;
+    created: { invitation_token: string; invitation: AccessInvitationRecord };
+  }> {
+    return this.request(
+      "/console/v1/access/invitations",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async acceptAccessInvitation(payload: {
+    invitation_token: string;
+  }): Promise<{ contract: ContractDescriptor; membership: AccessMembershipView }> {
+    return this.request(
+      "/console/v1/access/invitations/accept",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async updateAccessMembershipRole(payload: {
+    workspace_id: string;
+    member_principal: string;
+    role: string;
+  }): Promise<{ contract: ContractDescriptor; membership: AccessMembershipView }> {
+    return this.request(
+      "/console/v1/access/memberships/role",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async removeAccessMembership(payload: {
+    workspace_id: string;
+    member_principal: string;
+  }): Promise<{ contract: ContractDescriptor; removed: boolean }> {
+    return this.request(
+      "/console/v1/access/memberships/remove",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async upsertAccessShare(payload: {
+    workspace_id: string;
+    resource_kind: string;
+    resource_id: string;
+    access_level: string;
+  }): Promise<{ contract: ContractDescriptor; share: AccessShareRecord }> {
+    return this.request(
+      "/console/v1/access/shares",
       {
         method: "POST",
         body: JSON.stringify(payload),

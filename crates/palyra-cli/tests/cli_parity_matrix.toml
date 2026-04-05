@@ -524,6 +524,27 @@ path = "auth profiles"
 file = "auth-profiles-help.txt"
 
 [[entries]]
+path = "auth access"
+category = "nested_surface"
+status = "done"
+summary = "Compat API, workspace access, and rollout management workflows."
+
+[entries.snapshot]
+path = "auth access"
+file = "auth-access-help.txt"
+
+[[entries]]
+path = "auth access backfill"
+category = "nested_surface"
+status = "done"
+summary = "Phase-10 access schema repair and dry-run tooling."
+required_flags = ["dry-run", "json"]
+
+[entries.snapshot]
+path = "auth access backfill"
+file = "auth-access-backfill-help.txt"
+
+[[entries]]
 path = "auth openai"
 category = "nested_surface"
 status = "done"

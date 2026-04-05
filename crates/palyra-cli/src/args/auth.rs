@@ -6,6 +6,10 @@ pub enum AuthCommand {
         #[command(subcommand)]
         command: AuthProfilesCommand,
     },
+    Access {
+        #[command(subcommand)]
+        command: AuthAccessCommand,
+    },
     Openai {
         #[command(subcommand)]
         command: AuthOpenAiCommand,
@@ -164,6 +168,117 @@ pub enum AuthOpenAiCommand {
     },
 }
 
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum AuthAccessCommand {
+    Status {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Backfill {
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Feature {
+        feature_key: String,
+        #[arg(action = clap::ArgAction::Set, value_parser = clap::value_parser!(bool))]
+        enabled: bool,
+        #[arg(long)]
+        stage: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    TokenList {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    TokenCreate {
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        principal: String,
+        #[arg(long)]
+        workspace_id: Option<String>,
+        #[arg(long, value_enum, default_value_t = WorkspaceRoleArg::Operator)]
+        role: WorkspaceRoleArg,
+        #[arg(long = "scope")]
+        scope: Vec<String>,
+        #[arg(long)]
+        expires_at_unix_ms: Option<i64>,
+        #[arg(long)]
+        rate_limit_per_minute: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    TokenRotate {
+        token_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    TokenRevoke {
+        token_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    WorkspaceCreate {
+        #[arg(long)]
+        team_name: String,
+        #[arg(long)]
+        workspace_name: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    InviteCreate {
+        #[arg(long)]
+        workspace_id: String,
+        #[arg(long)]
+        invited_identity: String,
+        #[arg(long, value_enum, default_value_t = WorkspaceRoleArg::Operator)]
+        role: WorkspaceRoleArg,
+        #[arg(long)]
+        expires_at_unix_ms: i64,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    InviteAccept {
+        invitation_token: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    MembershipRole {
+        #[arg(long)]
+        workspace_id: String,
+        #[arg(long)]
+        member_principal: String,
+        #[arg(long, value_enum)]
+        role: WorkspaceRoleArg,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    MembershipRemove {
+        #[arg(long)]
+        workspace_id: String,
+        #[arg(long)]
+        member_principal: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    ShareUpsert {
+        #[arg(long)]
+        workspace_id: String,
+        #[arg(long)]
+        resource_kind: String,
+        #[arg(long)]
+        resource_id: String,
+        #[arg(long)]
+        access_level: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AuthProviderArg {
     Openai,
@@ -185,4 +300,11 @@ pub enum AuthScopeArg {
 pub enum AuthCredentialArg {
     ApiKey,
     Oauth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum WorkspaceRoleArg {
+    Owner,
+    Admin,
+    Operator,
 }

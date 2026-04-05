@@ -98,6 +98,25 @@ pub(crate) fn run_doctor(strict: bool, json: bool) -> Result<()> {
             println!("doctor.browser_error={error}");
         }
         println!(
+            "doctor.access registry_path={} exists={} parsed={} compat_api_enabled={} api_tokens_enabled={} team_mode_enabled={} rbac_enabled={} staged_rollout_enabled={} backfill_required={} blocking_issues={} warning_issues={} external_api_safe_mode={} team_mode_safe_mode={}",
+            report.access.registry_path.as_deref().unwrap_or("none"),
+            report.access.registry_exists,
+            report.access.parsed,
+            report.access.compat_api_enabled,
+            report.access.api_tokens_enabled,
+            report.access.team_mode_enabled,
+            report.access.rbac_enabled,
+            report.access.staged_rollout_enabled,
+            report.access.backfill_required,
+            report.access.blocking_issues,
+            report.access.warning_issues,
+            report.access.external_api_safe_mode,
+            report.access.team_mode_safe_mode,
+        );
+        if let Some(error) = report.access.error.as_deref() {
+            println!("doctor.access_error={error}");
+        }
+        println!(
             "doctor.sandbox tier_b_preflight_only={} tier_c_strict_offline={} tier_c_windows_backend_supported={}",
             report.sandbox.tier_b_egress_allowlists_preflight_only,
             report.sandbox.tier_c_strict_offline_only,
@@ -156,6 +175,9 @@ pub(crate) fn run_doctor(strict: bool, json: bool) -> Result<()> {
         }
         if !report.deployment.warnings.is_empty() || !warning_checks.is_empty() {
             next_steps.push("palyra security audit --offline");
+        }
+        if report.access.backfill_required || report.access.blocking_issues > 0 {
+            next_steps.push("palyra auth access backfill --dry-run");
         }
         if report.browser.configured_enabled
             && (!report.browser.auth_token_configured

@@ -1,12 +1,9 @@
-Usage: palyra auth [OPTIONS] <COMMAND>
-
-Commands:
-  profiles
-  access
-  openai
+Usage: palyra auth access backfill [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --dry-run
+      --json
+  -h, --help     Print help
 
 Global Options:
       --profile <PROFILE>

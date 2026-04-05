@@ -4,10 +4,11 @@ use super::{
     AcpBridgeArgs, AcpCommand, AcpConnectionArgs, AcpSessionDefaultsArgs, AcpShimArgs,
     AcpSubcommand, AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalDecisionScopeArg,
     ApprovalExportFormatArg, ApprovalResolveDecisionArg, ApprovalSubjectTypeArg, ApprovalsCommand,
-    AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg,
-    AuthScopeArg, BackupCommand, BackupComponentArg, BrowserCommand, BrowserPermissionsCommand,
-    BrowserSessionCommand, ChannelProviderArg, ChannelResolveEntityArg, ChannelsCommand,
-    ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell, ConfigCommand,
+    AuthAccessCommand, AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand,
+    AuthProviderArg, AuthScopeArg, BackupCommand, BackupComponentArg, BrowserCommand,
+    BrowserPermissionsCommand, BrowserSessionCommand, ChannelProviderArg, ChannelResolveEntityArg,
+    ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell,
+    ConfigCommand,
     ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
     CronScheduleTypeArg, DaemonCommand, DevicesCommand, DocsCommand, GatewayBindProfileArg,
     HooksCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
@@ -20,7 +21,7 @@ use super::{
     SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
     SkillsCommand, SkillsPackageCommand, SupportBundleCommand, SystemCommand, SystemEventCommand,
     SystemEventSeverityArg, TuiCommand, UninstallCommand, UpdateCommand, WebhooksCommand,
-    WizardOverridesArg,
+    WizardOverridesArg, WorkspaceRoleArg,
 };
 
 #[test]
@@ -1983,6 +1984,95 @@ fn parse_auth_profiles_health() {
                 command: AuthProfilesCommand::Health {
                     agent_id: Some("assistant".to_owned()),
                     include_profiles: true,
+                    json: true,
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_auth_access_backfill_dry_run() {
+    let parsed = Cli::parse_from(["palyra", "auth", "access", "backfill", "--dry-run", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Auth {
+            command: AuthCommand::Access {
+                command: AuthAccessCommand::Backfill {
+                    dry_run: true,
+                    json: true,
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_auth_access_feature_toggle() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "auth",
+        "access",
+        "feature",
+        "compat_api",
+        "true",
+        "--stage",
+        "admin_only",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Auth {
+            command: AuthCommand::Access {
+                command: AuthAccessCommand::Feature {
+                    feature_key: "compat_api".to_owned(),
+                    enabled: true,
+                    stage: Some("admin_only".to_owned()),
+                    json: true,
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_auth_access_token_create_for_workspace() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "auth",
+        "access",
+        "token-create",
+        "--label",
+        "Compat API",
+        "--principal",
+        "user:alice",
+        "--workspace-id",
+        "01WORKSPACE",
+        "--role",
+        "admin",
+        "--scope",
+        "compat.chat.create",
+        "--scope",
+        "compat.responses.create",
+        "--rate-limit-per-minute",
+        "240",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Auth {
+            command: AuthCommand::Access {
+                command: AuthAccessCommand::TokenCreate {
+                    label: "Compat API".to_owned(),
+                    principal: "user:alice".to_owned(),
+                    workspace_id: Some("01WORKSPACE".to_owned()),
+                    role: WorkspaceRoleArg::Admin,
+                    scope: vec![
+                        "compat.chat.create".to_owned(),
+                        "compat.responses.create".to_owned()
+                    ],
+                    expires_at_unix_ms: None,
+                    rate_limit_per_minute: Some(240),
                     json: true,
                 },
             },

@@ -7,19 +7,19 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 
 ## Summary
 
-- Total entries: `94`
-- Verified entries: `94`
+- Total entries: `96`
+- Verified entries: `96`
 - Regression entries: `0`
-- Help snapshot coverage: `94` entries
+- Help snapshot coverage: `96` entries
 
 ### Expected parity status counts
 
-- `done`: `90`
+- `done`: `92`
 - `partial`: `4`
 
 ### Validation status counts
 
-- `verified`: `94`
+- `verified`: `96`
 
 ## Entries
 
@@ -76,6 +76,8 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 | `pairing` | `top_level` | `done` | `verified` | `pairing-help.txt` | - | - | - |
 | `acp shim` | `nested_surface` | `done` | `verified` | `acp-shim-help.txt` | - | `--session-id`, `--run-id`, `--prompt`, `--prompt-stdin`, `--ndjson-stdin` | - |
 | `auth profiles` | `nested_surface` | `done` | `verified` | `auth-profiles-help.txt` | - | - | - |
+| `auth access` | `nested_surface` | `done` | `verified` | `auth-access-help.txt` | - | - | - |
+| `auth access backfill` | `nested_surface` | `done` | `verified` | `auth-access-backfill-help.txt` | - | `--dry-run`, `--json` | - |
 | `auth openai` | `nested_surface` | `done` | `verified` | `auth-openai-help.txt` | - | - | - |
 | `auth openai api-key` | `nested_surface` | `done` | `verified` | `auth-openai-api-key-help.txt` | - | `--profile-id`, `--api-key-stdin`, `--api-key-prompt`, `--set-default` | - |
 | `auth profiles list` | `nested_surface` | `done` | `verified` | `auth-profiles-list-help.txt` | - | - | - |

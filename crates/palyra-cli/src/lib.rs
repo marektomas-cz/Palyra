@@ -76,16 +76,17 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{CommandFactory, Parser};
 use cli::{
     AcpCommand, AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg,
-    ApprovalsCommand, AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand,
-    AuthProviderArg, AuthScopeArg, BrowserCommand, Cli, Command as CliCommand, CompletionShell,
-    ConfigCommand, ConfigureSectionArg, CronCommand, DaemonCommand, DocsCommand,
-    GatewayBindProfileArg, HooksCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg,
-    MemoryCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand, OnboardingAuthMethodArg,
-    OnboardingCommand, OnboardingFlowArg, PatchCommand, PluginsCommand, PolicyCommand,
-    ProtocolCommand, RemoteVerificationModeArg, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
-    SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
-    SupportBundleCommand, SystemCommand, SystemEventCommand, SystemEventSeverityArg,
-    WebhooksCommand, WizardOverridesArg,
+    ApprovalsCommand, AuthAccessCommand, AuthCommand, AuthCredentialArg, AuthOpenAiCommand,
+    AuthProfilesCommand, AuthProviderArg, AuthScopeArg, BrowserCommand, Cli,
+    Command as CliCommand, CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand,
+    DaemonCommand, DocsCommand, GatewayBindProfileArg, HooksCommand, InitModeArg,
+    InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand, MemoryScopeArg,
+    MemorySourceArg, ModelsCommand, OnboardingAuthMethodArg, OnboardingCommand,
+    OnboardingFlowArg, PatchCommand, PluginsCommand, PolicyCommand, ProtocolCommand,
+    RemoteVerificationModeArg, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
+    SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand,
+    SkillsPackageCommand, SupportBundleCommand, SystemCommand, SystemEventCommand,
+    SystemEventSeverityArg, WebhooksCommand, WizardOverridesArg, WorkspaceRoleArg,
 };
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
@@ -667,6 +668,7 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
     let provider_auth =
         collect_doctor_provider_auth_snapshot(admin_payload.as_ref(), admin_error.as_deref());
     let browser = collect_doctor_browser_snapshot(admin_payload.as_ref(), admin_error.as_deref());
+    let access = collect_doctor_access_snapshot();
     let deployment = collect_doctor_deployment_snapshot();
     let skills = build_default_skills_inventory_snapshot();
 
@@ -695,6 +697,7 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
         connectivity,
         provider_auth,
         browser,
+        access,
         skills,
         sandbox: DoctorSandboxSnapshot {
             tier_b_egress_allowlists_preflight_only: process_runner_tier_b_allowlist_config_ok(),
@@ -1015,6 +1018,210 @@ fn collect_doctor_browser_snapshot(
         recent_health_failures,
         error,
     }
+}
+
+fn collect_doctor_access_snapshot() -> DoctorAccessSnapshot {
+    let state_root = match app::resolve_cli_state_root(None) {
+        Ok(path) => path,
+        Err(error) => {
+            return DoctorAccessSnapshot {
+                registry_path: None,
+                registry_exists: false,
+                parsed: false,
+                compat_api_enabled: false,
+                api_tokens_enabled: false,
+                team_mode_enabled: false,
+                rbac_enabled: false,
+                staged_rollout_enabled: false,
+                backfill_required: false,
+                blocking_issues: 0,
+                warning_issues: 0,
+                external_api_safe_mode: true,
+                team_mode_safe_mode: true,
+                error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
+            };
+        }
+    };
+    let registry_path = state_root.join("access_registry.json");
+    if !registry_path.exists() {
+        return DoctorAccessSnapshot {
+            registry_path: Some(registry_path.display().to_string()),
+            registry_exists: false,
+            parsed: false,
+            compat_api_enabled: false,
+            api_tokens_enabled: false,
+            team_mode_enabled: false,
+            rbac_enabled: false,
+            staged_rollout_enabled: false,
+            backfill_required: false,
+            blocking_issues: 0,
+            warning_issues: 0,
+            external_api_safe_mode: true,
+            team_mode_safe_mode: true,
+            error: None,
+        };
+    }
+
+    let raw = match fs::read_to_string(&registry_path) {
+        Ok(value) => value,
+        Err(error) => {
+            return DoctorAccessSnapshot {
+                registry_path: Some(registry_path.display().to_string()),
+                registry_exists: true,
+                parsed: false,
+                compat_api_enabled: false,
+                api_tokens_enabled: false,
+                team_mode_enabled: false,
+                rbac_enabled: false,
+                staged_rollout_enabled: false,
+                backfill_required: false,
+                blocking_issues: 0,
+                warning_issues: 0,
+                external_api_safe_mode: true,
+                team_mode_safe_mode: true,
+                error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
+            };
+        }
+    };
+    let value = match serde_json::from_str::<Value>(raw.as_str()) {
+        Ok(value) => value,
+        Err(error) => {
+            return DoctorAccessSnapshot {
+                registry_path: Some(registry_path.display().to_string()),
+                registry_exists: true,
+                parsed: false,
+                compat_api_enabled: false,
+                api_tokens_enabled: false,
+                team_mode_enabled: false,
+                rbac_enabled: false,
+                staged_rollout_enabled: false,
+                backfill_required: true,
+                blocking_issues: 1,
+                warning_issues: 0,
+                external_api_safe_mode: true,
+                team_mode_safe_mode: true,
+                error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
+            };
+        }
+    };
+
+    let feature_flags = value
+        .get("feature_flags")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let compat_api_enabled = doctor_access_flag_enabled(feature_flags.as_slice(), "compat_api");
+    let api_tokens_enabled = doctor_access_flag_enabled(feature_flags.as_slice(), "api_tokens");
+    let team_mode_enabled = doctor_access_flag_enabled(feature_flags.as_slice(), "team_mode");
+    let rbac_enabled = doctor_access_flag_enabled(feature_flags.as_slice(), "rbac");
+    let staged_rollout_enabled =
+        doctor_access_flag_enabled(feature_flags.as_slice(), "staged_rollout");
+
+    let missing_flags = ["compat_api", "api_tokens", "team_mode", "rbac", "staged_rollout"]
+        .into_iter()
+        .filter(|key| !feature_flags.iter().any(|entry| {
+            entry.get("key").and_then(Value::as_str).is_some_and(|value| value == *key)
+        }))
+        .count();
+    let workspaces_missing_runtime = value
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .map(|workspaces| {
+            workspaces
+                .iter()
+                .filter(|workspace| {
+                    workspace
+                        .get("runtime_principal")
+                        .and_then(Value::as_str)
+                        .is_none_or(|value| value.trim().is_empty())
+                        || workspace
+                            .get("runtime_device_id")
+                            .and_then(Value::as_str)
+                            .is_none_or(|value| value.trim().is_empty())
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let api_tokens_missing_scopes = value
+        .get("api_tokens")
+        .and_then(Value::as_array)
+        .map(|tokens| {
+            tokens
+                .iter()
+                .filter(|token| {
+                    token.get("scopes").and_then(Value::as_array).is_none_or(|value| value.is_empty())
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let workspace_ids = value
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .map(|workspaces| {
+            workspaces
+                .iter()
+                .filter_map(|workspace| {
+                    workspace.get("workspace_id").and_then(Value::as_str).map(ToOwned::to_owned)
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let orphaned_memberships = value
+        .get("memberships")
+        .and_then(Value::as_array)
+        .map(|memberships| {
+            memberships
+                .iter()
+                .filter(|membership| {
+                    membership
+                        .get("workspace_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|workspace_id| !workspace_ids.contains(workspace_id))
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let orphaned_invitations = value
+        .get("invitations")
+        .and_then(Value::as_array)
+        .map(|invitations| {
+            invitations
+                .iter()
+                .filter(|invitation| {
+                    invitation
+                        .get("workspace_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|workspace_id| !workspace_ids.contains(workspace_id))
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let warning_issues = missing_flags + workspaces_missing_runtime + api_tokens_missing_scopes;
+    let blocking_issues = orphaned_memberships + orphaned_invitations;
+
+    DoctorAccessSnapshot {
+        registry_path: Some(registry_path.display().to_string()),
+        registry_exists: true,
+        parsed: true,
+        compat_api_enabled,
+        api_tokens_enabled,
+        team_mode_enabled,
+        rbac_enabled,
+        staged_rollout_enabled,
+        backfill_required: warning_issues > 0 || blocking_issues > 0,
+        blocking_issues,
+        warning_issues,
+        external_api_safe_mode: !compat_api_enabled || !api_tokens_enabled,
+        team_mode_safe_mode: !team_mode_enabled || !rbac_enabled,
+        error: None,
+    }
+}
+
+fn doctor_access_flag_enabled(flags: &[Value], key: &str) -> bool {
+    flags.iter().any(|entry| {
+        entry.get("key").and_then(Value::as_str).is_some_and(|value| value == key)
+            && entry.get("enabled").and_then(Value::as_bool).unwrap_or(false)
+    })
 }
 
 fn collect_doctor_deployment_snapshot() -> DoctorDeploymentSnapshot {
@@ -6222,6 +6429,7 @@ struct DoctorReport {
     connectivity: DoctorConnectivitySnapshot,
     provider_auth: DoctorProviderAuthSnapshot,
     browser: DoctorBrowserSnapshot,
+    access: DoctorAccessSnapshot,
     skills: SkillsInventorySnapshot,
     sandbox: DoctorSandboxSnapshot,
     deployment: DoctorDeploymentSnapshot,
@@ -6306,6 +6514,25 @@ struct DoctorBrowserSnapshot {
     recent_relay_action_failures: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recent_health_failures: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorAccessSnapshot {
+    registry_path: Option<String>,
+    registry_exists: bool,
+    parsed: bool,
+    compat_api_enabled: bool,
+    api_tokens_enabled: bool,
+    team_mode_enabled: bool,
+    rbac_enabled: bool,
+    staged_rollout_enabled: bool,
+    backfill_required: bool,
+    blocking_issues: usize,
+    warning_issues: usize,
+    external_api_safe_mode: bool,
+    team_mode_safe_mode: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -7680,7 +7907,7 @@ mod init_command_tests {
 mod diagnostics_bundle_tests {
     use super::{
         encode_support_bundle_with_cap, extract_support_bundle_error_message,
-        DoctorBrowserSnapshot, DoctorConfigSnapshot, DoctorConnectivityProbe,
+        DoctorAccessSnapshot, DoctorBrowserSnapshot, DoctorConfigSnapshot, DoctorConnectivityProbe,
         DoctorConnectivitySnapshot, DoctorDeploymentBindSnapshot, DoctorDeploymentSnapshot,
         DoctorIdentitySnapshot, DoctorProviderAuthSnapshot, DoctorReport, DoctorSandboxSnapshot,
         DoctorSummary, SkillsInventorySnapshot, SupportBundle, SupportBundleBuildSnapshot,
@@ -7742,6 +7969,22 @@ mod diagnostics_bundle_tests {
                 active_sessions: Some(1),
                 recent_relay_action_failures: Some(0),
                 recent_health_failures: Some(0),
+                error: None,
+            },
+            access: DoctorAccessSnapshot {
+                registry_path: Some("state/access_registry.json".to_owned()),
+                registry_exists: true,
+                parsed: true,
+                compat_api_enabled: false,
+                api_tokens_enabled: false,
+                team_mode_enabled: false,
+                rbac_enabled: false,
+                staged_rollout_enabled: false,
+                backfill_required: false,
+                blocking_issues: 0,
+                warning_issues: 0,
+                external_api_safe_mode: true,
+                team_mode_safe_mode: true,
                 error: None,
             },
             skills: SkillsInventorySnapshot {

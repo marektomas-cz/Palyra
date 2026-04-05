@@ -13,6 +13,10 @@ pub(crate) fn run_auth(command: AuthCommand) -> Result<()> {
             let runtime = build_runtime()?;
             runtime.block_on(run_auth_profiles_async(command, connection))
         }
+        AuthCommand::Access { .. } => {
+            let runtime = build_runtime()?;
+            runtime.block_on(run_auth_access_async(command))
+        }
         AuthCommand::Openai { command } => {
             let runtime = build_runtime()?;
             runtime.block_on(run_auth_openai_async(command))
@@ -275,6 +279,209 @@ pub(crate) async fn run_auth_profiles_async(
         }
     }
 
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+async fn run_auth_access_async(command: AuthCommand) -> Result<()> {
+    let AuthCommand::Access { command } = command else {
+        anyhow::bail!("auth access dispatch received an incompatible auth command");
+    };
+    let context = client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
+        .await?;
+    match command {
+        AuthAccessCommand::Status { json } => {
+            let payload = context
+                .client
+                .get_access_snapshot()
+                .await
+                .context("failed to fetch access snapshot")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::Backfill { dry_run, json } => {
+            let payload = context
+                .client
+                .run_access_backfill(&json!({ "dry_run": dry_run }))
+                .await
+                .context("failed to run access backfill")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::Feature {
+            feature_key,
+            enabled,
+            stage,
+            json,
+        } => {
+            let payload = context
+                .client
+                .set_access_feature_flag(
+                    feature_key.as_str(),
+                    &json!({
+                        "enabled": enabled,
+                        "stage": stage,
+                    }),
+                )
+                .await
+                .with_context(|| format!("failed to set access feature flag {feature_key}"))?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::TokenList { json } => {
+            let payload = context
+                .client
+                .list_access_api_tokens()
+                .await
+                .context("failed to list access API tokens")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::TokenCreate {
+            label,
+            principal,
+            workspace_id,
+            role,
+            scope,
+            expires_at_unix_ms,
+            rate_limit_per_minute,
+            json,
+        } => {
+            let payload = context
+                .client
+                .create_access_api_token(
+                    &json!({
+                        "label": label,
+                        "principal": principal,
+                        "workspace_id": workspace_id,
+                        "role": workspace_role_arg_to_text(role),
+                        "scopes": scope,
+                        "expires_at_unix_ms": expires_at_unix_ms,
+                        "rate_limit_per_minute": rate_limit_per_minute,
+                    }),
+                )
+                .await
+                .context("failed to create access API token")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::TokenRotate { token_id, json } => {
+            let payload = context
+                .client
+                .rotate_access_api_token(token_id.as_str())
+                .await
+                .with_context(|| format!("failed to rotate access API token {token_id}"))?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::TokenRevoke { token_id, json } => {
+            let payload = context
+                .client
+                .revoke_access_api_token(token_id.as_str())
+                .await
+                .with_context(|| format!("failed to revoke access API token {token_id}"))?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::WorkspaceCreate {
+            team_name,
+            workspace_name,
+            json,
+        } => {
+            let payload = context
+                .client
+                .create_access_workspace(
+                    &json!({
+                        "team_name": team_name,
+                        "workspace_name": workspace_name,
+                    }),
+                )
+                .await
+                .context("failed to create access workspace")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::InviteCreate {
+            workspace_id,
+            invited_identity,
+            role,
+            expires_at_unix_ms,
+            json,
+        } => {
+            let payload = context
+                .client
+                .create_access_invitation(
+                    &json!({
+                        "workspace_id": workspace_id,
+                        "invited_identity": invited_identity,
+                        "role": workspace_role_arg_to_text(role),
+                        "expires_at_unix_ms": expires_at_unix_ms,
+                    }),
+                )
+                .await
+                .context("failed to create access invitation")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::InviteAccept {
+            invitation_token,
+            json,
+        } => {
+            let payload = context
+                .client
+                .accept_access_invitation(&json!({ "invitation_token": invitation_token }))
+                .await
+                .context("failed to accept access invitation")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::MembershipRole {
+            workspace_id,
+            member_principal,
+            role,
+            json,
+        } => {
+            let payload = context
+                .client
+                .update_access_membership_role(
+                    &json!({
+                        "workspace_id": workspace_id,
+                        "member_principal": member_principal,
+                        "role": workspace_role_arg_to_text(role),
+                    }),
+                )
+                .await
+                .context("failed to update workspace membership role")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::MembershipRemove {
+            workspace_id,
+            member_principal,
+            json,
+        } => {
+            let payload = context
+                .client
+                .remove_access_membership(
+                    &json!({
+                        "workspace_id": workspace_id,
+                        "member_principal": member_principal,
+                    }),
+                )
+                .await
+                .context("failed to remove workspace membership")?;
+            emit_access_payload(payload, json)?;
+        }
+        AuthAccessCommand::ShareUpsert {
+            workspace_id,
+            resource_kind,
+            resource_id,
+            access_level,
+            json,
+        } => {
+            let payload = context
+                .client
+                .upsert_access_share(
+                    &json!({
+                        "workspace_id": workspace_id,
+                        "resource_kind": resource_kind,
+                        "resource_id": resource_id,
+                        "access_level": access_level,
+                    }),
+                )
+                .await
+                .context("failed to upsert access share")?;
+            emit_access_payload(payload, json)?;
+        }
+    }
     std::io::stdout().flush().context("stdout flush failed")
 }
 
@@ -807,6 +1014,80 @@ fn build_control_plane_scope(
             kind: "agent".to_owned(),
             agent_id: Some(agent_id.context("--agent-id is required when --scope=agent")?),
         }),
+    }
+}
+
+fn emit_access_payload(payload: Value, json_output: bool) -> Result<()> {
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    let count = payload
+        .get("api_tokens")
+        .and_then(Value::as_array)
+        .map(std::vec::Vec::len)
+        .unwrap_or_default();
+    let membership_count = payload
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("memberships"))
+        .and_then(Value::as_array)
+        .map(std::vec::Vec::len)
+        .unwrap_or_default();
+    let feature_count = payload
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("feature_flags"))
+        .and_then(Value::as_array)
+        .map(std::vec::Vec::len)
+        .unwrap_or_default();
+    let migration_backfill_required = payload
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("migration"))
+        .and_then(|migration| migration.get("backfill_required"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let migration_blockers = payload
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("migration"))
+        .and_then(|migration| migration.get("blocking_issues"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let external_api_safe_mode = payload
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("rollout"))
+        .and_then(|rollout| rollout.get("external_api_safe_mode"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let team_mode_safe_mode = payload
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("rollout"))
+        .and_then(|rollout| rollout.get("team_mode_safe_mode"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let backfill_changes = payload
+        .get("backfill")
+        .and_then(|backfill| backfill.get("changed_records"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    println!(
+        "auth.access result tokens={} memberships={} feature_flags={} backfill_required={} migration_blockers={} external_api_safe_mode={} team_mode_safe_mode={} backfill_changes={}",
+        count,
+        membership_count,
+        feature_count,
+        migration_backfill_required,
+        migration_blockers,
+        external_api_safe_mode,
+        team_mode_safe_mode,
+        backfill_changes
+    );
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+fn workspace_role_arg_to_text(role: WorkspaceRoleArg) -> &'static str {
+    match role {
+        WorkspaceRoleArg::Owner => "owner",
+        WorkspaceRoleArg::Admin => "admin",
+        WorkspaceRoleArg::Operator => "operator",
     }
 }
 
