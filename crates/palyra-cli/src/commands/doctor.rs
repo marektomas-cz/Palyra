@@ -98,7 +98,7 @@ pub(crate) fn run_doctor(strict: bool, json: bool) -> Result<()> {
             println!("doctor.browser_error={error}");
         }
         println!(
-            "doctor.access registry_path={} exists={} parsed={} compat_api_enabled={} api_tokens_enabled={} team_mode_enabled={} rbac_enabled={} staged_rollout_enabled={} backfill_required={} blocking_issues={} warning_issues={} external_api_safe_mode={} team_mode_safe_mode={}",
+            "doctor.access registry_path={} exists={} parsed={} compat_api_enabled={} api_tokens_enabled={} team_mode_enabled={} rbac_enabled={} staged_rollout_enabled={} external_api_safe_mode={} team_mode_safe_mode={}",
             report.access.registry_path.as_deref().unwrap_or("none"),
             report.access.registry_exists,
             report.access.parsed,
@@ -107,9 +107,6 @@ pub(crate) fn run_doctor(strict: bool, json: bool) -> Result<()> {
             report.access.team_mode_enabled,
             report.access.rbac_enabled,
             report.access.staged_rollout_enabled,
-            report.access.backfill_required,
-            report.access.blocking_issues,
-            report.access.warning_issues,
             report.access.external_api_safe_mode,
             report.access.team_mode_safe_mode,
         );
