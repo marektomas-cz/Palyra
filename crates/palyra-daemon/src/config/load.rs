@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Component, PathBuf},
 };
@@ -1673,16 +1674,21 @@ fn parse_openai_embeddings_dims(raw: u32, source_name: &str) -> Result<u32> {
     parse_positive_u32(raw, source_name)
 }
 
+fn push_unique_string(values: &mut Vec<String>, seen: &mut HashSet<String>, value: String) {
+    if seen.insert(value.clone()) {
+        values.push(value);
+    }
+}
+
 fn parse_vault_ref_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
     let mut refs = Vec::new();
+    let mut seen_refs = HashSet::new();
     for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
         let parsed = VaultRef::parse(candidate).map_err(|error| {
             anyhow::anyhow!("{source_name} contains invalid vault ref '{candidate}': {error}")
         })?;
         let normalized = format!("{}/{}", parsed.scope, parsed.key).to_ascii_lowercase();
-        if !refs.iter().any(|existing| existing == &normalized) {
-            refs.push(normalized);
-        }
+        push_unique_string(&mut refs, &mut seen_refs, normalized);
     }
     if refs.is_empty() {
         anyhow::bail!("{source_name} must include at least one <scope>/<key> entry");
@@ -1725,15 +1731,14 @@ fn parse_cron_timezone_mode(raw: &str, source_name: &str) -> Result<CronTimezone
 
 fn parse_identifier_allowlist(raw: &str, source_name: &str, label: &str) -> Result<Vec<String>> {
     let mut allowlist = Vec::new();
+    let mut seen_values = HashSet::new();
     for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
         if !candidate.chars().all(|ch| {
             ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
         }) {
             anyhow::bail!("{source_name} contains invalid {label} '{candidate}'");
         }
-        if !allowlist.iter().any(|existing| existing == candidate) {
-            allowlist.push(candidate.to_owned());
-        }
+        push_unique_string(&mut allowlist, &mut seen_values, candidate.to_owned());
     }
     Ok(allowlist)
 }
@@ -1750,30 +1755,29 @@ fn parse_workspace_root(raw: &str) -> Result<PathBuf> {
 
 fn parse_host_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
     let mut allowlist = Vec::new();
+    let mut seen_values = HashSet::new();
     for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
         let normalized = normalize_host_candidate(candidate)
             .with_context(|| format!("{source_name} contains invalid host '{candidate}'"))?;
-        if !allowlist.iter().any(|existing| existing == &normalized) {
-            allowlist.push(normalized);
-        }
+        push_unique_string(&mut allowlist, &mut seen_values, normalized);
     }
     Ok(allowlist)
 }
 
 fn parse_dns_suffix_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
     let mut allowlist = Vec::new();
+    let mut seen_values = HashSet::new();
     for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
         let normalized = normalize_dns_suffix_candidate(candidate)
             .with_context(|| format!("{source_name} contains invalid dns suffix '{candidate}'"))?;
-        if !allowlist.iter().any(|existing| existing == &normalized) {
-            allowlist.push(normalized);
-        }
+        push_unique_string(&mut allowlist, &mut seen_values, normalized);
     }
     Ok(allowlist)
 }
 
 fn parse_content_type_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
     let mut allowlist = Vec::new();
+    let mut seen_values = HashSet::new();
     for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
         let normalized = candidate.to_ascii_lowercase();
         if normalized.len() > 128 {
@@ -1792,9 +1796,7 @@ fn parse_content_type_allowlist(raw: &str, source_name: &str) -> Result<Vec<Stri
         }) {
             anyhow::bail!("{source_name} contains invalid content type '{candidate}'");
         }
-        if !allowlist.iter().any(|existing| existing == &normalized) {
-            allowlist.push(normalized);
-        }
+        push_unique_string(&mut allowlist, &mut seen_values, normalized);
     }
     if allowlist.is_empty() {
         anyhow::bail!("{source_name} must include at least one content type");
@@ -1804,6 +1806,7 @@ fn parse_content_type_allowlist(raw: &str, source_name: &str) -> Result<Vec<Stri
 
 fn parse_http_header_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
     let mut allowlist = Vec::new();
+    let mut seen_values = HashSet::new();
     for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
         let normalized = candidate.to_ascii_lowercase();
         if normalized.len() > 128 {
@@ -1817,9 +1820,7 @@ fn parse_http_header_allowlist(raw: &str, source_name: &str) -> Result<Vec<Strin
         {
             anyhow::bail!("{source_name} contains invalid header name '{candidate}'");
         }
-        if !allowlist.iter().any(|existing| existing == &normalized) {
-            allowlist.push(normalized);
-        }
+        push_unique_string(&mut allowlist, &mut seen_values, normalized);
     }
     if allowlist.is_empty() {
         anyhow::bail!("{source_name} must include at least one header name");
@@ -1829,6 +1830,7 @@ fn parse_http_header_allowlist(raw: &str, source_name: &str) -> Result<Vec<Strin
 
 fn parse_storage_prefix_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
     let mut allowlist = Vec::new();
+    let mut seen_values = HashSet::new();
     for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
         if candidate.contains('\0')
             || candidate.contains("..")
@@ -1842,9 +1844,7 @@ fn parse_storage_prefix_allowlist(raw: &str, source_name: &str) -> Result<Vec<St
         {
             anyhow::bail!("{source_name} contains invalid storage prefix '{candidate}'");
         }
-        if !allowlist.iter().any(|existing| existing == candidate) {
-            allowlist.push(candidate.to_owned());
-        }
+        push_unique_string(&mut allowlist, &mut seen_values, candidate.to_owned());
     }
     Ok(allowlist)
 }
