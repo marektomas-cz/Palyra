@@ -104,6 +104,17 @@ struct ConfigConnectionDefaults {
     principal: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ConnectionEnvironment {
+    daemon_url: Option<String>,
+    grpc_url: Option<String>,
+    grpc_bind_addr: String,
+    grpc_port: u16,
+    admin_token: Option<String>,
+    admin_bound_principal: Option<String>,
+    profile_admin_token: Option<String>,
+}
+
 static ROOT_CONTEXT: OnceLock<Mutex<Option<RootCommandContext>>> = OnceLock::new();
 
 fn context_cell() -> &'static Mutex<Option<RootCommandContext>> {
@@ -203,10 +214,9 @@ impl RootCommandContext {
         if let Some(url) = self.config_defaults.daemon_url.as_deref() {
             return Ok(url.to_owned());
         }
-        if let Ok(url) = env::var("PALYRA_DAEMON_URL") {
-            if let Some(url) = normalize_optional_text(Some(url.as_str())) {
-                return Ok(url.to_owned());
-            }
+        let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
+        if let Some(url) = connection_env.daemon_url.as_deref() {
+            return Ok(url.to_owned());
         }
         Ok(DEFAULT_DAEMON_URL.to_owned())
     }
@@ -225,43 +235,30 @@ impl RootCommandContext {
         if let Some(url) = self.config_defaults.grpc_url.as_deref() {
             return Ok(url.to_owned());
         }
-        if let Ok(url) = env::var("PALYRA_GATEWAY_GRPC_URL") {
-            if let Some(url) = normalize_optional_text(Some(url.as_str())) {
-                return Ok(url.to_owned());
-            }
+        let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
+        if let Some(url) = connection_env.grpc_url.as_deref() {
+            return Ok(url.to_owned());
         }
-        let bind = env::var("PALYRA_GATEWAY_GRPC_BIND_ADDR")
-            .unwrap_or_else(|_| DEFAULT_GATEWAY_GRPC_BIND_ADDR.to_owned());
-        let port = env::var("PALYRA_GATEWAY_GRPC_PORT")
-            .ok()
-            .and_then(|raw| raw.parse::<u16>().ok())
-            .unwrap_or(DEFAULT_GATEWAY_GRPC_PORT);
-        let socket = parse_daemon_bind_socket(bind.as_str(), port)
-            .context("invalid gateway gRPC bind config")?;
+        let socket = parse_daemon_bind_socket(
+            connection_env.grpc_bind_addr.as_str(),
+            connection_env.grpc_port,
+        )
+        .context("invalid gateway gRPC bind config")?;
         let socket = normalize_client_socket(socket);
         Ok(format!("http://{socket}"))
     }
 
     fn resolve_token(&self, override_token: Option<String>) -> Option<String> {
+        let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
         normalize_owned_text(override_token)
             .or_else(|| {
                 self.profile
                     .as_ref()
                     .and_then(|profile| normalize_owned_text(profile.admin_token.clone()))
             })
-            .or_else(|| {
-                self.profile
-                    .as_ref()
-                    .and_then(|profile| normalize_optional_text(profile.admin_token_env.as_deref()))
-                    .and_then(|env_name| env::var(env_name).ok())
-                    .and_then(|value| normalize_owned_text(Some(value)))
-            })
+            .or(connection_env.profile_admin_token)
             .or_else(|| normalize_owned_text(self.config_defaults.admin_token.clone()))
-            .or_else(|| {
-                env::var("PALYRA_ADMIN_TOKEN")
-                    .ok()
-                    .and_then(|value| normalize_owned_text(Some(value)))
-            })
+            .or(connection_env.admin_token)
     }
 
     fn resolve_principal(
@@ -269,6 +266,7 @@ impl RootCommandContext {
         override_principal: Option<String>,
         defaults: ConnectionDefaults,
     ) -> String {
+        let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
         normalize_owned_text(override_principal)
             .or_else(|| {
                 self.profile
@@ -276,11 +274,7 @@ impl RootCommandContext {
                     .and_then(|profile| normalize_owned_text(profile.principal.clone()))
             })
             .or_else(|| normalize_owned_text(self.config_defaults.principal.clone()))
-            .or_else(|| {
-                env::var("PALYRA_ADMIN_BOUND_PRINCIPAL")
-                    .ok()
-                    .and_then(|value| normalize_owned_text(Some(value)))
-            })
+            .or(connection_env.admin_bound_principal)
             .unwrap_or_else(|| defaults.principal.to_owned())
     }
 
@@ -570,6 +564,30 @@ fn normalize_owned_text(value: Option<String>) -> Option<String> {
     value.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
+impl ConnectionEnvironment {
+    fn read(profile: Option<&CliConnectionProfile>) -> Self {
+        Self {
+            daemon_url: read_normalized_env_var("PALYRA_DAEMON_URL"),
+            grpc_url: read_normalized_env_var("PALYRA_GATEWAY_GRPC_URL"),
+            grpc_bind_addr: env::var("PALYRA_GATEWAY_GRPC_BIND_ADDR")
+                .unwrap_or_else(|_| DEFAULT_GATEWAY_GRPC_BIND_ADDR.to_owned()),
+            grpc_port: env::var("PALYRA_GATEWAY_GRPC_PORT")
+                .ok()
+                .and_then(|raw| raw.parse::<u16>().ok())
+                .unwrap_or(DEFAULT_GATEWAY_GRPC_PORT),
+            admin_token: read_normalized_env_var("PALYRA_ADMIN_TOKEN"),
+            admin_bound_principal: read_normalized_env_var("PALYRA_ADMIN_BOUND_PRINCIPAL"),
+            profile_admin_token: profile
+                .and_then(|profile| normalize_optional_text(profile.admin_token_env.as_deref()))
+                .and_then(read_normalized_env_var),
+        }
+    }
+}
+
+fn read_normalized_env_var(name: &str) -> Option<String> {
+    env::var(name).ok().and_then(|value| normalize_owned_text(Some(value)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -596,6 +614,7 @@ mod tests {
             "PALYRA_GATEWAY_GRPC_URL",
             "PALYRA_ADMIN_TOKEN",
             "PALYRA_ADMIN_BOUND_PRINCIPAL",
+            "PALYRA_PROFILE_ADMIN_TOKEN",
             CLI_PROFILE_ENV,
             CLI_PROFILES_PATH_ENV,
         ] {
@@ -696,6 +715,33 @@ channel = "staging"
         assert_eq!(http.principal, "admin:staging");
         assert_eq!(grpc.device_id, "01ARZ3NDEKTSV4RRFFQ69G5FB2");
         assert_eq!(grpc.channel, "staging");
+        Ok(())
+    }
+
+    #[test]
+    fn profile_admin_token_env_overrides_global_env_fallback() -> Result<()> {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_env();
+        let temp = tempdir()?;
+        let profile_path = temp.path().join("profiles.toml");
+        fs::write(
+            &profile_path,
+            r#"
+version = 1
+[profiles.ops]
+admin_token_env = "PALYRA_PROFILE_ADMIN_TOKEN"
+"#,
+        )?;
+        env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
+        env::set_var(CLI_PROFILE_ENV, "ops");
+        env::set_var("PALYRA_PROFILE_ADMIN_TOKEN", "profile-env-token");
+        env::set_var("PALYRA_ADMIN_TOKEN", "global-env-token");
+
+        let context = build_root_context(RootOptions::default())?;
+        let http = context
+            .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+
+        assert_eq!(http.token.as_deref(), Some("profile-env-token"));
         Ok(())
     }
 
