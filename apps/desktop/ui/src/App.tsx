@@ -83,7 +83,9 @@ export function App() {
     snapshot.inventory?.devices[0] ??
     null;
   const selectedApproval =
-    snapshot.approvals.find((approval) => readString(approval, "approval_id") === selectedApprovalId) ??
+    snapshot.approvals.find(
+      (approval) => readString(approval, "approval_id") === selectedApprovalId,
+    ) ??
     snapshot.approvals[0] ??
     null;
   const selectedApprovalIdResolved = readString(selectedApproval, "approval_id") ?? "";
@@ -104,7 +106,10 @@ export function App() {
       SECTION_ORDER.includes(current) ? current : snapshot.preferences.active_section,
     );
     setActiveSessionId((current) => {
-      if (current.trim().length > 0 && snapshot.session_catalog.some((entry) => entry.session_id === current)) {
+      if (
+        current.trim().length > 0 &&
+        snapshot.session_catalog.some((entry) => entry.session_id === current)
+      ) {
         return current;
       }
       return fallbackSessionId;
@@ -119,7 +124,10 @@ export function App() {
       return fallbackDeviceId;
     });
     setSelectedApprovalId((current) => {
-      if (current.trim().length > 0 && snapshot.approvals.some((approval) => readString(approval, "approval_id") === current)) {
+      if (
+        current.trim().length > 0 &&
+        snapshot.approvals.some((approval) => readString(approval, "approval_id") === current)
+      ) {
         return current;
       }
       return fallbackApprovalId;
@@ -206,7 +214,10 @@ export function App() {
     };
   }, [activeSessionId]);
 
-  async function runAction(action: ActionName, execute: () => Promise<ActionResult>): Promise<void> {
+  async function runAction(
+    action: ActionName,
+    execute: () => Promise<ActionResult>,
+  ): Promise<void> {
     if (action === null) {
       return;
     }
@@ -245,7 +256,8 @@ export function App() {
   async function createSession(): Promise<void> {
     try {
       const session = await resolveDesktopCompanionChatSession({
-        sessionLabel: sessionLabelDraft.trim().length > 0 ? sessionLabelDraft.trim() : "Desktop companion",
+        sessionLabel:
+          sessionLabelDraft.trim().length > 0 ? sessionLabelDraft.trim() : "Desktop companion",
       });
       setActiveSessionId(session.session_id);
       setActiveSection("chat");
@@ -265,7 +277,7 @@ export function App() {
     const text =
       draftId === undefined
         ? composerText.trim()
-        : snapshot.offline_drafts.find((draft) => draft.draft_id === draftId)?.text.trim() ?? "";
+        : (snapshot.offline_drafts.find((draft) => draft.draft_id === draftId)?.text.trim() ?? "");
     if (text.length === 0) {
       setNotice("Message cannot be empty.");
       return;
@@ -448,7 +460,9 @@ export function App() {
               rendering preview data.
             </InlineNotice>
           ) : null}
-          {notice !== null ? <InlineNotice title="Desktop action result">{notice}</InlineNotice> : null}
+          {notice !== null ? (
+            <InlineNotice title="Desktop action result">{notice}</InlineNotice>
+          ) : null}
           {error !== null ? (
             <InlineNotice title="Companion refresh failed" tone="danger">
               {error}
@@ -522,7 +536,11 @@ export function App() {
 
           <section className="desktop-grid desktop-grid--details">
             <QuickFactsCard loading={loading} snapshot={snapshot.control_center} />
-            <AttentionCard attentionItems={attentionItems} loading={loading} previewMode={previewMode} />
+            <AttentionCard
+              attentionItems={attentionItems}
+              loading={loading}
+              previewMode={previewMode}
+            />
           </section>
 
           <section className="desktop-grid desktop-grid--details">
@@ -603,7 +621,10 @@ export function App() {
                     value: snapshot.rollout.offline_drafts_enabled ? "enabled" : "disabled",
                   },
                   { label: "Release channel", value: snapshot.rollout.release_channel },
-                  { label: "Current onboarding step", value: snapshot.onboarding.current_step_title },
+                  {
+                    label: "Current onboarding step",
+                    value: snapshot.onboarding.current_step_title,
+                  },
                 ]}
               />
               <div className="desktop-inline-row">
@@ -611,7 +632,8 @@ export function App() {
                   variant="secondary"
                   onPress={() =>
                     void toggleRollout({
-                      desktop_notifications_enabled: !snapshot.rollout.desktop_notifications_enabled,
+                      desktop_notifications_enabled:
+                        !snapshot.rollout.desktop_notifications_enabled,
                     })
                   }
                 >
@@ -731,7 +753,9 @@ export function App() {
             description="Desktop keeps the active transcript readable and safely falls back to offline drafts when the control plane is unavailable."
             actions={
               selectedSession === null ? null : (
-                <StatusChip tone={selectedSession.last_run_state === "completed" ? "success" : "default"}>
+                <StatusChip
+                  tone={selectedSession.last_run_state === "completed" ? "success" : "default"}
+                >
                   {selectedSession.last_run_state ?? "ready"}
                 </StatusChip>
               )
@@ -756,7 +780,9 @@ export function App() {
                 <div className="desktop-inline-row">
                   <Button
                     variant="secondary"
-                    isDisabled={selectedSession === null || sendBusy || composerText.trim().length === 0}
+                    isDisabled={
+                      selectedSession === null || sendBusy || composerText.trim().length === 0
+                    }
                     onPress={() => void sendMessage()}
                   >
                     {sendBusy ? "Sending..." : "Send message"}
@@ -794,7 +820,11 @@ export function App() {
                     Updated {formatUnixMs(selectedSession.updated_at_unix_ms)}
                   </small>
                 </div>
-                <ScrollShadow className="desktop-scroll-list desktop-transcript" hideScrollBar size={48}>
+                <ScrollShadow
+                  className="desktop-scroll-list desktop-transcript"
+                  hideScrollBar
+                  size={48}
+                >
                   <div className="desktop-stack">
                     {(transcript?.records ?? []).length === 0 ? (
                       <p className="desktop-muted">No transcript records published yet.</p>
@@ -846,10 +876,18 @@ export function App() {
                         <p>{draft.text}</p>
                         <p className="desktop-muted">{draft.reason}</p>
                         <div className="desktop-inline-row">
-                          <Button variant="secondary" isDisabled={sendBusy} onPress={() => void sendMessage(draft.draft_id)}>
+                          <Button
+                            variant="secondary"
+                            isDisabled={sendBusy}
+                            onPress={() => void sendMessage(draft.draft_id)}
+                          >
                             Resend
                           </Button>
-                          <Button variant="ghost" isDisabled={sendBusy} onPress={() => void removeOfflineDraft(draft.draft_id)}>
+                          <Button
+                            variant="ghost"
+                            isDisabled={sendBusy}
+                            onPress={() => void removeOfflineDraft(draft.draft_id)}
+                          >
                             Remove
                           </Button>
                         </div>
@@ -973,13 +1011,31 @@ export function App() {
                 <KeyValueList
                   items={[
                     { label: "Approval ID", value: selectedApprovalIdResolved },
-                    { label: "Subject type", value: readString(selectedApproval, "subject_type") ?? "n/a" },
-                    { label: "Subject ID", value: readString(selectedApproval, "subject_id") ?? "n/a" },
-                    { label: "Principal", value: readString(selectedApproval, "principal") ?? "n/a" },
-                    { label: "Session", value: readString(selectedApproval, "session_id") ?? "n/a" },
+                    {
+                      label: "Subject type",
+                      value: readString(selectedApproval, "subject_type") ?? "n/a",
+                    },
+                    {
+                      label: "Subject ID",
+                      value: readString(selectedApproval, "subject_id") ?? "n/a",
+                    },
+                    {
+                      label: "Principal",
+                      value: readString(selectedApproval, "principal") ?? "n/a",
+                    },
+                    {
+                      label: "Session",
+                      value: readString(selectedApproval, "session_id") ?? "n/a",
+                    },
                     { label: "Run", value: readString(selectedApproval, "run_id") ?? "n/a" },
-                    { label: "Requested", value: formatUnixMs(readNumber(selectedApproval, "requested_at_unix_ms")) },
-                    { label: "Decision", value: readString(selectedApproval, "decision") ?? "pending" },
+                    {
+                      label: "Requested",
+                      value: formatUnixMs(readNumber(selectedApproval, "requested_at_unix_ms")),
+                    },
+                    {
+                      label: "Decision",
+                      value: readString(selectedApproval, "decision") ?? "pending",
+                    },
                   ]}
                 />
                 <InlineNotice title="Request summary" tone="warning">
@@ -988,10 +1044,24 @@ export function App() {
                 {selectedApprovalPrompt !== null ? (
                   <KeyValueList
                     items={[
-                      { label: "Prompt title", value: readString(selectedApprovalPrompt, "title") ?? "Untitled prompt" },
-                      { label: "Prompt summary", value: readString(selectedApprovalPrompt, "summary") ?? "No prompt summary published." },
-                      { label: "Risk level", value: readString(selectedApprovalPrompt, "risk_level") ?? "unspecified" },
-                      { label: "Timeout", value: `${readString(selectedApprovalPrompt, "timeout_seconds") ?? "n/a"}s` },
+                      {
+                        label: "Prompt title",
+                        value: readString(selectedApprovalPrompt, "title") ?? "Untitled prompt",
+                      },
+                      {
+                        label: "Prompt summary",
+                        value:
+                          readString(selectedApprovalPrompt, "summary") ??
+                          "No prompt summary published.",
+                      },
+                      {
+                        label: "Risk level",
+                        value: readString(selectedApprovalPrompt, "risk_level") ?? "unspecified",
+                      },
+                      {
+                        label: "Timeout",
+                        value: `${readString(selectedApprovalPrompt, "timeout_seconds") ?? "n/a"}s`,
+                      },
                     ]}
                   />
                 ) : null}
@@ -1046,16 +1116,14 @@ export function App() {
                       <div className="desktop-stack desktop-stack--compact">
                         <div className="desktop-inline-row">
                           <strong>{device.device_id}</strong>
-                          <StatusChip tone={toneForDevice(device)}>
-                            {device.trust_state}
-                          </StatusChip>
+                          <StatusChip tone={toneForDevice(device)}>{device.trust_state}</StatusChip>
                         </div>
                         <p className="desktop-muted">
                           {device.client_kind} · {device.platform ?? "unknown platform"}
                         </p>
                         <small className="desktop-muted">
-                          {device.capability_summary.available}/{device.capability_summary.total} capabilities ·{" "}
-                          {formatUnixMs(device.updated_at_unix_ms)}
+                          {device.capability_summary.available}/{device.capability_summary.total}{" "}
+                          capabilities · {formatUnixMs(device.updated_at_unix_ms)}
                         </small>
                       </div>
                     </button>
@@ -1113,7 +1181,10 @@ export function App() {
                     { label: "Issued by", value: selectedDevice.issued_by },
                     { label: "Fingerprint", value: selectedDevice.identity_fingerprint },
                     { label: "Last event", value: prettyEventName(selectedDevice.last_event_name) },
-                    { label: "Last seen", value: formatUnixMs(selectedDevice.last_seen_at_unix_ms) },
+                    {
+                      label: "Last seen",
+                      value: formatUnixMs(selectedDevice.last_seen_at_unix_ms),
+                    },
                     {
                       label: "Certificate expiry",
                       value: formatUnixMs(selectedDevice.current_certificate_expires_at_unix_ms),
@@ -1157,10 +1228,7 @@ export function App() {
             description="Desktop keeps current onboarding progress, authentication readiness, and release rollout state visible in one place."
             actions={
               <ButtonGroup className="desktop-action-group">
-                <Button
-                  variant="secondary"
-                  onPress={() => void openScopedHandoff("overview")}
-                >
+                <Button variant="secondary" onPress={() => void openScopedHandoff("overview")}>
                   Browser handoff
                 </Button>
                 <Button
@@ -1245,7 +1313,9 @@ function toneForConnection(connectionState: string): "success" | "warning" | "da
   return "danger";
 }
 
-function toneForDevice(device: InventoryDeviceRecord): "success" | "warning" | "danger" | "default" {
+function toneForDevice(
+  device: InventoryDeviceRecord,
+): "success" | "warning" | "danger" | "default" {
   if (device.trust_state === "trusted" && device.presence_state === "ok") {
     return "success";
   }
@@ -1308,13 +1378,19 @@ function toneClassForRecord(eventType: string): string {
   if (eventType.includes("approval") || eventType.includes("warning")) {
     return "desktop-transcript-entry--warning";
   }
-  if (eventType.includes("complete") || eventType.includes("summary") || eventType.includes("assistant")) {
+  if (
+    eventType.includes("complete") ||
+    eventType.includes("summary") ||
+    eventType.includes("assistant")
+  ) {
     return "desktop-transcript-entry--success";
   }
   return "desktop-transcript-entry--default";
 }
 
-function describeTranscriptRecord(record: DesktopSessionTranscriptEnvelope["records"][number]): string {
+function describeTranscriptRecord(
+  record: DesktopSessionTranscriptEnvelope["records"][number],
+): string {
   const parsedPayload = parsePayload(record.payload_json);
   const summary =
     readString(parsedPayload, "summary") ??

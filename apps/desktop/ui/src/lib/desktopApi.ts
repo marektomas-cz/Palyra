@@ -229,7 +229,7 @@ export type DesktopCompanionSnapshot = {
   control_center: ControlCenterSnapshot;
   onboarding: OnboardingStatusSnapshot;
   openai_status: OpenAiAuthStatusSnapshot;
-  connection_state: "connected" | "reconnecting" | "offline" | string;
+  connection_state: "connected" | "reconnecting" | "offline";
   rollout: DesktopCompanionRollout;
   preferences: DesktopCompanionPreferences;
   notifications: DesktopCompanionNotification[];
@@ -471,7 +471,11 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
         capabilities: [
           { name: "presence", available: true, summary: "Publishes desktop presence." },
           { name: "dashboard_handoff", available: true, summary: "Opens scoped browser handoff." },
-          { name: "local_notifications", available: true, summary: "Raises desktop notifications." },
+          {
+            name: "local_notifications",
+            available: true,
+            summary: "Raises desktop notifications.",
+          },
         ],
         capability_summary: { total: 3, available: 3, unavailable: 0 },
         last_event_name: "desktop.presence",
