@@ -15,6 +15,8 @@ pub(crate) const OPENAI_OAUTH_DEFAULT_SCOPES: &[&str] =
     &["openid", "profile", "email", "offline_access"];
 const OPENAI_VALIDATION_RETRY_ATTEMPTS: usize = 5;
 const OPENAI_VALIDATION_RETRY_DELAY: Duration = Duration::from_millis(100);
+const OPENAI_REVOCATION_RETRY_ATTEMPTS: usize = 3;
+const OPENAI_REVOCATION_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 const ENV_OPENAI_AUTHORIZATION_ENDPOINT: &str = "PALYRA_OPENAI_OAUTH_AUTHORIZATION_ENDPOINT";
 const ENV_OPENAI_TOKEN_ENDPOINT: &str = "PALYRA_OPENAI_OAUTH_TOKEN_ENDPOINT";
@@ -249,26 +251,47 @@ pub(crate) async fn revoke_openai_token(
     if !client_secret.trim().is_empty() {
         form_fields.push(("client_secret", client_secret.to_owned()));
     }
-    let response =
-        client.post(revocation_endpoint.clone()).form(&form_fields).send().await.with_context(
-            || {
-                format!(
-                    "OpenAI OAuth revocation request failed for host {}",
-                    revocation_endpoint.host_str().unwrap_or("<unknown>")
-                )
-            },
-        )?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let sanitized = sanitize_remote_error(body.as_str());
-        return Err(anyhow!(
-            "OpenAI OAuth revocation failed with status {}: {}",
-            status.as_u16(),
-            sanitized
-        ));
+
+    for attempt_index in 0..OPENAI_REVOCATION_RETRY_ATTEMPTS {
+        let response = client.post(revocation_endpoint.clone()).form(&form_fields).send().await;
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if status.is_success() {
+                    return Ok(());
+                }
+
+                let sanitized = sanitize_remote_error(body.as_str());
+                if status.is_server_error() && attempt_index + 1 < OPENAI_REVOCATION_RETRY_ATTEMPTS
+                {
+                    tokio::time::sleep(OPENAI_REVOCATION_RETRY_DELAY).await;
+                    continue;
+                }
+
+                return Err(anyhow!(
+                    "OpenAI OAuth revocation failed with status {}: {}",
+                    status.as_u16(),
+                    sanitized
+                ));
+            }
+            Err(error) => {
+                if attempt_index + 1 < OPENAI_REVOCATION_RETRY_ATTEMPTS {
+                    tokio::time::sleep(OPENAI_REVOCATION_RETRY_DELAY).await;
+                    continue;
+                }
+
+                return Err(error).with_context(|| {
+                    format!(
+                        "OpenAI OAuth revocation request failed for host {}",
+                        revocation_endpoint.host_str().unwrap_or("<unknown>")
+                    )
+                });
+            }
+        }
     }
-    Ok(())
+
+    Err(anyhow!("OpenAI OAuth revocation failed after exhausting retries"))
 }
 
 pub(crate) fn render_callback_page(title: &str, body: &str, payload_json: Option<&str>) -> String {
@@ -373,6 +396,12 @@ fn openai_models_endpoint(base_url: &str) -> Result<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{Arc, Mutex},
+        thread::{self, JoinHandle},
+    };
 
     #[test]
     fn openai_models_endpoint_preserves_versioned_base_path() {
@@ -427,5 +456,120 @@ mod tests {
             html.contains(r#"\u003c/script\u003e\u003cscript\u003ealert(1)\u003c/script\u003e"#),
             "callback payload should remain script-safe: {html}"
         );
+    }
+
+    #[tokio::test]
+    async fn revoke_openai_token_retries_transient_server_errors() {
+        let server = RevocationMockServer::new(vec!["503 Service Unavailable", "200 OK"]);
+        let endpoint = Url::parse(format!("{}/oauth/revoke", server.base_url()).as_str())
+            .expect("mock revocation endpoint should parse");
+
+        revoke_openai_token(
+            &endpoint,
+            "client-live-123",
+            "client-secret-live",
+            "refresh-token-live",
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("revocation should retry a transient 503");
+
+        let requests = server.request_bodies();
+        assert_eq!(requests.len(), 2, "revocation should retry exactly once");
+        assert!(
+            requests.iter().all(|body| {
+                body.contains("client_id=client-live-123")
+                    && body.contains("client_secret=client-secret-live")
+                    && body.contains("token=refresh-token-live")
+            }),
+            "revocation retry should preserve the same request body: {requests:?}"
+        );
+    }
+
+    struct RevocationMockServer {
+        address: String,
+        request_bodies: Arc<Mutex<Vec<String>>>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl RevocationMockServer {
+        fn new(statuses: Vec<&'static str>) -> Self {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("revocation mock listener should bind");
+            let address = listener
+                .local_addr()
+                .expect("revocation mock listener should expose a local address");
+            let request_bodies = Arc::new(Mutex::new(Vec::new()));
+            let request_bodies_for_thread = Arc::clone(&request_bodies);
+            let worker = thread::spawn(move || {
+                for status in statuses {
+                    let (mut stream, _) =
+                        listener.accept().expect("revocation mock should accept a request");
+                    let body = read_http_body(&mut stream)
+                        .expect("revocation mock should read the request body");
+                    request_bodies_for_thread
+                        .lock()
+                        .expect("revocation mock request log should lock")
+                        .push(body);
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                    )
+                    .expect("revocation mock should write the HTTP response");
+                    stream.flush().expect("revocation mock response should flush");
+                }
+            });
+            Self { address: address.to_string(), request_bodies, worker: Some(worker) }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.address)
+        }
+
+        fn request_bodies(&self) -> Vec<String> {
+            self.request_bodies.lock().expect("revocation mock request log should lock").clone()
+        }
+    }
+
+    impl Drop for RevocationMockServer {
+        fn drop(&mut self) {
+            if let Some(worker) = self.worker.take() {
+                worker.join().expect("revocation mock worker should stop cleanly");
+            }
+        }
+    }
+
+    fn read_http_body(stream: &mut TcpStream) -> Result<String> {
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .context("revocation mock request should include a request line")?;
+        if request_line.is_empty() {
+            anyhow::bail!("revocation mock request is missing a request line");
+        }
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).context("revocation mock should read a header line")?;
+            let line = line.trim_end_matches(&['\r', '\n'][..]);
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse::<usize>().with_context(|| {
+                        format!("invalid revocation mock content-length header: {value}")
+                    })?;
+                }
+            }
+        }
+
+        let mut body = vec![0u8; content_length];
+        reader
+            .read_exact(&mut body)
+            .context("revocation mock should read the full request body")?;
+        String::from_utf8(body).context("revocation mock body should be valid UTF-8")
     }
 }
