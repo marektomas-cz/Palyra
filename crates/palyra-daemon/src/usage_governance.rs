@@ -142,6 +142,14 @@ pub(crate) struct RoutingDecisionContext<'a> {
     pub budgets: &'a [UsageBudgetEvaluation],
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct RoutingModelSelection {
+    complexity_score: f64,
+    explanation: Vec<String>,
+    recommended_model_id: String,
+    actual_model_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct UsageModelMixRecord {
     pub model_id: String,
@@ -266,23 +274,60 @@ pub(crate) async fn plan_usage_routing(
         .unwrap_or_default();
     let approved_subjects =
         load_budget_override_approvals(request.runtime_state, &budget_policies).await;
+    let provider_health_state = provider_health_state(request.provider_snapshot);
+    let prompt_tokens_estimate = estimate_token_count(request.prompt_text);
+    let projected_selection = select_routing_models(&RoutingDecisionContext {
+        scope_kind: request.scope_kind,
+        scope_id: request.scope_id,
+        mode,
+        provider_id,
+        provider_kind,
+        default_model_id: default_model_id.as_str(),
+        prompt_text: request.prompt_text,
+        prompt_tokens_estimate,
+        json_mode: request.json_mode,
+        vision_inputs: request.vision_inputs,
+        provider_health_state,
+        pricing: pricing.as_slice(),
+        budgets: &[],
+    });
+    let routing_decisions = request
+        .runtime_state
+        .list_usage_routing_decisions(crate::journal::UsageRoutingDecisionsFilter {
+            since_unix_ms: None,
+            until_unix_ms: None,
+            session_id: Some(request.session_id.to_owned()),
+            run_id: None,
+            limit: historical_runs.len().saturating_mul(2).max(128),
+        })
+        .await
+        .unwrap_or_default();
+    let routing_by_run = latest_routing_decisions_by_run_id(routing_decisions.as_slice());
     let enriched_runs = historical_runs
         .iter()
         .map(|run| {
+            let routing = routing_by_run.get(run.run_id.as_str()).copied();
+            let inferred_model_id = routing
+                .map(|decision| decision.actual_model_id.as_str())
+                .unwrap_or(default_model_id.as_str());
+            let inferred_provider_kind =
+                routing.map(|decision| decision.provider_kind.as_str()).unwrap_or(provider_kind);
+            let inferred_provider_id =
+                routing.map(|decision| decision.provider_id.as_str()).unwrap_or(provider_id);
             let cost_estimate = estimate_cost_for_model(
                 pricing.as_slice(),
-                provider_kind,
-                provider_id,
-                default_model_id.as_str(),
+                inferred_provider_kind,
+                inferred_provider_id,
+                inferred_model_id,
                 run.started_at_unix_ms,
                 run.prompt_tokens,
                 run.completion_tokens,
             );
             UsageEnrichedRun {
                 run,
-                routing: None,
-                inferred_model_id: default_model_id.as_str(),
-                inferred_provider_kind: provider_kind,
+                routing,
+                inferred_model_id,
+                inferred_provider_kind,
                 cost_estimate,
             }
         })
@@ -291,15 +336,15 @@ pub(crate) async fn plan_usage_routing(
         .iter()
         .map(|entry| entry.total_tokens)
         .sum::<u64>()
-        .saturating_add(estimate_token_count(request.prompt_text));
+        .saturating_add(prompt_tokens_estimate);
     let projected_cost = estimate_cost_for_model(
         pricing.as_slice(),
         provider_kind,
         provider_id,
-        default_model_id.as_str(),
+        projected_selection.actual_model_id.as_str(),
         crate::gateway::current_unix_ms(),
-        estimate_token_count(request.prompt_text),
-        estimate_token_count(request.prompt_text) / 2,
+        prompt_tokens_estimate,
+        prompt_tokens_estimate / 2,
     );
     let budget_evaluations = evaluate_budget_policies(
         budget_policies.as_slice(),
@@ -316,10 +361,10 @@ pub(crate) async fn plan_usage_routing(
         provider_kind,
         default_model_id: default_model_id.as_str(),
         prompt_text: request.prompt_text,
-        prompt_tokens_estimate: estimate_token_count(request.prompt_text),
+        prompt_tokens_estimate,
         json_mode: request.json_mode,
         vision_inputs: request.vision_inputs,
-        provider_health_state: provider_health_state(request.provider_snapshot),
+        provider_health_state,
         pricing: pricing.as_slice(),
         budgets: budget_evaluations.as_slice(),
     });
@@ -387,6 +432,21 @@ pub(crate) async fn plan_usage_routing(
         ));
     }
     Ok(decision)
+}
+
+fn latest_routing_decisions_by_run_id<'a>(
+    decisions: &'a [UsageRoutingDecisionRecord],
+) -> HashMap<&'a str, &'a UsageRoutingDecisionRecord> {
+    let mut by_run: HashMap<&'a str, &'a UsageRoutingDecisionRecord> = HashMap::new();
+    for decision in decisions {
+        match by_run.get(decision.run_id.as_str()) {
+            Some(existing) if existing.created_at_unix_ms >= decision.created_at_unix_ms => {}
+            _ => {
+                by_run.insert(decision.run_id.as_str(), decision);
+            }
+        }
+    }
+    by_run
 }
 
 pub(crate) fn estimate_cost_for_model(
@@ -539,6 +599,58 @@ pub(crate) fn evaluate_budget_policies(
 }
 
 pub(crate) fn decide_routing(context: RoutingDecisionContext<'_>) -> RoutingDecision {
+    let selection = select_routing_models(&context);
+    let mut explanation = selection.explanation.clone();
+
+    let mut blocked = false;
+    let mut approval_required = false;
+    let mut budget_outcome = None;
+    for evaluation in context.budgets {
+        if matches!(
+            evaluation.status.as_str(),
+            "soft_limit" | "hard_limit" | "blocked" | "approval_required" | "override_applied"
+        ) {
+            explanation.push(evaluation.message.clone());
+            budget_outcome = Some(evaluation.status.clone());
+        }
+        if evaluation.status == "blocked" {
+            blocked = true;
+        }
+        if evaluation.status == "approval_required" {
+            approval_required = true;
+        }
+    }
+
+    let estimate = estimate_cost_for_model(
+        context.pricing,
+        context.provider_kind,
+        context.provider_id,
+        selection.actual_model_id.as_str(),
+        0,
+        context.prompt_tokens_estimate,
+        context.prompt_tokens_estimate / 2,
+    );
+
+    RoutingDecision {
+        mode: context.mode.as_str().to_owned(),
+        scope_kind: context.scope_kind.to_owned(),
+        scope_id: context.scope_id.to_owned(),
+        default_model_id: context.default_model_id.to_owned(),
+        recommended_model_id: selection.recommended_model_id,
+        actual_model_id: selection.actual_model_id,
+        provider_id: context.provider_id.to_owned(),
+        provider_kind: context.provider_kind.to_owned(),
+        complexity_score: selection.complexity_score,
+        health_state: context.provider_health_state.to_owned(),
+        explanation,
+        estimated_cost: Some(estimate),
+        budget_outcome,
+        blocked,
+        approval_required,
+    }
+}
+
+fn select_routing_models(context: &RoutingDecisionContext<'_>) -> RoutingModelSelection {
     let complexity_score = complexity_score(
         context.prompt_text,
         context.prompt_tokens_estimate,
@@ -588,26 +700,6 @@ pub(crate) fn decide_routing(context: RoutingDecisionContext<'_>) -> RoutingDeci
     } else {
         context.default_model_id.to_owned()
     };
-
-    let mut blocked = false;
-    let mut approval_required = false;
-    let mut budget_outcome = None;
-    for evaluation in context.budgets {
-        if matches!(
-            evaluation.status.as_str(),
-            "soft_limit" | "hard_limit" | "blocked" | "approval_required" | "override_applied"
-        ) {
-            explanation.push(evaluation.message.clone());
-            budget_outcome = Some(evaluation.status.clone());
-        }
-        if evaluation.status == "blocked" {
-            blocked = true;
-        }
-        if evaluation.status == "approval_required" {
-            approval_required = true;
-        }
-    }
-
     let actual_model_id = match context.mode {
         RoutingMode::Suggest | RoutingMode::DryRun => context.default_model_id.to_owned(),
         RoutingMode::Enforced => recommended_model_id.clone(),
@@ -619,33 +711,7 @@ pub(crate) fn decide_routing(context: RoutingDecisionContext<'_>) -> RoutingDeci
         ));
     }
 
-    let estimate = estimate_cost_for_model(
-        context.pricing,
-        context.provider_kind,
-        context.provider_id,
-        actual_model_id.as_str(),
-        0,
-        context.prompt_tokens_estimate,
-        context.prompt_tokens_estimate / 2,
-    );
-
-    RoutingDecision {
-        mode: context.mode.as_str().to_owned(),
-        scope_kind: context.scope_kind.to_owned(),
-        scope_id: context.scope_id.to_owned(),
-        default_model_id: context.default_model_id.to_owned(),
-        recommended_model_id,
-        actual_model_id,
-        provider_id: context.provider_id.to_owned(),
-        provider_kind: context.provider_kind.to_owned(),
-        complexity_score,
-        health_state: context.provider_health_state.to_owned(),
-        explanation,
-        estimated_cost: Some(estimate),
-        budget_outcome,
-        blocked,
-        approval_required,
-    }
+    RoutingModelSelection { complexity_score, explanation, recommended_model_id, actual_model_id }
 }
 
 pub(crate) fn build_model_mix(runs: &[UsageEnrichedRun<'_>]) -> Vec<UsageModelMixRecord> {
@@ -966,6 +1032,103 @@ pub(crate) async fn load_budget_override_approvals(
         approvals.insert(subject_id, approved);
     }
     approvals
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        latest_routing_decisions_by_run_id, select_routing_models, RoutingDecisionContext,
+        RoutingMode,
+    };
+    use crate::journal::{UsagePricingRecord, UsageRoutingDecisionRecord};
+
+    fn pricing_record(model_id: &str, input_cost: f64, output_cost: f64) -> UsagePricingRecord {
+        UsagePricingRecord {
+            pricing_id: format!("pricing-{model_id}"),
+            provider_kind: "openai_compatible".to_owned(),
+            provider_id: "openai".to_owned(),
+            model_id: model_id.to_owned(),
+            input_cost_per_million_usd: Some(input_cost),
+            output_cost_per_million_usd: Some(output_cost),
+            fixed_request_cost_usd: Some(0.0),
+            currency: "USD".to_owned(),
+            precision: "exact".to_owned(),
+            source: "test".to_owned(),
+            effective_from_unix_ms: 0,
+            effective_to_unix_ms: None,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        }
+    }
+
+    fn routing_record(
+        decision_id: &str,
+        run_id: &str,
+        actual_model_id: &str,
+        created_at_unix_ms: i64,
+    ) -> UsageRoutingDecisionRecord {
+        UsageRoutingDecisionRecord {
+            decision_id: decision_id.to_owned(),
+            run_id: run_id.to_owned(),
+            session_id: "session-1".to_owned(),
+            principal: "user:test".to_owned(),
+            device_id: "device-1".to_owned(),
+            channel: Some("console".to_owned()),
+            scope_kind: "session".to_owned(),
+            scope_id: "session-1".to_owned(),
+            mode: "enforced".to_owned(),
+            default_model_id: "cheap".to_owned(),
+            recommended_model_id: actual_model_id.to_owned(),
+            actual_model_id: actual_model_id.to_owned(),
+            provider_id: "openai".to_owned(),
+            provider_kind: "openai_compatible".to_owned(),
+            complexity_score: 0.9,
+            health_state: "ok".to_owned(),
+            explanation_json: "{}".to_owned(),
+            estimated_cost_lower_usd: Some(1.0),
+            estimated_cost_upper_usd: Some(1.0),
+            budget_outcome: None,
+            created_at_unix_ms,
+        }
+    }
+
+    #[test]
+    fn select_routing_models_uses_enforced_premium_model() {
+        let pricing = vec![pricing_record("cheap", 0.1, 0.2), pricing_record("premium", 2.0, 4.0)];
+        let selection = select_routing_models(&RoutingDecisionContext {
+            scope_kind: "session",
+            scope_id: "session-1",
+            mode: RoutingMode::Enforced,
+            provider_id: "openai",
+            provider_kind: "openai_compatible",
+            default_model_id: "cheap",
+            prompt_text: &"complex request ".repeat(400),
+            prompt_tokens_estimate: 2_400,
+            json_mode: true,
+            vision_inputs: 2,
+            provider_health_state: "ok",
+            pricing: pricing.as_slice(),
+            budgets: &[],
+        });
+        assert_eq!(selection.recommended_model_id, "premium");
+        assert_eq!(selection.actual_model_id, "premium");
+    }
+
+    #[test]
+    fn latest_routing_decisions_by_run_id_prefers_newest_decision() {
+        let latest = routing_record("decision-new", "run-1", "premium", 20);
+        let oldest = routing_record("decision-old", "run-1", "cheap", 10);
+        let decisions = [oldest, latest.clone()];
+        let by_run = latest_routing_decisions_by_run_id(&decisions);
+        assert_eq!(
+            by_run.get("run-1").map(|record| record.actual_model_id.as_str()),
+            Some("premium")
+        );
+        assert_eq!(
+            by_run.get("run-1").map(|record| record.decision_id.as_str()),
+            Some(latest.decision_id.as_str())
+        );
+    }
 }
 
 fn is_active_budget_override_allow(record: &ApprovalRecord) -> bool {
