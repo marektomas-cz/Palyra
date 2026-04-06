@@ -254,16 +254,33 @@ pub(crate) async fn fetch_download_artifact(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| format!("failed to read download response body: {error}"))?;
-    if (body.len() as u64) > DOWNLOAD_MAX_FILE_BYTES {
+    let content_length = response.content_length();
+    if matches!(content_length, Some(length) if length > DOWNLOAD_MAX_FILE_BYTES) {
         return Err(format!(
             "download exceeds max file bytes ({} > {})",
-            body.len(),
+            content_length.unwrap_or_default(),
             DOWNLOAD_MAX_FILE_BYTES
         ));
+    }
+    let mut response = response;
+    let mut body = Vec::with_capacity(
+        content_length
+            .map(|length| length.min(DOWNLOAD_MAX_FILE_BYTES) as usize)
+            .unwrap_or_default(),
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("failed to read download response body: {error}"))?
+    {
+        let next_size = (body.len() as u64).saturating_add(chunk.len() as u64);
+        if next_size > DOWNLOAD_MAX_FILE_BYTES {
+            return Err(format!(
+                "download exceeds max file bytes ({} > {})",
+                next_size, DOWNLOAD_MAX_FILE_BYTES
+            ));
+        }
+        body.extend_from_slice(chunk.as_ref());
     }
     let mime_type =
         sniff_download_mime_type(header_content_type.as_deref(), file_name, body.as_ref());
@@ -308,7 +325,7 @@ pub(crate) async fn fetch_download_artifact(
         sandbox.root_dir.path().join(DOWNLOADS_DIR_ALLOWLIST)
     };
     let storage_path = target_dir.join(stored_name);
-    fs::write(storage_path.as_path(), body.as_ref()).map_err(|error| {
+    fs::write(storage_path.as_path(), body.as_slice()).map_err(|error| {
         format!("failed to persist downloaded artifact to '{}' : {error}", storage_path.display())
     })?;
     sandbox.used_bytes = sandbox.used_bytes.saturating_add(body.len() as u64);

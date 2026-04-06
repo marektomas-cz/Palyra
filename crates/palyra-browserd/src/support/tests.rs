@@ -12,8 +12,8 @@ use super::{
     PersistedSessionSnapshot, PersistedStateStore, SessionPermissionsInternal,
     AUTHORIZATION_HEADER, CANONICAL_PROTOCOL_MAJOR, CHROMIUM_NEW_TAB_RETRY_DELAY_MS,
     CHROMIUM_PATH_ENV, DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS, DEFAULT_GRPC_PORT,
-    DEFAULT_MAX_TABS_PER_SESSION, MAX_RELAY_PAYLOAD_BYTES, ONE_BY_ONE_PNG, PRINCIPAL_HEADER,
-    PROFILE_RECORD_SCHEMA_VERSION, STATE_KEY_LEN,
+    DEFAULT_MAX_TABS_PER_SESSION, DOWNLOAD_MAX_FILE_BYTES, MAX_RELAY_PAYLOAD_BYTES, ONE_BY_ONE_PNG,
+    PRINCIPAL_HEADER, PROFILE_RECORD_SCHEMA_VERSION, STATE_KEY_LEN,
 };
 use crate::proto;
 use crate::proto::palyra::browser::v1::browser_service_server::BrowserService;
@@ -3777,6 +3777,113 @@ async fn browser_service_download_allowlist_and_quarantine_artifacts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_service_rejects_downloads_that_exceed_max_file_bytes() {
+    let runtime = std::sync::Arc::new(
+        BrowserRuntimeState::new(&Args {
+            bind: "127.0.0.1".to_owned(),
+            port: 7143,
+            grpc_bind: "127.0.0.1".to_owned(),
+            grpc_port: 7543,
+            auth_token: None,
+            session_idle_ttl_ms: 60_000,
+            max_sessions: 16,
+            max_navigation_timeout_ms: 10_000,
+            max_session_lifetime_ms: 60_000,
+            max_screenshot_bytes: 128 * 1024,
+            max_response_bytes: 256 * 1024,
+            max_title_bytes: 4 * 1024,
+            engine_mode: BrowserEngineMode::Simulated,
+            chromium_path: None,
+            chromium_startup_timeout_ms: DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
+        })
+        .expect("runtime should initialize"),
+    );
+    let service = BrowserServiceImpl { runtime };
+
+    let created = service
+        .create_session(Request::new(browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: true,
+            allow_downloads: true,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: false,
+            persistence_id: String::new(),
+            profile_id: None,
+            private_profile: false,
+            channel: String::new(),
+        }))
+        .await
+        .expect("create_session should succeed")
+        .into_inner();
+    let session_id = created
+        .session_id
+        .as_ref()
+        .map(|value| value.ulid.clone())
+        .expect("session id should be present");
+
+    let (oversized_url, oversized_handle) = spawn_streaming_download_fixture_http_server(
+        "/oversized.csv",
+        "text/csv",
+        (DOWNLOAD_MAX_FILE_BYTES as usize).saturating_add(1),
+    );
+    let navigate = service
+        .navigate(Request::new(browser_v1::NavigateRequest {
+            v: 1,
+            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id.clone() }),
+            url: oversized_url,
+            timeout_ms: 2_000,
+            allow_redirects: true,
+            max_redirects: 3,
+            allow_private_targets: true,
+        }))
+        .await
+        .expect("oversized navigate should execute")
+        .into_inner();
+    assert!(navigate.success, "oversized fixture navigation should succeed");
+
+    let click = service
+        .click(Request::new(browser_v1::ClickRequest {
+            v: 1,
+            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id.clone() }),
+            selector: "#download-link".to_owned(),
+            max_retries: 0,
+            timeout_ms: 1_500,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 2 * 1024,
+        }))
+        .await
+        .expect("oversized click should execute")
+        .into_inner();
+    assert!(!click.success, "oversized download should fail closed");
+    assert_eq!(
+        click.action_log.as_ref().map(|entry| entry.outcome.as_str()),
+        Some("download_failed")
+    );
+    assert!(
+        click.error.contains("download exceeds max file bytes"),
+        "oversized download failure should explain the size guard: {}",
+        click.error
+    );
+    assert!(click.artifact.is_none(), "oversized download must not register an artifact");
+    oversized_handle.join().expect("oversized server thread should exit");
+
+    let listed = service
+        .list_download_artifacts(Request::new(browser_v1::ListDownloadArtifactsRequest {
+            v: 1,
+            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+            limit: 10,
+            quarantined_only: false,
+        }))
+        .await
+        .expect("list_download_artifacts should execute")
+        .into_inner();
+    assert!(listed.artifacts.is_empty(), "failed oversized download must not leave artifacts");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_service_lists_and_gets_session_details() {
     let runtime = simulated_runtime_for_tests();
     let service = BrowserServiceImpl { runtime: Arc::clone(&runtime) };
@@ -4449,6 +4556,59 @@ fn spawn_download_fixture_http_server(
                     .write_all(file_body.as_slice())
                     .expect("server should write file response body");
                 stream.flush().expect("server should flush file response");
+                continue;
+            }
+            let fallback = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot_found";
+            stream.write_all(fallback.as_bytes()).expect("server should write fallback response");
+            stream.flush().expect("server should flush fallback response");
+        }
+    });
+    (format!("http://{address}/"), handle)
+}
+
+fn spawn_streaming_download_fixture_http_server(
+    file_path: &str,
+    file_content_type: &str,
+    file_size: usize,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let address = listener.local_addr().expect("listener local address should resolve");
+    let file_path = file_path.to_owned();
+    let file_content_type = file_content_type.to_owned();
+    let handle = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("listener should accept request");
+            let request = read_http_request(&mut stream);
+            let path = http_request_path(request.as_str());
+            if path == "/" {
+                let body = format!(
+                    "<!doctype html><html><body><a id=\"download-link\" href=\"{file_path}\" download>Download</a></body></html>"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).expect("server should write HTML response");
+                stream.flush().expect("server should flush HTML response");
+                continue;
+            }
+            if path == file_path {
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {file_content_type}\r\nContent-Length: {file_size}\r\nConnection: close\r\n\r\n",
+                );
+                stream
+                    .write_all(headers.as_bytes())
+                    .expect("server should write file response headers");
+                let chunk = vec![b'a'; 64 * 1024];
+                let mut remaining = file_size;
+                while remaining > 0 {
+                    let to_write = remaining.min(chunk.len());
+                    if stream.write_all(&chunk[..to_write]).is_err() {
+                        break;
+                    }
+                    remaining -= to_write;
+                }
+                let _ = stream.flush();
                 continue;
             }
             let fallback = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot_found";
