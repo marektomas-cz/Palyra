@@ -303,10 +303,25 @@ pub(crate) async fn console_session_run_abort_handler(
     Path(run_id): Path<String>,
     payload: Option<Json<RunCancelRequest>>,
 ) -> Result<Json<SessionCatalogRunAbortEnvelope>, Response> {
-    let _session = authorize_console_session(&state, &headers, true)?;
+    let session = authorize_console_session(&state, &headers, true)?;
     validate_canonical_id(run_id.as_str()).map_err(|_| {
         runtime_status_response(tonic::Status::invalid_argument("run_id must be a canonical ULID"))
     })?;
+    let run = state
+        .runtime
+        .orchestrator_run_status_snapshot(run_id.clone())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "orchestrator run not found: {run_id}"
+            )))
+        })?;
+    if !super::chat::run_matches_console_context(&run, &session.context) {
+        return Err(runtime_status_response(tonic::Status::permission_denied(
+            "chat run does not belong to the authenticated console session context",
+        )));
+    }
     let reason = payload
         .and_then(|body| body.0.reason)
         .and_then(trim_to_option)

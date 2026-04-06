@@ -2213,7 +2213,7 @@ pub(crate) async fn console_chat_pin_delete_handler(
     })))
 }
 
-fn run_matches_console_context(
+pub(super) fn run_matches_console_context(
     run: &journal::OrchestratorRunStatusSnapshot,
     context: &gateway::RequestContext,
 ) -> bool {
