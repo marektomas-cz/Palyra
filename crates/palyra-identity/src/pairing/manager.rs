@@ -2,12 +2,14 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use crate::{
     ca::{CertificateAuthority, IssuedCertificate},
-    error::IdentityResult,
+    error::{IdentityError, IdentityResult},
     store::{InMemorySecretStore, SecretStore},
     DEFAULT_CERT_VALIDITY, DEFAULT_PAIRING_WINDOW, DEFAULT_ROTATION_THRESHOLD,
 };
 
 use super::{persistence, IdentityManager};
+
+const PENDING_PAIRING_PRIVATE_KEY_KEY_PREFIX: &str = "identity/pairing/pending_private_keys";
 
 impl IdentityManager {
     pub fn with_store(store: Arc<dyn SecretStore>) -> IdentityResult<Self> {
@@ -85,4 +87,40 @@ impl IdentityManager {
             )
         })
     }
+
+    pub fn persist_pending_pairing_private_key(
+        &self,
+        request_id: &str,
+        private_key_pem: &str,
+    ) -> IdentityResult<()> {
+        let key = pending_pairing_private_key_store_key(request_id)?;
+        self.store.write_sealed_value(key.as_str(), private_key_pem.as_bytes())
+    }
+
+    pub fn load_pending_pairing_private_key(
+        &self,
+        request_id: &str,
+    ) -> IdentityResult<Option<String>> {
+        let key = pending_pairing_private_key_store_key(request_id)?;
+        match self.store.read_secret(key.as_str()) {
+            Ok(raw) => String::from_utf8(raw)
+                .map(Some)
+                .map_err(|error| IdentityError::Internal(error.to_string())),
+            Err(IdentityError::SecretNotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn delete_pending_pairing_private_key(&self, request_id: &str) -> IdentityResult<()> {
+        let key = pending_pairing_private_key_store_key(request_id)?;
+        self.store.delete_secret(key.as_str())
+    }
+}
+
+fn pending_pairing_private_key_store_key(request_id: &str) -> IdentityResult<String> {
+    let trimmed = request_id.trim();
+    if trimmed.is_empty() {
+        return Err(IdentityError::InvalidSecretStoreKey);
+    }
+    Ok(format!("{PENDING_PAIRING_PRIVATE_KEY_KEY_PREFIX}/{}.pem", hex::encode(trimmed.as_bytes())))
 }

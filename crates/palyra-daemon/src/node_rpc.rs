@@ -272,6 +272,54 @@ impl NodeRpcServiceImpl {
             max_payload_bytes: dispatch.max_payload_bytes,
         }
     }
+
+    fn persist_pairing_private_key(
+        &self,
+        request_id: &str,
+        private_key_pem: &str,
+    ) -> Result<(), Status> {
+        let identity = self.identity_manager.lock().map_err(|_| {
+            Status::internal("identity manager lock poisoned while sealing pairing private key")
+        })?;
+        identity.persist_pending_pairing_private_key(request_id, private_key_pem).map_err(|error| {
+            Status::internal(format!(
+                "failed to seal pending pairing private key for {request_id}: {error}"
+            ))
+        })
+    }
+
+    fn resolve_pairing_private_key(
+        &self,
+        request_id: &str,
+        material: &node_runtime::DevicePairingMaterialRecord,
+    ) -> Result<String, Status> {
+        let identity = self.identity_manager.lock().map_err(|_| {
+            Status::internal("identity manager lock poisoned while loading pairing private key")
+        })?;
+        let sealed_private_key =
+            identity.load_pending_pairing_private_key(request_id).map_err(|error| {
+                Status::internal(format!(
+                    "failed to load sealed pairing private key for {request_id}: {error}"
+                ))
+            })?;
+        if let Some(private_key_pem) = sealed_private_key {
+            return Ok(private_key_pem);
+        }
+        if !material.mtls_client_private_key_pem.is_empty() {
+            identity
+                .persist_pending_pairing_private_key(
+                    request_id,
+                    material.mtls_client_private_key_pem.as_str(),
+                )
+                .map_err(|error| {
+                    Status::internal(format!(
+                        "failed to migrate legacy pairing private key for {request_id}: {error}"
+                    ))
+                })?;
+            return Ok(material.mtls_client_private_key_pem.clone());
+        }
+        Err(Status::internal("completed pairing request is missing the sealed private key payload"))
+    }
 }
 
 #[tonic::async_trait]
@@ -439,12 +487,20 @@ impl node_v1::node_service_server::NodeService for NodeRpcServiceImpl {
                         Status::internal(format!("failed to finalize approved pairing: {error}"))
                     })?
             };
+            self.persist_pairing_private_key(
+                session_id.as_str(),
+                finalized.device.current_certificate.private_key_pem.as_str(),
+            )?;
             pairing_request = self
                 .node_runtime
                 .complete_pairing_request(session_id.as_str(), &finalized)?
                 .ok_or_else(|| Status::internal("pairing request disappeared during completion"))?;
         }
         let material = pairing_request.material.clone();
+        let private_key_pem = match material.as_ref() {
+            Some(value) => self.resolve_pairing_private_key(session_id.as_str(), value)?,
+            None => String::new(),
+        };
         Ok(Response::new(node_v1::GetPairingRequestStatusResponse {
             v: payload.v.max(1),
             status: pairing_request.state.as_str().to_owned(),
@@ -463,10 +519,7 @@ impl node_v1::node_service_server::NodeService for NodeRpcServiceImpl {
                 .as_ref()
                 .map(|value| value.mtls_client_certificate_pem.clone())
                 .unwrap_or_default(),
-            mtls_client_private_key_pem: material
-                .as_ref()
-                .map(|value| value.mtls_client_private_key_pem.clone())
-                .unwrap_or_default(),
+            mtls_client_private_key_pem: private_key_pem,
             gateway_ca_certificate_pem: material
                 .as_ref()
                 .map(|value| value.gateway_ca_certificate_pem.clone())

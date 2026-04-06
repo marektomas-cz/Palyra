@@ -80,6 +80,7 @@ pub(crate) struct DevicePairingMaterialRecord {
     pub(crate) identity_fingerprint: String,
     pub(crate) transcript_hash_hex: String,
     pub(crate) mtls_client_certificate_pem: String,
+    #[serde(default, skip_serializing)]
     pub(crate) mtls_client_private_key_pem: String,
     pub(crate) gateway_ca_certificate_pem: String,
     pub(crate) cert_expires_at_unix_ms: i64,
@@ -91,7 +92,7 @@ impl DevicePairingMaterialRecord {
             identity_fingerprint: result.identity_fingerprint.clone(),
             transcript_hash_hex: result.transcript_hash_hex.clone(),
             mtls_client_certificate_pem: result.device.current_certificate.certificate_pem.clone(),
-            mtls_client_private_key_pem: result.device.current_certificate.private_key_pem.clone(),
+            mtls_client_private_key_pem: String::new(),
             gateway_ca_certificate_pem: result.gateway_ca_certificate_pem.clone(),
             cert_expires_at_unix_ms: i64::try_from(
                 result.device.current_certificate.expires_at_unix_ms,
@@ -630,7 +631,10 @@ pub(crate) fn parse_capability_result_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_canonical_state_root, NodeRuntimeState, NODE_RUNTIME_STATE_FILE_NAME};
+    use super::{
+        resolve_canonical_state_root, DevicePairingMaterialRecord, NodeRuntimeState,
+        NODE_RUNTIME_STATE_FILE_NAME,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -652,5 +656,28 @@ mod tests {
             .expect_err("empty state root must fail");
 
         assert!(error.to_string().contains("must not be empty"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn pairing_material_omits_private_key_when_serialized() {
+        let raw = serde_json::json!({
+            "identity_fingerprint": "fingerprint",
+            "transcript_hash_hex": "transcript",
+            "mtls_client_certificate_pem": "CERT",
+            "mtls_client_private_key_pem": "PRIVATE KEY",
+            "gateway_ca_certificate_pem": "CA",
+            "cert_expires_at_unix_ms": 42
+        });
+
+        let material: DevicePairingMaterialRecord =
+            serde_json::from_value(raw).expect("legacy pairing material should deserialize");
+        assert_eq!(material.mtls_client_private_key_pem, "PRIVATE KEY");
+
+        let encoded =
+            serde_json::to_value(&material).expect("pairing material should serialize safely");
+        assert!(
+            encoded.get("mtls_client_private_key_pem").is_none(),
+            "runtime state serialization must not persist private keys"
+        );
     }
 }

@@ -766,6 +766,33 @@ fn failed_bundle_write_does_not_persist_partial_rotation_state() {
     );
 }
 
+#[test]
+fn pending_pairing_private_key_roundtrips_via_secret_store() {
+    let store = Arc::new(crate::InMemorySecretStore::new());
+    let manager = IdentityManager::with_store(store).expect("manager should initialize");
+    let request_id = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+
+    manager
+        .persist_pending_pairing_private_key(request_id, "PRIVATE KEY")
+        .expect("pending pairing private key should persist");
+    assert_eq!(
+        manager
+            .load_pending_pairing_private_key(request_id)
+            .expect("pending pairing private key should reload"),
+        Some("PRIVATE KEY".to_owned())
+    );
+
+    manager
+        .delete_pending_pairing_private_key(request_id)
+        .expect("pending pairing private key should delete");
+    assert_eq!(
+        manager
+            .load_pending_pairing_private_key(request_id)
+            .expect("deleted pending pairing key should read as absent"),
+        None
+    );
+}
+
 proptest! {
     #[test]
     fn transcript_mac_is_symmetric(
