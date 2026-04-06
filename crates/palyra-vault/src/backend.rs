@@ -207,23 +207,36 @@ impl EncryptedFileBackend {
             store_path.as_path(),
             "encrypted-file objects store path",
         )?;
+        let legacy_store = Self::read_legacy_store(objects_root.as_path())?;
         if !store_path.exists() {
-            fs::write(&store_path, b"{}").map_err(|error| {
-                VaultError::Io(format!(
-                    "failed to initialize encrypted-file objects store {}: {error}",
-                    store_path.display()
-                ))
-            })?;
-            ensure_owner_only_file(&store_path)?;
+            Self::write_store_at_path(objects_root.as_path(), &legacy_store)?;
+        } else if !legacy_store.is_empty() {
+            let mut merged_store = Self::read_store_at_path(objects_root.as_path())?;
+            let mut changed = false;
+            for (object_id, payload) in legacy_store {
+                if merged_store.contains_key(&object_id) {
+                    continue;
+                }
+                merged_store.insert(object_id, payload);
+                changed = true;
+            }
+            if changed {
+                Self::write_store_at_path(objects_root.as_path(), &merged_store)?;
+            }
         }
         Ok(Self { objects_root })
     }
 
     fn read_store(&self) -> Result<BTreeMap<String, Vec<u8>>, VaultError> {
-        let store_root = canonicalize_existing_dir(
-            self.objects_root.as_path(),
-            "encrypted-file objects directory",
-        )?;
+        Self::read_store_at_path(self.objects_root.as_path())
+    }
+
+    fn write_store(&self, store: &BTreeMap<String, Vec<u8>>) -> Result<(), VaultError> {
+        Self::write_store_at_path(self.objects_root.as_path(), store)
+    }
+
+    fn read_store_at_path(store_root: &Path) -> Result<BTreeMap<String, Vec<u8>>, VaultError> {
+        let store_root = canonicalize_existing_dir(store_root, "encrypted-file objects directory")?;
         let store_path = store_root.join(OBJECTS_STORE_FILE);
         ensure_path_within_root(
             store_root.as_path(),
@@ -258,21 +271,19 @@ impl EncryptedFileBackend {
                 ))
             }
         })?;
-        let parsed = serde_json::from_slice::<BTreeMap<String, Vec<u8>>>(bytes.as_slice())
-            .map_err(|error| {
-                VaultError::Io(format!(
-                    "failed to parse encrypted-file objects store {}: {error}",
-                    store_path.display()
-                ))
-            })?;
-        Ok(parsed)
+        serde_json::from_slice::<BTreeMap<String, Vec<u8>>>(bytes.as_slice()).map_err(|error| {
+            VaultError::Io(format!(
+                "failed to parse encrypted-file objects store {}: {error}",
+                store_path.display()
+            ))
+        })
     }
 
-    fn write_store(&self, store: &BTreeMap<String, Vec<u8>>) -> Result<(), VaultError> {
-        let store_root = canonicalize_existing_dir(
-            self.objects_root.as_path(),
-            "encrypted-file objects directory",
-        )?;
+    fn write_store_at_path(
+        store_root: &Path,
+        store: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), VaultError> {
+        let store_root = canonicalize_existing_dir(store_root, "encrypted-file objects directory")?;
         let store_path = store_root.join(OBJECTS_STORE_FILE);
         ensure_path_within_root(
             store_root.as_path(),
@@ -314,6 +325,58 @@ impl EncryptedFileBackend {
         })?;
         ensure_owner_only_file(&store_path)?;
         Ok(())
+    }
+
+    fn read_legacy_store(objects_root: &Path) -> Result<BTreeMap<String, Vec<u8>>, VaultError> {
+        let mut legacy_store = BTreeMap::new();
+        for entry in fs::read_dir(objects_root).map_err(|error| {
+            VaultError::Io(format!(
+                "failed to enumerate encrypted-file objects directory {}: {error}",
+                objects_root.display()
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                VaultError::Io(format!(
+                    "failed to inspect encrypted-file objects directory {}: {error}",
+                    objects_root.display()
+                ))
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                VaultError::Io(format!(
+                    "failed to inspect encrypted-file object entry in {}: {error}",
+                    objects_root.display()
+                ))
+            })?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name == OBJECTS_STORE_FILE || name.starts_with(&format!("{OBJECTS_STORE_FILE}.tmp."))
+            {
+                continue;
+            }
+            let object_id = match normalize_storage_object_id(name) {
+                Ok(object_id) => object_id,
+                Err(_) => continue,
+            };
+            let object_path = entry.path();
+            ensure_path_within_root(
+                objects_root,
+                object_path.as_path(),
+                "encrypted-file legacy object path",
+            )?;
+            let payload = fs::read(&object_path).map_err(|error| {
+                VaultError::Io(format!(
+                    "failed to read encrypted-file legacy object {}: {error}",
+                    object_path.display()
+                ))
+            })?;
+            legacy_store.insert(object_id, payload);
+        }
+        Ok(legacy_store)
     }
 }
 
@@ -767,6 +830,65 @@ mod tests {
             matches!(result, Err(VaultError::Io(ref message)) if message.contains("exceeds max size after update")),
             "unexpected result: {result:?}"
         );
+    }
+
+    #[test]
+    fn encrypted_file_backend_migrates_legacy_object_files_into_store() {
+        let temp = tempdir().expect("tempdir should be created");
+        let objects_root = temp.path().join("objects");
+        fs::create_dir_all(&objects_root).expect("objects root should be created");
+        fs::write(objects_root.join(TEST_OBJECT_ID), b"legacy-secret")
+            .expect("legacy object file should be written");
+
+        let backend =
+            EncryptedFileBackend::new(temp.path()).expect("backend should initialize cleanly");
+
+        let payload = backend.get_blob(TEST_OBJECT_ID).expect("legacy object should migrate");
+        assert_eq!(payload, b"legacy-secret");
+
+        let store_path = backend.objects_root.join(OBJECTS_STORE_FILE);
+        let store_bytes = fs::read(store_path).expect("objects store should be readable");
+        let store = serde_json::from_slice::<BTreeMap<String, Vec<u8>>>(&store_bytes)
+            .expect("migrated store should be valid json");
+        assert_eq!(
+            store.get(TEST_OBJECT_ID).map(Vec::as_slice),
+            Some(&b"legacy-secret"[..]),
+            "legacy object should be persisted into the consolidated objects store"
+        );
+    }
+
+    #[test]
+    fn encrypted_file_backend_merges_legacy_object_files_into_existing_store() {
+        let temp = tempdir().expect("tempdir should be created");
+        let objects_root = temp.path().join("objects");
+        fs::create_dir_all(&objects_root).expect("objects root should be created");
+        fs::write(
+            objects_root.join(OBJECTS_STORE_FILE),
+            serde_json::to_vec(&BTreeMap::<String, Vec<u8>>::from([(
+                TEST_OBJECT_ID.to_owned(),
+                b"store-secret".to_vec(),
+            )]))
+            .expect("seed store should serialize"),
+        )
+        .expect("seed store should be written");
+        fs::write(
+            objects_root
+                .join("obj_abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"),
+            b"legacy-only-secret",
+        )
+        .expect("legacy-only object file should be written");
+
+        let backend =
+            EncryptedFileBackend::new(temp.path()).expect("backend should initialize cleanly");
+
+        let legacy_only = backend
+            .get_blob("obj_abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+            .expect("legacy-only object should be merged into the store");
+        let preserved = backend
+            .get_blob(TEST_OBJECT_ID)
+            .expect("existing store object should remain accessible");
+        assert_eq!(legacy_only, b"legacy-only-secret");
+        assert_eq!(preserved, b"store-secret");
     }
 
     #[cfg(windows)]
