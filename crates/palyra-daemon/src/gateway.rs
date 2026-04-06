@@ -214,6 +214,21 @@ pub(crate) async fn ingest_memory_best_effort(
     if content_text.trim().is_empty() {
         return;
     }
+    if let Err(error) = crate::application::service_authorization::authorize_memory_action(
+        principal,
+        "memory.ingest",
+        "memory:item",
+    ) {
+        runtime_state.record_denied();
+        warn!(
+            reason,
+            principal,
+            status_code = ?error.code(),
+            status_message = %error.message(),
+            "memory ingest best-effort skipped by policy"
+        );
+        return;
+    }
     if let Err(error) = runtime_state
         .ingest_memory_item(MemoryItemCreateRequest {
             memory_id: Ulid::new().to_string(),

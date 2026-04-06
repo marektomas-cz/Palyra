@@ -27,7 +27,7 @@ use ulid::Ulid;
 use super::vault::vault_get_requires_approval;
 use super::{
     best_effort_mark_approval_error, common_v1, constant_time_eq,
-    enforce_vault_get_approval_policy, enforce_vault_scope_access,
+    enforce_vault_get_approval_policy, enforce_vault_scope_access, ingest_memory_best_effort,
     resolve_cron_job_channel_for_create, workspace_patch_metrics_from_output, GatewayAuthConfig,
     GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
     MemoryRuntimeConfig, ProviderRequest, RequestContext, ToolApprovalOutcome, HEADER_CHANNEL,
@@ -49,7 +49,8 @@ use crate::application::{
     route_message::approval::resolve_route_tool_approval_outcome,
     route_message::response::parse_route_message_structured_output,
     service_authorization::{
-        authorize_approvals_action, principal_has_sensitive_service_role, SensitiveServiceRole,
+        authorize_approvals_action, authorize_memory_action, principal_has_sensitive_service_role,
+        SensitiveServiceRole,
     },
     tool_runtime::{
         http_fetch::{
@@ -1101,6 +1102,51 @@ async fn prepare_model_provider_input_fail_mode_propagates_tape_append_error() {
     )
     .await;
     assert!(result.is_err(), "fail mode must propagate memory auto-inject tape persistence errors");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ingest_memory_best_effort_persists_memory_for_authorized_principal() {
+    let state = build_test_runtime_state(false);
+    let context = RequestContext {
+        principal: "user:ops".to_owned(),
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        channel: Some("cli".to_owned()),
+    };
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB8".to_owned();
+    upsert_test_orchestrator_session(&state, &context, session_id.as_str());
+
+    authorize_memory_action(context.principal.as_str(), "memory.ingest", "memory:item")
+        .expect("test principal should be allowed to ingest memory under the default policy");
+
+    ingest_memory_best_effort(
+        &state,
+        context.principal.as_str(),
+        context.channel.as_deref(),
+        Some(session_id.as_str()),
+        MemorySource::Summary,
+        "unauthorized route summary",
+        vec!["summary:route_message".to_owned()],
+        Some(0.75),
+        "ingest_memory_best_effort_policy_test",
+    )
+    .await;
+
+    let (items, next_after) = state
+        .list_memory_items(
+            None,
+            Some(10),
+            context.principal.clone(),
+            context.channel.clone(),
+            Some(session_id),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("memory listing should succeed");
+    assert_eq!(items.len(), 1, "authorized best-effort ingest should persist a memory item");
+    assert_eq!(items[0].content_text, "unauthorized route summary");
+    assert_eq!(items[0].source, MemorySource::Summary);
+    assert!(next_after.is_none(), "single-page listing must not report pagination state");
 }
 
 #[test]
