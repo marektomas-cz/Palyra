@@ -8174,6 +8174,7 @@ fn map_workspace_document_version_row(
     })
 }
 
+#[cfg(test)]
 fn load_orchestrator_tape(
     connection: &Connection,
     run_id: &str,
@@ -8243,9 +8244,7 @@ fn hydrate_orchestrator_session(
     search_query: Option<&str>,
 ) -> Result<OrchestratorSessionRecord, JournalError> {
     let transcript = if let Some(last_run_id) = session.last_run_id.as_deref() {
-        summarize_orchestrator_session_transcript(
-            load_orchestrator_tape(connection, last_run_id)?.as_slice(),
-        )
+        load_orchestrator_session_transcript_summary(connection, last_run_id)?
     } else {
         OrchestratorSessionTranscriptSummary::default()
     };
@@ -8337,47 +8336,74 @@ fn load_orchestrator_run_state(
         .map_err(Into::into)
 }
 
-fn summarize_orchestrator_session_transcript(
-    events: &[OrchestratorTapeRecord],
-) -> OrchestratorSessionTranscriptSummary {
-    let mut summary = OrchestratorSessionTranscriptSummary::default();
+fn load_orchestrator_session_transcript_summary(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<OrchestratorSessionTranscriptSummary, JournalError> {
+    Ok(OrchestratorSessionTranscriptSummary {
+        first_user_message: load_orchestrator_session_event_text(
+            connection,
+            run_id,
+            "message.received",
+            "text",
+            true,
+        )?,
+        latest_user_message: load_orchestrator_session_event_text(
+            connection,
+            run_id,
+            "message.received",
+            "text",
+            false,
+        )?,
+        latest_assistant_message: load_orchestrator_session_event_text(
+            connection,
+            run_id,
+            "message.replied",
+            "reply_text",
+            false,
+        )?,
+    })
+}
 
-    for event in events {
-        let payload = match serde_json::from_str::<serde_json::Value>(event.payload_json.as_str()) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        match event.event_type.as_str() {
-            "message.received" => {
-                let Some(text) =
-                    payload.get("text").and_then(serde_json::Value::as_str).and_then(|value| {
-                        normalize_orchestrator_session_text(value, ORCHESTRATOR_SESSION_PREVIEW_LEN)
-                    })
-                else {
-                    continue;
-                };
-                if summary.first_user_message.is_none() {
-                    summary.first_user_message = Some(text.clone());
-                }
-                summary.latest_user_message = Some(text);
-            }
-            "message.replied" => {
-                let Some(text) = payload
-                    .get("reply_text")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|value| {
-                        normalize_orchestrator_session_text(value, ORCHESTRATOR_SESSION_PREVIEW_LEN)
-                    })
-                else {
-                    continue;
-                };
-                summary.latest_assistant_message = Some(text);
-            }
-            _ => {}
-        }
-    }
-
-    summary
+fn load_orchestrator_session_event_text(
+    connection: &Connection,
+    run_id: &str,
+    event_type: &str,
+    field_name: &str,
+    ascending: bool,
+) -> Result<Option<String>, JournalError> {
+    let sql = if ascending {
+        r#"
+            SELECT payload_json
+            FROM orchestrator_tape
+            WHERE run_ulid = ?1
+              AND event_type = ?2
+            ORDER BY seq ASC
+            LIMIT 1
+        "#
+    } else {
+        r#"
+            SELECT payload_json
+            FROM orchestrator_tape
+            WHERE run_ulid = ?1
+              AND event_type = ?2
+            ORDER BY seq DESC
+            LIMIT 1
+        "#
+    };
+    let payload_json = connection
+        .query_row(sql, params![run_id, event_type], |row| row.get::<_, String>(0))
+        .optional()?;
+    let Some(payload_json) = payload_json else {
+        return Ok(None);
+    };
+    let payload = match serde_json::from_str::<serde_json::Value>(payload_json.as_str()) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    Ok(payload.get(field_name).and_then(serde_json::Value::as_str).and_then(|value| {
+        normalize_orchestrator_session_text(value, ORCHESTRATOR_SESSION_PREVIEW_LEN)
+    }))
 }
 
 fn normalize_orchestrator_session_text(raw: &str, max_chars: usize) -> Option<String> {
@@ -12040,6 +12066,83 @@ mod tests {
             !preview.contains("super-secret") && !preview.contains("abc123"),
             "raw secret-like values must not leak into previews: {preview}"
         );
+    }
+
+    #[test]
+    fn orchestrator_session_listing_uses_first_and_latest_message_events_without_full_tape_scan() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5FB4");
+        store
+            .start_orchestrator_run(&OrchestratorRunStartRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB5".to_owned(),
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB4".to_owned(),
+                origin_kind: String::new(),
+                origin_run_id: None,
+                triggered_by_principal: None,
+                parameter_delta_json: None,
+            })
+            .expect("run should start");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB5".to_owned(),
+                seq: 0,
+                event_type: "message.received".to_owned(),
+                payload_json: r#"{"text":"First operator question"}"#.to_owned(),
+            })
+            .expect("first user message should persist");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB5".to_owned(),
+                seq: 1,
+                event_type: "tool.executed".to_owned(),
+                payload_json: r#"{"result":"ignore me"}"#.to_owned(),
+            })
+            .expect("non-message filler event should persist");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB5".to_owned(),
+                seq: 2,
+                event_type: "message.received".to_owned(),
+                payload_json: r#"{"text":"Latest operator follow-up"}"#.to_owned(),
+            })
+            .expect("latest user message should persist");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB5".to_owned(),
+                seq: 3,
+                event_type: "message.replied".to_owned(),
+                payload_json: r#"{"reply_text":"Latest assistant response"}"#.to_owned(),
+            })
+            .expect("latest assistant response should persist");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FB5".to_owned(),
+                seq: 4,
+                event_type: "tool.result".to_owned(),
+                payload_json: r#"{"result":"still ignore me"}"#.to_owned(),
+            })
+            .expect("trailing filler event should persist");
+
+        let session = store
+            .list_orchestrator_sessions(
+                None,
+                "user:ops",
+                "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                Some("cli"),
+                false,
+                10,
+            )
+            .expect("session listing should succeed")
+            .into_iter()
+            .find(|entry| entry.session_id == "01ARZ3NDEKTSV4RRFFQ69G5FB4")
+            .expect("session should exist");
+        assert_eq!(session.title, "First operator question");
+        assert_eq!(session.last_intent.as_deref(), Some("Latest operator follow-up"));
+        assert_eq!(session.last_summary.as_deref(), Some("Latest assistant response"));
+        assert_eq!(session.preview.as_deref(), Some("Latest assistant response"));
     }
 
     #[test]
