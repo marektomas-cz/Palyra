@@ -9,7 +9,7 @@ use axum::{
     extract::{ConnectInfo, Request, State},
     http::{
         header::{CACHE_CONTROL, SET_COOKIE},
-        HeaderName, HeaderValue, Method, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
     },
     middleware::Next,
     response::Response,
@@ -30,7 +30,11 @@ pub(crate) async fn admin_console_security_headers_middleware(
     next: Next,
 ) -> Response {
     let mut response = next.run(request).await;
-    let headers = response.headers_mut();
+    apply_admin_console_security_headers(response.headers_mut());
+    response
+}
+
+pub(crate) fn apply_admin_console_security_headers(headers: &mut HeaderMap) {
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
@@ -38,10 +42,13 @@ pub(crate) async fn admin_console_security_headers_middleware(
     );
     headers.insert(HeaderName::from_static("x-frame-options"), HeaderValue::from_static("DENY"));
     headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(
         HeaderName::from_static("referrer-policy"),
         HeaderValue::from_static("no-referrer"),
     );
-    response
 }
 
 pub(crate) async fn console_observability_middleware(

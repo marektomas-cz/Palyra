@@ -4,9 +4,11 @@ use std::{
 };
 
 use axum::{
-    http::{header::CACHE_CONTROL, header::CONTENT_TYPE, HeaderValue, StatusCode, Uri},
+    http::{header::CONTENT_TYPE, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
 };
+
+use crate::transport::http::middleware::apply_admin_console_security_headers;
 
 const WEB_UI_ROOT_ENV: &str = "PALYRA_WEB_DIST_DIR";
 const WEB_UI_ENTRYPOINT: &str = "index.html";
@@ -32,7 +34,7 @@ pub(crate) async fn web_ui_entry_handler(uri: Uri) -> Response {
 }
 
 fn missing_web_ui_response() -> Response {
-    (
+    let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
         Html(
             r#"<!doctype html>
@@ -103,14 +105,16 @@ fn missing_web_ui_response() -> Response {
 </html>"#,
         ),
     )
-        .into_response()
+        .into_response();
+    apply_admin_console_security_headers(response.headers_mut());
+    response
 }
 
 async fn load_web_ui_response(root: &Path, request_path: &str) -> Result<Response, WebUiLoadError> {
     let asset_path = resolve_web_ui_asset_path(root, request_path)?;
     let bytes = fs::read(asset_path.as_path()).map_err(WebUiLoadError::Io)?;
     let mut response = bytes.into_response();
-    response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    apply_admin_console_security_headers(response.headers_mut());
     response.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static(content_type_for_path(asset_path.as_path())),
@@ -292,6 +296,21 @@ mod tests {
         assert_eq!(
             response.headers().get("cache-control").and_then(|value| value.to_str().ok()),
             Some("no-store")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_web_ui_response_sets_clickjacking_protections() {
+        let fixture = create_fixture();
+        let response =
+            load_web_ui_response(fixture.path(), "/").await.expect("root response should load");
+        assert_eq!(
+            response.headers().get("x-frame-options").and_then(|value| value.to_str().ok()),
+            Some("DENY")
+        );
+        assert_eq!(
+            response.headers().get("content-security-policy").and_then(|value| value.to_str().ok()),
+            Some("frame-ancestors 'none'")
         );
     }
 }
