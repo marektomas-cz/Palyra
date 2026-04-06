@@ -530,15 +530,30 @@ function Get-PalyraCliManagedProfilePaths {
     return @($profilePaths | Select-Object -Unique)
 }
 
+function ConvertTo-PosixSingleQuotedLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $singleQuote = [string][char]39
+    $doubleQuote = [string][char]34
+    $escapedQuote = $singleQuote + $doubleQuote + $singleQuote + $doubleQuote + $singleQuote
+    return $singleQuote + $Value.Replace($singleQuote, $escapedQuote) + $singleQuote
+}
+
 function Get-PalyraCliProfileBlock {
     param(
         [Parameter(Mandatory = $true)]
         [string]$CommandRoot
     )
 
+    $escapedCommandRoot = ConvertTo-PosixSingleQuotedLiteral -Value $CommandRoot
+
     return @"
 $script:PalyraCliProfileStartMarker
-PALYRA_CLI_BIN="$CommandRoot"
+PALYRA_CLI_BIN=$escapedCommandRoot
 case ":`$PATH:" in
   *":`$PALYRA_CLI_BIN:"*) ;;
   *) export PATH="`$PALYRA_CLI_BIN:`$PATH" ;;
