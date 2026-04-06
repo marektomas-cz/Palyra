@@ -154,7 +154,7 @@ fn flush_redacted_token(
     output.push_str(processed.as_ref());
     output.push_str(suffix);
 
-    *next_bearer_state = core.eq_ignore_ascii_case("bearer");
+    *next_bearer_state = should_redact_following_bearer_token(core);
 }
 
 fn flush_redacted_url_token(token: &str, output: &mut String) {
@@ -178,6 +178,16 @@ fn redact_assignment_token(token: &str) -> Cow<'_, str> {
         }
     }
     Cow::Borrowed(token)
+}
+
+fn should_redact_following_bearer_token(token: &str) -> bool {
+    if token.eq_ignore_ascii_case("bearer") {
+        return true;
+    }
+    if let Some((key, _, value)) = split_assignment(token) {
+        return is_sensitive_key(key) && value.eq_ignore_ascii_case("bearer");
+    }
+    false
 }
 
 fn split_assignment(token: &str) -> Option<(&str, char, &str)> {
@@ -330,6 +340,16 @@ mod tests {
             redacted.contains("code=429"),
             "non-sensitive diagnostic values should remain visible: {redacted}"
         );
+    }
+
+    #[test]
+    fn auth_error_redaction_masks_authorization_bearer_with_following_token() {
+        let redacted =
+            redact_auth_error("error: authorization=Bearer SECRET_TOKEN oauth=Bearer NEXT_TOKEN");
+
+        assert!(redacted.contains("authorization=<redacted> <redacted>"));
+        assert!(redacted.contains("oauth=Bearer NEXT_TOKEN"));
+        assert!(!redacted.contains("SECRET_TOKEN"));
     }
 
     #[test]
