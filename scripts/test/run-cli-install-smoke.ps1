@@ -135,7 +135,8 @@ function Invoke-TranscriptCommand {
         [Parameter(Mandatory = $true)]
         [string]$LogPath,
         [System.Collections.IDictionary]$Environment = @{},
-        [string]$StdinText
+        [string]$StdinText,
+        [switch]$RedactOutput
     )
 
     $resolvedCommand = $Command
@@ -173,6 +174,16 @@ function Invoke-TranscriptCommand {
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
     $exitCode = $process.ExitCode
+    $loggedStdout = if ($RedactOutput -and -not [string]::IsNullOrEmpty($stdout)) {
+        "[redacted by smoke harness]"
+    } else {
+        $stdout
+    }
+    $loggedStderr = if ($RedactOutput -and -not [string]::IsNullOrEmpty($stderr)) {
+        "[redacted by smoke harness]"
+    } else {
+        $stderr
+    }
 
     $transcript = @(
         "label: $Label"
@@ -180,10 +191,10 @@ function Invoke-TranscriptCommand {
         "command: $displayCommand"
         ""
         "stdout:"
-        $stdout
+        $loggedStdout
         ""
         "stderr:"
-        $stderr
+        $loggedStderr
         ""
         "exit_code: $exitCode"
     ) -join [Environment]::NewLine
@@ -197,13 +208,13 @@ function Invoke-TranscriptCommand {
         Write-Host "ENV> $key=$($Environment[$key])"
     }
     Write-Host "CMD> $displayCommand"
-    if (-not [string]::IsNullOrEmpty($stdout)) {
+    if (-not [string]::IsNullOrEmpty($loggedStdout)) {
         Write-Host "STDOUT>"
-        Write-Host $stdout.TrimEnd()
+        Write-Host $loggedStdout.TrimEnd()
     }
-    if (-not [string]::IsNullOrEmpty($stderr)) {
+    if (-not [string]::IsNullOrEmpty($loggedStderr)) {
         Write-Host "STDERR>"
-        Write-Host $stderr.TrimEnd()
+        Write-Host $loggedStderr.TrimEnd()
     }
     Write-Host "EXIT> $exitCode"
     Write-Host "::endgroup::"
@@ -382,7 +393,7 @@ try {
         @{ Label = "functional :: setup-secrets-config"; Context = $secretsContext; Args = @("setup", "--mode", "local", "--path", $secretsContext.ConfigPath, "--force") }
         @{ Label = "functional :: secrets-set"; Context = $secretsContext; Args = @("secrets", "set", "global", "openai_api_key", "--value-stdin"); Stdin = "sk-installed-secret`nline-2`n" }
         @{ Label = "functional :: secrets-get-redacted"; Context = $secretsContext; Args = @("secrets", "get", "global", "openai_api_key") }
-        @{ Label = "functional :: secrets-get-reveal"; Context = $secretsContext; Args = @("secrets", "get", "global", "openai_api_key", "--reveal") }
+        @{ Label = "functional :: secrets-get-reveal"; Context = $secretsContext; Args = @("secrets", "get", "global", "openai_api_key", "--reveal"); RedactOutput = $true }
         @{ Label = "functional :: secrets-configure-openai"; Context = $secretsContext; Args = @("secrets", "configure", "openai-api-key", "global", "openai_api_key", "--value-stdin", "--path", $secretsContext.ConfigPath, "--json"); Stdin = "sk-test-openai-secret" }
         @{ Label = "functional :: secrets-audit"; Context = $secretsContext; Args = @("secrets", "audit", "--path", $secretsContext.ConfigPath, "--offline", "--json") }
         @{ Label = "functional :: secrets-apply"; Context = $secretsContext; Args = @("secrets", "apply", "--path", $secretsContext.ConfigPath, "--offline", "--json") }
@@ -410,6 +421,9 @@ try {
         }
         if ($scenario.ContainsKey("Stdin")) {
             $invokeParams["StdinText"] = [string]$scenario.Stdin
+        }
+        if ($scenario.ContainsKey("RedactOutput")) {
+            $invokeParams["RedactOutput"] = [bool]$scenario.RedactOutput
         }
         Invoke-TranscriptCommand @invokeParams | Out-Null
         $transcriptStats.functional += 1
