@@ -131,6 +131,12 @@ pub(crate) fn run_resolved_wasm_plugin(
     capabilities: WasmPluginRequestedCapabilities,
     timeout: Duration,
 ) -> Result<WasmPluginRunSuccess, WasmPluginRunError> {
+    if !policy.enabled {
+        return Err(WasmPluginRunError {
+            kind: WasmPluginRunErrorKind::Disabled,
+            message: "wasm plugin runtime is disabled by runtime policy".to_owned(),
+        });
+    }
     execute_module(
         policy,
         Some(resolved),
@@ -736,7 +742,14 @@ fn duration_to_millis(duration: Duration) -> u64 {
 mod tests {
     use std::time::Duration;
 
-    use super::{run_wasm_plugin, WasmPluginRunErrorKind, WasmPluginRunnerPolicy};
+    use super::{
+        run_resolved_wasm_plugin, run_wasm_plugin, ResolvedInstalledSkillModule,
+        WasmPluginRequestedCapabilities, WasmPluginRunErrorKind, WasmPluginRunnerPolicy,
+    };
+    use palyra_skills::{
+        SkillCapabilities, SkillCapabilityGrantSnapshot, SkillCompat, SkillEntrypoints,
+        SkillIntegrity, SkillManifest,
+    };
     use serde_json::Value;
 
     fn test_policy() -> WasmPluginRunnerPolicy {
@@ -765,6 +778,48 @@ mod tests {
             Duration::from_secs(2),
         )
         .expect_err("disabled runner must fail closed");
+        assert_eq!(error.kind, WasmPluginRunErrorKind::Disabled);
+    }
+
+    #[test]
+    fn run_resolved_wasm_plugin_denies_when_disabled() {
+        let mut policy = test_policy();
+        policy.enabled = false;
+        let resolved = ResolvedInstalledSkillModule {
+            skill_id: "acme.echo".to_owned(),
+            skill_version: "1.0.0".to_owned(),
+            manifest: SkillManifest {
+                manifest_version: 1,
+                skill_id: "acme.echo".to_owned(),
+                name: "Acme Echo".to_owned(),
+                version: "1.0.0".to_owned(),
+                publisher: "Acme".to_owned(),
+                entrypoints: SkillEntrypoints { tools: Vec::new() },
+                capabilities: SkillCapabilities::default(),
+                compat: SkillCompat {
+                    required_protocol_major: 1,
+                    min_palyra_version: "0.1.0".to_owned(),
+                },
+                integrity: SkillIntegrity::default(),
+            },
+            selected_tool: None,
+            capability_grants: SkillCapabilityGrantSnapshot {
+                http_hosts: Vec::new(),
+                secret_keys: Vec::new(),
+                storage_prefixes: Vec::new(),
+                channels: Vec::new(),
+            },
+            module_path: "modules/echo.wasm".to_owned(),
+            module_bytes: br#"(module (func (export "run") (result i32) i32.const 1))"#.to_vec(),
+            entrypoint: "run".to_owned(),
+        };
+        let error = run_resolved_wasm_plugin(
+            &policy,
+            &resolved,
+            WasmPluginRequestedCapabilities::default(),
+            Duration::from_secs(2),
+        )
+        .expect_err("resolved runner must also fail closed when disabled");
         assert_eq!(error.kind, WasmPluginRunErrorKind::Disabled);
     }
 
