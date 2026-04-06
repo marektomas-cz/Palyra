@@ -44,6 +44,18 @@ pub(crate) struct ChromiumNavigateParams {
     pub(crate) cookie_header: Option<String>,
 }
 
+fn clamp_chromium_snapshot(
+    snapshot: ChromiumObserveSnapshot,
+    max_response_bytes: u64,
+    max_title_bytes: u64,
+) -> ChromiumObserveSnapshot {
+    ChromiumObserveSnapshot {
+        page_body: truncate_utf8_bytes(snapshot.page_body.as_str(), max_response_bytes as usize),
+        title: truncate_utf8_bytes(snapshot.title.as_str(), max_title_bytes as usize),
+        page_url: snapshot.page_url,
+    }
+}
+
 pub(crate) async fn run_chromium_blocking<T, F>(operation: &str, task: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -605,6 +617,13 @@ pub(crate) async fn chromium_observe_snapshot(
     tab_id: &str,
 ) -> Result<ChromiumObserveSnapshot, String> {
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let (max_response_bytes, max_title_bytes) = {
+        let sessions = runtime.sessions.lock().await;
+        let Some(session) = sessions.get(session_id) else {
+            return Err("session_not_found".to_owned());
+        };
+        (session.budget.max_response_bytes, session.budget.max_title_bytes)
+    };
     let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
     let snapshot = run_chromium_blocking("chromium observe snapshot", move || {
         let page_body = tab
@@ -616,7 +635,7 @@ pub(crate) async fn chromium_observe_snapshot(
     })
     .await?;
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
-    Ok(snapshot)
+    Ok(clamp_chromium_snapshot(snapshot, max_response_bytes, max_title_bytes))
 }
 
 pub(crate) async fn chromium_refresh_tab_snapshot(
@@ -985,6 +1004,28 @@ pub(crate) async fn type_with_chromium(
         outcome: "selector_not_found".to_owned(),
         error: format!("selector '{selector}' was not found"),
         attempts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_chromium_snapshot, ChromiumObserveSnapshot};
+
+    #[test]
+    fn clamp_chromium_snapshot_enforces_body_and_title_budgets() {
+        let snapshot = ChromiumObserveSnapshot {
+            page_body: "α".repeat(12),
+            title: "ß".repeat(4),
+            page_url: "https://example.invalid/oversized".to_owned(),
+        };
+
+        let clamped = clamp_chromium_snapshot(snapshot, 17, 5);
+
+        assert_eq!(clamped.page_body, "α".repeat(8));
+        assert_eq!(clamped.title, "ß".repeat(2));
+        assert_eq!(clamped.page_url, "https://example.invalid/oversized");
+        assert!(clamped.page_body.len() <= 17);
+        assert!(clamped.title.len() <= 5);
     }
 }
 
