@@ -345,8 +345,12 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::ListSessionsRequest>,
     ) -> Result<Response<browser_v1::ListSessionsResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
+        let caller_principal = request_principal(request.metadata())?.to_owned();
         let payload = request.into_inner();
         let principal = normalize_optional_string(payload.principal.as_str());
+        if principal.as_deref().is_some_and(|value| value != caller_principal) {
+            return Err(Status::permission_denied("principal mismatch"));
+        }
         let limit = if payload.limit == 0 {
             self.runtime.max_sessions
         } else {
@@ -355,9 +359,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         let sessions = self.runtime.sessions.lock().await;
         let mut records = sessions
             .iter()
-            .filter(|(_, session)| {
-                principal.as_deref().map(|value| session.principal == value).unwrap_or(true)
-            })
+            .filter(|(_, session)| session.principal == caller_principal)
             .map(|(session_id, session)| (session_id.clone(), session.clone()))
             .collect::<Vec<_>>();
         drop(sessions);
@@ -388,6 +390,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::GetSessionRequest>,
     ) -> Result<Response<browser_v1::GetSessionResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
+        let caller_principal = request_principal(request.metadata())?.to_owned();
         let session_id = parse_session_id_from_proto(request.into_inner().session_id)
             .map_err(Status::invalid_argument)?;
         let session = {
@@ -400,6 +403,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                     error: "session_not_found".to_owned(),
                 }));
             };
+            if session.principal != caller_principal {
+                return Err(Status::permission_denied("session access denied"));
+            }
             session.last_active = Instant::now();
             session.clone()
         };
@@ -417,6 +423,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::InspectSessionRequest>,
     ) -> Result<Response<browser_v1::InspectSessionResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
+        let caller_principal = request_principal(request.metadata())?.to_owned();
         let mut payload = request.into_inner();
         let session_id = parse_session_id_from_proto(payload.session_id.take())
             .map_err(Status::invalid_argument)?;
@@ -455,6 +462,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                         error: "session_not_found".to_owned(),
                     }));
                 };
+                if session.principal != caller_principal {
+                    return Err(Status::permission_denied("session access denied"));
+                }
                 session.active_tab_id.clone()
             };
             if let Ok(snapshot) = chromium_observe_snapshot(
@@ -498,6 +508,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                     error: "session_not_found".to_owned(),
                 }));
             };
+            if session.principal != caller_principal {
+                return Err(Status::permission_denied("session access denied"));
+            }
             session.last_active = Instant::now();
             session.clone()
         };
@@ -2687,4 +2700,16 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             error: String::new(),
         }))
     }
+}
+
+fn request_principal(metadata: &tonic::metadata::MetadataMap) -> Result<&str, Status> {
+    let Some(value) = metadata.get(PRINCIPAL_HEADER) else {
+        return Err(Status::unauthenticated("missing caller principal"));
+    };
+    let principal =
+        value.to_str().map_err(|_| Status::unauthenticated("invalid caller principal"))?.trim();
+    if principal.is_empty() {
+        return Err(Status::unauthenticated("missing caller principal"));
+    }
+    Ok(principal)
 }

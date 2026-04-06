@@ -12,7 +12,7 @@ use super::{
     PersistedSessionSnapshot, PersistedStateStore, SessionPermissionsInternal,
     AUTHORIZATION_HEADER, CANONICAL_PROTOCOL_MAJOR, CHROMIUM_NEW_TAB_RETRY_DELAY_MS,
     CHROMIUM_PATH_ENV, DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS, DEFAULT_GRPC_PORT,
-    DEFAULT_MAX_TABS_PER_SESSION, MAX_RELAY_PAYLOAD_BYTES, ONE_BY_ONE_PNG,
+    DEFAULT_MAX_TABS_PER_SESSION, MAX_RELAY_PAYLOAD_BYTES, ONE_BY_ONE_PNG, PRINCIPAL_HEADER,
     PROFILE_RECORD_SCHEMA_VERSION, STATE_KEY_LEN,
 };
 use crate::proto;
@@ -41,6 +41,11 @@ fn insert_bearer_auth<T>(request: &mut Request<T>, token: &str) {
     let value =
         format!("Bearer {token}").parse().expect("authorization header value should be valid");
     request.metadata_mut().insert(AUTHORIZATION_HEADER, value);
+}
+
+fn insert_principal<T>(request: &mut Request<T>, principal: &str) {
+    let value = principal.parse().expect("principal header value should be valid");
+    request.metadata_mut().insert(PRINCIPAL_HEADER, value);
 }
 
 async fn create_session_with_retry_for_chromium_test(
@@ -3778,7 +3783,7 @@ async fn browser_service_lists_and_gets_session_details() {
 
     let first = create_test_session(&service, "user:alpha").await;
     let first_id = first.session_id.expect("first session id should be present");
-    let second = create_test_session(&service, "user:beta").await;
+    let second = create_test_session(&service, "user:alpha").await;
     let second_id = second.session_id.expect("second session id should be present");
 
     {
@@ -3803,12 +3808,11 @@ async fn browser_service_lists_and_gets_session_details() {
         second_session.last_active = now;
     }
 
+    let mut list_request =
+        Request::new(browser_v1::ListSessionsRequest { v: 1, principal: String::new(), limit: 1 });
+    insert_principal(&mut list_request, "user:alpha");
     let listed = service
-        .list_sessions(Request::new(browser_v1::ListSessionsRequest {
-            v: 1,
-            principal: String::new(),
-            limit: 1,
-        }))
+        .list_sessions(list_request)
         .await
         .expect("list_sessions should execute")
         .into_inner();
@@ -3820,30 +3824,36 @@ async fn browser_service_lists_and_gets_session_details() {
         "most recently active session should be listed first"
     );
 
+    let mut filtered_request = Request::new(browser_v1::ListSessionsRequest {
+        v: 1,
+        principal: "user:alpha".to_owned(),
+        limit: 10,
+    });
+    insert_principal(&mut filtered_request, "user:alpha");
     let filtered = service
-        .list_sessions(Request::new(browser_v1::ListSessionsRequest {
-            v: 1,
-            principal: "user:alpha".to_owned(),
-            limit: 10,
-        }))
+        .list_sessions(filtered_request)
         .await
         .expect("filtered list_sessions should execute")
         .into_inner();
-    assert_eq!(filtered.sessions.len(), 1, "principal filter should narrow the result set");
-    let summary = filtered.sessions.first().expect("filtered session should be present");
+    assert_eq!(filtered.sessions.len(), 2, "matching principal should see both owned sessions");
+    let summary = filtered
+        .sessions
+        .iter()
+        .find(|session| {
+            session.session_id.as_ref().map(|value| value.ulid.as_str())
+                == Some(first_id.ulid.as_str())
+        })
+        .expect("filtered sessions should include the first owned session");
     assert_eq!(summary.principal, "user:alpha");
     assert_eq!(summary.channel, "alpha-channel");
     assert_eq!(summary.active_tab_title, "Alpha Session");
     assert_eq!(summary.action_allowed_domains, vec!["example.com".to_owned()]);
 
-    let detailed = service
-        .get_session(Request::new(browser_v1::GetSessionRequest {
-            v: 1,
-            session_id: Some(first_id),
-        }))
-        .await
-        .expect("get_session should execute")
-        .into_inner();
+    let mut get_request =
+        Request::new(browser_v1::GetSessionRequest { v: 1, session_id: Some(first_id) });
+    insert_principal(&mut get_request, "user:alpha");
+    let detailed =
+        service.get_session(get_request).await.expect("get_session should execute").into_inner();
     assert!(detailed.success, "get_session should succeed for an active session");
     let detail = detailed.session.expect("session detail should be returned");
     let detail_summary = detail.summary.expect("session detail should include summary");
@@ -3857,6 +3867,68 @@ async fn browser_service_lists_and_gets_session_details() {
             .max_network_log_entries,
         runtime.default_budget.max_network_log_entries as u64
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_service_session_diagnostics_require_matching_principal() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime };
+    let created = create_test_session(&service, "user:alpha").await;
+    let session_id = created.session_id.expect("session id should be present");
+
+    let missing_principal = service
+        .list_sessions(Request::new(browser_v1::ListSessionsRequest {
+            v: 1,
+            principal: String::new(),
+            limit: 10,
+        }))
+        .await
+        .expect_err("list_sessions without caller principal must fail");
+    assert_eq!(missing_principal.code(), tonic::Code::Unauthenticated);
+
+    let mut mismatched_list = Request::new(browser_v1::ListSessionsRequest {
+        v: 1,
+        principal: "user:alpha".to_owned(),
+        limit: 10,
+    });
+    insert_principal(&mut mismatched_list, "user:beta");
+    let mismatched_list_status = service
+        .list_sessions(mismatched_list)
+        .await
+        .expect_err("list_sessions should reject principal mismatch");
+    assert_eq!(mismatched_list_status.code(), tonic::Code::PermissionDenied);
+
+    let mut mismatched_get =
+        Request::new(browser_v1::GetSessionRequest { v: 1, session_id: Some(session_id.clone()) });
+    insert_principal(&mut mismatched_get, "user:beta");
+    let mismatched_get_status = service
+        .get_session(mismatched_get)
+        .await
+        .expect_err("get_session should reject cross-principal access");
+    assert_eq!(mismatched_get_status.code(), tonic::Code::PermissionDenied);
+
+    let mut mismatched_inspect = Request::new(browser_v1::InspectSessionRequest {
+        v: 1,
+        session_id: Some(session_id),
+        include_cookies: false,
+        include_storage: false,
+        include_action_log: false,
+        include_network_log: false,
+        include_page_snapshot: false,
+        max_cookie_bytes: 0,
+        max_storage_bytes: 0,
+        max_action_log_entries: 0,
+        max_network_log_entries: 0,
+        max_network_log_bytes: 0,
+        max_dom_snapshot_bytes: 0,
+        max_visible_text_bytes: 0,
+    });
+    insert_principal(&mut mismatched_inspect, "user:beta");
+    let mismatched_inspect_status = service
+        .inspect_session(mismatched_inspect)
+        .await
+        .expect_err("inspect_session should reject cross-principal access");
+    assert_eq!(mismatched_inspect_status.code(), tonic::Code::PermissionDenied);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3919,23 +3991,25 @@ async fn browser_service_inspect_session_redacts_debug_state() {
         });
     }
 
+    let mut inspect_request = Request::new(browser_v1::InspectSessionRequest {
+        v: 1,
+        session_id: Some(session_id),
+        include_cookies: true,
+        include_storage: true,
+        include_action_log: true,
+        include_network_log: true,
+        include_page_snapshot: true,
+        max_cookie_bytes: 2 * 1024,
+        max_storage_bytes: 2 * 1024,
+        max_action_log_entries: 10,
+        max_network_log_entries: 10,
+        max_network_log_bytes: 4 * 1024,
+        max_dom_snapshot_bytes: 4 * 1024,
+        max_visible_text_bytes: 512,
+    });
+    insert_principal(&mut inspect_request, "user:ops");
     let inspected = service
-        .inspect_session(Request::new(browser_v1::InspectSessionRequest {
-            v: 1,
-            session_id: Some(session_id),
-            include_cookies: true,
-            include_storage: true,
-            include_action_log: true,
-            include_network_log: true,
-            include_page_snapshot: true,
-            max_cookie_bytes: 2 * 1024,
-            max_storage_bytes: 2 * 1024,
-            max_action_log_entries: 10,
-            max_network_log_entries: 10,
-            max_network_log_bytes: 4 * 1024,
-            max_dom_snapshot_bytes: 4 * 1024,
-            max_visible_text_bytes: 512,
-        }))
+        .inspect_session(inspect_request)
         .await
         .expect("inspect_session should execute")
         .into_inner();
