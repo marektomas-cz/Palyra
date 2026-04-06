@@ -20,6 +20,7 @@ use crate::{
     application::tool_runtime::http_fetch::execute_http_fetch_tool,
     gateway::{truncate_with_ellipsis, GatewayRuntimeState, MEMORY_AUTO_INJECT_MIN_SCORE},
     journal::MemorySearchRequest,
+    tool_protocol::{decide_tool_call, ToolRequestContext},
     transport::grpc::auth::RequestContext,
 };
 
@@ -197,7 +198,8 @@ async fn resolve_context_reference(
             resolve_git_reference(workspace_roots, reference, index, total_chars, true).await
         }
         ContextReferenceKind::Url => {
-            resolve_url_reference(runtime_state, reference, index, total_chars).await
+            resolve_url_reference(runtime_state, context, session_id, reference, index, total_chars)
+                .await
         }
         ContextReferenceKind::Memory => {
             resolve_memory_reference(
@@ -351,6 +353,8 @@ async fn resolve_git_reference(
 
 async fn resolve_url_reference(
     runtime_state: &Arc<GatewayRuntimeState>,
+    context: &RequestContext,
+    session_id: &str,
     reference: ParsedContextReference,
     index: usize,
     total_chars: &mut usize,
@@ -361,6 +365,7 @@ async fn resolve_url_reference(
     if !matches!(parsed_url.scheme(), "http" | "https") {
         return Err(Status::invalid_argument("@url only supports http and https targets"));
     }
+    authorize_url_reference_fetch(&runtime_state.config.tool_call, context, session_id)?;
     let payload = serde_json::to_vec(&json!({
         "url": parsed_url.as_str(),
         "allow_redirects": true,
@@ -403,6 +408,35 @@ async fn resolve_url_reference(
             note: format!("Fetched via palyra.http.fetch ({content_type})."),
         }],
     )
+}
+
+fn authorize_url_reference_fetch(
+    tool_call_config: &crate::tool_protocol::ToolCallConfig,
+    context: &RequestContext,
+    session_id: &str,
+) -> Result<(), Status> {
+    let mut remaining_budget = 1;
+    let decision = decide_tool_call(
+        tool_call_config,
+        &mut remaining_budget,
+        &ToolRequestContext {
+            principal: context.principal.clone(),
+            device_id: Some(context.device_id.clone()),
+            channel: context.channel.clone(),
+            session_id: Some(session_id.to_owned()),
+            run_id: None,
+            skill_id: None,
+        },
+        "palyra.http.fetch",
+        false,
+    );
+    if !decision.allowed || decision.approval_required {
+        return Err(Status::permission_denied(format!(
+            "@url references cannot execute palyra.http.fetch: {}",
+            decision.reason
+        )));
+    }
+    Ok(())
 }
 
 async fn resolve_memory_reference(
@@ -721,9 +755,18 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        contains_blocked_path_component, estimate_text_tokens, read_text_file_limited,
-        render_context_reference_prompt, validate_workspace_relative_git_target,
-        ContextReferencePreviewEnvelope, ContextReferenceProvenance, ResolvedContextReference,
+        authorize_url_reference_fetch, contains_blocked_path_component, estimate_text_tokens,
+        read_text_file_limited, render_context_reference_prompt,
+        validate_workspace_relative_git_target, ContextReferencePreviewEnvelope,
+        ContextReferenceProvenance, ResolvedContextReference,
+    };
+    use crate::{
+        sandbox_runner::{
+            EgressEnforcementMode, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
+        },
+        tool_protocol::ToolCallConfig,
+        transport::grpc::auth::RequestContext,
+        wasm_plugin_runner::WasmPluginRunnerPolicy,
     };
     use palyra_common::context_references::ContextReferenceKind;
 
@@ -790,5 +833,59 @@ mod tests {
     fn token_estimate_is_zero_for_empty_text() {
         assert_eq!(estimate_text_tokens("   "), 0);
         assert_eq!(estimate_text_tokens("12345678"), 2);
+    }
+
+    fn context_reference_tool_config(allowed_tools: Vec<String>) -> ToolCallConfig {
+        ToolCallConfig {
+            allowed_tools,
+            max_calls_per_run: 8,
+            execution_timeout_ms: 5_000,
+            process_runner: SandboxProcessRunnerPolicy {
+                enabled: false,
+                tier: SandboxProcessRunnerTier::B,
+                workspace_root: Path::new(".").to_path_buf(),
+                allowed_executables: Vec::new(),
+                allow_interpreters: false,
+                egress_enforcement_mode: EgressEnforcementMode::None,
+                allowed_egress_hosts: Vec::new(),
+                allowed_dns_suffixes: Vec::new(),
+                cpu_time_limit_ms: 1_000,
+                memory_limit_bytes: 1_024 * 1_024,
+                max_output_bytes: 4_096,
+            },
+            wasm_runtime: WasmPluginRunnerPolicy {
+                enabled: false,
+                allow_inline_modules: false,
+                max_module_size_bytes: 64 * 1024,
+                fuel_budget: 10_000,
+                max_memory_bytes: 64 * 1024,
+                max_table_elements: 128,
+                max_instances: 1,
+                allowed_http_hosts: Vec::new(),
+                allowed_secrets: Vec::new(),
+                allowed_storage_prefixes: Vec::new(),
+                allowed_channels: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn url_references_reject_approval_gated_http_fetch() {
+        let error = authorize_url_reference_fetch(
+            &context_reference_tool_config(vec!["palyra.http.fetch".to_owned()]),
+            &RequestContext {
+                principal: "user:test".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("console".to_owned()),
+            },
+            "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+        )
+        .expect_err("@url references must fail closed for approval-gated fetches");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert!(
+            error.message().contains("palyra.http.fetch"),
+            "denial should explain that @url cannot bypass the fetch tool gate: {}",
+            error.message()
+        );
     }
 }
