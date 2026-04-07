@@ -63,6 +63,8 @@ apps/desktop/src-tauri/gen/
 /oc-docs/
 TechStack_Architecture.md
 /docs/
+/docs-codebase/
+/docs-users/
 /code-review/
 /current-docs/
 AGENTS.md
