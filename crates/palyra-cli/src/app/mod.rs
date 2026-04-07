@@ -429,9 +429,7 @@ where
         return parse_config_path(raw)
             .with_context(|| "PALYRA_STATE_ROOT contains an invalid path");
     }
-    default_state_root_resolver()
-        .map_err(missing_default_state_root_error)
-        .context("failed to resolve default state root")
+    default_state_root_resolver().map_err(missing_default_state_root_error)
 }
 
 #[cfg(windows)]
