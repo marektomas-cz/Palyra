@@ -26,6 +26,7 @@ use crate::{
     },
     model_provider::{ProviderRequest, ProviderResponse},
     orchestrator::{is_cancel_command, RunLifecycleState, RunStateMachine, RunTransition},
+    self_healing::{WorkHeartbeatKind, WorkHeartbeatUpdate},
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
     usage_governance::{plan_usage_routing, UsageRoutingPlanRequest},
 };
@@ -126,6 +127,7 @@ pub(crate) async fn finalize_run_stream_after_provider_response(
         runtime_state
             .update_orchestrator_run_state(run_id.to_owned(), RunLifecycleState::Done, None)
             .await?;
+        runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
         send_status_with_tape(
             sender,
             runtime_state,
@@ -296,6 +298,11 @@ pub(crate) async fn process_run_stream_message(
 
         *active_session_id = Some(session_id.clone());
         *active_run_id = Some(run_id.clone());
+        runtime_state.record_self_healing_heartbeat(WorkHeartbeatUpdate {
+            kind: WorkHeartbeatKind::Run,
+            object_id: run_id.clone(),
+            summary: format!("run {run_id} for session {session_id}"),
+        });
 
         let accepted_message =
             format!("accepted session={session_id} principal={}", request_context.principal);
@@ -322,6 +329,11 @@ pub(crate) async fn process_run_stream_message(
             )
         })?
         .to_owned();
+    runtime_state.record_self_healing_heartbeat(WorkHeartbeatUpdate {
+        kind: WorkHeartbeatKind::Run,
+        object_id: run_id.clone(),
+        summary: format!("run {run_id} for session {session_id_for_message}"),
+    });
 
     let previous_run_id_for_context = previous_session_run_id.take();
     let prepared_provider_input = prepare_model_provider_input(

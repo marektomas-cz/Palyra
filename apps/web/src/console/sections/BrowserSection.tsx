@@ -21,6 +21,7 @@ type BrowserSectionProps = {
   app: Pick<
     ConsoleAppState,
     | "browserBusy"
+    | "diagnosticsSnapshot"
     | "browserPrincipal"
     | "setBrowserPrincipal"
     | "browserProfiles"
@@ -70,6 +71,15 @@ type BrowserSectionProps = {
 };
 
 export function BrowserSection({ app }: BrowserSectionProps) {
+  const diagnostics = asJsonObject(app.diagnosticsSnapshot);
+  const observability = asJsonObject(diagnostics?.observability);
+  const selfHealing = asJsonObject(observability?.self_healing);
+  const activeIncidents = Array.isArray(selfHealing?.active_incidents)
+    ? selfHealing.active_incidents.map(asJsonObject).filter((value): value is JsonObject => value !== null)
+    : [];
+  const browserIncidents = activeIncidents.filter(
+    (incident) => readString(incident, "domain") === "browser",
+  );
   const profiles = Array.isArray(app.browserProfiles) ? app.browserProfiles : [];
   const activeProfile =
     profiles.find((profile) => readString(profile, "profile_id") === app.browserActiveProfileId) ??
@@ -95,6 +105,9 @@ export function BrowserSection({ app }: BrowserSectionProps) {
             </WorkspaceStatusChip>
             <WorkspaceStatusChip tone={quarantinedDownloads.length > 0 ? "warning" : "default"}>
               {quarantinedDownloads.length} quarantined
+            </WorkspaceStatusChip>
+            <WorkspaceStatusChip tone={browserIncidents.length > 0 ? "warning" : "default"}>
+              {browserIncidents.length} healing incidents
             </WorkspaceStatusChip>
           </>
         }
@@ -147,6 +160,16 @@ export function BrowserSection({ app }: BrowserSectionProps) {
               : `Expires ${formatUnixMs(app.browserRelayTokenExpiry)}`
           }
           tone={app.browserRelayToken.trim().length > 0 ? "success" : "default"}
+        />
+        <WorkspaceMetricCard
+          label="Healing watch"
+          value={browserIncidents.length}
+          detail={
+            browserIncidents[0] === undefined
+              ? "No browser incidents reported."
+              : (readString(browserIncidents[0], "summary") ?? "Incident available in diagnostics")
+          }
+          tone={browserIncidents.length > 0 ? "warning" : "default"}
         />
       </section>
 

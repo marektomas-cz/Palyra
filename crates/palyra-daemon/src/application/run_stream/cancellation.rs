@@ -6,6 +6,7 @@ use tonic::Status;
 use crate::{
     gateway::{GatewayRuntimeState, CANCELLED_REASON},
     orchestrator::{RunLifecycleState, RunStateMachine, RunTransition},
+    self_healing::WorkHeartbeatKind,
     transport::grpc::proto::palyra::common::v1 as common_v1,
 };
 
@@ -29,6 +30,7 @@ pub(crate) async fn transition_run_stream_to_cancelled(
             Some(CANCELLED_REASON.to_owned()),
         )
         .await?;
+    runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
     if let Err(error) = send_status_with_tape(
         sender,
         runtime_state,

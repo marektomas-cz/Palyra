@@ -48,6 +48,9 @@ struct StatusRuntimeSnapshot {
     memory_entries: Option<u64>,
     memory_bytes: Option<u64>,
     support_bundle_failures: Option<u64>,
+    self_healing_active_incidents: Option<u64>,
+    self_healing_resolved_incidents: Option<u64>,
+    self_healing_heartbeat_count: Option<u64>,
     diagnostics_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics_error: Option<String>,
@@ -207,7 +210,7 @@ pub(crate) fn run_status(
     }
     if let Some(runtime) = report.runtime.as_ref() {
         println!(
-            "status.runtime deployment_mode={} bind_profile={} remote_bind_detected={} auth_state={} browser_state={} browser_sessions={} connector_degraded={} connector_queue_depth={} memory_entries={} memory_bytes={} support_bundle_failures={} diagnostics_available={}",
+            "status.runtime deployment_mode={} bind_profile={} remote_bind_detected={} auth_state={} browser_state={} browser_sessions={} connector_degraded={} connector_queue_depth={} memory_entries={} memory_bytes={} support_bundle_failures={} self_healing_active_incidents={} self_healing_resolved_incidents={} self_healing_heartbeats={} diagnostics_available={}",
             runtime.deployment_mode.as_deref().unwrap_or("unknown"),
             runtime.bind_profile.as_deref().unwrap_or("unknown"),
             runtime.remote_bind_detected.unwrap_or(false),
@@ -219,6 +222,9 @@ pub(crate) fn run_status(
             runtime.memory_entries.unwrap_or(0),
             runtime.memory_bytes.unwrap_or(0),
             runtime.support_bundle_failures.unwrap_or(0),
+            runtime.self_healing_active_incidents.unwrap_or(0),
+            runtime.self_healing_resolved_incidents.unwrap_or(0),
+            runtime.self_healing_heartbeat_count.unwrap_or(0),
             runtime.diagnostics_available,
         );
         if let Some(error) = runtime.diagnostics_error.as_deref() {
@@ -340,6 +346,9 @@ fn build_status_report(
             memory_entries: None,
             memory_bytes: None,
             support_bundle_failures: None,
+            self_healing_active_incidents: None,
+            self_healing_resolved_incidents: None,
+            self_healing_heartbeat_count: None,
             diagnostics_available: false,
             diagnostics_error: Some(
                 "admin token is unavailable; runtime diagnostics were skipped".to_owned(),
@@ -440,6 +449,9 @@ async fn load_runtime_status_snapshot(
                 memory_entries: None,
                 memory_bytes: None,
                 support_bundle_failures: None,
+                self_healing_active_incidents: None,
+                self_healing_resolved_incidents: None,
+                self_healing_heartbeat_count: None,
                 diagnostics_available: false,
                 diagnostics_error: Some(redact_auth_error(error.to_string().as_str())),
             };
@@ -462,6 +474,9 @@ async fn load_runtime_status_snapshot(
                 memory_entries: None,
                 memory_bytes: None,
                 support_bundle_failures: None,
+                self_healing_active_incidents: None,
+                self_healing_resolved_incidents: None,
+                self_healing_heartbeat_count: None,
                 diagnostics_available: false,
                 diagnostics_error: Some(redact_auth_error(error.to_string().as_str())),
             };
@@ -501,6 +516,16 @@ async fn load_runtime_status_snapshot(
         support_bundle_failures: diagnostics
             .pointer("/observability/support_bundle/failures")
             .and_then(Value::as_u64),
+        self_healing_active_incidents: diagnostics
+            .pointer("/observability/self_healing/summary/active")
+            .and_then(Value::as_u64),
+        self_healing_resolved_incidents: diagnostics
+            .pointer("/observability/self_healing/summary/resolved")
+            .and_then(Value::as_u64),
+        self_healing_heartbeat_count: diagnostics
+            .pointer("/observability/self_healing/heartbeats")
+            .and_then(Value::as_array)
+            .and_then(|entries| u64::try_from(entries.len()).ok()),
         diagnostics_available: true,
         diagnostics_error: None,
     }

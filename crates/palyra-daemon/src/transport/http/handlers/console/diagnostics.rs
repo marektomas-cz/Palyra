@@ -363,6 +363,12 @@ pub(crate) async fn build_observability_payload(
     let doctor_recovery = build_doctor_recovery_observability(state);
     let recent_failures = state.observability.recent_failures();
     let failure_classes = build_failure_class_summary(recent_failures.as_slice());
+    let healing_settings = state.runtime.self_healing_settings_snapshot();
+    let healing_summary = state.runtime.self_healing_incident_summary();
+    let healing_incidents = state.runtime.self_healing_active_incidents(32);
+    let healing_history = state.runtime.self_healing_recent_history(64);
+    let healing_remediation_attempts = state.runtime.self_healing_recent_remediation_attempts(64);
+    let healing_heartbeats = state.runtime.self_healing_heartbeats();
 
     Ok(json!({
         "failure_classes": failure_classes,
@@ -373,6 +379,14 @@ pub(crate) async fn build_observability_payload(
         "doctor_recovery": doctor_recovery,
         "connector": connector,
         "browser": browser,
+        "self_healing": {
+            "settings": healing_settings,
+            "summary": healing_summary,
+            "active_incidents": healing_incidents,
+            "recent_history": healing_history,
+            "recent_remediation_attempts": healing_remediation_attempts,
+            "heartbeats": healing_heartbeats,
+        },
         "chat": {
             "active_console_streams": lock_console_chat_streams(&state.console_chat_streams).len(),
         },

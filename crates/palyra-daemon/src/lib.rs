@@ -28,6 +28,7 @@ mod plugins;
 mod quic_runtime;
 mod routines;
 mod sandbox_runner;
+mod self_healing;
 pub mod support;
 mod tool_protocol;
 pub mod transport;
@@ -2107,6 +2108,7 @@ pub async fn run() -> Result<()> {
         auth.clone(),
         grpc_url.clone(),
     );
+    let _self_healing_task = self_healing::spawn_self_healing_loop(state.clone());
 
     let admin_server = async move {
         axum::serve(admin_listener, app.into_make_service_with_connect_info::<SocketAddr>())

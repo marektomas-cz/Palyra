@@ -57,7 +57,13 @@ export function OperationsSection({ app }: OperationsSectionProps) {
   const connector = readObject(observability ?? {}, "connector");
   const browser = readObject(observability ?? {}, "browser");
   const doctorRecovery = readObject(observability ?? {}, "doctor_recovery");
+  const selfHealing = readObject(observability ?? {}, "self_healing");
+  const selfHealingSummary = readObject(selfHealing ?? {}, "summary");
+  const selfHealingSettings = readObject(selfHealing ?? {}, "settings");
   const latestDoctorRecovery = readObject(doctorRecovery ?? {}, "last_job");
+  const activeIncidents = readJsonObjectArray(selfHealing?.active_incidents);
+  const recentRemediationAttempts = readJsonObjectArray(selfHealing?.recent_remediation_attempts);
+  const selfHealingHeartbeats = readJsonObjectArray(selfHealing?.heartbeats);
   const browserFailureSamples = toStringArray(
     Array.isArray(browser?.recent_failure_samples) ? browser.recent_failure_samples : [],
   );
@@ -132,6 +138,12 @@ export function OperationsSection({ app }: OperationsSectionProps) {
           value={usageInsights?.alerts.length ?? 0}
           detail={usageInsights?.routing.default_mode ?? "No routing posture loaded."}
           tone={(usageInsights?.alerts.length ?? 0) > 0 ? "warning" : "default"}
+        />
+        <WorkspaceMetricCard
+          label="Self-healing incidents"
+          value={readNumber(selfHealingSummary ?? {}, "active") ?? 0}
+          detail={`${readNumber(selfHealingSummary ?? {}, "resolving") ?? 0} remediating · ${readNumber(selfHealingSummary ?? {}, "resolved") ?? 0} resolved`}
+          tone={(readNumber(selfHealingSummary ?? {}, "active") ?? 0) > 0 ? "warning" : "default"}
         />
         <WorkspaceMetricCard
           label="Recovery jobs"
@@ -250,6 +262,86 @@ export function OperationsSection({ app }: OperationsSectionProps) {
               entries={groupedCapabilities.internal_only}
               emptyMessage="No internal-only capability notes are currently published for diagnostics."
             />
+          </WorkspaceSectionCard>
+
+          <WorkspaceSectionCard
+            title="Self-healing"
+            description="Phase 2 incident telemetry, watchdog output, and recent remediation attempts are summarized here before you fall back to the raw diagnostics snapshot."
+          >
+            {selfHealing === null ? (
+              <WorkspaceEmptyState
+                compact
+                title="No self-healing snapshot loaded"
+                description="Refresh diagnostics to load incident telemetry and remediation history."
+              />
+            ) : (
+              <div className="workspace-stack">
+                <WorkspaceTable
+                  ariaLabel="Self-healing summary"
+                  columns={["Metric", "Value", "Detail"]}
+                >
+                  <tr>
+                    <td>Mode</td>
+                    <td>{readString(selfHealingSettings ?? {}, "mode") ?? "n/a"}</td>
+                    <td>{selfHealingHeartbeats.length} tracked heartbeats</td>
+                  </tr>
+                  <tr>
+                    <td>Active incidents</td>
+                    <td>{readNumber(selfHealingSummary ?? {}, "active") ?? 0}</td>
+                    <td>{activeIncidents.length} incident records in the current snapshot</td>
+                  </tr>
+                  <tr>
+                    <td>Recent remediations</td>
+                    <td>{recentRemediationAttempts.length}</td>
+                    <td>Most recent attempts remain redacted but operator-readable.</td>
+                  </tr>
+                </WorkspaceTable>
+
+                {activeIncidents.length === 0 ? (
+                  <WorkspaceEmptyState
+                    compact
+                    title="No active incidents"
+                    description="The watchdog currently reports no open self-healing incidents."
+                  />
+                ) : (
+                  <WorkspaceTable
+                    ariaLabel="Active self-healing incidents"
+                    columns={["Domain", "Severity", "State", "Summary", "Updated"]}
+                  >
+                    {activeIncidents.slice(0, 8).map((incident, index) => (
+                      <tr
+                        key={`${readString(incident, "incident_id") ?? "incident"}-${index}`}
+                      >
+                        <td>{readString(incident, "domain") ?? "unknown"}</td>
+                        <td>{readString(incident, "severity") ?? "unknown"}</td>
+                        <td>{readString(incident, "state") ?? "unknown"}</td>
+                        <td>{readString(incident, "summary") ?? "No summary"}</td>
+                        <td>{formatUnixMs(readNumber(incident, "updated_at_unix_ms")) ?? "n/a"}</td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
+                )}
+
+                {recentRemediationAttempts.length > 0 ? (
+                  <WorkspaceTable
+                    ariaLabel="Recent remediation attempts"
+                    columns={["When", "Feature", "Status", "Incident", "Detail"]}
+                  >
+                    {recentRemediationAttempts.slice(0, 8).map((attempt, index) => (
+                      <tr
+                        key={`${readString(attempt, "attempt_id") ?? "attempt"}-${index}`}
+                      >
+                        <td>{formatUnixMs(readNumber(attempt, "recorded_at_unix_ms")) ?? "n/a"}</td>
+                        <td>{readString(attempt, "feature") ?? "unknown"}</td>
+                        <td>{readString(attempt, "status") ?? "unknown"}</td>
+                        <td>{readString(attempt, "incident_id") ?? "n/a"}</td>
+                        <td>{readString(attempt, "detail") ?? "No detail"}</td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
+                ) : null}
+              </div>
+            )}
           </WorkspaceSectionCard>
 
           <WorkspaceSectionCard

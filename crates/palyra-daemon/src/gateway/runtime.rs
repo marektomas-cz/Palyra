@@ -22,6 +22,12 @@ use crate::journal::{
     WorkspaceDocumentVersionRecord, WorkspaceDocumentWriteRequest, WorkspaceSearchHit,
     WorkspaceSearchRequest,
 };
+use crate::self_healing::{
+    IncidentDomain, RemediationAttemptStatus, RuntimeIncidentHistoryEntry,
+    RuntimeIncidentObservation, RuntimeIncidentRecord, RuntimeIncidentSummary,
+    RuntimeRemediationAttemptRecord, SelfHealingFeature, SelfHealingSettingsSnapshot,
+    SelfHealingState, WorkHeartbeatKind, WorkHeartbeatRecord, WorkHeartbeatUpdate,
+};
 use crate::usage_governance::SmartRoutingRuntimeConfig;
 use palyra_auth::AuthHealthReport;
 use std::path::PathBuf;
@@ -293,6 +299,7 @@ pub struct GatewayRuntimeState {
     canvas_signing_secret: [u8; 32],
     agent_registry: AgentRegistry,
     pub(crate) channel_router: ChannelRouter,
+    pub(crate) self_healing: Arc<SelfHealingState>,
 }
 
 #[derive(Debug)]
@@ -1033,6 +1040,7 @@ impl GatewayRuntimeState {
             canvas_signing_secret: generate_canvas_signing_secret(),
             agent_registry,
             channel_router,
+            self_healing: Arc::new(SelfHealingState::new()),
         }))
     }
 
@@ -1042,6 +1050,85 @@ impl GatewayRuntimeState {
 
     pub fn record_admin_status_request(&self) {
         self.counters.admin_status_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub(crate) fn self_healing_settings_snapshot(&self) -> SelfHealingSettingsSnapshot {
+        self.self_healing.settings_snapshot()
+    }
+
+    #[must_use]
+    pub(crate) fn self_healing_incident_summary(&self) -> RuntimeIncidentSummary {
+        self.self_healing.incident_summary()
+    }
+
+    #[must_use]
+    pub(crate) fn self_healing_active_incidents(&self, limit: usize) -> Vec<RuntimeIncidentRecord> {
+        self.self_healing.active_incidents(limit)
+    }
+
+    #[must_use]
+    pub(crate) fn self_healing_recent_history(
+        &self,
+        limit: usize,
+    ) -> Vec<RuntimeIncidentHistoryEntry> {
+        self.self_healing.recent_incident_history(limit)
+    }
+
+    #[must_use]
+    pub(crate) fn self_healing_recent_remediation_attempts(
+        &self,
+        limit: usize,
+    ) -> Vec<RuntimeRemediationAttemptRecord> {
+        self.self_healing.recent_remediation_attempts(limit)
+    }
+
+    #[must_use]
+    pub(crate) fn self_healing_heartbeats(&self) -> Vec<WorkHeartbeatRecord> {
+        self.self_healing.list_heartbeats()
+    }
+
+    pub(crate) fn record_self_healing_heartbeat(&self, update: WorkHeartbeatUpdate) {
+        self.self_healing.record_heartbeat(update);
+    }
+
+    pub(crate) fn clear_self_healing_heartbeat(&self, kind: WorkHeartbeatKind, object_id: &str) {
+        self.self_healing.clear_heartbeat(kind, object_id);
+    }
+
+    #[must_use]
+    pub(crate) fn observe_self_healing_incident(
+        &self,
+        observation: RuntimeIncidentObservation,
+    ) -> RuntimeIncidentRecord {
+        self.self_healing.observe_incident(observation)
+    }
+
+    pub(crate) fn resolve_self_healing_incident(
+        &self,
+        domain: IncidentDomain,
+        dedupe_key: &str,
+        summary: &str,
+    ) {
+        self.self_healing.resolve_incident(domain, dedupe_key, summary);
+    }
+
+    #[must_use]
+    pub(crate) fn record_self_healing_remediation_attempt(
+        &self,
+        incident_id: &str,
+        remediation_id: &str,
+        feature: SelfHealingFeature,
+        status: RemediationAttemptStatus,
+        detail: impl Into<String>,
+    ) -> RuntimeRemediationAttemptRecord {
+        self.self_healing.record_remediation_attempt(
+            incident_id,
+            remediation_id,
+            feature,
+            status,
+            detail,
+        )
     }
 
     pub(crate) fn record_channel_message_routed(&self) {

@@ -21,6 +21,7 @@ use crate::{
         OrchestratorBackgroundTaskRecord, OrchestratorBackgroundTaskUpdateRequest,
         OrchestratorRunMetadataUpdateRequest, OrchestratorTapeAppendRequest,
     },
+    self_healing::{WorkHeartbeatKind, WorkHeartbeatUpdate},
 };
 
 const BACKGROUND_QUEUE_IDLE_SLEEP: Duration = Duration::from_secs(3);
@@ -98,8 +99,16 @@ async fn process_background_task(
     all_tasks: &[OrchestratorBackgroundTaskRecord],
 ) -> Result<(), Status> {
     if is_terminal_task_state(task.state.as_str()) || task.state == "paused" {
+        runtime
+            .clear_self_healing_heartbeat(WorkHeartbeatKind::BackgroundTask, task.task_id.as_str());
         return Ok(());
     }
+
+    runtime.record_self_healing_heartbeat(WorkHeartbeatUpdate {
+        kind: WorkHeartbeatKind::BackgroundTask,
+        object_id: task.task_id.clone(),
+        summary: format!("background task {} ({})", task.task_id, task.task_kind),
+    });
 
     let now = crate::gateway::current_unix_ms();
     if let Some(expires_at_unix_ms) = task.expires_at_unix_ms {
@@ -123,6 +132,10 @@ async fn process_background_task(
                     completed_at_unix_ms: Some(Some(now)),
                 })
                 .await?;
+            runtime.clear_self_healing_heartbeat(
+                WorkHeartbeatKind::BackgroundTask,
+                task.task_id.as_str(),
+            );
             return Ok(());
         }
     }
@@ -162,6 +175,10 @@ async fn process_background_task(
                     completed_at_unix_ms: Some(Some(now)),
                 })
                 .await?;
+            runtime.clear_self_healing_heartbeat(
+                WorkHeartbeatKind::BackgroundTask,
+                task.task_id.as_str(),
+            );
         }
         return Ok(());
     }
@@ -198,6 +215,8 @@ async fn process_background_task(
                 completed_at_unix_ms: Some(Some(now)),
             })
             .await?;
+        runtime
+            .clear_self_healing_heartbeat(WorkHeartbeatKind::BackgroundTask, task.task_id.as_str());
         return Ok(());
     }
 
@@ -264,6 +283,10 @@ async fn dispatch_background_task(
                     completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
                 })
                 .await;
+            runtime.clear_self_healing_heartbeat(
+                WorkHeartbeatKind::BackgroundTask,
+                task.task_id.as_str(),
+            );
         }
     });
     Ok(())
@@ -548,7 +571,9 @@ async fn finalize_task_from_run(
             started_at_unix_ms: None,
             completed_at_unix_ms: Some(Some(completed_at_unix_ms)),
         })
-        .await
+        .await?;
+    runtime.clear_self_healing_heartbeat(WorkHeartbeatKind::BackgroundTask, task.task_id.as_str());
+    Ok(())
 }
 
 fn extract_parameter_delta_bytes(payload_json: Option<&str>) -> Result<Vec<u8>, Status> {
