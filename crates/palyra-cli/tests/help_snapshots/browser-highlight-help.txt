@@ -1,4 +1,4 @@
-Structured unsupported placeholder for selector highlighting
+Temporarily highlight a selector in the active browser session
 
 Usage: palyra browser highlight [OPTIONS] --selector <SELECTOR> <SESSION_ID>
 

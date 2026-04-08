@@ -80,10 +80,16 @@ public enum PalyraBrowserV1 {
     public struct BrowserActionLogEntry: Equatable {
         public init() {}
     }
+    public struct BrowserConsoleEntry: Equatable {
+        public init() {}
+    }
     public struct BrowserHealthRequest: Equatable {
         public init() {}
     }
     public struct BrowserHealthResponse: Equatable {
+        public init() {}
+    }
+    public struct BrowserPageDiagnostics: Equatable {
         public init() {}
     }
     public struct BrowserProfile: Equatable {
@@ -116,6 +122,12 @@ public enum PalyraBrowserV1 {
     public struct CloseTabResponse: Equatable {
         public init() {}
     }
+    public struct ConsoleLogRequest: Equatable {
+        public init() {}
+    }
+    public struct ConsoleLogResponse: Equatable {
+        public init() {}
+    }
     public struct CreateProfileRequest: Equatable {
         public init() {}
     }
@@ -137,6 +149,12 @@ public enum PalyraBrowserV1 {
     public struct DownloadArtifact: Equatable {
         public init() {}
     }
+    public struct ExportPdfRequest: Equatable {
+        public init() {}
+    }
+    public struct ExportPdfResponse: Equatable {
+        public init() {}
+    }
     public struct GetPermissionsRequest: Equatable {
         public init() {}
     }
@@ -153,6 +171,12 @@ public enum PalyraBrowserV1 {
         public init() {}
     }
     public struct GetTitleResponse: Equatable {
+        public init() {}
+    }
+    public struct HighlightRequest: Equatable {
+        public init() {}
+    }
+    public struct HighlightResponse: Equatable {
         public init() {}
     }
     public struct InspectSessionRequest: Equatable {
@@ -215,6 +239,12 @@ public enum PalyraBrowserV1 {
     public struct OpenTabResponse: Equatable {
         public init() {}
     }
+    public struct PressRequest: Equatable {
+        public init() {}
+    }
+    public struct PressResponse: Equatable {
+        public init() {}
+    }
     public struct RelayActionRequest: Equatable {
         public init() {}
     }
@@ -258,6 +288,12 @@ public enum PalyraBrowserV1 {
         public init() {}
     }
     public struct ScrollResponse: Equatable {
+        public init() {}
+    }
+    public struct SelectRequest: Equatable {
+        public init() {}
+    }
+    public struct SelectResponse: Equatable {
         public init() {}
     }
     public struct SessionBudget: Equatable {
@@ -312,13 +348,16 @@ public enum PalyraBrowserV1 {
         func click()
         func closeSession()
         func closeTab()
+        func consoleLog()
         func createProfile()
         func createSession()
         func deleteProfile()
+        func exportPdf()
         func getPermissions()
         func getSession()
         func getTitle()
         func health()
+        func highlight()
         func inspectSession()
         func listDownloadArtifacts()
         func listProfiles()
@@ -328,11 +367,13 @@ public enum PalyraBrowserV1 {
         func networkLog()
         func observe()
         func openTab()
+        func press()
         func relayAction()
         func renameProfile()
         func resetState()
         func screenshot()
         func scroll()
+        func select()
         func setActiveProfile()
         func setPermissions()
         func switchTab()

@@ -1084,6 +1084,36 @@ pub struct BrowserNetworkLogEntry {
     pub headers: Vec<BrowserNetworkLogHeader>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserDiagnosticSeverity {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserConsoleEntry {
+    pub severity: BrowserDiagnosticSeverity,
+    pub kind: String,
+    pub message: String,
+    pub captured_at_unix_ms: u64,
+    pub source: String,
+    pub stack_trace: String,
+    pub page_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPageDiagnostics {
+    pub page_url: String,
+    pub page_title: String,
+    pub console_entry_count: u32,
+    pub warning_count: u32,
+    pub error_count: u32,
+    pub last_event_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserTabRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1360,6 +1390,111 @@ impl BrowserTypeEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPressRequest {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_failure_screenshot: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_failure_screenshot_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPressEnvelope {
+    pub contract: ContractDescriptor,
+    pub session_id: String,
+    pub success: bool,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_log: Option<BrowserActionLogEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_screenshot_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_screenshot_base64: Option<String>,
+}
+
+impl BrowserPressEnvelope {
+    #[must_use]
+    pub fn decode_failure_screenshot(&self) -> Option<Vec<u8>> {
+        decode_optional_base64(self.failure_screenshot_base64.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSelectRequest {
+    pub selector: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_failure_screenshot: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_failure_screenshot_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSelectEnvelope {
+    pub contract: ContractDescriptor,
+    pub session_id: String,
+    pub success: bool,
+    pub selected_value: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_log: Option<BrowserActionLogEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_screenshot_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_screenshot_base64: Option<String>,
+}
+
+impl BrowserSelectEnvelope {
+    #[must_use]
+    pub fn decode_failure_screenshot(&self) -> Option<Vec<u8>> {
+        decode_optional_base64(self.failure_screenshot_base64.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHighlightRequest {
+    pub selector: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_failure_screenshot: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_failure_screenshot_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHighlightEnvelope {
+    pub contract: ContractDescriptor,
+    pub session_id: String,
+    pub success: bool,
+    pub selector: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_log: Option<BrowserActionLogEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_screenshot_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_screenshot_base64: Option<String>,
+}
+
+impl BrowserHighlightEnvelope {
+    #[must_use]
+    pub fn decode_failure_screenshot(&self) -> Option<Vec<u8>> {
+        decode_optional_base64(self.failure_screenshot_base64.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserScrollRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta_x: Option<i64>,
@@ -1481,6 +1616,37 @@ impl BrowserScreenshotEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPdfQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserPdfEnvelope {
+    pub contract: ContractDescriptor,
+    pub session_id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<BrowserDownloadArtifactRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdf_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+impl BrowserPdfEnvelope {
+    #[must_use]
+    pub fn decode_pdf(&self) -> Option<Vec<u8>> {
+        decode_optional_base64(self.pdf_base64.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserObserveQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_dom_snapshot: Option<bool>,
@@ -1530,6 +1696,33 @@ pub struct BrowserNetworkLogEnvelope {
     #[serde(default)]
     pub entries: Vec<BrowserNetworkLogEntry>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserConsoleLogQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum_severity: Option<BrowserDiagnosticSeverity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_page_diagnostics: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_payload_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserConsoleLogEnvelope {
+    pub contract: ContractDescriptor,
+    pub session_id: String,
+    pub success: bool,
+    #[serde(default)]
+    pub entries: Vec<BrowserConsoleEntry>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_diagnostics: Option<BrowserPageDiagnostics>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
     pub page: PageInfo,

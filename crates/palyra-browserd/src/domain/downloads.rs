@@ -93,6 +93,85 @@ pub(crate) async fn capture_download_artifact_for_click(
     .await
 }
 
+pub(crate) async fn store_generated_artifact(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    profile_id: Option<&str>,
+    source_url: &str,
+    file_name: &str,
+    mime_type: &str,
+    body: &[u8],
+) -> Result<DownloadArtifactRecord, String> {
+    let mut quarantined = false;
+    let mut quarantine_reason = String::new();
+    if !extension_is_allowed(file_name) {
+        quarantined = true;
+        quarantine_reason = "extension_not_allowlisted".to_owned();
+    }
+    if !mime_type_is_allowed(mime_type) {
+        quarantined = true;
+        quarantine_reason = if quarantine_reason.is_empty() {
+            "mime_type_not_allowlisted".to_owned()
+        } else {
+            format!("{quarantine_reason}|mime_type_not_allowlisted")
+        };
+    }
+
+    let artifact_id = Ulid::new().to_string();
+    let sanitized_name = sanitize_download_file_name(file_name);
+    let stored_name = format!("{}-{}", artifact_id, sanitized_name);
+    let mut guard = runtime.download_sessions.lock().await;
+    let sandbox = match guard.get_mut(session_id) {
+        Some(value) => value,
+        None => {
+            let sandbox = DownloadSandboxSession::new()?;
+            guard.insert(session_id.to_owned(), sandbox);
+            guard
+                .get_mut(session_id)
+                .ok_or_else(|| "download sandbox is not active for this session".to_owned())?
+        }
+    };
+    if sandbox.used_bytes.saturating_add(body.len() as u64) > sandbox.max_bytes {
+        return Err(format!(
+            "download sandbox size limit exceeded ({} > {})",
+            sandbox.used_bytes.saturating_add(body.len() as u64),
+            sandbox.max_bytes
+        ));
+    }
+    while sandbox.artifacts.len() >= MAX_DOWNLOAD_ARTIFACTS_PER_SESSION {
+        if let Some(removed) = sandbox.artifacts.pop_front() {
+            let _ = fs::remove_file(removed.storage_path.as_path());
+            sandbox.used_bytes = sandbox.used_bytes.saturating_sub(removed.size_bytes);
+        }
+    }
+    let target_dir = if quarantined {
+        sandbox.root_dir.path().join(DOWNLOADS_DIR_QUARANTINE)
+    } else {
+        sandbox.root_dir.path().join(DOWNLOADS_DIR_ALLOWLIST)
+    };
+    let storage_path = target_dir.join(stored_name);
+    fs::write(storage_path.as_path(), body).map_err(|error| {
+        format!("failed to persist generated artifact to '{}' : {error}", storage_path.display())
+    })?;
+    sandbox.used_bytes = sandbox.used_bytes.saturating_add(body.len() as u64);
+    let artifact = DownloadArtifactRecord {
+        artifact_id,
+        session_id: session_id.to_owned(),
+        profile_id: profile_id.map(str::to_owned),
+        source_url: source_url.to_owned(),
+        file_name: sanitized_name,
+        mime_type: mime_type.to_owned(),
+        size_bytes: body.len() as u64,
+        sha256: sha256_hex(body),
+        created_at_unix_ms: current_unix_ms(),
+        quarantined,
+        quarantine_reason,
+        storage_path,
+    };
+    sandbox.artifacts.push_back(artifact.clone());
+    Ok(artifact)
+}
+
 pub(crate) fn resolve_download_target(
     tag: &str,
     current_url: Option<&str>,

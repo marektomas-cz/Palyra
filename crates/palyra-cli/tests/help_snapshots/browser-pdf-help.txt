@@ -1,4 +1,4 @@
-Structured unsupported placeholder for PDF export
+Export the active browser session as PDF
 
 Usage: palyra browser pdf [OPTIONS] <SESSION_ID>
 

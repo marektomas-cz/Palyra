@@ -1,4 +1,5 @@
 use crate::*;
+use headless_chrome::{browser::tab::ModifierKey, types::PrintToPdfOptions};
 
 #[derive(Debug)]
 pub(crate) struct ChromiumActionOutcome {
@@ -638,13 +639,192 @@ pub(crate) async fn chromium_observe_snapshot(
     Ok(clamp_chromium_snapshot(snapshot, max_response_bytes, max_title_bytes))
 }
 
+async fn chromium_install_page_diagnostics(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    tab_id: &str,
+) -> Result<(), String> {
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
+    run_chromium_blocking("chromium install page diagnostics", move || {
+        tab.evaluate(
+            r#"
+(() => {
+  const rootKey = "__palyraDiagnostics";
+  const state = window[rootKey] = window[rootKey] || {};
+  if (state.installed) {
+    return true;
+  }
+  state.installed = true;
+  state.entries = Array.isArray(state.entries) ? state.entries : [];
+  const stringify = (value) => {
+    try {
+      if (typeof value === "string") return value;
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  };
+  const push = (severity, kind, message, source, stackTrace) => {
+    try {
+      state.entries.push({
+        severity,
+        kind,
+        message: String(message || ""),
+        captured_at_unix_ms: Date.now(),
+        source: String(source || ""),
+        stack_trace: String(stackTrace || ""),
+        page_url: String((window.location && window.location.href) || "")
+      });
+      if (state.entries.length > 512) {
+        state.entries.splice(0, state.entries.length - 512);
+      }
+    } catch (_) {}
+  };
+  const mapSeverity = (level) => {
+    if (level === "warn") return "warn";
+    if (level === "error") return "error";
+    if (level === "debug") return "debug";
+    return "info";
+  };
+  ["debug", "info", "warn", "error", "log"].forEach((level) => {
+    const originalKey = `original_${level}`;
+    if (typeof console[level] !== "function" || state[originalKey]) {
+      return;
+    }
+    state[originalKey] = console[level].bind(console);
+    console[level] = (...args) => {
+      const message = args.map((value) => stringify(value)).join(" ");
+      push(mapSeverity(level), "console", message, `console.${level}`, "");
+      return state[originalKey](...args);
+    };
+  });
+  window.addEventListener("error", (event) => {
+    push(
+      "error",
+      "page_error",
+      event.message || "page error",
+      event.filename || "window.onerror",
+      (event.error && event.error.stack) || ""
+    );
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    push(
+      "error",
+      "unhandled_rejection",
+      stringify(event.reason),
+      "window.unhandledrejection",
+      ""
+    );
+  });
+  return true;
+})()
+"#,
+            false,
+        )
+        .map_err(|error| format!("failed to install Chromium page diagnostics hooks: {error}"))?;
+        Ok(())
+    })
+    .await?;
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    Ok(())
+}
+
+async fn chromium_read_console_log(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    tab_id: &str,
+) -> Result<Vec<BrowserConsoleEntryInternal>, String> {
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
+    let value = run_chromium_blocking("chromium read console log", move || {
+        let value = tab
+            .evaluate(
+                r#"
+(() => {
+  const state = window.__palyraDiagnostics;
+  if (!state || !Array.isArray(state.entries)) {
+    return [];
+  }
+  return state.entries;
+})()
+"#,
+                false,
+            )
+            .map_err(|error| format!("failed to read Chromium console diagnostics: {error}"))?
+            .value
+            .unwrap_or(serde_json::Value::Array(Vec::new()));
+        Ok(value)
+    })
+    .await?;
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    Ok(parse_chromium_console_entries(value))
+}
+
+fn parse_chromium_console_entries(value: serde_json::Value) -> Vec<BrowserConsoleEntryInternal> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            Some(BrowserConsoleEntryInternal {
+                severity: BrowserDiagnosticSeverityInternal::from_proto(
+                    match object
+                        .get("severity")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("info")
+                    {
+                        "debug" => browser_v1::BrowserDiagnosticSeverity::Debug as i32,
+                        "warn" => browser_v1::BrowserDiagnosticSeverity::Warn as i32,
+                        "error" => browser_v1::BrowserDiagnosticSeverity::Error as i32,
+                        _ => browser_v1::BrowserDiagnosticSeverity::Info as i32,
+                    },
+                ),
+                kind: object
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("console")
+                    .to_owned(),
+                message: object
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                captured_at_unix_ms: object
+                    .get("captured_at_unix_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                source: object
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                stack_trace: object
+                    .get("stack_trace")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                page_url: object
+                    .get("page_url")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn chromium_refresh_tab_snapshot(
     runtime: &BrowserRuntimeState,
     session_id: &str,
     tab_id: &str,
 ) -> Result<(), String> {
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let _ = chromium_install_page_diagnostics(runtime, session_id, tab_id).await;
     let snapshot = chromium_observe_snapshot(runtime, session_id, tab_id).await?;
+    let console_log =
+        chromium_read_console_log(runtime, session_id, tab_id).await.unwrap_or_default();
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
     let mut sessions = runtime.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
@@ -656,6 +836,11 @@ pub(crate) async fn chromium_refresh_tab_snapshot(
     tab.last_page_body = snapshot.page_body;
     tab.last_title = snapshot.title;
     tab.last_url = Some(snapshot.page_url);
+    tab.console_log = clamp_console_log_entries(
+        console_log,
+        DEFAULT_MAX_CONSOLE_LOG_ENTRIES,
+        DEFAULT_MAX_CONSOLE_LOG_BYTES,
+    );
     Ok(())
 }
 
@@ -749,6 +934,19 @@ pub(crate) async fn navigate_tab_with_chromium(
             .map_err(|error| format!("failed to issue Chromium navigation command: {error}"))?;
         tab.wait_until_navigated()
             .map_err(|error| format!("Chromium navigation timeout or failure: {error}"))?;
+        tab.evaluate(
+            r#"
+(() => {
+  const state = window.__palyraDiagnostics;
+  if (state && state.installed) {
+    return true;
+  }
+  return false;
+})()
+"#,
+            false,
+        )
+        .ok();
         let page_body = tab.get_content().map_err(|error| {
             format!("failed to read Chromium page HTML after navigation: {error}")
         })?;
@@ -786,6 +984,8 @@ pub(crate) async fn navigate_tab_with_chromium(
     outcome.title = snapshot.title;
     outcome.page_body = snapshot.page_body;
     outcome.body_bytes = body_bytes;
+    let _ = chromium_install_page_diagnostics(runtime, session_id, tab_id).await;
+    let _ = chromium_refresh_tab_snapshot(runtime, session_id, tab_id).await;
     outcome
 }
 
@@ -1005,6 +1205,342 @@ pub(crate) async fn type_with_chromium(
         error: format!("selector '{selector}' was not found"),
         attempts,
     }
+}
+
+fn parse_key_press_spec(raw: &str) -> Result<(String, Vec<ModifierKey>), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("key press requires non-empty key".to_owned());
+    }
+    let mut parts =
+        trimmed.split('+').map(str::trim).filter(|value| !value.is_empty()).collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err("key press requires non-empty key".to_owned());
+    }
+    let key = parts.pop().unwrap_or_default();
+    if key.is_empty() {
+        return Err("key press requires terminal key segment".to_owned());
+    }
+    let mut modifiers = Vec::new();
+    for modifier in parts {
+        let value = match modifier.to_ascii_lowercase().as_str() {
+            "alt" => ModifierKey::Alt,
+            "ctrl" | "control" => ModifierKey::Ctrl,
+            "meta" | "cmd" | "command" => ModifierKey::Meta,
+            "shift" => ModifierKey::Shift,
+            other => {
+                return Err(format!("unsupported key modifier '{other}'"));
+            }
+        };
+        modifiers.push(value);
+    }
+    Ok((key.to_owned(), modifiers))
+}
+
+pub(crate) async fn press_with_chromium(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    key_spec: &str,
+    timeout_ms: u64,
+) -> ChromiumActionOutcome {
+    let (tab_id, tab) = match chromium_active_tab_for_session(runtime, session_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumActionOutcome {
+                success: false,
+                outcome: "chromium_runtime_missing".to_owned(),
+                error,
+                attempts: 1,
+            }
+        }
+    };
+    let (key, modifiers) = match parse_key_press_spec(key_spec) {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumActionOutcome {
+                success: false,
+                outcome: "invalid_key_spec".to_owned(),
+                error,
+                attempts: 1,
+            }
+        }
+    };
+    let result = run_chromium_blocking("chromium press", move || {
+        tab.set_default_timeout(Duration::from_millis(timeout_ms.max(1)));
+        if modifiers.is_empty() {
+            tab.press_key(key.as_str())
+                .map_err(|error| format!("failed to press Chromium key '{}': {error}", key))?;
+        } else {
+            tab.press_key_with_modifiers(key.as_str(), Some(modifiers.as_slice()))
+                .map_err(|error| format!("failed to press Chromium key '{}': {error}", key))?;
+        }
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(()) => {
+            let _ = chromium_refresh_tab_snapshot(runtime, session_id, tab_id.as_str()).await;
+            ChromiumActionOutcome {
+                success: true,
+                outcome: "pressed".to_owned(),
+                error: String::new(),
+                attempts: 1,
+            }
+        }
+        Err(error) => ChromiumActionOutcome {
+            success: false,
+            outcome: "press_failed".to_owned(),
+            error,
+            attempts: 1,
+        },
+    }
+}
+
+pub(crate) async fn select_with_chromium(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    selector: &str,
+    value: &str,
+    timeout_ms: u64,
+) -> ChromiumActionOutcome {
+    let (tab_id, tab) = match chromium_active_tab_for_session(runtime, session_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumActionOutcome {
+                success: false,
+                outcome: "chromium_runtime_missing".to_owned(),
+                error,
+                attempts: 1,
+            }
+        }
+    };
+    let selector_json = match serde_json::to_string(selector) {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumActionOutcome {
+                success: false,
+                outcome: "select_failed".to_owned(),
+                error: format!("failed to encode selector for Chromium select: {error}"),
+                attempts: 1,
+            }
+        }
+    };
+    let value_json = match serde_json::to_string(value) {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumActionOutcome {
+                success: false,
+                outcome: "select_failed".to_owned(),
+                error: format!("failed to encode select value for Chromium select: {error}"),
+                attempts: 1,
+            }
+        }
+    };
+    let script = format!(
+        r#"
+(() => {{
+  const selector = {selector_json};
+  const value = {value_json};
+  const element = document.querySelector(selector);
+  if (!element) {{
+    return {{ status: "not_found" }};
+  }}
+  if ((element.tagName || "").toLowerCase() !== "select") {{
+    return {{ status: "not_select" }};
+  }}
+  if (element.disabled) {{
+    return {{ status: "disabled" }};
+  }}
+  const option = Array.from(element.options || []).find((candidate) => candidate.value === value);
+  if (!option) {{
+    return {{ status: "value_not_found" }};
+  }}
+  element.value = value;
+  element.dispatchEvent(new Event("input", {{ bubbles: true }}));
+  element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+  return {{ status: "selected", value: element.value }};
+}})()
+"#
+    );
+    let result = run_chromium_blocking("chromium select", move || {
+        tab.set_default_timeout(Duration::from_millis(timeout_ms.max(1)));
+        let value = tab
+            .evaluate(script.as_str(), false)
+            .map_err(|error| format!("failed to execute Chromium select script: {error}"))?
+            .value
+            .unwrap_or(serde_json::Value::Null);
+        Ok(value)
+    })
+    .await;
+    match result {
+        Ok(value) => {
+            let status =
+                value.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
+            match status {
+                "selected" => {
+                    let _ =
+                        chromium_refresh_tab_snapshot(runtime, session_id, tab_id.as_str()).await;
+                    ChromiumActionOutcome {
+                        success: true,
+                        outcome: "selected".to_owned(),
+                        error: String::new(),
+                        attempts: 1,
+                    }
+                }
+                "disabled" => ChromiumActionOutcome {
+                    success: false,
+                    outcome: "selector_disabled".to_owned(),
+                    error: format!("selector '{selector}' is disabled"),
+                    attempts: 1,
+                },
+                "not_select" => ChromiumActionOutcome {
+                    success: false,
+                    outcome: "selector_not_select".to_owned(),
+                    error: format!("selector '{selector}' does not target a <select> element"),
+                    attempts: 1,
+                },
+                "value_not_found" => ChromiumActionOutcome {
+                    success: false,
+                    outcome: "value_not_found".to_owned(),
+                    error: format!("value '{value}' was not found for selector '{selector}'"),
+                    attempts: 1,
+                },
+                _ => ChromiumActionOutcome {
+                    success: false,
+                    outcome: "selector_not_found".to_owned(),
+                    error: format!("selector '{selector}' was not found"),
+                    attempts: 1,
+                },
+            }
+        }
+        Err(error) => ChromiumActionOutcome {
+            success: false,
+            outcome: "select_failed".to_owned(),
+            error,
+            attempts: 1,
+        },
+    }
+}
+
+pub(crate) async fn highlight_with_chromium(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    selector: &str,
+    timeout_ms: u64,
+    duration_ms: u64,
+) -> ChromiumActionOutcome {
+    let (_tab_id, tab) = match chromium_active_tab_for_session(runtime, session_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumActionOutcome {
+                success: false,
+                outcome: "chromium_runtime_missing".to_owned(),
+                error,
+                attempts: 1,
+            }
+        }
+    };
+    let selector_json = match serde_json::to_string(selector) {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumActionOutcome {
+                success: false,
+                outcome: "highlight_failed".to_owned(),
+                error: format!("failed to encode selector for Chromium highlight: {error}"),
+                attempts: 1,
+            }
+        }
+    };
+    let duration_ms = duration_ms.clamp(250, 10_000);
+    let script = format!(
+        r#"
+(() => {{
+  const selector = {selector_json};
+  const durationMs = {duration_ms};
+  const element = document.querySelector(selector);
+  if (!element) {{
+    return {{ status: "not_found" }};
+  }}
+  const rect = element.getBoundingClientRect();
+  const existing = document.getElementById("__palyra-highlight-overlay");
+  if (existing) {{
+    existing.remove();
+  }}
+  const overlay = document.createElement("div");
+  overlay.id = "__palyra-highlight-overlay";
+  overlay.style.position = "fixed";
+  overlay.style.left = `${{Math.max(0, rect.left - 4)}}px`;
+  overlay.style.top = `${{Math.max(0, rect.top - 4)}}px`;
+  overlay.style.width = `${{Math.max(8, rect.width + 8)}}px`;
+  overlay.style.height = `${{Math.max(8, rect.height + 8)}}px`;
+  overlay.style.border = "3px solid #ff6b00";
+  overlay.style.borderRadius = "6px";
+  overlay.style.background = "rgba(255, 107, 0, 0.08)";
+  overlay.style.pointerEvents = "none";
+  overlay.style.zIndex = "2147483647";
+  document.body.appendChild(overlay);
+  window.setTimeout(() => {{
+    const current = document.getElementById("__palyra-highlight-overlay");
+    if (current) {{
+      current.remove();
+    }}
+  }}, durationMs);
+  return {{ status: "highlighted" }};
+}})()
+"#
+    );
+    let result = run_chromium_blocking("chromium highlight", move || {
+        tab.set_default_timeout(Duration::from_millis(timeout_ms.max(1)));
+        let value = tab
+            .evaluate(script.as_str(), false)
+            .map_err(|error| format!("failed to execute Chromium highlight script: {error}"))?
+            .value
+            .unwrap_or(serde_json::Value::Null);
+        Ok(value)
+    })
+    .await;
+    match result {
+        Ok(value) => {
+            let status =
+                value.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if status == "highlighted" {
+                ChromiumActionOutcome {
+                    success: true,
+                    outcome: "highlighted".to_owned(),
+                    error: String::new(),
+                    attempts: 1,
+                }
+            } else {
+                ChromiumActionOutcome {
+                    success: false,
+                    outcome: "selector_not_found".to_owned(),
+                    error: format!("selector '{selector}' was not found"),
+                    attempts: 1,
+                }
+            }
+        }
+        Err(error) => ChromiumActionOutcome {
+            success: false,
+            outcome: "highlight_failed".to_owned(),
+            error,
+            attempts: 1,
+        },
+    }
+}
+
+pub(crate) async fn export_pdf_with_chromium(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+) -> Result<Vec<u8>, String> {
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let (_tab_id, tab) = chromium_active_tab_for_session(runtime, session_id).await?;
+    let pdf = run_chromium_blocking("chromium print pdf", move || {
+        tab.print_to_pdf(Some(PrintToPdfOptions::default()))
+            .map_err(|error| format!("failed to export Chromium page as PDF: {error}"))
+    })
+    .await?;
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    Ok(pdf)
 }
 
 #[cfg(test)]

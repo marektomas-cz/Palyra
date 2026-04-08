@@ -225,6 +225,38 @@ pub(crate) async fn console_browser_profile_activate_handler(
     Ok(Json(control_plane::BrowserProfileEnvelope { contract: contract_descriptor(), profile }))
 }
 
+pub(crate) async fn console_browser_sessions_list_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ConsoleBrowserSessionsQuery>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let principal = resolve_console_browser_principal(
+        query.principal.as_deref(),
+        session.context.principal.as_str(),
+    )?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 250);
+
+    let mut client = build_console_browser_client(&state).await?;
+    let mut request = TonicRequest::new(browser_v1::ListSessionsRequest {
+        v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        principal: principal.clone(),
+        limit,
+    });
+    apply_browser_service_auth(&state, request.metadata_mut())?;
+    let response =
+        client.list_sessions(request).await.map_err(runtime_status_response)?.into_inner();
+    let sessions = response.sessions.iter().map(session_summary_to_value).collect::<Vec<_>>();
+    Ok(Json(json!({
+        "contract": contract_descriptor(),
+        "principal": principal,
+        "truncated": response.truncated,
+        "error": response.error,
+        "page": build_page_info(limit as usize, sessions.len(), None),
+        "sessions": sessions,
+    })))
+}
+
 pub(crate) async fn console_browser_session_create_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -303,6 +335,88 @@ pub(crate) async fn console_browser_session_create_handler(
     .await?;
 
     Ok(Json(envelope))
+}
+
+pub(crate) async fn console_browser_session_show_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, false)?;
+    validate_console_browser_canonical_id(session_id.as_str(), "session_id")?;
+
+    let mut client = build_console_browser_client(&state).await?;
+    let mut request = TonicRequest::new(browser_v1::GetSessionRequest {
+        v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+    });
+    apply_browser_service_auth(&state, request.metadata_mut())?;
+    let response = client.get_session(request).await.map_err(runtime_status_response)?.into_inner();
+    Ok(Json(json!({
+        "contract": contract_descriptor(),
+        "session_id": session_id,
+        "success": response.success,
+        "session": response.session.as_ref().map(session_detail_to_value).unwrap_or(Value::Null),
+        "error": response.error,
+    })))
+}
+
+pub(crate) async fn console_browser_session_inspect_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Query(query): Query<ConsoleBrowserInspectSessionQuery>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, false)?;
+    validate_console_browser_canonical_id(session_id.as_str(), "session_id")?;
+
+    let mut client = build_console_browser_client(&state).await?;
+    let mut request = TonicRequest::new(browser_v1::InspectSessionRequest {
+        v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        include_cookies: query.include_cookies.unwrap_or(false),
+        include_storage: query.include_storage.unwrap_or(false),
+        include_action_log: query.include_action_log.unwrap_or(true),
+        include_network_log: query.include_network_log.unwrap_or(true),
+        include_page_snapshot: query.include_page_snapshot.unwrap_or(true),
+        max_cookie_bytes: query.max_cookie_bytes.unwrap_or(0),
+        max_storage_bytes: query.max_storage_bytes.unwrap_or(0),
+        max_action_log_entries: query.max_action_log_entries.unwrap_or(0),
+        max_network_log_entries: query.max_network_log_entries.unwrap_or(0),
+        max_network_log_bytes: query.max_network_log_bytes.unwrap_or(0),
+        max_dom_snapshot_bytes: query.max_dom_snapshot_bytes.unwrap_or(0),
+        max_visible_text_bytes: query.max_visible_text_bytes.unwrap_or(0),
+        include_console_log: query.include_console_log.unwrap_or(true),
+        include_page_diagnostics: query.include_page_diagnostics.unwrap_or(true),
+        max_console_log_entries: query.max_console_log_entries.unwrap_or(0),
+        max_console_log_bytes: query.max_console_log_bytes.unwrap_or(0),
+    });
+    apply_browser_service_auth(&state, request.metadata_mut())?;
+    let response =
+        client.inspect_session(request).await.map_err(runtime_status_response)?.into_inner();
+    Ok(Json(json!({
+        "contract": contract_descriptor(),
+        "session_id": session_id,
+        "success": response.success,
+        "session": response.session.as_ref().map(session_detail_to_value).unwrap_or(Value::Null),
+        "cookies": response.cookies.iter().map(cookie_domain_to_value).collect::<Vec<_>>(),
+        "storage": response.storage.iter().map(storage_origin_to_value).collect::<Vec<_>>(),
+        "action_log": response.action_log.iter().map(browser_action_log_entry_to_value).collect::<Vec<_>>(),
+        "network_log": response.network_log.iter().map(browser_network_log_entry_to_value).collect::<Vec<_>>(),
+        "dom_snapshot": response.dom_snapshot,
+        "visible_text": response.visible_text,
+        "page_url": response.page_url,
+        "cookies_truncated": response.cookies_truncated,
+        "storage_truncated": response.storage_truncated,
+        "action_log_truncated": response.action_log_truncated,
+        "network_log_truncated": response.network_log_truncated,
+        "dom_truncated": response.dom_truncated,
+        "visible_text_truncated": response.visible_text_truncated,
+        "console_log": response.console_log.iter().map(browser_console_entry_to_value).collect::<Vec<_>>(),
+        "console_log_truncated": response.console_log_truncated,
+        "page_diagnostics": response.page_diagnostics.as_ref().map(browser_page_diagnostics_to_value).unwrap_or(Value::Null),
+        "error": response.error,
+    })))
 }
 
 pub(crate) async fn console_browser_session_close_handler(
@@ -526,6 +640,198 @@ pub(crate) async fn console_browser_type_handler(
     Ok(Json(envelope))
 }
 
+pub(crate) async fn console_browser_press_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleBrowserPressRequest>,
+) -> Result<Json<control_plane::BrowserPressEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_console_browser_canonical_id(session_id.as_str(), "session_id")?;
+    let key = payload.key.trim();
+    if key.is_empty() {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "key cannot be empty",
+        )));
+    }
+
+    let mut client = build_console_browser_client(&state).await?;
+    let mut request = TonicRequest::new(browser_v1::PressRequest {
+        v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        key: key.to_owned(),
+        timeout_ms: payload.timeout_ms.unwrap_or(0),
+        capture_failure_screenshot: payload.capture_failure_screenshot.unwrap_or(true),
+        max_failure_screenshot_bytes: clamp_console_browser_max_screenshot_bytes(
+            &state,
+            payload.max_failure_screenshot_bytes,
+        ),
+    });
+    apply_browser_service_auth(&state, request.metadata_mut())?;
+    let response = client.press(request).await.map_err(runtime_status_response)?.into_inner();
+    let action_log = response.action_log.map(control_plane_browser_action_log);
+    let envelope = control_plane::BrowserPressEnvelope {
+        contract: contract_descriptor(),
+        session_id: session_id.clone(),
+        success: response.success,
+        key: response.key.clone(),
+        error: response.error.clone(),
+        action_log: action_log.clone(),
+        failure_screenshot_mime_type: non_empty_string(response.failure_screenshot_mime_type),
+        failure_screenshot_base64: encode_optional_base64(
+            response.failure_screenshot_bytes.as_slice(),
+        ),
+    };
+
+    record_browser_console_event(
+        &state,
+        &session.context,
+        "browser.action.press",
+        json!({
+            "session_id": session_id,
+            "key": key,
+            "success": envelope.success,
+            "error": envelope.error,
+            "action_id": action_log.as_ref().map(|value| value.action_id.clone()),
+            "attempts": action_log.as_ref().map(|value| value.attempts),
+        }),
+    )
+    .await?;
+
+    Ok(Json(envelope))
+}
+
+pub(crate) async fn console_browser_select_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleBrowserSelectRequest>,
+) -> Result<Json<control_plane::BrowserSelectEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_console_browser_canonical_id(session_id.as_str(), "session_id")?;
+    let selector = payload.selector.trim();
+    if selector.is_empty() {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "selector cannot be empty",
+        )));
+    }
+    let value = payload.value.trim();
+    if value.is_empty() {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "value cannot be empty",
+        )));
+    }
+
+    let mut client = build_console_browser_client(&state).await?;
+    let mut request = TonicRequest::new(browser_v1::SelectRequest {
+        v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        selector: selector.to_owned(),
+        value: value.to_owned(),
+        timeout_ms: payload.timeout_ms.unwrap_or(0),
+        capture_failure_screenshot: payload.capture_failure_screenshot.unwrap_or(true),
+        max_failure_screenshot_bytes: clamp_console_browser_max_screenshot_bytes(
+            &state,
+            payload.max_failure_screenshot_bytes,
+        ),
+    });
+    apply_browser_service_auth(&state, request.metadata_mut())?;
+    let response = client.select(request).await.map_err(runtime_status_response)?.into_inner();
+    let action_log = response.action_log.map(control_plane_browser_action_log);
+    let envelope = control_plane::BrowserSelectEnvelope {
+        contract: contract_descriptor(),
+        session_id: session_id.clone(),
+        success: response.success,
+        selected_value: response.selected_value.clone(),
+        error: response.error.clone(),
+        action_log: action_log.clone(),
+        failure_screenshot_mime_type: non_empty_string(response.failure_screenshot_mime_type),
+        failure_screenshot_base64: encode_optional_base64(
+            response.failure_screenshot_bytes.as_slice(),
+        ),
+    };
+
+    record_browser_console_event(
+        &state,
+        &session.context,
+        "browser.action.select",
+        json!({
+            "session_id": session_id,
+            "selector": selector,
+            "value": value,
+            "success": envelope.success,
+            "error": envelope.error,
+            "action_id": action_log.as_ref().map(|value| value.action_id.clone()),
+            "attempts": action_log.as_ref().map(|value| value.attempts),
+        }),
+    )
+    .await?;
+
+    Ok(Json(envelope))
+}
+
+pub(crate) async fn console_browser_highlight_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleBrowserHighlightRequest>,
+) -> Result<Json<control_plane::BrowserHighlightEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_console_browser_canonical_id(session_id.as_str(), "session_id")?;
+    let selector = payload.selector.trim();
+    if selector.is_empty() {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "selector cannot be empty",
+        )));
+    }
+
+    let mut client = build_console_browser_client(&state).await?;
+    let mut request = TonicRequest::new(browser_v1::HighlightRequest {
+        v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        selector: selector.to_owned(),
+        timeout_ms: payload.timeout_ms.unwrap_or(0),
+        duration_ms: payload.duration_ms.unwrap_or(1_500),
+        capture_failure_screenshot: payload.capture_failure_screenshot.unwrap_or(true),
+        max_failure_screenshot_bytes: clamp_console_browser_max_screenshot_bytes(
+            &state,
+            payload.max_failure_screenshot_bytes,
+        ),
+    });
+    apply_browser_service_auth(&state, request.metadata_mut())?;
+    let response = client.highlight(request).await.map_err(runtime_status_response)?.into_inner();
+    let action_log = response.action_log.map(control_plane_browser_action_log);
+    let envelope = control_plane::BrowserHighlightEnvelope {
+        contract: contract_descriptor(),
+        session_id: session_id.clone(),
+        success: response.success,
+        selector: response.selector.clone(),
+        error: response.error.clone(),
+        action_log: action_log.clone(),
+        failure_screenshot_mime_type: non_empty_string(response.failure_screenshot_mime_type),
+        failure_screenshot_base64: encode_optional_base64(
+            response.failure_screenshot_bytes.as_slice(),
+        ),
+    };
+
+    record_browser_console_event(
+        &state,
+        &session.context,
+        "browser.action.highlight",
+        json!({
+            "session_id": session_id,
+            "selector": selector,
+            "success": envelope.success,
+            "error": envelope.error,
+            "action_id": action_log.as_ref().map(|value| value.action_id.clone()),
+            "attempts": action_log.as_ref().map(|value| value.attempts),
+        }),
+    )
+    .await?;
+
+    Ok(Json(envelope))
+}
+
 pub(crate) async fn console_browser_scroll_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -706,6 +1012,36 @@ pub(crate) async fn console_browser_screenshot_handler(
     }))
 }
 
+pub(crate) async fn console_browser_pdf_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Query(query): Query<ConsoleBrowserPdfQuery>,
+) -> Result<Json<control_plane::BrowserPdfEnvelope>, Response> {
+    let _session = authorize_console_session(&state, &headers, false)?;
+    validate_console_browser_canonical_id(session_id.as_str(), "session_id")?;
+
+    let mut client = build_console_browser_client(&state).await?;
+    let mut request = TonicRequest::new(browser_v1::ExportPdfRequest {
+        v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        max_bytes: query.max_bytes.unwrap_or(0),
+    });
+    apply_browser_service_auth(&state, request.metadata_mut())?;
+    let response = client.export_pdf(request).await.map_err(runtime_status_response)?.into_inner();
+    Ok(Json(control_plane::BrowserPdfEnvelope {
+        contract: contract_descriptor(),
+        session_id,
+        success: response.success,
+        mime_type: non_empty_string(response.mime_type),
+        size_bytes: response.size_bytes,
+        sha256: non_empty_string(response.sha256),
+        artifact: response.artifact.map(control_plane_browser_download_artifact),
+        pdf_base64: encode_optional_base64(response.pdf_bytes.as_slice()),
+        error: response.error,
+    }))
+}
+
 pub(crate) async fn console_browser_observe_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -776,6 +1112,42 @@ pub(crate) async fn console_browser_network_log_handler(
         error: response.error,
         page: build_page_info(limit as usize, entries.len(), None),
         entries,
+    }))
+}
+
+pub(crate) async fn console_browser_console_log_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Query(query): Query<ConsoleBrowserConsoleLogQuery>,
+) -> Result<Json<control_plane::BrowserConsoleLogEnvelope>, Response> {
+    let _session = authorize_console_session(&state, &headers, false)?;
+    validate_console_browser_canonical_id(session_id.as_str(), "session_id")?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 250);
+
+    let mut client = build_console_browser_client(&state).await?;
+    let mut request = TonicRequest::new(browser_v1::ConsoleLogRequest {
+        v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+        limit,
+        minimum_severity: browser_diagnostic_severity_to_proto(query.minimum_severity),
+        include_page_diagnostics: query.include_page_diagnostics.unwrap_or(false),
+        max_payload_bytes: query.max_payload_bytes.unwrap_or(0),
+    });
+    apply_browser_service_auth(&state, request.metadata_mut())?;
+    let response = client.console_log(request).await.map_err(runtime_status_response)?.into_inner();
+    let entries =
+        response.entries.into_iter().map(control_plane_browser_console_entry).collect::<Vec<_>>();
+    let entry_count = entries.len();
+    Ok(Json(control_plane::BrowserConsoleLogEnvelope {
+        contract: contract_descriptor(),
+        session_id,
+        success: response.success,
+        entries,
+        truncated: response.truncated,
+        page_diagnostics: response.page_diagnostics.map(control_plane_browser_page_diagnostics),
+        error: response.error,
+        page: build_page_info(limit as usize, entry_count, None),
     }))
 }
 
@@ -1553,6 +1925,73 @@ fn control_plane_browser_network_log_entry(
     }
 }
 
+fn browser_diagnostic_severity_to_proto(
+    value: Option<control_plane::BrowserDiagnosticSeverity>,
+) -> i32 {
+    match value {
+        None => browser_v1::BrowserDiagnosticSeverity::Unspecified as i32,
+        Some(control_plane::BrowserDiagnosticSeverity::Debug) => {
+            browser_v1::BrowserDiagnosticSeverity::Debug as i32
+        }
+        Some(control_plane::BrowserDiagnosticSeverity::Info) => {
+            browser_v1::BrowserDiagnosticSeverity::Info as i32
+        }
+        Some(control_plane::BrowserDiagnosticSeverity::Warn) => {
+            browser_v1::BrowserDiagnosticSeverity::Warn as i32
+        }
+        Some(control_plane::BrowserDiagnosticSeverity::Error) => {
+            browser_v1::BrowserDiagnosticSeverity::Error as i32
+        }
+    }
+}
+
+fn control_plane_browser_console_severity(value: i32) -> control_plane::BrowserDiagnosticSeverity {
+    match browser_v1::BrowserDiagnosticSeverity::try_from(value)
+        .unwrap_or(browser_v1::BrowserDiagnosticSeverity::Unspecified)
+    {
+        browser_v1::BrowserDiagnosticSeverity::Debug => {
+            control_plane::BrowserDiagnosticSeverity::Debug
+        }
+        browser_v1::BrowserDiagnosticSeverity::Warn => {
+            control_plane::BrowserDiagnosticSeverity::Warn
+        }
+        browser_v1::BrowserDiagnosticSeverity::Error => {
+            control_plane::BrowserDiagnosticSeverity::Error
+        }
+        browser_v1::BrowserDiagnosticSeverity::Info
+        | browser_v1::BrowserDiagnosticSeverity::Unspecified => {
+            control_plane::BrowserDiagnosticSeverity::Info
+        }
+    }
+}
+
+fn control_plane_browser_console_entry(
+    entry: browser_v1::BrowserConsoleEntry,
+) -> control_plane::BrowserConsoleEntry {
+    control_plane::BrowserConsoleEntry {
+        severity: control_plane_browser_console_severity(entry.severity),
+        kind: entry.kind,
+        message: entry.message,
+        captured_at_unix_ms: entry.captured_at_unix_ms,
+        source: entry.source,
+        stack_trace: entry.stack_trace,
+        page_url: entry.page_url,
+    }
+}
+
+fn control_plane_browser_page_diagnostics(
+    diagnostics: browser_v1::BrowserPageDiagnostics,
+) -> control_plane::BrowserPageDiagnostics {
+    control_plane::BrowserPageDiagnostics {
+        page_url: diagnostics.page_url,
+        page_title: diagnostics.page_title,
+        console_entry_count: diagnostics.console_entry_count,
+        warning_count: diagnostics.warning_count,
+        error_count: diagnostics.error_count,
+        last_event_unix_ms: diagnostics.last_event_unix_ms,
+    }
+}
+
 fn control_plane_browser_profile(
     profile: browser_v1::BrowserProfile,
 ) -> control_plane::BrowserProfileRecord {
@@ -1595,6 +2034,186 @@ fn control_plane_browser_download_artifact(
         quarantined: artifact.quarantined,
         quarantine_reason: artifact.quarantine_reason,
     }
+}
+
+fn session_summary_to_value(summary: &browser_v1::BrowserSessionSummary) -> Value {
+    json!({
+        "session_id": maybe_canonical_id(summary.session_id.clone()),
+        "principal": summary.principal,
+        "channel": summary.channel,
+        "created_at_unix_ms": summary.created_at_unix_ms,
+        "last_active_unix_ms": summary.last_active_unix_ms,
+        "idle_ttl_ms": summary.idle_ttl_ms,
+        "age_ms": summary.age_ms,
+        "idle_for_ms": summary.idle_for_ms,
+        "action_count": summary.action_count,
+        "action_log_entries": summary.action_log_entries,
+        "tab_count": summary.tab_count,
+        "active_tab_id": maybe_canonical_id(summary.active_tab_id.clone()),
+        "active_tab_url": summary.active_tab_url,
+        "active_tab_title": summary.active_tab_title,
+        "allow_private_targets": summary.allow_private_targets,
+        "downloads_enabled": summary.downloads_enabled,
+        "persistence_enabled": summary.persistence_enabled,
+        "persistence_id": summary.persistence_id,
+        "state_restored": summary.state_restored,
+        "profile_id": maybe_canonical_id(summary.profile_id.clone()),
+        "private_profile": summary.private_profile,
+        "action_allowed_domains": summary.action_allowed_domains,
+        "permissions": summary
+            .permissions
+            .as_ref()
+            .map(session_permissions_to_value)
+            .unwrap_or(Value::Null),
+    })
+}
+
+fn session_detail_to_value(detail: &browser_v1::BrowserSessionDetail) -> Value {
+    json!({
+        "summary": detail.summary.as_ref().map(session_summary_to_value).unwrap_or(Value::Null),
+        "effective_budget": detail
+            .effective_budget
+            .as_ref()
+            .map(session_budget_to_value)
+            .unwrap_or(Value::Null),
+        "tabs": detail.tabs.iter().map(browser_tab_to_value).collect::<Vec<_>>(),
+    })
+}
+
+fn session_budget_to_value(budget: &browser_v1::SessionBudget) -> Value {
+    json!({
+        "max_navigation_timeout_ms": budget.max_navigation_timeout_ms,
+        "max_session_lifetime_ms": budget.max_session_lifetime_ms,
+        "max_screenshot_bytes": budget.max_screenshot_bytes,
+        "max_response_bytes": budget.max_response_bytes,
+        "max_action_timeout_ms": budget.max_action_timeout_ms,
+        "max_type_input_bytes": budget.max_type_input_bytes,
+        "max_actions_per_session": budget.max_actions_per_session,
+        "max_actions_per_window": budget.max_actions_per_window,
+        "action_rate_window_ms": budget.action_rate_window_ms,
+        "max_action_log_entries": budget.max_action_log_entries,
+        "max_observe_snapshot_bytes": budget.max_observe_snapshot_bytes,
+        "max_visible_text_bytes": budget.max_visible_text_bytes,
+        "max_network_log_entries": budget.max_network_log_entries,
+        "max_network_log_bytes": budget.max_network_log_bytes,
+    })
+}
+
+fn session_permissions_to_value(permissions: &browser_v1::SessionPermissions) -> Value {
+    json!({
+        "camera": browser_permission_setting_text(permissions.camera),
+        "microphone": browser_permission_setting_text(permissions.microphone),
+        "location": browser_permission_setting_text(permissions.location),
+    })
+}
+
+fn browser_permission_setting_text(value: i32) -> &'static str {
+    match browser_v1::PermissionSetting::try_from(value)
+        .unwrap_or(browser_v1::PermissionSetting::Unspecified)
+    {
+        browser_v1::PermissionSetting::Allow => "allow",
+        browser_v1::PermissionSetting::Deny => "deny",
+        browser_v1::PermissionSetting::Unspecified => "unspecified",
+    }
+}
+
+fn browser_tab_to_value(tab: &browser_v1::BrowserTab) -> Value {
+    json!({
+        "tab_id": maybe_canonical_id(tab.tab_id.clone()),
+        "url": tab.url,
+        "title": tab.title,
+        "active": tab.active,
+    })
+}
+
+fn cookie_domain_to_value(value: &browser_v1::SessionCookieDomain) -> Value {
+    json!({
+        "domain": value.domain,
+        "cookies": value.cookies.iter().map(|cookie| {
+            json!({
+                "name": cookie.name,
+                "value": cookie.value,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn storage_origin_to_value(value: &browser_v1::SessionStorageOrigin) -> Value {
+    json!({
+        "origin": value.origin,
+        "entries": value.entries.iter().map(|entry| {
+            json!({
+                "key": entry.key,
+                "value": entry.value,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn browser_action_log_entry_to_value(entry: &browser_v1::BrowserActionLogEntry) -> Value {
+    json!({
+        "action_id": entry.action_id,
+        "action_name": entry.action_name,
+        "selector": entry.selector,
+        "success": entry.success,
+        "outcome": entry.outcome,
+        "error": entry.error,
+        "started_at_unix_ms": entry.started_at_unix_ms,
+        "completed_at_unix_ms": entry.completed_at_unix_ms,
+        "attempts": entry.attempts,
+        "page_url": entry.page_url,
+    })
+}
+
+fn browser_network_log_entry_to_value(entry: &browser_v1::NetworkLogEntry) -> Value {
+    json!({
+        "request_url": entry.request_url,
+        "status_code": entry.status_code,
+        "timing_bucket": entry.timing_bucket,
+        "latency_ms": entry.latency_ms,
+        "captured_at_unix_ms": entry.captured_at_unix_ms,
+        "headers": entry.headers.iter().map(|header| {
+            json!({
+                "name": header.name,
+                "value": header.value,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn browser_console_entry_to_value(entry: &browser_v1::BrowserConsoleEntry) -> Value {
+    json!({
+        "severity": browser_console_severity_text(entry.severity),
+        "kind": entry.kind,
+        "message": entry.message,
+        "captured_at_unix_ms": entry.captured_at_unix_ms,
+        "source": entry.source,
+        "stack_trace": entry.stack_trace,
+        "page_url": entry.page_url,
+    })
+}
+
+fn browser_console_severity_text(value: i32) -> &'static str {
+    match browser_v1::BrowserDiagnosticSeverity::try_from(value)
+        .unwrap_or(browser_v1::BrowserDiagnosticSeverity::Unspecified)
+    {
+        browser_v1::BrowserDiagnosticSeverity::Debug => "debug",
+        browser_v1::BrowserDiagnosticSeverity::Info => "info",
+        browser_v1::BrowserDiagnosticSeverity::Warn => "warn",
+        browser_v1::BrowserDiagnosticSeverity::Error => "error",
+        browser_v1::BrowserDiagnosticSeverity::Unspecified => "unspecified",
+    }
+}
+
+fn browser_page_diagnostics_to_value(value: &browser_v1::BrowserPageDiagnostics) -> Value {
+    json!({
+        "page_url": value.page_url,
+        "page_title": value.page_title,
+        "console_entry_count": value.console_entry_count,
+        "warning_count": value.warning_count,
+        "error_count": value.error_count,
+        "last_event_unix_ms": value.last_event_unix_ms,
+    })
 }
 
 async fn record_browser_console_event(

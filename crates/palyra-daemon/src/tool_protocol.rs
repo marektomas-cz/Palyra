@@ -312,6 +312,15 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.browser.type" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
+        "palyra.browser.press" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
+        "palyra.browser.select" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
+        "palyra.browser.highlight" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
         "palyra.browser.scroll" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
@@ -324,10 +333,16 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.browser.screenshot" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
+        "palyra.browser.pdf" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
         "palyra.browser.observe" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.browser.network_log" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
+        "palyra.browser.console_log" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.browser.reset_state" => {
@@ -580,12 +595,17 @@ async fn run_allowlisted_tool(
         | "palyra.browser.navigate"
         | "palyra.browser.click"
         | "palyra.browser.type"
+        | "palyra.browser.press"
+        | "palyra.browser.select"
+        | "palyra.browser.highlight"
         | "palyra.browser.scroll"
         | "palyra.browser.wait_for"
         | "palyra.browser.title"
         | "palyra.browser.screenshot"
+        | "palyra.browser.pdf"
         | "palyra.browser.observe"
         | "palyra.browser.network_log"
+        | "palyra.browser.console_log"
         | "palyra.browser.reset_state"
         | "palyra.browser.tabs.list"
         | "palyra.browser.tabs.open"
@@ -626,12 +646,17 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.browser.navigate"
             | "palyra.browser.click"
             | "palyra.browser.type"
+            | "palyra.browser.press"
+            | "palyra.browser.select"
+            | "palyra.browser.highlight"
             | "palyra.browser.scroll"
             | "palyra.browser.wait_for"
             | "palyra.browser.title"
             | "palyra.browser.screenshot"
+            | "palyra.browser.pdf"
             | "palyra.browser.observe"
             | "palyra.browser.network_log"
+            | "palyra.browser.console_log"
             | "palyra.browser.reset_state"
             | "palyra.browser.tabs.list"
             | "palyra.browser.tabs.open"
@@ -674,12 +699,17 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         | "palyra.browser.navigate"
         | "palyra.browser.click"
         | "palyra.browser.type"
+        | "palyra.browser.press"
+        | "palyra.browser.select"
+        | "palyra.browser.highlight"
         | "palyra.browser.scroll"
         | "palyra.browser.wait_for"
         | "palyra.browser.title"
         | "palyra.browser.screenshot"
+        | "palyra.browser.pdf"
         | "palyra.browser.observe"
         | "palyra.browser.network_log"
+        | "palyra.browser.console_log"
         | "palyra.browser.reset_state"
         | "palyra.browser.tabs.list"
         | "palyra.browser.tabs.open"
@@ -1172,12 +1202,17 @@ mod tests {
         assert!(tool_requires_approval("palyra.browser.navigate"));
         assert!(tool_requires_approval("palyra.browser.click"));
         assert!(tool_requires_approval("palyra.browser.type"));
+        assert!(tool_requires_approval("palyra.browser.press"));
+        assert!(tool_requires_approval("palyra.browser.select"));
+        assert!(tool_requires_approval("palyra.browser.highlight"));
         assert!(tool_requires_approval("palyra.browser.scroll"));
         assert!(tool_requires_approval("palyra.browser.wait_for"));
         assert!(tool_requires_approval("palyra.browser.title"));
         assert!(tool_requires_approval("palyra.browser.screenshot"));
+        assert!(tool_requires_approval("palyra.browser.pdf"));
         assert!(tool_requires_approval("palyra.browser.observe"));
         assert!(tool_requires_approval("palyra.browser.network_log"));
+        assert!(tool_requires_approval("palyra.browser.console_log"));
         assert!(tool_requires_approval("palyra.browser.reset_state"));
         assert!(tool_requires_approval("palyra.browser.tabs.list"));
         assert!(tool_requires_approval("palyra.browser.tabs.open"));

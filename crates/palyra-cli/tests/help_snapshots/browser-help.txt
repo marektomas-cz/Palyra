@@ -26,11 +26,11 @@ Commands:
   downloads    List download artifacts for a browser session
   permissions  Get or set browser permissions for a session
   reset-state  Reset browser state for a session
-  console      Structured unsupported placeholder for console logs
-  pdf          Structured unsupported placeholder for PDF export
-  press        Structured unsupported placeholder for key presses
-  select       Structured unsupported placeholder for select element changes
-  highlight    Structured unsupported placeholder for selector highlighting
+  console      Show browser console diagnostics for a session
+  pdf          Export the active browser session as PDF
+  press        Press a key or key chord in the active browser session
+  select       Set the selected value of a <select> element
+  highlight    Temporarily highlight a selector in the active browser session
 
 Options:
   -h, --help

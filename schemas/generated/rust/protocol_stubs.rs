@@ -62,9 +62,13 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct BrowserActionLogEntry;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct BrowserConsoleEntry;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct BrowserHealthRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct BrowserHealthResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct BrowserPageDiagnostics;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct BrowserProfile;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -86,6 +90,10 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct CloseTabResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ConsoleLogRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ConsoleLogResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct CreateProfileRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct CreateProfileResponse;
@@ -100,6 +108,10 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct DownloadArtifact;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ExportPdfRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ExportPdfResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct GetPermissionsRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct GetPermissionsResponse;
@@ -111,6 +123,10 @@ pub mod palyra_browser_v1 {
     pub struct GetTitleRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct GetTitleResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct HighlightRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct HighlightResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct InspectSessionRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -152,6 +168,10 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct OpenTabResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct PressRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct PressResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct RelayActionRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct RelayActionResponse;
@@ -181,6 +201,10 @@ pub mod palyra_browser_v1 {
     pub struct ScrollRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ScrollResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct SelectRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct SelectResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SessionBudget;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -217,13 +241,16 @@ pub mod palyra_browser_v1 {
         fn Click(&self);
         fn CloseSession(&self);
         fn CloseTab(&self);
+        fn ConsoleLog(&self);
         fn CreateProfile(&self);
         fn CreateSession(&self);
         fn DeleteProfile(&self);
+        fn ExportPdf(&self);
         fn GetPermissions(&self);
         fn GetSession(&self);
         fn GetTitle(&self);
         fn Health(&self);
+        fn Highlight(&self);
         fn InspectSession(&self);
         fn ListDownloadArtifacts(&self);
         fn ListProfiles(&self);
@@ -233,11 +260,13 @@ pub mod palyra_browser_v1 {
         fn NetworkLog(&self);
         fn Observe(&self);
         fn OpenTab(&self);
+        fn Press(&self);
         fn RelayAction(&self);
         fn RenameProfile(&self);
         fn ResetState(&self);
         fn Screenshot(&self);
         fn Scroll(&self);
+        fn Select(&self);
         fn SetActiveProfile(&self);
         fn SetPermissions(&self);
         fn SwitchTab(&self);

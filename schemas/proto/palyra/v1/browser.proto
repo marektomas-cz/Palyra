@@ -19,12 +19,17 @@ service BrowserService {
   rpc Navigate(NavigateRequest) returns (NavigateResponse);
   rpc Click(ClickRequest) returns (ClickResponse);
   rpc Type(TypeRequest) returns (TypeResponse);
+  rpc Press(PressRequest) returns (PressResponse);
+  rpc Select(SelectRequest) returns (SelectResponse);
+  rpc Highlight(HighlightRequest) returns (HighlightResponse);
   rpc Scroll(ScrollRequest) returns (ScrollResponse);
   rpc WaitFor(WaitForRequest) returns (WaitForResponse);
   rpc GetTitle(GetTitleRequest) returns (GetTitleResponse);
   rpc Screenshot(ScreenshotRequest) returns (ScreenshotResponse);
   rpc Observe(ObserveRequest) returns (ObserveResponse);
   rpc NetworkLog(NetworkLogRequest) returns (NetworkLogResponse);
+  rpc ConsoleLog(ConsoleLogRequest) returns (ConsoleLogResponse);
+  rpc ExportPdf(ExportPdfRequest) returns (ExportPdfResponse);
   rpc ResetState(ResetStateRequest) returns (ResetStateResponse);
   rpc ListTabs(ListTabsRequest) returns (ListTabsResponse);
   rpc OpenTab(OpenTabRequest) returns (OpenTabResponse);
@@ -234,6 +239,10 @@ message InspectSessionRequest {
   uint64 max_network_log_bytes = 12;
   uint64 max_dom_snapshot_bytes = 13;
   uint64 max_visible_text_bytes = 14;
+  bool include_console_log = 21;
+  bool include_page_diagnostics = 22;
+  uint32 max_console_log_entries = 23;
+  uint64 max_console_log_bytes = 24;
 
   reserved 15 to 20;
 }
@@ -256,6 +265,9 @@ message InspectSessionResponse {
   bool dom_truncated = 15;
   bool visible_text_truncated = 16;
   string error = 17;
+  repeated BrowserConsoleEntry console_log = 25;
+  bool console_log_truncated = 26;
+  BrowserPageDiagnostics page_diagnostics = 27;
 
   reserved 18 to 24;
 }
@@ -342,6 +354,77 @@ message TypeResponse {
   uint32 v = 1;
   bool success = 2;
   uint64 typed_bytes = 3;
+  string error = 4;
+  BrowserActionLogEntry action_log = 5;
+  bytes failure_screenshot_bytes = 6;
+  string failure_screenshot_mime_type = 7;
+
+  reserved 8 to 14;
+}
+
+message PressRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  string key = 3;
+  uint64 timeout_ms = 4;
+  bool capture_failure_screenshot = 5;
+  uint64 max_failure_screenshot_bytes = 6;
+
+  reserved 7 to 14;
+}
+
+message PressResponse {
+  uint32 v = 1;
+  bool success = 2;
+  string key = 3;
+  string error = 4;
+  BrowserActionLogEntry action_log = 5;
+  bytes failure_screenshot_bytes = 6;
+  string failure_screenshot_mime_type = 7;
+
+  reserved 8 to 14;
+}
+
+message SelectRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  string selector = 3;
+  string value = 4;
+  uint64 timeout_ms = 5;
+  bool capture_failure_screenshot = 6;
+  uint64 max_failure_screenshot_bytes = 7;
+
+  reserved 8 to 16;
+}
+
+message SelectResponse {
+  uint32 v = 1;
+  bool success = 2;
+  string selected_value = 3;
+  string error = 4;
+  BrowserActionLogEntry action_log = 5;
+  bytes failure_screenshot_bytes = 6;
+  string failure_screenshot_mime_type = 7;
+
+  reserved 8 to 14;
+}
+
+message HighlightRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  string selector = 3;
+  uint64 timeout_ms = 4;
+  uint64 duration_ms = 5;
+  bool capture_failure_screenshot = 6;
+  uint64 max_failure_screenshot_bytes = 7;
+
+  reserved 8 to 16;
+}
+
+message HighlightResponse {
+  uint32 v = 1;
+  bool success = 2;
+  string selector = 3;
   string error = 4;
   BrowserActionLogEntry action_log = 5;
   bytes failure_screenshot_bytes = 6;
@@ -503,6 +586,82 @@ message NetworkLogResponse {
   string error = 5;
 
   reserved 6 to 12;
+}
+
+enum BrowserDiagnosticSeverity {
+  BROWSER_DIAGNOSTIC_SEVERITY_UNSPECIFIED = 0;
+  BROWSER_DIAGNOSTIC_SEVERITY_DEBUG = 1;
+  BROWSER_DIAGNOSTIC_SEVERITY_INFO = 2;
+  BROWSER_DIAGNOSTIC_SEVERITY_WARN = 3;
+  BROWSER_DIAGNOSTIC_SEVERITY_ERROR = 4;
+}
+
+message BrowserConsoleEntry {
+  uint32 v = 1;
+  BrowserDiagnosticSeverity severity = 2;
+  string kind = 3;
+  string message = 4;
+  uint64 captured_at_unix_ms = 5;
+  string source = 6;
+  string stack_trace = 7;
+  string page_url = 8;
+
+  reserved 9 to 14;
+}
+
+message BrowserPageDiagnostics {
+  uint32 v = 1;
+  string page_url = 2;
+  string page_title = 3;
+  uint32 console_entry_count = 4;
+  uint32 warning_count = 5;
+  uint32 error_count = 6;
+  uint64 last_event_unix_ms = 7;
+
+  reserved 8 to 14;
+}
+
+message ConsoleLogRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  uint32 limit = 3;
+  BrowserDiagnosticSeverity minimum_severity = 4;
+  bool include_page_diagnostics = 5;
+  uint64 max_payload_bytes = 6;
+
+  reserved 7 to 14;
+}
+
+message ConsoleLogResponse {
+  uint32 v = 1;
+  bool success = 2;
+  repeated BrowserConsoleEntry entries = 3;
+  bool truncated = 4;
+  BrowserPageDiagnostics page_diagnostics = 5;
+  string error = 6;
+
+  reserved 7 to 14;
+}
+
+message ExportPdfRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  uint64 max_bytes = 3;
+
+  reserved 4 to 10;
+}
+
+message ExportPdfResponse {
+  uint32 v = 1;
+  bool success = 2;
+  bytes pdf_bytes = 3;
+  string mime_type = 4;
+  uint64 size_bytes = 5;
+  string sha256 = 6;
+  DownloadArtifact artifact = 7;
+  string error = 8;
+
+  reserved 9 to 14;
 }
 
 enum PermissionSetting {

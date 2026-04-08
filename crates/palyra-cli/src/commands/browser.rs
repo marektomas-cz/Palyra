@@ -106,15 +106,6 @@ struct BrowserStatusPayload {
     policy: BrowserPolicySnapshot,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct UnsupportedBrowserCapabilityPayload {
-    capability: String,
-    session_id: String,
-    supported: bool,
-    detail: String,
-    suggestions: Vec<String>,
-}
-
 struct BrowserOpenArgs {
     url: String,
     principal: Option<String>,
@@ -214,15 +205,17 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             allow_redirects,
             max_redirects,
             allow_private_targets,
-        } => run_browser_navigate(
-            session_id,
-            url,
-            timeout_ms,
-            allow_redirects,
-            max_redirects,
-            allow_private_targets,
-        )
-        .await,
+        } => {
+            run_browser_navigate(
+                session_id,
+                url,
+                timeout_ms,
+                allow_redirects,
+                max_redirects,
+                allow_private_targets,
+            )
+            .await
+        }
         BrowserCommand::Click {
             session_id,
             selector,
@@ -377,55 +370,27 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             clear_storage,
             reset_tabs,
             reset_permissions,
-        } => run_browser_reset_state(
-            session_id,
-            clear_cookies,
-            clear_storage,
-            reset_tabs,
-            reset_permissions,
-        )
-        .await,
-        BrowserCommand::Console { session_id, output } => emit_unsupported_browser_capability(
-            "console",
-            session_id.as_str(),
-            "Console log export is not available in the current browser backend.",
-            &["browser trace", "browser errors", "browser snapshot"],
-            output.as_deref(),
-        ),
-        BrowserCommand::Pdf { session_id, output } => emit_unsupported_browser_capability(
-            "pdf",
-            session_id.as_str(),
-            "PDF export is not available in the current browser backend.",
-            &["browser screenshot", "browser snapshot", "browser trace"],
-            output.as_deref(),
-        ),
-        BrowserCommand::Press { session_id, key } => emit_unsupported_browser_capability(
-            "press",
-            session_id.as_str(),
-            format!("Key press '{key}' is not available as a dedicated browser primitive.").as_str(),
-            &["browser type", "browser fill"],
-            None,
-        ),
-        BrowserCommand::Select { session_id, selector, value } => emit_unsupported_browser_capability(
-            "select",
-            session_id.as_str(),
-            format!(
-                "Select mutation for selector '{selector}' and value '{value}' is not available as a dedicated browser primitive."
+        } => {
+            run_browser_reset_state(
+                session_id,
+                clear_cookies,
+                clear_storage,
+                reset_tabs,
+                reset_permissions,
             )
-            .as_str(),
-            &["browser fill", "browser type"],
-            None,
-        ),
-        BrowserCommand::Highlight { session_id, selector } => emit_unsupported_browser_capability(
-            "highlight",
-            session_id.as_str(),
-            format!(
-                "Highlight for selector '{selector}' is not available in the current browser backend."
-            )
-            .as_str(),
-            &["browser snapshot", "browser screenshot"],
-            None,
-        ),
+            .await
+        }
+        BrowserCommand::Console { session_id, output } => {
+            run_browser_console(session_id, output).await
+        }
+        BrowserCommand::Pdf { session_id, output } => run_browser_pdf(session_id, output).await,
+        BrowserCommand::Press { session_id, key } => run_browser_press(session_id, key).await,
+        BrowserCommand::Select { session_id, selector, value } => {
+            run_browser_select(session_id, selector, value).await
+        }
+        BrowserCommand::Highlight { session_id, selector } => {
+            run_browser_highlight(session_id, selector).await
+        }
     }
 }
 
@@ -828,6 +793,10 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                     max_network_log_bytes: max_network_log_bytes.unwrap_or_default(),
                     max_dom_snapshot_bytes: max_dom_snapshot_bytes.unwrap_or_default(),
                     max_visible_text_bytes: max_visible_text_bytes.unwrap_or_default(),
+                    include_console_log: false,
+                    include_page_diagnostics: false,
+                    max_console_log_entries: 0,
+                    max_console_log_bytes: 0,
                 },
             )
             .await?;
@@ -1599,6 +1568,10 @@ async fn run_browser_storage(
             max_network_log_bytes: 0,
             max_dom_snapshot_bytes: 0,
             max_visible_text_bytes: 0,
+            include_console_log: false,
+            include_page_diagnostics: false,
+            max_console_log_entries: 0,
+            max_console_log_bytes: 0,
         },
     )
     .await?;
@@ -1642,6 +1615,10 @@ async fn run_browser_errors(
             max_network_log_bytes: 0,
             max_dom_snapshot_bytes: 0,
             max_visible_text_bytes: 0,
+            include_console_log: true,
+            include_page_diagnostics: true,
+            max_console_log_entries: limit.unwrap_or_default(),
+            max_console_log_bytes: 0,
         },
     )
     .await?;
@@ -1698,6 +1675,10 @@ async fn run_browser_trace(
             max_network_log_bytes: 0,
             max_dom_snapshot_bytes: 0,
             max_visible_text_bytes: 0,
+            include_console_log: true,
+            include_page_diagnostics: true,
+            max_console_log_entries: 0,
+            max_console_log_bytes: 0,
         },
     )
     .await?;
@@ -1715,6 +1696,219 @@ async fn run_browser_trace(
             value.get("network_log").and_then(Value::as_array).map_or(0, Vec::len),
         ),
         "failed to encode browser trace output",
+    )
+}
+
+async fn run_browser_console(session_id: String, output: Option<String>) -> Result<()> {
+    let resolved = resolve_browser_config(None, None, None)?;
+    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let mut client = connect_browser_service(&resolved.connection).await?;
+    let response = client
+        .console_log(browser_request(
+            browser_v1::ConsoleLogRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(resolve_required_canonical_id(session_id.clone())?),
+                limit: 50,
+                minimum_severity: browser_v1::BrowserDiagnosticSeverity::Info as i32,
+                include_page_diagnostics: true,
+                max_payload_bytes: 0,
+            },
+            resolved.connection.auth_token.as_deref(),
+            caller_principal.as_str(),
+        )?)
+        .await
+        .context("failed to fetch browser console log")?
+        .into_inner();
+    if !response.success {
+        anyhow::bail!("browser console lookup failed: {}", empty_as_dash(response.error.as_str()));
+    }
+    let mut value = json!({
+        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "entries": response.entries.iter().map(console_entry_value).collect::<Vec<_>>(),
+        "truncated": response.truncated,
+        "page_diagnostics": response.page_diagnostics.as_ref().map(page_diagnostics_value).unwrap_or(Value::Null),
+    });
+    let written =
+        write_optional_json_output(output.as_deref(), session_id.as_str(), "console", &value)?;
+    maybe_attach_output_path(&mut value, written.as_ref());
+    emit_browser_value(
+        &value,
+        format!(
+            "browser.console session_id={} entries={} truncated={} output={}",
+            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            value.get("entries").and_then(Value::as_array).map_or(0, Vec::len),
+            value.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+            written.as_deref().unwrap_or("-"),
+        ),
+        "failed to encode browser console output",
+    )
+}
+
+async fn run_browser_pdf(session_id: String, output: Option<String>) -> Result<()> {
+    let resolved = resolve_browser_config(None, None, None)?;
+    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let mut client = connect_browser_service(&resolved.connection).await?;
+    let response = client
+        .export_pdf(browser_request(
+            browser_v1::ExportPdfRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(resolve_required_canonical_id(session_id.clone())?),
+                max_bytes: 0,
+            },
+            resolved.connection.auth_token.as_deref(),
+            caller_principal.as_str(),
+        )?)
+        .await
+        .context("failed to export browser session PDF")?
+        .into_inner();
+    if !response.success {
+        anyhow::bail!("browser pdf export failed: {}", empty_as_dash(response.error.as_str()));
+    }
+    let output_path = write_optional_binary_output(
+        output.as_deref(),
+        session_id.as_str(),
+        "session",
+        "pdf",
+        Some(response.pdf_bytes.as_slice()),
+    )?;
+    let mut value = json!({
+        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "success": response.success,
+        "mime_type": response.mime_type,
+        "size_bytes": response.size_bytes,
+        "sha256": response.sha256,
+        "artifact": response.artifact.as_ref().map(download_artifact_proto_value).unwrap_or(Value::Null),
+    });
+    maybe_attach_output_path(&mut value, output_path.as_ref());
+    emit_browser_value(
+        &value,
+        format!(
+            "browser.pdf session_id={} size_bytes={} output={}",
+            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            value.get("size_bytes").and_then(Value::as_u64).unwrap_or(0),
+            output_path.as_deref().unwrap_or("-"),
+        ),
+        "failed to encode browser pdf output",
+    )
+}
+
+async fn run_browser_press(session_id: String, key: String) -> Result<()> {
+    let resolved = resolve_browser_config(None, None, None)?;
+    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let mut client = connect_browser_service(&resolved.connection).await?;
+    let response = client
+        .press(browser_request(
+            browser_v1::PressRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(resolve_required_canonical_id(session_id.clone())?),
+                key: key.clone(),
+                timeout_ms: 0,
+                capture_failure_screenshot: false,
+                max_failure_screenshot_bytes: 0,
+            },
+            resolved.connection.auth_token.as_deref(),
+            caller_principal.as_str(),
+        )?)
+        .await
+        .context("failed to press browser key")?
+        .into_inner();
+    let value = json!({
+        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "success": response.success,
+        "key": response.key,
+        "error": response.error,
+        "action_log": response.action_log.as_ref().map(action_log_entry_value).unwrap_or(Value::Null),
+    });
+    emit_browser_value(
+        &value,
+        format!(
+            "browser.press session_id={} success={} key={}",
+            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            value.get("success").and_then(Value::as_bool).unwrap_or(false),
+            key,
+        ),
+        "failed to encode browser press output",
+    )
+}
+
+async fn run_browser_select(session_id: String, selector: String, value: String) -> Result<()> {
+    let resolved = resolve_browser_config(None, None, None)?;
+    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let mut client = connect_browser_service(&resolved.connection).await?;
+    let response = client
+        .select(browser_request(
+            browser_v1::SelectRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(resolve_required_canonical_id(session_id.clone())?),
+                selector: selector.clone(),
+                value: value.clone(),
+                timeout_ms: 0,
+                capture_failure_screenshot: false,
+                max_failure_screenshot_bytes: 0,
+            },
+            resolved.connection.auth_token.as_deref(),
+            caller_principal.as_str(),
+        )?)
+        .await
+        .context("failed to select browser option")?
+        .into_inner();
+    let payload = json!({
+        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "success": response.success,
+        "selector": selector,
+        "selected_value": response.selected_value,
+        "error": response.error,
+        "action_log": response.action_log.as_ref().map(action_log_entry_value).unwrap_or(Value::Null),
+    });
+    emit_browser_value(
+        &payload,
+        format!(
+            "browser.select session_id={} success={} value={}",
+            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            payload.get("success").and_then(Value::as_bool).unwrap_or(false),
+            value,
+        ),
+        "failed to encode browser select output",
+    )
+}
+
+async fn run_browser_highlight(session_id: String, selector: String) -> Result<()> {
+    let resolved = resolve_browser_config(None, None, None)?;
+    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let mut client = connect_browser_service(&resolved.connection).await?;
+    let response = client
+        .highlight(browser_request(
+            browser_v1::HighlightRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(resolve_required_canonical_id(session_id.clone())?),
+                selector: selector.clone(),
+                timeout_ms: 0,
+                duration_ms: 1_500,
+                capture_failure_screenshot: false,
+                max_failure_screenshot_bytes: 0,
+            },
+            resolved.connection.auth_token.as_deref(),
+            caller_principal.as_str(),
+        )?)
+        .await
+        .context("failed to highlight browser selector")?
+        .into_inner();
+    let payload = json!({
+        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "success": response.success,
+        "selector": response.selector,
+        "error": response.error,
+        "action_log": response.action_log.as_ref().map(action_log_entry_value).unwrap_or(Value::Null),
+    });
+    emit_browser_value(
+        &payload,
+        format!(
+            "browser.highlight session_id={} success={} selector={}",
+            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            payload.get("success").and_then(Value::as_bool).unwrap_or(false),
+            selector,
+        ),
+        "failed to encode browser highlight output",
     )
 }
 
@@ -1876,37 +2070,6 @@ async fn run_browser_reset_state(
     )
 }
 
-fn emit_unsupported_browser_capability(
-    capability: &str,
-    session_id: &str,
-    detail: &str,
-    suggestions: &[&str],
-    output: Option<&str>,
-) -> Result<()> {
-    let payload = UnsupportedBrowserCapabilityPayload {
-        capability: capability.to_owned(),
-        session_id: session_id.to_owned(),
-        supported: false,
-        detail: detail.to_owned(),
-        suggestions: suggestions.iter().map(|value| (*value).to_owned()).collect(),
-    };
-    let mut value = serde_json::to_value(&payload)
-        .context("failed to encode unsupported browser capability")?;
-    let written = write_optional_json_output(output, session_id, capability, &value)?;
-    maybe_attach_output_path(&mut value, written.as_ref());
-    emit_browser_value(
-        &value,
-        format!(
-            "browser.{} supported=false session_id={} detail={} output={}",
-            capability,
-            redacted_browser_identifier_text(Some(session_id), "session"),
-            detail,
-            written.as_deref().unwrap_or("-"),
-        ),
-        "failed to encode unsupported browser capability output",
-    )
-}
-
 async fn connect_browser_service(
     connection: &BrowserServiceConnection,
 ) -> Result<browser_v1::browser_service_client::BrowserServiceClient<tonic::transport::Channel>> {
@@ -2047,6 +2210,7 @@ async fn inspect_browser_session(
         "storage": response.storage.iter().map(storage_origin_value).collect::<Vec<_>>(),
         "action_log": response.action_log.iter().map(action_log_entry_value).collect::<Vec<_>>(),
         "network_log": response.network_log.iter().map(network_log_entry_value).collect::<Vec<_>>(),
+        "console_log": response.console_log.iter().map(console_entry_value).collect::<Vec<_>>(),
         "dom_snapshot": response.dom_snapshot,
         "visible_text": response.visible_text,
         "page_url": response.page_url,
@@ -2054,8 +2218,10 @@ async fn inspect_browser_session(
         "storage_truncated": response.storage_truncated,
         "action_log_truncated": response.action_log_truncated,
         "network_log_truncated": response.network_log_truncated,
+        "console_log_truncated": response.console_log_truncated,
         "dom_truncated": response.dom_truncated,
         "visible_text_truncated": response.visible_text_truncated,
+        "page_diagnostics": response.page_diagnostics.as_ref().map(page_diagnostics_value).unwrap_or(Value::Null),
         "error": response.error,
         "session_id": redacted_browser_identifier_json_value(Some(session_id), "session"),
     }))
@@ -2831,4 +2997,58 @@ fn network_log_entry_value(entry: &browser_v1::NetworkLogEntry) -> Value {
             .map(|header| json!({"name": header.name, "value": header.value}))
             .collect::<Vec<_>>(),
     })
+}
+
+fn console_entry_value(entry: &browser_v1::BrowserConsoleEntry) -> Value {
+    json!({
+        "severity": proto_console_severity_text(entry.severity),
+        "kind": entry.kind,
+        "message": entry.message,
+        "captured_at_unix_ms": entry.captured_at_unix_ms,
+        "source": entry.source,
+        "stack_trace": entry.stack_trace,
+        "page_url": entry.page_url,
+    })
+}
+
+fn page_diagnostics_value(value: &browser_v1::BrowserPageDiagnostics) -> Value {
+    json!({
+        "page_url": value.page_url,
+        "page_title": value.page_title,
+        "console_entry_count": value.console_entry_count,
+        "warning_count": value.warning_count,
+        "error_count": value.error_count,
+        "last_event_unix_ms": value.last_event_unix_ms,
+    })
+}
+
+fn download_artifact_proto_value(value: &browser_v1::DownloadArtifact) -> Value {
+    json!({
+        "artifact_id": value.artifact_id.as_ref().map(|entry| entry.ulid.clone()),
+        "session_id": value
+            .session_id
+            .as_ref()
+            .map(|entry| redacted_browser_identifier_json_value(Some(entry.ulid.as_str()), "session"))
+            .unwrap_or(Value::Null),
+        "profile_id": value.profile_id.as_ref().map(|entry| entry.ulid.clone()),
+        "source_url": value.source_url,
+        "file_name": value.file_name,
+        "mime_type": value.mime_type,
+        "size_bytes": value.size_bytes,
+        "sha256": value.sha256,
+        "created_at_unix_ms": value.created_at_unix_ms,
+        "quarantined": value.quarantined,
+        "quarantine_reason": value.quarantine_reason,
+    })
+}
+
+fn proto_console_severity_text(value: i32) -> &'static str {
+    match browser_v1::BrowserDiagnosticSeverity::try_from(value)
+        .unwrap_or(browser_v1::BrowserDiagnosticSeverity::Unspecified)
+    {
+        browser_v1::BrowserDiagnosticSeverity::Debug => "debug",
+        browser_v1::BrowserDiagnosticSeverity::Warn => "warn",
+        browser_v1::BrowserDiagnosticSeverity::Error => "error",
+        _ => "info",
+    }
 }

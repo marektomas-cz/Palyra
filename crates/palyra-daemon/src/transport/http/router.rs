@@ -831,7 +831,16 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route(
             "/console/v1/browser/sessions",
-            post(console::browser::console_browser_session_create_handler),
+            get(console::browser::console_browser_sessions_list_handler)
+                .post(console::browser::console_browser_session_create_handler),
+        )
+        .route(
+            "/console/v1/browser/sessions/{session_id}",
+            get(console::browser::console_browser_session_show_handler),
+        )
+        .route(
+            "/console/v1/browser/sessions/{session_id}/inspect",
+            get(console::browser::console_browser_session_inspect_handler),
         )
         .route(
             "/console/v1/browser/sessions/{session_id}/close",
@@ -850,6 +859,18 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(console::browser::console_browser_type_handler),
         )
         .route(
+            "/console/v1/browser/sessions/{session_id}/press",
+            post(console::browser::console_browser_press_handler),
+        )
+        .route(
+            "/console/v1/browser/sessions/{session_id}/select",
+            post(console::browser::console_browser_select_handler),
+        )
+        .route(
+            "/console/v1/browser/sessions/{session_id}/highlight",
+            post(console::browser::console_browser_highlight_handler),
+        )
+        .route(
             "/console/v1/browser/sessions/{session_id}/scroll",
             post(console::browser::console_browser_scroll_handler),
         )
@@ -866,12 +887,20 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(console::browser::console_browser_screenshot_handler),
         )
         .route(
+            "/console/v1/browser/sessions/{session_id}/pdf",
+            get(console::browser::console_browser_pdf_handler),
+        )
+        .route(
             "/console/v1/browser/sessions/{session_id}/observe",
             get(console::browser::console_browser_observe_handler),
         )
         .route(
             "/console/v1/browser/sessions/{session_id}/network-log",
             get(console::browser::console_browser_network_log_handler),
+        )
+        .route(
+            "/console/v1/browser/sessions/{session_id}/console",
+            get(console::browser::console_browser_console_log_handler),
         )
         .route(
             "/console/v1/browser/sessions/{session_id}/reset-state",

@@ -1037,6 +1037,42 @@ struct ConsoleBrowserTypeRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConsoleBrowserPressRequest {
+    key: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    capture_failure_screenshot: Option<bool>,
+    #[serde(default)]
+    max_failure_screenshot_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleBrowserSelectRequest {
+    selector: String,
+    value: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    capture_failure_screenshot: Option<bool>,
+    #[serde(default)]
+    max_failure_screenshot_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleBrowserHighlightRequest {
+    selector: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    capture_failure_screenshot: Option<bool>,
+    #[serde(default)]
+    max_failure_screenshot_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ConsoleBrowserScrollRequest {
     #[serde(default)]
     delta_x: Option<i64>,
@@ -1076,6 +1112,18 @@ struct ConsoleBrowserScreenshotQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConsoleBrowserPdfQuery {
+    max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleBrowserSessionsQuery {
+    #[serde(default)]
+    principal: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ConsoleBrowserObserveQuery {
     include_dom_snapshot: Option<bool>,
     include_accessibility_tree: Option<bool>,
@@ -1090,6 +1138,41 @@ struct ConsoleBrowserNetworkLogQuery {
     limit: Option<u32>,
     include_headers: Option<bool>,
     max_payload_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleBrowserConsoleLogQuery {
+    limit: Option<u32>,
+    minimum_severity: Option<control_plane::BrowserDiagnosticSeverity>,
+    include_page_diagnostics: Option<bool>,
+    max_payload_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleBrowserInspectSessionQuery {
+    #[serde(default)]
+    include_cookies: Option<bool>,
+    #[serde(default)]
+    include_storage: Option<bool>,
+    #[serde(default)]
+    include_action_log: Option<bool>,
+    #[serde(default)]
+    include_network_log: Option<bool>,
+    #[serde(default)]
+    include_page_snapshot: Option<bool>,
+    #[serde(default)]
+    include_console_log: Option<bool>,
+    #[serde(default)]
+    include_page_diagnostics: Option<bool>,
+    max_cookie_bytes: Option<u64>,
+    max_storage_bytes: Option<u64>,
+    max_action_log_entries: Option<u32>,
+    max_network_log_entries: Option<u32>,
+    max_network_log_bytes: Option<u64>,
+    max_dom_snapshot_bytes: Option<u64>,
+    max_visible_text_bytes: Option<u64>,
+    max_console_log_entries: Option<u32>,
+    max_console_log_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

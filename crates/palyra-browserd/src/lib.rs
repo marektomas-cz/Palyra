@@ -97,18 +97,24 @@ const DEFAULT_MAX_OBSERVE_SNAPSHOT_BYTES: u64 = 64 * 1024;
 const DEFAULT_MAX_VISIBLE_TEXT_BYTES: u64 = 16 * 1024;
 const DEFAULT_MAX_NETWORK_LOG_ENTRIES: usize = 256;
 const DEFAULT_MAX_NETWORK_LOG_BYTES: u64 = 64 * 1024;
+const DEFAULT_MAX_CONSOLE_LOG_ENTRIES: usize = 256;
+const DEFAULT_MAX_CONSOLE_LOG_BYTES: u64 = 32 * 1024;
 const DEFAULT_MAX_INSPECT_COOKIE_BYTES: u64 = 8 * 1024;
 const DEFAULT_MAX_INSPECT_STORAGE_BYTES: u64 = 16 * 1024;
 const DEFAULT_MAX_TABS_PER_SESSION: usize = 32;
 const MAX_NETWORK_LOG_HEADER_COUNT: usize = 24;
 const MAX_NETWORK_LOG_HEADER_VALUE_BYTES: usize = 256;
 const MAX_NETWORK_LOG_URL_BYTES: usize = 2 * 1024;
+const MAX_CONSOLE_MESSAGE_BYTES: usize = 1_024;
+const MAX_CONSOLE_SOURCE_BYTES: usize = 256;
+const MAX_CONSOLE_STACK_BYTES: usize = 1_024;
 const MAX_INSPECT_COOKIE_VALUE_BYTES: usize = 512;
 const MAX_INSPECT_STORAGE_VALUE_BYTES: usize = 1_024;
 const MAX_INSPECT_ACTION_NAME_BYTES: usize = 64;
 const MAX_INSPECT_ACTION_SELECTOR_BYTES: usize = 256;
 const MAX_INSPECT_ACTION_OUTCOME_BYTES: usize = 256;
 const MAX_INSPECT_ACTION_ERROR_BYTES: usize = 512;
+const MAX_INSPECT_CONSOLE_KIND_BYTES: usize = 64;
 const DEFAULT_ACTION_RETRY_INTERVAL_MS: u64 = 100;
 const CLEANUP_INTERVAL_MS: u64 = 15_000;
 const AUTHORIZATION_HEADER: &str = "authorization";
@@ -419,6 +425,47 @@ struct NetworkLogEntryInternal {
     headers: Vec<NetworkLogHeaderInternal>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+enum BrowserDiagnosticSeverityInternal {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl BrowserDiagnosticSeverityInternal {
+    fn to_proto(self) -> i32 {
+        match self {
+            Self::Debug => browser_v1::BrowserDiagnosticSeverity::Debug as i32,
+            Self::Info => browser_v1::BrowserDiagnosticSeverity::Info as i32,
+            Self::Warn => browser_v1::BrowserDiagnosticSeverity::Warn as i32,
+            Self::Error => browser_v1::BrowserDiagnosticSeverity::Error as i32,
+        }
+    }
+
+    fn from_proto(value: i32) -> Self {
+        match browser_v1::BrowserDiagnosticSeverity::try_from(value)
+            .unwrap_or(browser_v1::BrowserDiagnosticSeverity::Unspecified)
+        {
+            browser_v1::BrowserDiagnosticSeverity::Debug => Self::Debug,
+            browser_v1::BrowserDiagnosticSeverity::Warn => Self::Warn,
+            browser_v1::BrowserDiagnosticSeverity::Error => Self::Error,
+            _ => Self::Info,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrowserConsoleEntryInternal {
+    severity: BrowserDiagnosticSeverityInternal,
+    kind: String,
+    message: String,
+    captured_at_unix_ms: u64,
+    source: String,
+    stack_trace: String,
+    page_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BrowserTabRecord {
     tab_id: String,
@@ -429,6 +476,8 @@ struct BrowserTabRecord {
     scroll_y: i64,
     typed_inputs: HashMap<String, String>,
     network_log: VecDeque<NetworkLogEntryInternal>,
+    #[serde(default)]
+    console_log: VecDeque<BrowserConsoleEntryInternal>,
 }
 
 impl BrowserTabRecord {
@@ -442,6 +491,7 @@ impl BrowserTabRecord {
             scroll_y: 0,
             typed_inputs: HashMap::new(),
             network_log: VecDeque::new(),
+            console_log: VecDeque::new(),
         }
     }
 }
@@ -589,6 +639,11 @@ impl BrowserSessionRecord {
                     tab.network_log,
                     self.budget.max_network_log_entries,
                     self.budget.max_network_log_bytes,
+                );
+                tab.console_log = clamp_console_log_entries(
+                    tab.console_log,
+                    DEFAULT_MAX_CONSOLE_LOG_ENTRIES,
+                    DEFAULT_MAX_CONSOLE_LOG_BYTES,
                 );
                 tabs.insert(tab.tab_id.clone(), tab);
             }
@@ -813,6 +868,75 @@ fn estimate_network_log_entry_internal_bytes(entry: &NetworkLogEntryInternal) ->
     entry.request_url.len() + entry.timing_bucket.len() + headers_bytes + 64
 }
 
+fn clamp_console_log_entries<I>(
+    entries: I,
+    max_entries: usize,
+    max_bytes: u64,
+) -> VecDeque<BrowserConsoleEntryInternal>
+where
+    I: IntoIterator<Item = BrowserConsoleEntryInternal>,
+{
+    let mut console_log = VecDeque::new();
+    let mut total_bytes = 0usize;
+    for entry in entries.into_iter().take(max_entries) {
+        total_bytes = total_bytes.saturating_add(estimate_console_entry_internal_bytes(&entry));
+        console_log.push_back(entry);
+    }
+    trim_console_log_to_budget(&mut console_log, &mut total_bytes, max_entries, max_bytes as usize);
+    console_log
+}
+
+fn trim_console_log_to_budget(
+    console_log: &mut VecDeque<BrowserConsoleEntryInternal>,
+    total_bytes: &mut usize,
+    max_entries: usize,
+    max_bytes: usize,
+) {
+    while console_log.len() > max_entries {
+        if let Some(entry) = console_log.pop_front() {
+            *total_bytes =
+                total_bytes.saturating_sub(estimate_console_entry_internal_bytes(&entry));
+        } else {
+            break;
+        }
+    }
+    while *total_bytes > max_bytes {
+        if let Some(entry) = console_log.pop_front() {
+            *total_bytes =
+                total_bytes.saturating_sub(estimate_console_entry_internal_bytes(&entry));
+        } else {
+            break;
+        }
+    }
+}
+
+fn estimate_console_entry_internal_bytes(entry: &BrowserConsoleEntryInternal) -> usize {
+    entry.kind.len()
+        + entry.message.len()
+        + entry.source.len()
+        + entry.stack_trace.len()
+        + entry.page_url.len()
+        + 64
+}
+
+fn append_console_log_entry(
+    tab: &mut BrowserTabRecord,
+    entry: BrowserConsoleEntryInternal,
+    max_entries: usize,
+    max_bytes: u64,
+) {
+    let mut total_bytes =
+        tab.console_log.iter().map(estimate_console_entry_internal_bytes).sum::<usize>();
+    total_bytes = total_bytes.saturating_add(estimate_console_entry_internal_bytes(&entry));
+    tab.console_log.push_back(entry);
+    trim_console_log_to_budget(
+        &mut tab.console_log,
+        &mut total_bytes,
+        max_entries,
+        max_bytes as usize,
+    );
+}
+
 fn network_log_entry_to_proto(
     entry: NetworkLogEntryInternal,
     include_headers: bool,
@@ -864,6 +988,46 @@ fn truncate_network_log_payload(
     let mut truncated = false;
     while !entries.is_empty()
         && estimate_network_log_payload_bytes(entries.as_slice()) > max_payload_bytes
+    {
+        entries.remove(0);
+        truncated = true;
+    }
+    truncated
+}
+
+fn console_entry_to_proto(entry: &BrowserConsoleEntryInternal) -> browser_v1::BrowserConsoleEntry {
+    browser_v1::BrowserConsoleEntry {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        severity: entry.severity.to_proto(),
+        kind: truncate_utf8_bytes(entry.kind.as_str(), MAX_INSPECT_CONSOLE_KIND_BYTES),
+        message: sanitize_debug_text(entry.message.as_str(), MAX_CONSOLE_MESSAGE_BYTES),
+        captured_at_unix_ms: entry.captured_at_unix_ms,
+        source: sanitize_debug_text(entry.source.as_str(), MAX_CONSOLE_SOURCE_BYTES),
+        stack_trace: sanitize_debug_text(entry.stack_trace.as_str(), MAX_CONSOLE_STACK_BYTES),
+        page_url: normalize_url_with_redaction(entry.page_url.as_str()),
+    }
+}
+
+fn estimate_console_log_payload_bytes(entries: &[browser_v1::BrowserConsoleEntry]) -> usize {
+    entries.iter().map(estimate_console_log_proto_entry_bytes).sum::<usize>() + 2
+}
+
+fn estimate_console_log_proto_entry_bytes(entry: &browser_v1::BrowserConsoleEntry) -> usize {
+    entry.kind.len()
+        + entry.message.len()
+        + entry.source.len()
+        + entry.stack_trace.len()
+        + entry.page_url.len()
+        + 64
+}
+
+fn truncate_console_log_payload(
+    entries: &mut Vec<browser_v1::BrowserConsoleEntry>,
+    max_payload_bytes: usize,
+) -> bool {
+    let mut truncated = false;
+    while !entries.is_empty()
+        && estimate_console_log_payload_bytes(entries.as_slice()) > max_payload_bytes
     {
         entries.remove(0);
         truncated = true;
@@ -1779,6 +1943,30 @@ fn action_log_entry_to_proto(
     }
 }
 
+fn page_diagnostics_to_proto(tab: &BrowserTabRecord) -> browser_v1::BrowserPageDiagnostics {
+    let warning_count = tab
+        .console_log
+        .iter()
+        .filter(|entry| entry.severity == BrowserDiagnosticSeverityInternal::Warn)
+        .count();
+    let error_count = tab
+        .console_log
+        .iter()
+        .filter(|entry| entry.severity == BrowserDiagnosticSeverityInternal::Error)
+        .count();
+    let last_event_unix_ms =
+        tab.console_log.iter().map(|entry| entry.captured_at_unix_ms).max().unwrap_or(0);
+    browser_v1::BrowserPageDiagnostics {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        page_url: normalize_url_with_redaction(tab.last_url.as_deref().unwrap_or_default()),
+        page_title: truncate_utf8_bytes(tab.last_title.as_str(), MAX_CONSOLE_SOURCE_BYTES),
+        console_entry_count: u32::try_from(tab.console_log.len()).unwrap_or(u32::MAX),
+        warning_count: u32::try_from(warning_count).unwrap_or(u32::MAX),
+        error_count: u32::try_from(error_count).unwrap_or(u32::MAX),
+        last_event_unix_ms,
+    }
+}
+
 fn cookie_jar_to_proto(
     cookie_jar: &HashMap<String, HashMap<String, String>>,
 ) -> Vec<browser_v1::SessionCookieDomain> {
@@ -2104,6 +2292,34 @@ async fn finalize_session_action(
     session.action_log.push_back(entry.clone());
     while session.action_log.len() > session.budget.max_action_log_entries {
         session.action_log.pop_front();
+    }
+    if !request.success {
+        let page_url =
+            session.active_tab().and_then(|tab| tab.last_url.clone()).unwrap_or_default();
+        if let Some(tab) = session.active_tab_mut() {
+            append_console_log_entry(
+                tab,
+                BrowserConsoleEntryInternal {
+                    severity: BrowserDiagnosticSeverityInternal::Error,
+                    kind: "browser_action_failure".to_owned(),
+                    message: format!(
+                        "{} failed: {}",
+                        request.action_name,
+                        if request.error.trim().is_empty() {
+                            request.outcome
+                        } else {
+                            request.error
+                        }
+                    ),
+                    captured_at_unix_ms: current_unix_ms(),
+                    source: format!("browser.action.{}", request.action_name),
+                    stack_trace: String::new(),
+                    page_url,
+                },
+                DEFAULT_MAX_CONSOLE_LOG_ENTRIES,
+                DEFAULT_MAX_CONSOLE_LOG_BYTES,
+            );
+        }
     }
     let (failure_screenshot_bytes, failure_screenshot_mime_type) =
         if !request.success && request.capture_failure_screenshot {

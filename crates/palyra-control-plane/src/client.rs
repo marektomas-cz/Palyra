@@ -238,6 +238,48 @@ impl ControlPlaneClient {
         .await
     }
 
+    pub async fn press_browser_session(
+        &self,
+        session_id: &str,
+        request: &BrowserPressRequest,
+    ) -> Result<BrowserPressEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/browser/sessions/{}/press", urlencoding(session_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
+    pub async fn select_browser_session(
+        &self,
+        session_id: &str,
+        request: &BrowserSelectRequest,
+    ) -> Result<BrowserSelectEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/browser/sessions/{}/select", urlencoding(session_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
+    pub async fn highlight_browser_session(
+        &self,
+        session_id: &str,
+        request: &BrowserHighlightRequest,
+    ) -> Result<BrowserHighlightEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/browser/sessions/{}/highlight", urlencoding(session_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
     pub async fn scroll_browser_session(
         &self,
         session_id: &str,
@@ -304,6 +346,23 @@ impl ControlPlaneClient {
         .await
     }
 
+    pub async fn get_browser_pdf(
+        &self,
+        session_id: &str,
+        query: &BrowserPdfQuery,
+    ) -> Result<BrowserPdfEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            build_query_path(
+                format!("console/v1/browser/sessions/{}/pdf", urlencoding(session_id)).as_str(),
+                vec![("max_bytes", query.max_bytes.map(|value| value.to_string()))],
+            ),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
     pub async fn observe_browser_session(
         &self,
         session_id: &str,
@@ -359,6 +418,39 @@ impl ControlPlaneClient {
                 vec![
                     ("limit", query.limit.map(|value| value.to_string())),
                     ("include_headers", query.include_headers.map(|value| value.to_string())),
+                    ("max_payload_bytes", query.max_payload_bytes.map(|value| value.to_string())),
+                ],
+            ),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn get_browser_console_log(
+        &self,
+        session_id: &str,
+        query: &BrowserConsoleLogQuery,
+    ) -> Result<BrowserConsoleLogEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            build_query_path(
+                format!("console/v1/browser/sessions/{}/console", urlencoding(session_id)).as_str(),
+                vec![
+                    ("limit", query.limit.map(|value| value.to_string())),
+                    (
+                        "minimum_severity",
+                        query.minimum_severity.map(|value| {
+                            serde_json::to_string(&value)
+                                .unwrap_or_default()
+                                .trim_matches('"')
+                                .to_owned()
+                        }),
+                    ),
+                    (
+                        "include_page_diagnostics",
+                        query.include_page_diagnostics.map(|value| value.to_string()),
+                    ),
                     ("max_payload_bytes", query.max_payload_bytes.map(|value| value.to_string())),
                 ],
             ),

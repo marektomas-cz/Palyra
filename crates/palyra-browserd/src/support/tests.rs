@@ -4022,6 +4022,8 @@ async fn browser_service_session_diagnostics_require_matching_principal() {
         include_action_log: false,
         include_network_log: false,
         include_page_snapshot: false,
+        include_console_log: false,
+        include_page_diagnostics: false,
         max_cookie_bytes: 0,
         max_storage_bytes: 0,
         max_action_log_entries: 0,
@@ -4029,6 +4031,8 @@ async fn browser_service_session_diagnostics_require_matching_principal() {
         max_network_log_bytes: 0,
         max_dom_snapshot_bytes: 0,
         max_visible_text_bytes: 0,
+        max_console_log_entries: 0,
+        max_console_log_bytes: 0,
     });
     insert_principal(&mut mismatched_inspect, "user:beta");
     let mismatched_inspect_status = service
@@ -4106,6 +4110,8 @@ async fn browser_service_inspect_session_redacts_debug_state() {
         include_action_log: true,
         include_network_log: true,
         include_page_snapshot: true,
+        include_console_log: true,
+        include_page_diagnostics: true,
         max_cookie_bytes: 2 * 1024,
         max_storage_bytes: 2 * 1024,
         max_action_log_entries: 10,
@@ -4113,6 +4119,8 @@ async fn browser_service_inspect_session_redacts_debug_state() {
         max_network_log_bytes: 4 * 1024,
         max_dom_snapshot_bytes: 4 * 1024,
         max_visible_text_bytes: 512,
+        max_console_log_entries: 10,
+        max_console_log_bytes: 2 * 1024,
     });
     insert_principal(&mut inspect_request, "user:ops");
     let inspected = service
@@ -4285,6 +4293,8 @@ async fn browser_service_inspect_session_truncates_deterministically() {
         include_action_log: true,
         include_network_log: true,
         include_page_snapshot: true,
+        include_console_log: true,
+        include_page_diagnostics: true,
         max_cookie_bytes: 96,
         max_storage_bytes: 128,
         max_action_log_entries: 1,
@@ -4292,6 +4302,8 @@ async fn browser_service_inspect_session_truncates_deterministically() {
         max_network_log_bytes: 128,
         max_dom_snapshot_bytes: 64,
         max_visible_text_bytes: 32,
+        max_console_log_entries: 2,
+        max_console_log_bytes: 128,
     };
     let mut first_request = Request::new(request.clone());
     insert_principal(&mut first_request, "user:ops");

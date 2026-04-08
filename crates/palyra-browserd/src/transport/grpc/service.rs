@@ -3,6 +3,8 @@ use crate::*;
 #[derive(Debug, Clone, Copy)]
 struct RelayPrivateTargetBlock;
 
+const MINIMAL_SIMULATED_PDF: &[u8] = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n";
+
 #[derive(Clone)]
 pub(crate) struct BrowserServiceImpl {
     pub(crate) runtime: Arc<BrowserRuntimeState>,
@@ -431,14 +433,20 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             && !payload.include_storage
             && !payload.include_action_log
             && !payload.include_network_log
-            && !payload.include_page_snapshot;
+            && !payload.include_page_snapshot
+            && !payload.include_console_log
+            && !payload.include_page_diagnostics;
         let include_cookies = payload.include_cookies || default_include;
         let include_storage = payload.include_storage || default_include;
         let include_action_log = payload.include_action_log || default_include;
         let include_network_log = payload.include_network_log || default_include;
         let include_page_snapshot = payload.include_page_snapshot || default_include;
+        let include_console_log = payload.include_console_log || default_include;
+        let include_page_diagnostics = payload.include_page_diagnostics || default_include;
 
-        if include_page_snapshot && self.runtime.engine_mode == BrowserEngineMode::Chromium {
+        if (include_page_snapshot || include_console_log || include_page_diagnostics)
+            && self.runtime.engine_mode == BrowserEngineMode::Chromium
+        {
             let active_tab_id = {
                 let sessions = self.runtime.sessions.lock().await;
                 let Some(session) = sessions.get(session_id.as_str()) else {
@@ -459,6 +467,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                         network_log_truncated: false,
                         dom_truncated: false,
                         visible_text_truncated: false,
+                        console_log: Vec::new(),
+                        console_log_truncated: false,
+                        page_diagnostics: None,
                         error: "session_not_found".to_owned(),
                     }));
                 };
@@ -467,22 +478,12 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 }
                 session.active_tab_id.clone()
             };
-            if let Ok(snapshot) = chromium_observe_snapshot(
+            let _ = chromium_refresh_tab_snapshot(
                 self.runtime.as_ref(),
                 session_id.as_str(),
                 active_tab_id.as_str(),
             )
-            .await
-            {
-                let mut sessions = self.runtime.sessions.lock().await;
-                if let Some(session) = sessions.get_mut(session_id.as_str()) {
-                    if let Some(tab) = session.tabs.get_mut(active_tab_id.as_str()) {
-                        tab.last_page_body = snapshot.page_body;
-                        tab.last_title = snapshot.title;
-                        tab.last_url = Some(snapshot.page_url);
-                    }
-                }
-            }
+            .await;
         }
 
         let session = {
@@ -505,6 +506,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                     network_log_truncated: false,
                     dom_truncated: false,
                     visible_text_truncated: false,
+                    console_log: Vec::new(),
+                    console_log_truncated: false,
+                    page_diagnostics: None,
                     error: "session_not_found".to_owned(),
                 }));
             };
@@ -532,6 +536,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 network_log_truncated: false,
                 dom_truncated: false,
                 visible_text_truncated: false,
+                console_log: Vec::new(),
+                console_log_truncated: false,
+                page_diagnostics: None,
                 error: "active_tab_not_found".to_owned(),
             }));
         };
@@ -568,6 +575,20 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             session.budget.max_network_log_bytes
         } else {
             payload.max_network_log_bytes.min(session.budget.max_network_log_bytes)
+        }
+        .max(1) as usize;
+        let max_console_log_entries = if payload.max_console_log_entries == 0 {
+            DEFAULT_MAX_CONSOLE_LOG_ENTRIES
+        } else {
+            usize::try_from(payload.max_console_log_entries)
+                .unwrap_or(usize::MAX)
+                .min(DEFAULT_MAX_CONSOLE_LOG_ENTRIES)
+                .max(1)
+        };
+        let max_console_log_bytes = if payload.max_console_log_bytes == 0 {
+            DEFAULT_MAX_CONSOLE_LOG_BYTES
+        } else {
+            payload.max_console_log_bytes.min(DEFAULT_MAX_CONSOLE_LOG_BYTES)
         }
         .max(1) as usize;
         let max_dom_snapshot_bytes = if payload.max_dom_snapshot_bytes == 0 {
@@ -632,6 +653,20 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         } else {
             (Vec::new(), false)
         };
+        let (console_log, console_log_truncated) = if include_console_log {
+            let start = active_tab.console_log.len().saturating_sub(max_console_log_entries);
+            let mut entries = active_tab
+                .console_log
+                .iter()
+                .skip(start)
+                .map(console_entry_to_proto)
+                .collect::<Vec<_>>();
+            let truncated =
+                start > 0 || truncate_console_log_payload(&mut entries, max_console_log_bytes);
+            (entries, truncated)
+        } else {
+            (Vec::new(), false)
+        };
 
         let page_url =
             normalize_url_with_redaction(active_tab.last_url.as_deref().unwrap_or_default());
@@ -647,6 +682,11 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             } else {
                 ((String::new(), false), (String::new(), false))
             };
+        let page_diagnostics = if include_page_diagnostics {
+            Some(page_diagnostics_to_proto(active_tab))
+        } else {
+            None
+        };
 
         Ok(Response::new(browser_v1::InspectSessionResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
@@ -665,6 +705,9 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             network_log_truncated,
             dom_truncated,
             visible_text_truncated,
+            console_log,
+            console_log_truncated,
+            page_diagnostics,
             error: String::new(),
         }))
     }
@@ -1370,6 +1413,331 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         }))
     }
 
+    async fn press(
+        &self,
+        request: Request<browser_v1::PressRequest>,
+    ) -> Result<Response<browser_v1::PressResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        let key = payload.key.trim().to_owned();
+        if key.is_empty() {
+            return Err(Status::invalid_argument("press requires non-empty key"));
+        }
+
+        let context = match consume_action_budget_and_snapshot(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            true,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(Response::new(browser_v1::PressResponse {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    success: false,
+                    key,
+                    error,
+                    action_log: None,
+                    failure_screenshot_bytes: Vec::new(),
+                    failure_screenshot_mime_type: String::new(),
+                }));
+            }
+        };
+
+        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let started_at_unix_ms = current_unix_ms();
+        let (success, outcome, error, attempts) = match self.runtime.engine_mode {
+            BrowserEngineMode::Simulated => (true, "pressed".to_owned(), String::new(), 1),
+            BrowserEngineMode::Chromium => {
+                let result = press_with_chromium(
+                    self.runtime.as_ref(),
+                    session_id.as_str(),
+                    key.as_str(),
+                    timeout_ms,
+                )
+                .await;
+                (result.success, result.outcome, result.error, result.attempts)
+            }
+        };
+
+        let (action_log, failure_screenshot_bytes, failure_screenshot_mime_type) =
+            finalize_session_action(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                FinalizeActionRequest {
+                    action_name: "press",
+                    selector: "",
+                    success,
+                    outcome: outcome.as_str(),
+                    error: error.as_str(),
+                    started_at_unix_ms,
+                    attempts,
+                    capture_failure_screenshot: payload.capture_failure_screenshot,
+                    max_failure_screenshot_bytes: payload.max_failure_screenshot_bytes,
+                },
+            )
+            .await;
+        let session_for_persist = {
+            let sessions = self.runtime.sessions.lock().await;
+            sessions.get(session_id.as_str()).filter(|session| session.persistence.enabled).cloned()
+        };
+        persist_session_after_mutation(self.runtime.as_ref(), session_for_persist, "press")
+            .map_err(map_persist_error_to_status)?;
+
+        Ok(Response::new(browser_v1::PressResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success,
+            key,
+            error,
+            action_log,
+            failure_screenshot_bytes,
+            failure_screenshot_mime_type,
+        }))
+    }
+
+    async fn select(
+        &self,
+        request: Request<browser_v1::SelectRequest>,
+    ) -> Result<Response<browser_v1::SelectResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        let selector = payload.selector.trim().to_owned();
+        let value = payload.value.trim().to_owned();
+        if selector.is_empty() {
+            return Err(Status::invalid_argument("select requires non-empty selector"));
+        }
+        if value.is_empty() {
+            return Err(Status::invalid_argument("select requires non-empty value"));
+        }
+
+        let context = match consume_action_budget_and_snapshot(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            true,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(Response::new(browser_v1::SelectResponse {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    success: false,
+                    selected_value: String::new(),
+                    error,
+                    action_log: None,
+                    failure_screenshot_bytes: Vec::new(),
+                    failure_screenshot_mime_type: String::new(),
+                }));
+            }
+        };
+
+        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let started_at_unix_ms = current_unix_ms();
+        let (success, outcome, error, attempts) = match self.runtime.engine_mode {
+            BrowserEngineMode::Simulated => {
+                let tag = find_matching_html_tag(selector.as_str(), context.page_body.as_str());
+                match tag {
+                    None => (
+                        false,
+                        "selector_not_found".to_owned(),
+                        format!("selector '{selector}' was not found"),
+                        1,
+                    ),
+                    Some(tag) if !tag.to_ascii_lowercase().starts_with("<select") => (
+                        false,
+                        "selector_not_select".to_owned(),
+                        format!("selector '{selector}' does not target a <select> element"),
+                        1,
+                    ),
+                    Some(tag) if tag.to_ascii_lowercase().contains("disabled") => (
+                        false,
+                        "selector_disabled".to_owned(),
+                        format!("selector '{selector}' is disabled"),
+                        1,
+                    ),
+                    Some(_)
+                        if !context.page_body.contains(format!("value=\"{value}\"").as_str()) =>
+                    {
+                        (
+                            false,
+                            "value_not_found".to_owned(),
+                            format!("value '{value}' was not found for selector '{selector}'"),
+                            1,
+                        )
+                    }
+                    Some(_) => (true, "selected".to_owned(), String::new(), 1),
+                }
+            }
+            BrowserEngineMode::Chromium => {
+                let result = select_with_chromium(
+                    self.runtime.as_ref(),
+                    session_id.as_str(),
+                    selector.as_str(),
+                    value.as_str(),
+                    timeout_ms,
+                )
+                .await;
+                (result.success, result.outcome, result.error, result.attempts)
+            }
+        };
+
+        if success {
+            let mut sessions = self.runtime.sessions.lock().await;
+            if let Some(session) = sessions.get_mut(session_id.as_str()) {
+                let mut origin = None;
+                if let Some(tab) = session.active_tab_mut() {
+                    tab.typed_inputs.insert(selector.clone(), value.clone());
+                    origin = tab.last_url.as_deref().and_then(url_origin_key);
+                }
+                if let Some(origin_key) = origin {
+                    apply_storage_entry_update(
+                        session,
+                        origin_key.as_str(),
+                        selector.as_str(),
+                        value.as_str(),
+                        true,
+                    );
+                }
+            }
+        }
+
+        let (action_log, failure_screenshot_bytes, failure_screenshot_mime_type) =
+            finalize_session_action(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                FinalizeActionRequest {
+                    action_name: "select",
+                    selector: selector.as_str(),
+                    success,
+                    outcome: outcome.as_str(),
+                    error: error.as_str(),
+                    started_at_unix_ms,
+                    attempts,
+                    capture_failure_screenshot: payload.capture_failure_screenshot,
+                    max_failure_screenshot_bytes: payload.max_failure_screenshot_bytes,
+                },
+            )
+            .await;
+        let session_for_persist = {
+            let sessions = self.runtime.sessions.lock().await;
+            sessions.get(session_id.as_str()).filter(|session| session.persistence.enabled).cloned()
+        };
+        persist_session_after_mutation(self.runtime.as_ref(), session_for_persist, "select")
+            .map_err(map_persist_error_to_status)?;
+
+        Ok(Response::new(browser_v1::SelectResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success,
+            selected_value: if success { value } else { String::new() },
+            error,
+            action_log,
+            failure_screenshot_bytes,
+            failure_screenshot_mime_type,
+        }))
+    }
+
+    async fn highlight(
+        &self,
+        request: Request<browser_v1::HighlightRequest>,
+    ) -> Result<Response<browser_v1::HighlightResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        let selector = payload.selector.trim().to_owned();
+        if selector.is_empty() {
+            return Err(Status::invalid_argument("highlight requires non-empty selector"));
+        }
+
+        let context = match consume_action_budget_and_snapshot(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            true,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(Response::new(browser_v1::HighlightResponse {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    success: false,
+                    selector,
+                    error,
+                    action_log: None,
+                    failure_screenshot_bytes: Vec::new(),
+                    failure_screenshot_mime_type: String::new(),
+                }));
+            }
+        };
+        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let duration_ms = payload.duration_ms.max(500);
+        let started_at_unix_ms = current_unix_ms();
+        let (success, outcome, error, attempts) = match self.runtime.engine_mode {
+            BrowserEngineMode::Simulated => {
+                if find_matching_html_tag(selector.as_str(), context.page_body.as_str()).is_some() {
+                    (true, "highlighted".to_owned(), String::new(), 1)
+                } else {
+                    (
+                        false,
+                        "selector_not_found".to_owned(),
+                        format!("selector '{selector}' was not found"),
+                        1,
+                    )
+                }
+            }
+            BrowserEngineMode::Chromium => {
+                let result = highlight_with_chromium(
+                    self.runtime.as_ref(),
+                    session_id.as_str(),
+                    selector.as_str(),
+                    timeout_ms,
+                    duration_ms,
+                )
+                .await;
+                (result.success, result.outcome, result.error, result.attempts)
+            }
+        };
+
+        let (action_log, failure_screenshot_bytes, failure_screenshot_mime_type) =
+            finalize_session_action(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                FinalizeActionRequest {
+                    action_name: "highlight",
+                    selector: selector.as_str(),
+                    success,
+                    outcome: outcome.as_str(),
+                    error: error.as_str(),
+                    started_at_unix_ms,
+                    attempts,
+                    capture_failure_screenshot: payload.capture_failure_screenshot,
+                    max_failure_screenshot_bytes: payload.max_failure_screenshot_bytes,
+                },
+            )
+            .await;
+        let session_for_persist = {
+            let sessions = self.runtime.sessions.lock().await;
+            sessions.get(session_id.as_str()).filter(|session| session.persistence.enabled).cloned()
+        };
+        persist_session_after_mutation(self.runtime.as_ref(), session_for_persist, "highlight")
+            .map_err(map_persist_error_to_status)?;
+
+        Ok(Response::new(browser_v1::HighlightResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success,
+            selector,
+            error,
+            action_log,
+            failure_screenshot_bytes,
+            failure_screenshot_mime_type,
+        }))
+    }
+
     async fn scroll(
         &self,
         request: Request<browser_v1::ScrollRequest>,
@@ -1959,6 +2327,193 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             success: true,
             entries,
             truncated,
+            error: String::new(),
+        }))
+    }
+
+    async fn console_log(
+        &self,
+        request: Request<browser_v1::ConsoleLogRequest>,
+    ) -> Result<Response<browser_v1::ConsoleLogResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let caller_principal = request_principal(request.metadata())?.to_owned();
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+
+        if self.runtime.engine_mode == BrowserEngineMode::Chromium {
+            let active_tab_id = {
+                let sessions = self.runtime.sessions.lock().await;
+                let Some(session) = sessions.get(session_id.as_str()) else {
+                    return Ok(Response::new(browser_v1::ConsoleLogResponse {
+                        v: CANONICAL_PROTOCOL_MAJOR,
+                        success: false,
+                        entries: Vec::new(),
+                        truncated: false,
+                        page_diagnostics: None,
+                        error: "session_not_found".to_owned(),
+                    }));
+                };
+                if session.principal != caller_principal {
+                    return Err(Status::permission_denied("session access denied"));
+                }
+                session.active_tab_id.clone()
+            };
+            let _ = chromium_refresh_tab_snapshot(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                active_tab_id.as_str(),
+            )
+            .await;
+        }
+
+        let mut sessions = self.runtime.sessions.lock().await;
+        let Some(session) = sessions.get_mut(session_id.as_str()) else {
+            return Ok(Response::new(browser_v1::ConsoleLogResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: false,
+                entries: Vec::new(),
+                truncated: false,
+                page_diagnostics: None,
+                error: "session_not_found".to_owned(),
+            }));
+        };
+        if session.principal != caller_principal {
+            return Err(Status::permission_denied("session access denied"));
+        }
+        session.last_active = Instant::now();
+        let Some(active_tab) = session.active_tab() else {
+            return Ok(Response::new(browser_v1::ConsoleLogResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: false,
+                entries: Vec::new(),
+                truncated: false,
+                page_diagnostics: None,
+                error: "active_tab_not_found".to_owned(),
+            }));
+        };
+        let minimum_severity =
+            BrowserDiagnosticSeverityInternal::from_proto(payload.minimum_severity);
+        let limit = if payload.limit == 0 {
+            DEFAULT_MAX_CONSOLE_LOG_ENTRIES
+        } else {
+            usize::try_from(payload.limit)
+                .unwrap_or(usize::MAX)
+                .min(DEFAULT_MAX_CONSOLE_LOG_ENTRIES)
+                .max(1)
+        };
+        let max_payload_bytes = if payload.max_payload_bytes == 0 {
+            DEFAULT_MAX_CONSOLE_LOG_BYTES
+        } else {
+            payload.max_payload_bytes.min(DEFAULT_MAX_CONSOLE_LOG_BYTES)
+        }
+        .max(1) as usize;
+        let filtered = active_tab
+            .console_log
+            .iter()
+            .filter(|entry| entry.severity >= minimum_severity)
+            .cloned()
+            .collect::<Vec<_>>();
+        let start = filtered.len().saturating_sub(limit);
+        let mut entries = filtered
+            .into_iter()
+            .skip(start)
+            .map(|entry| console_entry_to_proto(&entry))
+            .collect::<Vec<_>>();
+        let truncated = start > 0 || truncate_console_log_payload(&mut entries, max_payload_bytes);
+
+        Ok(Response::new(browser_v1::ConsoleLogResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success: true,
+            entries,
+            truncated,
+            page_diagnostics: if payload.include_page_diagnostics {
+                Some(page_diagnostics_to_proto(active_tab))
+            } else {
+                None
+            },
+            error: String::new(),
+        }))
+    }
+
+    async fn export_pdf(
+        &self,
+        request: Request<browser_v1::ExportPdfRequest>,
+    ) -> Result<Response<browser_v1::ExportPdfResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let caller_principal = request_principal(request.metadata())?.to_owned();
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        let (budget_max_bytes, profile_id, private_profile, current_url) = {
+            let mut sessions = self.runtime.sessions.lock().await;
+            let Some(session) = sessions.get_mut(session_id.as_str()) else {
+                return Ok(Response::new(browser_v1::ExportPdfResponse {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    success: false,
+                    pdf_bytes: Vec::new(),
+                    mime_type: "application/pdf".to_owned(),
+                    size_bytes: 0,
+                    sha256: String::new(),
+                    artifact: None,
+                    error: "session_not_found".to_owned(),
+                }));
+            };
+            if session.principal != caller_principal {
+                return Err(Status::permission_denied("session access denied"));
+            }
+            session.last_active = Instant::now();
+            (
+                session.budget.max_response_bytes,
+                session.profile_id.clone(),
+                session.private_profile,
+                session.active_tab().and_then(|tab| tab.last_url.clone()),
+            )
+        };
+        let max_bytes = payload.max_bytes.max(1).min(budget_max_bytes);
+        let pdf_bytes = match self.runtime.engine_mode {
+            BrowserEngineMode::Simulated => MINIMAL_SIMULATED_PDF.to_vec(),
+            BrowserEngineMode::Chromium => {
+                export_pdf_with_chromium(self.runtime.as_ref(), session_id.as_str())
+                    .await
+                    .map_err(Status::internal)?
+            }
+        };
+        if (pdf_bytes.len() as u64) > max_bytes {
+            return Ok(Response::new(browser_v1::ExportPdfResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: false,
+                pdf_bytes: Vec::new(),
+                mime_type: "application/pdf".to_owned(),
+                size_bytes: pdf_bytes.len() as u64,
+                sha256: String::new(),
+                artifact: None,
+                error: format!("pdf output exceeds max_bytes ({} > {max_bytes})", pdf_bytes.len()),
+            }));
+        }
+
+        let source_url =
+            current_url.unwrap_or_else(|| format!("browser://session/{}/export.pdf", session_id));
+        let artifact = store_generated_artifact(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            if private_profile { None } else { profile_id.as_deref() },
+            source_url.as_str(),
+            format!("browser-session-{}.pdf", &session_id[..12]).as_str(),
+            "application/pdf",
+            pdf_bytes.as_slice(),
+        )
+        .await
+        .map_err(Status::internal)?;
+
+        Ok(Response::new(browser_v1::ExportPdfResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success: true,
+            pdf_bytes: pdf_bytes.clone(),
+            mime_type: "application/pdf".to_owned(),
+            size_bytes: pdf_bytes.len() as u64,
+            sha256: sha256_hex(pdf_bytes.as_slice()),
+            artifact: Some(download_artifact_to_proto(&artifact)),
             error: String::new(),
         }))
     }

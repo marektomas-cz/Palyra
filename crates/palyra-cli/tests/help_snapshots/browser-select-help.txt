@@ -1,4 +1,4 @@
-Structured unsupported placeholder for select element changes
+Set the selected value of a <select> element
 
 Usage: palyra browser select [OPTIONS] --selector <SELECTOR> --value <VALUE> <SESSION_ID>
 

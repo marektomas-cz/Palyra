@@ -1,4 +1,4 @@
-Structured unsupported placeholder for console logs
+Show browser console diagnostics for a session
 
 Usage: palyra browser console [OPTIONS] <SESSION_ID>
 

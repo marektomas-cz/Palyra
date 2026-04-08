@@ -251,25 +251,25 @@ pub enum BrowserCommand {
         #[arg(long, default_value_t = false)]
         reset_permissions: bool,
     },
-    #[command(about = "Structured unsupported placeholder for console logs")]
+    #[command(about = "Show browser console diagnostics for a session")]
     Console {
         session_id: String,
         #[arg(long)]
         output: Option<String>,
     },
-    #[command(about = "Structured unsupported placeholder for PDF export")]
+    #[command(about = "Export the active browser session as PDF")]
     Pdf {
         session_id: String,
         #[arg(long)]
         output: Option<String>,
     },
-    #[command(about = "Structured unsupported placeholder for key presses")]
+    #[command(about = "Press a key or key chord in the active browser session")]
     Press {
         session_id: String,
         #[arg(long)]
         key: String,
     },
-    #[command(about = "Structured unsupported placeholder for select element changes")]
+    #[command(about = "Set the selected value of a <select> element")]
     Select {
         session_id: String,
         #[arg(long)]
@@ -277,7 +277,7 @@ pub enum BrowserCommand {
         #[arg(long)]
         value: String,
     },
-    #[command(about = "Structured unsupported placeholder for selector highlighting")]
+    #[command(about = "Temporarily highlight a selector in the active browser session")]
     Highlight {
         session_id: String,
         #[arg(long)]
