@@ -582,8 +582,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         } else {
             usize::try_from(payload.max_console_log_entries)
                 .unwrap_or(usize::MAX)
-                .min(DEFAULT_MAX_CONSOLE_LOG_ENTRIES)
-                .max(1)
+                .clamp(1, DEFAULT_MAX_CONSOLE_LOG_ENTRIES)
         };
         let max_console_log_bytes = if payload.max_console_log_bytes == 0 {
             DEFAULT_MAX_CONSOLE_LOG_BYTES
@@ -2399,8 +2398,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         } else {
             usize::try_from(payload.limit)
                 .unwrap_or(usize::MAX)
-                .min(DEFAULT_MAX_CONSOLE_LOG_ENTRIES)
-                .max(1)
+                .clamp(1, DEFAULT_MAX_CONSOLE_LOG_ENTRIES)
         };
         let max_payload_bytes = if payload.max_payload_bytes == 0 {
             DEFAULT_MAX_CONSOLE_LOG_BYTES
