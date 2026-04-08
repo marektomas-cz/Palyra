@@ -346,7 +346,7 @@ describe("M56 config, access, and support surfaces", () => {
                   next_steps: ["Apply repairs after reviewing the preview."],
                 },
               },
-              command_output: "{\\n  \\\"mode\\\": \\\"repair_preview\\\"\\n}",
+              command_output: '{\\n  \\"mode\\": \\"repair_preview\\"\\n}',
             },
           });
         }

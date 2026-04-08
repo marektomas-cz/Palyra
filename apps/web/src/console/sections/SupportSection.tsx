@@ -567,8 +567,8 @@ export function SupportSection({ app }: SupportSectionProps) {
                           : "default"
                       }
                     >
-                      run {readString(selectedDoctorRecovery, "run_id") ?? "preview-only"} ·
-                      planned {selectedDoctorPlannedSteps.length} · applied{" "}
+                      run {readString(selectedDoctorRecovery, "run_id") ?? "preview-only"} · planned{" "}
+                      {selectedDoctorPlannedSteps.length} · applied{" "}
                       {selectedDoctorAppliedSteps.length}
                     </InlineNotice>
                     {selectedDoctorPlannedSteps.length > 0 ? (
@@ -577,7 +577,9 @@ export function SupportSection({ app }: SupportSectionProps) {
                         <ul className="console-compact-list">
                           {selectedDoctorPlannedSteps.map((step, index) => (
                             <li key={`${readString(step, "id") ?? "planned"}-${index}`}>
-                              {readString(step, "title") ?? readString(step, "id") ?? "Unnamed step"}
+                              {readString(step, "title") ??
+                                readString(step, "id") ??
+                                "Unnamed step"}
                             </li>
                           ))}
                         </ul>
@@ -589,7 +591,9 @@ export function SupportSection({ app }: SupportSectionProps) {
                         <ul className="console-compact-list">
                           {selectedDoctorAppliedSteps.map((step, index) => (
                             <li key={`${readString(step, "id") ?? "applied"}-${index}`}>
-                              {(readString(step, "message") ?? readString(step, "id") ?? "Unnamed step")}
+                              {readString(step, "message") ??
+                                readString(step, "id") ??
+                                "Unnamed step"}
                             </li>
                           ))}
                         </ul>

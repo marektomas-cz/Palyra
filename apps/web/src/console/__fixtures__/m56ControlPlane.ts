@@ -246,13 +246,14 @@ export function doctorRecoveryJobsFixture() {
             available_runs: [
               {
                 run_id: "01HRECOVERYRUN0",
-                rollback_command: "cargo run -p palyra-cli -- doctor --rollback-run 01HRECOVERYRUN0",
+                rollback_command:
+                  "cargo run -p palyra-cli -- doctor --rollback-run 01HRECOVERYRUN0",
               },
             ],
             next_steps: ["Review the preview before applying repairs."],
           },
         },
-        command_output: "{\\n  \\\"mode\\\": \\\"repair_preview\\\"\\n}",
+        command_output: '{\\n  \\"mode\\": \\"repair_preview\\"\\n}',
       },
     ],
     page: {
