@@ -1102,7 +1102,10 @@ async function selectApiKeyProvider(providerLabel: "OpenAI" | "Anthropic"): Prom
 
   const providerTrigger = within(form)
     .getAllByRole("button")
-    .find((button) => button.getAttribute("type") === "button" && button.textContent?.trim() === "OpenAI");
+    .find(
+      (button) =>
+        button.getAttribute("type") === "button" && button.textContent?.trim() === "OpenAI",
+    );
   if (!(providerTrigger instanceof HTMLButtonElement)) {
     throw new Error("Expected provider select trigger to be present.");
   }

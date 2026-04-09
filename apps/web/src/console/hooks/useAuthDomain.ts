@@ -94,11 +94,11 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
 
     const [profilesResponse, healthResponse, openAiProviderResponse, anthropicProviderResponse] =
       await Promise.all([
-      api.listAuthProfiles(),
-      api.getAuthHealth(healthParams),
-      api.getOpenAiProviderState(),
-      api.getAnthropicProviderState(),
-    ]);
+        api.listAuthProfiles(),
+        api.getAuthHealth(healthParams),
+        api.getOpenAiProviderState(),
+        api.getAnthropicProviderState(),
+      ]);
 
     setAuthProfiles(profilesResponse.profiles);
     setAuthHealth(healthResponse);
@@ -368,10 +368,13 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
       scopeKind: profile.scope.kind === "agent" ? "agent" : "global",
       agentId: profile.scope.agent_id ?? "",
       apiKey: "",
-      setDefault: authProviderStates[profile.provider.kind]?.default_profile_id === profile.profile_id,
+      setDefault:
+        authProviderStates[profile.provider.kind]?.default_profile_id === profile.profile_id,
     });
     setError(null);
-    setNotice(`Editing ${profile.provider.kind} API key profile '${profile.profile_name}'. Submit a new key to rotate it.`);
+    setNotice(
+      `Editing ${profile.provider.kind} API key profile '${profile.profile_name}'. Submit a new key to rotate it.`,
+    );
   }
 
   function cancelApiKeyRotation(): void {
