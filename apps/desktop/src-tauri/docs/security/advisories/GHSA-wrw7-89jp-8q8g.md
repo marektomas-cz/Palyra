@@ -47,7 +47,7 @@ Reference upstream fix:
 Governance record:
 
 - Machine-readable contract: `third_party/glib-0.18.5-patched/PALYRA_PATCH_GOVERNANCE.env`
-- Owner: `@marektomas-cz`
+- Owner: `@tomasmarekk`
 - Review cadence: every 30 days while the downstream patch remains active
 - Patched file checksum (`src/variant_iter.rs`, SHA-256): `821cbd7f2bdbf5407236cf15cc848e2d660581d97428924de77ca32899c31a95`
 - Verification command: `bash scripts/check-desktop-glib-patch.sh`

@@ -21,7 +21,7 @@ If you are using an older release, you may be asked to reproduce the issue on th
 
 Use the **“Report a vulnerability”** button in the repository’s *Security* tab, or open a new private advisory directly:
 
-- https://github.com/marektomas-cz/Palyra/security/advisories/new
+- https://github.com/tomasmarekk/Palyra/security/advisories/new
 
 This creates a **private** report visible only to repository maintainers and allows coordinated disclosure.
 

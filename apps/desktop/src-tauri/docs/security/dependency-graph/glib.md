@@ -36,7 +36,7 @@ The `path+file://` package id confirms that the desktop crate resolves `glib` fr
 ## Governance checksum
 
 - Governance contract: `apps/desktop/src-tauri/third_party/glib-0.18.5-patched/PALYRA_PATCH_GOVERNANCE.env`
-- Owner: `@marektomas-cz`
+- Owner: `@tomasmarekk`
 - Review cadence: every 30 days
 - Patched file checksum (`src/variant_iter.rs`, SHA-256): `821cbd7f2bdbf5407236cf15cc848e2d660581d97428924de77ca32899c31a95`
 

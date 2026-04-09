@@ -80,7 +80,7 @@ test("fails when allowlist contains stale expired entry", (t) => {
       {
         id: "GHSA-stale-expired-0001",
         expires_on: dateWithOffsetDays(-2),
-        owner: "@marektomas-cz",
+        owner: "@tomasmarekk",
         reason: "fixture",
       },
     ],
@@ -117,7 +117,7 @@ test("passes when stale allowlist entry is not expired", (t) => {
       {
         id: "GHSA-stale-valid-0001",
         expires_on: dateWithOffsetDays(14),
-        owner: "@marektomas-cz",
+        owner: "@tomasmarekk",
         reason: "fixture",
       },
     ],
@@ -154,7 +154,7 @@ test("fails when active dev advisory uses an expired allowlist entry", (t) => {
       {
         id: advisoryId,
         expires_on: dateWithOffsetDays(-2),
-        owner: "@marektomas-cz",
+        owner: "@tomasmarekk",
         reason: "fixture",
       },
     ],
