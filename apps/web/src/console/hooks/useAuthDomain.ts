@@ -22,8 +22,10 @@ type UseAuthDomainArgs = {
 };
 
 export type OpenAiScopeKind = "global" | "agent";
+export type AuthProviderKind = "openai" | "anthropic";
 
 export type AuthApiKeyDraft = {
+  provider: AuthProviderKind;
   profileId: string;
   profileName: string;
   scopeKind: OpenAiScopeKind;
@@ -50,6 +52,9 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
   const [authProviderState, setAuthProviderState] = useState<ProviderAuthStateEnvelope | null>(
     null,
   );
+  const [authProviderStates, setAuthProviderStates] = useState<
+    Record<string, ProviderAuthStateEnvelope>
+  >({});
   const [authApiKeyDraft, setAuthApiKeyDraft] = useState<AuthApiKeyDraft>(createDefaultApiKeyDraft);
   const [authOAuthDraft, setAuthOAuthDraft] = useState<AuthOAuthDraft>(createDefaultOAuthDraft);
   const [authActiveOauthAttempt, setAuthActiveOauthAttempt] =
@@ -87,15 +92,22 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     const healthParams = new URLSearchParams();
     healthParams.set("include_profiles", "true");
 
-    const [profilesResponse, healthResponse, providerResponse] = await Promise.all([
+    const [profilesResponse, healthResponse, openAiProviderResponse, anthropicProviderResponse] =
+      await Promise.all([
       api.listAuthProfiles(),
       api.getAuthHealth(healthParams),
       api.getOpenAiProviderState(),
+      api.getAnthropicProviderState(),
     ]);
 
     setAuthProfiles(profilesResponse.profiles);
     setAuthHealth(healthResponse);
-    setAuthProviderState(providerResponse);
+    const providerStates = {
+      openai: openAiProviderResponse,
+      anthropic: anthropicProviderResponse,
+    };
+    setAuthProviderStates(providerStates);
+    setAuthProviderState(resolvePrimaryProviderState(providerStates, profilesResponse.profiles));
   }
 
   async function refreshAuth(): Promise<void> {
@@ -110,15 +122,16 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     }
   }
 
-  async function connectOpenAiApiKey(): Promise<void> {
+  async function connectApiKeyProfile(): Promise<void> {
     const profileName = authApiKeyDraft.profileName.trim();
     const apiKey = authApiKeyDraft.apiKey.trim();
+    const providerLabel = authApiKeyDraft.provider === "anthropic" ? "Anthropic" : "OpenAI";
     if (profileName.length === 0) {
-      setError("OpenAI API key connect requires a profile name.");
+      setError(`${providerLabel} API key connect requires a profile name.`);
       return;
     }
     if (apiKey.length === 0) {
-      setError("OpenAI API key connect requires an API key.");
+      setError(`${providerLabel} API key connect requires an API key.`);
       return;
     }
 
@@ -126,13 +139,17 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     setError(null);
     setNotice(null);
     try {
-      const response = await api.connectOpenAiApiKey({
+      const request = {
         profile_id: emptyToUndefined(authApiKeyDraft.profileId),
         profile_name: profileName,
         scope: resolveScope(authApiKeyDraft.scopeKind, authApiKeyDraft.agentId),
         api_key: apiKey,
         set_default: authApiKeyDraft.setDefault,
-      });
+      };
+      const response =
+        authApiKeyDraft.provider === "anthropic"
+          ? await api.connectAnthropicApiKey(request)
+          : await api.connectOpenAiApiKey(request);
       resetAuthApiKeyDraft();
       setNotice(response.message);
       await loadAuthState();
@@ -239,14 +256,51 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     }
   }
 
-  async function setOpenAiDefaultProfile(profileId: string): Promise<void> {
+  async function revokeProviderProfile(profile: AuthProfileView): Promise<void> {
     setAuthBusy(true);
     setError(null);
     setNotice(null);
     try {
-      const response = await api.setOpenAiDefaultProfile({
-        profile_id: normalizeProfileSelection(profileId),
-      });
+      const normalizedProfileId = normalizeProfileSelection(profile.profile_id);
+      const response =
+        profile.provider.kind === "anthropic"
+          ? await api.revokeAnthropicProvider({
+              profile_id: normalizedProfileId,
+            })
+          : await api.revokeOpenAiProvider({
+              profile_id: normalizedProfileId,
+            });
+      setAuthApiKeyDraft((current) =>
+        current.profileId === normalizedProfileId ? createDefaultApiKeyDraft() : current,
+      );
+      if (authActiveOauthAttempt?.profile_id === normalizedProfileId) {
+        clearOauthPolling();
+        setAuthActiveOauthAttempt(null);
+        setAuthOauthCallbackState(null);
+      }
+      setNotice(response.message);
+      await loadAuthState();
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function setDefaultProviderProfile(profile: AuthProfileView): Promise<void> {
+    setAuthBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const normalizedProfileId = normalizeProfileSelection(profile.profile_id);
+      const response =
+        profile.provider.kind === "anthropic"
+          ? await api.setAnthropicDefaultProfile({
+              profile_id: normalizedProfileId,
+            })
+          : await api.setOpenAiDefaultProfile({
+              profile_id: normalizedProfileId,
+            });
       setNotice(response.message);
       await loadAuthState();
     } catch (failure) {
@@ -308,17 +362,16 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
 
   function prepareApiKeyRotation(profile: AuthProfileView): void {
     setAuthApiKeyDraft({
+      provider: profile.provider.kind === "anthropic" ? "anthropic" : "openai",
       profileId: profile.profile_id,
       profileName: profile.profile_name,
       scopeKind: profile.scope.kind === "agent" ? "agent" : "global",
       agentId: profile.scope.agent_id ?? "",
       apiKey: "",
-      setDefault: authProviderState?.default_profile_id === profile.profile_id,
+      setDefault: authProviderStates[profile.provider.kind]?.default_profile_id === profile.profile_id,
     });
     setError(null);
-    setNotice(
-      `Editing OpenAI API key profile '${profile.profile_name}'. Submit a new key to rotate it.`,
-    );
+    setNotice(`Editing ${profile.provider.kind} API key profile '${profile.profile_name}'. Submit a new key to rotate it.`);
   }
 
   function cancelApiKeyRotation(): void {
@@ -335,6 +388,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     setAuthProfiles([]);
     setAuthHealth(null);
     setAuthProviderState(null);
+    setAuthProviderStates({});
     setAuthActiveOauthAttempt(null);
     setAuthOauthCallbackState(null);
     resetAuthApiKeyDraft();
@@ -409,6 +463,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     authProfiles,
     authHealth,
     authProviderState,
+    authProviderStates,
     authApiKeyDraft,
     setAuthApiKeyDraft,
     authOAuthDraft,
@@ -416,12 +471,13 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     authActiveOauthAttempt,
     authOauthCallbackState,
     refreshAuth,
-    connectOpenAiApiKey,
+    connectApiKeyProfile,
     startOpenAiOAuth,
     reconnectOpenAiProfile,
     refreshOpenAiProfile,
     revokeOpenAiProfile,
-    setOpenAiDefaultProfile,
+    revokeProviderProfile,
+    setDefaultProviderProfile,
     checkOpenAiCallbackState,
     openActiveOauthWindow,
     prepareApiKeyRotation,
@@ -432,6 +488,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
 
 function createDefaultApiKeyDraft(): AuthApiKeyDraft {
   return {
+    provider: "openai",
     profileId: "",
     profileName: "",
     scopeKind: "global",
@@ -439,6 +496,21 @@ function createDefaultApiKeyDraft(): AuthApiKeyDraft {
     apiKey: "",
     setDefault: true,
   };
+}
+
+function resolvePrimaryProviderState(
+  providerStates: Record<string, ProviderAuthStateEnvelope>,
+  profiles: AuthProfileView[],
+): ProviderAuthStateEnvelope | null {
+  const selectedProfileId =
+    providerStates.openai?.default_profile_id ?? providerStates.anthropic?.default_profile_id;
+  if (selectedProfileId !== undefined) {
+    const selectedProfile = profiles.find((profile) => profile.profile_id === selectedProfileId);
+    if (selectedProfile !== undefined) {
+      return providerStates[selectedProfile.provider.kind] ?? null;
+    }
+  }
+  return providerStates.openai ?? providerStates.anthropic ?? null;
 }
 
 function createDefaultOAuthDraft(): AuthOAuthDraft {

@@ -1246,7 +1246,7 @@ export interface ProviderAuthActionRequest {
   profile_id?: string;
 }
 
-export interface OpenAiApiKeyUpsertRequest {
+export interface ProviderApiKeyUpsertRequest {
   profile_id?: string;
   profile_name: string;
   scope: AuthProfileScope;
@@ -1821,7 +1821,7 @@ export class ConsoleApiClient {
   }
 
   async connectOpenAiApiKey(
-    payload: OpenAiApiKeyUpsertRequest,
+    payload: ProviderApiKeyUpsertRequest,
   ): Promise<ProviderAuthActionEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/api-key",
@@ -1835,6 +1835,23 @@ export class ConsoleApiClient {
 
   async getOpenAiProviderState(): Promise<ProviderAuthStateEnvelope> {
     return this.request("/console/v1/auth/providers/openai");
+  }
+
+  async connectAnthropicApiKey(
+    payload: ProviderApiKeyUpsertRequest,
+  ): Promise<ProviderAuthActionEnvelope> {
+    return this.request(
+      "/console/v1/auth/providers/anthropic/api-key",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async getAnthropicProviderState(): Promise<ProviderAuthStateEnvelope> {
+    return this.request("/console/v1/auth/providers/anthropic");
   }
 
   async startOpenAiProviderBootstrap(
@@ -1904,6 +1921,32 @@ export class ConsoleApiClient {
   ): Promise<ProviderAuthActionEnvelope> {
     return this.request(
       "/console/v1/auth/providers/openai/default-profile",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async revokeAnthropicProvider(
+    payload: ProviderAuthActionRequest = {},
+  ): Promise<ProviderAuthActionEnvelope> {
+    return this.request(
+      "/console/v1/auth/providers/anthropic/revoke",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async setAnthropicDefaultProfile(
+    payload: ProviderAuthActionRequest = {},
+  ): Promise<ProviderAuthActionEnvelope> {
+    return this.request(
+      "/console/v1/auth/providers/anthropic/default-profile",
       {
         method: "POST",
         body: JSON.stringify(payload),

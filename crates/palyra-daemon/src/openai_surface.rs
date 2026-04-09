@@ -3,8 +3,13 @@ use std::env;
 use super::*;
 
 const OPENAI_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const ANTHROPIC_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENAI_DEFAULT_CONFIG_BACKUPS: usize = 5;
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
+const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const ANTHROPIC_DEFAULT_MODEL: &str = "claude-3-5-sonnet-latest";
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const OPENAI_OAUTH_CALLBACK_PATH: &str = "console/v1/auth/providers/openai/callback";
 
 #[allow(clippy::result_large_err)]
@@ -53,7 +58,13 @@ pub(crate) async fn connect_openai_api_key(
     };
     persist_openai_auth_profile(state, context, profile).await?;
     if payload.set_default {
-        persist_model_provider_auth_profile_selection(state, context, profile_id.as_str()).await?;
+        persist_model_provider_auth_profile_selection(
+            state,
+            context,
+            profile_id.as_str(),
+            ModelProviderAuthProviderKind::Openai,
+        )
+        .await?;
     }
 
     let (state_name, message) = if payload.set_default {
@@ -62,6 +73,69 @@ pub(crate) async fn connect_openai_api_key(
         ("saved", "OpenAI API key profile saved.")
     };
     Ok(openai_provider_action_envelope("api_key", state_name, message, Some(profile_id)))
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn connect_anthropic_api_key(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::ProviderApiKeyUpsertRequest,
+) -> Result<control_plane::ProviderAuthActionEnvelope, Response> {
+    let profile_name = normalize_openai_profile_name(payload.profile_name.as_str())?;
+    let profile_id = payload
+        .profile_id
+        .as_deref()
+        .map(|value| normalize_openai_identifier(value, "profile_id"))
+        .transpose()?
+        .unwrap_or_else(|| generate_provider_profile_id("anthropic", profile_name.as_str()));
+    let scope = normalize_openai_profile_scope(Some(payload.scope))?;
+    let api_key = normalize_required_openai_text(payload.api_key.as_str(), "api_key")?;
+    let validation_base_url = load_anthropic_validation_base_url(None);
+    validate_anthropic_api_key(
+        validation_base_url.as_str(),
+        api_key.as_str(),
+        ANTHROPIC_HTTP_TIMEOUT,
+    )
+    .await
+    .map_err(|error| map_anthropic_validation_error("api_key", error))?;
+
+    let api_key_vault_ref = store_provider_secret(
+        state.vault.as_ref(),
+        &scope,
+        profile_id.as_str(),
+        "anthropic",
+        "api_key",
+        api_key.as_bytes(),
+    )?;
+    let profile = control_plane::AuthProfileView {
+        profile_id: profile_id.clone(),
+        provider: control_plane::AuthProfileProvider {
+            kind: "anthropic".to_owned(),
+            custom_name: None,
+        },
+        profile_name,
+        scope: scope.clone(),
+        credential: control_plane::AuthCredentialView::ApiKey { api_key_vault_ref },
+        created_at_unix_ms: 0,
+        updated_at_unix_ms: 0,
+    };
+    persist_openai_auth_profile(state, context, profile).await?;
+    if payload.set_default {
+        persist_model_provider_auth_profile_selection(
+            state,
+            context,
+            profile_id.as_str(),
+            ModelProviderAuthProviderKind::Anthropic,
+        )
+        .await?;
+    }
+
+    let (state_name, message) = if payload.set_default {
+        ("selected", "Anthropic API key profile saved and selected as the default auth profile.")
+    } else {
+        ("saved", "Anthropic API key profile saved.")
+    };
+    Ok(provider_action_envelope("anthropic", "api_key", state_name, message, Some(profile_id)))
 }
 
 #[allow(clippy::result_large_err)]
@@ -234,27 +308,30 @@ pub(crate) async fn complete_openai_oauth_callback(
         );
     }
 
-    let access_token_vault_ref = store_openai_secret(
+    let access_token_vault_ref = store_provider_secret(
         state.vault.as_ref(),
         &attempt.scope,
         attempt.profile_id.as_str(),
+        "openai",
         "oauth_access_token",
         token_result.access_token.as_bytes(),
     )?;
-    let refresh_token_vault_ref = store_openai_secret(
+    let refresh_token_vault_ref = store_provider_secret(
         state.vault.as_ref(),
         &attempt.scope,
         attempt.profile_id.as_str(),
+        "openai",
         "oauth_refresh_token",
         token_result.refresh_token.as_bytes(),
     )?;
     let client_secret_vault_ref = if attempt.client_secret.trim().is_empty() {
         None
     } else {
-        Some(store_openai_secret(
+        Some(store_provider_secret(
             state.vault.as_ref(),
             &attempt.scope,
             attempt.profile_id.as_str(),
+            "openai",
             "oauth_client_secret",
             attempt.client_secret.as_bytes(),
         )?)
@@ -291,8 +368,13 @@ pub(crate) async fn complete_openai_oauth_callback(
     let context = request_context_from_console_action(&attempt.context);
     persist_openai_auth_profile(state, &context, profile).await?;
     if attempt.set_default {
-        persist_model_provider_auth_profile_selection(state, &context, attempt.profile_id.as_str())
-            .await?;
+        persist_model_provider_auth_profile_selection(
+            state,
+            &context,
+            attempt.profile_id.as_str(),
+            ModelProviderAuthProviderKind::Openai,
+        )
+        .await?;
     }
 
     let message = if attempt.set_default {
@@ -538,11 +620,113 @@ pub(crate) async fn select_default_openai_auth_profile(
         })
         .and_then(|value| normalize_openai_identifier(value, "profile_id"))?;
     let _profile = load_openai_auth_profile_record(state, profile_id.as_str())?;
-    persist_model_provider_auth_profile_selection(state, context, profile_id.as_str()).await?;
+    persist_model_provider_auth_profile_selection(
+        state,
+        context,
+        profile_id.as_str(),
+        ModelProviderAuthProviderKind::Openai,
+    )
+    .await?;
     Ok(openai_provider_action_envelope(
         "default_profile",
         "selected",
         "OpenAI default auth profile updated.",
+        Some(profile_id),
+    ))
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn revoke_anthropic_auth_profile(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::ProviderAuthActionRequest,
+) -> Result<control_plane::ProviderAuthActionEnvelope, Response> {
+    let profile_id = payload
+        .profile_id
+        .as_deref()
+        .ok_or_else(|| {
+            validation_error_response(
+                "profile_id",
+                "required",
+                "profile_id is required for Anthropic revoke",
+            )
+        })
+        .and_then(|value| normalize_openai_identifier(value, "profile_id"))?;
+    let profile = load_auth_profile_record_for_provider(
+        state,
+        profile_id.as_str(),
+        AuthProviderKind::Anthropic,
+    )?;
+    let deleted =
+        delete_auth_profile_via_console_service(state, context, profile_id.as_str()).await?;
+    if !deleted {
+        return Ok(provider_action_envelope(
+            "anthropic",
+            "revoke",
+            "not_found",
+            "Anthropic auth profile was already removed.",
+            Some(profile_id),
+        ));
+    }
+    let default_cleared =
+        clear_model_provider_auth_profile_selection_if_matches(state, context, profile_id.as_str())
+            .await?;
+    append_console_auth_journal_event(
+        state,
+        context,
+        json!({
+            "event": "auth.profile.revoked",
+            "provider": "anthropic",
+            "profile_id": profile.profile_id,
+            "credential_type": "api_key",
+            "remote_revocation": false,
+            "default_cleared": default_cleared,
+        }),
+    )
+    .await?;
+    Ok(provider_action_envelope(
+        "anthropic",
+        "revoke",
+        "revoked",
+        "Anthropic auth profile revoked.",
+        Some(profile_id),
+    ))
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn select_default_anthropic_auth_profile(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::ProviderAuthActionRequest,
+) -> Result<control_plane::ProviderAuthActionEnvelope, Response> {
+    let profile_id = payload
+        .profile_id
+        .as_deref()
+        .ok_or_else(|| {
+            validation_error_response(
+                "profile_id",
+                "required",
+                "profile_id is required for default profile selection",
+            )
+        })
+        .and_then(|value| normalize_openai_identifier(value, "profile_id"))?;
+    let _profile = load_auth_profile_record_for_provider(
+        state,
+        profile_id.as_str(),
+        AuthProviderKind::Anthropic,
+    )?;
+    persist_model_provider_auth_profile_selection(
+        state,
+        context,
+        profile_id.as_str(),
+        ModelProviderAuthProviderKind::Anthropic,
+    )
+    .await?;
+    Ok(provider_action_envelope(
+        "anthropic",
+        "default_profile",
+        "selected",
+        "Anthropic default auth profile updated.",
         Some(profile_id),
     ))
 }
@@ -744,9 +928,9 @@ fn vault_scope_for_openai_profile_scope(
     }
 }
 
-fn openai_secret_key(profile_id: &str, suffix: &str) -> String {
+fn provider_secret_key(provider_slug: &str, profile_id: &str, suffix: &str) -> String {
     let digest = sha256_hex(profile_id.as_bytes());
-    format!("auth_openai_{}_{}", &digest[..16], suffix)
+    format!("auth_{provider_slug}_{}_{}", &digest[..16], suffix)
 }
 
 fn openai_secret_vault_ref(scope: &VaultScope, key: &str) -> String {
@@ -761,11 +945,23 @@ fn store_openai_secret(
     suffix: &str,
     value: &[u8],
 ) -> Result<String, Response> {
+    store_provider_secret(vault, scope, profile_id, "openai", suffix, value)
+}
+
+#[allow(clippy::result_large_err)]
+fn store_provider_secret(
+    vault: &Vault,
+    scope: &control_plane::AuthProfileScope,
+    profile_id: &str,
+    provider_slug: &str,
+    suffix: &str,
+    value: &[u8],
+) -> Result<String, Response> {
     let vault_scope = vault_scope_for_openai_profile_scope(scope)?;
-    let key = openai_secret_key(profile_id, suffix);
+    let key = provider_secret_key(provider_slug, profile_id, suffix);
     vault.put_secret(&vault_scope, key.as_str(), value).map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
-            "failed to store OpenAI secret {}: {error}",
+            "failed to store provider secret {}: {error}",
             openai_secret_vault_ref(&vault_scope, key.as_str())
         )))
     })?;
@@ -792,6 +988,10 @@ fn load_vault_secret_utf8(vault: &Vault, vault_ref: &str, field: &str) -> Result
 }
 
 fn generate_openai_profile_id(profile_name: &str) -> String {
+    generate_provider_profile_id("openai", profile_name)
+}
+
+fn generate_provider_profile_id(provider_slug: &str, profile_name: &str) -> String {
     let slug = profile_name
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
@@ -801,7 +1001,7 @@ fn generate_openai_profile_id(profile_name: &str) -> String {
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    let base = if slug.is_empty() { "openai".to_owned() } else { slug };
+    let base = if slug.is_empty() { provider_slug.to_owned() } else { slug };
     let suffix = Ulid::new().to_string().to_ascii_lowercase();
     format!("{base}-{suffix}")
 }
@@ -819,6 +1019,21 @@ fn load_openai_validation_base_url(document: Option<&toml::Value>) -> String {
         })
         .or_else(|| document.and_then(openai_validation_base_url_from_document))
         .unwrap_or_else(|| OPENAI_DEFAULT_BASE_URL.to_owned())
+}
+
+fn load_anthropic_validation_base_url(document: Option<&toml::Value>) -> String {
+    env::var("PALYRA_MODEL_PROVIDER_ANTHROPIC_BASE_URL")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        })
+        .or_else(|| document.and_then(anthropic_validation_base_url_from_document))
+        .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_owned())
 }
 
 #[allow(clippy::result_large_err)]
@@ -843,6 +1058,15 @@ fn resolve_openai_console_config_path(
 
 fn openai_validation_base_url_from_document(document: &toml::Value) -> Option<String> {
     get_value_at_path(document, "model_provider.openai_base_url")
+        .ok()
+        .and_then(|value| value.and_then(toml::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn anthropic_validation_base_url_from_document(document: &toml::Value) -> Option<String> {
+    get_value_at_path(document, "model_provider.anthropic_base_url")
         .ok()
         .and_then(|value| value.and_then(toml::Value::as_str))
         .map(str::trim)
@@ -922,6 +1146,15 @@ fn load_openai_auth_profile_record(
     state: &AppState,
     profile_id: &str,
 ) -> Result<AuthProfileRecord, Response> {
+    load_auth_profile_record_for_provider(state, profile_id, AuthProviderKind::Openai)
+}
+
+#[allow(clippy::result_large_err)]
+fn load_auth_profile_record_for_provider(
+    state: &AppState,
+    profile_id: &str,
+    expected_provider: AuthProviderKind,
+) -> Result<AuthProfileRecord, Response> {
     let record = state
         .auth_runtime
         .registry()
@@ -932,9 +1165,9 @@ fn load_openai_auth_profile_record(
                 "auth profile not found: {profile_id}"
             )))
         })?;
-    if record.provider.kind != AuthProviderKind::Openai {
+    if record.provider.kind != expected_provider {
         return Err(runtime_status_response(tonic::Status::failed_precondition(
-            "auth profile does not belong to the OpenAI provider",
+            "auth profile does not belong to the expected provider",
         )));
     }
     Ok(record)
@@ -1038,11 +1271,16 @@ pub(crate) async fn persist_model_provider_auth_profile_selection(
     state: &AppState,
     context: &RequestContext,
     profile_id: &str,
+    provider_kind: ModelProviderAuthProviderKind,
 ) -> Result<(), Response> {
     let path = resolve_console_config_mutation_path(None)?;
     let path_ref = FsPath::new(path.as_str());
     ensure_console_config_parent_dir(path_ref)?;
     let (mut document, _) = load_console_document_for_mutation(path_ref)?;
+    let provider_kind_value = match provider_kind {
+        ModelProviderAuthProviderKind::Openai => "openai_compatible",
+        ModelProviderAuthProviderKind::Anthropic => "anthropic",
+    };
     set_value_at_path(
         &mut document,
         "model_provider.auth_profile_id",
@@ -1053,8 +1291,56 @@ pub(crate) async fn persist_model_provider_auth_profile_selection(
             "failed to set model_provider.auth_profile_id: {error}"
         )))
     })?;
+    set_value_at_path(
+        &mut document,
+        "model_provider.auth_provider_kind",
+        toml::Value::String(provider_kind.as_str().to_owned()),
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::invalid_argument(format!(
+            "failed to set model_provider.auth_provider_kind: {error}"
+        )))
+    })?;
+    set_value_at_path(
+        &mut document,
+        "model_provider.kind",
+        toml::Value::String(provider_kind_value.to_owned()),
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::invalid_argument(format!(
+            "failed to set model_provider.kind: {error}"
+        )))
+    })?;
+    match provider_kind {
+        ModelProviderAuthProviderKind::Openai => {
+            ensure_string_value_at_path(
+                &mut document,
+                "model_provider.openai_base_url",
+                OPENAI_DEFAULT_BASE_URL,
+            )?;
+            ensure_string_value_at_path(
+                &mut document,
+                "model_provider.openai_model",
+                OPENAI_DEFAULT_MODEL,
+            )?;
+        }
+        ModelProviderAuthProviderKind::Anthropic => {
+            ensure_string_value_at_path(
+                &mut document,
+                "model_provider.anthropic_base_url",
+                ANTHROPIC_DEFAULT_BASE_URL,
+            )?;
+            ensure_string_value_at_path(
+                &mut document,
+                "model_provider.anthropic_model",
+                ANTHROPIC_DEFAULT_MODEL,
+            )?;
+        }
+    }
     let _ = unset_value_at_path(&mut document, "model_provider.openai_api_key");
     let _ = unset_value_at_path(&mut document, "model_provider.openai_api_key_vault_ref");
+    let _ = unset_value_at_path(&mut document, "model_provider.anthropic_api_key");
+    let _ = unset_value_at_path(&mut document, "model_provider.anthropic_api_key_vault_ref");
     validate_daemon_compatible_document(&document)?;
     write_document_with_backups(path_ref, &document, OPENAI_DEFAULT_CONFIG_BACKUPS).map_err(
         |error| {
@@ -1070,7 +1356,7 @@ pub(crate) async fn persist_model_provider_auth_profile_selection(
         json!({
             "event": "auth.profile.default_selected",
             "profile_id": profile_id,
-            "provider": "openai",
+            "provider": provider_kind.as_str(),
             "source_path": path,
         }),
     )
@@ -1093,6 +1379,7 @@ pub(crate) async fn clear_model_provider_auth_profile_selection_if_matches(
     let path_ref = FsPath::new(path.as_str());
     let (mut document, _) = load_console_document_for_mutation(path_ref)?;
     let _ = unset_value_at_path(&mut document, "model_provider.auth_profile_id");
+    let _ = unset_value_at_path(&mut document, "model_provider.auth_provider_kind");
     validate_daemon_compatible_document(&document)?;
     write_document_with_backups(path_ref, &document, OPENAI_DEFAULT_CONFIG_BACKUPS).map_err(
         |error| {
@@ -1108,12 +1395,115 @@ pub(crate) async fn clear_model_provider_auth_profile_selection_if_matches(
         json!({
             "event": "auth.profile.default_cleared",
             "profile_id": profile_id,
-            "provider": "openai",
             "source_path": path,
         }),
     )
     .await?;
     Ok(true)
+}
+
+#[allow(clippy::result_large_err)]
+fn ensure_string_value_at_path(
+    document: &mut toml::Value,
+    path: &str,
+    default_value: &str,
+) -> Result<(), Response> {
+    let existing = get_value_at_path(document, path)
+        .ok()
+        .and_then(|value| value.and_then(toml::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if existing.is_some() {
+        return Ok(());
+    }
+    set_value_at_path(document, path, toml::Value::String(default_value.to_owned())).map_err(
+        |error| {
+            runtime_status_response(tonic::Status::invalid_argument(format!(
+                "failed to set {path}: {error}"
+            )))
+        },
+    )
+}
+
+enum AnthropicCredentialValidationError {
+    InvalidCredential,
+    RateLimited,
+    ProviderUnavailable,
+    Unexpected(String),
+}
+
+#[allow(clippy::result_large_err)]
+async fn validate_anthropic_api_key(
+    base_url: &str,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<(), AnthropicCredentialValidationError> {
+    let base = base_url.trim().trim_end_matches('/');
+    let endpoint =
+        if base.ends_with("/v1") { format!("{base}/models") } else { format!("{base}/v1/models") };
+    let client = ReqwestClient::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| AnthropicCredentialValidationError::Unexpected(error.to_string()))?;
+    let response = client
+        .get(endpoint)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_API_VERSION)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                AnthropicCredentialValidationError::ProviderUnavailable
+            } else {
+                AnthropicCredentialValidationError::Unexpected(error.to_string())
+            }
+        })?;
+    match response.status() {
+        StatusCode::OK => Ok(()),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            Err(AnthropicCredentialValidationError::InvalidCredential)
+        }
+        StatusCode::TOO_MANY_REQUESTS => Err(AnthropicCredentialValidationError::RateLimited),
+        status if status.is_server_error() => {
+            Err(AnthropicCredentialValidationError::ProviderUnavailable)
+        }
+        status => {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<anthropic error body unavailable>".to_owned());
+            Err(AnthropicCredentialValidationError::Unexpected(format!(
+                "Anthropic endpoint returned HTTP {status}: {body}"
+            )))
+        }
+    }
+}
+
+fn map_anthropic_validation_error(
+    field: &str,
+    error: AnthropicCredentialValidationError,
+) -> Response {
+    match error {
+        AnthropicCredentialValidationError::InvalidCredential => validation_error_response(
+            field,
+            "invalid_credential",
+            "Anthropic credential is invalid or does not have the required access.",
+        ),
+        AnthropicCredentialValidationError::RateLimited => runtime_status_response(
+            tonic::Status::resource_exhausted("Anthropic credential validation was rate limited"),
+        ),
+        AnthropicCredentialValidationError::ProviderUnavailable => {
+            runtime_status_response(tonic::Status::unavailable(
+                "Anthropic credential validation is temporarily unavailable",
+            ))
+        }
+        AnthropicCredentialValidationError::Unexpected(message) => {
+            runtime_status_response(tonic::Status::internal(format!(
+                "Anthropic credential validation failed: {}",
+                sanitize_http_error_message(message.as_str())
+            )))
+        }
+    }
 }
 
 fn map_openai_validation_error(field: &str, error: OpenAiCredentialValidationError) -> Response {

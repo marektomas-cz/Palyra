@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { App } from "./App";
@@ -36,6 +36,11 @@ describe("M54 web auth surface", () => {
       if (request.path === "/console/v1/auth/providers/openai" && request.method === "GET") {
         return Promise.resolve(
           jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId)),
+        );
+      }
+      if (request.path === "/console/v1/auth/providers/anthropic" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId, "anthropic")),
         );
       }
       if (
@@ -84,10 +89,11 @@ describe("M54 web auth surface", () => {
     fireEvent.change(screen.getByLabelText("API key"), {
       target: { value: "sk-test-key" },
     });
+    const apiKeySubmitButton = firstSubmitButton();
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Create profile" })).toBeEnabled();
+      expect(apiKeySubmitButton).toBeEnabled();
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    fireEvent.click(apiKeySubmitButton);
 
     await waitFor(() => {
       expect(screen.getByText("OpenAI API key stored.")).toBeInTheDocument();
@@ -129,6 +135,11 @@ describe("M54 web auth surface", () => {
           jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId)),
         );
       }
+      if (request.path === "/console/v1/auth/providers/anthropic" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId, "anthropic")),
+        );
+      }
       if (
         request.path === "/console/v1/auth/providers/openai/api-key" &&
         request.method === "POST"
@@ -158,10 +169,11 @@ describe("M54 web auth surface", () => {
     fireEvent.change(screen.getByLabelText("API key"), {
       target: { value: "sk-invalid" },
     });
+    const apiKeySubmitButton = firstSubmitButton();
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Create profile" })).toBeEnabled();
+      expect(apiKeySubmitButton).toBeEnabled();
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    fireEvent.click(apiKeySubmitButton);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "OpenAI API key rejected by provider validation.",
@@ -207,6 +219,11 @@ describe("M54 web auth surface", () => {
       if (request.path === "/console/v1/auth/providers/openai" && request.method === "GET") {
         return Promise.resolve(
           jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId)),
+        );
+      }
+      if (request.path === "/console/v1/auth/providers/anthropic" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId, "anthropic")),
         );
       }
       if (
@@ -325,6 +342,11 @@ describe("M54 web auth surface", () => {
       if (request.path === "/console/v1/auth/providers/openai" && request.method === "GET") {
         return Promise.resolve(
           jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId)),
+        );
+      }
+      if (request.path === "/console/v1/auth/providers/anthropic" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId, "anthropic")),
         );
       }
       if (
@@ -451,6 +473,11 @@ describe("M54 web auth surface", () => {
       if (request.path === "/console/v1/auth/providers/openai" && request.method === "GET") {
         return Promise.resolve(
           jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId)),
+        );
+      }
+      if (request.path === "/console/v1/auth/providers/anthropic" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId, "anthropic")),
         );
       }
       if (
@@ -605,38 +632,9 @@ describe("M54 web auth surface", () => {
     expect(revokeBody).toContain('"profile_id":"openai-oauth"');
   }, 20_000);
 
-  it("shows multi-provider inventory and limits interactive actions to the OpenAI control plane", async () => {
+  it("connects an Anthropic API key profile and exposes provider actions", async () => {
     const state = createAuthSurfaceState();
-    state.defaultProfileId = "openai-api";
-    state.profiles = [
-      createApiKeyProfile({
-        profile_id: "openai-api",
-        profile_name: "api-primary",
-      }),
-      createApiKeyProfile({
-        profile_id: "anthropic-api",
-        profile_name: "claude-primary",
-        provider_kind: "anthropic",
-      }),
-    ];
-    state.healthProfiles = [
-      createHealthProfile({
-        profile_id: "openai-api",
-        profile_name: "api-primary",
-        credential_type: "api_key",
-        state: "static",
-        reason: "OpenAI API key validated.",
-        provider: "openai",
-      }),
-      createHealthProfile({
-        profile_id: "anthropic-api",
-        profile_name: "claude-primary",
-        credential_type: "api_key",
-        state: "static",
-        reason: "Anthropic API key validated.",
-        provider: "anthropic",
-      }),
-    ];
+    let anthropicConnectBody = "";
 
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const request = requestDescriptor(input, init);
@@ -662,6 +660,45 @@ describe("M54 web auth surface", () => {
           jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId)),
         );
       }
+      if (request.path === "/console/v1/auth/providers/anthropic" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId, "anthropic")),
+        );
+      }
+      if (
+        request.path === "/console/v1/auth/providers/anthropic/api-key" &&
+        request.method === "POST"
+      ) {
+        anthropicConnectBody = request.body;
+        state.defaultProfileId = "anthropic-api";
+        state.profiles = [
+          createApiKeyProfile({
+            profile_id: "anthropic-api",
+            profile_name: "claude-primary",
+            provider_kind: "anthropic",
+          }),
+        ];
+        state.healthProfiles = [
+          createHealthProfile({
+            profile_id: "anthropic-api",
+            profile_name: "claude-primary",
+            credential_type: "api_key",
+            state: "static",
+            reason: "Anthropic API key validated.",
+            provider: "anthropic",
+          }),
+        ];
+        return Promise.resolve(
+          jsonResponse({
+            contract: controlPlaneContract(),
+            provider: "anthropic",
+            action: "api_key",
+            state: "selected",
+            message: "Anthropic API key profile saved and selected as the default auth profile.",
+            profile_id: "anthropic-api",
+          }),
+        );
+      }
       throw new Error(`Unhandled mocked request: ${request.method} ${request.path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -669,23 +706,28 @@ describe("M54 web auth surface", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Profiles" }));
 
-    await waitFor(
-      () => {
-        expect(document.body).toHaveTextContent("claude-primary");
-        expect(document.body).toHaveTextContent("Provider registry");
-      },
-      { timeout: 5_000 },
-    );
+    await selectApiKeyProvider("Anthropic");
+    fireEvent.change(screen.getAllByLabelText("Profile name")[0], {
+      target: { value: "claude-primary" },
+    });
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "sk-ant-test" },
+    });
+    const apiKeySubmitButton = firstSubmitButton();
+    await waitFor(() => {
+      expect(apiKeySubmitButton).toBeEnabled();
+    });
+    fireEvent.click(apiKeySubmitButton);
 
-    fireEvent.click((await screen.findAllByRole("button", { name: /^Inspect / }))[1]);
+    await waitFor(() => {
+      expect(document.body).toHaveTextContent("claude-primary");
+    });
+    expect(anthropicConnectBody).toContain('"profile_name":"claude-primary"');
+    expect(anthropicConnectBody).toContain('"api_key":"sk-ant-test"');
 
-    expect(await screen.findByText("Web actions limited")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /interactive browser actions are still limited to the OpenAI control-plane surface/i,
-      ),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Rotate API key" })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: /^Inspect / }));
+    expect(await screen.findByRole("button", { name: "Rotate API key" })).toBeInTheDocument();
+    expect(screen.queryByText("Web actions limited")).not.toBeInTheDocument();
     expect(document.body).toHaveTextContent("anthropic");
   }, 20_000);
 });
@@ -773,25 +815,33 @@ function authHealthEnvelope(profiles: unknown[]) {
   };
 }
 
-function providerStateEnvelope(profiles: unknown[], defaultProfileId?: string) {
-  const profileIds = (profiles as Array<{ profile_id: string }>).map(
-    (profile) => profile.profile_id,
-  );
+function providerStateEnvelope(
+  profiles: unknown[],
+  defaultProfileId?: string,
+  provider: "openai" | "anthropic" = "openai",
+) {
+  const typedProfiles = profiles as Array<{ profile_id: string; provider?: { kind?: string } }>;
+  const profileIds = typedProfiles
+    .filter((profile) => (profile.provider?.kind ?? "openai") === provider)
+    .map((profile) => profile.profile_id);
+  const defaultProfileProvider = typedProfiles.find(
+    (profile) => profile.profile_id === defaultProfileId,
+  )?.provider?.kind;
   return {
     contract: controlPlaneContract(),
-    provider: "openai",
-    oauth_supported: true,
-    bootstrap_supported: true,
-    callback_supported: true,
-    reconnect_supported: true,
+    provider,
+    oauth_supported: provider === "openai",
+    bootstrap_supported: provider === "openai",
+    callback_supported: provider === "openai",
+    reconnect_supported: provider === "openai",
     revoke_supported: true,
     default_selection_supported: true,
-    default_profile_id: defaultProfileId,
+    default_profile_id: defaultProfileProvider === provider ? defaultProfileId : undefined,
     available_profile_ids: profileIds,
     state: profileIds.length > 0 ? "configured" : "unconfigured",
     note:
       profileIds.length > 0
-        ? "OpenAI provider has available auth profiles."
+        ? `${provider} provider has available auth profiles.`
         : "Connect a profile to continue.",
   };
 }
@@ -1029,4 +1079,34 @@ function requestDescriptor(input: RequestInfo | URL, init?: RequestInit) {
     method: (init?.method ?? "GET").toUpperCase(),
     body: typeof init?.body === "string" ? init.body : "",
   };
+}
+
+function firstSubmitButton(): HTMLButtonElement {
+  const submitButton = screen
+    .getAllByRole("button")
+    .find((button) => button.getAttribute("type") === "submit");
+
+  if (!(submitButton instanceof HTMLButtonElement)) {
+    throw new Error("Expected API key form submit button to be present.");
+  }
+
+  return submitButton;
+}
+
+async function selectApiKeyProvider(providerLabel: "OpenAI" | "Anthropic"): Promise<void> {
+  const submitButton = firstSubmitButton();
+  const form = submitButton.closest("form");
+  if (!(form instanceof HTMLFormElement)) {
+    throw new Error("Expected API key submit button to belong to a form.");
+  }
+
+  const providerTrigger = within(form)
+    .getAllByRole("button")
+    .find((button) => button.getAttribute("type") === "button" && button.textContent?.trim() === "OpenAI");
+  if (!(providerTrigger instanceof HTMLButtonElement)) {
+    throw new Error("Expected provider select trigger to be present.");
+  }
+
+  fireEvent.click(providerTrigger);
+  fireEvent.click(await screen.findByRole("option", { name: providerLabel }));
 }

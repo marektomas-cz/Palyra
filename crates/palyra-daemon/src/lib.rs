@@ -99,9 +99,10 @@ use openai_auth::{
 };
 use openai_surface::{
     clear_model_provider_auth_profile_selection_if_matches, complete_openai_oauth_callback,
-    connect_openai_api_key, load_openai_oauth_callback_state, reconnect_openai_oauth_attempt,
-    refresh_openai_oauth_profile, revoke_openai_auth_profile, select_default_openai_auth_profile,
-    start_openai_oauth_attempt_from_request,
+    connect_anthropic_api_key, connect_openai_api_key, load_openai_oauth_callback_state,
+    reconnect_openai_oauth_attempt, refresh_openai_oauth_profile, revoke_anthropic_auth_profile,
+    revoke_openai_auth_profile, select_default_anthropic_auth_profile,
+    select_default_openai_auth_profile, start_openai_oauth_attempt_from_request,
 };
 use palyra_auth::{
     AuthCredential, AuthProfileError, AuthProfileRecord, AuthProfileRegistry, AuthProfileScope,

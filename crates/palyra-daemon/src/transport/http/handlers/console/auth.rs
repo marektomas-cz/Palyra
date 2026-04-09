@@ -373,9 +373,9 @@ pub(crate) async fn console_auth_profile_delete_handler(
         .map_err(runtime_status_response)?
         .into_inner();
     if response.deleted
-        && existing_profile
-            .as_ref()
-            .is_some_and(|profile| profile.provider.kind == AuthProviderKind::Openai)
+        && existing_profile.as_ref().is_some_and(|profile| {
+            matches!(profile.provider.kind, AuthProviderKind::Openai | AuthProviderKind::Anthropic)
+        })
     {
         let _ = clear_model_provider_auth_profile_selection_if_matches(
             &state,
@@ -437,6 +437,22 @@ pub(crate) async fn console_openai_provider_state_handler(
     Ok(Json(build_openai_provider_state(&document, profiles)))
 }
 
+pub(crate) async fn console_anthropic_provider_state_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<control_plane::ProviderAuthStateEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let profiles = list_console_auth_profiles(
+        &state,
+        &session,
+        gateway::proto::palyra::auth::v1::AuthProviderKind::Anthropic,
+    )
+    .await?;
+    let configured_path = std::env::var("PALYRA_CONFIG").ok();
+    let (document, _, _) = load_console_config_snapshot(configured_path.as_deref(), true)?;
+    Ok(Json(build_provider_state(&document, profiles, ModelProviderAuthProviderKind::Anthropic)))
+}
+
 pub(crate) async fn console_openai_provider_api_key_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -446,6 +462,35 @@ pub(crate) async fn console_openai_provider_api_key_handler(
     state.observability.record_provider_auth_attempt();
     let profile_id = payload.profile_id.clone();
     match connect_openai_api_key(&state, &session.context, payload).await {
+        Ok(envelope) => Ok(Json(envelope)),
+        Err(response) => {
+            record_provider_auth_failure(
+                &state,
+                "provider_auth.api_key_connect",
+                response.status(),
+                auth_correlation_from_context(
+                    &session.context,
+                    profile_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                ),
+                false,
+            );
+            Err(response)
+        }
+    }
+}
+
+pub(crate) async fn console_anthropic_provider_api_key_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::ProviderApiKeyUpsertRequest>,
+) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    state.observability.record_provider_auth_attempt();
+    let profile_id = payload.profile_id.clone();
+    match connect_anthropic_api_key(&state, &session.context, payload).await {
         Ok(envelope) => Ok(Json(envelope)),
         Err(response) => {
             record_provider_auth_failure(
@@ -623,6 +668,44 @@ pub(crate) async fn console_openai_provider_default_profile_handler(
 ) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
     select_default_openai_auth_profile(&state, &session.context, payload).await.map(Json)
+}
+
+pub(crate) async fn console_anthropic_provider_revoke_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::ProviderAuthActionRequest>,
+) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    state.observability.record_provider_auth_attempt();
+    let profile_id = payload.profile_id.clone();
+    match revoke_anthropic_auth_profile(&state, &session.context, payload).await {
+        Ok(envelope) => Ok(Json(envelope)),
+        Err(response) => {
+            record_provider_auth_failure(
+                &state,
+                "provider_auth.api_key_revoke",
+                response.status(),
+                auth_correlation_from_context(
+                    &session.context,
+                    profile_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                ),
+                false,
+            );
+            Err(response)
+        }
+    }
+}
+
+pub(crate) async fn console_anthropic_provider_default_profile_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::ProviderAuthActionRequest>,
+) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    select_default_anthropic_auth_profile(&state, &session.context, payload).await.map(Json)
 }
 
 pub(crate) fn issue_console_session(

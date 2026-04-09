@@ -146,6 +146,104 @@ fn console_openai_api_key_flow_persists_vault_refs_and_default_selection() -> Re
 }
 
 #[test]
+fn console_anthropic_api_key_flow_persists_vault_refs_and_default_selection() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
+    let mock = OpenAiMockServer::new(None, None)?;
+    mock.allow_token("sk-live-anthropic");
+    wait_for_openai_mock_ready(&mock)?;
+
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
+        ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
+        ("PALYRA_MODEL_PROVIDER_ANTHROPIC_BASE_URL".to_owned(), mock.base_url()),
+    ])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = http_client()?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let connected = post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/auth/providers/anthropic/api-key",
+        &cookie,
+        &csrf_token,
+        &json!({
+            "profile_name": "Anthropic Production",
+            "scope": { "kind": "global" },
+            "api_key": "sk-live-anthropic",
+            "set_default": true
+        }),
+    )?;
+    let profile_id = connected
+        .get("profile_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("api-key connect response missing profile_id"))?
+        .to_owned();
+    assert_eq!(connected.get("provider").and_then(Value::as_str), Some("anthropic"));
+    assert_eq!(connected.get("state").and_then(Value::as_str), Some("selected"));
+
+    let provider_state =
+        get_console_json(&client, admin_port, "/console/v1/auth/providers/anthropic", &cookie)?;
+    assert_eq!(
+        provider_state.get("default_profile_id").and_then(Value::as_str),
+        Some(profile_id.as_str()),
+        "Anthropic provider state should publish the selected default profile"
+    );
+
+    let profiles = get_console_json(&client, admin_port, "/console/v1/auth/profiles", &cookie)?;
+    let profile = find_profile(&profiles, profile_id.as_str())?;
+    assert_eq!(
+        profile.get("provider").and_then(|provider| provider.get("kind")).and_then(Value::as_str),
+        Some("anthropic"),
+        "stored profile should preserve anthropic provider kind"
+    );
+    let vault_ref = profile
+        .get("credential")
+        .and_then(|credential| credential.get("api_key_vault_ref"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("anthropic credential is missing api_key_vault_ref"))?;
+    assert!(
+        vault_ref.contains("anthropic"),
+        "Anthropic API key should be stored through an anthropic-scoped vault ref: {vault_ref}"
+    );
+
+    let config = post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/config/inspect",
+        &cookie,
+        &csrf_token,
+        &json!({}),
+    )?;
+    let document_toml = config
+        .get("document_toml")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("config inspect response missing document_toml"))?;
+    assert!(
+        document_toml.contains("kind = \"anthropic\""),
+        "default selection should switch the model provider kind to anthropic: {document_toml}"
+    );
+    assert!(
+        document_toml.contains("auth_provider_kind = \"anthropic\""),
+        "default selection should persist the anthropic auth provider kind: {document_toml}"
+    );
+    assert!(
+        !document_toml.contains("sk-live-anthropic"),
+        "config inspect must not leak the raw Anthropic API key"
+    );
+
+    let mock_snapshot = mock.snapshot();
+    assert!(
+        mock_snapshot.model_request_paths.iter().any(|path| path == "/v1/models"),
+        "Anthropic credential validation must target /v1/models: {:?}",
+        mock_snapshot.model_request_paths
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_openai_default_selection_and_revoke_use_palyra_config_override() -> Result<()> {
     let _test_guard = lock_openai_auth_surface_test();
     let mock = OpenAiMockServer::new(None, None)?;
@@ -221,6 +319,50 @@ fn console_openai_default_selection_and_revoke_use_palyra_config_override() -> R
         "revoking the selected profile must clear model_provider.auth_profile_id in PALYRA_CONFIG"
     );
 
+    Ok(())
+}
+
+#[test]
+fn console_anthropic_api_key_flow_surfaces_invalid_credentials() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
+    let mock = OpenAiMockServer::new(None, None)?;
+    wait_for_openai_mock_ready(&mock)?;
+
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
+        ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
+        ("PALYRA_MODEL_PROVIDER_ANTHROPIC_BASE_URL".to_owned(), mock.base_url()),
+    ])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = http_client()?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let response = client
+        .post(console_url(admin_port, "/console/v1/auth/providers/anthropic/api-key"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&json!({
+            "profile_name": "Anthropic Invalid",
+            "scope": { "kind": "global" },
+            "api_key": "sk-invalid",
+            "set_default": false
+        }))
+        .send()
+        .context("failed to submit invalid Anthropic API key")?;
+    let status = response.status();
+    let error_body =
+        response.text().context("failed to read invalid anthropic api-key error response body")?;
+    assert_eq!(status.as_u16(), 400, "invalid Anthropic API key should fail closed: {error_body}");
+
+    let profiles = get_console_json(&client, admin_port, "/console/v1/auth/profiles", &cookie)?;
+    assert!(
+        profiles
+            .get("profiles")
+            .and_then(Value::as_array)
+            .is_some_and(|entries| entries.is_empty()),
+        "failed Anthropic API key validation must not persist a partial auth profile"
+    );
     Ok(())
 }
 
@@ -1150,12 +1292,14 @@ fn handle_openai_mock_request(
     if request.request_line.starts_with("GET /v1/models ") {
         let authorization =
             request.headers.get("authorization").map(String::as_str).unwrap_or_default();
-        let bearer_token =
-            authorization.strip_prefix("Bearer ").map(str::trim).unwrap_or_default().to_owned();
+        let bearer_token = authorization.strip_prefix("Bearer ").map(str::trim);
+        let api_key_token = request.headers.get("x-api-key").map(String::as_str).map(str::trim);
+        let presented_token =
+            api_key_token.filter(|value| !value.is_empty()).or(bearer_token).unwrap_or_default();
         let authorized = {
             let mut guard = state.lock().expect("OpenAI mock state lock should be available");
             guard.model_request_paths.push(request.path);
-            guard.valid_tokens.contains(&bearer_token)
+            guard.valid_tokens.contains(presented_token)
         };
         if authorized {
             write_json_response(stream, "200 OK", r#"{"data":[]}"#)?;

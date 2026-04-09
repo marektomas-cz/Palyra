@@ -1211,7 +1211,8 @@ pub(crate) async fn list_console_auth_profiles(
     response.profiles.iter().map(control_plane_auth_profile_from_proto).collect()
 }
 
-pub(crate) fn openai_provider_action_envelope(
+pub(crate) fn provider_action_envelope(
+    provider: &str,
     action: &str,
     state: &str,
     message: &str,
@@ -1219,7 +1220,7 @@ pub(crate) fn openai_provider_action_envelope(
 ) -> control_plane::ProviderAuthActionEnvelope {
     control_plane::ProviderAuthActionEnvelope {
         contract: contract_descriptor(),
-        provider: "openai".to_owned(),
+        provider: provider.to_owned(),
         action: action.to_owned(),
         state: state.to_owned(),
         message: message.to_owned(),
@@ -1227,18 +1228,77 @@ pub(crate) fn openai_provider_action_envelope(
     }
 }
 
-pub(crate) fn build_openai_provider_state(
+pub(crate) fn openai_provider_action_envelope(
+    action: &str,
+    state: &str,
+    message: &str,
+    profile_id: Option<String>,
+) -> control_plane::ProviderAuthActionEnvelope {
+    provider_action_envelope("openai", action, state, message, profile_id)
+}
+
+fn provider_selection_matches(
+    document: &toml::Value,
+    provider: ModelProviderAuthProviderKind,
+) -> bool {
+    let selected_profile_id = get_value_at_path(document, "model_provider.auth_profile_id")
+        .ok()
+        .and_then(|value| value.and_then(toml::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if selected_profile_id.is_none() {
+        return false;
+    }
+
+    let configured_provider = get_value_at_path(document, "model_provider.auth_provider_kind")
+        .ok()
+        .and_then(|value| value.and_then(toml::Value::as_str))
+        .and_then(|value| ModelProviderAuthProviderKind::parse(value).ok())
+        .or_else(|| {
+            get_value_at_path(document, "model_provider.kind")
+                .ok()
+                .and_then(|value| value.and_then(toml::Value::as_str))
+                .and_then(|value| ModelProviderKind::parse(value).ok())
+                .and_then(|kind| match kind {
+                    ModelProviderKind::OpenAiCompatible => {
+                        Some(ModelProviderAuthProviderKind::Openai)
+                    }
+                    ModelProviderKind::Anthropic => Some(ModelProviderAuthProviderKind::Anthropic),
+                    ModelProviderKind::Deterministic => None,
+                })
+        });
+    configured_provider == Some(provider)
+}
+
+pub(crate) fn build_provider_state(
     document: &toml::Value,
     profiles: Vec<control_plane::AuthProfileView>,
+    provider: ModelProviderAuthProviderKind,
 ) -> control_plane::ProviderAuthStateEnvelope {
-    let default_profile_id = get_value_at_path(document, "model_provider.auth_profile_id")
+    let selected_profile_id = get_value_at_path(document, "model_provider.auth_profile_id")
         .ok()
         .and_then(|value| value.and_then(toml::Value::as_str).map(str::to_owned));
-    let api_key_vault_ref = get_value_at_path(document, "model_provider.openai_api_key_vault_ref")
+    let default_profile_id =
+        if provider_selection_matches(document, provider) { selected_profile_id } else { None };
+    let (provider_name, api_key_path, inline_key_path, oauth_supported) = match provider {
+        ModelProviderAuthProviderKind::Openai => (
+            "openai",
+            "model_provider.openai_api_key_vault_ref",
+            "model_provider.openai_api_key",
+            true,
+        ),
+        ModelProviderAuthProviderKind::Anthropic => (
+            "anthropic",
+            "model_provider.anthropic_api_key_vault_ref",
+            "model_provider.anthropic_api_key",
+            false,
+        ),
+    };
+    let api_key_vault_ref = get_value_at_path(document, api_key_path)
         .ok()
         .and_then(|value| value.and_then(toml::Value::as_str).map(str::to_owned))
         .filter(|value| !value.trim().is_empty());
-    let api_key_inline = get_value_at_path(document, "model_provider.openai_api_key")
+    let api_key_inline = get_value_at_path(document, inline_key_path)
         .ok()
         .and_then(|value| value.and_then(toml::Value::as_str).map(str::to_owned))
         .filter(|value| !value.trim().is_empty());
@@ -1249,20 +1309,33 @@ pub(crate) fn build_openai_provider_state(
     } else {
         "not_configured"
     };
-    let note = if api_key_inline.is_some() {
-        Some("Inline API keys remain supported for backward compatibility, but operator auth flows should prefer auth profiles or vault refs.".to_owned())
-    } else if api_key_vault_ref.is_some() {
-        Some("Vault-backed API key is configured; selecting an auth profile will supersede direct API-key usage.".to_owned())
-    } else {
-        None
+    let note = match provider {
+        ModelProviderAuthProviderKind::Openai => {
+            if api_key_inline.is_some() {
+                Some("Inline API keys remain supported for backward compatibility, but operator auth flows should prefer auth profiles or vault refs.".to_owned())
+            } else if api_key_vault_ref.is_some() {
+                Some("Vault-backed API key is configured; selecting an auth profile will supersede direct API-key usage.".to_owned())
+            } else {
+                None
+            }
+        }
+        ModelProviderAuthProviderKind::Anthropic => {
+            if api_key_inline.is_some() {
+                Some("Inline Anthropic API keys remain supported for backward compatibility, but operator auth flows should prefer auth profiles or vault refs.".to_owned())
+            } else if api_key_vault_ref.is_some() {
+                Some("Vault-backed Anthropic API key is configured; selecting an auth profile will supersede direct API-key usage.".to_owned())
+            } else {
+                None
+            }
+        }
     };
     control_plane::ProviderAuthStateEnvelope {
         contract: contract_descriptor(),
-        provider: "openai".to_owned(),
-        oauth_supported: true,
-        bootstrap_supported: true,
-        callback_supported: true,
-        reconnect_supported: true,
+        provider: provider_name.to_owned(),
+        oauth_supported,
+        bootstrap_supported: oauth_supported,
+        callback_supported: oauth_supported,
+        reconnect_supported: oauth_supported,
         revoke_supported: true,
         default_selection_supported: true,
         default_profile_id,
@@ -1270,6 +1343,13 @@ pub(crate) fn build_openai_provider_state(
         state: state.to_owned(),
         note,
     }
+}
+
+pub(crate) fn build_openai_provider_state(
+    document: &toml::Value,
+    profiles: Vec<control_plane::AuthProfileView>,
+) -> control_plane::ProviderAuthStateEnvelope {
+    build_provider_state(document, profiles, ModelProviderAuthProviderKind::Openai)
 }
 
 #[allow(clippy::result_large_err)]
@@ -2339,6 +2419,10 @@ pub(crate) fn build_capability_catalog() -> Result<control_plane::CapabilityCata
                     "/console/v1/auth/providers/openai/refresh",
                     "/console/v1/auth/providers/openai/revoke",
                     "/console/v1/auth/providers/openai/default-profile",
+                    "/console/v1/auth/providers/anthropic",
+                    "/console/v1/auth/providers/anthropic/api-key",
+                    "/console/v1/auth/providers/anthropic/revoke",
+                    "/console/v1/auth/providers/anthropic/default-profile",
                 ],
                 &["crates/palyra-daemon/tests/admin_surface.rs"],
                 &[],

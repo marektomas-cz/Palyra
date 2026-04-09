@@ -2283,6 +2283,17 @@ pub struct ProviderAuthActionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderApiKeyUpsertRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    pub profile_name: String,
+    pub scope: AuthProfileScope,
+    pub api_key: String,
+    #[serde(default)]
+    pub set_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiApiKeyUpsertRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,

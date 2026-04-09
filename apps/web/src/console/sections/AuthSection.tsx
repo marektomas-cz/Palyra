@@ -33,6 +33,7 @@ type AuthSectionProps = {
     | "authProfiles"
     | "authHealth"
     | "authProviderState"
+    | "authProviderStates"
     | "diagnosticsSnapshot"
     | "authApiKeyDraft"
     | "setAuthApiKeyDraft"
@@ -41,12 +42,12 @@ type AuthSectionProps = {
     | "authActiveOauthAttempt"
     | "authOauthCallbackState"
     | "refreshAuth"
-    | "connectOpenAiApiKey"
+    | "connectApiKeyProfile"
     | "startOpenAiOAuth"
     | "reconnectOpenAiProfile"
     | "refreshOpenAiProfile"
-    | "revokeOpenAiProfile"
-    | "setOpenAiDefaultProfile"
+    | "revokeProviderProfile"
+    | "setDefaultProviderProfile"
     | "checkOpenAiCallbackState"
     | "openActiveOauthWindow"
     | "prepareApiKeyRotation"
@@ -333,10 +334,12 @@ type SelectedProfileCardProps = {
 };
 
 function SelectedProfileCard({ app, profile, health }: SelectedProfileCardProps) {
-  const isDefault = profile.profile_id === app.authProviderState?.default_profile_id;
+  const providerState = app.authProviderStates[profile.provider.kind] ?? null;
+  const isDefault = profile.profile_id === providerState?.default_profile_id;
   const oauthCredential = profile.credential.type === "oauth" ? profile.credential : null;
   const providerKind = profile.provider.kind;
   const isOpenAiProfile = providerKind === "openai";
+  const isAnthropicProfile = providerKind === "anthropic";
 
   return (
     <div className="workspace-stack">
@@ -456,11 +459,11 @@ function SelectedProfileCard({ app, profile, health }: SelectedProfileCardProps)
 
       {isOpenAiProfile ? (
         <div className="workspace-inline">
-          {!isDefault && app.authProviderState?.default_selection_supported && (
+          {!isDefault && providerState?.default_selection_supported && (
             <ActionButton
               type="button"
               variant="secondary"
-              onPress={() => void app.setOpenAiDefaultProfile(profile.profile_id)}
+              onPress={() => void app.setDefaultProviderProfile(profile)}
               isDisabled={app.authBusy}
             >
               Set as default
@@ -472,7 +475,7 @@ function SelectedProfileCard({ app, profile, health }: SelectedProfileCardProps)
                 type="button"
                 variant="secondary"
                 onPress={() => void app.reconnectOpenAiProfile(profile.profile_id)}
-                isDisabled={app.authBusy || !app.authProviderState?.reconnect_supported}
+                isDisabled={app.authBusy || !providerState?.reconnect_supported}
               >
                 Reconnect
               </ActionButton>
@@ -498,18 +501,44 @@ function SelectedProfileCard({ app, profile, health }: SelectedProfileCardProps)
           <ActionButton
             type="button"
             variant="danger"
-            onPress={() => void app.revokeOpenAiProfile(profile.profile_id)}
-            isDisabled={app.authBusy || !app.authProviderState?.revoke_supported}
+            onPress={() => void app.revokeProviderProfile(profile)}
+            isDisabled={app.authBusy || !providerState?.revoke_supported}
+          >
+            Revoke
+          </ActionButton>
+        </div>
+      ) : isAnthropicProfile ? (
+        <div className="workspace-inline">
+          {!isDefault && providerState?.default_selection_supported && (
+            <ActionButton
+              type="button"
+              variant="secondary"
+              onPress={() => void app.setDefaultProviderProfile(profile)}
+              isDisabled={app.authBusy}
+            >
+              Set as default
+            </ActionButton>
+          )}
+          <ActionButton
+            type="button"
+            variant="secondary"
+            onPress={() => app.prepareApiKeyRotation(profile)}
+            isDisabled={app.authBusy}
+          >
+            Rotate API key
+          </ActionButton>
+          <ActionButton
+            type="button"
+            variant="danger"
+            onPress={() => void app.revokeProviderProfile(profile)}
+            isDisabled={app.authBusy || !providerState?.revoke_supported}
           >
             Revoke
           </ActionButton>
         </div>
       ) : (
-        <WorkspaceInlineNotice title="Web actions limited" tone="default">
-          <p>
-            This profile participates in registry-aware routing and validation, but interactive
-            browser actions are still limited to the OpenAI control-plane surface.
-          </p>
+        <WorkspaceInlineNotice title="Provider actions unavailable" tone="default">
+          <p>Interactive provider actions are not published for this provider kind yet.</p>
         </WorkspaceInlineNotice>
       )}
     </div>
@@ -525,7 +554,7 @@ function ApiKeyForm({ app }: { app: AuthSectionProps["app"] }) {
       description={
         app.authApiKeyDraft.profileId.trim().length > 0
           ? `Updating profile ${app.authApiKeyDraft.profileId}.`
-          : "Create a new OpenAI auth profile backed by a Vault-stored API key."
+          : `Create a new ${app.authApiKeyDraft.provider === "anthropic" ? "Anthropic" : "OpenAI"} auth profile backed by a Vault-stored API key.`
       }
       actions={
         app.authApiKeyDraft.profileId.trim().length > 0 ? (
@@ -544,10 +573,25 @@ function ApiKeyForm({ app }: { app: AuthSectionProps["app"] }) {
         className="workspace-stack"
         onSubmit={(event) => {
           event.preventDefault();
-          void app.connectOpenAiApiKey();
+          void app.connectApiKeyProfile();
         }}
       >
         <div className="workspace-form-grid">
+          <SelectField
+            label="Provider"
+            value={app.authApiKeyDraft.provider}
+            onChange={(value) =>
+              app.setAuthApiKeyDraft((current) => ({
+                ...current,
+                provider: value === "anthropic" ? "anthropic" : "openai",
+              }))
+            }
+            options={[
+              { key: "openai", label: "OpenAI" },
+              { key: "anthropic", label: "Anthropic" },
+            ]}
+            disabled={app.authApiKeyDraft.profileId.trim().length > 0}
+          />
           <TextInputField
             label="Profile name"
             value={app.authApiKeyDraft.profileName}
@@ -600,7 +644,7 @@ function ApiKeyForm({ app }: { app: AuthSectionProps["app"] }) {
               ? "Submitting..."
               : app.authApiKeyDraft.profileId.trim().length > 0
                 ? "Rotate API key"
-                : "Create profile"}
+                : `Create ${app.authApiKeyDraft.provider === "anthropic" ? "Anthropic" : "OpenAI"} profile`}
           </ActionButton>
         </div>
       </AppForm>

@@ -265,6 +265,22 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/auth/providers/openai/default-profile",
             post(console::auth::console_openai_provider_default_profile_handler),
         )
+        .route(
+            "/console/v1/auth/providers/anthropic",
+            get(console::auth::console_anthropic_provider_state_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/anthropic/api-key",
+            post(console::auth::console_anthropic_provider_api_key_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/anthropic/revoke",
+            post(console::auth::console_anthropic_provider_revoke_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/anthropic/default-profile",
+            post(console::auth::console_anthropic_provider_default_profile_handler),
+        )
         .route("/console/v1/config/inspect", post(console::config::console_config_inspect_handler))
         .route(
             "/console/v1/config/validate",

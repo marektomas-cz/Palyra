@@ -1929,6 +1929,70 @@ describe("ConsoleApiClient", () => {
     expect(calls[2]?.init?.method).toBe("POST");
     expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
   });
+
+  it("posts Anthropic provider auth mutations with CSRF and provider-specific paths", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        provider: "anthropic",
+        action: "api_key",
+        state: "selected",
+        message: "Anthropic API key stored.",
+        profile_id: "anthropic-default",
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        provider: "anthropic",
+        action: "default_profile",
+        state: "selected",
+        message: "Anthropic default profile updated.",
+        profile_id: "anthropic-default",
+      }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+    const client = new ConsoleApiClient("", fetcher);
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    await client.connectAnthropicApiKey({
+      profile_name: "claude-primary",
+      scope: { kind: "global" },
+      api_key: "sk-ant-test",
+      set_default: true,
+    });
+    await client.setAnthropicDefaultProfile({ profile_id: "anthropic-default" });
+
+    expect(requestUrl(calls[1]?.input)).toBe("/console/v1/auth/providers/anthropic/api-key");
+    expect(calls[1]?.init?.method).toBe("POST");
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+    expect(requestBody(calls[1]?.init?.body)).toContain('"profile_name":"claude-primary"');
+
+    expect(requestUrl(calls[2]?.input)).toBe(
+      "/console/v1/auth/providers/anthropic/default-profile",
+    );
+    expect(calls[2]?.init?.method).toBe("POST");
+    expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+    expect(requestBody(calls[2]?.init?.body)).toContain('"profile_id":"anthropic-default"');
+  });
 });
 
 function jsonResponse(payload: unknown, status = 200): Response {
