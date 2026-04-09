@@ -39,12 +39,10 @@ export function UsageSection({ app }: UsageSectionProps) {
   );
   const recentRoutingDecisions = useMemo(
     () =>
-      (usage.insights?.routing.recent_decisions ?? [])
-        .slice(0, 8)
-        .map((decision) => ({
-          ...decision,
-          explanation: parseRoutingExplanation(decision.explanation_json),
-        })),
+      (usage.insights?.routing.recent_decisions ?? []).slice(0, 8).map((decision) => ({
+        ...decision,
+        explanation: parseRoutingExplanation(decision.explanation_json),
+      })),
     [usage.insights?.routing.recent_decisions],
   );
 
@@ -638,8 +636,7 @@ export function UsageSection({ app }: UsageSectionProps) {
                   {
                     key: "budget",
                     label: "Budget",
-                    render: (row) =>
-                      row.explanation.budgetOutcome ?? row.budget_outcome ?? "ok",
+                    render: (row) => row.explanation.budgetOutcome ?? row.budget_outcome ?? "ok",
                   },
                 ]}
                 getRowId={(row) => row.decision_id}

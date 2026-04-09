@@ -82,9 +82,10 @@ export function readProviderRegistrySummary(
     readProviderRegistryModel,
   );
   return {
-    providerState: readString(readObject(modelProvider, "health") ?? {}, "status")
-      ?? readString(modelProvider, "kind")
-      ?? "unknown",
+    providerState:
+      readString(readObject(modelProvider, "health") ?? {}, "status") ??
+      readString(modelProvider, "kind") ??
+      "unknown",
     providerKind: readString(modelProvider, "kind") ?? "unknown",
     providerId: readString(modelProvider, "provider_id") ?? undefined,
     modelId: readString(modelProvider, "model_id") ?? undefined,
