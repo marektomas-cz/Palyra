@@ -1954,8 +1954,7 @@ fn parse_model_provider_registry_entry(
     let kind =
         ModelProviderKind::parse(raw.kind.unwrap_or_default().as_str()).with_context(|| {
             format!(
-                "{} must be one of: deterministic, openai_compatible, anthropic",
-                format!("{source_name}.kind")
+                "{source_name}.kind must be one of: deterministic, openai_compatible, anthropic"
             )
         })?;
     let display_name = parse_optional_display_name(

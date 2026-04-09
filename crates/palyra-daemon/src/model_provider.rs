@@ -3223,7 +3223,7 @@ impl AnthropicProvider {
         for block in parsed.content {
             match block.kind.as_str() {
                 "text" => {
-                    if let Some(text) = block.text.and_then(|value| trim_to_option(value)) {
+                    if let Some(text) = block.text.and_then(trim_to_option) {
                         completion_fragments.push(text);
                     }
                 }
