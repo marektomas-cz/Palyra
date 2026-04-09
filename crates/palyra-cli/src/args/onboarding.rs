@@ -12,6 +12,7 @@ pub enum OnboardingFlowArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OnboardingAuthMethodArg {
     ApiKey,
+    AnthropicApiKey,
     Skip,
     ExistingConfig,
 }

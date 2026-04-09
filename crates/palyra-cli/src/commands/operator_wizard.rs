@@ -18,6 +18,7 @@ const CONFIGURE_BACKUPS: usize = 5;
 const DEFAULT_TEXT_MODEL: &str = "gpt-4o-mini";
 const DEFAULT_EMBEDDINGS_MODEL: &str = "text-embedding-3-small";
 const DEFAULT_EMBEDDINGS_DIMS: u32 = 1536;
+const DEFAULT_ANTHROPIC_TEXT_MODEL: &str = "claude-3-5-sonnet-latest";
 
 #[derive(Debug, Clone)]
 pub(crate) struct OnboardingWizardRequest {
@@ -398,7 +399,6 @@ pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()
                     request.api_key_prompt,
                     &mut warnings,
                 )?;
-                set_model_defaults(&mut document)?;
             }
             ConfigureSectionArg::Gateway => {
                 wizard.note(WizardStep::note(
@@ -667,7 +667,7 @@ fn build_onboarding_answers(
         answers.insert("auth_method".to_owned(), WizardValue::Choice(auth_method));
     }
     if let Some(api_key) = secrets.api_key {
-        answers.insert("openai_api_key".to_owned(), WizardValue::SensitiveText(api_key));
+        answers.insert("model_provider_api_key".to_owned(), WizardValue::SensitiveText(api_key));
     }
     if let Some(bind_profile) = request.options.bind_profile {
         answers.insert(
@@ -767,7 +767,7 @@ fn build_configure_answers(
             .insert("auth_method".to_owned(), WizardValue::Choice(auth_method_value(auth_method)));
     }
     if let Some(api_key) = secrets.api_key {
-        answers.insert("openai_api_key".to_owned(), WizardValue::SensitiveText(api_key));
+        answers.insert("model_provider_api_key".to_owned(), WizardValue::SensitiveText(api_key));
     }
     if let Some(bind_profile) = request.bind_profile {
         answers.insert(
@@ -969,7 +969,7 @@ fn populate_quickstart_plan(
     wizard.note(WizardStep::note(
         "quickstart.note",
         "QuickStart",
-        "QuickStart keeps loopback-only binds, admin auth enabled, OpenAI-compatible defaults, and a single workspace root for process execution.",
+        "QuickStart keeps loopback-only binds, admin auth enabled, safe provider defaults, and a single workspace root for process execution.",
     ))?;
     let workspace_root = wizard.text(
         text_step(
@@ -988,13 +988,18 @@ fn populate_quickstart_plan(
 
     let auth_method = wizard.select(select_step(
         "auth_method",
-        "OpenAI Auth",
-        "Choose how QuickStart should configure OpenAI-compatible access.",
+        "Model Provider Auth",
+        "Choose how QuickStart should configure model-provider access.",
         vec![
             choice(
                 "api_key",
-                "Vault-Backed API Key",
-                Some("recommended for a working local instance"),
+                "OpenAI-Compatible API Key",
+                Some("recommended default for a working local instance"),
+            ),
+            choice(
+                "anthropic_api_key",
+                "Anthropic API Key",
+                Some("use Anthropic as the primary provider for chat workloads"),
             ),
             choice(
                 "skip",
@@ -1005,23 +1010,28 @@ fn populate_quickstart_plan(
         Some("api_key".to_owned()),
     ))?;
     plan.auth_method = auth_method.clone();
-    if auth_method == "api_key" {
+    if auth_method == "api_key" || auth_method == "anthropic_api_key" {
+        let api_key_label = api_key_field_label(auth_method.as_str());
         let api_key = wizard.text(
             text_step(
-                "openai_api_key",
-                "OpenAI API Key",
-                "Enter the API key that should be written to the local vault.",
+                "model_provider_api_key",
+                api_key_label,
+                if auth_method == "anthropic_api_key" {
+                    "Enter the Anthropic API key that should be written to the local vault."
+                } else {
+                    "Enter the OpenAI-compatible API key that should be written to the local vault."
+                },
                 None,
                 None,
                 true,
             ),
-            |value| validate_non_empty_text(value, "OpenAI API key"),
+            |value| validate_non_empty_text(value, api_key_label),
         )?;
         plan.api_key = Some(api_key);
     } else {
         plan.risk_events.push("model_auth_skipped".to_owned());
         plan.warnings.push(
-            "OpenAI auth was skipped; the resulting config is structurally valid but not ready for model calls."
+            "Model-provider auth was skipped; the resulting config is structurally valid but not ready for remote model calls."
                 .to_owned(),
         );
     }
@@ -1036,7 +1046,7 @@ fn populate_manual_plan(
     wizard.note(WizardStep::note(
         "manual.note",
         "Manual",
-        "Manual mode exposes the important deployment and auth posture choices while still applying them through the same safe mutation layer.",
+        "Manual mode exposes the important deployment and provider-auth posture choices while still applying them through the same safe mutation layer.",
     ))?;
     let workspace_root = wizard.text(
         text_step(
@@ -1055,13 +1065,18 @@ fn populate_manual_plan(
 
     let auth_method = wizard.select(select_step(
         "auth_method",
-        "OpenAI Auth",
-        "Choose how this installation should authenticate to OpenAI-compatible APIs.",
+        "Model Provider Auth",
+        "Choose how this installation should authenticate to model providers.",
         vec![
             choice(
                 "api_key",
-                "Vault-Backed API Key",
+                "OpenAI-Compatible API Key",
                 Some("store the key in the vault and point the config at it"),
+            ),
+            choice(
+                "anthropic_api_key",
+                "Anthropic API Key",
+                Some("store the Anthropic key in the vault and switch the config to Anthropic"),
             ),
             choice(
                 "existing_config",
@@ -1077,17 +1092,22 @@ fn populate_manual_plan(
         Some("api_key".to_owned()),
     ))?;
     plan.auth_method = auth_method.clone();
-    if auth_method == "api_key" {
+    if auth_method == "api_key" || auth_method == "anthropic_api_key" {
+        let api_key_label = api_key_field_label(auth_method.as_str());
         let api_key = wizard.text(
             text_step(
-                "openai_api_key",
-                "OpenAI API Key",
-                "Enter the API key that should be stored in the local vault.",
+                "model_provider_api_key",
+                api_key_label,
+                if auth_method == "anthropic_api_key" {
+                    "Enter the Anthropic API key that should be stored in the local vault."
+                } else {
+                    "Enter the OpenAI-compatible API key that should be stored in the local vault."
+                },
                 None,
                 None,
                 true,
             ),
-            |value| validate_non_empty_text(value, "OpenAI API key"),
+            |value| validate_non_empty_text(value, api_key_label),
         )?;
         plan.api_key = Some(api_key);
     }
@@ -1158,7 +1178,7 @@ fn populate_manual_plan(
     if auth_method == "skip" {
         plan.risk_events.push("model_auth_skipped".to_owned());
         plan.warnings.push(
-            "Manual flow left model auth unset; review `palyra auth openai api-key` before using remote model calls."
+            "Manual flow left model-provider auth unset; review `palyra auth profiles list` and provider credentials before using remote model calls."
                 .to_owned(),
         );
     }
@@ -1468,19 +1488,9 @@ fn apply_onboarding_plan(
         )?;
     }
     if plan.auth_method == "skip" {
-        unset_value_at_path(&mut document, "model_provider.openai_api_key")?;
-        unset_value_at_path(&mut document, "model_provider.openai_api_key_vault_ref")?;
-        unset_value_at_path(&mut document, "model_provider.auth_profile_id")?;
+        clear_model_provider_auth(&mut document)?;
     } else if let Some(api_key) = plan.api_key.as_ref() {
-        let vault_ref = store_secret_in_vault("global", "openai_api_key", api_key.as_str())?;
-        set_model_defaults(&mut document)?;
-        unset_value_at_path(&mut document, "model_provider.openai_api_key")?;
-        unset_value_at_path(&mut document, "model_provider.auth_profile_id")?;
-        set_value_at_path(
-            &mut document,
-            "model_provider.openai_api_key_vault_ref",
-            toml::Value::String(vault_ref),
-        )?;
+        apply_model_provider_api_key(&mut document, plan.auth_method.as_str(), api_key.as_str())?;
     }
 
     set_value_at_path(
@@ -1901,44 +1911,40 @@ fn apply_auth_method_choice(
 ) -> Result<()> {
     match auth_method {
         "skip" => {
-            unset_value_at_path(document, "model_provider.openai_api_key")?;
-            unset_value_at_path(document, "model_provider.openai_api_key_vault_ref")?;
-            unset_value_at_path(document, "model_provider.auth_profile_id")?;
+            clear_model_provider_auth(document)?;
             warnings.push(
-                "model auth was left unset; review `palyra auth openai api-key` before enabling remote model calls."
+                "model-provider auth was left unset; review `palyra auth profiles list` and provider credentials before enabling remote model calls."
                     .to_owned(),
             );
         }
         "existing_config" => {}
         _ => {
+            let api_key_label = api_key_field_label(auth_method);
             let explicit_secret = load_secret_input_optional(
                 api_key_env,
                 api_key_stdin,
                 api_key_prompt,
-                "OpenAI API key: ",
+                format!("{api_key_label}: ").as_str(),
             )?;
             let api_key = match explicit_secret {
                 Some(value) => value,
                 None => wizard.text(
                     text_step(
-                        "openai_api_key",
-                        "OpenAI API Key",
-                        "Enter the API key that should be stored in the local vault.",
+                        "model_provider_api_key",
+                        api_key_label,
+                        if auth_method == "anthropic_api_key" {
+                            "Enter the Anthropic API key that should be stored in the local vault."
+                        } else {
+                            "Enter the OpenAI-compatible API key that should be stored in the local vault."
+                        },
                         None,
                         None,
                         true,
                     ),
-                    |value| validate_non_empty_text(value, "OpenAI API key"),
+                    |value| validate_non_empty_text(value, api_key_label),
                 )?,
             };
-            let vault_ref = store_secret_in_vault("global", "openai_api_key", api_key.as_str())?;
-            unset_value_at_path(document, "model_provider.openai_api_key")?;
-            unset_value_at_path(document, "model_provider.auth_profile_id")?;
-            set_value_at_path(
-                document,
-                "model_provider.openai_api_key_vault_ref",
-                toml::Value::String(vault_ref),
-            )?;
+            apply_model_provider_api_key(document, auth_method, api_key.as_str())?;
         }
     }
     Ok(())
@@ -2342,37 +2348,90 @@ fn prompt_port(
     value.parse::<u16>().with_context(|| format!("{title} must be a valid u16 value"))
 }
 
-fn set_model_defaults(document: &mut toml::Value) -> Result<()> {
-    set_value_at_path(
-        document,
-        "model_provider.kind",
-        toml::Value::String("openai_compatible".to_owned()),
-    )?;
-    if get_value_at_path(document, "model_provider.openai_base_url")?
-        .and_then(toml::Value::as_str)
-        .is_none()
-    {
-        set_value_at_path(
-            document,
-            "model_provider.openai_base_url",
-            toml::Value::String("https://api.openai.com/v1".to_owned()),
-        )?;
+fn clear_model_provider_auth(document: &mut toml::Value) -> Result<()> {
+    unset_value_at_path(document, "model_provider.openai_api_key")?;
+    unset_value_at_path(document, "model_provider.openai_api_key_vault_ref")?;
+    unset_value_at_path(document, "model_provider.anthropic_api_key")?;
+    unset_value_at_path(document, "model_provider.anthropic_api_key_vault_ref")?;
+    unset_value_at_path(document, "model_provider.auth_profile_id")?;
+    Ok(())
+}
+
+fn apply_model_provider_api_key(
+    document: &mut toml::Value,
+    auth_method: &str,
+    api_key: &str,
+) -> Result<()> {
+    clear_model_provider_auth(document)?;
+    match auth_method {
+        "anthropic_api_key" => {
+            let vault_ref = store_secret_in_vault("global", "anthropic_api_key", api_key)?;
+            set_value_at_path(
+                document,
+                "model_provider.kind",
+                toml::Value::String("anthropic".to_owned()),
+            )?;
+            set_value_at_path(
+                document,
+                "model_provider.anthropic_base_url",
+                toml::Value::String("https://api.anthropic.com".to_owned()),
+            )?;
+            set_value_at_path(
+                document,
+                "model_provider.anthropic_model",
+                toml::Value::String(DEFAULT_ANTHROPIC_TEXT_MODEL.to_owned()),
+            )?;
+            unset_value_at_path(document, "model_provider.openai_base_url")?;
+            unset_value_at_path(document, "model_provider.openai_model")?;
+            unset_value_at_path(document, "model_provider.openai_embeddings_model")?;
+            unset_value_at_path(document, "model_provider.openai_embeddings_dims")?;
+            set_value_at_path(
+                document,
+                "model_provider.anthropic_api_key_vault_ref",
+                toml::Value::String(vault_ref),
+            )?;
+        }
+        _ => {
+            let vault_ref = store_secret_in_vault("global", "openai_api_key", api_key)?;
+            set_value_at_path(
+                document,
+                "model_provider.kind",
+                toml::Value::String("openai_compatible".to_owned()),
+            )?;
+            if get_value_at_path(document, "model_provider.openai_base_url")?
+                .and_then(toml::Value::as_str)
+                .is_none()
+            {
+                set_value_at_path(
+                    document,
+                    "model_provider.openai_base_url",
+                    toml::Value::String("https://api.openai.com/v1".to_owned()),
+                )?;
+            }
+            set_value_at_path(
+                document,
+                "model_provider.openai_model",
+                toml::Value::String(DEFAULT_TEXT_MODEL.to_owned()),
+            )?;
+            set_value_at_path(
+                document,
+                "model_provider.openai_embeddings_model",
+                toml::Value::String(DEFAULT_EMBEDDINGS_MODEL.to_owned()),
+            )?;
+            set_value_at_path(
+                document,
+                "model_provider.openai_embeddings_dims",
+                toml::Value::Integer(i64::from(DEFAULT_EMBEDDINGS_DIMS)),
+            )?;
+            unset_value_at_path(document, "model_provider.anthropic_base_url")?;
+            unset_value_at_path(document, "model_provider.anthropic_model")?;
+            set_value_at_path(
+                document,
+                "model_provider.openai_api_key_vault_ref",
+                toml::Value::String(vault_ref),
+            )?;
+        }
     }
-    set_value_at_path(
-        document,
-        "model_provider.openai_model",
-        toml::Value::String(DEFAULT_TEXT_MODEL.to_owned()),
-    )?;
-    set_value_at_path(
-        document,
-        "model_provider.openai_embeddings_model",
-        toml::Value::String(DEFAULT_EMBEDDINGS_MODEL.to_owned()),
-    )?;
-    set_value_at_path(
-        document,
-        "model_provider.openai_embeddings_dims",
-        toml::Value::Integer(i64::from(DEFAULT_EMBEDDINGS_DIMS)),
-    )?;
     Ok(())
 }
 
@@ -2398,7 +2457,7 @@ fn collect_secret_inputs(
             api_key_env,
             api_key_stdin,
             api_key_prompt,
-            "OpenAI API key: ",
+            "Model provider API key: ",
         )?,
         admin_token: load_secret_input_optional(
             admin_token_env,
@@ -2454,7 +2513,7 @@ fn load_secret_input_optional(
 fn validate_stdin_secret_usage(api_key_stdin: bool, admin_token_stdin: bool) -> Result<()> {
     if api_key_stdin && admin_token_stdin {
         anyhow::bail!(
-            "only one secret may be sourced from stdin per invocation; split OpenAI API key and admin token configuration into separate runs or use environment/prompt sources"
+            "only one secret may be sourced from stdin per invocation; split model-provider API key and admin token configuration into separate runs or use environment/prompt sources"
         );
     }
     Ok(())
@@ -2510,7 +2569,23 @@ fn get_bool_value_at_path(document: &toml::Value, key: &str) -> Result<Option<bo
 
 fn model_auth_configured(document: &toml::Value) -> Result<bool> {
     Ok(get_string_value_at_path(document, "model_provider.openai_api_key_vault_ref")?.is_some()
+        || get_string_value_at_path(document, "model_provider.anthropic_api_key_vault_ref")?
+            .is_some()
         || get_string_value_at_path(document, "model_provider.auth_profile_id")?.is_some())
+}
+
+fn configured_chat_model(document: &toml::Value) -> Result<Option<String>> {
+    let provider_kind = get_string_value_at_path(document, "model_provider.kind")?
+        .unwrap_or_else(|| "openai_compatible".to_owned());
+    if provider_kind == "anthropic" {
+        get_string_value_at_path(document, "model_provider.anthropic_model")
+    } else {
+        get_string_value_at_path(document, "model_provider.openai_model")
+    }
+}
+
+fn configured_embeddings_model(document: &toml::Value) -> Result<Option<String>> {
+    get_string_value_at_path(document, "model_provider.openai_embeddings_model")
 }
 
 fn join_section_state(values: &[String]) -> String {
@@ -2545,6 +2620,11 @@ fn describe_configure_section(
             let auth_source =
                 if get_string_value_at_path(document, "model_provider.openai_api_key_vault_ref")?
                     .is_some()
+                    || get_string_value_at_path(
+                        document,
+                        "model_provider.anthropic_api_key_vault_ref",
+                    )?
+                    .is_some()
                 {
                     "vault_ref".to_owned()
                 } else if get_string_value_at_path(document, "model_provider.auth_profile_id")?
@@ -2562,14 +2642,12 @@ fn describe_configure_section(
                 ),
                 format!("auth_source={auth_source}"),
                 format!(
-                    "openai_model={}",
-                    get_string_value_at_path(document, "model_provider.openai_model")?
-                        .unwrap_or_else(|| "unset".to_owned())
+                    "chat_model={}",
+                    configured_chat_model(document)?.unwrap_or_else(|| "unset".to_owned())
                 ),
                 format!(
                     "embeddings_model={}",
-                    get_string_value_at_path(document, "model_provider.openai_embeddings_model")?
-                        .unwrap_or_else(|| "unset".to_owned())
+                    configured_embeddings_model(document)?.unwrap_or_else(|| "unset".to_owned())
                 ),
             ])
         }
@@ -2692,6 +2770,7 @@ fn section_follow_up_checks(
         }
         ConfigureSectionArg::AuthModel => vec![
             "palyra doctor".to_owned(),
+            "palyra models status".to_owned(),
             "restart daemon so model-provider auth changes take effect".to_owned(),
         ],
         ConfigureSectionArg::Gateway => {
@@ -2721,26 +2800,58 @@ fn section_follow_up_checks(
 }
 
 fn current_auth_method(document: &toml::Value) -> String {
-    get_string_value_at_path(document, "model_provider.openai_api_key_vault_ref")
+    let provider_kind = get_string_value_at_path(document, "model_provider.kind")
         .ok()
         .flatten()
-        .map(|_| "existing_config".to_owned())
-        .or_else(|| {
-            get_string_value_at_path(document, "model_provider.auth_profile_id")
-                .ok()
-                .flatten()
-                .map(|_| "existing_config".to_owned())
-        })
-        .unwrap_or_else(|| "api_key".to_owned())
+        .unwrap_or_else(|| "openai_compatible".to_owned());
+    if get_string_value_at_path(document, "model_provider.auth_profile_id").ok().flatten().is_some()
+    {
+        return "existing_config".to_owned();
+    }
+    if get_string_value_at_path(document, "model_provider.anthropic_api_key_vault_ref")
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return if provider_kind == "anthropic" {
+            "anthropic_api_key".to_owned()
+        } else {
+            "existing_config".to_owned()
+        };
+    }
+    if get_string_value_at_path(document, "model_provider.openai_api_key_vault_ref")
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return if provider_kind == "openai_compatible" {
+            "api_key".to_owned()
+        } else {
+            "existing_config".to_owned()
+        };
+    }
+    if provider_kind == "anthropic" {
+        "anthropic_api_key".to_owned()
+    } else {
+        "api_key".to_owned()
+    }
 }
 
 fn auth_method_value(value: OnboardingAuthMethodArg) -> String {
     match value {
         OnboardingAuthMethodArg::ApiKey => "api_key",
+        OnboardingAuthMethodArg::AnthropicApiKey => "anthropic_api_key",
         OnboardingAuthMethodArg::Skip => "skip",
         OnboardingAuthMethodArg::ExistingConfig => "existing_config",
     }
     .to_owned()
+}
+
+fn api_key_field_label(auth_method: &str) -> &'static str {
+    match auth_method {
+        "anthropic_api_key" => "Anthropic API Key",
+        _ => "OpenAI API Key",
+    }
 }
 
 fn bind_profile_value(value: GatewayBindProfileArg) -> &'static str {
