@@ -12,8 +12,12 @@ use crate::journal::{
     UsagePricingRecord, UsageRoutingDecisionCreateRequest, UsageRoutingDecisionRecord,
 };
 use crate::{
-    gateway::GatewayRuntimeState, model_provider::ProviderStatusSnapshot,
-    orchestrator::estimate_token_count, transport::grpc::auth::RequestContext,
+    gateway::GatewayRuntimeState,
+    model_provider::{
+        ProviderRegistryModelSnapshot, ProviderRegistryProviderSnapshot, ProviderStatusSnapshot,
+    },
+    orchestrator::estimate_token_count,
+    transport::grpc::auth::RequestContext,
 };
 
 const ALERT_MIN_COST_SPIKE_USD: f64 = 0.50;
@@ -130,14 +134,13 @@ pub(crate) struct RoutingDecisionContext<'a> {
     pub scope_kind: &'a str,
     pub scope_id: &'a str,
     pub mode: RoutingMode,
-    pub provider_id: &'a str,
-    pub provider_kind: &'a str,
     pub default_model_id: &'a str,
     pub prompt_text: &'a str,
     pub prompt_tokens_estimate: u64,
     pub json_mode: bool,
     pub vision_inputs: usize,
     pub provider_health_state: &'a str,
+    pub provider_snapshot: &'a ProviderStatusSnapshot,
     pub pricing: &'a [UsagePricingRecord],
     pub budgets: &'a [UsageBudgetEvaluation],
 }
@@ -148,6 +151,18 @@ struct RoutingModelSelection {
     explanation: Vec<String>,
     recommended_model_id: String,
     actual_model_id: String,
+    provider_id: String,
+    provider_kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoutingCandidate {
+    model_id: String,
+    provider_id: String,
+    provider_kind: String,
+    health_state: String,
+    cost_rank: u8,
+    latency_rank: u8,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -234,12 +249,14 @@ pub(crate) async fn plan_usage_routing(
     request: UsageRoutingPlanRequest<'_>,
 ) -> Result<RoutingDecision, Status> {
     let pricing = request.runtime_state.list_usage_pricing_records().await?;
-    let provider_kind = request.provider_snapshot.kind.as_str();
-    let provider_id = if provider_kind == "openai_compatible" { "openai" } else { "palyra" };
     let default_model_id = request
         .provider_snapshot
-        .openai_model
+        .registry
+        .default_chat_model_id
         .clone()
+        .or_else(|| request.provider_snapshot.model_id.clone())
+        .or_else(|| request.provider_snapshot.openai_model.clone())
+        .or_else(|| request.provider_snapshot.anthropic_model.clone())
         .unwrap_or_else(|| "deterministic".to_owned());
     let mode = if request.runtime_state.config.smart_routing.enabled {
         parse_routing_mode_override(request.parameter_delta_json)
@@ -280,14 +297,13 @@ pub(crate) async fn plan_usage_routing(
         scope_kind: request.scope_kind,
         scope_id: request.scope_id,
         mode,
-        provider_id,
-        provider_kind,
         default_model_id: default_model_id.as_str(),
         prompt_text: request.prompt_text,
         prompt_tokens_estimate,
         json_mode: request.json_mode,
         vision_inputs: request.vision_inputs,
         provider_health_state,
+        provider_snapshot: request.provider_snapshot,
         pricing: pricing.as_slice(),
         budgets: &[],
     });
@@ -310,10 +326,14 @@ pub(crate) async fn plan_usage_routing(
             let inferred_model_id = routing
                 .map(|decision| decision.actual_model_id.as_str())
                 .unwrap_or(default_model_id.as_str());
-            let inferred_provider_kind =
-                routing.map(|decision| decision.provider_kind.as_str()).unwrap_or(provider_kind);
-            let inferred_provider_id =
-                routing.map(|decision| decision.provider_id.as_str()).unwrap_or(provider_id);
+            let (fallback_provider_id, fallback_provider_kind) =
+                resolve_provider_for_model(request.provider_snapshot, inferred_model_id);
+            let inferred_provider_kind = routing
+                .map(|decision| decision.provider_kind.as_str())
+                .unwrap_or(fallback_provider_kind);
+            let inferred_provider_id = routing
+                .map(|decision| decision.provider_id.as_str())
+                .unwrap_or(fallback_provider_id);
             let cost_estimate = estimate_cost_for_model(
                 pricing.as_slice(),
                 inferred_provider_kind,
@@ -339,8 +359,8 @@ pub(crate) async fn plan_usage_routing(
         .saturating_add(prompt_tokens_estimate);
     let projected_cost = estimate_cost_for_model(
         pricing.as_slice(),
-        provider_kind,
-        provider_id,
+        projected_selection.provider_kind.as_str(),
+        projected_selection.provider_id.as_str(),
         projected_selection.actual_model_id.as_str(),
         crate::gateway::current_unix_ms(),
         prompt_tokens_estimate,
@@ -357,14 +377,13 @@ pub(crate) async fn plan_usage_routing(
         scope_kind: request.scope_kind,
         scope_id: request.scope_id,
         mode,
-        provider_id,
-        provider_kind,
         default_model_id: default_model_id.as_str(),
         prompt_text: request.prompt_text,
         prompt_tokens_estimate,
         json_mode: request.json_mode,
         vision_inputs: request.vision_inputs,
         provider_health_state,
+        provider_snapshot: request.provider_snapshot,
         pricing: pricing.as_slice(),
         budgets: budget_evaluations.as_slice(),
     });
@@ -623,8 +642,8 @@ pub(crate) fn decide_routing(context: RoutingDecisionContext<'_>) -> RoutingDeci
 
     let estimate = estimate_cost_for_model(
         context.pricing,
-        context.provider_kind,
-        context.provider_id,
+        selection.provider_kind.as_str(),
+        selection.provider_id.as_str(),
         selection.actual_model_id.as_str(),
         0,
         context.prompt_tokens_estimate,
@@ -638,8 +657,8 @@ pub(crate) fn decide_routing(context: RoutingDecisionContext<'_>) -> RoutingDeci
         default_model_id: context.default_model_id.to_owned(),
         recommended_model_id: selection.recommended_model_id,
         actual_model_id: selection.actual_model_id,
-        provider_id: context.provider_id.to_owned(),
-        provider_kind: context.provider_kind.to_owned(),
+        provider_id: selection.provider_id,
+        provider_kind: selection.provider_kind,
         complexity_score: selection.complexity_score,
         health_state: context.provider_health_state.to_owned(),
         explanation,
@@ -668,50 +687,244 @@ fn select_routing_models(context: &RoutingDecisionContext<'_>) -> RoutingModelSe
         ));
     }
 
-    let mut candidates = context
-        .pricing
-        .iter()
-        .filter(|entry| {
-            entry.provider_kind == context.provider_kind && entry.provider_id == context.provider_id
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        let left_cost = left.input_cost_per_million_usd.unwrap_or(f64::MAX)
-            + left.output_cost_per_million_usd.unwrap_or(f64::MAX);
-        let right_cost = right.input_cost_per_million_usd.unwrap_or(f64::MAX)
-            + right.output_cost_per_million_usd.unwrap_or(f64::MAX);
-        left_cost.total_cmp(&right_cost)
-    });
-    let cheapest_model = candidates
-        .first()
-        .map(|entry| entry.model_id.clone())
-        .unwrap_or_else(|| context.default_model_id.to_owned());
-    let premium_model = candidates
-        .last()
-        .map(|entry| entry.model_id.clone())
-        .unwrap_or_else(|| context.default_model_id.to_owned());
+    let mut candidates = build_routing_candidates(context);
+    let default_candidate = default_routing_candidate(context);
+    let default_candidate_in_registry =
+        candidates.iter().any(|candidate| candidate.model_id == default_candidate.model_id);
+    if !default_candidate_in_registry {
+        candidates.push(default_candidate.clone());
+    }
 
-    let recommended_model_id = if context.provider_health_state != "ok" {
-        context.default_model_id.to_owned()
-    } else if complexity_score >= 0.75 {
-        premium_model
-    } else if complexity_score <= 0.35 {
-        cheapest_model
-    } else {
-        context.default_model_id.to_owned()
+    let capability_filtered = context.provider_snapshot.registry.models.iter().any(|model| {
+        model.role == "chat"
+            && model.enabled
+            && (context.json_mode && !model.capabilities.json_mode
+                || context.vision_inputs > 0 && !model.capabilities.vision)
+    });
+    if capability_filtered && (context.json_mode || context.vision_inputs > 0) {
+        explanation.push(
+            "Capability filters removed one or more chat models that could not satisfy the request."
+                .to_owned(),
+        );
+    }
+
+    let mut recommendation_pool = candidates.clone();
+    if context.provider_snapshot.registry.failover_enabled
+        && default_candidate.health_state != "ok"
+        && candidates.iter().any(|candidate| candidate.health_state == "ok")
+    {
+        recommendation_pool.retain(|candidate| candidate.health_state == "ok");
+        explanation.push(format!(
+            "Default provider {} is {}, so smart routing prefers a healthy registry fallback.",
+            default_candidate.provider_id, default_candidate.health_state
+        ));
+    }
+
+    let recommended_candidate = choose_routing_candidate(
+        recommendation_pool.as_slice(),
+        &default_candidate,
+        complexity_score,
+    );
+    let actual_candidate = match context.mode {
+        RoutingMode::Suggest | RoutingMode::DryRun => default_candidate.clone(),
+        RoutingMode::Enforced => recommended_candidate.clone(),
     };
-    let actual_model_id = match context.mode {
-        RoutingMode::Suggest | RoutingMode::DryRun => context.default_model_id.to_owned(),
-        RoutingMode::Enforced => recommended_model_id.clone(),
-    };
-    if context.mode != RoutingMode::Enforced && recommended_model_id != actual_model_id {
+    if context.mode != RoutingMode::Enforced
+        && (recommended_candidate.model_id != actual_candidate.model_id
+            || recommended_candidate.provider_id != actual_candidate.provider_id)
+    {
         explanation.push(format!(
             "Mode {} keeps the default model active while still publishing the recommendation.",
             context.mode.as_str()
         ));
     }
 
-    RoutingModelSelection { complexity_score, explanation, recommended_model_id, actual_model_id }
+    RoutingModelSelection {
+        complexity_score,
+        explanation,
+        recommended_model_id: recommended_candidate.model_id,
+        actual_model_id: actual_candidate.model_id,
+        provider_id: actual_candidate.provider_id,
+        provider_kind: actual_candidate.provider_kind,
+    }
+}
+
+fn build_routing_candidates(context: &RoutingDecisionContext<'_>) -> Vec<RoutingCandidate> {
+    let mut candidates = Vec::new();
+    for model in &context.provider_snapshot.registry.models {
+        if model.role != "chat" || !model.enabled {
+            continue;
+        }
+        if context.json_mode && !model.capabilities.json_mode {
+            continue;
+        }
+        if context.vision_inputs > 0 && !model.capabilities.vision {
+            continue;
+        }
+        let Some(provider) =
+            find_registry_provider(context.provider_snapshot, model.provider_id.as_str())
+        else {
+            continue;
+        };
+        if !provider.enabled {
+            continue;
+        }
+        candidates.push(RoutingCandidate {
+            model_id: model.model_id.clone(),
+            provider_id: provider.provider_id.clone(),
+            provider_kind: provider.kind.clone(),
+            health_state: registry_provider_health_state(provider).to_owned(),
+            cost_rank: provider_cost_rank(model),
+            latency_rank: provider_latency_rank(model),
+        });
+    }
+    candidates
+}
+
+fn default_routing_candidate(context: &RoutingDecisionContext<'_>) -> RoutingCandidate {
+    if let Some(model) = find_registry_model(context.provider_snapshot, context.default_model_id) {
+        if let Some(provider) =
+            find_registry_provider(context.provider_snapshot, model.provider_id.as_str())
+        {
+            return RoutingCandidate {
+                model_id: model.model_id.clone(),
+                provider_id: provider.provider_id.clone(),
+                provider_kind: provider.kind.clone(),
+                health_state: registry_provider_health_state(provider).to_owned(),
+                cost_rank: provider_cost_rank(model),
+                latency_rank: provider_latency_rank(model),
+            };
+        }
+    }
+
+    RoutingCandidate {
+        model_id: context.default_model_id.to_owned(),
+        provider_id: context.provider_snapshot.provider_id.clone(),
+        provider_kind: context.provider_snapshot.kind.clone(),
+        health_state: context.provider_health_state.to_owned(),
+        cost_rank: cost_tier_rank(context.provider_snapshot.capabilities.cost_tier.as_str()),
+        latency_rank: latency_tier_rank(
+            context.provider_snapshot.capabilities.latency_tier.as_str(),
+        ),
+    }
+}
+
+fn choose_routing_candidate(
+    candidates: &[RoutingCandidate],
+    default_candidate: &RoutingCandidate,
+    complexity_score: f64,
+) -> RoutingCandidate {
+    if candidates.is_empty() {
+        return default_candidate.clone();
+    }
+
+    if complexity_score >= 0.75 {
+        return candidates
+            .iter()
+            .max_by(|left, right| {
+                left.cost_rank
+                    .cmp(&right.cost_rank)
+                    .then_with(|| right.latency_rank.cmp(&left.latency_rank))
+                    .then_with(|| left.model_id.cmp(&right.model_id))
+            })
+            .cloned()
+            .unwrap_or_else(|| default_candidate.clone());
+    }
+
+    if complexity_score <= 0.35 {
+        return candidates
+            .iter()
+            .min_by(|left, right| {
+                left.cost_rank
+                    .cmp(&right.cost_rank)
+                    .then_with(|| left.latency_rank.cmp(&right.latency_rank))
+                    .then_with(|| left.model_id.cmp(&right.model_id))
+            })
+            .cloned()
+            .unwrap_or_else(|| default_candidate.clone());
+    }
+
+    candidates
+        .iter()
+        .find(|candidate| candidate.model_id == default_candidate.model_id)
+        .cloned()
+        .or_else(|| {
+            candidates
+                .iter()
+                .min_by(|left, right| {
+                    left.latency_rank
+                        .cmp(&right.latency_rank)
+                        .then_with(|| left.cost_rank.cmp(&right.cost_rank))
+                        .then_with(|| left.model_id.cmp(&right.model_id))
+                })
+                .cloned()
+        })
+        .unwrap_or_else(|| default_candidate.clone())
+}
+
+fn find_registry_provider<'a>(
+    snapshot: &'a ProviderStatusSnapshot,
+    provider_id: &str,
+) -> Option<&'a ProviderRegistryProviderSnapshot> {
+    snapshot.registry.providers.iter().find(|provider| provider.provider_id == provider_id)
+}
+
+fn find_registry_model<'a>(
+    snapshot: &'a ProviderStatusSnapshot,
+    model_id: &str,
+) -> Option<&'a ProviderRegistryModelSnapshot> {
+    snapshot.registry.models.iter().find(|model| model.model_id == model_id)
+}
+
+fn resolve_provider_for_model<'a>(
+    snapshot: &'a ProviderStatusSnapshot,
+    model_id: &str,
+) -> (&'a str, &'a str) {
+    if let Some(model) = find_registry_model(snapshot, model_id) {
+        if let Some(provider) = find_registry_provider(snapshot, model.provider_id.as_str()) {
+            return (provider.provider_id.as_str(), provider.kind.as_str());
+        }
+    }
+    (snapshot.provider_id.as_str(), snapshot.kind.as_str())
+}
+
+fn registry_provider_health_state(provider: &ProviderRegistryProviderSnapshot) -> &'static str {
+    if provider.circuit_breaker.open || provider.runtime_metrics.error_count > 0 {
+        "degraded"
+    } else {
+        match provider.health.state.as_str() {
+            "ok" | "static" => "ok",
+            "missing_auth" => "missing_auth",
+            _ if provider.api_key_configured || provider.auth_profile_id.is_some() => "ok",
+            _ => "degraded",
+        }
+    }
+}
+
+fn provider_cost_rank(model: &ProviderRegistryModelSnapshot) -> u8 {
+    cost_tier_rank(model.capabilities.cost_tier.as_str())
+}
+
+fn provider_latency_rank(model: &ProviderRegistryModelSnapshot) -> u8 {
+    latency_tier_rank(model.capabilities.latency_tier.as_str())
+}
+
+fn cost_tier_rank(value: &str) -> u8 {
+    match value {
+        "low" => 0,
+        "standard" => 1,
+        "premium" => 2,
+        _ => 1,
+    }
+}
+
+fn latency_tier_rank(value: &str) -> u8 {
+    match value {
+        "low" => 0,
+        "standard" => 1,
+        "high" => 2,
+        _ => 1,
+    }
 }
 
 pub(crate) fn build_model_mix(runs: &[UsageEnrichedRun<'_>]) -> Vec<UsageModelMixRecord> {
@@ -1042,6 +1255,158 @@ mod tests {
         RoutingMode,
     };
     use crate::journal::{UsagePricingRecord, UsageRoutingDecisionRecord};
+    use crate::model_provider::{
+        ProviderCapabilitiesSnapshot, ProviderCircuitBreakerSnapshot, ProviderDiscoverySnapshot,
+        ProviderHealthProbeSnapshot, ProviderRegistryModelSnapshot,
+        ProviderRegistryProviderSnapshot, ProviderRegistrySnapshot, ProviderRetryPolicySnapshot,
+        ProviderRuntimeMetricsSnapshot, ProviderStatusSnapshot,
+    };
+
+    fn capabilities(
+        cost_tier: &str,
+        latency_tier: &str,
+        json_mode: bool,
+        vision: bool,
+    ) -> ProviderCapabilitiesSnapshot {
+        ProviderCapabilitiesSnapshot {
+            streaming_tokens: true,
+            tool_calls: true,
+            json_mode,
+            vision,
+            audio_transcribe: false,
+            embeddings: false,
+            max_context_tokens: Some(128_000),
+            cost_tier: cost_tier.to_owned(),
+            latency_tier: latency_tier.to_owned(),
+            recommended_use_cases: vec![],
+            known_limitations: vec![],
+            operator_override: false,
+            metadata_source: "static".to_owned(),
+        }
+    }
+
+    fn provider_runtime_metrics(error_count: u64) -> ProviderRuntimeMetricsSnapshot {
+        ProviderRuntimeMetricsSnapshot {
+            request_count: 0,
+            error_count,
+            error_rate_bps: 0,
+            total_retry_attempts: 0,
+            total_prompt_tokens: 0,
+            total_completion_tokens: 0,
+            avg_prompt_tokens_per_run: 0,
+            avg_completion_tokens_per_run: 0,
+            last_latency_ms: 0,
+            avg_latency_ms: 0,
+            max_latency_ms: 0,
+        }
+    }
+
+    fn registry_provider(
+        provider_id: &str,
+        kind: &str,
+        health_state: &str,
+        error_count: u64,
+    ) -> ProviderRegistryProviderSnapshot {
+        ProviderRegistryProviderSnapshot {
+            provider_id: provider_id.to_owned(),
+            display_name: provider_id.to_owned(),
+            kind: kind.to_owned(),
+            enabled: true,
+            endpoint_base_url: None,
+            auth_profile_id: Some(format!("auth-{provider_id}")),
+            auth_profile_provider_kind: Some(kind.to_owned()),
+            credential_source: Some("auth_profile_api_key".to_owned()),
+            api_key_configured: true,
+            retry_policy: ProviderRetryPolicySnapshot { max_retries: 2, retry_backoff_ms: 100 },
+            circuit_breaker: ProviderCircuitBreakerSnapshot {
+                failure_threshold: 3,
+                cooldown_ms: 30_000,
+                consecutive_failures: error_count as u32,
+                open: false,
+            },
+            runtime_metrics: provider_runtime_metrics(error_count),
+            health: ProviderHealthProbeSnapshot {
+                state: health_state.to_owned(),
+                message: health_state.to_owned(),
+                checked_at_unix_ms: Some(0),
+                latency_ms: Some(50),
+                source: "test".to_owned(),
+            },
+            discovery: ProviderDiscoverySnapshot {
+                status: "static".to_owned(),
+                checked_at_unix_ms: Some(0),
+                expires_at_unix_ms: None,
+                discovered_model_ids: vec![],
+                source: "test".to_owned(),
+                message: None,
+            },
+        }
+    }
+
+    fn registry_model(
+        model_id: &str,
+        provider_id: &str,
+        cost_tier: &str,
+        latency_tier: &str,
+        json_mode: bool,
+        vision: bool,
+    ) -> ProviderRegistryModelSnapshot {
+        ProviderRegistryModelSnapshot {
+            model_id: model_id.to_owned(),
+            provider_id: provider_id.to_owned(),
+            role: "chat".to_owned(),
+            enabled: true,
+            capabilities: capabilities(cost_tier, latency_tier, json_mode, vision),
+        }
+    }
+
+    fn provider_snapshot(
+        default_model_id: &str,
+        providers: Vec<ProviderRegistryProviderSnapshot>,
+        models: Vec<ProviderRegistryModelSnapshot>,
+    ) -> ProviderStatusSnapshot {
+        let default_model =
+            models.iter().find(|model| model.model_id == default_model_id).cloned().unwrap_or_else(
+                || registry_model(default_model_id, "openai", "low", "low", true, false),
+            );
+        let default_provider = providers
+            .iter()
+            .find(|provider| provider.provider_id == default_model.provider_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                registry_provider(default_model.provider_id.as_str(), "openai_compatible", "ok", 0)
+            });
+        ProviderStatusSnapshot {
+            kind: default_provider.kind.clone(),
+            provider_id: default_provider.provider_id.clone(),
+            model_id: Some(default_model.model_id.clone()),
+            capabilities: default_model.capabilities.clone(),
+            openai_base_url: Some("https://api.openai.test/v1".to_owned()),
+            anthropic_base_url: Some("https://api.anthropic.test".to_owned()),
+            openai_model: Some(default_model.model_id.clone()),
+            anthropic_model: None,
+            openai_embeddings_model: None,
+            openai_embeddings_dims: None,
+            auth_profile_id: default_provider.auth_profile_id.clone(),
+            auth_profile_provider_kind: default_provider.auth_profile_provider_kind.clone(),
+            credential_source: default_provider.credential_source.clone(),
+            api_key_configured: default_provider.api_key_configured,
+            retry_policy: default_provider.retry_policy.clone(),
+            circuit_breaker: default_provider.circuit_breaker.clone(),
+            runtime_metrics: default_provider.runtime_metrics.clone(),
+            health: default_provider.health.clone(),
+            discovery: default_provider.discovery.clone(),
+            registry: ProviderRegistrySnapshot {
+                default_chat_model_id: Some(default_model_id.to_owned()),
+                default_embeddings_model_id: None,
+                default_audio_transcription_model_id: None,
+                failover_enabled: true,
+                response_cache_enabled: true,
+                providers,
+                models,
+            },
+        }
+    }
 
     fn pricing_record(model_id: &str, input_cost: f64, output_cost: f64) -> UsagePricingRecord {
         UsagePricingRecord {
@@ -1096,23 +1461,65 @@ mod tests {
     #[test]
     fn select_routing_models_uses_enforced_premium_model() {
         let pricing = vec![pricing_record("cheap", 0.1, 0.2), pricing_record("premium", 2.0, 4.0)];
+        let snapshot = provider_snapshot(
+            "cheap",
+            vec![registry_provider("openai", "openai_compatible", "ok", 0)],
+            vec![
+                registry_model("cheap", "openai", "low", "low", true, false),
+                registry_model("premium", "openai", "premium", "high", true, true),
+            ],
+        );
         let selection = select_routing_models(&RoutingDecisionContext {
             scope_kind: "session",
             scope_id: "session-1",
             mode: RoutingMode::Enforced,
-            provider_id: "openai",
-            provider_kind: "openai_compatible",
             default_model_id: "cheap",
             prompt_text: &"complex request ".repeat(400),
             prompt_tokens_estimate: 2_400,
             json_mode: true,
             vision_inputs: 2,
             provider_health_state: "ok",
+            provider_snapshot: &snapshot,
             pricing: pricing.as_slice(),
             budgets: &[],
         });
         assert_eq!(selection.recommended_model_id, "premium");
         assert_eq!(selection.actual_model_id, "premium");
+        assert_eq!(selection.provider_id, "openai");
+        assert_eq!(selection.provider_kind, "openai_compatible");
+    }
+
+    #[test]
+    fn select_routing_models_prefers_healthy_registry_fallback_when_default_is_degraded() {
+        let snapshot = provider_snapshot(
+            "cheap",
+            vec![
+                registry_provider("openai", "openai_compatible", "ok", 3),
+                registry_provider("anthropic", "anthropic", "ok", 0),
+            ],
+            vec![
+                registry_model("cheap", "openai", "low", "low", true, false),
+                registry_model("claude-sonnet", "anthropic", "premium", "standard", true, true),
+            ],
+        );
+        let selection = select_routing_models(&RoutingDecisionContext {
+            scope_kind: "session",
+            scope_id: "session-1",
+            mode: RoutingMode::Enforced,
+            default_model_id: "cheap",
+            prompt_text: "summarize this request",
+            prompt_tokens_estimate: 180,
+            json_mode: false,
+            vision_inputs: 0,
+            provider_health_state: "degraded",
+            provider_snapshot: &snapshot,
+            pricing: &[],
+            budgets: &[],
+        });
+        assert_eq!(selection.recommended_model_id, "claude-sonnet");
+        assert_eq!(selection.actual_model_id, "claude-sonnet");
+        assert_eq!(selection.provider_id, "anthropic");
+        assert_eq!(selection.provider_kind, "anthropic");
     }
 
     #[test]

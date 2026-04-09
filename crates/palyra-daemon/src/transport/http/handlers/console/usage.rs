@@ -573,16 +573,15 @@ pub(crate) async fn console_usage_insights_handler(
         .status_snapshot_async(session.context.clone(), state.auth.clone())
         .await
         .map_err(runtime_status_response)?;
-    let provider_kind = status_snapshot.model_provider.kind.clone();
-    let provider_id = if provider_kind == "openai_compatible" {
-        "openai".to_owned()
-    } else {
-        "palyra".to_owned()
-    };
-    let default_model_id = status_snapshot
-        .model_provider
-        .openai_model
+    let provider_snapshot = &status_snapshot.model_provider;
+    let provider_kind = provider_snapshot.kind.clone();
+    let default_model_id = provider_snapshot
+        .registry
+        .default_chat_model_id
         .clone()
+        .or_else(|| provider_snapshot.model_id.clone())
+        .or_else(|| provider_snapshot.openai_model.clone())
+        .or_else(|| provider_snapshot.anthropic_model.clone())
         .unwrap_or_else(|| "deterministic".to_owned());
 
     let routing_by_run = routing_decisions
@@ -596,11 +595,13 @@ pub(crate) async fn console_usage_insights_handler(
             let model_id = routing
                 .map(|record| record.actual_model_id.as_str())
                 .unwrap_or(default_model_id.as_str());
+            let (fallback_provider_id, fallback_provider_kind) =
+                resolve_provider_for_model(provider_snapshot, model_id);
             let provider_kind_value = routing
                 .map(|record| record.provider_kind.as_str())
-                .unwrap_or(provider_kind.as_str());
+                .unwrap_or(fallback_provider_kind);
             let provider_id_value =
-                routing.map(|record| record.provider_id.as_str()).unwrap_or(provider_id.as_str());
+                routing.map(|record| record.provider_id.as_str()).unwrap_or(fallback_provider_id);
             let cost_estimate = estimate_cost_for_model(
                 pricing.as_slice(),
                 provider_kind_value,
@@ -1007,6 +1008,20 @@ fn model_provider_health_state(
     } else {
         "missing_auth"
     }
+}
+
+fn resolve_provider_for_model<'a>(
+    snapshot: &'a crate::model_provider::ProviderStatusSnapshot,
+    model_id: &str,
+) -> (&'a str, &'a str) {
+    if let Some(model) = snapshot.registry.models.iter().find(|entry| entry.model_id == model_id) {
+        if let Some(provider) =
+            snapshot.registry.providers.iter().find(|entry| entry.provider_id == model.provider_id)
+        {
+            return (provider.provider_id.as_str(), provider.kind.as_str());
+        }
+    }
+    (snapshot.provider_id.as_str(), snapshot.kind.as_str())
 }
 
 async fn load_usage_tool_mix(

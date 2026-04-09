@@ -43,6 +43,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::{Path as FsPath, PathBuf},
     process::Stdio,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -85,7 +86,7 @@ use journal::{
 use model_provider::{
     build_embeddings_provider, build_model_provider, EmbeddingsProvider, EmbeddingsRequest,
     ModelProviderAuthProviderKind, ModelProviderConfig, ModelProviderCredentialSource,
-    ModelProviderKind,
+    ModelProviderKind, ProviderRegistryEntryConfig,
 };
 use observability::{
     CorrelationSnapshot as ObservabilityCorrelationSnapshot, FailureClass, ObservabilityState,
@@ -1741,7 +1742,7 @@ pub async fn run() -> Result<()> {
         AuthProfileRegistry::open(identity_runtime.store_root.as_path())
             .context("failed to initialize auth profile registry state")?,
     );
-    if let Some(access_audit) = resolve_model_provider_secret(
+    for access_audit in resolve_model_provider_secret(
         &mut loaded.model_provider,
         auth_registry.as_ref(),
         vault.as_ref(),
@@ -2669,82 +2670,201 @@ fn resolve_model_provider_secret(
     model_provider: &mut ModelProviderConfig,
     auth_registry: &AuthProfileRegistry,
     vault: &Vault,
-) -> Result<Option<SecretAccessAuditRecord>> {
-    if model_provider.kind != ModelProviderKind::OpenAiCompatible {
-        return Ok(None);
+) -> Result<Vec<SecretAccessAuditRecord>> {
+    let mut audits = Vec::new();
+
+    if let Some(access_audit) =
+        resolve_primary_model_provider_secret(model_provider, auth_registry, vault)?
+    {
+        audits.push(access_audit);
     }
-    if model_provider.openai_api_key.is_some() {
-        model_provider.credential_source = Some(ModelProviderCredentialSource::InlineConfig);
-        return Ok(None);
+
+    for entry in &mut model_provider.registry.providers {
+        if let Some(access_audit) = resolve_registry_provider_secret(entry, auth_registry, vault)? {
+            audits.push(access_audit);
+        }
     }
-    if model_provider.auth_profile_id.is_some() {
-        return resolve_model_provider_secret_from_auth_profile(
-            model_provider,
-            auth_registry,
-            vault,
-        );
-    }
-    let Some(vault_ref_raw) = model_provider.openai_api_key_vault_ref.clone() else {
-        return Ok(None);
-    };
-    let vault_ref = VaultRef::parse(vault_ref_raw.as_str()).with_context(|| {
-        format!("invalid model_provider.openai_api_key_vault_ref: {vault_ref_raw}")
-    })?;
-    let value = vault.get_secret(&vault_ref.scope, vault_ref.key.as_str()).with_context(|| {
-        format!("failed to load model provider API key from vault ref {}", vault_ref_raw)
-    })?;
-    if value.is_empty() {
-        anyhow::bail!("vault ref {} resolved to an empty secret value", vault_ref_raw);
-    }
-    let decoded = String::from_utf8(value.clone())
-        .context("model provider API key from vault must be valid UTF-8 text")?;
-    if decoded.trim().is_empty() {
-        anyhow::bail!(
-            "model provider API key from vault ref {} cannot be whitespace only",
-            vault_ref_raw
-        );
-    }
-    model_provider.openai_api_key = Some(decoded);
-    model_provider.credential_source = Some(ModelProviderCredentialSource::VaultRef);
-    Ok(Some(SecretAccessAuditRecord {
-        scope: vault_ref.scope.to_string(),
-        key: vault_ref.key,
-        action: "model_provider.openai_api_key.resolve".to_owned(),
-        value_bytes: value.len(),
-    }))
+
+    Ok(audits)
 }
 
-fn resolve_model_provider_secret_from_auth_profile(
+fn resolve_primary_model_provider_secret(
     model_provider: &mut ModelProviderConfig,
     auth_registry: &AuthProfileRegistry,
     vault: &Vault,
 ) -> Result<Option<SecretAccessAuditRecord>> {
-    let Some(auth_profile_id) = model_provider.auth_profile_id.clone() else {
+    let Some(expected_provider) = auth_provider_kind_for_model_provider(model_provider.kind) else {
         return Ok(None);
     };
+
+    let inline_api_key = match model_provider.kind {
+        ModelProviderKind::OpenAiCompatible => &mut model_provider.openai_api_key,
+        ModelProviderKind::Anthropic => &mut model_provider.anthropic_api_key,
+        ModelProviderKind::Deterministic => return Ok(None),
+    };
+    let vault_ref = match model_provider.kind {
+        ModelProviderKind::OpenAiCompatible => model_provider.openai_api_key_vault_ref.clone(),
+        ModelProviderKind::Anthropic => model_provider.anthropic_api_key_vault_ref.clone(),
+        ModelProviderKind::Deterministic => None,
+    };
+
+    if inline_api_key.is_some() {
+        model_provider.credential_source = Some(ModelProviderCredentialSource::InlineConfig);
+        return Ok(None);
+    }
+
+    if let Some(auth_profile_id) = model_provider.auth_profile_id.clone() {
+        let (decoded, access_audit, credential_source, resolved_profile_id) =
+            resolve_provider_secret_from_auth_profile(
+                auth_registry,
+                vault,
+                auth_profile_id.as_str(),
+                model_provider.auth_profile_provider_kind.unwrap_or(expected_provider),
+                "model provider runtime",
+                "model_provider.auth_profile",
+            )?;
+        *inline_api_key = Some(decoded);
+        model_provider.auth_profile_id = Some(resolved_profile_id);
+        model_provider.credential_source = Some(credential_source);
+        return Ok(Some(access_audit));
+    }
+
+    let Some(vault_ref_raw) = vault_ref else {
+        return Ok(None);
+    };
+    let action = match model_provider.kind {
+        ModelProviderKind::OpenAiCompatible => "model_provider.openai_api_key.resolve",
+        ModelProviderKind::Anthropic => "model_provider.anthropic_api_key.resolve",
+        ModelProviderKind::Deterministic => "model_provider.api_key.resolve",
+    };
+    let access_audit = resolve_provider_secret_from_vault_ref(
+        vault,
+        vault_ref_raw.as_str(),
+        "model provider API key",
+        action,
+    )?;
+    let value = load_secret_for_audit(
+        vault,
+        &access_audit,
+        format!("model provider API key from vault ref {}", vault_ref_raw).as_str(),
+    )?;
+    *inline_api_key = Some(decode_provider_secret_value(
+        value,
+        format!("model provider API key from vault ref {}", vault_ref_raw).as_str(),
+    )?);
+    model_provider.credential_source = Some(ModelProviderCredentialSource::VaultRef);
+    Ok(Some(access_audit))
+}
+
+fn resolve_registry_provider_secret(
+    entry: &mut ProviderRegistryEntryConfig,
+    auth_registry: &AuthProfileRegistry,
+    vault: &Vault,
+) -> Result<Option<SecretAccessAuditRecord>> {
+    let Some(expected_provider) = auth_provider_kind_for_model_provider(entry.kind) else {
+        return Ok(None);
+    };
+
+    if entry.api_key.is_some() {
+        entry.credential_source = Some(ModelProviderCredentialSource::InlineConfig);
+        return Ok(None);
+    }
+
+    if let Some(auth_profile_id) = entry.auth_profile_id.clone() {
+        let context_label = format!("provider registry entry '{}'", entry.provider_id);
+        let action_prefix =
+            format!("model_provider.registry.providers[{}].auth_profile", entry.provider_id);
+        let (decoded, access_audit, credential_source, resolved_profile_id) =
+            resolve_provider_secret_from_auth_profile(
+                auth_registry,
+                vault,
+                auth_profile_id.as_str(),
+                entry.auth_profile_provider_kind.unwrap_or(expected_provider),
+                context_label.as_str(),
+                action_prefix.as_str(),
+            )?;
+        entry.api_key = Some(decoded);
+        entry.auth_profile_id = Some(resolved_profile_id);
+        entry.credential_source = Some(credential_source);
+        return Ok(Some(access_audit));
+    }
+
+    let Some(vault_ref_raw) = entry.api_key_vault_ref.clone() else {
+        return Ok(None);
+    };
+    let action_prefix = format!("model_provider.registry.providers[{}].api_key", entry.provider_id);
+    let access_audit = resolve_provider_secret_from_vault_ref(
+        vault,
+        vault_ref_raw.as_str(),
+        format!("provider registry entry '{}' API key", entry.provider_id).as_str(),
+        action_prefix.as_str(),
+    )?;
+    let value = load_secret_for_audit(
+        vault,
+        &access_audit,
+        format!(
+            "provider registry entry '{}' API key from vault ref {}",
+            entry.provider_id, vault_ref_raw
+        )
+        .as_str(),
+    )?;
+    entry.api_key = Some(decode_provider_secret_value(
+        value,
+        format!(
+            "provider registry entry '{}' API key from vault ref {}",
+            entry.provider_id, vault_ref_raw
+        )
+        .as_str(),
+    )?);
+    entry.credential_source = Some(ModelProviderCredentialSource::VaultRef);
+    Ok(Some(access_audit))
+}
+
+fn auth_provider_kind_for_model_provider(
+    kind: ModelProviderKind,
+) -> Option<ModelProviderAuthProviderKind> {
+    match kind {
+        ModelProviderKind::OpenAiCompatible => Some(ModelProviderAuthProviderKind::Openai),
+        ModelProviderKind::Anthropic => Some(ModelProviderAuthProviderKind::Anthropic),
+        ModelProviderKind::Deterministic => None,
+    }
+}
+
+fn resolve_provider_secret_from_auth_profile(
+    auth_registry: &AuthProfileRegistry,
+    vault: &Vault,
+    auth_profile_id: &str,
+    expected_provider: ModelProviderAuthProviderKind,
+    context_label: &str,
+    action_prefix: &str,
+) -> Result<(String, SecretAccessAuditRecord, ModelProviderCredentialSource, String)> {
     let profile = auth_registry
-        .get_profile(auth_profile_id.as_str())
+        .get_profile(auth_profile_id)
         .with_context(|| {
-            format!(
-                "failed to resolve auth profile '{}' for model provider runtime",
-                auth_profile_id
-            )
+            format!("failed to resolve auth profile '{}' for {}", auth_profile_id, context_label)
         })?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "model provider auth profile '{}' was not found in auth registry",
+                "{} auth profile '{}' was not found in auth registry",
+                context_label,
                 auth_profile_id
             )
         })?;
 
-    let expected_provider =
-        model_provider.auth_profile_provider_kind.unwrap_or(ModelProviderAuthProviderKind::Openai);
-    if matches!(expected_provider, ModelProviderAuthProviderKind::Openai)
-        && !matches!(profile.provider.kind, AuthProviderKind::Openai)
-    {
+    let provider_matches = match expected_provider {
+        ModelProviderAuthProviderKind::Openai => {
+            matches!(profile.provider.kind, AuthProviderKind::Openai)
+        }
+        ModelProviderAuthProviderKind::Anthropic => {
+            matches!(profile.provider.kind, AuthProviderKind::Anthropic)
+        }
+    };
+    if !provider_matches {
         anyhow::bail!(
-            "model provider auth profile '{}' provider mismatch: expected openai-compatible profile, got '{}'",
+            "{} auth profile '{}' provider mismatch: expected '{}', got '{}'",
+            context_label,
             profile.profile_id,
+            expected_provider.as_str(),
             profile.provider.label()
         );
     }
@@ -2752,57 +2872,90 @@ fn resolve_model_provider_secret_from_auth_profile(
     let (vault_ref_raw, action, credential_source) = match &profile.credential {
         AuthCredential::ApiKey { api_key_vault_ref } => (
             api_key_vault_ref.clone(),
-            "model_provider.auth_profile.api_key.resolve",
+            format!("{action_prefix}.api_key.resolve"),
             ModelProviderCredentialSource::AuthProfileApiKey,
         ),
         AuthCredential::Oauth { access_token_vault_ref, .. } => (
             access_token_vault_ref.clone(),
-            "model_provider.auth_profile.oauth_access_token.resolve",
+            format!("{action_prefix}.oauth_access_token.resolve"),
             ModelProviderCredentialSource::AuthProfileOauthAccessToken,
         ),
     };
-    let vault_ref = VaultRef::parse(vault_ref_raw.as_str()).with_context(|| {
+    let access_audit = resolve_provider_secret_from_vault_ref(
+        vault,
+        vault_ref_raw.as_str(),
+        format!("{} credential from auth profile '{}'", context_label, profile.profile_id).as_str(),
+        action.as_str(),
+    )?;
+    let value = load_secret_for_audit(
+        vault,
+        &access_audit,
         format!(
-            "invalid vault ref '{}' in model provider auth profile '{}'",
-            vault_ref_raw, profile.profile_id
+            "{} credential from auth profile '{}' vault ref '{}'",
+            context_label, profile.profile_id, vault_ref_raw
         )
-    })?;
+        .as_str(),
+    )?;
+    Ok((
+        decode_provider_secret_value(
+            value,
+            format!(
+                "{} credential from auth profile '{}' vault ref '{}'",
+                context_label, profile.profile_id, vault_ref_raw
+            )
+            .as_str(),
+        )?,
+        access_audit,
+        credential_source,
+        profile.profile_id,
+    ))
+}
+
+fn resolve_provider_secret_from_vault_ref(
+    vault: &Vault,
+    vault_ref_raw: &str,
+    context_label: &str,
+    action: &str,
+) -> Result<SecretAccessAuditRecord> {
+    let vault_ref = VaultRef::parse(vault_ref_raw)
+        .with_context(|| format!("invalid vault ref '{}' for {}", vault_ref_raw, context_label))?;
     let value = vault.get_secret(&vault_ref.scope, vault_ref.key.as_str()).with_context(|| {
-        format!(
-            "failed to load model provider credential from auth profile '{}' vault ref '{}'",
-            profile.profile_id, vault_ref_raw
-        )
+        format!("failed to load {} from vault ref {}", context_label, vault_ref_raw)
     })?;
     if value.is_empty() {
-        anyhow::bail!(
-            "auth profile '{}' vault ref '{}' resolved to an empty secret value",
-            profile.profile_id,
-            vault_ref_raw
-        );
+        anyhow::bail!("vault ref {} resolved to an empty secret value", vault_ref_raw);
     }
-    let decoded = String::from_utf8(value.clone()).with_context(|| {
-        format!(
-            "model provider credential from auth profile '{}' must be valid UTF-8 text",
-            profile.profile_id
-        )
-    })?;
-    if decoded.trim().is_empty() {
-        anyhow::bail!(
-            "model provider credential from auth profile '{}' vault ref '{}' cannot be whitespace only",
-            profile.profile_id,
-            vault_ref_raw
-        );
-    }
-
-    model_provider.openai_api_key = Some(decoded);
-    model_provider.auth_profile_id = Some(profile.profile_id);
-    model_provider.credential_source = Some(credential_source);
-    Ok(Some(SecretAccessAuditRecord {
+    Ok(SecretAccessAuditRecord {
         scope: vault_ref.scope.to_string(),
         key: vault_ref.key,
         action: action.to_owned(),
         value_bytes: value.len(),
-    }))
+    })
+}
+
+fn decode_provider_secret_value(value: Vec<u8>, context_label: &str) -> Result<String> {
+    let decoded = String::from_utf8(value)
+        .with_context(|| format!("{context_label} must be valid UTF-8 text"))?;
+    if decoded.trim().is_empty() {
+        anyhow::bail!("{context_label} cannot be whitespace only");
+    }
+    Ok(decoded)
+}
+
+fn load_secret_for_audit(
+    vault: &Vault,
+    audit: &SecretAccessAuditRecord,
+    context_label: &str,
+) -> Result<Vec<u8>> {
+    let scope = VaultScope::from_str(audit.scope.as_str()).with_context(|| {
+        format!("invalid vault scope '{}' recorded for {}", audit.scope, context_label)
+    })?;
+    vault.get_secret(&scope, audit.key.as_str()).with_context(|| {
+        format!(
+            "failed to load {} from vault scope '{}' key '{}'",
+            context_label, audit.scope, audit.key
+        )
+    })
 }
 
 fn record_secret_access_journal_event(
@@ -3072,7 +3225,7 @@ mod tests {
     use crate::gateway::GatewayAuthConfig;
     use crate::model_provider::{
         ModelProviderAuthProviderKind, ModelProviderConfig, ModelProviderCredentialSource,
-        ModelProviderKind,
+        ModelProviderKind, ProviderRegistryEntryConfig,
     };
     use crate::sandbox_runner::{EgressEnforcementMode, SandboxProcessRunnerTier};
 
@@ -3752,9 +3905,10 @@ mod tests {
         model_provider.auth_profile_provider_kind = Some(ModelProviderAuthProviderKind::Openai);
         model_provider.openai_api_key_vault_ref = Some("global/openai_legacy_key".to_owned());
 
-        let audit = resolve_model_provider_secret(&mut model_provider, &auth_registry, &vault)
-            .expect("auth profile resolution should succeed")
-            .expect("audit record should be emitted for resolved secret");
+        let audits = resolve_model_provider_secret(&mut model_provider, &auth_registry, &vault)
+            .expect("auth profile resolution should succeed");
+        let audit =
+            audits.into_iter().next().expect("audit record should be emitted for resolved secret");
         assert_eq!(
             model_provider.openai_api_key,
             Some("sk-auth-profile".to_owned()),
@@ -3782,9 +3936,10 @@ mod tests {
         let mut model_provider = openai_model_provider_config();
         model_provider.openai_api_key_vault_ref = Some("global/openai_legacy_key".to_owned());
 
-        let audit = resolve_model_provider_secret(&mut model_provider, &auth_registry, &vault)
-            .expect("legacy vault-ref resolution should succeed")
-            .expect("audit record should be emitted for resolved secret");
+        let audits = resolve_model_provider_secret(&mut model_provider, &auth_registry, &vault)
+            .expect("legacy vault-ref resolution should succeed");
+        let audit =
+            audits.into_iter().next().expect("audit record should be emitted for resolved secret");
         assert_eq!(
             model_provider.openai_api_key,
             Some("sk-legacy".to_owned()),
@@ -3856,8 +4011,11 @@ mod tests {
         model_provider.auth_profile_id = Some("openai-oauth".to_owned());
         model_provider.auth_profile_provider_kind = Some(ModelProviderAuthProviderKind::Openai);
 
-        let audit = resolve_model_provider_secret(&mut model_provider, &auth_registry, &vault)
-            .expect("oauth auth profile resolution should succeed")
+        let audits = resolve_model_provider_secret(&mut model_provider, &auth_registry, &vault)
+            .expect("oauth auth profile resolution should succeed");
+        let audit = audits
+            .into_iter()
+            .next()
             .expect("audit record should be emitted for resolved oauth token");
         assert_eq!(
             model_provider.openai_api_key,
@@ -3872,6 +4030,64 @@ mod tests {
         assert_eq!(
             audit.action, "model_provider.auth_profile.oauth_access_token.resolve",
             "audit action should capture oauth credential source"
+        );
+    }
+
+    #[test]
+    fn model_provider_secret_resolver_hydrates_registry_provider_auth_profile() {
+        let (_tempdir, auth_registry, vault) = setup_auth_registry_and_vault();
+        let auth_ref = VaultRef::parse("global/anthropic_auth_key")
+            .expect("auth profile vault ref should parse");
+        vault
+            .put_secret(&auth_ref.scope, auth_ref.key.as_str(), b"anthropic-secret")
+            .expect("anthropic auth profile API key should be written");
+        auth_registry
+            .set_profile(AuthProfileSetRequest {
+                profile_id: "anthropic-default".to_owned(),
+                provider: AuthProvider::known(AuthProviderKind::Anthropic),
+                profile_name: "Anthropic Default".to_owned(),
+                scope: AuthProfileScope::Global,
+                credential: AuthCredential::ApiKey {
+                    api_key_vault_ref: "global/anthropic_auth_key".to_owned(),
+                },
+            })
+            .expect("anthropic auth profile should be persisted");
+
+        let mut model_provider = ModelProviderConfig::default();
+        model_provider.registry.providers = vec![ProviderRegistryEntryConfig {
+            provider_id: "anthropic-primary".to_owned(),
+            display_name: Some("Anthropic".to_owned()),
+            kind: ModelProviderKind::Anthropic,
+            base_url: Some("https://api.anthropic.com".to_owned()),
+            allow_private_base_url: false,
+            enabled: true,
+            auth_profile_id: Some("anthropic-default".to_owned()),
+            auth_profile_provider_kind: Some(ModelProviderAuthProviderKind::Anthropic),
+            api_key: None,
+            api_key_vault_ref: None,
+            credential_source: None,
+            request_timeout_ms: 15_000,
+            max_retries: 2,
+            retry_backoff_ms: 100,
+            circuit_breaker_failure_threshold: 3,
+            circuit_breaker_cooldown_ms: 30_000,
+        }];
+
+        let audits = resolve_model_provider_secret(&mut model_provider, &auth_registry, &vault)
+            .expect("registry auth profile resolution should succeed");
+
+        assert_eq!(audits.len(), 1);
+        assert_eq!(
+            model_provider.registry.providers[0].api_key.as_deref(),
+            Some("anthropic-secret")
+        );
+        assert_eq!(
+            model_provider.registry.providers[0].credential_source,
+            Some(ModelProviderCredentialSource::AuthProfileApiKey)
+        );
+        assert_eq!(
+            audits[0].action,
+            "model_provider.registry.providers[anthropic-primary].auth_profile.api_key.resolve"
         );
     }
 
