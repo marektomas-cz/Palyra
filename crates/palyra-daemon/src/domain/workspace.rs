@@ -381,6 +381,7 @@ pub fn apply_workspace_managed_block(
     current_content: &str,
     update: &WorkspaceManagedBlockUpdate,
 ) -> Result<WorkspaceManagedBlockOutcome, WorkspaceManagedBlockError> {
+    let normalized_current = normalize_workspace_document_content(current_content.to_owned());
     let before_content = current_content.trim_end_matches('\n').to_owned();
     let before_hash = crate::sha256_hex(before_content.as_bytes());
     let existing = parse_existing_block(current_content, update.block_id.as_str())?;
@@ -421,7 +422,7 @@ pub fn apply_workspace_managed_block(
         after_hash,
     );
     let action = match existing.range {
-        Some(_) if inserted_entry_ids.is_empty() && before_content == next_content => "noop",
+        Some(_) if inserted_entry_ids.is_empty() && normalized_current == next_content => "noop",
         Some(_) => "updated_block",
         None => "created_block",
     }
@@ -602,8 +603,25 @@ fn parse_existing_block(
             Err(WorkspaceManagedBlockError::MissingBlockStart { block_id: block_id.to_owned() })
         }
         (Some(begin_start), Some(end_start)) => {
+            let marker_line_start =
+                current_content[..begin_start].rfind('\n').map_or(0, |index| index + 1);
+            let heading_scan_end = marker_line_start.saturating_sub(1);
+            let heading_line_start =
+                current_content[..heading_scan_end].rfind('\n').map_or(0, |index| index + 1);
+            let heading_line = current_content[heading_line_start..heading_scan_end]
+                .trim_end_matches(['\r', '\n']);
+            let range_start = if heading_line.starts_with("## ") {
+                heading_line_start
+            } else {
+                marker_line_start
+            };
             let after_begin = begin_start + begin_marker.len();
-            let block_end = end_start + end_marker.len();
+            let mut block_end = end_start + end_marker.len();
+            if current_content[block_end..].starts_with("\r\n") {
+                block_end += 2;
+            } else if current_content[block_end..].starts_with('\n') {
+                block_end += 1;
+            }
             let inner = current_content[after_begin..end_start]
                 .trim_matches(|character| character == '\r' || character == '\n');
             let mut entries = Vec::new();
@@ -650,7 +668,7 @@ fn parse_existing_block(
                     line: "dangling managed item marker".to_owned(),
                 });
             }
-            Ok(ParsedManagedBlock { range: Some((begin_start, block_end)), entries })
+            Ok(ParsedManagedBlock { range: Some((range_start, block_end)), entries })
         }
     }
 }

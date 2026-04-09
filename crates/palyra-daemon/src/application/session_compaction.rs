@@ -251,6 +251,17 @@ struct WriteInput {
     outcome: WorkspaceManagedBlockOutcome,
 }
 
+struct CompactionSummaryJsonInput<'a> {
+    session: &'a OrchestratorSessionRecord,
+    eligible: bool,
+    blocked_reason: Option<&'a str>,
+    candidates: &'a [SessionCompactionCandidate],
+    writes: &'a [SessionCompactionWritePreview],
+    checkpoint_preview: &'a SessionCompactionCheckpointPreview,
+    lifecycle_state: &'a str,
+    review_candidate_count: usize,
+}
+
 pub(crate) async fn preview_session_compaction(
     runtime_state: &Arc<GatewayRuntimeState>,
     session: &OrchestratorSessionRecord,
@@ -410,16 +421,16 @@ pub(crate) async fn apply_session_compaction(
             estimated_input_tokens: plan.estimated_input_tokens,
             estimated_output_tokens: plan.estimated_output_tokens,
             source_records_json: plan.source_records_json.clone(),
-            summary_json: build_compaction_summary_json(
-                request.session,
-                plan.eligible,
-                plan.blocked_reason.as_deref(),
-                plan.candidates.as_slice(),
-                applied_writes.as_slice(),
-                &plan.checkpoint_preview,
+            summary_json: build_compaction_summary_json(CompactionSummaryJsonInput {
+                session: request.session,
+                eligible: plan.eligible,
+                blocked_reason: plan.blocked_reason.as_deref(),
+                candidates: plan.candidates.as_slice(),
+                writes: applied_writes.as_slice(),
+                checkpoint_preview: &plan.checkpoint_preview,
                 lifecycle_state,
-                pending_review_count,
-            ),
+                review_candidate_count: pending_review_count,
+            }),
             created_by_principal: request.actor_principal.to_owned(),
         })
         .await?;
@@ -581,16 +592,16 @@ pub(crate) fn build_session_compaction_plan(
         ),
         workspace_paths: write_previews.iter().map(|write| write.target_path.clone()).collect(),
     };
-    let summary_json = build_compaction_summary_json(
+    let summary_json = build_compaction_summary_json(CompactionSummaryJsonInput {
         session,
         eligible,
-        blocked_reason.as_deref(),
-        candidates.as_slice(),
-        write_previews.as_slice(),
-        &checkpoint_preview,
-        if eligible { "preview_ready" } else { "preview_blocked" },
+        blocked_reason: blocked_reason.as_deref(),
+        candidates: candidates.as_slice(),
+        writes: write_previews.as_slice(),
+        checkpoint_preview: &checkpoint_preview,
+        lifecycle_state: if eligible { "preview_ready" } else { "preview_blocked" },
         review_candidate_count,
-    );
+    });
     let source_records_json = json!({
         "records": condensed_records.iter().map(compaction_record_json).collect::<Vec<_>>(),
         "protected": protected_records.iter().map(compaction_record_json).collect::<Vec<_>>(),
@@ -839,30 +850,21 @@ fn build_initial_write_previews(
     previews
 }
 
-fn build_compaction_summary_json(
-    session: &OrchestratorSessionRecord,
-    eligible: bool,
-    blocked_reason: Option<&str>,
-    candidates: &[SessionCompactionCandidate],
-    writes: &[SessionCompactionWritePreview],
-    checkpoint_preview: &SessionCompactionCheckpointPreview,
-    lifecycle_state: &str,
-    review_candidate_count: usize,
-) -> String {
-    let quality_gates = build_quality_gate_metrics(candidates, writes);
+fn build_compaction_summary_json(input: CompactionSummaryJsonInput<'_>) -> String {
+    let quality_gates = build_quality_gate_metrics(input.candidates, input.writes);
     json!({
-        "session_id": session.session_id,
-        "branch_state": session.branch_state,
-        "eligible": eligible,
-        "blocked_reason": blocked_reason,
-        "lifecycle_state": lifecycle_state,
+        "session_id": input.session.session_id,
+        "branch_state": input.session.branch_state,
+        "eligible": input.eligible,
+        "blocked_reason": input.blocked_reason,
+        "lifecycle_state": input.lifecycle_state,
         "planner": {
-            "candidate_count": candidates.len(),
-            "review_candidate_count": review_candidate_count,
-            "candidates": candidates,
+            "candidate_count": input.candidates.len(),
+            "review_candidate_count": input.review_candidate_count,
+            "candidates": input.candidates,
         },
-        "writes": writes,
-        "checkpoint_preview": checkpoint_preview,
+        "writes": input.writes,
+        "checkpoint_preview": input.checkpoint_preview,
         "quality_gates": quality_gates,
     })
     .to_string()

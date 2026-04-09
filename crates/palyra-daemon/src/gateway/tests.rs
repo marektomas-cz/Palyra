@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, MutexGuard, OnceLock,
+        OnceLock,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,6 +14,7 @@ use std::{
 use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
 use palyra_common::workspace_patch::WorkspacePatchRedactionPolicy;
 use serde_json::{json, Value};
+use tokio::sync::{Mutex, MutexGuard};
 
 use crate::agents::AgentCreateRequest;
 use crate::journal::{
@@ -84,11 +85,8 @@ const PARITY_REDIRECT_CREDENTIALS_URL: &str =
     include_str!("../../../../fixtures/parity/redirect-credentials-url.txt");
 const PARITY_TRICKY_DOM_HTML: &str = include_str!("../../../../fixtures/parity/tricky-dom.html");
 
-fn lock_session_compaction_test_guard() -> MutexGuard<'static, ()> {
-    SESSION_COMPACTION_TEST_MUTEX
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("session compaction test guard should lock")
+async fn lock_session_compaction_test_guard() -> MutexGuard<'static, ()> {
+    SESSION_COMPACTION_TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().await
 }
 
 fn unique_temp_journal_path() -> PathBuf {
@@ -2748,7 +2746,7 @@ async fn model_token_tape_compaction_emits_real_lifecycle_event() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn session_compaction_apply_persists_durable_writes_and_quality_gates() {
-    let _test_guard = lock_session_compaction_test_guard();
+    let _test_guard = lock_session_compaction_test_guard().await;
     configure_test_write_failure_path(None);
     let state = build_test_runtime_state(false);
     let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -2850,7 +2848,7 @@ async fn session_compaction_apply_persists_durable_writes_and_quality_gates() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn session_compaction_apply_rolls_back_workspace_writes_on_partial_failure() {
-    let _test_guard = lock_session_compaction_test_guard();
+    let _test_guard = lock_session_compaction_test_guard().await;
     configure_test_write_failure_path(None);
     let state = build_test_runtime_state(false);
     let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
