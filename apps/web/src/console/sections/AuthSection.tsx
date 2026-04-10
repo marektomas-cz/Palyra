@@ -312,10 +312,15 @@ export function AuthSection({ app }: AuthSectionProps) {
                         </td>
                         <td>
                           <div className="workspace-table__meta">
-                            <strong>{probe?.discovery_source === "live" ? "live" : provider.discoveryStatus}</strong>
+                            <strong>
+                              {probe?.discovery_source === "live"
+                                ? "live"
+                                : provider.discoveryStatus}
+                            </strong>
                             <span className="chat-muted">
-                              {(probe?.discovered_model_ids ?? provider.discoveredModelIds).join(", ") ||
-                                "No models"}
+                              {(probe?.discovered_model_ids ?? provider.discoveredModelIds).join(
+                                ", ",
+                              ) || "No models"}
                             </span>
                           </div>
                         </td>
@@ -360,7 +365,9 @@ export function AuthSection({ app }: AuthSectionProps) {
                               {probe.state}
                             </WorkspaceStatusChip>
                           </td>
-                          <td>{probe.latency_ms === undefined ? "n/a" : `${probe.latency_ms} ms`}</td>
+                          <td>
+                            {probe.latency_ms === undefined ? "n/a" : `${probe.latency_ms} ms`}
+                          </td>
                           <td>{probe.message}</td>
                         </tr>
                       ))}

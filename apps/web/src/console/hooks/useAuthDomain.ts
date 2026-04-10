@@ -330,7 +330,9 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
         ? await api.discoverModelProviderModels({ provider_id: normalizedProviderId })
         : await api.testModelProviderConnection({ provider_id: normalizedProviderId });
       const nextResults = Object.fromEntries(
-        response.providers.map((result) => [result.provider_id, result] satisfies [string, ProviderProbeResult]),
+        response.providers.map(
+          (result) => [result.provider_id, result] satisfies [string, ProviderProbeResult],
+        ),
       );
       setAuthProviderProbeMode(response.mode);
       setAuthProviderProbeResults((current) => ({ ...current, ...nextResults }));
