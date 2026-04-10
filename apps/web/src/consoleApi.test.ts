@@ -154,6 +154,63 @@ describe("ConsoleApiClient", () => {
     expect(requestUrl(calls[6]?.input)).toBe("/console/v1/system/events/emit");
   });
 
+  it("uses objective endpoints with GET without CSRF and mutating requests with CSRF", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({ objectives: [] }),
+      jsonResponse({ objective: { objective_id: "OBJ1", kind: "heartbeat" } }),
+      jsonResponse({ objective: { objective_id: "OBJ1", state: "active" } }),
+      jsonResponse({
+        objective: { objective_id: "OBJ1" },
+        summary_markdown: "# Heartbeat",
+      }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+
+    const client = new ConsoleApiClient("", fetcher);
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    await client.listObjectives(new URLSearchParams({ limit: "5", kind: "heartbeat" }));
+    await client.upsertObjective({
+      kind: "heartbeat",
+      name: "Ops heartbeat",
+      prompt: "Summarize the current state.",
+      natural_language_schedule: "every weekday at 9",
+    });
+    await client.lifecycleObjective("OBJ1", { action: "fire" });
+    await client.getObjectiveSummary("OBJ1");
+
+    expect(requestUrl(calls[1]?.input)).toBe("/console/v1/objectives?limit=5&kind=heartbeat");
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[2]?.input)).toBe("/console/v1/objectives");
+    expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[3]?.input)).toBe("/console/v1/objectives/OBJ1/lifecycle");
+    expect(new Headers(calls[3]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[4]?.input)).toBe("/console/v1/objectives/OBJ1/summary");
+    expect(new Headers(calls[4]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+  });
+
   it("uses GET without CSRF and POST with CSRF for channel operations", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const responses = [

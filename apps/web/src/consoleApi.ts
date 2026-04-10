@@ -3366,6 +3366,62 @@ export class ConsoleApiClient {
     return this.listRoutineRuns(jobId, params);
   }
 
+  async listObjectives(params?: URLSearchParams): Promise<{ objectives: JsonValue[] }> {
+    return this.request(buildPathWithQuery("/console/v1/objectives", params));
+  }
+
+  async getObjective(objectiveId: string): Promise<{ objective: JsonValue }> {
+    return this.request(`/console/v1/objectives/${encodeURIComponent(objectiveId)}`);
+  }
+
+  async upsertObjective(payload: Record<string, JsonValue | undefined>): Promise<{
+    objective: JsonValue;
+    linked_routine?: JsonValue;
+    last_run?: JsonValue;
+    health?: JsonValue;
+  }> {
+    return this.request(
+      "/console/v1/objectives",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async lifecycleObjective(
+    objectiveId: string,
+    payload: {
+      action: "fire" | "pause" | "resume" | "cancel" | "archive";
+      reason?: string;
+    },
+  ): Promise<{
+    objective: JsonValue;
+    linked_routine?: JsonValue;
+    last_run?: JsonValue;
+    health?: JsonValue;
+  }> {
+    return this.request(
+      `/console/v1/objectives/${encodeURIComponent(objectiveId)}/lifecycle`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async getObjectiveSummary(objectiveId: string): Promise<{
+    objective: JsonValue;
+    linked_routine?: JsonValue;
+    last_run?: JsonValue;
+    health?: JsonValue;
+    summary_markdown: string;
+  }> {
+    return this.request(`/console/v1/objectives/${encodeURIComponent(objectiveId)}/summary`);
+  }
+
   async listRoutines(params?: URLSearchParams): Promise<{ routines: JsonValue[] }> {
     return this.request(buildPathWithQuery("/console/v1/routines", params));
   }
