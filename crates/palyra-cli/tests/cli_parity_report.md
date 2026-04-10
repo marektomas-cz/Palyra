@@ -7,19 +7,19 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 
 ## Summary
 
-- Total entries: `101`
-- Verified entries: `101`
+- Total entries: `107`
+- Verified entries: `107`
 - Regression entries: `0`
-- Help snapshot coverage: `101` entries
+- Help snapshot coverage: `107` entries
 
 ### Expected parity status counts
 
-- `done`: `97`
+- `done`: `103`
 - `partial`: `4`
 
 ### Validation status counts
 
-- `verified`: `101`
+- `verified`: `107`
 
 ## Entries
 
@@ -53,6 +53,7 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 | `docs` | `canonical_family` | `done` | `verified` | `docs-help.txt` | - | - | - |
 | `plugins` | `canonical_family` | `done` | `verified` | `plugins-help.txt` | - | - | - |
 | `hooks` | `canonical_family` | `done` | `verified` | `hooks-help.txt` | - | - | - |
+| `profile` | `canonical_family` | `done` | `verified` | `profile-help.txt` | - | - | - |
 | `devices` | `top_level` | `done` | `verified` | `devices-help.txt` | - | - | - |
 | `node` | `top_level` | `done` | `verified` | `node-help.txt` | - | - | - |
 | `nodes` | `top_level` | `done` | `verified` | `nodes-help.txt` | - | - | - |
@@ -101,6 +102,11 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 | `channels router` | `nested_surface` | `done` | `verified` | `channels-router-help.txt` | - | - | - |
 | `channels router preview` | `nested_surface` | `done` | `verified` | `channels-router-preview-help.txt` | - | `--route-channel`, `--text`, `--requested-broadcast` | - |
 | `config list` | `nested_surface` | `done` | `verified` | `config-list-help.txt` | `show` | `--path`, `--show-secrets` | - |
+| `profile create` | `nested_surface` | `done` | `verified` | `profile-create-help.txt` | - | `--mode`, `--environment`, `--color`, `--risk-level`, `--strict-mode`, `--set-default`, `--force` | - |
+| `profile delete` | `nested_surface` | `done` | `verified` | `profile-delete-help.txt` | - | `--yes`, `--delete-state-root` | - |
+| `profile clone` | `nested_surface` | `done` | `verified` | `profile-clone-help.txt` | - | `--label`, `--environment`, `--color`, `--risk-level`, `--strict-mode`, `--set-default`, `--force` | - |
+| `profile export` | `nested_surface` | `done` | `verified` | `profile-export-help.txt` | - | `--output`, `--mode`, `--password-stdin` | - |
+| `profile import` | `nested_surface` | `done` | `verified` | `profile-import-help.txt` | - | `--input`, `--name`, `--password-stdin`, `--set-default`, `--force` | - |
 | `cron update` | `nested_surface` | `done` | `verified` | `cron-update-help.txt` | `edit` | `--id` | - |
 | `cron add` | `nested_surface` | `done` | `verified` | `cron-add-help.txt` | - | `--name`, `--prompt`, `--schedule-type`, `--schedule` | - |
 | `cron delete` | `nested_surface` | `done` | `verified` | `cron-delete-help.txt` | `rm` | `--id` | - |

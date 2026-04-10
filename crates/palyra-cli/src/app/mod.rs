@@ -614,12 +614,11 @@ fn build_active_profile_context(
             "low"
         }
     });
-    let color =
-        normalize_optional_text(profile.color.as_deref()).unwrap_or_else(|| match risk_level {
-            "critical" | "high" => "red",
-            "elevated" => "amber",
-            _ => "green",
-        });
+    let color = normalize_optional_text(profile.color.as_deref()).unwrap_or(match risk_level {
+        "critical" | "high" => "red",
+        "elevated" => "amber",
+        _ => "green",
+    });
     let label = normalize_optional_text(profile.label.as_deref()).unwrap_or(profile_name);
     Some(ActiveProfileContext {
         name: profile_name.to_owned(),

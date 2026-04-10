@@ -1679,8 +1679,9 @@ state_key_vault_ref = "global/browser_state_key"
             }],
         };
         let plaintext = serde_json::to_vec(&bundle)?;
-        let encrypted = encrypt_profile_bundle(plaintext.as_slice(), b"test-password")?;
-        let decrypted = decrypt_profile_bundle(&encrypted, b"test-password")?;
+        let password = sha256_hex(plaintext.as_slice());
+        let encrypted = encrypt_profile_bundle(plaintext.as_slice(), password.as_bytes())?;
+        let decrypted = decrypt_profile_bundle(&encrypted, password.as_bytes())?;
         let round_trip: ProfilePortabilityBundle = serde_json::from_slice(decrypted.as_slice())?;
         assert_eq!(round_trip.source_profile, "prod");
         assert_eq!(round_trip.secret_references.len(), 1);
