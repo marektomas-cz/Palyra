@@ -129,6 +129,16 @@ path = "routines"
 file = "routines-help.txt"
 
 [[entries]]
+path = "objectives"
+category = "top_level"
+status = "done"
+summary = "Durable objective, heartbeat, standing-order, and program workflows."
+
+[entries.snapshot]
+path = "objectives"
+file = "objectives-help.txt"
+
+[[entries]]
 path = "memory"
 category = "top_level"
 status = "done"

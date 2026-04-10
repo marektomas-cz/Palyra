@@ -2231,7 +2231,7 @@ fn render_help_popup(frame: &mut Frame<'_>, area: Rect) {
             "  /resume [/id-or-key] /model [/id] /reset /retry /branch [label] /queue <text>",
         ),
         Line::from(
-            "  /objective list|show|select|fire|pause|resume|archive|create  /heartbeat ...  /standing-order ...",
+            "  /objective list|show|select|fire|pause|resume|archive|create  /heartbeat ...  /standing-order ...  /program ...",
         ),
         Line::from(
             "  /delegate <profile-or-template> <text>  /checkpoint save|list|restore",

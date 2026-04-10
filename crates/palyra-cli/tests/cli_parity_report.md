@@ -7,19 +7,19 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 
 ## Summary
 
-- Total entries: `100`
-- Verified entries: `100`
+- Total entries: `101`
+- Verified entries: `101`
 - Regression entries: `0`
-- Help snapshot coverage: `100` entries
+- Help snapshot coverage: `101` entries
 
 ### Expected parity status counts
 
-- `done`: `96`
+- `done`: `97`
 - `partial`: `4`
 
 ### Validation status counts
 
-- `verified`: `100`
+- `verified`: `101`
 
 ## Entries
 
@@ -37,6 +37,7 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 | `agents` | `top_level` | `done` | `verified` | `agents-help.txt` | - | - | - |
 | `cron` | `top_level` | `done` | `verified` | `cron-help.txt` | - | - | - |
 | `routines` | `top_level` | `done` | `verified` | `routines-help.txt` | - | - | - |
+| `objectives` | `top_level` | `done` | `verified` | `objectives-help.txt` | - | - | - |
 | `memory` | `top_level` | `done` | `verified` | `memory-help.txt` | - | - | - |
 | `memory learning` | `nested_surface` | `done` | `verified` | `memory-learning-help.txt` | - | - | - |
 | `memory learning list` | `nested_surface` | `done` | `verified` | `memory-learning-list-help.txt` | - | - | - |

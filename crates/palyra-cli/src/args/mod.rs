@@ -121,6 +121,7 @@ Examples:
   palyra gateway status
   palyra dashboard --open
   palyra backup create --output ./artifacts/palyra-backup.zip
+  palyra objectives list --kind heartbeat --json
   palyra system heartbeat
   palyra sandbox explain --runtime process-runner
   palyra update --check
@@ -134,6 +135,7 @@ Canonical command map:
   docs       Local committed docs/help discovery surface
   gateway    Preferred runtime/admin family (`daemon` remains as a compatibility alias)
   dashboard  Thin operator shortcut for dashboard URL discovery/open workflows
+  objectives Durable objective, heartbeat, standing-order, and program surface
   routines   Unified automation surface for schedules, hooks, webhooks, and system events
   backup     Portable lifecycle backup/create verification surface
   system     Runtime heartbeat, presence, and recent system-event observability
