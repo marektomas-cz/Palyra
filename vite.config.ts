@@ -67,7 +67,7 @@ export default defineConfig({
   run: {
     tasks: {
       "lint:web": {
-        command: "vp lint apps/web"
+        command: "node scripts/run-vp-lint.mjs apps/web"
       },
       "lint:desktop-ui": {
         command: "vp lint apps/desktop/ui"

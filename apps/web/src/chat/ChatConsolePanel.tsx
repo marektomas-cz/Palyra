@@ -5,7 +5,6 @@ import type {
   ChatBackgroundTaskRecord,
   ChatCheckpointRecord,
   ChatCompactionArtifactRecord,
-  ChatDelegationCatalog,
   MediaDerivedArtifactRecord,
   ChatPinRecord,
   ChatQueuedInputRecord,
@@ -33,12 +32,10 @@ import {
 } from "./chatInspectorActions";
 import {
   CHAT_SLASH_COMMANDS,
-  buildContextBudgetSummary,
   buildSessionLineageHint,
   describeBranchState,
   parseSlashCommand,
   parseCompactCommandMode,
-  shortId,
   toErrorMessage,
   type ComposerAttachment,
 } from "./chatShared";
@@ -56,11 +53,18 @@ import {
 } from "./chatSessionActions";
 import { useContextReferencePreview } from "./useContextReferencePreview";
 import { useRecallPreview } from "./useRecallPreview";
+import { useChatContextBudget } from "./useChatContextBudget";
 import { useChatRunStream } from "./useChatRunStream";
 import { useChatSessions } from "./useChatSessions";
 import { usePhase4DeepLinks } from "./usePhase4DeepLinks";
-import { buildObjectiveOverviewHref, findObjectiveForSession } from "../console/objectiveLinks";
-import { isJsonObject, readString, type JsonObject } from "../console/shared";
+import { useChatObjectives } from "./useChatObjectives";
+import { useChatPanelBootstrap } from "./useChatPanelBootstrap";
+import {
+  buildSessionsSidebarProps,
+  describeSelectedSessionTitle,
+} from "./chatWorkspaceSessionBindings";
+import { buildObjectiveOverviewHref } from "../console/objectiveLinks";
+import { readString, type JsonObject } from "../console/shared";
 
 interface ChatConsolePanelProps {
   readonly api: ConsoleApiClient;
@@ -92,17 +96,14 @@ export function ChatConsolePanel({
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [transcriptRecords, setTranscriptRecords] = useState<ChatTranscriptRecord[]>([]);
   const [sessionAttachments, setSessionAttachments] = useState<ChatAttachmentRecord[]>([]);
-  const [sessionDerivedArtifacts, setSessionDerivedArtifacts] = useState<
-    MediaDerivedArtifactRecord[]
-  >([]);
+  const [sessionDerivedArtifacts, setSessionDerivedArtifacts] =
+    useState<MediaDerivedArtifactRecord[]>([]);
   const [sessionRuns, setSessionRuns] = useState<ChatRunStatusRecord[]>([]);
   const [sessionPins, setSessionPins] = useState<ChatPinRecord[]>([]);
   const [compactions, setCompactions] = useState<ChatCompactionArtifactRecord[]>([]);
   const [checkpoints, setCheckpoints] = useState<ChatCheckpointRecord[]>([]);
   const [queuedInputs, setQueuedInputs] = useState<ChatQueuedInputRecord[]>([]);
   const [backgroundTasks, setBackgroundTasks] = useState<ChatBackgroundTaskRecord[]>([]);
-  const [delegationCatalog, setDelegationCatalog] = useState<ChatDelegationCatalog | null>(null);
-  const [objectives, setObjectives] = useState<JsonObject[]>([]);
   const [transcriptSearchQuery, setTranscriptSearchQuery] = useState("");
   const [transcriptSearchBusy, setTranscriptSearchBusy] = useState(false);
   const [transcriptSearchResults, setTranscriptSearchResults] = useState<TranscriptSearchMatch[]>(
@@ -205,39 +206,9 @@ export function ChatConsolePanel({
         : CHAT_SLASH_COMMANDS.filter((command) => command.name.includes(slashQuery)),
     [slashQuery],
   );
-  const selectedSessionLineage = useMemo(
-    () => buildSessionLineageHint(sessions.selectedSession),
-    [sessions.selectedSession],
-  );
-  const selectedObjective = useMemo(
-    () =>
-      findObjectiveForSession(
-        objectives,
-        sessions.selectedSession === null
-          ? null
-          : {
-              session_id: sessions.selectedSession.session_id,
-              session_key: sessions.selectedSession.session_key,
-              session_label: sessions.selectedSession.session_label,
-            },
-        preferredObjectiveId,
-      ),
-    [objectives, preferredObjectiveId, sessions.selectedSession],
-  );
-  const selectedObjectiveLabel = useMemo(() => {
-    if (selectedObjective === null) {
-      return null;
-    }
-    const name = readString(selectedObjective, "name") ?? "Objective";
-    const kind = readString(selectedObjective, "kind") ?? "objective";
-    return `${kind.replaceAll("_", " ")} · ${name}`;
-  }, [selectedObjective]);
-  const selectedObjectiveFocus = useMemo(() => {
-    if (selectedObjective === null) {
-      return null;
-    }
-    return readString(selectedObjective, "current_focus");
-  }, [selectedObjective]);
+  const selectedSessionLineage = useMemo(() => buildSessionLineageHint(sessions.selectedSession), [
+    sessions.selectedSession,
+  ]);
   const attachSelectedFiles = useChatAttachmentUploadHandler({
     api,
     sessionId: sessions.activeSessionId.trim(),
@@ -247,13 +218,30 @@ export function ChatConsolePanel({
     setError,
     setNotice,
   });
-
-  const refreshObjectives = useCallback(async () => {
-    const response = await api.listObjectives(new URLSearchParams({ limit: "64" }));
-    setObjectives(
-      Array.isArray(response.objectives) ? response.objectives.filter(isJsonObject) : [],
-    );
-  }, [api]);
+  const {
+    refreshObjectives,
+    selectedObjective,
+    selectedObjectiveFocus,
+    selectedObjectiveLabel,
+  } = useChatObjectives({
+    api,
+    preferredObjectiveId,
+    selectedSession:
+      sessions.selectedSession === null
+        ? null
+        : {
+            session_id: sessions.selectedSession.session_id,
+            session_key: sessions.selectedSession.session_key ?? undefined,
+            session_label: sessions.selectedSession.session_label ?? undefined,
+          },
+  });
+  const delegationCatalog = useChatPanelBootstrap({
+    api,
+    dispose,
+    refreshObjectives,
+    refreshSessions: sessions.refreshSessions,
+    setError,
+  });
 
   usePhase4DeepLinks({
     activeSessionId: sessions.activeSessionId,
@@ -294,43 +282,14 @@ export function ChatConsolePanel({
     setComposerText,
     setError,
   });
-  const contextBudget = useMemo(
-    () =>
-      buildContextBudgetSummary({
-        baseline_tokens: Math.max(
-          sessions.selectedSession?.total_tokens ?? 0,
-          runStatus?.total_tokens ?? 0,
-        ),
-        draft_text: composerText,
-        attachments,
-        reference_tokens:
-          contextReferencePreview !== null && !contextReferencePreviewStale
-            ? contextReferencePreview.total_estimated_tokens
-            : 0,
-      }),
-    [
-      attachments,
-      composerText,
-      contextReferencePreview,
-      contextReferencePreviewStale,
-      runStatus?.total_tokens,
-      sessions.selectedSession?.total_tokens,
-    ],
-  );
-
-  useEffect(() => {
-    void sessions.refreshSessions(true);
-    void Promise.all([api.getDelegationCatalog(), refreshObjectives()])
-      .then(([delegationResponse]) => {
-        setDelegationCatalog(delegationResponse.catalog);
-      })
-      .catch((error) => {
-        setError(toErrorMessage(error));
-      });
-    return () => {
-      dispose();
-    };
-  }, [api, dispose, refreshObjectives, sessions.refreshSessions, setError]);
+  const contextBudget = useChatContextBudget({
+    attachments,
+    composerText,
+    contextReferencePreview,
+    contextReferencePreviewStale,
+    runTotalTokens: runStatus?.total_tokens ?? 0,
+    sessionTotalTokens: sessions.selectedSession?.total_tokens ?? 0,
+  });
 
   const refreshSessionTranscript = useCallback(async () => {
     const sessionId = sessions.activeSessionId.trim();
@@ -1016,27 +975,10 @@ export function ChatConsolePanel({
           sessions.selectedSession?.branch_state ?? "missing",
         )}
         selectedSessionLineage={selectedSessionLineage}
-        selectedSessionTitle={
-          sessions.selectedSession?.title ??
-          (sessions.selectedSession
-            ? shortId(sessions.selectedSession.session_id)
-            : "Operator workspace")
-        }
+        selectedSessionTitle={describeSelectedSessionTitle(sessions.selectedSession)}
         sessionsBusy={sessions.sessionsBusy}
-        sessionsSidebarProps={{
-          sessionsBusy: sessions.sessionsBusy,
-          newSessionLabel: sessions.newSessionLabel,
-          setNewSessionLabel: sessions.setNewSessionLabel,
-          searchQuery: sessions.searchQuery,
-          setSearchQuery: sessions.setSearchQuery,
-          includeArchived: sessions.includeArchived,
-          setIncludeArchived: sessions.setIncludeArchived,
-          sessionLabelDraft: sessions.sessionLabelDraft,
-          setSessionLabelDraft: sessions.setSessionLabelDraft,
-          selectedSession: sessions.selectedSession,
-          sortedSessions: sessions.sortedSessions,
-          activeSessionId: sessions.activeSessionId,
-          setActiveSessionId: sessions.setActiveSessionId,
+        sessionsSidebarProps={buildSessionsSidebarProps({
+          sessions,
           createSession: () => {
             void sessions.createSession();
           },
@@ -1049,7 +991,7 @@ export function ChatConsolePanel({
           archiveSession: () => {
             void archiveSessionAndTranscript();
           },
-        }}
+        })}
         streaming={streaming}
         toolPayloadCount={toolPayloadCount}
         transcriptBusy={transcriptBusy}
