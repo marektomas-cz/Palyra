@@ -4,6 +4,8 @@ use super::*;
 
 const OPENAI_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const ANTHROPIC_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const ANTHROPIC_VALIDATION_RETRY_ATTEMPTS: usize = 3;
+const ANTHROPIC_VALIDATION_RETRY_DELAY: Duration = Duration::from_millis(100);
 const OPENAI_DEFAULT_CONFIG_BACKUPS: usize = 5;
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
@@ -1445,38 +1447,58 @@ async fn validate_anthropic_api_key(
         .timeout(timeout)
         .build()
         .map_err(|error| AnthropicCredentialValidationError::Unexpected(error.to_string()))?;
-    let response = client
-        .get(endpoint)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", ANTHROPIC_API_VERSION)
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                AnthropicCredentialValidationError::ProviderUnavailable
-            } else {
-                AnthropicCredentialValidationError::Unexpected(error.to_string())
+
+    for attempt in 1..=ANTHROPIC_VALIDATION_RETRY_ATTEMPTS {
+        let response = client
+            .get(endpoint.as_str())
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .send()
+            .await;
+
+        let outcome = match response {
+            Ok(response) => match response.status() {
+                StatusCode::OK => Ok(()),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                    Err(AnthropicCredentialValidationError::InvalidCredential)
+                }
+                StatusCode::TOO_MANY_REQUESTS => {
+                    Err(AnthropicCredentialValidationError::RateLimited)
+                }
+                status if status.is_server_error() => {
+                    Err(AnthropicCredentialValidationError::ProviderUnavailable)
+                }
+                status => {
+                    let body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "<anthropic error body unavailable>".to_owned());
+                    Err(AnthropicCredentialValidationError::Unexpected(format!(
+                        "Anthropic endpoint returned HTTP {status}: {body}"
+                    )))
+                }
+            },
+            Err(error) => {
+                if error.is_timeout() {
+                    Err(AnthropicCredentialValidationError::ProviderUnavailable)
+                } else {
+                    Err(AnthropicCredentialValidationError::Unexpected(error.to_string()))
+                }
             }
-        })?;
-    match response.status() {
-        StatusCode::OK => Ok(()),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            Err(AnthropicCredentialValidationError::InvalidCredential)
-        }
-        StatusCode::TOO_MANY_REQUESTS => Err(AnthropicCredentialValidationError::RateLimited),
-        status if status.is_server_error() => {
+        };
+
+        match outcome {
+            Ok(()) => return Ok(()),
             Err(AnthropicCredentialValidationError::ProviderUnavailable)
-        }
-        status => {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<anthropic error body unavailable>".to_owned());
-            Err(AnthropicCredentialValidationError::Unexpected(format!(
-                "Anthropic endpoint returned HTTP {status}: {body}"
-            )))
+                if attempt < ANTHROPIC_VALIDATION_RETRY_ATTEMPTS =>
+            {
+                tokio::time::sleep(ANTHROPIC_VALIDATION_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
         }
     }
+
+    Err(AnthropicCredentialValidationError::ProviderUnavailable)
 }
 
 fn map_anthropic_validation_error(
