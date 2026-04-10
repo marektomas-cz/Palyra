@@ -1,13 +1,8 @@
-import type {
-  AuthProfileView,
-  ChatCheckpointRecord,
-  ConsoleApiClient,
-} from "../consoleApi";
+import type { AuthProfileView, ChatCheckpointRecord, ConsoleApiClient } from "../consoleApi";
 import type { Section } from "../console/sectionMetadata";
 import { readString, type JsonObject } from "../console/shared";
 
 import {
-  checkpointHasTag,
   selectUndoCheckpoint,
   type BrowserProfileSuggestionRecord,
   type BrowserSessionSuggestionRecord,
@@ -64,7 +59,6 @@ export async function interruptAndMaybeRedirect(args: {
   api: ConsoleApiClient;
   actionableRunId: string | null;
   raw: string;
-  activeSessionId: string;
   runDrawerOpen: boolean;
   runDrawerId: string;
   cancelStreaming: () => void;
@@ -87,7 +81,6 @@ export async function interruptAndMaybeRedirect(args: {
     api,
     actionableRunId,
     raw,
-    activeSessionId,
     runDrawerOpen,
     runDrawerId,
     cancelStreaming,
@@ -113,9 +106,7 @@ export async function interruptAndMaybeRedirect(args: {
   const [firstToken = "", ...promptParts] = trimmed.split(/\s+/);
   const mode: "soft" | "force" = firstToken === "force" ? "force" : "soft";
   const redirectText =
-    firstToken === "force" || firstToken === "soft"
-      ? promptParts.join(" ").trim()
-      : trimmed;
+    firstToken === "force" || firstToken === "soft" ? promptParts.join(" ").trim() : trimmed;
 
   if (redirectText.length > 0) {
     await createUndoCheckpointBeforeRedirect();
@@ -158,7 +149,6 @@ export async function executeChatSlashCommand(args: {
   commandBusy: string | null;
   api: ConsoleApiClient;
   activeSessionId: string;
-  actionableRunId: string | null;
   checkpoints: readonly ChatCheckpointRecord[];
   objectives: readonly JsonObject[];
   selectedObjective: JsonObject | null;
@@ -199,7 +189,6 @@ export async function executeChatSlashCommand(args: {
     commandBusy,
     api,
     activeSessionId,
-    actionableRunId,
     checkpoints,
     objectives,
     selectedObjective,
@@ -400,9 +389,9 @@ async function undoLastTurn(args: {
   const { checkpoints, explicitCheckpointId, restoreCheckpoint, setError, recordUxMetric } = args;
   const resolvedCheckpoint =
     explicitCheckpointId.trim().length > 0
-      ? checkpoints.find(
+      ? (checkpoints.find(
           (checkpoint) => checkpoint.checkpoint_id === explicitCheckpointId.trim(),
-        ) ?? null
+        ) ?? null)
       : selectUndoCheckpoint(checkpoints);
   if (resolvedCheckpoint === null) {
     setError(
@@ -438,11 +427,11 @@ function openObjectiveFromCommand(args: {
   const matchedObjective =
     target.length === 0
       ? selectedObjective
-      : objectives.find((objective) => {
+      : (objectives.find((objective) => {
           const objectiveId = readString(objective, "objective_id")?.toLowerCase() ?? "";
           const name = readString(objective, "name")?.toLowerCase() ?? "";
           return objectiveId === target || name === target;
-        }) ?? null;
+        }) ?? null);
   const objectiveId =
     matchedObjective === null ? null : readString(matchedObjective, "objective_id");
   if (objectiveId === null) {
@@ -463,14 +452,7 @@ function openProfileFromCommand(args: {
   setNotice: (next: string | null) => void;
   recordUxMetric: RecordUxMetric;
 }): void {
-  const {
-    rawTarget,
-    authProfiles,
-    setConsoleSection,
-    setError,
-    setNotice,
-    recordUxMetric,
-  } = args;
+  const { rawTarget, authProfiles, setConsoleSection, setError, setNotice, recordUxMetric } = args;
   const target = rawTarget.trim().toLowerCase();
   setConsoleSection("auth");
   if (target.length === 0) {
@@ -547,15 +529,8 @@ async function runDoctorCommand(args: {
   setNotice: (next: string | null) => void;
   recordUxMetric: RecordUxMetric;
 }): Promise<void> {
-  const {
-    api,
-    rawArgs,
-    setConsoleSection,
-    setCommandBusy,
-    setError,
-    setNotice,
-    recordUxMetric,
-  } = args;
+  const { api, rawArgs, setConsoleSection, setCommandBusy, setError, setNotice, recordUxMetric } =
+    args;
   const normalized = rawArgs.trim().toLowerCase();
   if (normalized === "" || normalized === "jobs") {
     setConsoleSection("operations");

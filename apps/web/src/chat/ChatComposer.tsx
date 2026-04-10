@@ -450,7 +450,8 @@ export function ChatComposer({
                   example: command.example,
                   replacement: command.example,
                   badge: command.category,
-                }))).map((suggestion, index) => (
+                }))
+            ).map((suggestion, index) => (
               <button
                 key={suggestion.id}
                 aria-selected={index === selectedSlashSuggestionIndex}

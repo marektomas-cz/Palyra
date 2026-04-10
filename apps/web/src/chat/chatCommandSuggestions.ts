@@ -1,8 +1,17 @@
-import type { AuthProfileView, ChatCheckpointRecord, JsonValue, SessionCatalogRecord } from "../consoleApi";
+import type {
+  AuthProfileView,
+  ChatCheckpointRecord,
+  JsonValue,
+  SessionCatalogRecord,
+} from "../consoleApi";
 import { isJsonObject, readString, type JsonObject } from "../console/shared";
 import type { ChatDelegationCatalog } from "../consoleApi";
 import type { SlashCommandDefinition } from "./chatCommandRegistry";
-import { findChatSlashCommand, resolveChatSlashCommandName, type SlashCommandSurface } from "./chatCommandRegistry";
+import {
+  findChatSlashCommand,
+  resolveChatSlashCommandName,
+  type SlashCommandSurface,
+} from "./chatCommandRegistry";
 
 export interface BrowserProfileSuggestionRecord {
   readonly profile_id: string;
@@ -80,7 +89,7 @@ export function buildSlashSuggestions(
   const activeToken =
     hasTrailingWhitespace || normalizedRest.length === 0
       ? ""
-      : normalizedRest.split(/\s+/).at(-1)?.toLowerCase() ?? "";
+      : (normalizedRest.split(/\s+/).at(-1)?.toLowerCase() ?? "");
   return {
     activeCommand,
     activeToken,
@@ -97,7 +106,9 @@ export function selectUndoCheckpoint(
   if (undoTagged.length > 0) {
     return undoTagged[0] ?? null;
   }
-  const sorted = [...checkpoints].sort((left, right) => right.created_at_unix_ms - left.created_at_unix_ms);
+  const sorted = [...checkpoints].sort(
+    (left, right) => right.created_at_unix_ms - left.created_at_unix_ms,
+  );
   return sorted[0] ?? null;
 }
 
@@ -109,7 +120,9 @@ export function checkpointHasTag(checkpoint: ChatCheckpointRecord, tag: string):
   try {
     const parsed: JsonValue = JSON.parse(checkpoint.tags_json);
     return Array.isArray(parsed)
-      ? parsed.some((value) => typeof value === "string" && value.trim().toLowerCase() === normalizedTag)
+      ? parsed.some(
+          (value) => typeof value === "string" && value.trim().toLowerCase() === normalizedTag,
+        )
       : false;
   } catch {
     return false;
@@ -226,7 +239,12 @@ function buildObjectiveSuggestions(
       const objectiveId = readString(objective, "objective_id")?.toLowerCase() ?? "";
       const name = readString(objective, "name")?.toLowerCase() ?? "";
       const kind = readString(objective, "kind")?.toLowerCase() ?? "";
-      return query.length === 0 || objectiveId.includes(query) || name.includes(query) || kind.includes(query);
+      return (
+        query.length === 0 ||
+        objectiveId.includes(query) ||
+        name.includes(query) ||
+        kind.includes(query)
+      );
     })
     .slice(0, 6)
     .map((objective) => {
@@ -290,7 +308,10 @@ function buildBrowserProfileSuggestions(
       if (query.length === 0) {
         return true;
       }
-      return profile.profile_id.toLowerCase().includes(query) || profile.name.toLowerCase().includes(query);
+      return (
+        profile.profile_id.toLowerCase().includes(query) ||
+        profile.name.toLowerCase().includes(query)
+      );
     })
     .slice(0, 4)
     .map((profile) => ({
@@ -317,7 +338,10 @@ function buildBrowserSessionSuggestions(
       if (query.length === 0) {
         return true;
       }
-      return session.session_id.toLowerCase().includes(query) || session.title.toLowerCase().includes(query);
+      return (
+        session.session_id.toLowerCase().includes(query) ||
+        session.title.toLowerCase().includes(query)
+      );
     })
     .slice(0, 4)
     .map((session) => ({
@@ -392,7 +416,10 @@ function buildCheckpointSuggestions(
       if (query.length === 0) {
         return true;
       }
-      return checkpoint.checkpoint_id.toLowerCase().includes(query) || checkpoint.name.toLowerCase().includes(query);
+      return (
+        checkpoint.checkpoint_id.toLowerCase().includes(query) ||
+        checkpoint.name.toLowerCase().includes(query)
+      );
     })
     .slice(0, 6)
     .map((checkpoint) => ({
@@ -504,7 +531,9 @@ function buildDoctorSuggestions(
       if (activeToken.length === 0) {
         return true;
       }
-      return candidate.id.includes(activeToken) || candidate.title.toLowerCase().includes(activeToken);
+      return (
+        candidate.id.includes(activeToken) || candidate.title.toLowerCase().includes(activeToken)
+      );
     })
     .map((candidate) => {
       const keyword = candidate.id.split(":")[1] ?? "jobs";
@@ -542,14 +571,15 @@ function buildStaticSuggestions(
     }));
 }
 
-export function toBrowserProfileSuggestionRecords(values: readonly JsonValue[]): BrowserProfileSuggestionRecord[] {
+export function toBrowserProfileSuggestionRecords(
+  values: readonly JsonValue[],
+): BrowserProfileSuggestionRecord[] {
   return values
     .filter(isJsonObject)
     .map((record) => ({
       profile_id: readString(record, "profile_id") ?? "",
       name: readString(record, "name") ?? readString(record, "profile_name") ?? "Browser profile",
-      persistence_enabled:
-        record["persistence_enabled"] === true || record["persistence"] === true,
+      persistence_enabled: record["persistence_enabled"] === true || record["persistence"] === true,
       private_profile: record["private_profile"] === true,
     }))
     .filter((record) => record.profile_id.length > 0);

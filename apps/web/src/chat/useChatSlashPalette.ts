@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type {
-  ChatCheckpointRecord,
-  ConsoleApiClient,
-  SessionCatalogRecord,
-} from "../consoleApi";
+import type { ChatCheckpointRecord, ConsoleApiClient, SessionCatalogRecord } from "../consoleApi";
 import type { ChatDelegationCatalog } from "../consoleApi";
 import type { JsonObject } from "../console/shared";
 
@@ -95,8 +91,7 @@ export function useChatSlashPalette({
   });
 
   const parsedSlashCommand = parseSlashCommand(composerText);
-  const showSlashPalette =
-    composerText.trim().startsWith("/") && !slashPaletteDismissed;
+  const showSlashPalette = composerText.trim().startsWith("/") && !slashPaletteDismissed;
   const slashQuery = useMemo(() => {
     if (!showSlashPalette) {
       return "";
@@ -147,12 +142,11 @@ export function useChatSlashPalette({
 
   const refreshSlashEntityCatalogs = useCallback(async (): Promise<void> => {
     try {
-      const [authResponse, browserProfilesResponse, browserSessionsResponse] =
-        await Promise.all([
-          api.listAuthProfiles(new URLSearchParams({ limit: "64" })),
-          api.listBrowserProfiles(new URLSearchParams({ limit: "32" })),
-          api.listBrowserSessions(new URLSearchParams({ limit: "32" })),
-        ]);
+      const [authResponse, browserProfilesResponse, browserSessionsResponse] = await Promise.all([
+        api.listAuthProfiles(new URLSearchParams({ limit: "64" })),
+        api.listBrowserProfiles(new URLSearchParams({ limit: "32" })),
+        api.listBrowserSessions(new URLSearchParams({ limit: "32" })),
+      ]);
       setAuthProfiles(authResponse.profiles);
       setBrowserProfiles(toBrowserProfileSuggestionRecords(browserProfilesResponse.profiles));
       setBrowserSessions(toBrowserSessionSuggestionRecords(browserSessionsResponse.sessions));
