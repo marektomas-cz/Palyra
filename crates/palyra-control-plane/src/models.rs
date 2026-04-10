@@ -5,11 +5,24 @@ use serde_json::Value;
 use crate::contract::{ContractDescriptor, PageInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsoleProfileContext {
+    pub name: String,
+    pub label: String,
+    pub environment: String,
+    pub color: String,
+    pub risk_level: String,
+    pub strict_mode: bool,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsoleSession {
     pub principal: String,
     pub device_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ConsoleProfileContext>,
     pub csrf_token: String,
     pub issued_at_unix_ms: i64,
     pub expires_at_unix_ms: i64,

@@ -489,6 +489,12 @@ impl App {
             self.status_line = "Shell command is empty".to_owned();
             return Ok(());
         }
+        if strict_profile_blocks_local_shell() {
+            self.pending_shell_command = None;
+            self.mode = Mode::Chat;
+            self.status_line = "Local shell is blocked by strict profile posture".to_owned();
+            return Ok(());
+        }
         if !self.local_shell_enabled {
             self.pending_shell_command = Some(command);
             self.mode = Mode::ShellConfirm;
@@ -1792,8 +1798,16 @@ impl App {
     }
 
     fn status_summary(&self) -> String {
+        let profile = app::current_root_context().and_then(|context| context.active_profile_context());
         format!(
-            "session={} branch={} agent={} source={} model={} tools={} thinking={} shell={} active_run={}",
+            "profile={} env={} risk={} strict={} session={} branch={} agent={} source={} model={} tools={} thinking={} shell={} active_run={}",
+            profile.as_ref().map(|value| value.label.as_str()).unwrap_or("none"),
+            profile.as_ref().map(|value| value.environment.as_str()).unwrap_or("none"),
+            profile.as_ref().map(|value| value.risk_level.as_str()).unwrap_or("none"),
+            profile
+                .as_ref()
+                .map(|value| value.strict_mode.to_string())
+                .unwrap_or_else(|| "false".to_owned()),
             display_session_identity(&self.session),
             if self.session.branch_state.trim().is_empty() {
                 "none"
@@ -1934,6 +1948,13 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) -> Result<()> {
 async fn handle_shell_confirm_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Enter => {
+            if strict_profile_blocks_local_shell() {
+                app.pending_shell_command = None;
+                app.mode = Mode::Chat;
+                app.status_line =
+                    "Local shell remains disabled because the active profile is strict".to_owned();
+                return Ok(());
+            }
             app.local_shell_enabled = true;
             app.mode = Mode::Chat;
             app.status_line = "Local shell enabled for this TUI session".to_owned();
@@ -1963,7 +1984,10 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
             SettingsItem::ShowTools => app.show_tools = !app.show_tools,
             SettingsItem::ShowThinking => app.show_thinking = !app.show_thinking,
             SettingsItem::LocalShell => {
-                if app.local_shell_enabled {
+                if strict_profile_blocks_local_shell() {
+                    app.status_line =
+                        "Local shell is blocked by strict profile posture".to_owned();
+                } else if app.local_shell_enabled {
                     app.local_shell_enabled = false;
                     app.status_line = "Local shell disabled".to_owned();
                 } else {
@@ -2001,7 +2025,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(3),
             Constraint::Length(1),
@@ -2028,12 +2052,14 @@ fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let profile = app::current_root_context().and_then(|context| context.active_profile_context());
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
         .split(area);
     let top = rows[0];
     let bottom = rows[1];
+    let banner = rows[2];
     let connection_line = Line::from(vec![
         Span::styled("Gateway ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw(app.runtime.connection().grpc_url.as_str()),
@@ -2058,8 +2084,29 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Span::styled("Status ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
         Span::raw(sanitize_terminal_text(app.status_line.as_str())),
     ]);
+    let profile_line = if let Some(profile) = profile {
+        Line::from(vec![
+            Span::styled("Profile ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::raw(profile.label),
+            Span::raw("  "),
+            Span::styled("Env ", Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)),
+            Span::raw(profile.environment),
+            Span::raw("  "),
+            Span::styled("Risk ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::raw(profile.risk_level),
+            Span::raw("  "),
+            Span::styled("Strict ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(if profile.strict_mode { "on" } else { "off" }),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Profile ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+            Span::raw("none"),
+        ])
+    };
     frame.render_widget(Paragraph::new(connection_line), top);
     frame.render_widget(Paragraph::new(status_line), bottom);
+    frame.render_widget(Paragraph::new(profile_line), banner);
 }
 
 fn render_transcript(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -2107,11 +2154,23 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let strict_hint = if strict_profile_blocks_local_shell() {
+        "  strict profile: local shell blocked"
+    } else {
+        ""
+    };
     let help = format!(
-        "Enter send  Tab focus  F2/F3/F4 pickers  F5 settings  Ctrl+R reload  ? help  / commands  ! shell({})",
-        if app.local_shell_enabled { "on" } else { "off" }
+        "Enter send  Tab focus  F2/F3/F4 pickers  F5 settings  Ctrl+R reload  ? help  / commands  ! shell({}){}",
+        if app.local_shell_enabled { "on" } else { "off" },
+        strict_hint
     );
     frame.render_widget(Paragraph::new(help), area);
+}
+
+fn strict_profile_blocks_local_shell() -> bool {
+    app::current_root_context()
+        .map(|context| context.strict_profile_mode() && !context.allow_strict_profile_actions())
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Default)]

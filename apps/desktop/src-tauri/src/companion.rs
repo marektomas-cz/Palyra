@@ -53,6 +53,8 @@ pub(crate) struct DesktopCompanionSnapshot {
     pub(crate) control_center: super::snapshot::ControlCenterSnapshot,
     pub(crate) onboarding: super::onboarding::OnboardingStatusSnapshot,
     pub(crate) openai_status: super::openai_auth::OpenAiAuthStatusSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) console_session: Option<control_plane::ConsoleSession>,
     pub(crate) connection_state: String,
     pub(crate) rollout: DesktopCompanionRolloutState,
     pub(crate) preferences: DesktopCompanionPreferencesSnapshot,
@@ -406,6 +408,7 @@ pub(crate) async fn build_companion_snapshot(
     let DesktopRefreshPayload { snapshot, onboarding_status, openai_status } = refresh_payload;
 
     let mut warnings = Vec::new();
+    let mut console_session = None;
     let mut session_catalog = Vec::new();
     let mut session_summary = None;
     let mut approvals = Vec::new();
@@ -414,6 +417,7 @@ pub(crate) async fn build_companion_snapshot(
     if companion_state.rollout.companion_shell_enabled {
         match fetch_companion_console_data(&http_client, &runtime, admin_token.as_str()).await {
             Ok(data) => {
+                console_session = Some(data.console_session);
                 session_catalog = data.session_catalog.sessions;
                 session_summary = Some(data.session_catalog.summary);
                 approvals = data.approvals;
@@ -473,6 +477,7 @@ pub(crate) async fn build_companion_snapshot(
         control_center: snapshot,
         onboarding: onboarding_status,
         openai_status,
+        console_session,
         connection_state,
         rollout: companion_state.rollout.clone(),
         preferences: DesktopCompanionPreferencesSnapshot {
@@ -678,6 +683,7 @@ pub(crate) async fn build_companion_handoff_url(
 }
 
 struct FetchedCompanionConsoleData {
+    console_session: control_plane::ConsoleSession,
     session_catalog: control_plane::SessionCatalogListEnvelope,
     approvals: Vec<Value>,
     inventory: control_plane::InventoryListEnvelope,
@@ -689,8 +695,8 @@ async fn fetch_companion_console_data(
     admin_token: &str,
 ) -> Result<FetchedCompanionConsoleData> {
     let mut control_plane = build_control_plane_client(http_client.clone(), runtime)?;
-    let _csrf_token =
-        ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
+    let console_session = request_console_session(&mut control_plane, admin_token).await?;
+    control_plane.set_csrf_token(Some(console_session.csrf_token.clone()));
     let session_catalog_future = control_plane.list_session_catalog(vec![
         ("limit", Some(CHAT_SESSION_LIMIT.to_string())),
         ("sort", Some("updated_desc".to_owned())),
@@ -710,7 +716,7 @@ async fn fetch_companion_console_data(
         .map(|value| value.approvals)
         .unwrap_or_default();
     let inventory = trim_inventory_list(inventory);
-    Ok(FetchedCompanionConsoleData { session_catalog, approvals, inventory })
+    Ok(FetchedCompanionConsoleData { console_session, session_catalog, approvals, inventory })
 }
 
 fn trim_inventory_list(

@@ -2820,7 +2820,46 @@ pub(crate) fn redact_console_diagnostics_value(value: &mut Value, key_context: O
     }
 }
 
+fn build_console_profile_context(state: &AppState) -> control_plane::ConsoleProfileContext {
+    let deployment = build_deployment_posture_summary(state);
+    let remote_like = deployment.remote_bind_detected
+        || deployment.bind_profile.eq_ignore_ascii_case("public_tls")
+        || deployment.mode.eq_ignore_ascii_case("remote_vps");
+    let strict_mode = remote_like || !deployment.warnings.is_empty();
+    let label = match deployment.mode.as_str() {
+        "local_desktop" => "Local desktop",
+        "remote_vps" => "Remote VPS",
+        other => other,
+    };
+    let environment = if remote_like { "production" } else { "local" };
+    let color = if deployment.remote_bind_detected {
+        "red"
+    } else if strict_mode {
+        "amber"
+    } else {
+        "green"
+    };
+    let risk_level = if deployment.remote_bind_detected {
+        "high"
+    } else if strict_mode {
+        "elevated"
+    } else {
+        "low"
+    };
+
+    control_plane::ConsoleProfileContext {
+        name: deployment.mode.clone(),
+        label: label.to_owned(),
+        environment: environment.to_owned(),
+        color: color.to_owned(),
+        risk_level: risk_level.to_owned(),
+        strict_mode,
+        mode: deployment.bind_profile,
+    }
+}
+
 pub(crate) fn build_console_session_response(
+    state: &AppState,
     session: &ConsoleSession,
     csrf_token: String,
 ) -> ConsoleSessionResponse {
@@ -2828,6 +2867,7 @@ pub(crate) fn build_console_session_response(
         principal: session.context.principal.clone(),
         device_id: session.context.device_id.clone(),
         channel: session.context.channel.clone(),
+        profile: Some(build_console_profile_context(state)),
         csrf_token,
         issued_at_unix_ms: session.issued_at_unix_ms,
         expires_at_unix_ms: session.expires_at_unix_ms,

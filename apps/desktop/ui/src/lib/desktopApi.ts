@@ -214,6 +214,26 @@ export type OpenAiAuthStatusSnapshot = {
   default_profile_id?: string;
 };
 
+export type ConsoleProfileContext = {
+  name: string;
+  label: string;
+  environment: string;
+  color: string;
+  risk_level: string;
+  strict_mode: boolean;
+  mode: string;
+};
+
+export type ConsoleSession = {
+  principal: string;
+  device_id: string;
+  channel?: string;
+  profile?: ConsoleProfileContext;
+  csrf_token: string;
+  issued_at_unix_ms: number;
+  expires_at_unix_ms: number;
+};
+
 export type DesktopCompanionMetrics = {
   unread_notifications: number;
   pending_approvals: number;
@@ -229,6 +249,7 @@ export type DesktopCompanionSnapshot = {
   control_center: ControlCenterSnapshot;
   onboarding: OnboardingStatusSnapshot;
   openai_status: OpenAiAuthStatusSnapshot;
+  console_session?: ConsoleSession;
   connection_state: "connected" | "reconnecting" | "offline";
   rollout: DesktopCompanionRollout;
   preferences: DesktopCompanionPreferences;
@@ -361,6 +382,23 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
     state: "connected",
     note: "Preview profile is connected.",
     default_profile_id: "preview",
+  },
+  console_session: {
+    principal: "admin:desktop-control-center",
+    device_id: "preview-device",
+    channel: "desktop",
+    profile: {
+      name: "preview",
+      label: "Preview",
+      environment: "staging",
+      color: "amber",
+      risk_level: "elevated",
+      strict_mode: true,
+      mode: "remote",
+    },
+    csrf_token: "preview-csrf",
+    issued_at_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms - 30_000,
+    expires_at_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms + 3_600_000,
   },
   connection_state: "connected",
   rollout: {

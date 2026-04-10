@@ -20,6 +20,8 @@ Options:
 Global Options:
       --profile <PROFILE>
 
+      --expect-profile <EXPECT_PROFILE>
+
       --state-root <STATE_ROOT>
 
   -v, --verbose...
@@ -36,6 +38,10 @@ Global Options:
       --plain
 
       --no-color
+
+      --allow-profile-mismatch
+
+      --allow-strict-profile-actions
 
 Examples:
   palyra reset --scope service --dry-run

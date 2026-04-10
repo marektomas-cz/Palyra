@@ -129,6 +129,8 @@ Examples:
   palyra sandbox explain --runtime process-runner
   palyra update --check
   palyra --profile staging agents list --json
+  palyra --profile prod --expect-profile prod gateway status
+  palyra --profile prod --allow-strict-profile-actions reset --scope state --yes
   palyra --config ./palyra.toml --output-format json status --admin
 
 Canonical command map:
@@ -358,6 +360,8 @@ pub enum LogLevelArg {
 pub struct RootOptions {
     #[arg(long, global = true)]
     pub profile: Option<String>,
+    #[arg(long = "expect-profile", global = true)]
+    pub expect_profile: Option<String>,
     #[arg(long = "config", global = true)]
     pub config_path: Option<String>,
     #[arg(long, global = true)]
@@ -378,6 +382,10 @@ pub struct RootOptions {
     pub plain: bool,
     #[arg(long, default_value_t = false, global = true)]
     pub no_color: bool,
+    #[arg(long, default_value_t = false, global = true)]
+    pub allow_profile_mismatch: bool,
+    #[arg(long, default_value_t = false, global = true)]
+    pub allow_strict_profile_actions: bool,
 }
 
 #[derive(Debug, Parser)]

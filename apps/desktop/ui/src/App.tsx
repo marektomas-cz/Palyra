@@ -90,6 +90,7 @@ export function App() {
     null;
   const selectedApprovalIdResolved = readString(selectedApproval, "approval_id") ?? "";
   const unreadNotifications = snapshot.notifications.filter((entry) => !entry.read);
+  const activeProfile = snapshot.console_session?.profile ?? null;
   const offlineDraftsForSession = snapshot.offline_drafts.filter(
     (draft) => draft.session_id === undefined || draft.session_id === activeSessionId,
   );
@@ -425,6 +426,14 @@ export function App() {
             <StatusChip tone={previewMode ? "warning" : "success"}>
               {previewMode ? "Preview data" : snapshot.rollout.release_channel}
             </StatusChip>
+            {activeProfile !== null ? (
+              <StatusChip tone={toneForProfile(activeProfile.risk_level)}>
+                {activeProfile.label} · {activeProfile.environment}
+              </StatusChip>
+            ) : null}
+            {activeProfile?.strict_mode ? (
+              <StatusChip tone="warning">Strict posture</StatusChip>
+            ) : null}
           </>
         }
         actions={
@@ -475,6 +484,14 @@ export function App() {
                   <li key={warning}>{warning}</li>
                 ))}
               </ul>
+            </InlineNotice>
+          ) : null}
+          {activeProfile !== null ? (
+            <InlineNotice
+              title={`Active profile: ${activeProfile.label}`}
+              tone={activeProfile.strict_mode ? "warning" : "default"}
+            >
+              {`Environment ${activeProfile.environment}, risk ${activeProfile.risk_level}, mode ${activeProfile.mode}.`}
             </InlineNotice>
           ) : null}
         </section>
@@ -1311,6 +1328,21 @@ function toneForConnection(connectionState: string): "success" | "warning" | "da
     return "warning";
   }
   return "danger";
+}
+
+function toneForProfile(
+  riskLevel: string,
+): "success" | "warning" | "danger" | "default" {
+  if (riskLevel === "critical" || riskLevel === "high") {
+    return "danger";
+  }
+  if (riskLevel === "elevated") {
+    return "warning";
+  }
+  if (riskLevel === "low") {
+    return "success";
+  }
+  return "default";
 }
 
 function toneForDevice(

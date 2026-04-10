@@ -21,6 +21,21 @@ function formatSessionExpiry(unixMs: number): string {
     .replace(",", "");
 }
 
+function toneForProfile(
+  riskLevel: string | undefined,
+): "default" | "success" | "warning" | "danger" {
+  if (riskLevel === "critical" || riskLevel === "high") {
+    return "danger";
+  }
+  if (riskLevel === "elevated") {
+    return "warning";
+  }
+  if (riskLevel === "low") {
+    return "success";
+  }
+  return "default";
+}
+
 export function ConsoleShell({ app, children }: ConsoleShellProps) {
   const session = app.session;
   if (session === null) {
@@ -28,6 +43,7 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
   }
   const currentEntry = getNavigationEntry(app.section);
   const groupLabel = getNavigationGroupLabel(app.section);
+  const activeProfile = session.profile ?? null;
 
   return (
     <div className="console-root">
@@ -53,6 +69,14 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
                 <Chip variant="secondary">
                   Expires {formatSessionExpiry(session.expires_at_unix_ms)} UTC
                 </Chip>
+                {activeProfile !== null ? (
+                  <StatusChip tone={toneForProfile(activeProfile.risk_level)}>
+                    {activeProfile.label} · {activeProfile.environment}
+                  </StatusChip>
+                ) : null}
+                {activeProfile?.strict_mode ? (
+                  <StatusChip tone="warning">Strict posture</StatusChip>
+                ) : null}
               </div>
               <div className="console-shell__actions">
                 <Button
@@ -109,8 +133,19 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
                   { label: "Device", value: session.device_id },
                   { label: "Channel", value: session.channel ?? "none" },
                   { label: "Transport", value: "Cookie session + CSRF" },
+                  { label: "Profile", value: activeProfile?.label ?? "none" },
+                  { label: "Environment", value: activeProfile?.environment ?? "n/a" },
+                  { label: "Risk", value: activeProfile?.risk_level ?? "n/a" },
                 ]}
               />
+              {activeProfile !== null ? (
+                <InlineNotice
+                  title={`Active profile: ${activeProfile.label}`}
+                  tone={activeProfile.strict_mode ? "warning" : "default"}
+                >
+                  {`Mode ${activeProfile.mode}, environment ${activeProfile.environment}, risk ${activeProfile.risk_level}.`}
+                </InlineNotice>
+              ) : null}
             </CardContent>
           </Card>
           {app.notice !== null ? (

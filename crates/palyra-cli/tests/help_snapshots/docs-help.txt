@@ -14,6 +14,8 @@ Options:
 Global Options:
       --profile <PROFILE>
 
+      --expect-profile <EXPECT_PROFILE>
+
       --config <CONFIG_PATH>
 
       --state-root <STATE_ROOT>
@@ -32,6 +34,10 @@ Global Options:
       --plain
 
       --no-color
+
+      --allow-profile-mismatch
+
+      --allow-strict-profile-actions
 
 Examples:
   palyra docs list

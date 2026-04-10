@@ -268,9 +268,11 @@ fn build_embedded_support_bundle(generated_at_unix_ms: i64) -> Result<SupportBun
     let doctor = build_doctor_report(checks.as_slice())?;
     let build = build_metadata();
     let diagnostics = build_support_bundle_diagnostics_snapshot();
+    let profile = app::current_root_context().and_then(|context| context.active_profile_context());
     Ok(SupportBundle {
         schema_version: 1,
         generated_at_unix_ms,
+        profile,
         build: SupportBundleBuildSnapshot {
             version: build.version.to_owned(),
             git_hash: build.git_hash.to_owned(),

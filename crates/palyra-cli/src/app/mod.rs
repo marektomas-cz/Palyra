@@ -41,6 +41,7 @@ pub(crate) struct RootCommandContext {
     trace_id: String,
     profile: Option<CliConnectionProfile>,
     config_defaults: ConfigConnectionDefaults,
+    allow_strict_profile_actions: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,6 +112,17 @@ pub(crate) struct CliConnectionProfile {
     pub(crate) last_used_at_unix_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ActiveProfileContext {
+    pub(crate) name: String,
+    pub(crate) label: String,
+    pub(crate) environment: String,
+    pub(crate) color: String,
+    pub(crate) risk_level: String,
+    pub(crate) strict_mode: bool,
+    pub(crate) mode: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ConfigConnectionDefaults {
     daemon_url: Option<String>,
@@ -167,6 +179,18 @@ impl RootCommandContext {
 
     pub(crate) fn profile_name(&self) -> Option<&str> {
         self.profile_name.as_deref()
+    }
+
+    pub(crate) fn active_profile_context(&self) -> Option<ActiveProfileContext> {
+        build_active_profile_context(self.profile_name.as_deref(), self.profile.as_ref())
+    }
+
+    pub(crate) fn strict_profile_mode(&self) -> bool {
+        self.active_profile_context().map(|profile| profile.strict_mode).unwrap_or(false)
+    }
+
+    pub(crate) fn allow_strict_profile_actions(&self) -> bool {
+        self.allow_strict_profile_actions
     }
 
     pub(crate) fn state_root(&self) -> &Path {
@@ -327,10 +351,16 @@ fn build_root_context(root: RootOptions) -> Result<RootCommandContext> {
     let profiles_path = resolve_profiles_path(&bootstrap_state_root)?;
     let profiles = load_profiles_document(profiles_path.as_deref())?;
     let profile_name = resolve_active_profile_name(&root, &profiles);
+    let expected_profile_name = normalize_owned_text(root.expect_profile.clone());
     let profile = resolve_profile(profile_name.as_deref(), &profiles)?;
     let state_root = resolve_final_state_root(&root, profile.as_ref())?;
     let config_path = resolve_config_path(&root, profile.as_ref())?;
     let config_defaults = load_config_defaults(config_path.as_deref())?;
+    validate_expected_profile(
+        expected_profile_name.as_deref(),
+        profile_name.as_deref(),
+        root.allow_profile_mismatch,
+    )?;
 
     Ok(RootCommandContext {
         output_format: resolve_output_format(&root),
@@ -342,6 +372,7 @@ fn build_root_context(root: RootOptions) -> Result<RootCommandContext> {
         profile_name,
         profile,
         config_defaults,
+        allow_strict_profile_actions: root.allow_strict_profile_actions,
     })
 }
 
@@ -526,6 +557,79 @@ fn resolve_profile(
         anyhow::bail!("CLI profile not found: {profile_name}");
     };
     Ok(Some(profile.clone()))
+}
+
+fn validate_expected_profile(
+    expected_profile_name: Option<&str>,
+    actual_profile_name: Option<&str>,
+    allow_profile_mismatch: bool,
+) -> Result<()> {
+    let Some(expected_profile_name) = expected_profile_name else {
+        return Ok(());
+    };
+    if allow_profile_mismatch {
+        return Ok(());
+    }
+    match actual_profile_name {
+        Some(actual_profile_name) if actual_profile_name == expected_profile_name => Ok(()),
+        Some(actual_profile_name) => anyhow::bail!(
+            "active CLI profile mismatch: expected `{expected_profile_name}` but resolved `{actual_profile_name}`; re-run with --profile {expected_profile_name} or acknowledge the mismatch with --allow-profile-mismatch"
+        ),
+        None => anyhow::bail!(
+            "active CLI profile mismatch: expected `{expected_profile_name}` but no active profile was resolved; re-run with --profile {expected_profile_name} or acknowledge the mismatch with --allow-profile-mismatch"
+        ),
+    }
+}
+
+fn build_active_profile_context(
+    profile_name: Option<&str>,
+    profile: Option<&CliConnectionProfile>,
+) -> Option<ActiveProfileContext> {
+    let profile_name = profile_name?;
+    let profile = profile?;
+    let mode = normalize_optional_text(profile.mode.as_deref()).unwrap_or_else(|| {
+        if normalize_optional_text(profile.daemon_url.as_deref())
+            .is_some_and(|value| !value.contains("127.0.0.1") && !value.contains("localhost"))
+        {
+            "remote"
+        } else {
+            "local"
+        }
+    });
+    let strict_mode = profile.strict_mode;
+    let environment = normalize_optional_text(profile.environment.as_deref()).unwrap_or_else(|| {
+        if strict_mode || mode.eq_ignore_ascii_case("remote") {
+            "production"
+        } else {
+            "local"
+        }
+    });
+    let risk_level = normalize_optional_text(profile.risk_level.as_deref()).unwrap_or_else(|| {
+        if strict_mode {
+            "high"
+        } else if mode.eq_ignore_ascii_case("remote") {
+            "elevated"
+        } else {
+            "low"
+        }
+    });
+    let color = normalize_optional_text(profile.color.as_deref()).unwrap_or_else(|| {
+        match risk_level {
+            "critical" | "high" => "red",
+            "elevated" => "amber",
+            _ => "green",
+        }
+    });
+    let label = normalize_optional_text(profile.label.as_deref()).unwrap_or(profile_name);
+    Some(ActiveProfileContext {
+        name: profile_name.to_owned(),
+        label: label.to_owned(),
+        environment: environment.to_owned(),
+        color: color.to_owned(),
+        risk_level: risk_level.to_owned(),
+        strict_mode,
+        mode: mode.to_owned(),
+    })
 }
 
 pub(crate) fn resolve_cli_state_root(explicit: Option<&str>) -> Result<PathBuf> {
@@ -715,7 +819,8 @@ fn read_normalized_env_var(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_root_context, ConnectionDefaults, ConnectionOverrides, RootOptions,
+        build_active_profile_context, build_root_context, CliConnectionProfile, ConnectionDefaults,
+        ConnectionOverrides, RootOptions,
         CLI_PROFILES_PATH_ENV, CLI_PROFILE_ENV,
     };
     use crate::args::{LogLevelArg, OutputFormatArg};
@@ -771,6 +876,7 @@ channel = "profile"
 
         let context = build_root_context(RootOptions {
             profile: Some("ops".to_owned()),
+            expect_profile: None,
             config_path: None,
             state_root: Some(state_root.display().to_string()),
             verbose: 1,
@@ -778,6 +884,8 @@ channel = "profile"
             output_format: OutputFormatArg::Json,
             plain: false,
             no_color: true,
+            allow_profile_mismatch: false,
+            allow_strict_profile_actions: false,
         })?;
 
         let grpc = context.resolve_grpc_connection(
@@ -867,6 +975,56 @@ admin_token_env = "PALYRA_PROFILE_ADMIN_TOKEN"
 
         assert_eq!(http.token.as_deref(), Some("profile-env-token"));
         Ok(())
+    }
+
+    #[test]
+    fn expected_profile_fails_closed_on_mismatch() {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_env();
+        let temp = tempdir().expect("tempdir");
+        let profile_path = temp.path().join("profiles.toml");
+        fs::write(
+            &profile_path,
+            r#"
+version = 1
+default_profile = "staging"
+[profiles.staging]
+daemon_url = "http://127.0.0.1:8200"
+"#,
+        )
+        .expect("profile registry should be written");
+        env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
+
+        let error = build_root_context(RootOptions {
+            expect_profile: Some("prod".to_owned()),
+            ..RootOptions::default()
+        })
+        .expect_err("profile mismatch should fail closed");
+
+        assert!(
+            error.to_string().contains("active CLI profile mismatch"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn active_profile_context_derives_visible_posture_defaults() {
+        let profile = CliConnectionProfile {
+            label: Some("Production".to_owned()),
+            mode: Some("remote".to_owned()),
+            strict_mode: true,
+            ..CliConnectionProfile::default()
+        };
+
+        let context = build_active_profile_context(Some("prod"), Some(&profile))
+            .expect("profile context should resolve");
+
+        assert_eq!(context.name, "prod");
+        assert_eq!(context.label, "Production");
+        assert_eq!(context.environment, "production");
+        assert_eq!(context.risk_level, "high");
+        assert_eq!(context.color, "red");
+        assert!(context.strict_mode);
     }
 
     #[cfg(windows)]

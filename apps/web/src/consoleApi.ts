@@ -920,10 +920,21 @@ export type ChatStreamLine =
   | ChatStreamErrorLine
   | ChatStreamCompleteLine;
 
+export interface ConsoleProfileContext {
+  name: string;
+  label: string;
+  environment: string;
+  color: string;
+  risk_level: string;
+  strict_mode: boolean;
+  mode: string;
+}
+
 export interface ConsoleSession {
   principal: string;
   device_id: string;
   channel?: string;
+  profile?: ConsoleProfileContext;
   csrf_token: string;
   issued_at_unix_ms: number;
   expires_at_unix_ms: number;

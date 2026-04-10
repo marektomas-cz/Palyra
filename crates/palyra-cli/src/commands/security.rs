@@ -564,6 +564,7 @@ mod tests {
     fn minimal_doctor() -> DoctorReport {
         DoctorReport {
             generated_at_unix_ms: 1,
+            profile: None,
             checks: Vec::new(),
             summary: DoctorSummary {
                 required_checks_total: 0,

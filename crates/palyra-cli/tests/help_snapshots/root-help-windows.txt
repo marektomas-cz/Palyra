@@ -61,6 +61,8 @@ Options:
 Global Options:
       --profile <PROFILE>
 
+      --expect-profile <EXPECT_PROFILE>
+
       --config <CONFIG_PATH>
 
       --state-root <STATE_ROOT>
@@ -80,6 +82,10 @@ Global Options:
 
       --no-color
 
+      --allow-profile-mismatch
+
+      --allow-strict-profile-actions
+
 Examples:
   palyra setup --mode local
   palyra acp --session-key ops:triage
@@ -93,6 +99,8 @@ Examples:
   palyra sandbox explain --runtime process-runner
   palyra update --check
   palyra --profile staging agents list --json
+  palyra --profile prod --expect-profile prod gateway status
+  palyra --profile prod --allow-strict-profile-actions reset --scope state --yes
   palyra --config ./palyra.toml --output-format json status --admin
 
 Canonical command map:

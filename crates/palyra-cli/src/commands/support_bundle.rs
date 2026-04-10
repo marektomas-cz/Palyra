@@ -24,9 +24,11 @@ fn run_support_bundle_export(
 
     let build = build_metadata();
     let diagnostics = build_support_bundle_diagnostics_snapshot();
+    let profile = app::current_root_context().and_then(|context| context.active_profile_context());
     let mut bundle = SupportBundle {
         schema_version: 1,
         generated_at_unix_ms,
+        profile,
         build: SupportBundleBuildSnapshot {
             version: build.version.to_owned(),
             git_hash: build.git_hash.to_owned(),

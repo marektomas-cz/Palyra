@@ -229,6 +229,7 @@ fn run_cli() -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     let _root_context = app::install_root_context(cli.root.clone())?;
+    enforce_profile_guardrails(&cli.command)?;
     match cli.command {
         CliCommand::Version => print_version(),
         CliCommand::Setup { mode, path, force, tls_scaffold, wizard, wizard_options } => {
@@ -370,9 +371,47 @@ fn run_cli() -> Result<()> {
     }
 }
 
+fn enforce_profile_guardrails(command: &CliCommand) -> Result<()> {
+    let Some(context) = app::current_root_context() else {
+        return Ok(());
+    };
+    let Some(profile) = context.active_profile_context() else {
+        return Ok(());
+    };
+    if !profile.strict_mode || context.allow_strict_profile_actions() {
+        return Ok(());
+    }
+    if !is_strict_profile_blocked_command(command) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "command is blocked by strict profile posture for `{}` (environment={}, risk_level={}); re-run with --allow-strict-profile-actions if this destructive action is intentional",
+        profile.name,
+        profile.environment,
+        profile.risk_level
+    );
+}
+
+fn is_strict_profile_blocked_command(command: &CliCommand) -> bool {
+    match command {
+        CliCommand::Reset { command } => !command.dry_run && command.yes,
+        CliCommand::Uninstall { command } => !command.dry_run && command.yes,
+        CliCommand::Profile { command } => matches!(
+            command,
+            crate::cli::ProfileCommand::Delete {
+                yes: true,
+                delete_state_root: true,
+                ..
+            } | crate::cli::ProfileCommand::Delete { yes: true, .. }
+        ),
+        _ => false,
+    }
+}
+
 fn print_version() -> Result<()> {
     let build = build_metadata();
     if let Some(context) = app::current_root_context() {
+        let profile = context.active_profile_context();
         if context.prefers_json() {
             return output::print_json_pretty(
                 &json!({
@@ -382,6 +421,7 @@ fn print_version() -> Result<()> {
                     "build_profile": build.build_profile,
                     "trace_id": context.trace_id(),
                     "profile": context.profile_name(),
+                    "profile_context": profile,
                     "state_root": context.state_root().display().to_string(),
                     "log_level": format!("{:?}", context.log_level()).to_ascii_lowercase(),
                     "no_color": context.no_color(),
@@ -398,12 +438,26 @@ fn print_version() -> Result<()> {
                     "build_profile": build.build_profile,
                     "trace_id": context.trace_id(),
                     "profile": context.profile_name(),
+                    "profile_context": profile,
                     "state_root": context.state_root().display().to_string(),
                     "log_level": format!("{:?}", context.log_level()).to_ascii_lowercase(),
                     "no_color": context.no_color(),
                 }),
                 "failed to encode version output as NDJSON",
             );
+        }
+        if let Some(profile) = profile {
+            println!(
+                "name=palyra version={} git_hash={} build_profile={} profile={} environment={} risk_level={} strict_mode={}",
+                build.version,
+                build.git_hash,
+                build.build_profile,
+                profile.label,
+                profile.environment,
+                profile.risk_level,
+                profile.strict_mode
+            );
+            return std::io::stdout().flush().context("stdout flush failed");
         }
     }
     println!(
@@ -677,6 +731,7 @@ fn build_doctor_checks() -> Vec<DoctorCheck> {
 
 fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
     let generated_at_unix_ms = now_unix_ms_i64()?;
+    let profile = app::current_root_context().and_then(|context| context.active_profile_context());
     let config = collect_doctor_config_snapshot();
     let identity = collect_doctor_identity_snapshot();
     let (connectivity, admin_payload, admin_error) = collect_doctor_connectivity_snapshot();
@@ -699,6 +754,7 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
 
     Ok(DoctorReport {
         generated_at_unix_ms,
+        profile,
         checks: checks.to_vec(),
         summary: DoctorSummary {
             required_checks_total,
@@ -6441,6 +6497,8 @@ impl DoctorCheck {
 #[derive(Debug, Serialize)]
 struct DoctorReport {
     generated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<app::ActiveProfileContext>,
     checks: Vec<DoctorCheck>,
     summary: DoctorSummary,
     config: DoctorConfigSnapshot,
@@ -6588,6 +6646,8 @@ struct DoctorDeploymentBindSnapshot {
 struct SupportBundle {
     schema_version: u32,
     generated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<app::ActiveProfileContext>,
     build: SupportBundleBuildSnapshot,
     platform: SupportBundlePlatformSnapshot,
     doctor: DoctorReport,
@@ -7942,6 +8002,15 @@ mod diagnostics_bundle_tests {
     fn minimal_doctor_report() -> DoctorReport {
         DoctorReport {
             generated_at_unix_ms: 1_730_000_000_000,
+            profile: Some(crate::app::ActiveProfileContext {
+                name: "staging".to_owned(),
+                label: "Staging".to_owned(),
+                environment: "staging".to_owned(),
+                color: "amber".to_owned(),
+                risk_level: "elevated".to_owned(),
+                strict_mode: true,
+                mode: "remote".to_owned(),
+            }),
             checks: Vec::new(),
             summary: DoctorSummary {
                 required_checks_total: 2,
@@ -8063,6 +8132,15 @@ mod diagnostics_bundle_tests {
         SupportBundle {
             schema_version: 1,
             generated_at_unix_ms: 1_730_000_000_000,
+            profile: Some(crate::app::ActiveProfileContext {
+                name: "staging".to_owned(),
+                label: "Staging".to_owned(),
+                environment: "staging".to_owned(),
+                color: "amber".to_owned(),
+                risk_level: "elevated".to_owned(),
+                strict_mode: true,
+                mode: "remote".to_owned(),
+            }),
             build: SupportBundleBuildSnapshot {
                 version: "0.1.0".to_owned(),
                 git_hash: "deadbeef".to_owned(),
@@ -8307,6 +8385,52 @@ mod diagnostics_bundle_tests {
             Some(true),
             "trimmed support bundle should mark truncated=true"
         );
+    }
+}
+
+#[cfg(test)]
+mod profile_guardrail_tests {
+    use super::is_strict_profile_blocked_command;
+    use crate::cli::{
+        Command as CliCommand, ProfileCommand, ResetCommand, ResetScopeArg, UninstallCommand,
+    };
+
+    #[test]
+    fn strict_profile_guard_blocks_destructive_commands_only() {
+        assert!(is_strict_profile_blocked_command(&CliCommand::Reset {
+            command: ResetCommand {
+                scopes: vec![ResetScopeArg::State],
+                config_path: None,
+                workspace_root: None,
+                dry_run: false,
+                yes: true,
+            },
+        }));
+        assert!(is_strict_profile_blocked_command(&CliCommand::Uninstall {
+            command: UninstallCommand {
+                install_root: None,
+                remove_state: true,
+                dry_run: false,
+                yes: true,
+            },
+        }));
+        assert!(is_strict_profile_blocked_command(&CliCommand::Profile {
+            command: ProfileCommand::Delete {
+                name: "prod".to_owned(),
+                yes: true,
+                delete_state_root: false,
+                json: false,
+            },
+        }));
+        assert!(!is_strict_profile_blocked_command(&CliCommand::Reset {
+            command: ResetCommand {
+                scopes: vec![ResetScopeArg::State],
+                config_path: None,
+                workspace_root: None,
+                dry_run: true,
+                yes: false,
+            },
+        }));
     }
 }
 

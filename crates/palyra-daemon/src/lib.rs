@@ -318,6 +318,8 @@ struct ConsoleSessionResponse {
     device_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<control_plane::ConsoleProfileContext>,
     csrf_token: String,
     issued_at_unix_ms: i64,
     expires_at_unix_ms: i64,
