@@ -13,15 +13,14 @@ use super::{
     GatewayBindProfileArg, HooksCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg,
     MemoryCommand, MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, MessageCommand,
     ModelsCommand, NodeCommand, NodesCommand, OnboardingAuthMethodArg, OnboardingCommand,
-    OnboardingFlowArg,
-    PairingClientKindArg, PairingCommand, PairingMethodArg, PairingStateArg, PatchCommand,
-    PluginsCommand, PolicyCommand, ProtocolCommand, RemoteVerificationModeArg, ResetCommand,
-    ResetScopeArg, RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutinePreviewTimezoneArg,
-    RoutineTriggerKindArg, RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
-    SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
-    SkillsCommand, SkillsPackageCommand, SupportBundleCommand, SystemCommand, SystemEventCommand,
-    SystemEventSeverityArg, TuiCommand, UninstallCommand, UpdateCommand, WebhooksCommand,
-    WizardOverridesArg, WorkspaceRoleArg,
+    OnboardingFlowArg, PairingClientKindArg, PairingCommand, PairingMethodArg, PairingStateArg,
+    PatchCommand, PluginsCommand, PolicyCommand, ProtocolCommand, RemoteVerificationModeArg,
+    ResetCommand, ResetScopeArg, RoutineApprovalModeArg, RoutineDeliveryModeArg,
+    RoutinePreviewTimezoneArg, RoutineTriggerKindArg, RoutinesCommand, SandboxCommand,
+    SandboxRuntimeArg, SecretsCommand, SecretsConfigureCommand, SecurityCommand, SessionsCommand,
+    SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand, SupportBundleCommand,
+    SystemCommand, SystemEventCommand, SystemEventSeverityArg, TuiCommand, UninstallCommand,
+    UpdateCommand, WebhooksCommand, WizardOverridesArg, WorkspaceRoleArg,
 };
 
 #[test]

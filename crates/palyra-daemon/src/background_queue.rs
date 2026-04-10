@@ -257,16 +257,18 @@ async fn dispatch_background_task(
             match process_post_run_reflection_task(&runtime, &task).await {
                 Ok(result) => {
                     let _ = runtime
-                        .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
-                            task_id: task.task_id.clone(),
-                            state: Some("succeeded".to_owned()),
-                            target_run_id: Some(None),
-                            increment_attempt_count: false,
-                            last_error: Some(None),
-                            result_json: Some(Some(result.to_string())),
-                            started_at_unix_ms: None,
-                            completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
-                        })
+                        .update_orchestrator_background_task(
+                            OrchestratorBackgroundTaskUpdateRequest {
+                                task_id: task.task_id.clone(),
+                                state: Some("succeeded".to_owned()),
+                                target_run_id: Some(None),
+                                increment_attempt_count: false,
+                                last_error: Some(None),
+                                result_json: Some(Some(result.to_string())),
+                                started_at_unix_ms: None,
+                                completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
+                            },
+                        )
                         .await;
                     runtime.clear_self_healing_heartbeat(
                         WorkHeartbeatKind::BackgroundTask,
@@ -281,23 +283,25 @@ async fn dispatch_background_task(
                         "post-run reflection task failed"
                     );
                     let _ = runtime
-                        .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
-                            task_id: task.task_id.clone(),
-                            state: Some("failed".to_owned()),
-                            target_run_id: Some(None),
-                            increment_attempt_count: false,
-                            last_error: Some(Some(error.message().to_owned())),
-                            result_json: Some(Some(
-                                json!({
-                                    "status": "failed",
-                                    "task_id": task.task_id,
-                                    "error": error.message(),
-                                })
-                                .to_string(),
-                            )),
-                            started_at_unix_ms: None,
-                            completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
-                        })
+                        .update_orchestrator_background_task(
+                            OrchestratorBackgroundTaskUpdateRequest {
+                                task_id: task.task_id.clone(),
+                                state: Some("failed".to_owned()),
+                                target_run_id: Some(None),
+                                increment_attempt_count: false,
+                                last_error: Some(Some(error.message().to_owned())),
+                                result_json: Some(Some(
+                                    json!({
+                                        "status": "failed",
+                                        "task_id": task.task_id,
+                                        "error": error.message(),
+                                    })
+                                    .to_string(),
+                                )),
+                                started_at_unix_ms: None,
+                                completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
+                            },
+                        )
                         .await;
                     runtime.clear_self_healing_heartbeat(
                         WorkHeartbeatKind::BackgroundTask,

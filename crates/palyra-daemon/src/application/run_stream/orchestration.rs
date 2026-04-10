@@ -529,18 +529,13 @@ async fn process_run_stream_provider_response(
         .await;
     }
 
-    if let Ok(Some(run_snapshot)) = runtime_state
-        .orchestrator_run_status_snapshot(run_id.to_owned())
-        .await
+    if let Ok(Some(run_snapshot)) =
+        runtime_state.orchestrator_run_status_snapshot(run_id.to_owned()).await
     {
         if run_snapshot.state == RunLifecycleState::Done.as_str() {
-            if let Err(error) = schedule_post_run_reflection(
-                runtime_state,
-                request_context,
-                session_id,
-                run_id,
-            )
-            .await
+            if let Err(error) =
+                schedule_post_run_reflection(runtime_state, request_context, session_id, run_id)
+                    .await
             {
                 warn!(
                     run_id,

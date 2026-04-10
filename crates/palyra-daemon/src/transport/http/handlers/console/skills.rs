@@ -1,8 +1,8 @@
-use crate::*;
 use crate::gateway::current_unix_ms;
 use crate::journal::{
     LearningCandidateListFilter, LearningCandidateRecord, LearningCandidateReviewRequest,
 };
+use crate::*;
 
 pub(crate) async fn console_skills_list_handler(
     State(state): State<AppState>,
@@ -346,8 +346,8 @@ pub(crate) async fn console_procedure_skill_promote_handler(
     Json(payload): Json<ConsoleProcedureSkillPromotionRequest>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    let candidate = load_console_procedure_candidate(&state, &session.context, candidate_id.as_str())
-        .await?;
+    let candidate =
+        load_console_procedure_candidate(&state, &session.context, candidate_id.as_str()).await?;
     if candidate.candidate_kind != "procedure" {
         return Err(runtime_status_response(tonic::Status::failed_precondition(
             "only procedure learning candidates can be promoted to skill scaffolds",
@@ -360,8 +360,10 @@ pub(crate) async fn console_procedure_skill_promote_handler(
     }
 
     let default_skill_id = default_generated_skill_id(candidate.candidate_id.as_str());
-    let skill_id =
-        normalize_generated_skill_identifier(payload.skill_id.as_deref().unwrap_or(default_skill_id.as_str()), "skill_id")?;
+    let skill_id = normalize_generated_skill_identifier(
+        payload.skill_id.as_deref().unwrap_or(default_skill_id.as_str()),
+        "skill_id",
+    )?;
     let version = payload.version.unwrap_or_else(|| "0.1.0".to_owned());
     let publisher = normalize_generated_skill_identifier(
         payload.publisher.as_deref().unwrap_or("palyra.generated"),
@@ -375,17 +377,20 @@ pub(crate) async fn console_procedure_skill_promote_handler(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| candidate.title.clone());
 
-    let scaffold = write_procedure_skill_scaffold(&candidate, skill_id.as_str(), version.as_str(), publisher.as_str(), name.as_str())?;
+    let scaffold = write_procedure_skill_scaffold(
+        &candidate,
+        skill_id.as_str(),
+        version.as_str(),
+        publisher.as_str(),
+        name.as_str(),
+    )?;
     let record = state
         .runtime
         .upsert_skill_status(SkillStatusUpsertRequest {
             skill_id: skill_id.clone(),
             version: version.clone(),
             status: SkillExecutionStatus::Quarantined,
-            reason: Some(format!(
-                "generated_from_learning_candidate:{}",
-                candidate.candidate_id
-            )),
+            reason: Some(format!("generated_from_learning_candidate:{}", candidate.candidate_id)),
             detected_at_ms: unix_ms_now().map_err(|error| {
                 runtime_status_response(tonic::Status::internal(format!(
                     "failed to read system clock: {error}"
@@ -486,9 +491,9 @@ fn normalize_generated_skill_identifier(raw: &str, field: &str) -> Result<String
     let normalized = raw.trim().to_ascii_lowercase();
     if normalized.is_empty()
         || normalized.contains("..")
-        || !normalized
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+        || !normalized.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        })
     {
         return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
             "{field} must use non-empty lowercase [a-z0-9._-] segments"
@@ -505,10 +510,7 @@ fn write_procedure_skill_scaffold(
     name: &str,
 ) -> Result<ProcedureSkillScaffold, Response> {
     let skills_root = resolve_skills_root()?;
-    let scaffold_root = skills_root
-        .join("candidate-scaffolds")
-        .join(skill_id)
-        .join(version);
+    let scaffold_root = skills_root.join("candidate-scaffolds").join(skill_id).join(version);
     let root_existed = scaffold_root.exists();
     fs::create_dir_all(scaffold_root.as_path()).map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(

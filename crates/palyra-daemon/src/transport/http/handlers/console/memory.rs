@@ -330,7 +330,8 @@ pub(crate) async fn console_learning_candidate_history_handler(
     Path(candidate_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
-    let candidate = load_console_learning_candidate(&state, &session.context, candidate_id.as_str()).await?;
+    let candidate =
+        load_console_learning_candidate(&state, &session.context, candidate_id.as_str()).await?;
     let history = state
         .runtime
         .learning_candidate_history(candidate.candidate_id.clone())
@@ -350,7 +351,8 @@ pub(crate) async fn console_learning_candidate_review_handler(
     Json(payload): Json<ConsoleLearningCandidateReviewRequest>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    let candidate = load_console_learning_candidate(&state, &session.context, candidate_id.as_str()).await?;
+    let candidate =
+        load_console_learning_candidate(&state, &session.context, candidate_id.as_str()).await?;
     let reviewed = state
         .runtime
         .review_learning_candidate(journal::LearningCandidateReviewRequest {

@@ -146,9 +146,9 @@ use palyra_policy::{
 };
 use palyra_skills::{
     audit_skill_artifact_security, inspect_skill_artifact, verify_skill_artifact,
-    SkillCapabilities, SkillCompat, SkillFilesystemCapabilities, SkillIntegrity, SkillManifest,
-    SkillQuotaConfig, SkillSecurityAuditPolicy, SkillToolEntrypoint, SkillToolRisk,
-    SkillTrustStore, SkillEntrypoints, SKILL_MANIFEST_VERSION,
+    SkillCapabilities, SkillCompat, SkillEntrypoints, SkillFilesystemCapabilities, SkillIntegrity,
+    SkillManifest, SkillQuotaConfig, SkillSecurityAuditPolicy, SkillToolEntrypoint, SkillToolRisk,
+    SkillTrustStore, SKILL_MANIFEST_VERSION,
 };
 use palyra_vault::{Vault, VaultConfig as VaultConfigOptions, VaultRef, VaultScope};
 use reqwest::{Client as ReqwestClient, Url};
@@ -1734,10 +1734,7 @@ fn build_learning_runtime_config() -> Result<LearningRuntimeConfig> {
             .parse::<u16>()
             .with_context(|| format!("{name} must be integer 0-10000, got '{raw}'"))?;
         if value > 10_000 {
-            return Err(anyhow::anyhow!(
-                "{name} must be between 0 and 10000, got {}",
-                value
-            ));
+            return Err(anyhow::anyhow!("{name} must be between 0 and 10000, got {}", value));
         }
         Ok(value)
     }

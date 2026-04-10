@@ -8,8 +8,8 @@ use crate::application::auth::map_auth_profile_error;
 use crate::journal::{
     LearningCandidateCreateRequest, LearningCandidateHistoryRecord, LearningCandidateListFilter,
     LearningCandidateRecord, LearningCandidateReviewRequest, LearningPreferenceListFilter,
-    LearningPreferenceRecord, LearningPreferenceUpsertRequest,
-    MemoryEmbeddingsStatus, MemoryItemRecord, OrchestratorBackgroundTaskCreateRequest,
+    LearningPreferenceRecord, LearningPreferenceUpsertRequest, MemoryEmbeddingsStatus,
+    MemoryItemRecord, OrchestratorBackgroundTaskCreateRequest,
     OrchestratorBackgroundTaskListFilter, OrchestratorBackgroundTaskRecord,
     OrchestratorBackgroundTaskUpdateRequest, OrchestratorCheckpointCreateRequest,
     OrchestratorCheckpointRecord, OrchestratorCheckpointRestoreMarkRequest,
@@ -874,9 +874,7 @@ impl RuntimeCounters {
             learning_reflections_completed: self
                 .learning_reflections_completed
                 .load(Ordering::Relaxed),
-            learning_candidates_created: self
-                .learning_candidates_created
-                .load(Ordering::Relaxed),
+            learning_candidates_created: self.learning_candidates_created.load(Ordering::Relaxed),
             learning_candidates_auto_applied: self
                 .learning_candidates_auto_applied
                 .load(Ordering::Relaxed),
@@ -1226,27 +1224,19 @@ impl GatewayRuntimeState {
     }
 
     pub(crate) fn record_learning_reflection_scheduled(&self) {
-        self.counters
-            .learning_reflections_scheduled
-            .fetch_add(1, Ordering::Relaxed);
+        self.counters.learning_reflections_scheduled.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_learning_reflection_completed(&self) {
-        self.counters
-            .learning_reflections_completed
-            .fetch_add(1, Ordering::Relaxed);
+        self.counters.learning_reflections_completed.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_learning_candidate_created(&self) {
-        self.counters
-            .learning_candidates_created
-            .fetch_add(1, Ordering::Relaxed);
+        self.counters.learning_candidates_created.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_learning_candidate_auto_applied(&self) {
-        self.counters
-            .learning_candidates_auto_applied
-            .fetch_add(1, Ordering::Relaxed);
+        self.counters.learning_candidates_auto_applied.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_tool_decision(&self, tool_name: &str, decision_allowed: bool) {
@@ -3796,9 +3786,9 @@ impl GatewayRuntimeState {
         &self,
         request: &LearningCandidateCreateRequest,
     ) -> Result<LearningCandidateRecord, Status> {
-        self.journal_store.upsert_learning_candidate(request).map_err(|error| {
-            map_orchestrator_store_error("upsert learning candidate", error)
-        })
+        self.journal_store
+            .upsert_learning_candidate(request)
+            .map_err(|error| map_orchestrator_store_error("upsert learning candidate", error))
     }
 
     #[allow(clippy::result_large_err)]
@@ -3817,9 +3807,9 @@ impl GatewayRuntimeState {
         &self,
         request: &LearningCandidateReviewRequest,
     ) -> Result<LearningCandidateRecord, Status> {
-        self.journal_store.review_learning_candidate(request).map_err(|error| {
-            map_orchestrator_store_error("review learning candidate", error)
-        })
+        self.journal_store
+            .review_learning_candidate(request)
+            .map_err(|error| map_orchestrator_store_error("review learning candidate", error))
     }
 
     #[allow(clippy::result_large_err)]
@@ -3838,9 +3828,9 @@ impl GatewayRuntimeState {
         &self,
         filter: &LearningCandidateListFilter,
     ) -> Result<Vec<LearningCandidateRecord>, Status> {
-        self.journal_store.list_learning_candidates(filter).map_err(|error| {
-            map_orchestrator_store_error("list learning candidates", error)
-        })
+        self.journal_store
+            .list_learning_candidates(filter)
+            .map_err(|error| map_orchestrator_store_error("list learning candidates", error))
     }
 
     #[allow(clippy::result_large_err)]
@@ -3859,9 +3849,9 @@ impl GatewayRuntimeState {
         &self,
         candidate_id: &str,
     ) -> Result<Vec<LearningCandidateHistoryRecord>, Status> {
-        self.journal_store.learning_candidate_history(candidate_id).map_err(|error| {
-            map_orchestrator_store_error("list learning candidate history", error)
-        })
+        self.journal_store
+            .learning_candidate_history(candidate_id)
+            .map_err(|error| map_orchestrator_store_error("list learning candidate history", error))
     }
 
     #[allow(clippy::result_large_err)]
@@ -3882,9 +3872,9 @@ impl GatewayRuntimeState {
         &self,
         request: &LearningPreferenceUpsertRequest,
     ) -> Result<LearningPreferenceRecord, Status> {
-        self.journal_store.upsert_learning_preference(request).map_err(|error| {
-            map_orchestrator_store_error("upsert learning preference", error)
-        })
+        self.journal_store
+            .upsert_learning_preference(request)
+            .map_err(|error| map_orchestrator_store_error("upsert learning preference", error))
     }
 
     #[allow(clippy::result_large_err)]
@@ -3903,9 +3893,9 @@ impl GatewayRuntimeState {
         &self,
         filter: &LearningPreferenceListFilter,
     ) -> Result<Vec<LearningPreferenceRecord>, Status> {
-        self.journal_store.list_learning_preferences(filter).map_err(|error| {
-            map_orchestrator_store_error("list learning preferences", error)
-        })
+        self.journal_store
+            .list_learning_preferences(filter)
+            .map_err(|error| map_orchestrator_store_error("list learning preferences", error))
     }
 
     #[allow(clippy::result_large_err)]

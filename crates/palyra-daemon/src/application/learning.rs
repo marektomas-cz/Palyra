@@ -9,21 +9,21 @@ use ulid::Ulid;
 
 use crate::{
     application::session_compaction::{
-        preview_session_compaction, SessionCompactionCandidate, SessionCompactionCandidateProvenance,
+        preview_session_compaction, SessionCompactionCandidate,
+        SessionCompactionCandidateProvenance,
     },
     domain::workspace::{
         apply_workspace_managed_block, curated_workspace_templates,
-        scan_workspace_content_for_prompt_injection, WorkspaceManagedBlockUpdate, WorkspaceManagedEntry,
-        WorkspaceRiskState,
+        scan_workspace_content_for_prompt_injection, WorkspaceManagedBlockUpdate,
+        WorkspaceManagedEntry, WorkspaceRiskState,
     },
     gateway::{GatewayRuntimeState, LearningRuntimeConfig, RequestContext},
     journal::{
         LearningCandidateCreateRequest, LearningCandidateRecord, LearningCandidateReviewRequest,
         LearningPreferenceListFilter, LearningPreferenceRecord, LearningPreferenceUpsertRequest,
-        OrchestratorBackgroundTaskCreateRequest,
-        OrchestratorBackgroundTaskListFilter, OrchestratorBackgroundTaskRecord,
-        OrchestratorSessionResolveRequest, OrchestratorSessionTranscriptRecord,
-        WorkspaceDocumentWriteRequest,
+        OrchestratorBackgroundTaskCreateRequest, OrchestratorBackgroundTaskListFilter,
+        OrchestratorBackgroundTaskRecord, OrchestratorSessionResolveRequest,
+        OrchestratorSessionTranscriptRecord, WorkspaceDocumentWriteRequest,
     },
 };
 
@@ -155,9 +155,8 @@ pub(crate) async fn process_post_run_reflection_task(
         Some(REFLECTION_TRIGGER_POLICY),
     )
     .await?;
-    let transcript = runtime_state
-        .list_orchestrator_session_transcript(session.session_id.clone())
-        .await?;
+    let transcript =
+        runtime_state.list_orchestrator_session_transcript(session.session_id.clone()).await?;
     let mut candidates = Vec::new();
     candidates.extend(build_compaction_learning_candidates(
         &run,
@@ -187,10 +186,7 @@ pub(crate) async fn process_post_run_reflection_task(
 
     let mut created = Vec::new();
     let mut auto_applied = Vec::new();
-    for request in candidates
-        .into_iter()
-        .take(learning_config.max_candidates_per_run)
-    {
+    for request in candidates.into_iter().take(learning_config.max_candidates_per_run) {
         let mut record = runtime_state.upsert_learning_candidate(request).await?;
         runtime_state.record_learning_candidate_created();
         if record.candidate_kind == "durable_fact"
@@ -273,10 +269,7 @@ pub(crate) async fn render_preference_prompt_context(
             preference.confidence
         ));
     }
-    Ok(Some(format!(
-        "<preference_context>\n{}\n</preference_context>",
-        lines.join("\n")
-    )))
+    Ok(Some(format!("<preference_context>\n{}\n</preference_context>", lines.join("\n"))))
 }
 
 pub(crate) async fn apply_preference_candidate(
@@ -299,18 +292,12 @@ pub(crate) async fn apply_preference_candidate(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| Status::failed_precondition("preference candidate is missing value"))?;
-    let scope_kind = content
-        .get("scope_kind")
-        .and_then(Value::as_str)
-        .unwrap_or("profile");
+    let scope_kind = content.get("scope_kind").and_then(Value::as_str).unwrap_or("profile");
     let scope_id = content
         .get("scope_id")
         .and_then(Value::as_str)
         .unwrap_or(candidate.owner_principal.as_str());
-    let source_kind = content
-        .get("source_kind")
-        .and_then(Value::as_str)
-        .unwrap_or("inferred");
+    let source_kind = content.get("source_kind").and_then(Value::as_str).unwrap_or("inferred");
     let record = runtime_state
         .upsert_learning_preference(LearningPreferenceUpsertRequest {
             preference_id: None,
@@ -477,16 +464,15 @@ fn build_preference_candidates(
             channel: run.channel.clone(),
             scope_kind: "profile".to_owned(),
             scope_id: run.principal.clone(),
-            status: if confidence
-                < learning_review_min_confidence("preference", learning_config)
-            {
+            status: if confidence < learning_review_min_confidence("preference", learning_config) {
                 "suppressed".to_owned()
             } else {
                 "queued".to_owned()
             },
             auto_applied: false,
             confidence,
-            risk_level: if confidence < learning_review_min_confidence("preference", learning_config)
+            risk_level: if confidence
+                < learning_review_min_confidence("preference", learning_config)
             {
                 "low_confidence".to_owned()
             } else {
@@ -538,7 +524,8 @@ fn build_procedure_candidates(
                 let Some(tool_name) = payload.get("tool_name").and_then(Value::as_str) else {
                     continue;
                 };
-                proposals.insert((record.run_id.clone(), proposal_id.to_owned()), tool_name.to_owned());
+                proposals
+                    .insert((record.run_id.clone(), proposal_id.to_owned()), tool_name.to_owned());
                 excerpts.insert(
                     (record.run_id.clone(), proposal_id.to_owned()),
                     format!("proposed {}", tool_name),
@@ -579,10 +566,7 @@ fn build_procedure_candidates(
     let mut signatures = BTreeMap::<String, Vec<ProcedureRunSignature>>::new();
     let mut per_run_tools = BTreeMap::<String, Vec<(String, String)>>::new();
     for ((candidate_run_id, proposal_id), tool_name) in proposals {
-        if !results
-            .get(&(candidate_run_id.clone(), proposal_id.clone()))
-            .copied()
-            .unwrap_or(false)
+        if !results.get(&(candidate_run_id.clone(), proposal_id.clone())).copied().unwrap_or(false)
             || tainted_results
                 .get(&(candidate_run_id.clone(), proposal_id.clone()))
                 .copied()
@@ -590,10 +574,7 @@ fn build_procedure_candidates(
         {
             continue;
         }
-        per_run_tools
-            .entry(candidate_run_id)
-            .or_default()
-            .push((proposal_id, tool_name));
+        per_run_tools.entry(candidate_run_id).or_default().push((proposal_id, tool_name));
     }
     for (candidate_run_id, mut tools) in per_run_tools {
         tools.sort_by(|left, right| left.0.cmp(&right.0));
@@ -704,8 +685,10 @@ async fn try_auto_write_durable_fact(
     candidate: &LearningCandidateRecord,
     path: &str,
 ) -> Result<bool, Status> {
-    let content = serde_json::from_str::<Value>(candidate.content_json.as_str())
-        .map_err(|error| Status::internal(format!("invalid durable fact candidate JSON: {error}")))?;
+    let content =
+        serde_json::from_str::<Value>(candidate.content_json.as_str()).map_err(|error| {
+            Status::internal(format!("invalid durable fact candidate JSON: {error}"))
+        })?;
     let text = content
         .get("content")
         .and_then(Value::as_str)
@@ -737,8 +720,10 @@ async fn try_auto_write_durable_fact(
             content: text.to_owned(),
         }],
     };
-    let outcome = apply_workspace_managed_block(base_content.as_str(), &update)
-        .map_err(|error| Status::failed_precondition(format!("learning auto-write blocked: {error}")))?;
+    let outcome =
+        apply_workspace_managed_block(base_content.as_str(), &update).map_err(|error| {
+            Status::failed_precondition(format!("learning auto-write blocked: {error}"))
+        })?;
     runtime_state
         .upsert_workspace_document(WorkspaceDocumentWriteRequest {
             document_id: existing.as_ref().map(|document| document.document_id.clone()),
@@ -759,7 +744,10 @@ async fn try_auto_write_durable_fact(
     Ok(true)
 }
 
-fn learning_review_min_confidence(candidate_kind: &str, learning_config: &LearningRuntimeConfig) -> f64 {
+fn learning_review_min_confidence(
+    candidate_kind: &str,
+    learning_config: &LearningRuntimeConfig,
+) -> f64 {
     let bps = match candidate_kind {
         "durable_fact" => learning_config.durable_fact_review_min_confidence_bps,
         "preference" => learning_config.preference_review_min_confidence_bps,
@@ -798,7 +786,9 @@ fn looks_like_preference(content: &str) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
-fn provenance_from_transcript(record: &OrchestratorSessionTranscriptRecord) -> SessionCompactionCandidateProvenance {
+fn provenance_from_transcript(
+    record: &OrchestratorSessionTranscriptRecord,
+) -> SessionCompactionCandidateProvenance {
     SessionCompactionCandidateProvenance {
         run_id: record.run_id.clone(),
         seq: record.seq,

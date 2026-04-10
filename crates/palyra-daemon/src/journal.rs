@@ -5612,9 +5612,7 @@ impl JournalStore {
             ],
         )?;
         load_learning_candidate_by_id(&guard, request.candidate_id.as_str())?.ok_or(
-            JournalError::LearningCandidateNotFound {
-                candidate_id: request.candidate_id.clone(),
-            },
+            JournalError::LearningCandidateNotFound { candidate_id: request.candidate_id.clone() },
         )
     }
 
@@ -5726,10 +5724,8 @@ impl JournalStore {
     ) -> Result<LearningPreferenceRecord, JournalError> {
         let now = current_unix_ms()?;
         let confidence = request.confidence.clamp(0.0, 1.0);
-        let preference_id = request
-            .preference_id
-            .clone()
-            .unwrap_or_else(|| Ulid::new().to_string());
+        let preference_id =
+            request.preference_id.clone().unwrap_or_else(|| Ulid::new().to_string());
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         guard.execute(
             r#"
@@ -10896,10 +10892,7 @@ fn load_learning_preference_by_scope_key(
         "#,
     )?;
     statement
-        .query_row(
-            params![owner_principal, scope_kind, scope_id, key],
-            map_learning_preference_row,
-        )
+        .query_row(params![owner_principal, scope_kind, scope_id, key], map_learning_preference_row)
         .optional()
         .map_err(Into::into)
 }
@@ -14945,11 +14938,7 @@ mod tests {
         let store = JournalStore::open(test_journal_config(db_path, false))
             .expect("journal store should open");
         upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5FC2");
-        start_orchestrator_run(
-            &store,
-            "01ARZ3NDEKTSV4RRFFQ69G5FC2",
-            "01ARZ3NDEKTSV4RRFFQ69G5FC3",
-        );
+        start_orchestrator_run(&store, "01ARZ3NDEKTSV4RRFFQ69G5FC2", "01ARZ3NDEKTSV4RRFFQ69G5FC3");
 
         let created = store
             .upsert_learning_candidate(&super::LearningCandidateCreateRequest {
@@ -15002,11 +14991,7 @@ mod tests {
         let store = JournalStore::open(test_journal_config(db_path, false))
             .expect("journal store should open");
         upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5FC6");
-        start_orchestrator_run(
-            &store,
-            "01ARZ3NDEKTSV4RRFFQ69G5FC6",
-            "01ARZ3NDEKTSV4RRFFQ69G5FC7",
-        );
+        start_orchestrator_run(&store, "01ARZ3NDEKTSV4RRFFQ69G5FC6", "01ARZ3NDEKTSV4RRFFQ69G5FC7");
         store
             .upsert_learning_candidate(&super::LearningCandidateCreateRequest {
                 candidate_id: "01ARZ3NDEKTSV4RRFFQ69G5FC5".to_owned(),
