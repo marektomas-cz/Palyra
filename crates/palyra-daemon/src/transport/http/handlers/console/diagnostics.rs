@@ -59,6 +59,8 @@ pub(crate) async fn console_diagnostics_handler(
         let registry = super::access::lock_access_registry(&state.access_registry);
         registry.snapshot(session.context.principal.as_str())
     };
+    let objectives_payload =
+        collect_console_objectives_diagnostics(&state, session.context.principal.as_str())?;
     let deployment_payload = collect_console_deployment_diagnostics(&state);
     let observability_payload =
         build_observability_payload(&state, &auth_payload, &media_payload).await?;
@@ -86,6 +88,7 @@ pub(crate) async fn console_diagnostics_handler(
         "hooks": hooks_payload,
         "webhooks": webhook_payload,
         "media": media_payload,
+        "objectives": objectives_payload,
         "access": {
             "feature_flags": access_snapshot.feature_flags,
             "migration": access_snapshot.migration,
@@ -138,6 +141,46 @@ pub(crate) async fn console_diagnostics_handler(
             }
         },
     })))
+}
+
+#[allow(clippy::result_large_err)]
+fn collect_console_objectives_diagnostics(
+    state: &AppState,
+    principal: &str,
+) -> Result<Value, Response> {
+    let objectives = state
+        .objectives
+        .list_objectives()
+        .map_err(|error| runtime_status_response(tonic::Status::internal(error.to_string())))?
+        .into_iter()
+        .filter(|entry| entry.owner_principal == principal)
+        .collect::<Vec<_>>();
+    let mut by_state = std::collections::BTreeMap::<String, u64>::new();
+    let mut by_kind = std::collections::BTreeMap::<String, u64>::new();
+    for objective in &objectives {
+        *by_state.entry(objective.state.as_str().to_owned()).or_default() += 1;
+        *by_kind.entry(objective.kind.as_str().to_owned()).or_default() += 1;
+    }
+    let recent = objectives
+        .iter()
+        .rev()
+        .take(10)
+        .map(|entry| {
+            json!({
+                "objective_id": entry.objective_id,
+                "kind": entry.kind.as_str(),
+                "state": entry.state.as_str(),
+                "name": entry.name,
+                "updated_at_unix_ms": entry.updated_at_unix_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "count": objectives.len(),
+        "by_state": by_state,
+        "by_kind": by_kind,
+        "recent": recent,
+    }))
 }
 
 pub(crate) async fn collect_console_browser_diagnostics(state: &AppState) -> Value {

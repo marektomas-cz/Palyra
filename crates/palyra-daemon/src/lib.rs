@@ -20,6 +20,7 @@ mod media_derived;
 mod model_provider;
 mod node_rpc;
 mod node_runtime;
+mod objectives;
 mod observability;
 mod openai_auth;
 mod openai_surface;
@@ -1900,6 +1901,10 @@ pub async fn run() -> Result<()> {
         routines::RoutineRegistry::open(runtime_state_root.as_path())
             .context("failed to initialize routine registry state")?,
     );
+    let objective_registry = Arc::new(
+        objectives::ObjectiveRegistry::open(runtime_state_root.as_path())
+            .context("failed to initialize objective registry state")?,
+    );
     let access_registry = Arc::new(Mutex::new(
         access_control::AccessRegistry::open(runtime_state_root.as_path())
             .context("failed to initialize access registry state")?,
@@ -2302,6 +2307,7 @@ pub async fn run() -> Result<()> {
             channels: Arc::clone(&channels),
             webhooks: Arc::clone(&webhook_registry),
             routines: Arc::clone(&routine_registry),
+            objectives: Arc::clone(&objective_registry),
             vault: Arc::clone(&vault),
             auth_runtime: Arc::clone(&auth_runtime),
             auth: auth.clone(),

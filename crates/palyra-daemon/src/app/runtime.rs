@@ -18,6 +18,7 @@ use crate::{
     config::{BrowserServiceConfig, LoadedConfig},
     gateway::{self, GatewayAuthConfig, GatewayRuntimeState},
     node_runtime::NodeRuntimeState,
+    objectives,
     observability::ObservabilityState,
     routines, webhooks,
 };
@@ -31,6 +32,7 @@ pub(crate) struct AppStateBuildContext {
     pub(crate) channels: Arc<channels::ChannelPlatform>,
     pub(crate) webhooks: Arc<webhooks::WebhookRegistry>,
     pub(crate) routines: Arc<routines::RoutineRegistry>,
+    pub(crate) objectives: Arc<objectives::ObjectiveRegistry>,
     pub(crate) vault: Arc<Vault>,
     pub(crate) auth_runtime: Arc<gateway::AuthRuntimeState>,
     pub(crate) auth: GatewayAuthConfig,
@@ -52,6 +54,7 @@ pub(crate) fn build_app_state(
         channels: context.channels,
         webhooks: context.webhooks,
         routines: context.routines,
+        objectives: context.objectives,
         vault: context.vault,
         tool_allowed_tools: loaded.tool_call.allowed_tools.clone(),
         browser_service_config: build_browser_service_runtime_config(

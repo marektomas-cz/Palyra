@@ -606,6 +606,11 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/console/v1/cron/jobs/{job_id}/runs", get(console::cron::console_cron_runs_handler))
         .route("/console/v1/routines", get(console::routines::console_routines_list_handler))
         .route("/console/v1/routines", post(console::routines::console_routine_upsert_handler))
+        .route("/console/v1/objectives", get(console::objectives::console_objectives_list_handler))
+        .route(
+            "/console/v1/objectives",
+            post(console::objectives::console_objective_upsert_handler),
+        )
         .route(
             "/console/v1/routines/templates",
             get(console::routines::console_routine_templates_handler),
@@ -645,6 +650,26 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/console/v1/routines/{routine_id}/dispatch",
             post(console::routines::console_routine_dispatch_handler),
+        )
+        .route(
+            "/console/v1/objectives/{objective_id}",
+            get(console::objectives::console_objective_get_handler),
+        )
+        .route(
+            "/console/v1/objectives/{objective_id}/lifecycle",
+            post(console::objectives::console_objective_lifecycle_handler),
+        )
+        .route(
+            "/console/v1/objectives/{objective_id}/attempts",
+            post(console::objectives::console_objective_attempt_handler),
+        )
+        .route(
+            "/console/v1/objectives/{objective_id}/approach",
+            post(console::objectives::console_objective_approach_handler),
+        )
+        .route(
+            "/console/v1/objectives/{objective_id}/summary",
+            get(console::objectives::console_objective_summary_handler),
         )
         .route("/console/v1/memory/status", get(console::memory::console_memory_status_handler))
         .route(

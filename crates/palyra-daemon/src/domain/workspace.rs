@@ -437,6 +437,50 @@ pub fn apply_workspace_managed_block(
     })
 }
 
+pub fn sync_workspace_managed_block(
+    current_content: &str,
+    update: &WorkspaceManagedBlockUpdate,
+) -> Result<WorkspaceManagedBlockOutcome, WorkspaceManagedBlockError> {
+    let before_content = current_content.trim_end_matches('\n').to_owned();
+    let before_hash = crate::sha256_hex(before_content.as_bytes());
+    let existing = parse_existing_block(current_content, update.block_id.as_str())?;
+    let preserved_entry_ids = existing.entries.iter().map(|entry| entry.entry_id.clone()).collect();
+    let inserted_entry_ids = update.entries.iter().map(|entry| entry.entry_id.clone()).collect();
+    let rendered_block =
+        render_managed_block(update.heading.as_str(), update.block_id.as_str(), &update.entries);
+    let next_content = match existing.range {
+        Some((start, end)) => {
+            let mut content = String::new();
+            content.push_str(&current_content[..start]);
+            content.push_str(rendered_block.as_str());
+            content.push_str(&current_content[end..]);
+            normalize_workspace_document_content(content)
+        }
+        None => append_managed_block(current_content, rendered_block.as_str()),
+    };
+    let after_hash = crate::sha256_hex(next_content.as_bytes());
+    let diff = build_managed_block_diff(
+        before_content.as_str(),
+        next_content.as_str(),
+        before_hash,
+        after_hash,
+    );
+    let action = match existing.range {
+        Some(_) if before_content == next_content.trim_end_matches('\n') => "noop",
+        Some(_) => "synced_block",
+        None => "created_block",
+    }
+    .to_owned();
+
+    Ok(WorkspaceManagedBlockOutcome {
+        content_text: next_content,
+        action,
+        inserted_entry_ids,
+        preserved_entry_ids,
+        diff,
+    })
+}
+
 #[must_use]
 pub fn scan_workspace_content_for_prompt_injection(content: &str) -> WorkspaceRiskScan {
     let normalized = content.to_ascii_lowercase();
@@ -575,6 +619,11 @@ pub fn normalize_workspace_path(path: &str) -> Result<WorkspacePathInfo, Workspa
     }
 
     Ok(path_info)
+}
+
+pub fn objective_workspace_document_path(objective_id: &str) -> Result<String, WorkspacePathError> {
+    let path = format!("projects/objectives/{objective_id}.md");
+    Ok(normalize_workspace_path(path.as_str())?.normalized_path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -832,5 +881,43 @@ mod tests {
             matches!(error, WorkspaceManagedBlockError::MalformedItem { .. }),
             "manual edits inside the managed block must fail closed"
         );
+    }
+
+    #[test]
+    fn managed_block_sync_replaces_stale_entries() {
+        let existing = r#"# Current Focus
+
+<!-- PALYRA:BEGIN objective-focus -->
+<!-- PALYRA:ITEM old -->
+- [objective] Retire stale plan
+<!-- PALYRA:ITEM keep -->
+- [objective] Keep this one
+<!-- PALYRA:END objective-focus -->
+"#;
+        let update = WorkspaceManagedBlockUpdate {
+            block_id: "objective-focus".to_owned(),
+            heading: "Objective Focus".to_owned(),
+            entries: vec![WorkspaceManagedEntry {
+                entry_id: "keep".to_owned(),
+                label: "objective".to_owned(),
+                content: "Keep this one".to_owned(),
+            }],
+        };
+        let synced = sync_workspace_managed_block(existing, &update).expect("sync should succeed");
+        assert!(
+            !synced.content_text.contains("Retire stale plan"),
+            "stale managed entries should be removed during sync"
+        );
+        assert!(
+            synced.content_text.contains("Keep this one"),
+            "current managed entries should remain"
+        );
+    }
+
+    #[test]
+    fn objective_document_path_normalizes_into_projects_tree() {
+        let path = objective_workspace_document_path("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .expect("objective workspace path should normalize");
+        assert_eq!(path, "projects/objectives/01ARZ3NDEKTSV4RRFFQ69G5FAV.md");
     }
 }
