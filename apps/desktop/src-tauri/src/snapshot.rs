@@ -3,8 +3,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
     sync::atomic::Ordering,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -20,12 +20,12 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::process::Command;
 
+use super::supervisor::{CachedConsolePayload, ConsolePayloadCache, ConsoleSessionCache};
 use super::{
-    normalize_optional_text, resolve_binary_path, unix_ms_now, ControlCenter, HealthEndpointPayload,
-    LogLine, RuntimeConfig, ServiceKind, ServiceProcessSnapshot,
+    normalize_optional_text, resolve_binary_path, unix_ms_now, ControlCenter,
+    HealthEndpointPayload, LogLine, RuntimeConfig, ServiceKind, ServiceProcessSnapshot,
     CONSOLE_DEVICE_ID, CONSOLE_PRINCIPAL, DASHBOARD_SCHEME, LOOPBACK_HOST, MAX_DIAGNOSTIC_ERRORS,
 };
-use super::supervisor::{CachedConsolePayload, ConsolePayloadCache, ConsoleSessionCache};
 
 const DEFAULT_DASHBOARD_HASH_ROUTE: &str = "#/control/overview";
 const CONSOLE_SESSION_EXPIRY_SKEW_MS: i64 = 5_000;
@@ -577,8 +577,10 @@ pub(crate) fn collect_redacted_errors_inner(
 
 fn should_collect_operator_error_key(key: &str) -> bool {
     let lowered = key.to_ascii_lowercase();
-    if matches!(lowered.as_str(), "failure_class" | "failure_classes" | "recent_upload_failures_only")
-    {
+    if matches!(
+        lowered.as_str(),
+        "failure_class" | "failure_classes" | "recent_upload_failures_only"
+    ) {
         return false;
     }
     is_error_like_key(key)
@@ -830,7 +832,8 @@ async fn get_console_json_with_cache(
     console_session_cache: &Mutex<Option<ConsoleSessionCache>>,
     console_payload_cache: &Mutex<ConsolePayloadCache>,
 ) -> Result<Option<Value>, String> {
-    if let Some(cached) = load_cached_console_payload(kind, console_payload_cache, CONSOLE_PAYLOAD_CACHE_TTL_MS)
+    if let Some(cached) =
+        load_cached_console_payload(kind, console_payload_cache, CONSOLE_PAYLOAD_CACHE_TTL_MS)
     {
         return Ok(Some(cached));
     }
@@ -848,9 +851,11 @@ async fn get_console_json_with_cache(
             Ok(Some(value))
         }
         Err(error) => {
-            if let Some(cached) =
-                load_cached_console_payload(kind, console_payload_cache, CONSOLE_PAYLOAD_STALE_WARNING_MS)
-            {
+            if let Some(cached) = load_cached_console_payload(
+                kind,
+                console_payload_cache,
+                CONSOLE_PAYLOAD_STALE_WARNING_MS,
+            ) {
                 return Ok(Some(cached));
             }
             Err(format!(
@@ -935,9 +940,7 @@ pub(crate) async fn ensure_console_session_with_csrf(
     control_plane: &mut ControlPlaneClient,
     admin_token: &str,
 ) -> Result<String> {
-    request_console_session(control_plane, admin_token)
-        .await
-        .map(|session| session.csrf_token)
+    request_console_session(control_plane, admin_token).await.map(|session| session.csrf_token)
 }
 
 pub(crate) async fn build_dashboard_open_url(
@@ -950,7 +953,8 @@ pub(crate) async fn build_dashboard_open_url(
     }
 
     let redirect_path = dashboard_redirect_path_from_url(dashboard_url)?;
-    let mut control_plane = build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
+    let mut control_plane =
+        build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
     let _csrf_token =
         ensure_console_session_with_csrf(&mut control_plane, inputs.admin_token.as_str()).await?;
     let handoff = control_plane
@@ -968,15 +972,17 @@ pub(crate) async fn request_console_session(
 ) -> Result<control_plane::ConsoleSession> {
     match control_plane.get_session().await {
         Ok(session) => Ok(session),
-        Err(control_plane::ControlPlaneClientError::Http { status: 401 | 403, .. }) => control_plane
-            .login(&control_plane::ConsoleLoginRequest {
-                admin_token: admin_token.to_owned(),
-                principal: CONSOLE_PRINCIPAL.to_owned(),
-                device_id: CONSOLE_DEVICE_ID.to_owned(),
-                channel: None,
-            })
-            .await
-            .map_err(|error| anyhow!("console login failed: {error}")),
+        Err(control_plane::ControlPlaneClientError::Http { status: 401 | 403, .. }) => {
+            control_plane
+                .login(&control_plane::ConsoleLoginRequest {
+                    admin_token: admin_token.to_owned(),
+                    principal: CONSOLE_PRINCIPAL.to_owned(),
+                    device_id: CONSOLE_DEVICE_ID.to_owned(),
+                    channel: None,
+                })
+                .await
+                .map_err(|error| anyhow!("console login failed: {error}"))
+        }
         Err(error) => Err(anyhow!("console session request failed: {error}")),
     }
 }
@@ -984,9 +990,7 @@ pub(crate) async fn request_console_session(
 fn dashboard_redirect_path_from_url(dashboard_url: &str) -> Result<String> {
     let parsed = Url::parse(dashboard_url)
         .with_context(|| format!("failed to parse dashboard URL {dashboard_url}"))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow!("dashboard URL is missing a host"))?;
+    let host = parsed.host_str().ok_or_else(|| anyhow!("dashboard URL is missing a host"))?;
     if !host.eq_ignore_ascii_case(LOOPBACK_HOST) {
         bail!("dashboard browser handoff only supports loopback dashboard URLs");
     }
@@ -1022,19 +1026,15 @@ fn normalize_local_browser_handoff_url(dashboard_url: &str, handoff_url: &str) -
     if dashboard.port_or_known_default() != handoff.port_or_known_default() {
         bail!("browser handoff URL must use the local dashboard port");
     }
-    let has_handoff_token = handoff
-        .query_pairs()
-        .any(|(key, value)| key == "token" && !value.trim().is_empty());
+    let has_handoff_token =
+        handoff.query_pairs().any(|(key, value)| key == "token" && !value.trim().is_empty());
     if !has_handoff_token {
         bail!("browser handoff URL is missing a token query parameter");
     }
     Ok(handoff.to_string())
 }
 
-async fn fetch_console_json(
-    control_plane: &ControlPlaneClient,
-    path: &str,
-) -> Result<Value> {
+async fn fetch_console_json(control_plane: &ControlPlaneClient, path: &str) -> Result<Value> {
     control_plane.get_json_value(path).await.map_err(anyhow::Error::new)
 }
 
@@ -1060,7 +1060,9 @@ async fn get_console_json_with_login_retry(
             clear_console_session_cache(console_session_cache);
             login_console_session(control_plane, admin_token, console_session_cache)
                 .await
-                .map_err(|login_error| anyhow!("console session bootstrap failed: {login_error}"))?;
+                .map_err(|login_error| {
+                    anyhow!("console session bootstrap failed: {login_error}")
+                })?;
             fetch_console_json(control_plane, path).await.map_err(|retry_error| {
                 anyhow!(
                     "console request {path} failed after login: {}",
@@ -1103,10 +1105,8 @@ fn cache_console_session(
     let Ok(mut cache) = console_session_cache.lock() else {
         return;
     };
-    *cache = Some(ConsoleSessionCache {
-        csrf_token: session.csrf_token.clone(),
-        expires_at_unix_ms,
-    });
+    *cache =
+        Some(ConsoleSessionCache { csrf_token: session.csrf_token.clone(), expires_at_unix_ms });
 }
 
 fn clear_console_session_cache(console_session_cache: &Mutex<Option<ConsoleSessionCache>>) {
@@ -1257,8 +1257,9 @@ mod tests {
 
     #[test]
     fn dashboard_redirect_path_from_url_preserves_hash_routes() {
-        let redirect_path = dashboard_redirect_path_from_url("http://127.0.0.1:7142/#/control/overview")
-            .expect("loopback dashboard URL should produce redirect path");
+        let redirect_path =
+            dashboard_redirect_path_from_url("http://127.0.0.1:7142/#/control/overview")
+                .expect("loopback dashboard URL should produce redirect path");
         assert_eq!(redirect_path, "/#/control/overview");
     }
 

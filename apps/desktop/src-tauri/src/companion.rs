@@ -25,6 +25,9 @@ pub(crate) struct DesktopCompanionInputs {
     pub(crate) runtime: RuntimeConfig,
     pub(crate) admin_token: String,
     pub(crate) http_client: Client,
+    pub(crate) active_profile: DesktopCompanionProfileRecord,
+    pub(crate) profiles: Vec<DesktopCompanionProfileRecord>,
+    pub(crate) recent_profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,12 +50,41 @@ pub(crate) struct DesktopCompanionMetrics {
     pub(crate) stale_devices: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DesktopCompanionProfileRecord {
+    pub(crate) context: control_plane::ConsoleProfileContext,
+    pub(crate) implicit: bool,
+    pub(crate) recent: bool,
+    pub(crate) last_used_at_unix_ms: Option<i64>,
+    pub(crate) active: bool,
+}
+
+impl DesktopCompanionProfileRecord {
+    pub(crate) fn from_resolved_profile(
+        profile: &super::profile_registry::DesktopResolvedProfile,
+        recent: bool,
+        implicit_recent_default: bool,
+        active: bool,
+    ) -> Self {
+        Self {
+            context: profile.context.clone(),
+            implicit: profile.implicit,
+            recent: if recent { true } else { implicit_recent_default && profile.implicit },
+            last_used_at_unix_ms: profile.last_used_at_unix_ms,
+            active,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct DesktopCompanionSnapshot {
     pub(crate) generated_at_unix_ms: i64,
     pub(crate) control_center: super::snapshot::ControlCenterSnapshot,
     pub(crate) onboarding: super::onboarding::OnboardingStatusSnapshot,
     pub(crate) openai_status: super::openai_auth::OpenAiAuthStatusSnapshot,
+    pub(crate) active_profile: DesktopCompanionProfileRecord,
+    pub(crate) profiles: Vec<DesktopCompanionProfileRecord>,
+    pub(crate) recent_profiles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) console_session: Option<control_plane::ConsoleSession>,
     pub(crate) connection_state: String,
@@ -167,6 +199,14 @@ pub(crate) struct DesktopCompanionOpenDashboardRequest {
     pub(crate) run_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompanionSwitchProfileRequest {
+    pub(crate) profile_name: String,
+    #[serde(default)]
+    pub(crate) allow_strict_switch: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DesktopTranscriptRecord {
     pub(crate) session_id: String,
@@ -235,7 +275,7 @@ pub(crate) struct DesktopResolvedChatSessionRecord {
 
 impl ControlCenter {
     pub(crate) fn companion_offline_drafts_enabled(&self) -> bool {
-        self.persisted.companion.rollout.offline_drafts_enabled
+        self.persisted.active_companion().rollout.offline_drafts_enabled
     }
 
     pub(crate) fn capture_companion_inputs(&mut self) -> DesktopCompanionInputs {
@@ -244,6 +284,9 @@ impl ControlCenter {
             runtime: self.runtime.clone(),
             admin_token: self.admin_token.clone(),
             http_client: self.http_client.clone(),
+            active_profile: self.current_profile_record(),
+            profiles: self.profile_records(),
+            recent_profiles: self.persisted.recent_profile_names().to_vec(),
         }
     }
 
@@ -251,7 +294,7 @@ impl ControlCenter {
         &mut self,
         payload: &DesktopCompanionPreferencesRequest,
     ) -> Result<()> {
-        let companion = &mut self.persisted.companion;
+        let companion = self.persisted.active_companion_mut();
         if let Some(section) = payload.active_section {
             companion.set_active_section(section);
         }
@@ -271,7 +314,7 @@ impl ControlCenter {
         &mut self,
         payload: &DesktopCompanionRolloutRequest,
     ) -> Result<()> {
-        let rollout = &mut self.persisted.companion.rollout;
+        let rollout = &mut self.persisted.active_companion_mut().rollout;
         if let Some(enabled) = payload.companion_shell_enabled {
             rollout.companion_shell_enabled = enabled;
         }
@@ -293,12 +336,12 @@ impl ControlCenter {
         &mut self,
         ids: Option<&[String]>,
     ) -> Result<()> {
-        self.persisted.companion.mark_notifications_read(ids);
+        self.persisted.active_companion_mut().mark_notifications_read(ids);
         self.save_state_file()
     }
 
     pub(crate) fn remove_companion_offline_draft(&mut self, draft_id: &str) -> Result<()> {
-        self.persisted.companion.remove_offline_draft(draft_id);
+        self.persisted.active_companion_mut().remove_offline_draft(draft_id);
         self.save_state_file()
     }
 
@@ -308,14 +351,15 @@ impl ControlCenter {
         status: &str,
         session_id: &str,
     ) -> Result<()> {
-        let detail = format!("Run {run_id} for session {session_id} completed with status {status}.");
-        self.persisted.companion.push_notification(
+        let detail =
+            format!("Run {run_id} for session {session_id} completed with status {status}.");
+        self.persisted.active_companion_mut().push_notification(
             DesktopCompanionNotificationKind::Run,
             "Companion run completed",
             detail,
             unix_ms_now(),
         );
-        self.persisted.companion.set_last_run_id(Some(run_id));
+        self.persisted.active_companion_mut().set_last_run_id(Some(run_id));
         self.save_state_file()
     }
 
@@ -325,13 +369,13 @@ impl ControlCenter {
         text: &str,
         reason: &str,
     ) -> Result<String> {
-        let draft_id = self.persisted.companion.queue_offline_draft(
+        let draft_id = self.persisted.active_companion_mut().queue_offline_draft(
             session_id,
             text,
             reason,
             unix_ms_now(),
         );
-        self.persisted.companion.push_notification(
+        self.persisted.active_companion_mut().push_notification(
             DesktopCompanionNotificationKind::Draft,
             "Message queued for reconnect",
             format!("Stored a safe offline draft. {reason}"),
@@ -345,7 +389,7 @@ impl ControlCenter {
         &mut self,
         snapshot: &mut DesktopCompanionSnapshot,
     ) -> Result<()> {
-        let companion = &mut self.persisted.companion;
+        let companion = self.persisted.active_companion_mut();
         let now_unix_ms = unix_ms_now();
         if companion.last_connection_state != snapshot.connection_state {
             if !companion.last_connection_state.trim().is_empty()
@@ -402,8 +446,16 @@ impl ControlCenter {
 pub(crate) async fn build_companion_snapshot(
     inputs: DesktopCompanionInputs,
 ) -> Result<DesktopCompanionSnapshot> {
-    let DesktopCompanionInputs { refresh_inputs, runtime, admin_token, http_client } = inputs;
-    let companion_state = refresh_inputs.persisted.companion.clone();
+    let DesktopCompanionInputs {
+        refresh_inputs,
+        runtime,
+        admin_token,
+        http_client,
+        active_profile,
+        profiles,
+        recent_profiles,
+    } = inputs;
+    let companion_state = refresh_inputs.persisted.active_companion().clone();
     let refresh_payload = super::build_desktop_refresh_payload(refresh_inputs).await?;
     let DesktopRefreshPayload { snapshot, onboarding_status, openai_status } = refresh_payload;
 
@@ -435,11 +487,9 @@ pub(crate) async fn build_companion_snapshot(
     );
     let pending_approval_count = approvals
         .iter()
-        .filter(|approval| {
-            match approval.as_object().and_then(|value| value.get("decision")) {
-                None => true,
-                Some(value) => value.is_null(),
-            }
+        .filter(|approval| match approval.as_object().and_then(|value| value.get("decision")) {
+            None => true,
+            Some(value) => value.is_null(),
         })
         .count();
 
@@ -447,36 +497,26 @@ pub(crate) async fn build_companion_snapshot(
         .active_session_id
         .clone()
         .or_else(|| session_catalog.first().map(|record| record.session_id.clone()));
-    let selected_device_id = companion_state
-        .active_device_id
-        .clone()
-        .or_else(|| {
-            inventory
-                .as_ref()
-                .and_then(|list| list.devices.first().map(|record| record.device_id.clone()))
-        });
-    let active_sessions = session_summary
-        .as_ref()
-        .map(|value| value.active_sessions)
-        .unwrap_or(0);
-    let sessions_with_active_runs = session_summary
-        .as_ref()
-        .map(|value| value.sessions_with_active_runs)
-        .unwrap_or(0);
-    let trusted_devices = inventory
-        .as_ref()
-        .map(|value| value.summary.trusted_devices)
-        .unwrap_or(0);
-    let stale_devices = inventory
-        .as_ref()
-        .map(|value| value.summary.stale_devices)
-        .unwrap_or(0);
+    let selected_device_id = companion_state.active_device_id.clone().or_else(|| {
+        inventory
+            .as_ref()
+            .and_then(|list| list.devices.first().map(|record| record.device_id.clone()))
+    });
+    let active_sessions = session_summary.as_ref().map(|value| value.active_sessions).unwrap_or(0);
+    let sessions_with_active_runs =
+        session_summary.as_ref().map(|value| value.sessions_with_active_runs).unwrap_or(0);
+    let trusted_devices =
+        inventory.as_ref().map(|value| value.summary.trusted_devices).unwrap_or(0);
+    let stale_devices = inventory.as_ref().map(|value| value.summary.stale_devices).unwrap_or(0);
 
     Ok(DesktopCompanionSnapshot {
         generated_at_unix_ms: unix_ms_now(),
         control_center: snapshot,
         onboarding: onboarding_status,
         openai_status,
+        active_profile,
+        profiles,
+        recent_profiles,
         console_session,
         connection_state,
         rollout: companion_state.rollout.clone(),
@@ -516,8 +556,7 @@ pub(crate) async fn resolve_companion_chat_session(
     payload: &DesktopCompanionResolveSessionRequest,
 ) -> Result<DesktopResolvedChatSessionRecord> {
     let mut control_plane = build_control_plane_client(http_client.clone(), runtime)?;
-    let _csrf_token =
-        ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
+    let _csrf_token = ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
     let raw = control_plane
         .post_json_value(
             "console/v1/chat/sessions",
@@ -542,13 +581,9 @@ pub(crate) async fn fetch_companion_transcript(
     session_id: &str,
 ) -> Result<DesktopSessionTranscriptEnvelope> {
     let mut control_plane = build_control_plane_client(http_client.clone(), runtime)?;
-    let _csrf_token =
-        ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
+    let _csrf_token = ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
     let raw = control_plane
-        .get_json_value(format!(
-            "console/v1/chat/sessions/{}/transcript",
-            urlencoding(session_id)
-        ))
+        .get_json_value(format!("console/v1/chat/sessions/{}/transcript", urlencoding(session_id)))
         .await?;
     serde_json::from_value(raw)
         .context("desktop companion transcript response did not match the expected contract")
@@ -561,8 +596,7 @@ pub(crate) async fn send_companion_chat_message(
     payload: &DesktopCompanionSendMessageRequest,
 ) -> Result<DesktopCompanionSendMessageResult> {
     let mut control_plane = build_control_plane_client(http_client.clone(), runtime)?;
-    let csrf_token =
-        ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
+    let csrf_token = ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
     let url = build_console_url(
         runtime,
         format!(
@@ -603,20 +637,17 @@ pub(crate) async fn send_companion_chat_message(
         .map(parse_chat_stream_line)
         .collect::<Result<Vec<_>>>()?;
     let run_id = stream_lines.iter().find_map(|line| {
-        line.get("run_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                line.get("event")
-                    .and_then(Value::as_object)
-                    .and_then(|event| event.get("run_id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
+        line.get("run_id").and_then(Value::as_str).map(str::to_owned).or_else(|| {
+            line.get("event")
+                .and_then(Value::as_object)
+                .and_then(|event| event.get("run_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
     });
-    let status = stream_lines.iter().find_map(|line| {
-        line.get("status").and_then(Value::as_str).map(str::to_owned)
-    });
+    let status = stream_lines
+        .iter()
+        .find_map(|line| line.get("status").and_then(Value::as_str).map(str::to_owned));
     let error_text = stream_lines.iter().find_map(|line| {
         if line.get("type").and_then(Value::as_str) == Some("error") {
             line.get("error").and_then(Value::as_str).map(str::to_owned)
@@ -643,17 +674,14 @@ pub(crate) async fn decide_companion_approval(
     payload: &DesktopCompanionApprovalDecisionRequest,
 ) -> Result<Value> {
     let mut control_plane = build_control_plane_client(http_client.clone(), runtime)?;
-    let _csrf_token =
-        ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
+    let _csrf_token = ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
     let request = control_plane::ApprovalDecisionRequest {
         approved: payload.approved,
         reason: payload.reason.clone(),
         decision_scope: payload.scope.clone(),
         decision_scope_ttl_ms: None,
     };
-    let response = control_plane
-        .decide_approval(payload.approval_id.as_str(), &request)
-        .await?;
+    let response = control_plane.decide_approval(payload.approval_id.as_str(), &request).await?;
     serde_json::to_value(response)
         .context("desktop companion approval response could not be serialized")
 }
@@ -702,9 +730,8 @@ async fn fetch_companion_console_data(
         ("sort", Some("updated_desc".to_owned())),
         ("include_archived", Some("false".to_owned())),
     ]);
-    let approvals_future = control_plane.get_json_value(format!(
-        "console/v1/approvals?limit={APPROVAL_LIMIT}"
-    ));
+    let approvals_future =
+        control_plane.get_json_value(format!("console/v1/approvals?limit={APPROVAL_LIMIT}"));
     let inventory_future = control_plane.list_inventory();
     let (session_catalog, approvals_raw, inventory) =
         tokio::join!(session_catalog_future, approvals_future, inventory_future);
@@ -750,11 +777,8 @@ fn derive_connection_state(requests_succeeded: bool, runtime_expected: bool) -> 
 }
 
 fn build_companion_redirect_path(payload: &DesktopCompanionOpenDashboardRequest) -> String {
-    let section = payload
-        .section
-        .as_deref()
-        .and_then(normalize_optional_text)
-        .unwrap_or("overview");
+    let section =
+        payload.section.as_deref().and_then(normalize_optional_text).unwrap_or("overview");
     let mut query = Vec::new();
     if let Some(session_id) = payload.session_id.as_deref().and_then(normalize_optional_text) {
         query.push(format!("sessionId={}", urlencoding(session_id)));
@@ -783,8 +807,8 @@ fn build_companion_redirect_path(payload: &DesktopCompanionOpenDashboardRequest)
 }
 
 fn apply_redirect_path(dashboard_url: &str, redirect_path: &str) -> Result<String> {
-    let mut url =
-        Url::parse(dashboard_url).with_context(|| format!("invalid dashboard URL {dashboard_url}"))?;
+    let mut url = Url::parse(dashboard_url)
+        .with_context(|| format!("invalid dashboard URL {dashboard_url}"))?;
     if redirect_path.starts_with("/#/") {
         let mut parts = redirect_path.splitn(2, '#');
         let path = parts.next().unwrap_or("/");
@@ -835,11 +859,9 @@ mod tests {
 
     #[test]
     fn apply_redirect_path_converts_hash_route_into_dashboard_url() {
-        let redirected = apply_redirect_path(
-            "http://127.0.0.1:7142/",
-            "/#/chat?sessionId=session-1",
-        )
-        .expect("redirect should resolve");
+        let redirected =
+            apply_redirect_path("http://127.0.0.1:7142/", "/#/chat?sessionId=session-1")
+                .expect("redirect should resolve");
         assert_eq!(redirected, "http://127.0.0.1:7142/#/chat?sessionId=session-1");
     }
 }

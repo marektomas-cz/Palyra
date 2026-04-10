@@ -32,6 +32,7 @@ import {
   showMainWindow,
   startPalyra,
   stopPalyra,
+  switchDesktopCompanionProfile,
   updateDesktopCompanionPreferences,
   updateDesktopCompanionRollout,
   type ActionResult,
@@ -63,6 +64,7 @@ export function App() {
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState(false);
+  const [profileSwitchBusy, setProfileSwitchBusy] = useState(false);
   const [transcript, setTranscript] = useState<DesktopSessionTranscriptEnvelope | null>(null);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
     typeof window !== "undefined" && "Notification" in window ? Notification.permission : "denied",
@@ -90,7 +92,7 @@ export function App() {
     null;
   const selectedApprovalIdResolved = readString(selectedApproval, "approval_id") ?? "";
   const unreadNotifications = snapshot.notifications.filter((entry) => !entry.read);
-  const activeProfile = snapshot.console_session?.profile ?? null;
+  const activeProfile = snapshot.active_profile?.context ?? snapshot.console_session?.profile ?? null;
   const offlineDraftsForSession = snapshot.offline_drafts.filter(
     (draft) => draft.session_id === undefined || draft.session_id === activeSessionId,
   );
@@ -380,6 +382,40 @@ export function App() {
     }
   }
 
+  async function switchProfile(
+    profileName: string,
+    strictMode: boolean,
+    label: string,
+  ): Promise<void> {
+    if (previewMode) {
+      setNotice("Profile switching is unavailable while preview data is active.");
+      return;
+    }
+    if (
+      strictMode &&
+      typeof window !== "undefined" &&
+      !window.confirm(
+        `Switch to strict profile "${label}"? The local runtime will pause so the desktop can rebind safely.`,
+      )
+    ) {
+      return;
+    }
+    setProfileSwitchBusy(true);
+    try {
+      const result = await switchDesktopCompanionProfile({
+        profileName,
+        allowStrictSwitch: strictMode,
+      });
+      setNotice(result.message);
+      await refresh();
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setNotice(message);
+    } finally {
+      setProfileSwitchBusy(false);
+    }
+  }
+
   const selectedApprovalPrompt = readObject(selectedApproval, "prompt");
   const selectedApprovalPolicy = readObject(selectedApproval, "policy_snapshot");
 
@@ -499,6 +535,60 @@ export function App() {
 
       {activeSection === "home" ? (
         <>
+          <section className="desktop-grid">
+            <SectionCard
+              title="Profiles"
+              description="Desktop startup, drafts, session caches, and companion selections are isolated per profile. Switching pauses local runtime activity before the new profile binds."
+            >
+              <div className="desktop-profile-grid">
+                {snapshot.profiles.map((profile) => (
+                  <button
+                    key={profile.context.name}
+                    className={`desktop-profile-card${profile.active ? " is-active" : ""}`}
+                    type="button"
+                    disabled={profileSwitchBusy || previewMode || profile.active}
+                    onClick={() =>
+                      void switchProfile(
+                        profile.context.name,
+                        profile.context.strict_mode,
+                        profile.context.label,
+                      )
+                    }
+                  >
+                    <div className="desktop-inline-row">
+                      <strong>{profile.context.label}</strong>
+                      <StatusChip tone={toneForProfile(profile.context.risk_level)}>
+                        {profile.context.environment}
+                      </StatusChip>
+                    </div>
+                    <p className="desktop-muted">
+                      {profile.context.mode} · risk {profile.context.risk_level}
+                      {profile.implicit ? " · desktop-managed" : ""}
+                    </p>
+                    <div className="desktop-profile-meta">
+                      <StatusChip tone={profile.active ? "success" : "default"}>
+                        {profile.active ? "Active" : profile.recent ? "Recent" : "Available"}
+                      </StatusChip>
+                      {profile.context.strict_mode ? (
+                        <StatusChip tone="warning">Strict</StatusChip>
+                      ) : null}
+                      {profile.last_used_at_unix_ms !== undefined ? (
+                        <small className="desktop-muted">
+                          {formatUnixMs(profile.last_used_at_unix_ms)}
+                        </small>
+                      ) : null}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              {snapshot.recent_profiles.length > 0 ? (
+                <p className="desktop-muted">
+                  Recent order: {snapshot.recent_profiles.join(" · ")}
+                </p>
+              ) : null}
+            </SectionCard>
+          </section>
+
           <DesktopHeader loading={loading} snapshot={snapshot.control_center} />
 
           <LifecycleActionBar

@@ -244,11 +244,22 @@ export type DesktopCompanionMetrics = {
   stale_devices: number;
 };
 
+export type DesktopCompanionProfileRecord = {
+  context: ConsoleProfileContext;
+  implicit: boolean;
+  recent: boolean;
+  last_used_at_unix_ms?: number;
+  active: boolean;
+};
+
 export type DesktopCompanionSnapshot = {
   generated_at_unix_ms: number;
   control_center: ControlCenterSnapshot;
   onboarding: OnboardingStatusSnapshot;
   openai_status: OpenAiAuthStatusSnapshot;
+  active_profile: DesktopCompanionProfileRecord;
+  profiles: DesktopCompanionProfileRecord[];
+  recent_profiles: string[];
   console_session?: ConsoleSession;
   connection_state: "connected" | "reconnecting" | "offline";
   rollout: DesktopCompanionRollout;
@@ -383,6 +394,54 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
     note: "Preview profile is connected.",
     default_profile_id: "preview",
   },
+  active_profile: {
+    context: {
+      name: "preview",
+      label: "Preview",
+      environment: "staging",
+      color: "amber",
+      risk_level: "elevated",
+      strict_mode: true,
+      mode: "remote",
+    },
+    implicit: false,
+    recent: true,
+    last_used_at_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms - 120_000,
+    active: true,
+  },
+  profiles: [
+    {
+      context: {
+        name: "preview",
+        label: "Preview",
+        environment: "staging",
+        color: "amber",
+        risk_level: "elevated",
+        strict_mode: true,
+        mode: "remote",
+      },
+      implicit: false,
+      recent: true,
+      last_used_at_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms - 120_000,
+      active: true,
+    },
+    {
+      context: {
+        name: "desktop-local",
+        label: "Desktop local",
+        environment: "local",
+        color: "emerald",
+        risk_level: "low",
+        strict_mode: false,
+        mode: "local",
+      },
+      implicit: true,
+      recent: true,
+      last_used_at_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms - 420_000,
+      active: false,
+    },
+  ],
+  recent_profiles: ["preview", "desktop-local"],
   console_session: {
     principal: "admin:desktop-control-center",
     device_id: "preview-device",
@@ -581,6 +640,15 @@ export async function updateDesktopCompanionRollout(payload: {
   releaseChannel?: string;
 }): Promise<ActionResult> {
   return invoke<ActionResult>("update_desktop_companion_rollout", {
+    payload,
+  });
+}
+
+export async function switchDesktopCompanionProfile(payload: {
+  profileName: string;
+  allowStrictSwitch?: boolean;
+}): Promise<ActionResult> {
+  return invoke<ActionResult>("switch_desktop_companion_profile", {
     payload,
   });
 }

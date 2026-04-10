@@ -19,6 +19,8 @@ use super::{
 const DESKTOP_ONBOARDING_EVENT_LIMIT: usize = 40;
 const DESKTOP_COMPANION_NOTIFICATION_LIMIT: usize = 40;
 const DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT: usize = 20;
+const DESKTOP_RECENT_PROFILE_LIMIT: usize = 6;
+pub(crate) const IMPLICIT_DESKTOP_PROFILE_NAME: &str = "desktop-local";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,13 +125,11 @@ impl DesktopCompanionState {
     }
 
     pub(crate) fn set_active_session_id(&mut self, next: Option<&str>) {
-        self.active_session_id =
-            next.and_then(normalize_optional_text).map(str::to_owned);
+        self.active_session_id = next.and_then(normalize_optional_text).map(str::to_owned);
     }
 
     pub(crate) fn set_active_device_id(&mut self, next: Option<&str>) {
-        self.active_device_id =
-            next.and_then(normalize_optional_text).map(str::to_owned);
+        self.active_device_id = next.and_then(normalize_optional_text).map(str::to_owned);
     }
 
     pub(crate) fn set_last_run_id(&mut self, next: Option<&str>) {
@@ -152,10 +152,8 @@ impl DesktopCompanionState {
             read: false,
         });
         if self.notifications.len() > DESKTOP_COMPANION_NOTIFICATION_LIMIT {
-            let overflow = self
-                .notifications
-                .len()
-                .saturating_sub(DESKTOP_COMPANION_NOTIFICATION_LIMIT);
+            let overflow =
+                self.notifications.len().saturating_sub(DESKTOP_COMPANION_NOTIFICATION_LIMIT);
             self.notifications.drain(0..overflow);
         }
     }
@@ -164,9 +162,9 @@ impl DesktopCompanionState {
         for notification in &mut self.notifications {
             let should_mark = match ids {
                 None => true,
-                Some(values) => values
-                    .iter()
-                    .any(|candidate| candidate == &notification.notification_id),
+                Some(values) => {
+                    values.iter().any(|candidate| candidate == &notification.notification_id)
+                }
             };
             if should_mark {
                 notification.read = true;
@@ -190,10 +188,8 @@ impl DesktopCompanionState {
             created_at_unix_ms,
         });
         if self.offline_drafts.len() > DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT {
-            let overflow = self
-                .offline_drafts
-                .len()
-                .saturating_sub(DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT);
+            let overflow =
+                self.offline_drafts.len().saturating_sub(DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT);
             self.offline_drafts.drain(0..overflow);
         }
         draft_id
@@ -339,35 +335,150 @@ impl Default for DesktopOnboardingState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct DesktopStateFile {
-    pub(crate) schema_version: u32,
-    pub(crate) browser_service_enabled: bool,
+pub(crate) struct DesktopProfileState {
     pub(crate) runtime_state_root: Option<String>,
     pub(crate) onboarding: DesktopOnboardingState,
     pub(crate) companion: DesktopCompanionState,
 }
 
-impl DesktopStateFile {
-    pub(crate) fn new_default() -> Self {
+impl Default for DesktopProfileState {
+    fn default() -> Self {
         Self {
-            schema_version: DESKTOP_STATE_SCHEMA_VERSION,
-            browser_service_enabled: true,
             runtime_state_root: None,
             onboarding: DesktopOnboardingState::default(),
             companion: DesktopCompanionState::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DesktopStateFile {
+    pub(crate) schema_version: u32,
+    pub(crate) browser_service_enabled: bool,
+    pub(crate) active_profile_name: Option<String>,
+    pub(crate) recent_profile_names: Vec<String>,
+    pub(crate) profile_states: BTreeMap<String, DesktopProfileState>,
+}
+
+impl DesktopStateFile {
+    pub(crate) fn new_default() -> Self {
+        let mut profile_states = BTreeMap::new();
+        profile_states
+            .insert(IMPLICIT_DESKTOP_PROFILE_NAME.to_owned(), DesktopProfileState::default());
+        Self {
+            schema_version: DESKTOP_STATE_SCHEMA_VERSION,
+            browser_service_enabled: true,
+            active_profile_name: Some(IMPLICIT_DESKTOP_PROFILE_NAME.to_owned()),
+            recent_profile_names: vec![IMPLICIT_DESKTOP_PROFILE_NAME.to_owned()],
+            profile_states,
+        }
+    }
 
     pub(crate) fn resolve_runtime_root(&self, default_root: &Path) -> Result<PathBuf> {
         validate_runtime_state_root_override(
-            normalize_optional_text(self.runtime_state_root.as_deref().unwrap_or_default()),
+            normalize_optional_text(
+                self.active_profile_state().runtime_state_root.as_deref().unwrap_or_default(),
+            ),
             default_root,
         )
     }
 
     pub(crate) fn normalized_runtime_state_root(&self) -> Option<String> {
-        normalize_optional_text(self.runtime_state_root.as_deref().unwrap_or_default())
-            .map(str::to_owned)
+        normalize_optional_text(
+            self.active_profile_state().runtime_state_root.as_deref().unwrap_or_default(),
+        )
+        .map(str::to_owned)
+    }
+
+    pub(crate) fn active_profile_name(&self) -> &str {
+        self.active_profile_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(IMPLICIT_DESKTOP_PROFILE_NAME)
+    }
+
+    pub(crate) fn recent_profile_names(&self) -> &[String] {
+        self.recent_profile_names.as_slice()
+    }
+
+    pub(crate) fn active_profile_state(&self) -> &DesktopProfileState {
+        self.profile_states
+            .get(self.active_profile_name())
+            .or_else(|| self.profile_states.get(IMPLICIT_DESKTOP_PROFILE_NAME))
+            .or_else(|| self.profile_states.values().next())
+            .expect("desktop state must always contain at least one profile state")
+    }
+
+    pub(crate) fn active_profile_state_mut(&mut self) -> &mut DesktopProfileState {
+        let profile_name = self.active_profile_name().to_owned();
+        self.ensure_profile_state(profile_name.as_str())
+    }
+
+    pub(crate) fn active_onboarding(&self) -> &DesktopOnboardingState {
+        &self.active_profile_state().onboarding
+    }
+
+    pub(crate) fn active_onboarding_mut(&mut self) -> &mut DesktopOnboardingState {
+        &mut self.active_profile_state_mut().onboarding
+    }
+
+    pub(crate) fn active_companion(&self) -> &DesktopCompanionState {
+        &self.active_profile_state().companion
+    }
+
+    pub(crate) fn active_companion_mut(&mut self) -> &mut DesktopCompanionState {
+        &mut self.active_profile_state_mut().companion
+    }
+
+    pub(crate) fn ensure_profile_state(&mut self, profile_name: &str) -> &mut DesktopProfileState {
+        self.profile_states
+            .entry(profile_name.to_owned())
+            .or_insert_with(DesktopProfileState::default)
+    }
+
+    pub(crate) fn activate_profile(&mut self, profile_name: &str) {
+        let normalized = normalize_profile_name(profile_name);
+        self.active_profile_name = Some(normalized.clone());
+        let _ = self.ensure_profile_state(normalized.as_str());
+        self.promote_recent_profile(normalized.as_str());
+    }
+
+    pub(crate) fn active_profile_completion_unix_ms(&self) -> Option<i64> {
+        self.active_onboarding().completed_at_unix_ms
+    }
+
+    pub(crate) fn ensure_profile_integrity(&mut self) {
+        if self.profile_states.is_empty() {
+            self.profile_states
+                .insert(IMPLICIT_DESKTOP_PROFILE_NAME.to_owned(), DesktopProfileState::default());
+        }
+
+        let active_name = normalize_profile_name(self.active_profile_name());
+        if !self.profile_states.contains_key(active_name.as_str()) {
+            self.profile_states.insert(active_name.clone(), DesktopProfileState::default());
+        }
+        self.active_profile_name = Some(active_name.clone());
+        self.promote_recent_profile(active_name.as_str());
+
+        let valid_names = self.profile_states.keys().cloned().collect::<Vec<_>>();
+        self.recent_profile_names
+            .retain(|name| valid_names.iter().any(|candidate| candidate == name));
+        if self.recent_profile_names.len() > DESKTOP_RECENT_PROFILE_LIMIT {
+            self.recent_profile_names.truncate(DESKTOP_RECENT_PROFILE_LIMIT);
+        }
+
+        for state in self.profile_states.values_mut() {
+            state.onboarding.ensure_flow_id();
+        }
+    }
+
+    fn promote_recent_profile(&mut self, profile_name: &str) {
+        self.recent_profile_names.retain(|candidate| candidate != profile_name);
+        self.recent_profile_names.insert(0, profile_name.to_owned());
+        if self.recent_profile_names.len() > DESKTOP_RECENT_PROFILE_LIMIT {
+            self.recent_profile_names.truncate(DESKTOP_RECENT_PROFILE_LIMIT);
+        }
     }
 }
 
@@ -389,26 +500,19 @@ pub(crate) fn validate_runtime_state_root_override(
         return Err(anyhow!("desktop runtime state root must be an absolute path"));
     }
     if parsed.components().any(|component| matches!(component, Component::ParentDir)) {
-        return Err(anyhow!(
-            "desktop runtime state root must not contain parent traversal"
-        ));
+        return Err(anyhow!("desktop runtime state root must not contain parent traversal"));
     }
 
     let allowed_root = default_root.parent().ok_or_else(|| {
-        anyhow!(
-            "desktop runtime state root validation requires a desktop state directory parent"
-        )
+        anyhow!("desktop runtime state root validation requires a desktop state directory parent")
     })?;
     let canonical_allowed_root = fs::canonicalize(allowed_root).with_context(|| {
-        format!(
-            "failed to resolve desktop state directory {}",
-            allowed_root.display()
-        )
+        format!("failed to resolve desktop state directory {}", allowed_root.display())
     })?;
-    let existing_ancestor = parsed
-        .ancestors()
-        .find(|ancestor| ancestor.exists())
-        .ok_or_else(|| anyhow!("desktop runtime state root must include an existing filesystem root"))?;
+    let existing_ancestor =
+        parsed.ancestors().find(|ancestor| ancestor.exists()).ok_or_else(|| {
+            anyhow!("desktop runtime state root must include an existing filesystem root")
+        })?;
     let canonical_existing_ancestor = fs::canonicalize(existing_ancestor).with_context(|| {
         format!(
             "failed to resolve desktop runtime state root ancestor {}",
@@ -436,6 +540,12 @@ struct PersistedDesktopStateEnvelope {
     #[serde(default = "default_browser_service_enabled")]
     browser_service_enabled: bool,
     #[serde(default)]
+    active_profile_name: Option<String>,
+    #[serde(default)]
+    recent_profile_names: Vec<String>,
+    #[serde(default)]
+    profile_states: BTreeMap<String, DesktopProfileState>,
+    #[serde(default)]
     runtime_state_root: Option<String>,
     #[serde(default)]
     onboarding: DesktopOnboardingState,
@@ -450,6 +560,9 @@ impl Default for PersistedDesktopStateEnvelope {
             admin_token: String::new(),
             browser_auth_token: String::new(),
             browser_service_enabled: default_browser_service_enabled(),
+            active_profile_name: Some(IMPLICIT_DESKTOP_PROFILE_NAME.to_owned()),
+            recent_profile_names: vec![IMPLICIT_DESKTOP_PROFILE_NAME.to_owned()],
+            profile_states: BTreeMap::new(),
             runtime_state_root: None,
             onboarding: DesktopOnboardingState::default(),
             companion: DesktopCompanionState::default(),
@@ -460,16 +573,30 @@ impl Default for PersistedDesktopStateEnvelope {
 impl PersistedDesktopStateEnvelope {
     fn into_state(self) -> DesktopStateFile {
         let _ = self.schema_version;
-        DesktopStateFile {
+        let mut profile_states = self.profile_states;
+        if profile_states.is_empty() {
+            profile_states.insert(
+                IMPLICIT_DESKTOP_PROFILE_NAME.to_owned(),
+                DesktopProfileState {
+                    runtime_state_root: normalize_optional_text(
+                        self.runtime_state_root.as_deref().unwrap_or_default(),
+                    )
+                    .map(str::to_owned),
+                    onboarding: self.onboarding,
+                    companion: self.companion,
+                },
+            );
+        }
+
+        let mut state = DesktopStateFile {
             schema_version: DESKTOP_STATE_SCHEMA_VERSION,
             browser_service_enabled: self.browser_service_enabled,
-            runtime_state_root: normalize_optional_text(
-                self.runtime_state_root.as_deref().unwrap_or_default(),
-            )
-            .map(str::to_owned),
-            onboarding: self.onboarding,
-            companion: self.companion,
-        }
+            active_profile_name: self.active_profile_name,
+            recent_profile_names: self.recent_profile_names,
+            profile_states,
+        };
+        state.ensure_profile_integrity();
+        state
     }
 }
 
@@ -583,7 +710,7 @@ pub(crate) fn load_or_initialize_state_file(
             Some(persisted_envelope.browser_auth_token.as_str()),
         )?;
         let mut persisted = persisted_envelope.into_state();
-        persisted.onboarding.ensure_flow_id();
+        persisted.ensure_profile_integrity();
         persist_desktop_state_file(path, &persisted, "normalized")?;
         return Ok(LoadedDesktopState { persisted, admin_token, browser_auth_token });
     }
@@ -607,6 +734,10 @@ fn generate_secret_token() -> String {
     format!("{}{}", Ulid::new(), Ulid::new())
 }
 
+fn normalize_profile_name(raw: &str) -> String {
+    normalize_optional_text(raw).unwrap_or(IMPLICIT_DESKTOP_PROFILE_NAME).to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -617,12 +748,7 @@ mod tests {
     #[test]
     fn companion_notifications_can_be_marked_read_selectively() {
         let mut state = DesktopCompanionState::default();
-        state.push_notification(
-            DesktopCompanionNotificationKind::Run,
-            "Run finished",
-            "detail",
-            1,
-        );
+        state.push_notification(DesktopCompanionNotificationKind::Run, "Run finished", "detail", 1);
         state.push_notification(
             DesktopCompanionNotificationKind::Approval,
             "Approval waiting",
@@ -646,12 +772,9 @@ mod tests {
         }
 
         assert_eq!(state.offline_drafts.len(), DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT);
-        assert!(
-            state
-                .offline_drafts
-                .iter()
-                .all(|draft| draft.text != "draft-0" && draft.text != "draft-1" && draft.text != "draft-2")
-        );
+        assert!(state.offline_drafts.iter().all(|draft| draft.text != "draft-0"
+            && draft.text != "draft-1"
+            && draft.text != "draft-2"));
     }
 
     #[test]
@@ -667,11 +790,9 @@ mod tests {
         }
 
         assert_eq!(state.notifications.len(), DESKTOP_COMPANION_NOTIFICATION_LIMIT);
-        assert!(
-            state
-                .notifications
-                .iter()
-                .all(|entry| entry.title != "notification-0" && entry.title != "notification-1")
-        );
+        assert!(state
+            .notifications
+            .iter()
+            .all(|entry| entry.title != "notification-0" && entry.title != "notification-1"));
     }
 }

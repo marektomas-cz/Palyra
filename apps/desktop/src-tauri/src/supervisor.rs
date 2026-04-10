@@ -18,11 +18,13 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
+use super::companion::DesktopCompanionProfileRecord;
+use super::profile_registry::{DesktopProfileCatalog, DesktopResolvedProfile};
 use super::{
-    load_or_initialize_state_file, sanitize_log_line, DesktopOnboardingStep, DesktopSecretStore,
-    DesktopStateFile, BROWSER_GRPC_PORT, BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL,
-    GATEWAY_ADMIN_PORT, GATEWAY_GRPC_PORT, GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY,
-    LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE, validate_runtime_state_root_override,
+    load_or_initialize_state_file, sanitize_log_line, validate_runtime_state_root_override,
+    DesktopOnboardingStep, DesktopSecretStore, DesktopStateFile, BROWSER_GRPC_PORT,
+    BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL, GATEWAY_ADMIN_PORT, GATEWAY_GRPC_PORT,
+    GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY, LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,11 +201,15 @@ pub(crate) struct HealthEndpointPayload {
 
 #[derive(Debug)]
 pub(crate) struct ControlCenter {
+    pub(crate) desktop_state_root: PathBuf,
+    pub(crate) state_dir: PathBuf,
     pub(crate) default_runtime_root: PathBuf,
     pub(crate) runtime_root: PathBuf,
     pub(crate) support_bundle_dir: PathBuf,
     pub(crate) state_file_path: PathBuf,
     pub(crate) persisted: DesktopStateFile,
+    pub(crate) active_profile: DesktopResolvedProfile,
+    pub(crate) profile_catalog: DesktopProfileCatalog,
     pub(crate) admin_token: String,
     pub(crate) browser_auth_token: String,
     pub(crate) runtime: RuntimeConfig,
@@ -221,7 +227,6 @@ impl ControlCenter {
     pub(crate) fn new() -> Result<Self> {
         let state_root = super::resolve_desktop_state_root()?;
         let state_dir = state_root.join("desktop-control-center");
-        let default_runtime_root = state_dir.join("runtime");
         let support_bundle_dir = state_dir.join("support-bundles");
         fs::create_dir_all(support_bundle_dir.as_path()).with_context(|| {
             format!("failed to create support bundle output dir {}", support_bundle_dir.display())
@@ -230,10 +235,24 @@ impl ControlCenter {
         let state_file_path = state_dir.join("state.json");
         let secret_store = DesktopSecretStore::open(state_dir.as_path())?;
         let loaded = load_or_initialize_state_file(state_file_path.as_path(), &secret_store)?;
-        let runtime_root = loaded.persisted.resolve_runtime_root(default_runtime_root.as_path())?;
+        let mut persisted = loaded.persisted;
+        let profile_catalog = DesktopProfileCatalog::load(state_root.as_path())?;
+        let active_profile = resolve_active_profile(&persisted, &profile_catalog);
+        persisted.activate_profile(active_profile.context.name.as_str());
+        let default_runtime_root = default_runtime_root_for_profile(
+            state_root.as_path(),
+            state_dir.as_path(),
+            &active_profile,
+        );
+        let runtime_root = resolve_runtime_root_for_profile(
+            &persisted,
+            &active_profile,
+            default_runtime_root.as_path(),
+        )?;
         fs::create_dir_all(runtime_root.as_path()).with_context(|| {
             format!("failed to create desktop runtime dir {}", runtime_root.display())
         })?;
+        apply_profile_process_env(&active_profile);
 
         let runtime = RuntimeConfig::default();
         let gateway = ManagedService::new(vec![
@@ -244,21 +263,21 @@ impl ControlCenter {
         let browserd =
             ManagedService::new(vec![runtime.browser_health_port, runtime.browser_grpc_port]);
 
-        let http_client = Client::builder()
-            .cookie_store(true)
-            .timeout(Duration::from_secs(4))
-            .build()
-            .context("failed to build desktop HTTP client")?;
+        let http_client = build_http_client()?;
 
         let (log_tx, log_rx) = mpsc::channel(LOG_EVENT_CHANNEL_CAPACITY);
         let dropped_log_events = Arc::new(AtomicU64::new(0));
 
         Ok(Self {
+            desktop_state_root: state_root,
+            state_dir,
             default_runtime_root,
             runtime_root,
             support_bundle_dir,
             state_file_path,
-            persisted: loaded.persisted,
+            persisted,
+            active_profile,
+            profile_catalog,
             admin_token: loaded.admin_token,
             browser_auth_token: loaded.browser_auth_token,
             runtime,
@@ -286,16 +305,17 @@ impl ControlCenter {
         kind: impl Into<String>,
         detail: Option<String>,
     ) -> Result<()> {
-        self.persisted.onboarding.ensure_flow_id();
-        self.persisted.onboarding.push_event(kind, detail, unix_ms_now());
+        let onboarding = self.persisted.active_onboarding_mut();
+        onboarding.ensure_flow_id();
+        onboarding.push_event(kind, detail, unix_ms_now());
         self.save_state_file()
     }
 
     pub(crate) fn clear_onboarding_failure(&mut self) -> Result<()> {
-        if self.persisted.onboarding.last_failure.is_none() {
+        if self.persisted.active_onboarding().last_failure.is_none() {
             return Ok(());
         }
-        self.persisted.onboarding.last_failure = None;
+        self.persisted.active_onboarding_mut().last_failure = None;
         self.save_state_file()
     }
 
@@ -305,15 +325,15 @@ impl ControlCenter {
         message: String,
     ) -> Result<()> {
         let sanitized = sanitize_log_line(message.as_str());
-        self.persisted.onboarding.ensure_flow_id();
-        self.persisted.onboarding.record_failure_step(step);
-        self.persisted.onboarding.last_failure =
-            Some(super::desktop_state::DesktopOnboardingFailureState {
-                step,
-                message: sanitized.clone(),
-                recorded_at_unix_ms: unix_ms_now(),
-            });
-        self.persisted.onboarding.push_event(
+        let onboarding = self.persisted.active_onboarding_mut();
+        onboarding.ensure_flow_id();
+        onboarding.record_failure_step(step);
+        onboarding.last_failure = Some(super::desktop_state::DesktopOnboardingFailureState {
+            step,
+            message: sanitized.clone(),
+            recorded_at_unix_ms: unix_ms_now(),
+        });
+        onboarding.push_event(
             "failure",
             Some(format!("{}: {}", step.as_str(), sanitized)),
             unix_ms_now(),
@@ -326,9 +346,10 @@ impl ControlCenter {
         success: bool,
         detail: Option<String>,
     ) -> Result<()> {
-        self.persisted.onboarding.ensure_flow_id();
-        self.persisted.onboarding.record_support_bundle_export_result(success);
-        self.persisted.onboarding.push_event(
+        let onboarding = self.persisted.active_onboarding_mut();
+        onboarding.ensure_flow_id();
+        onboarding.record_support_bundle_export_result(success);
+        onboarding.push_event(
             if success {
                 "support_bundle_export_succeeded"
             } else {
@@ -341,15 +362,16 @@ impl ControlCenter {
     }
 
     pub(crate) fn mark_onboarding_welcome_acknowledged(&mut self) -> Result<()> {
-        if self.persisted.onboarding.welcome_acknowledged_at_unix_ms.is_none() {
-            self.persisted.onboarding.welcome_acknowledged_at_unix_ms = Some(unix_ms_now());
+        let onboarding = self.persisted.active_onboarding_mut();
+        if onboarding.welcome_acknowledged_at_unix_ms.is_none() {
+            onboarding.welcome_acknowledged_at_unix_ms = Some(unix_ms_now());
         }
-        self.persisted.onboarding.push_event(
+        onboarding.push_event(
             "welcome_acknowledged",
             Some("Desktop first-run onboarding started.".to_owned()),
             unix_ms_now(),
         );
-        self.persisted.onboarding.last_failure = None;
+        onboarding.last_failure = None;
         self.save_state_file()
     }
 
@@ -363,22 +385,23 @@ impl ControlCenter {
         fs::create_dir_all(runtime_root.as_path()).with_context(|| {
             format!("failed to create desktop runtime root {}", runtime_root.display())
         })?;
-        self.persisted.runtime_state_root = if runtime_root == self.default_runtime_root {
-            None
-        } else {
-            Some(runtime_root.to_string_lossy().into_owned())
-        };
+        self.persisted.active_profile_state_mut().runtime_state_root =
+            if runtime_root == self.default_runtime_root {
+                None
+            } else {
+                Some(runtime_root.to_string_lossy().into_owned())
+            };
         self.runtime_root = runtime_root.clone();
-        if confirm_selection && self.persisted.onboarding.state_root_confirmed_at_unix_ms.is_none()
-        {
-            self.persisted.onboarding.state_root_confirmed_at_unix_ms = Some(unix_ms_now());
+        let onboarding = self.persisted.active_onboarding_mut();
+        if confirm_selection && onboarding.state_root_confirmed_at_unix_ms.is_none() {
+            onboarding.state_root_confirmed_at_unix_ms = Some(unix_ms_now());
         }
-        self.persisted.onboarding.push_event(
+        onboarding.push_event(
             "state_root_selected",
             Some(self.runtime_root.to_string_lossy().into_owned()),
             unix_ms_now(),
         );
-        self.persisted.onboarding.last_failure = None;
+        onboarding.last_failure = None;
         self.save_state_file()?;
         Ok(runtime_root)
     }
@@ -388,15 +411,16 @@ impl ControlCenter {
         preferred_method: Option<&str>,
         profile_id: Option<&str>,
     ) -> Result<()> {
+        let onboarding = self.persisted.active_onboarding_mut();
         if let Some(method) = preferred_method.and_then(normalize_optional_text) {
-            self.persisted.onboarding.openai.preferred_method = Some(method.to_ascii_lowercase());
+            onboarding.openai.preferred_method = Some(method.to_ascii_lowercase());
         }
         if let Some(profile_id) = profile_id.and_then(normalize_optional_text) {
-            self.persisted.onboarding.openai.last_profile_id = Some(profile_id.to_owned());
+            onboarding.openai.last_profile_id = Some(profile_id.to_owned());
         }
-        self.persisted.onboarding.openai.last_connected_at_unix_ms = Some(unix_ms_now());
-        self.persisted.onboarding.last_failure = None;
-        self.persisted.onboarding.push_event(
+        onboarding.openai.last_connected_at_unix_ms = Some(unix_ms_now());
+        onboarding.last_failure = None;
+        onboarding.push_event(
             "openai_connected",
             profile_id.map(str::to_owned).or_else(|| preferred_method.map(str::to_owned)),
             unix_ms_now(),
@@ -408,7 +432,7 @@ impl ControlCenter {
         &mut self,
         request: &super::DiscordOnboardingRequest,
     ) -> Result<()> {
-        let discord = &mut self.persisted.onboarding.discord;
+        let discord = &mut self.persisted.active_onboarding_mut().discord;
         discord.account_id =
             normalize_optional_text(request.account_id.as_deref().unwrap_or_default())
                 .unwrap_or("default")
@@ -437,10 +461,11 @@ impl ControlCenter {
         request: &super::DiscordOnboardingRequest,
     ) -> Result<()> {
         self.update_discord_onboarding_metadata(request)?;
-        self.persisted.onboarding.last_failure = None;
-        self.persisted.onboarding.push_event(
+        let onboarding = self.persisted.active_onboarding_mut();
+        onboarding.last_failure = None;
+        onboarding.push_event(
             "discord_preflight",
-            self.persisted.onboarding.discord.verify_channel_id.clone(),
+            onboarding.discord.verify_channel_id.clone(),
             unix_ms_now(),
         );
         self.save_state_file()
@@ -451,23 +476,25 @@ impl ControlCenter {
         request: &super::DiscordOnboardingRequest,
     ) -> Result<()> {
         self.update_discord_onboarding_metadata(request)?;
-        self.persisted.onboarding.last_failure = None;
-        self.persisted.onboarding.push_event(
+        let onboarding = self.persisted.active_onboarding_mut();
+        onboarding.last_failure = None;
+        onboarding.push_event(
             "discord_applied",
-            Some(self.persisted.onboarding.discord.connector_id()),
+            Some(onboarding.discord.connector_id()),
             unix_ms_now(),
         );
         self.save_state_file()
     }
 
     pub(crate) fn mark_discord_verified(&mut self, connector_id: &str, target: &str) -> Result<()> {
-        self.persisted.onboarding.discord.last_connector_id =
+        let onboarding = self.persisted.active_onboarding_mut();
+        onboarding.discord.last_connector_id =
             normalize_optional_text(connector_id).map(str::to_owned);
-        self.persisted.onboarding.discord.last_verified_target =
+        onboarding.discord.last_verified_target =
             normalize_optional_text(target).map(str::to_owned);
-        self.persisted.onboarding.discord.last_verified_at_unix_ms = Some(unix_ms_now());
-        self.persisted.onboarding.last_failure = None;
-        self.persisted.onboarding.push_event(
+        onboarding.discord.last_verified_at_unix_ms = Some(unix_ms_now());
+        onboarding.last_failure = None;
+        onboarding.push_event(
             "discord_verified",
             Some(format!("{connector_id}:{target}")),
             unix_ms_now(),
@@ -476,11 +503,12 @@ impl ControlCenter {
     }
 
     pub(crate) fn mark_dashboard_handoff_complete(&mut self) -> Result<()> {
-        if self.persisted.onboarding.dashboard_handoff_at_unix_ms.is_none() {
-            self.persisted.onboarding.dashboard_handoff_at_unix_ms = Some(unix_ms_now());
+        let onboarding = self.persisted.active_onboarding_mut();
+        if onboarding.dashboard_handoff_at_unix_ms.is_none() {
+            onboarding.dashboard_handoff_at_unix_ms = Some(unix_ms_now());
         }
-        self.persisted.onboarding.last_failure = None;
-        self.persisted.onboarding.push_event(
+        onboarding.last_failure = None;
+        onboarding.push_event(
             "dashboard_opened",
             Some("Dashboard handoff completed from desktop.".to_owned()),
             unix_ms_now(),
@@ -489,16 +517,110 @@ impl ControlCenter {
     }
 
     pub(crate) fn mark_onboarding_complete(&mut self) -> Result<()> {
-        if self.persisted.onboarding.completed_at_unix_ms.is_none() {
-            self.persisted.onboarding.completed_at_unix_ms = Some(unix_ms_now());
-            self.persisted.onboarding.push_event(
+        let onboarding = self.persisted.active_onboarding_mut();
+        if onboarding.completed_at_unix_ms.is_none() {
+            onboarding.completed_at_unix_ms = Some(unix_ms_now());
+            onboarding.push_event(
                 "onboarding_completed",
                 Some("Desktop onboarding completed.".to_owned()),
                 unix_ms_now(),
             );
         }
-        self.persisted.onboarding.last_failure = None;
+        onboarding.last_failure = None;
         self.save_state_file()
+    }
+
+    pub(crate) fn current_profile_record(&self) -> DesktopCompanionProfileRecord {
+        DesktopCompanionProfileRecord::from_resolved_profile(
+            &self.active_profile,
+            true,
+            true,
+            self.active_profile.context.name.as_str() == self.persisted.active_profile_name(),
+        )
+    }
+
+    pub(crate) fn profile_records(&self) -> Vec<DesktopCompanionProfileRecord> {
+        let active_name = self.persisted.active_profile_name();
+        let recent_names = self.persisted.recent_profile_names();
+        let mut ordered_names = recent_names.to_vec();
+        for name in self.profile_catalog.profiles.keys() {
+            if !ordered_names.iter().any(|candidate| candidate == name) {
+                ordered_names.push(name.clone());
+            }
+        }
+
+        ordered_names
+            .into_iter()
+            .filter_map(|name| {
+                self.profile_catalog.profiles.get(name.as_str()).map(|profile| {
+                    DesktopCompanionProfileRecord::from_resolved_profile(
+                        profile,
+                        recent_names.iter().any(|candidate| candidate == &name),
+                        false,
+                        profile.context.name == active_name,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn switch_active_profile(
+        &mut self,
+        profile_name: &str,
+        allow_strict_switch: bool,
+    ) -> Result<String> {
+        let profile_name = normalize_optional_text(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("desktop profile switch requires a profile name"))?;
+        let Some(next_profile) = self.profile_catalog.profiles.get(profile_name).cloned() else {
+            bail!("desktop profile '{profile_name}' is not available");
+        };
+        if next_profile.context.name == self.active_profile.context.name {
+            return Ok(format!(
+                "desktop companion is already using profile {}",
+                next_profile.context.label
+            ));
+        }
+        if next_profile.context.strict_mode && !allow_strict_switch {
+            bail!(
+                "switching to strict desktop profile '{}' requires explicit confirmation",
+                next_profile.context.label
+            );
+        }
+
+        let runtime_was_active = self.gateway.desired_running
+            || self.gateway.running()
+            || self.browserd.desired_running
+            || self.browserd.running();
+        self.stop_all();
+        self.reset_profile_bound_runtime_state()?;
+
+        self.persisted.activate_profile(next_profile.context.name.as_str());
+        self.active_profile = next_profile;
+        self.default_runtime_root = default_runtime_root_for_profile(
+            self.desktop_state_root.as_path(),
+            self.state_dir.as_path(),
+            &self.active_profile,
+        );
+        self.runtime_root = resolve_runtime_root_for_profile(
+            &self.persisted,
+            &self.active_profile,
+            self.default_runtime_root.as_path(),
+        )?;
+        fs::create_dir_all(self.runtime_root.as_path()).with_context(|| {
+            format!("failed to create desktop runtime dir {}", self.runtime_root.display())
+        })?;
+        apply_profile_process_env(&self.active_profile);
+        self.record_onboarding_event(
+            "profile_switched",
+            Some(self.active_profile.context.name.clone()),
+        )?;
+
+        let suffix =
+            if runtime_was_active { "; runtime was paused for safe profile isolation" } else { "" };
+        Ok(format!(
+            "switched desktop companion to profile {}{}",
+            self.active_profile.context.label, suffix
+        ))
     }
 
     pub(crate) fn start_all(&mut self) {
@@ -796,6 +918,29 @@ impl ControlCenter {
         ]
     }
 
+    fn reset_profile_bound_runtime_state(&mut self) -> Result<()> {
+        self.http_client = build_http_client()?;
+        if let Ok(mut session_cache) = self.console_session_cache.lock() {
+            *session_cache = None;
+        }
+        if let Ok(mut payload_cache) = self.console_payload_cache.lock() {
+            *payload_cache = ConsolePayloadCache::default();
+        }
+        self.gateway.logs.clear();
+        self.browserd.logs.clear();
+        self.gateway.last_exit = None;
+        self.browserd.last_exit = None;
+        self.gateway.pid = None;
+        self.browserd.pid = None;
+        self.gateway.last_start_unix_ms = None;
+        self.browserd.last_start_unix_ms = None;
+        self.gateway.restart_attempt = 0;
+        self.browserd.restart_attempt = 0;
+        self.gateway.next_restart_unix_ms = None;
+        self.browserd.next_restart_unix_ms = None;
+        Ok(())
+    }
+
     fn service_mut(&mut self, kind: ServiceKind) -> &mut ManagedService {
         match kind {
             ServiceKind::Gateway => &mut self.gateway,
@@ -883,6 +1028,14 @@ pub(crate) fn normalize_optional_text(raw: &str) -> Option<&str> {
     }
 }
 
+fn build_http_client() -> Result<Client> {
+    Client::builder()
+        .cookie_store(true)
+        .timeout(Duration::from_secs(4))
+        .build()
+        .context("failed to build desktop HTTP client")
+}
+
 fn open_url_in_default_browser(url: &str) -> Result<()> {
     let normalized_url = normalize_browser_open_url(url)?;
     webbrowser::open(normalized_url.as_str())
@@ -908,6 +1061,67 @@ pub(crate) fn compute_backoff_ms(attempt: u32) -> u64 {
     scaled.min(30_000)
 }
 
+fn resolve_active_profile(
+    persisted: &DesktopStateFile,
+    catalog: &DesktopProfileCatalog,
+) -> DesktopResolvedProfile {
+    let active_name = persisted.active_profile_name();
+    if let Some(profile) = catalog.profiles.get(active_name) {
+        return profile.clone();
+    }
+    if let Some(default_name) = catalog.default_profile_name.as_deref() {
+        if let Some(profile) = catalog.profiles.get(default_name) {
+            return profile.clone();
+        }
+    }
+    catalog
+        .profiles
+        .get(crate::desktop_state::IMPLICIT_DESKTOP_PROFILE_NAME)
+        .cloned()
+        .or_else(|| catalog.profiles.values().next().cloned())
+        .expect("desktop profile catalog must contain at least one profile")
+}
+
+fn default_runtime_root_for_profile(
+    base_state_root: &Path,
+    state_dir: &Path,
+    profile: &DesktopResolvedProfile,
+) -> PathBuf {
+    if let Some(state_root) = profile.state_root.as_ref() {
+        return state_root.clone();
+    }
+    if profile.implicit {
+        return state_dir.join("runtime");
+    }
+    base_state_root.join("profiles").join(profile.context.name.as_str()).join("state")
+}
+
+fn resolve_runtime_root_for_profile(
+    persisted: &DesktopStateFile,
+    profile: &DesktopResolvedProfile,
+    default_runtime_root: &Path,
+) -> Result<PathBuf> {
+    if let Some(state_root) = profile.state_root.as_ref() {
+        if !state_root.is_absolute() {
+            bail!("desktop profile '{}' must use an absolute state root", profile.context.name);
+        }
+        return Ok(state_root.clone());
+    }
+    persisted.resolve_runtime_root(default_runtime_root)
+}
+
+fn apply_profile_process_env(profile: &DesktopResolvedProfile) {
+    // SAFETY: desktop app serializes control-center mutations through a single async mutex.
+    unsafe {
+        std::env::set_var("PALYRA_CLI_PROFILE", profile.context.name.as_str());
+        if let Some(config_path) = profile.config_path.as_ref() {
+            std::env::set_var("PALYRA_CONFIG", config_path.as_os_str());
+        } else {
+            std::env::remove_var("PALYRA_CONFIG");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_browser_open_url;
@@ -929,9 +1143,7 @@ mod tests {
             .expect_err("embedded credentials should be rejected");
 
         assert!(
-            error
-                .to_string()
-                .contains("must not include embedded credentials"),
+            error.to_string().contains("must not include embedded credentials"),
             "unexpected error: {error}"
         );
     }

@@ -324,6 +324,54 @@ samp {
   background: color-mix(in oklab, var(--accent) 14%, var(--surface-secondary));
 }
 
+.desktop-profile-grid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+}
+
+.desktop-profile-card {
+  width: 100%;
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
+  border-radius: var(--field-radius);
+  background: color-mix(in oklab, var(--surface-secondary) 88%, transparent);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    transform 120ms ease;
+}
+
+.desktop-profile-card:hover,
+.desktop-profile-card:focus-visible {
+  border-color: color-mix(in oklab, var(--accent) 48%, transparent);
+  background: color-mix(in oklab, var(--accent) 10%, var(--surface-secondary));
+  transform: translateY(-1px);
+}
+
+.desktop-profile-card:disabled {
+  cursor: default;
+  transform: none;
+  opacity: 0.78;
+}
+
+.desktop-profile-card.is-active {
+  border-color: color-mix(in oklab, var(--success) 42%, transparent);
+  background: color-mix(in oklab, var(--success) 10%, var(--surface-secondary));
+}
+
+.desktop-profile-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
 .desktop-transcript {
   max-height: min(28rem, 52vh);
 }

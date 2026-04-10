@@ -26,6 +26,7 @@ use super::openai_auth::{
     OpenAiControlPlaneInputs, OpenAiOAuthBootstrapRequest, OpenAiOAuthCallbackStateRequest,
     OpenAiProfileActionRequest, OpenAiScopeInput,
 };
+use super::profile_registry::{implicit_profile, DesktopProfileCatalog};
 use super::snapshot::{resolve_dashboard_access_target, OverallStatus};
 use super::supervisor::ConsolePayloadCache;
 use super::{
@@ -132,9 +133,16 @@ fn write_file(path: &Path, content: &str) {
     std::fs::write(path, content).expect("fixture file should be written");
 }
 
+fn write_cli_profiles_file(root: &Path, content: &str) -> PathBuf {
+    let path = root.join("cli").join("profiles.toml");
+    write_file(path.as_path(), content);
+    path
+}
+
 fn build_test_control_center(root: &Path) -> ControlCenter {
-    let runtime_root = root.join("runtime");
-    let support_bundle_dir = root.join("support-bundles");
+    let state_dir = root.join("desktop-control-center");
+    let runtime_root = state_dir.join("runtime");
+    let support_bundle_dir = state_dir.join("support-bundles");
     std::fs::create_dir_all(runtime_root.as_path())
         .expect("runtime root should be created for test control center");
     std::fs::create_dir_all(support_bundle_dir.as_path())
@@ -153,12 +161,19 @@ fn build_test_control_center(root: &Path) -> ControlCenter {
         .build()
         .expect("HTTP client should initialize for test control center");
     let (log_tx, log_rx) = mpsc::channel(LOG_EVENT_CHANNEL_CAPACITY);
+    let persisted = DesktopStateFile::new_default();
+    let active_profile = implicit_profile(persisted.active_profile_name());
+    let profile_catalog = DesktopProfileCatalog::load(root).expect("profile catalog should load");
     ControlCenter {
+        desktop_state_root: root.to_path_buf(),
+        state_dir: state_dir.clone(),
         default_runtime_root: runtime_root.clone(),
         runtime_root,
         support_bundle_dir,
-        state_file_path: root.join("state.json"),
-        persisted: DesktopStateFile::new_default(),
+        state_file_path: state_dir.join("state.json"),
+        persisted,
+        active_profile,
+        profile_catalog,
         admin_token: format!("test-admin-{}", Ulid::new()),
         browser_auth_token: format!("test-browser-{}", Ulid::new()),
         runtime,
@@ -258,6 +273,141 @@ fn companion_offline_draft_queueing_respects_rollout_toggle() {
     assert!(
         !control_center.companion_offline_drafts_enabled(),
         "offline draft queueing should disable when rollout toggle is false"
+    );
+}
+
+#[test]
+fn profile_switch_isolates_companion_preferences_and_drafts() {
+    let fixture = TempFixtureDir::new();
+    let _profiles = write_cli_profiles_file(
+        fixture.path(),
+        r#"
+version = 1
+default_profile = "review"
+
+[profiles.review]
+label = "Review"
+mode = "remote"
+environment = "staging"
+color = "amber"
+risk_level = "elevated"
+"#,
+    );
+
+    let mut control_center = build_test_control_center(fixture.path());
+    control_center
+        .update_companion_preferences(&super::companion::DesktopCompanionPreferencesRequest {
+            active_section: Some(super::DesktopCompanionSection::Chat),
+            active_session_id: Some("desktop-local-session".to_owned()),
+            active_device_id: None,
+            last_run_id: Some("desktop-local-run".to_owned()),
+        })
+        .expect("desktop-local preferences should persist");
+    let local_draft_id = control_center
+        .record_companion_offline_draft(
+            Some("desktop-local-session"),
+            "Retry this when local runtime returns",
+            "local runtime offline",
+        )
+        .expect("desktop-local draft should persist");
+
+    control_center.gateway.desired_running = true;
+    let message = control_center
+        .switch_active_profile("review", false)
+        .expect("profile switch should succeed");
+
+    assert!(message.contains("runtime was paused"));
+    assert_eq!(control_center.persisted.active_profile_name(), "review");
+    assert_eq!(control_center.active_profile.context.name, "review");
+    assert!(!control_center.gateway.desired_running);
+    assert!(control_center.persisted.active_companion().active_session_id.is_none());
+    assert!(control_center.persisted.active_companion().offline_drafts.is_empty());
+
+    control_center
+        .update_companion_preferences(&super::companion::DesktopCompanionPreferencesRequest {
+            active_section: Some(super::DesktopCompanionSection::Approvals),
+            active_session_id: Some("review-session".to_owned()),
+            active_device_id: Some("review-device".to_owned()),
+            last_run_id: Some("review-run".to_owned()),
+        })
+        .expect("review preferences should persist");
+    let review_draft_id = control_center
+        .record_companion_offline_draft(
+            Some("review-session"),
+            "Resume review workflow",
+            "review profile disconnected",
+        )
+        .expect("review draft should persist");
+
+    control_center
+        .switch_active_profile("desktop-local", false)
+        .expect("switch back to desktop-local should succeed");
+
+    let companion = control_center.persisted.active_companion();
+    assert_eq!(companion.active_session_id.as_deref(), Some("desktop-local-session"));
+    assert_eq!(companion.last_run_id.as_deref(), Some("desktop-local-run"));
+    assert_eq!(companion.offline_drafts.len(), 1);
+    assert_eq!(companion.offline_drafts[0].draft_id, local_draft_id);
+    assert_ne!(companion.offline_drafts[0].draft_id, review_draft_id);
+}
+
+#[test]
+fn profile_switch_requires_explicit_ack_for_strict_profiles() {
+    let fixture = TempFixtureDir::new();
+    let _profiles = write_cli_profiles_file(
+        fixture.path(),
+        r#"
+version = 1
+
+[profiles.production]
+label = "Production"
+strict_mode = true
+mode = "remote"
+environment = "production"
+color = "red"
+risk_level = "high"
+"#,
+    );
+
+    let mut control_center = build_test_control_center(fixture.path());
+    let error = control_center
+        .switch_active_profile("production", false)
+        .expect_err("strict profile switch must require explicit confirmation");
+
+    assert!(error.to_string().contains("requires explicit confirmation"));
+    assert_eq!(control_center.persisted.active_profile_name(), "desktop-local");
+}
+
+#[test]
+fn profile_switch_persists_active_profile_for_restore() {
+    let fixture = TempFixtureDir::new();
+    let _profiles = write_cli_profiles_file(
+        fixture.path(),
+        r#"
+version = 1
+
+[profiles.review]
+label = "Review"
+mode = "remote"
+"#,
+    );
+
+    let mut control_center = build_test_control_center(fixture.path());
+    control_center
+        .switch_active_profile("review", false)
+        .expect("profile switch should persist state");
+    control_center.save_state_file().expect("desktop state should save after profile switch");
+
+    let secret_store = DesktopSecretStore::open(control_center.state_dir.as_path())
+        .expect("secret store should reopen");
+    let reloaded =
+        load_or_initialize_state_file(control_center.state_file_path.as_path(), &secret_store)
+            .expect("desktop state should reload after switch");
+
+    assert_eq!(reloaded.persisted.active_profile_name(), "review");
+    assert!(
+        reloaded.persisted.recent_profile_names().iter().any(|name| name == "review"),
+        "recent profile list should include the switched profile"
     );
 }
 
@@ -490,7 +640,10 @@ async fn snapshot_console_reads_reuse_session_cookie_across_refreshes() {
                 continue;
             }
             if request_line.starts_with("GET /console/v1/channels/discord%3Adefault ") {
-                assert!(has_cookie, "Discord status fetch should reuse the authenticated console session");
+                assert!(
+                    has_cookie,
+                    "Discord status fetch should reuse the authenticated console session"
+                );
                 write_json_response(
                     &mut stream,
                     "200 OK",
@@ -591,7 +744,10 @@ async fn snapshot_keeps_launcher_status_stable_when_optional_diagnostics_fetch_f
                 continue;
             }
             if request_line.starts_with("GET /console/v1/channels/discord%3Adefault ") {
-                assert!(has_cookie, "Discord status fetch should reuse the authenticated console session");
+                assert!(
+                    has_cookie,
+                    "Discord status fetch should reuse the authenticated console session"
+                );
                 write_json_response(
                     &mut stream,
                     "200 OK",
@@ -701,14 +857,15 @@ fn state_file_initialization_seeds_onboarding_defaults() {
         DesktopSecretStore::open(fixture.path()).expect("secret store should initialize");
     let loaded = load_or_initialize_state_file(state_path.as_path(), &secret_store)
         .expect("desktop state should initialize");
-    assert!(loaded.persisted.runtime_state_root.is_none());
-    assert!(loaded.persisted.onboarding.welcome_acknowledged_at_unix_ms.is_none());
-    assert!(!loaded.persisted.onboarding.flow_id.trim().is_empty());
-    assert_eq!(loaded.persisted.onboarding.discord.account_id, "default");
-    assert_eq!(loaded.persisted.onboarding.discord.broadcast_strategy, "deny");
-    assert!(loaded.persisted.onboarding.recent_events.is_empty());
-    assert!(loaded.persisted.onboarding.failure_step_counts.is_empty());
-    assert_eq!(loaded.persisted.onboarding.support_bundle_export_attempts, 0);
+    assert_eq!(loaded.persisted.active_profile_name(), "desktop-local");
+    assert!(loaded.persisted.normalized_runtime_state_root().is_none());
+    assert!(loaded.persisted.active_onboarding().welcome_acknowledged_at_unix_ms.is_none());
+    assert!(!loaded.persisted.active_onboarding().flow_id.trim().is_empty());
+    assert_eq!(loaded.persisted.active_onboarding().discord.account_id, "default");
+    assert_eq!(loaded.persisted.active_onboarding().discord.broadcast_strategy, "deny");
+    assert!(loaded.persisted.active_onboarding().recent_events.is_empty());
+    assert!(loaded.persisted.active_onboarding().failure_step_counts.is_empty());
+    assert_eq!(loaded.persisted.active_onboarding().support_bundle_export_attempts, 0);
 }
 
 #[test]
@@ -727,8 +884,8 @@ fn desktop_state_root_rejects_relative_palyra_state_root_override() {
     let _env_guard = lock_env();
     let _state_root_override = ScopedEnvVar::set("PALYRA_STATE_ROOT", "relative-state-root");
 
-    let error = resolve_desktop_state_root()
-        .expect_err("relative PALYRA_STATE_ROOT should be rejected");
+    let error =
+        resolve_desktop_state_root().expect_err("relative PALYRA_STATE_ROOT should be rejected");
     assert!(error.to_string().contains("must be an absolute path"));
 }
 
@@ -765,9 +922,7 @@ fn runtime_state_root_override_rejects_paths_outside_desktop_state_directory() {
     .expect_err("paths outside the desktop state directory must be rejected");
 
     assert!(
-        error
-            .to_string()
-            .contains("must stay within the desktop state directory"),
+        error.to_string().contains("must stay within the desktop state directory"),
         "unexpected error: {error}"
     );
 }
@@ -781,18 +936,16 @@ fn desktop_state_file_rejects_runtime_root_escape_on_reload() {
     std::fs::create_dir_all(default_runtime_root.as_path())
         .expect("default runtime root should exist for reload validation");
 
-    let state_file = DesktopStateFile {
-        runtime_state_root: Some(escaped_runtime_root.to_string_lossy().into_owned()),
-        ..DesktopStateFile::default()
-    };
+    let state_file = DesktopStateFile { ..DesktopStateFile::default() };
+    let mut state_file = state_file;
+    state_file.active_profile_state_mut().runtime_state_root =
+        Some(escaped_runtime_root.to_string_lossy().into_owned());
     let error = state_file
         .resolve_runtime_root(default_runtime_root.as_path())
         .expect_err("persisted runtime root escapes must be rejected on reload");
 
     assert!(
-        error
-            .to_string()
-            .contains("must stay within the desktop state directory"),
+        error.to_string().contains("must stay within the desktop state directory"),
         "unexpected error: {error}"
     );
 }

@@ -211,10 +211,10 @@ pub(crate) async fn build_desktop_refresh_payload(
         probe_operator_auth(&http_client, &runtime, admin_token.as_str(), &snapshot).await;
     let openai_ready = is_openai_ready(&openai_status);
     let discord_ready = is_discord_ready(&snapshot);
+    let onboarding = persisted.active_onboarding().clone();
     let discord_verified = discord_ready
-        && persisted.onboarding.discord.last_verified_at_unix_ms.is_some()
-        && persisted
-            .onboarding
+        && onboarding.discord.last_verified_at_unix_ms.is_some()
+        && onboarding
             .discord
             .last_connector_id
             .as_deref()
@@ -229,10 +229,10 @@ pub(crate) async fn build_desktop_refresh_payload(
         discord_verified,
     );
     let recovery = derive_recovery(
-        persisted.onboarding.last_failure.as_ref(),
+        onboarding.last_failure.as_ref(),
         &preflight,
         current_step,
-        persisted.onboarding.completed_at_unix_ms.is_some(),
+        onboarding.completed_at_unix_ms.is_some(),
     );
     let steps = build_step_snapshots(
         &persisted,
@@ -256,7 +256,7 @@ pub(crate) async fn build_desktop_refresh_payload(
         .map(|step| step.detail.clone())
         .unwrap_or_else(|| "Desktop onboarding is waiting for the next step.".to_owned());
     let failure_step_counts = persisted
-        .onboarding
+        .active_onboarding()
         .failure_step_counts
         .iter()
         .map(|(step, failures)| OnboardingStepFailureMetric {
@@ -265,16 +265,16 @@ pub(crate) async fn build_desktop_refresh_payload(
         })
         .collect::<Vec<_>>();
     let support_bundle_exports = OnboardingSupportBundleMetrics {
-        attempts: persisted.onboarding.support_bundle_export_attempts,
-        successes: persisted.onboarding.support_bundle_export_successes,
-        failures: persisted.onboarding.support_bundle_export_failures,
+        attempts: onboarding.support_bundle_export_attempts,
+        successes: onboarding.support_bundle_export_successes,
+        failures: onboarding.support_bundle_export_failures,
         success_rate_bps: success_rate_bps(
-            persisted.onboarding.support_bundle_export_successes,
-            persisted.onboarding.support_bundle_export_attempts,
+            onboarding.support_bundle_export_successes,
+            onboarding.support_bundle_export_attempts,
         ),
     };
 
-    let phase = if persisted.onboarding.completed_at_unix_ms.is_some()
+    let phase = if onboarding.completed_at_unix_ms.is_some()
         || current_step == DesktopOnboardingStep::Completion
     {
         "home"
@@ -284,7 +284,7 @@ pub(crate) async fn build_desktop_refresh_payload(
     .to_owned();
 
     let onboarding_status = OnboardingStatusSnapshot {
-        flow_id: persisted.onboarding.flow_id.clone(),
+        flow_id: onboarding.flow_id.clone(),
         phase,
         current_step,
         current_step_title,
@@ -293,13 +293,13 @@ pub(crate) async fn build_desktop_refresh_payload(
         progress_total,
         state_root_path: runtime_root.to_string_lossy().into_owned(),
         default_state_root_path: default_runtime_root.to_string_lossy().into_owned(),
-        state_root_confirmed: persisted.onboarding.state_root_confirmed_at_unix_ms.is_some(),
+        state_root_confirmed: onboarding.state_root_confirmed_at_unix_ms.is_some(),
         state_root_overridden: persisted.normalized_runtime_state_root().is_some(),
         dashboard_url: snapshot.quick_facts.dashboard_url.clone(),
         dashboard_access_mode: snapshot.quick_facts.dashboard_access_mode.clone(),
         dashboard_reachable,
-        dashboard_handoff_completed: persisted.onboarding.dashboard_handoff_at_unix_ms.is_some(),
-        completion_unix_ms: persisted.onboarding.completed_at_unix_ms,
+        dashboard_handoff_completed: onboarding.dashboard_handoff_at_unix_ms.is_some(),
+        completion_unix_ms: onboarding.completed_at_unix_ms,
         preflight,
         operator_auth,
         openai_ready,
@@ -307,13 +307,13 @@ pub(crate) async fn build_desktop_refresh_payload(
         openai_note: openai_status.note.clone(),
         discord_ready,
         discord_verified,
-        discord_last_verified_target: persisted.onboarding.discord.last_verified_target.clone(),
-        discord_last_verified_at_unix_ms: persisted.onboarding.discord.last_verified_at_unix_ms,
-        discord_defaults: persisted.onboarding.discord,
+        discord_last_verified_target: onboarding.discord.last_verified_target.clone(),
+        discord_last_verified_at_unix_ms: onboarding.discord.last_verified_at_unix_ms,
+        discord_defaults: onboarding.discord.clone(),
         recovery,
         failure_step_counts,
         support_bundle_exports,
-        recent_events: persisted.onboarding.recent_events,
+        recent_events: onboarding.recent_events.clone(),
         steps,
     };
 
@@ -699,13 +699,14 @@ fn derive_current_step(
     openai_ready: bool,
     discord_verified: bool,
 ) -> DesktopOnboardingStep {
-    if persisted.onboarding.welcome_acknowledged_at_unix_ms.is_none() {
+    let onboarding = persisted.active_onboarding();
+    if onboarding.welcome_acknowledged_at_unix_ms.is_none() {
         return DesktopOnboardingStep::Welcome;
     }
     if preflight.blocked_count > 0 {
         return DesktopOnboardingStep::Environment;
     }
-    if persisted.onboarding.state_root_confirmed_at_unix_ms.is_none() {
+    if onboarding.state_root_confirmed_at_unix_ms.is_none() {
         return DesktopOnboardingStep::StateRoot;
     }
     if snapshot.quick_facts.gateway_version.is_none()
@@ -722,7 +723,7 @@ fn derive_current_step(
     if !discord_verified {
         return DesktopOnboardingStep::DiscordConnect;
     }
-    if persisted.onboarding.dashboard_handoff_at_unix_ms.is_none() {
+    if onboarding.dashboard_handoff_at_unix_ms.is_none() {
         return DesktopOnboardingStep::DashboardHandoff;
     }
     DesktopOnboardingStep::Completion
@@ -825,6 +826,7 @@ fn build_step_snapshots(
     runtime_root_path: &str,
     current_step: DesktopOnboardingStep,
 ) -> Vec<OnboardingStepSnapshot> {
+    let onboarding = persisted.active_onboarding();
     let steps = [
         DesktopOnboardingStep::Welcome,
         DesktopOnboardingStep::Environment,
@@ -842,9 +844,9 @@ fn build_step_snapshots(
         .map(|step| {
             let (complete, blocked, detail) = match step {
                 DesktopOnboardingStep::Welcome => (
-                    persisted.onboarding.welcome_acknowledged_at_unix_ms.is_some(),
+                    onboarding.welcome_acknowledged_at_unix_ms.is_some(),
                     false,
-                    if persisted.onboarding.welcome_acknowledged_at_unix_ms.is_some() {
+                    if onboarding.welcome_acknowledged_at_unix_ms.is_some() {
                         "Desktop onboarding has been started from the welcome screen.".to_owned()
                     } else {
                         "Start the guided first-run flow to begin local setup.".to_owned()
@@ -868,9 +870,9 @@ fn build_step_snapshots(
                     },
                 ),
                 DesktopOnboardingStep::StateRoot => (
-                    persisted.onboarding.state_root_confirmed_at_unix_ms.is_some(),
+                    onboarding.state_root_confirmed_at_unix_ms.is_some(),
                     false,
-                    if persisted.onboarding.state_root_confirmed_at_unix_ms.is_some() {
+                    if onboarding.state_root_confirmed_at_unix_ms.is_some() {
                         format!(
                             "Desktop will use {} for the local runtime state root.",
                             runtime_root_path
@@ -913,8 +915,7 @@ fn build_step_snapshots(
                     if discord_verified {
                         format!(
                             "Discord verification last succeeded for {}.",
-                            persisted
-                                .onboarding
+                            onboarding
                                 .discord
                                 .last_verified_target
                                 .as_deref()
@@ -927,9 +928,9 @@ fn build_step_snapshots(
                     },
                 ),
                 DesktopOnboardingStep::DashboardHandoff => (
-                    persisted.onboarding.dashboard_handoff_at_unix_ms.is_some(),
+                    onboarding.dashboard_handoff_at_unix_ms.is_some(),
                     false,
-                    if persisted.onboarding.dashboard_handoff_at_unix_ms.is_some() {
+                    if onboarding.dashboard_handoff_at_unix_ms.is_some() {
                         "Dashboard handoff has been recorded from desktop.".to_owned()
                     } else if dashboard_reachable || snapshot.quick_facts.dashboard_access_mode == "remote" {
                         "Open the dashboard for the full operator surface and finish the handoff.".to_owned()
@@ -938,10 +939,9 @@ fn build_step_snapshots(
                     },
                 ),
                 DesktopOnboardingStep::Completion => (
-                    persisted.onboarding.completed_at_unix_ms.is_some()
-                        || current_step == DesktopOnboardingStep::Completion,
+                    onboarding.completed_at_unix_ms.is_some() || current_step == DesktopOnboardingStep::Completion,
                     false,
-                    if persisted.onboarding.completed_at_unix_ms.is_some() {
+                    if onboarding.completed_at_unix_ms.is_some() {
                         "Desktop home is active for this local install.".to_owned()
                     } else {
                         "Desktop will switch to home mode after the dashboard handoff is complete.".to_owned()

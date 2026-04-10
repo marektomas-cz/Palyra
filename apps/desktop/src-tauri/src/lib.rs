@@ -6,7 +6,7 @@ const DASHBOARD_SCHEME: &str = "http";
 const LOOPBACK_HOST: &str = "127.0.0.1";
 const CONSOLE_PRINCIPAL: &str = "admin:desktop-control-center";
 const CONSOLE_DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-const DESKTOP_STATE_SCHEMA_VERSION: u32 = 4;
+const DESKTOP_STATE_SCHEMA_VERSION: u32 = 5;
 const DESKTOP_SECRET_MAX_BYTES: usize = 4_096;
 const DESKTOP_SECRET_KEY_ADMIN_TOKEN: &str = "desktop_admin_token";
 const DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN: &str = "desktop_browser_auth_token";
@@ -27,6 +27,7 @@ mod desktop_state;
 mod features;
 mod onboarding;
 mod openai_auth;
+mod profile_registry;
 mod snapshot;
 mod supervisor;
 
