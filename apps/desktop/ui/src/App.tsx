@@ -1330,9 +1330,7 @@ function toneForConnection(connectionState: string): "success" | "warning" | "da
   return "danger";
 }
 
-function toneForProfile(
-  riskLevel: string,
-): "success" | "warning" | "danger" | "default" {
+function toneForProfile(riskLevel: string): "success" | "warning" | "danger" | "default" {
   if (riskLevel === "critical" || riskLevel === "high") {
     return "danger";
   }
