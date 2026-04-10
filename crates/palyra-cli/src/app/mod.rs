@@ -597,13 +597,14 @@ fn build_active_profile_context(
         }
     });
     let strict_mode = profile.strict_mode;
-    let environment = normalize_optional_text(profile.environment.as_deref()).unwrap_or_else(|| {
-        if strict_mode || mode.eq_ignore_ascii_case("remote") {
-            "production"
-        } else {
-            "local"
-        }
-    });
+    let environment =
+        normalize_optional_text(profile.environment.as_deref()).unwrap_or_else(|| {
+            if strict_mode || mode.eq_ignore_ascii_case("remote") {
+                "production"
+            } else {
+                "local"
+            }
+        });
     let risk_level = normalize_optional_text(profile.risk_level.as_deref()).unwrap_or_else(|| {
         if strict_mode {
             "high"
@@ -613,13 +614,12 @@ fn build_active_profile_context(
             "low"
         }
     });
-    let color = normalize_optional_text(profile.color.as_deref()).unwrap_or_else(|| {
-        match risk_level {
+    let color =
+        normalize_optional_text(profile.color.as_deref()).unwrap_or_else(|| match risk_level {
             "critical" | "high" => "red",
             "elevated" => "amber",
             _ => "green",
-        }
-    });
+        });
     let label = normalize_optional_text(profile.label.as_deref()).unwrap_or(profile_name);
     Some(ActiveProfileContext {
         name: profile_name.to_owned(),
@@ -820,8 +820,7 @@ fn read_normalized_env_var(name: &str) -> Option<String> {
 mod tests {
     use super::{
         build_active_profile_context, build_root_context, CliConnectionProfile, ConnectionDefaults,
-        ConnectionOverrides, RootOptions,
-        CLI_PROFILES_PATH_ENV, CLI_PROFILE_ENV,
+        ConnectionOverrides, RootOptions, CLI_PROFILES_PATH_ENV, CLI_PROFILE_ENV,
     };
     use crate::args::{LogLevelArg, OutputFormatArg};
     use anyhow::Result;

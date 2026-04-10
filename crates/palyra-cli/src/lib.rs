@@ -398,11 +398,8 @@ fn is_strict_profile_blocked_command(command: &CliCommand) -> bool {
         CliCommand::Uninstall { command } => !command.dry_run && command.yes,
         CliCommand::Profile { command } => matches!(
             command,
-            crate::cli::ProfileCommand::Delete {
-                yes: true,
-                delete_state_root: true,
-                ..
-            } | crate::cli::ProfileCommand::Delete { yes: true, .. }
+            crate::cli::ProfileCommand::Delete { yes: true, delete_state_root: true, .. }
+                | crate::cli::ProfileCommand::Delete { yes: true, .. }
         ),
         _ => false,
     }

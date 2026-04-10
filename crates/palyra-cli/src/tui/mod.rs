@@ -1798,7 +1798,8 @@ impl App {
     }
 
     fn status_summary(&self) -> String {
-        let profile = app::current_root_context().and_then(|context| context.active_profile_context());
+        let profile =
+            app::current_root_context().and_then(|context| context.active_profile_context());
         format!(
             "profile={} env={} risk={} strict={} session={} branch={} agent={} source={} model={} tools={} thinking={} shell={} active_run={}",
             profile.as_ref().map(|value| value.label.as_str()).unwrap_or("none"),
@@ -1985,8 +1986,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
             SettingsItem::ShowThinking => app.show_thinking = !app.show_thinking,
             SettingsItem::LocalShell => {
                 if strict_profile_blocks_local_shell() {
-                    app.status_line =
-                        "Local shell is blocked by strict profile posture".to_owned();
+                    app.status_line = "Local shell is blocked by strict profile posture".to_owned();
                 } else if app.local_shell_enabled {
                     app.local_shell_enabled = false;
                     app.status_line = "Local shell disabled".to_owned();
@@ -2086,21 +2086,36 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ]);
     let profile_line = if let Some(profile) = profile {
         Line::from(vec![
-            Span::styled("Profile ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Profile ",
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(profile.label),
             Span::raw("  "),
-            Span::styled("Env ", Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Env ",
+                Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(profile.environment),
             Span::raw("  "),
-            Span::styled("Risk ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Risk ",
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(profile.risk_level),
             Span::raw("  "),
-            Span::styled("Strict ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Strict ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(if profile.strict_mode { "on" } else { "off" }),
         ])
     } else {
         Line::from(vec![
-            Span::styled("Profile ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Profile ",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            ),
             Span::raw("none"),
         ])
     };

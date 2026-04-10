@@ -219,11 +219,7 @@ pub(crate) async fn console_session_handler(
     headers: HeaderMap,
 ) -> Result<Json<ConsoleSessionResponse>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
-    Ok(Json(build_console_session_response(
-        &state,
-        &session,
-        session.csrf_token.clone(),
-    )))
+    Ok(Json(build_console_session_response(&state, &session, session.csrf_token.clone())))
 }
 
 pub(crate) async fn console_capability_catalog_handler(
