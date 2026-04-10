@@ -133,7 +133,11 @@ export function UsageSection({ app }: UsageSectionProps) {
         <WorkspaceMetricCard
           detail="Reflection workload is tracked separately from foreground runs."
           label="Learning reflections"
-          tone={(readNumber(learningCounters ?? {}, "reflections_scheduled") ?? 0) > 0 ? "accent" : "default"}
+          tone={
+            (readNumber(learningCounters ?? {}, "reflections_scheduled") ?? 0) > 0
+              ? "accent"
+              : "default"
+          }
           value={readNumber(learningCounters ?? {}, "reflections_scheduled") ?? 0}
         />
       </section>

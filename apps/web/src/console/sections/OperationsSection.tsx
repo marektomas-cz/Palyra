@@ -172,7 +172,11 @@ export function OperationsSection({ app }: OperationsSectionProps) {
           label="Learning reflections"
           value={readNumber(learningCounters ?? {}, "reflections_scheduled") ?? 0}
           detail={`${readNumber(learningCounters ?? {}, "candidates_created") ?? 0} candidates · ${readNumber(learningCounters ?? {}, "candidates_auto_applied") ?? 0} auto-applied`}
-          tone={(readNumber(learningCounters ?? {}, "reflections_scheduled") ?? 0) > 0 ? "accent" : "default"}
+          tone={
+            (readNumber(learningCounters ?? {}, "reflections_scheduled") ?? 0) > 0
+              ? "accent"
+              : "default"
+          }
         />
       </section>
 
@@ -274,14 +278,13 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                 description="Refresh learning to load reflection policy and candidate counters."
               />
             ) : (
-              <WorkspaceTable
-                ariaLabel="Learning workload"
-                columns={["Metric", "Value", "Detail"]}
-              >
+              <WorkspaceTable ariaLabel="Learning workload" columns={["Metric", "Value", "Detail"]}>
                 <tr>
                   <td>Enabled</td>
                   <td>{learningEnabled ? "true" : "false"}</td>
-                  <td>{readNumber(learning, "sampling_percent") ?? 0}% sampled background reflections</td>
+                  <td>
+                    {readNumber(learning, "sampling_percent") ?? 0}% sampled background reflections
+                  </td>
                 </tr>
                 <tr>
                   <td>Cooldown</td>
@@ -290,16 +293,25 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                 </tr>
                 <tr>
                   <td>Thresholds</td>
-                  <td>{readNumber(learning, "durable_fact_review_min_confidence_bps") ?? 0} bps facts review</td>
                   <td>
-                    {readNumber(learning, "durable_fact_auto_write_threshold_bps") ?? 0} bps auto-write ·{" "}
-                    {readNumber(learning, "preference_review_min_confidence_bps") ?? 0} bps preferences
+                    {readNumber(learning, "durable_fact_review_min_confidence_bps") ?? 0} bps facts
+                    review
+                  </td>
+                  <td>
+                    {readNumber(learning, "durable_fact_auto_write_threshold_bps") ?? 0} bps
+                    auto-write · {readNumber(learning, "preference_review_min_confidence_bps") ?? 0}{" "}
+                    bps preferences
                   </td>
                 </tr>
                 <tr>
                   <td>Throughput</td>
-                  <td>{readNumber(learningCounters ?? {}, "reflections_completed") ?? 0} completed</td>
-                  <td>{readNumber(learningCounters ?? {}, "candidates_created") ?? 0} candidates generated</td>
+                  <td>
+                    {readNumber(learningCounters ?? {}, "reflections_completed") ?? 0} completed
+                  </td>
+                  <td>
+                    {readNumber(learningCounters ?? {}, "candidates_created") ?? 0} candidates
+                    generated
+                  </td>
                 </tr>
                 <tr>
                   <td>Procedure policy</td>

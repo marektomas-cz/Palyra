@@ -158,15 +158,17 @@ export function MemorySection({ app }: MemorySectionProps) {
   const selectedLearningCandidate =
     learningCandidates.find(
       (candidate) => readString(candidate, "candidate_id") === app.memoryLearningCandidateId,
-    ) ?? learningCandidates[0] ?? null;
+    ) ??
+    learningCandidates[0] ??
+    null;
   const selectedLearningCandidateId =
     readString(selectedLearningCandidate ?? EMPTY_OBJECT, "candidate_id") ??
     app.memoryLearningCandidateId;
   const queuedLearningCount = learningCandidates.filter(
     (candidate) => readString(candidate, "status") === "queued",
   ).length;
-  const autoAppliedLearningCount = learningCandidates.filter(
-    (candidate) => readBoolean(candidate, "auto_applied"),
+  const autoAppliedLearningCount = learningCandidates.filter((candidate) =>
+    readBoolean(candidate, "auto_applied"),
   ).length;
   const learningStatus = readObject(app.memoryStatus ?? {}, "learning");
   const learningThresholds =
@@ -284,9 +286,7 @@ export function MemorySection({ app }: MemorySectionProps) {
               <WorkspaceStatusChip tone={queuedLearningCount > 0 ? "warning" : "default"}>
                 {queuedLearningCount} queued
               </WorkspaceStatusChip>
-              <WorkspaceStatusChip
-                tone={autoAppliedLearningCount > 0 ? "accent" : "default"}
-              >
+              <WorkspaceStatusChip tone={autoAppliedLearningCount > 0 ? "accent" : "default"}>
                 {autoAppliedLearningCount} auto-applied
               </WorkspaceStatusChip>
               <ActionButton
@@ -366,8 +366,8 @@ export function MemorySection({ app }: MemorySectionProps) {
                     0) / 10_000,
                 )}
                 . Procedures require{" "}
-                {readNumber(procedureThresholds ?? EMPTY_OBJECT, "min_occurrences") ?? 0}{" "}
-                matching runs.
+                {readNumber(procedureThresholds ?? EMPTY_OBJECT, "min_occurrences") ?? 0} matching
+                runs.
               </WorkspaceInlineNotice>
             </div>
             {learningCandidates.length === 0 ? (
@@ -397,8 +397,8 @@ export function MemorySection({ app }: MemorySectionProps) {
                         <strong>{readString(candidate, "title") ?? candidateKind}</strong>
                         <p className="chat-muted">
                           {candidateKind} · confidence{" "}
-                          {formatLearningConfidence(readNumber(candidate, "confidence") ?? 0)} · risk{" "}
-                          {readString(candidate, "risk_level") ?? "normal"}
+                          {formatLearningConfidence(readNumber(candidate, "confidence") ?? 0)} ·
+                          risk {readString(candidate, "risk_level") ?? "normal"}
                         </p>
                       </div>
                       <WorkspaceStatusChip

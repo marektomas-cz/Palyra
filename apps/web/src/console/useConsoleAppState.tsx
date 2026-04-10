@@ -1120,7 +1120,7 @@ export function useConsoleAppState() {
       const nextCandidateId =
         memoryLearningCandidateId.trim().length > 0
           ? memoryLearningCandidateId.trim()
-          : readString(candidates[0], "candidate_id") ?? "";
+          : (readString(candidates[0], "candidate_id") ?? "");
       setMemoryLearningCandidateId(nextCandidateId);
       if (nextCandidateId.length > 0) {
         const historyResponse = await api.getLearningCandidateHistory(nextCandidateId);
@@ -1173,7 +1173,9 @@ export function useConsoleAppState() {
         status,
         apply_preference: applyPreference,
       });
-      setNotice(`Learning candidate ${response.candidate.title} marked as ${response.candidate.status}.`);
+      setNotice(
+        `Learning candidate ${response.candidate.title} marked as ${response.candidate.status}.`,
+      );
       await refreshLearningQueue();
       await selectLearningCandidate(trimmed);
     } catch (failure) {
