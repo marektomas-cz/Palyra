@@ -21,8 +21,9 @@ use tokio::sync::mpsc;
 use super::companion::DesktopCompanionProfileRecord;
 use super::profile_registry::{DesktopProfileCatalog, DesktopResolvedProfile};
 use super::{
-    load_or_initialize_state_file, sanitize_log_line, validate_runtime_state_root_override,
-    DesktopOnboardingStep, DesktopSecretStore, DesktopStateFile, BROWSER_GRPC_PORT,
+    load_or_initialize_state_file, load_runtime_secrets, sanitize_log_line,
+    validate_runtime_state_root_override, DesktopOnboardingStep, DesktopSecretStore,
+    DesktopStateFile, BROWSER_GRPC_PORT,
     BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL, GATEWAY_ADMIN_PORT, GATEWAY_GRPC_PORT,
     GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY, LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE,
 };
@@ -234,8 +235,8 @@ impl ControlCenter {
 
         let state_file_path = state_dir.join("state.json");
         let secret_store = DesktopSecretStore::open(state_dir.as_path())?;
-        let loaded = load_or_initialize_state_file(state_file_path.as_path(), &secret_store)?;
-        let mut persisted = loaded.persisted;
+        let mut persisted = load_or_initialize_state_file(state_file_path.as_path(), &secret_store)?;
+        let runtime_secrets = load_runtime_secrets(&secret_store)?;
         let profile_catalog = DesktopProfileCatalog::load(state_root.as_path())?;
         let active_profile = resolve_active_profile(&persisted, &profile_catalog);
         persisted.activate_profile(active_profile.context.name.as_str());
@@ -278,8 +279,8 @@ impl ControlCenter {
             persisted,
             active_profile,
             profile_catalog,
-            admin_token: loaded.admin_token,
-            browser_auth_token: loaded.browser_auth_token,
+            admin_token: runtime_secrets.admin_token,
+            browser_auth_token: runtime_secrets.browser_auth_token,
             runtime,
             gateway,
             browserd,

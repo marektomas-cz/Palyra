@@ -34,7 +34,7 @@ mod supervisor;
 use snapshot::sanitize_log_line;
 
 pub(crate) use desktop_state::{
-    load_or_initialize_state_file, resolve_desktop_state_root,
+    load_or_initialize_state_file, load_runtime_secrets, resolve_desktop_state_root,
     validate_runtime_state_root_override, DesktopCompanionSection, DesktopOnboardingStep,
     DesktopSecretStore, DesktopStateFile,
 };

@@ -32,11 +32,12 @@ use super::supervisor::ConsolePayloadCache;
 use super::{
     build_desktop_refresh_payload, build_onboarding_status, build_snapshot_from_inputs,
     collect_redacted_errors, compute_backoff_ms, executable_file_name,
-    load_or_initialize_state_file, mpsc, parse_discord_status, parse_remote_dashboard_base_url,
-    resolve_binary_path, resolve_desktop_state_root, sanitize_log_line, try_enqueue_log_event,
-    validate_runtime_state_root_override, BrowserStatusSnapshot, Client, ControlCenter,
-    DashboardAccessMode, DesktopOnboardingStep, DesktopSecretStore, DesktopStateFile, LogEvent,
-    LogStream, ManagedService, RuntimeConfig, ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
+    load_or_initialize_state_file, load_runtime_secrets, mpsc, parse_discord_status,
+    parse_remote_dashboard_base_url, resolve_binary_path, resolve_desktop_state_root,
+    sanitize_log_line, try_enqueue_log_event, validate_runtime_state_root_override,
+    BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode, DesktopOnboardingStep,
+    DesktopSecretStore, DesktopStateFile, LogEvent, LogStream, ManagedService, RuntimeConfig,
+    ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
 };
 
 fn env_lock() -> &'static Mutex<()> {
@@ -404,9 +405,9 @@ mode = "remote"
         load_or_initialize_state_file(control_center.state_file_path.as_path(), &secret_store)
             .expect("desktop state should reload after switch");
 
-    assert_eq!(reloaded.persisted.active_profile_name(), "review");
+    assert_eq!(reloaded.active_profile_name(), "review");
     assert!(
-        reloaded.persisted.recent_profile_names().iter().any(|name| name == "review"),
+        reloaded.recent_profile_names().iter().any(|name| name == "review"),
         "recent profile list should include the switched profile"
     );
 }
@@ -804,17 +805,19 @@ fn state_file_migration_moves_plaintext_tokens_to_secret_store() {
         DesktopSecretStore::open(fixture.path()).expect("secret store should initialize");
     let loaded = load_or_initialize_state_file(state_path.as_path(), &secret_store)
         .expect("legacy desktop state should migrate");
+    let runtime_secrets =
+        load_runtime_secrets(&secret_store).expect("runtime secrets should load after migration");
     assert_eq!(
-        loaded.admin_token,
+        runtime_secrets.admin_token,
         legacy["admin_token"].as_str().expect("legacy admin token fixture should be string")
     );
     assert_eq!(
-        loaded.browser_auth_token,
+        runtime_secrets.browser_auth_token,
         legacy["browser_auth_token"]
             .as_str()
             .expect("legacy browser token fixture should be string")
     );
-    assert!(!loaded.persisted.browser_service_enabled);
+    assert!(!loaded.browser_service_enabled);
 
     let rewritten = std::fs::read_to_string(state_path.as_path())
         .expect("rewritten desktop state should be readable");
@@ -829,8 +832,11 @@ fn state_file_migration_moves_plaintext_tokens_to_secret_store() {
 
     let loaded_again = load_or_initialize_state_file(state_path.as_path(), &secret_store)
         .expect("migrated desktop state should load from secret store");
-    assert_eq!(loaded_again.admin_token, loaded.admin_token);
-    assert_eq!(loaded_again.browser_auth_token, loaded.browser_auth_token);
+    let runtime_secrets_again =
+        load_runtime_secrets(&secret_store).expect("runtime secrets should reload from secret store");
+    assert_eq!(runtime_secrets_again.admin_token, runtime_secrets.admin_token);
+    assert_eq!(runtime_secrets_again.browser_auth_token, runtime_secrets.browser_auth_token);
+    assert_eq!(loaded_again.browser_service_enabled, loaded.browser_service_enabled);
 }
 
 #[test]
@@ -841,12 +847,15 @@ fn state_file_initialization_never_writes_plaintext_tokens() {
         DesktopSecretStore::open(fixture.path()).expect("secret store should initialize");
     let loaded = load_or_initialize_state_file(state_path.as_path(), &secret_store)
         .expect("desktop state should initialize");
+    let runtime_secrets =
+        load_runtime_secrets(&secret_store).expect("runtime secrets should initialize");
     let persisted_raw =
         std::fs::read_to_string(state_path.as_path()).expect("desktop state should be readable");
-    assert!(!persisted_raw.contains(loaded.admin_token.as_str()));
-    assert!(!persisted_raw.contains(loaded.browser_auth_token.as_str()));
+    assert!(!persisted_raw.contains(runtime_secrets.admin_token.as_str()));
+    assert!(!persisted_raw.contains(runtime_secrets.browser_auth_token.as_str()));
     assert!(!persisted_raw.contains("admin_token"));
     assert!(!persisted_raw.contains("browser_auth_token"));
+    assert_eq!(loaded.active_profile_name(), "desktop-local");
 }
 
 #[test]
@@ -857,15 +866,15 @@ fn state_file_initialization_seeds_onboarding_defaults() {
         DesktopSecretStore::open(fixture.path()).expect("secret store should initialize");
     let loaded = load_or_initialize_state_file(state_path.as_path(), &secret_store)
         .expect("desktop state should initialize");
-    assert_eq!(loaded.persisted.active_profile_name(), "desktop-local");
-    assert!(loaded.persisted.normalized_runtime_state_root().is_none());
-    assert!(loaded.persisted.active_onboarding().welcome_acknowledged_at_unix_ms.is_none());
-    assert!(!loaded.persisted.active_onboarding().flow_id.trim().is_empty());
-    assert_eq!(loaded.persisted.active_onboarding().discord.account_id, "default");
-    assert_eq!(loaded.persisted.active_onboarding().discord.broadcast_strategy, "deny");
-    assert!(loaded.persisted.active_onboarding().recent_events.is_empty());
-    assert!(loaded.persisted.active_onboarding().failure_step_counts.is_empty());
-    assert_eq!(loaded.persisted.active_onboarding().support_bundle_export_attempts, 0);
+    assert_eq!(loaded.active_profile_name(), "desktop-local");
+    assert!(loaded.normalized_runtime_state_root().is_none());
+    assert!(loaded.active_onboarding().welcome_acknowledged_at_unix_ms.is_none());
+    assert!(!loaded.active_onboarding().flow_id.trim().is_empty());
+    assert_eq!(loaded.active_onboarding().discord.account_id, "default");
+    assert_eq!(loaded.active_onboarding().discord.broadcast_strategy, "deny");
+    assert!(loaded.active_onboarding().recent_events.is_empty());
+    assert!(loaded.active_onboarding().failure_step_counts.is_empty());
+    assert_eq!(loaded.active_onboarding().support_bundle_export_attempts, 0);
 }
 
 #[test]

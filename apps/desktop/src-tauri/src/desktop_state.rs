@@ -631,26 +631,9 @@ impl PersistedDesktopStateEnvelope {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct LoadedDesktopState {
-    pub(crate) persisted: DesktopStateFile,
+pub(crate) struct DesktopRuntimeSecrets {
     pub(crate) admin_token: String,
     pub(crate) browser_auth_token: String,
-}
-
-impl std::fmt::Debug for LoadedDesktopState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LoadedDesktopState")
-            .field("persisted", &self.persisted)
-            .field("admin_token", &"<redacted>")
-            .field("browser_auth_token", &"<redacted>")
-            .finish()
-    }
-}
-
-struct DesktopRuntimeSecrets {
-    admin_token: String,
-    browser_auth_token: String,
 }
 
 pub(crate) struct DesktopSecretStore {
@@ -735,7 +718,7 @@ pub(crate) fn resolve_desktop_state_root() -> Result<PathBuf> {
 pub(crate) fn load_or_initialize_state_file(
     path: &Path,
     secret_store: &DesktopSecretStore,
-) -> Result<LoadedDesktopState> {
+) -> Result<DesktopStateFile> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!("failed to create desktop state directory {}", parent.display())
@@ -748,24 +731,16 @@ pub(crate) fn load_or_initialize_state_file(
         let persisted_envelope: PersistedDesktopStateEnvelope = serde_json::from_str(raw.as_str())
             .with_context(|| format!("failed to parse desktop state file {}", path.display()))?;
         let (mut persisted, legacy_secrets) = persisted_envelope.into_parts();
-        let runtime_secrets = load_desktop_runtime_secrets(secret_store, legacy_secrets)?;
+        hydrate_desktop_runtime_secrets(secret_store, legacy_secrets)?;
         persisted.ensure_profile_integrity();
         persist_desktop_state_file(path, &persisted, "normalized")?;
-        return Ok(LoadedDesktopState {
-            persisted,
-            admin_token: runtime_secrets.admin_token,
-            browser_auth_token: runtime_secrets.browser_auth_token,
-        });
+        return Ok(persisted);
     }
 
     let persisted = DesktopStateFile::new_default();
-    let runtime_secrets = load_desktop_runtime_secrets(secret_store, LegacyDesktopSecrets::default())?;
+    let _ = load_runtime_secrets(secret_store)?;
     persist_desktop_state_file(path, &persisted, "default")?;
-    Ok(LoadedDesktopState {
-        persisted,
-        admin_token: runtime_secrets.admin_token,
-        browser_auth_token: runtime_secrets.browser_auth_token,
-    })
+    Ok(persisted)
 }
 
 fn persist_desktop_state_file(path: &Path, state: &DesktopStateFile, label: &str) -> Result<()> {
@@ -773,6 +748,18 @@ fn persist_desktop_state_file(path: &Path, state: &DesktopStateFile, label: &str
         .with_context(|| format!("failed to encode {label} desktop state file"))?;
     fs::write(path, encoded)
         .with_context(|| format!("failed to persist {label} desktop state file {}", path.display()))
+}
+
+pub(crate) fn load_runtime_secrets(secret_store: &DesktopSecretStore) -> Result<DesktopRuntimeSecrets> {
+    load_desktop_runtime_secrets(secret_store, LegacyDesktopSecrets::default())
+}
+
+fn hydrate_desktop_runtime_secrets(
+    secret_store: &DesktopSecretStore,
+    legacy_secrets: LegacyDesktopSecrets,
+) -> Result<()> {
+    let _ = load_desktop_runtime_secrets(secret_store, legacy_secrets)?;
+    Ok(())
 }
 
 fn load_desktop_runtime_secrets(
