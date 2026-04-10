@@ -32,7 +32,8 @@ use super::supervisor::ConsolePayloadCache;
 use super::{
     build_desktop_refresh_payload, build_onboarding_status, build_snapshot_from_inputs,
     collect_redacted_errors, compute_backoff_ms, executable_file_name,
-    load_or_initialize_state_file, load_runtime_secrets, mpsc, parse_discord_status,
+    load_or_initialize_state_file, load_runtime_secrets,
+    migrate_legacy_runtime_secrets_from_state_file, mpsc, parse_discord_status,
     parse_remote_dashboard_base_url, resolve_binary_path, resolve_desktop_state_root,
     sanitize_log_line, try_enqueue_log_event, validate_runtime_state_root_override,
     BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode, DesktopOnboardingStep,
@@ -399,11 +400,8 @@ mode = "remote"
         .expect("profile switch should persist state");
     control_center.save_state_file().expect("desktop state should save after profile switch");
 
-    let secret_store = DesktopSecretStore::open(control_center.state_dir.as_path())
-        .expect("secret store should reopen");
-    let reloaded =
-        load_or_initialize_state_file(control_center.state_file_path.as_path(), &secret_store)
-            .expect("desktop state should reload after switch");
+    let reloaded = load_or_initialize_state_file(control_center.state_file_path.as_path())
+        .expect("desktop state should reload after switch");
 
     assert_eq!(reloaded.active_profile_name(), "review");
     assert!(
@@ -803,8 +801,10 @@ fn state_file_migration_moves_plaintext_tokens_to_secret_store() {
 
     let secret_store =
         DesktopSecretStore::open(fixture.path()).expect("secret store should initialize");
-    let loaded = load_or_initialize_state_file(state_path.as_path(), &secret_store)
-        .expect("legacy desktop state should migrate");
+    migrate_legacy_runtime_secrets_from_state_file(state_path.as_path(), &secret_store)
+        .expect("legacy desktop secrets should migrate");
+    let loaded = load_or_initialize_state_file(state_path.as_path())
+        .expect("legacy desktop state should load");
     let runtime_secrets =
         load_runtime_secrets(&secret_store).expect("runtime secrets should load after migration");
     assert_eq!(
@@ -830,7 +830,9 @@ fn state_file_migration_moves_plaintext_tokens_to_secret_store() {
     assert!(persisted_json.get("browser_auth_token").is_none());
     assert_eq!(persisted_json["browser_service_enabled"], json!(false));
 
-    let loaded_again = load_or_initialize_state_file(state_path.as_path(), &secret_store)
+    migrate_legacy_runtime_secrets_from_state_file(state_path.as_path(), &secret_store)
+        .expect("legacy desktop secrets should reload idempotently");
+    let loaded_again = load_or_initialize_state_file(state_path.as_path())
         .expect("migrated desktop state should load from secret store");
     let runtime_secrets_again =
         load_runtime_secrets(&secret_store).expect("runtime secrets should reload from secret store");
@@ -845,7 +847,7 @@ fn state_file_initialization_never_writes_plaintext_tokens() {
     let state_path = fixture.path().join("state.json");
     let secret_store =
         DesktopSecretStore::open(fixture.path()).expect("secret store should initialize");
-    let loaded = load_or_initialize_state_file(state_path.as_path(), &secret_store)
+    let loaded = load_or_initialize_state_file(state_path.as_path())
         .expect("desktop state should initialize");
     let runtime_secrets =
         load_runtime_secrets(&secret_store).expect("runtime secrets should initialize");
@@ -862,9 +864,7 @@ fn state_file_initialization_never_writes_plaintext_tokens() {
 fn state_file_initialization_seeds_onboarding_defaults() {
     let fixture = TempFixtureDir::new();
     let state_path = fixture.path().join("state.json");
-    let secret_store =
-        DesktopSecretStore::open(fixture.path()).expect("secret store should initialize");
-    let loaded = load_or_initialize_state_file(state_path.as_path(), &secret_store)
+    let loaded = load_or_initialize_state_file(state_path.as_path())
         .expect("desktop state should initialize");
     assert_eq!(loaded.active_profile_name(), "desktop-local");
     assert!(loaded.normalized_runtime_state_root().is_none());

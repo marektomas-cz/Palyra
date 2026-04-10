@@ -533,8 +533,6 @@ pub(crate) fn validate_runtime_state_root_override(
 struct PersistedDesktopStateEnvelope {
     #[serde(default = "default_legacy_schema_version")]
     schema_version: u32,
-    #[serde(flatten)]
-    legacy_secrets: LegacyDesktopSecrets,
     #[serde(default = "default_browser_service_enabled")]
     browser_service_enabled: bool,
     #[serde(default)]
@@ -555,7 +553,6 @@ impl std::fmt::Debug for PersistedDesktopStateEnvelope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PersistedDesktopStateEnvelope")
             .field("schema_version", &self.schema_version)
-            .field("legacy_secrets", &"<redacted>")
             .field("browser_service_enabled", &self.browser_service_enabled)
             .field("active_profile_name", &self.active_profile_name)
             .field("recent_profile_names", &self.recent_profile_names)
@@ -571,7 +568,6 @@ impl Default for PersistedDesktopStateEnvelope {
     fn default() -> Self {
         Self {
             schema_version: default_legacy_schema_version(),
-            legacy_secrets: LegacyDesktopSecrets::default(),
             browser_service_enabled: default_browser_service_enabled(),
             active_profile_name: Some(IMPLICIT_DESKTOP_PROFILE_NAME.to_owned()),
             recent_profile_names: vec![IMPLICIT_DESKTOP_PROFILE_NAME.to_owned()],
@@ -600,10 +596,23 @@ impl std::fmt::Debug for LegacyDesktopSecrets {
     }
 }
 
+impl LegacyDesktopSecrets {
+    fn is_empty(&self) -> bool {
+        self.admin_token.trim().is_empty() && self.browser_auth_token.trim().is_empty()
+    }
+
+    fn seed_for_admin_token(&self) -> Option<&str> {
+        (!self.admin_token.trim().is_empty()).then_some(self.admin_token.as_str())
+    }
+
+    fn seed_for_browser_auth_token(&self) -> Option<&str> {
+        (!self.browser_auth_token.trim().is_empty()).then_some(self.browser_auth_token.as_str())
+    }
+}
+
 impl PersistedDesktopStateEnvelope {
-    fn into_parts(self) -> (DesktopStateFile, LegacyDesktopSecrets) {
+    fn into_state(self) -> DesktopStateFile {
         let _ = self.schema_version;
-        let legacy_secrets = self.legacy_secrets;
         let mut profile_states = self.profile_states;
         if profile_states.is_empty() {
             profile_states.insert(
@@ -627,7 +636,7 @@ impl PersistedDesktopStateEnvelope {
             profile_states,
         };
         state.ensure_profile_integrity();
-        (state, legacy_secrets)
+        state
     }
 }
 
@@ -715,10 +724,7 @@ pub(crate) fn resolve_desktop_state_root() -> Result<PathBuf> {
     })
 }
 
-pub(crate) fn load_or_initialize_state_file(
-    path: &Path,
-    secret_store: &DesktopSecretStore,
-) -> Result<DesktopStateFile> {
+pub(crate) fn load_or_initialize_state_file(path: &Path) -> Result<DesktopStateFile> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!("failed to create desktop state directory {}", parent.display())
@@ -730,15 +736,13 @@ pub(crate) fn load_or_initialize_state_file(
             .with_context(|| format!("failed to read desktop state file {}", path.display()))?;
         let persisted_envelope: PersistedDesktopStateEnvelope = serde_json::from_str(raw.as_str())
             .with_context(|| format!("failed to parse desktop state file {}", path.display()))?;
-        let (mut persisted, legacy_secrets) = persisted_envelope.into_parts();
-        hydrate_desktop_runtime_secrets(secret_store, legacy_secrets)?;
+        let mut persisted = persisted_envelope.into_state();
         persisted.ensure_profile_integrity();
         persist_desktop_state_file(path, &persisted, "normalized")?;
         return Ok(persisted);
     }
 
     let persisted = DesktopStateFile::new_default();
-    let _ = load_runtime_secrets(secret_store)?;
     persist_desktop_state_file(path, &persisted, "default")?;
     Ok(persisted)
 }
@@ -754,10 +758,28 @@ pub(crate) fn load_runtime_secrets(secret_store: &DesktopSecretStore) -> Result<
     load_desktop_runtime_secrets(secret_store, LegacyDesktopSecrets::default())
 }
 
+pub(crate) fn migrate_legacy_runtime_secrets_from_state_file(
+    path: &Path,
+    secret_store: &DesktopSecretStore,
+) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read desktop state file {}", path.display()))?;
+    let legacy_secrets: LegacyDesktopSecrets = serde_json::from_str(raw.as_str()).with_context(
+        || format!("failed to parse legacy desktop secrets from {}", path.display()),
+    )?;
+    hydrate_desktop_runtime_secrets(secret_store, legacy_secrets)
+}
+
 fn hydrate_desktop_runtime_secrets(
     secret_store: &DesktopSecretStore,
     legacy_secrets: LegacyDesktopSecrets,
 ) -> Result<()> {
+    if legacy_secrets.is_empty() {
+        return Ok(());
+    }
     let _ = load_desktop_runtime_secrets(secret_store, legacy_secrets)?;
     Ok(())
 }
@@ -768,11 +790,11 @@ fn load_desktop_runtime_secrets(
 ) -> Result<DesktopRuntimeSecrets> {
     let admin_token = secret_store.load_or_create_secret(
         DESKTOP_SECRET_KEY_ADMIN_TOKEN,
-        Some(legacy_secrets.admin_token.as_str()),
+        legacy_secrets.seed_for_admin_token(),
     )?;
     let browser_auth_token = secret_store.load_or_create_secret(
         DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN,
-        Some(legacy_secrets.browser_auth_token.as_str()),
+        legacy_secrets.seed_for_browser_auth_token(),
     )?;
     Ok(DesktopRuntimeSecrets { admin_token, browser_auth_token })
 }
@@ -789,7 +811,7 @@ fn normalize_profile_name(raw: &str) -> String {
 mod tests {
     use super::{
         DesktopCompanionNotificationKind, DesktopCompanionState, LegacyDesktopSecrets,
-        PersistedDesktopStateEnvelope, DESKTOP_COMPANION_NOTIFICATION_LIMIT,
+        DESKTOP_COMPANION_NOTIFICATION_LIMIT,
         DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT,
     };
 
@@ -845,14 +867,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_state_envelope_debug_redacts_legacy_secrets() {
-        let mut envelope = PersistedDesktopStateEnvelope::default();
-        envelope.legacy_secrets = LegacyDesktopSecrets {
+    fn legacy_desktop_secrets_debug_redacts_tokens() {
+        let legacy_secrets = LegacyDesktopSecrets {
             admin_token: "admin-secret".to_owned(),
             browser_auth_token: "browser-secret".to_owned(),
         };
 
-        let rendered = format!("{envelope:?}");
+        let rendered = format!("{legacy_secrets:?}");
 
         assert!(!rendered.contains("admin-secret"));
         assert!(!rendered.contains("browser-secret"));
