@@ -58,7 +58,6 @@ import {
   buildObjectiveOverviewHref,
   resolveObjectiveId,
 } from "../objectiveLinks";
-import { getSectionPath } from "../navigation";
 
 type CronSectionProps = { app: ConsoleAppState };
 
@@ -120,10 +119,11 @@ export function CronSection({ app }: CronSectionProps) {
   const selectedObjective =
     selectedRoutineId === null
       ? null
-      : objectives.find(
+      : (objectives.find(
           (objective) =>
-            readString(readObject(objective, "automation") ?? {}, "routine_id") === selectedRoutineId,
-        ) ?? null;
+            readString(readObject(objective, "automation") ?? {}, "routine_id") ===
+            selectedRoutineId,
+        ) ?? null);
   const busy = app.cronBusy || routineBusy || previewBusy;
 
   useEffect(() => {
@@ -136,11 +136,15 @@ export function CronSection({ app }: CronSectionProps) {
   const scheduleCount = app.cronJobs.filter(
     (routine) => readString(routine, "trigger_kind") === "schedule",
   ).length;
-  const heartbeatCount = objectives.filter((objective) => readString(objective, "kind") === "heartbeat").length;
+  const heartbeatCount = objectives.filter(
+    (objective) => readString(objective, "kind") === "heartbeat",
+  ).length;
   const standingOrderCount = objectives.filter(
     (objective) => readString(objective, "kind") === "standing_order",
   ).length;
-  const programCount = objectives.filter((objective) => readString(objective, "kind") === "program").length;
+  const programCount = objectives.filter(
+    (objective) => readString(objective, "kind") === "program",
+  ).length;
   const productBackedRoutineCount = objectives.filter((objective) => {
     const routineId = readString(readObject(objective, "automation") ?? {}, "routine_id");
     return routineId !== null;
@@ -170,9 +174,7 @@ export function CronSection({ app }: CronSectionProps) {
           nextRun: formatUnixMs(readNumber(routine, "next_run_at_unix_ms")),
           lastOutcome: readString(lastRun, "outcome_kind") ?? "never_run",
           productTone: productToneForObjective(linkedObjective),
-          focus:
-            readString(linkedObjective ?? {}, "current_focus") ??
-            routineSummary(routine),
+          focus: readString(linkedObjective ?? {}, "current_focus") ?? routineSummary(routine),
         };
       }),
     [app.cronJobs, objectives],
@@ -544,9 +546,7 @@ export function CronSection({ app }: CronSectionProps) {
                     <WorkspaceStatusChip tone={row.enabled ? "success" : "default"}>
                       {row.enabled ? "enabled" : "paused"}
                     </WorkspaceStatusChip>
-                    <WorkspaceStatusChip tone={row.productTone}>
-                      {row.product}
-                    </WorkspaceStatusChip>
+                    <WorkspaceStatusChip tone={row.productTone}>{row.product}</WorkspaceStatusChip>
                     <WorkspaceStatusChip tone={workspaceToneForState(row.lastOutcome)}>
                       {row.lastOutcome}
                     </WorkspaceStatusChip>
@@ -950,8 +950,7 @@ export function CronSection({ app }: CronSectionProps) {
                   </p>
                   <p>
                     <strong>Current focus:</strong>{" "}
-                    {readString(selectedObjective, "current_focus") ??
-                      "No current focus recorded."}
+                    {readString(selectedObjective, "current_focus") ?? "No current focus recorded."}
                   </p>
                   <p>
                     <strong>Next action:</strong>{" "}
@@ -990,11 +989,9 @@ export function CronSection({ app }: CronSectionProps) {
                   </ActionCluster>
                 </InlineNotice>
               ) : null}
-              {selectedObjective !== null && readString(selectedObjective, "kind") === "heartbeat" ? (
-                <InlineNotice
-                  title="Heartbeat signal"
-                  tone={heartbeatSignalTone(selectedLastRun)}
-                >
+              {selectedObjective !== null &&
+              readString(selectedObjective, "kind") === "heartbeat" ? (
+                <InlineNotice title="Heartbeat signal" tone={heartbeatSignalTone(selectedLastRun)}>
                   {heartbeatSignalSummary(selectedObjective, selectedLastRun)}
                 </InlineNotice>
               ) : null}
