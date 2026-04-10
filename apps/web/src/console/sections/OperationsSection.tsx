@@ -336,6 +336,35 @@ export function OperationsSection({ app }: OperationsSectionProps) {
           </WorkspaceSectionCard>
 
           <WorkspaceSectionCard
+            title="Interop surfaces"
+            description="ACP remains the stateful editor bridge, MCP stays the narrower stdio facade, and compat responses now carry `_palyra` metadata so run/session IDs stay explainable across transports."
+          >
+            <WorkspaceTable
+              ariaLabel="Interop surfaces"
+              columns={["Surface", "Primary use", "Operator note"]}
+            >
+              <tr>
+                <td>ACP bridge</td>
+                <td>IDE-style session control</td>
+                <td>Stable session binding and reconnect behavior share the native approval model.</td>
+              </tr>
+              <tr>
+                <td>MCP facade</td>
+                <td>Tool-oriented stdio integrations</td>
+                <td>Read-only by default, with explicit mutation tools gated by the same approvals.</td>
+              </tr>
+              <tr>
+                <td>Compat API</td>
+                <td>OpenAI-compatible clients</td>
+                <td>
+                  `_palyra.run_id` and `_palyra.session_id` help correlate interop traffic with
+                  audit and transcript records.
+                </td>
+              </tr>
+            </WorkspaceTable>
+          </WorkspaceSectionCard>
+
+          <WorkspaceSectionCard
             title="Internal notes"
             description="Keep internal-only capabilities visible so hidden power does not become accidental product surface."
           >

@@ -1339,6 +1339,10 @@ fn populate_remote_plan(
             "remote SSH-tunnel profile expects a live `palyra tunnel --ssh ...` session before admin/gateway commands can succeed."
                 .to_owned(),
         );
+        plan.warnings.push(
+            "if the first remote handoff fails, export a support bundle before retrying so trust and handshake diagnostics stay available."
+                .to_owned(),
+        );
     }
 
     let store_admin_token = wizard.confirm(confirm_step(
@@ -2777,6 +2781,11 @@ fn section_follow_up_checks(
             let mut values = vec!["palyra gateway status".to_owned()];
             if get_string_value_at_path(document, "gateway_access.remote_base_url")?.is_some() {
                 values.push("palyra dashboard --verify-remote".to_owned());
+                values.push("palyra gateway discover --verify-remote".to_owned());
+                values.push(
+                    "palyra support-bundle export --output ./artifacts/palyra-support-bundle.zip"
+                        .to_owned(),
+                );
             }
             values
         }

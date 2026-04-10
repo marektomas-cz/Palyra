@@ -82,12 +82,15 @@ impl DashboardAccessMode {
 pub(crate) struct DashboardAccessTarget {
     pub(crate) url: String,
     pub(crate) mode: DashboardAccessMode,
+    pub(crate) remote_verification_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct QuickFactsSnapshot {
     pub(crate) dashboard_url: String,
     pub(crate) dashboard_access_mode: String,
+    pub(crate) dashboard_remote_trust_state: String,
+    pub(crate) dashboard_remote_verification_mode: Option<String>,
     pub(crate) gateway_version: Option<String>,
     pub(crate) gateway_git_hash: Option<String>,
     pub(crate) gateway_uptime_seconds: Option<u64>,
@@ -696,8 +699,10 @@ pub(crate) async fn build_snapshot_from_inputs(
     };
 
     let quick_facts = QuickFactsSnapshot {
-        dashboard_url: dashboard_access.url,
+        dashboard_url: dashboard_access.url.clone(),
         dashboard_access_mode: dashboard_access.mode.as_str().to_owned(),
+        dashboard_remote_trust_state: dashboard_remote_trust_state(&dashboard_access).to_owned(),
+        dashboard_remote_verification_mode: dashboard_access.remote_verification_mode.clone(),
         gateway_version: gateway_health.as_ref().map(|value| value.version.clone()),
         gateway_git_hash: gateway_health.as_ref().map(|value| value.git_hash.clone()),
         gateway_uptime_seconds: gateway_health.as_ref().map(|value| value.uptime_seconds),
@@ -1390,6 +1395,9 @@ pub(crate) fn resolve_dashboard_access_target(default_port: u16) -> Result<Dashb
                 "gateway_access.remote_base_url",
             )?,
             mode: DashboardAccessMode::Remote,
+            remote_verification_mode: resolve_dashboard_remote_verification_mode(
+                parsed.gateway_access.as_ref(),
+            ),
         });
     }
 
@@ -1404,7 +1412,42 @@ pub(crate) fn resolve_dashboard_access_target(default_port: u16) -> Result<Dashb
     Ok(DashboardAccessTarget {
         url: format_dashboard_url(normalize_dashboard_socket(socket)),
         mode: DashboardAccessMode::Local,
+        remote_verification_mode: None,
     })
+}
+
+fn resolve_dashboard_remote_verification_mode(
+    gateway_access: Option<&palyra_common::daemon_config_schema::FileGatewayAccessConfig>,
+) -> Option<String> {
+    let gateway_access = gateway_access?;
+    if gateway_access
+        .pinned_server_cert_fingerprint_sha256
+        .as_deref()
+        .and_then(normalize_optional_text)
+        .is_some()
+    {
+        return Some("server_cert".to_owned());
+    }
+    if gateway_access
+        .pinned_gateway_ca_fingerprint_sha256
+        .as_deref()
+        .and_then(normalize_optional_text)
+        .is_some()
+    {
+        return Some("gateway_ca".to_owned());
+    }
+    None
+}
+
+fn dashboard_remote_trust_state(target: &DashboardAccessTarget) -> &'static str {
+    if !matches!(target.mode, DashboardAccessMode::Remote) {
+        return "local";
+    }
+    if target.remote_verification_mode.is_some() {
+        "verification_configured"
+    } else {
+        "pin_missing"
+    }
 }
 
 pub(crate) fn resolve_dashboard_config_path() -> Result<Option<PathBuf>> {
@@ -1475,5 +1518,6 @@ pub(crate) fn default_dashboard_access_target(default_port: u16) -> DashboardAcc
             "{DASHBOARD_SCHEME}://{LOOPBACK_HOST}:{default_port}/{DEFAULT_DASHBOARD_HASH_ROUTE}"
         ),
         mode: DashboardAccessMode::Local,
+        remote_verification_mode: None,
     }
 }

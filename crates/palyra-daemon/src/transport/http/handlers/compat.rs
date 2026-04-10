@@ -452,6 +452,7 @@ fn build_compat_chat_completion_payload(result: &CompatExecutionResult) -> Value
             "finish_reason": result.finish_reason,
         }],
         "usage": compat_usage_json(&result.snapshot),
+        "_palyra": compat_interop_json(&result.snapshot),
     })
 }
 
@@ -471,6 +472,7 @@ fn build_compat_responses_payload(result: &CompatExecutionResult) -> Value {
         }],
         "tool_calls": result.tool_calls.iter().map(compat_tool_call_json).collect::<Vec<Value>>(),
         "usage": compat_usage_json(&result.snapshot),
+        "_palyra": compat_interop_json(&result.snapshot),
     })
 }
 
@@ -490,6 +492,15 @@ fn compat_usage_json(snapshot: &journal::OrchestratorRunStatusSnapshot) -> Value
         "prompt_tokens": snapshot.prompt_tokens,
         "completion_tokens": snapshot.completion_tokens,
         "total_tokens": snapshot.total_tokens,
+    })
+}
+
+fn compat_interop_json(snapshot: &journal::OrchestratorRunStatusSnapshot) -> Value {
+    json!({
+        "origin": "compat_api",
+        "run_id": snapshot.run_id,
+        "session_id": snapshot.session_id,
+        "approval_mode": "shared_palyra_approvals",
     })
 }
 
@@ -525,6 +536,12 @@ fn build_compat_chat_streaming_response(state: AppState, prepared: CompatPrepare
                     "delta": { "role": "assistant" },
                     "finish_reason": Value::Null,
                 }],
+                "_palyra": {
+                    "origin": "compat_api",
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "approval_mode": "shared_palyra_approvals",
+                },
             }),
         )
         .await

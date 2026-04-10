@@ -89,6 +89,8 @@ pub(crate) struct OnboardingStatusSnapshot {
     pub(crate) state_root_overridden: bool,
     pub(crate) dashboard_url: String,
     pub(crate) dashboard_access_mode: String,
+    pub(crate) dashboard_remote_trust_state: String,
+    pub(crate) dashboard_remote_verification_mode: Option<String>,
     pub(crate) dashboard_reachable: bool,
     pub(crate) dashboard_handoff_completed: bool,
     pub(crate) completion_unix_ms: Option<i64>,
@@ -297,6 +299,11 @@ pub(crate) async fn build_desktop_refresh_payload(
         state_root_overridden: persisted.normalized_runtime_state_root().is_some(),
         dashboard_url: snapshot.quick_facts.dashboard_url.clone(),
         dashboard_access_mode: snapshot.quick_facts.dashboard_access_mode.clone(),
+        dashboard_remote_trust_state: snapshot.quick_facts.dashboard_remote_trust_state.clone(),
+        dashboard_remote_verification_mode: snapshot
+            .quick_facts
+            .dashboard_remote_verification_mode
+            .clone(),
         dashboard_reachable,
         dashboard_handoff_completed: onboarding.dashboard_handoff_at_unix_ms.is_some(),
         completion_unix_ms: onboarding.completed_at_unix_ms,
@@ -382,7 +389,21 @@ fn build_preflight_snapshot(
         label: "Dashboard access mode".to_owned(),
         status: "ok".to_owned(),
         detail: if snapshot.quick_facts.dashboard_access_mode == "remote" {
-            "Remote dashboard access is configured. Desktop stays local-first.".to_owned()
+            match snapshot.quick_facts.dashboard_remote_trust_state.as_str() {
+                "verification_configured" => format!(
+                    "Remote dashboard access is configured with {} verification. Re-run verify after trust changes.",
+                    snapshot
+                        .quick_facts
+                        .dashboard_remote_verification_mode
+                        .as_deref()
+                        .unwrap_or("remote")
+                ),
+                "pin_missing" => {
+                    "Remote dashboard access is configured without an explicit pin. Re-run onboarding or update config before first connect."
+                        .to_owned()
+                }
+                _ => "Remote dashboard access is configured. Desktop stays local-first.".to_owned(),
+            }
         } else if dashboard_reachable {
             "Dashboard resolves to a local address and responds to HTTP checks.".to_owned()
         } else {
@@ -802,8 +823,14 @@ fn suggested_actions(step: DesktopOnboardingStep) -> Vec<String> {
                 .to_owned(),
         ],
         DesktopOnboardingStep::DashboardHandoff => {
-            vec!["Open the dashboard from desktop once runtime, OpenAI, and Discord are ready."
-                .to_owned()]
+            vec![
+                "Open the dashboard from desktop once runtime, OpenAI, and Discord are ready."
+                    .to_owned(),
+                "If remote trust material rotated, re-run verify-remote before relying on the dashboard handoff."
+                    .to_owned(),
+                "Export a support bundle if remote verification or handshake keeps failing."
+                    .to_owned(),
+            ]
         }
         DesktopOnboardingStep::Completion => vec![
             "Desktop home is ready. Use diagnostics or support bundle export if health degrades."
@@ -932,6 +959,20 @@ fn build_step_snapshots(
                     false,
                     if onboarding.dashboard_handoff_at_unix_ms.is_some() {
                         "Dashboard handoff has been recorded from desktop.".to_owned()
+                    } else if snapshot.quick_facts.dashboard_access_mode == "remote"
+                        && snapshot.quick_facts.dashboard_remote_trust_state == "pin_missing"
+                    {
+                        "Remote dashboard is configured but missing an explicit pin. Fix trust config before first-connect handoff."
+                            .to_owned()
+                    } else if snapshot.quick_facts.dashboard_access_mode == "remote" {
+                        format!(
+                            "Remote dashboard handoff is ready with {} verification. Re-verify after trust rotation.",
+                            snapshot
+                                .quick_facts
+                                .dashboard_remote_verification_mode
+                                .as_deref()
+                                .unwrap_or("remote")
+                        )
                     } else if dashboard_reachable || snapshot.quick_facts.dashboard_access_mode == "remote" {
                         "Open the dashboard for the full operator surface and finish the handoff.".to_owned()
                     } else {

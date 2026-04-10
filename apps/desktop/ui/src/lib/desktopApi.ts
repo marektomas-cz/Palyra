@@ -285,6 +285,8 @@ export type BrowserServiceSnapshot = {
 export type QuickFactsSnapshot = {
   dashboard_url: string;
   dashboard_access_mode: string;
+  dashboard_remote_trust_state: string;
+  dashboard_remote_verification_mode?: string | null;
   gateway_version: string | null;
   gateway_git_hash: string | null;
   gateway_uptime_seconds: number | null;
@@ -331,6 +333,8 @@ export const DESKTOP_PREVIEW_SNAPSHOT: ControlCenterSnapshot = {
   quick_facts: {
     dashboard_url: "http://127.0.0.1:7142/",
     dashboard_access_mode: "local",
+    dashboard_remote_trust_state: "local",
+    dashboard_remote_verification_mode: null,
     gateway_version: "preview",
     gateway_git_hash: "preview",
     gateway_uptime_seconds: 142,

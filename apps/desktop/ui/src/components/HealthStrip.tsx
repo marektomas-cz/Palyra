@@ -66,7 +66,9 @@ export function HealthStrip({ snapshot, attentionCount, loading }: HealthStripPr
             <Skeleton className="desktop-skeleton desktop-skeleton--detail" />
           ) : (
             <p className="desktop-muted">
-              Gateway uptime {formatUptime(snapshot.quick_facts.gateway_uptime_seconds)}
+              {snapshot.quick_facts.dashboard_remote_trust_state === "local"
+                ? `Gateway uptime ${formatUptime(snapshot.quick_facts.gateway_uptime_seconds)}`
+                : `Trust ${snapshot.quick_facts.dashboard_remote_trust_state} · ${snapshot.quick_facts.dashboard_remote_verification_mode ?? "verify mode n/a"}`}
             </p>
           )
         }

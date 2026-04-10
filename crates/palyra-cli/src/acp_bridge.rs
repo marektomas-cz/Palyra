@@ -37,8 +37,44 @@ struct SessionBinding {
 
 #[derive(Debug, Default)]
 struct BridgeState {
-    sessions: HashMap<String, SessionBinding>,
+    bindings_by_acp_session_id: HashMap<String, SessionBinding>,
+    bindings_by_session_key: HashMap<String, SessionBinding>,
+    bindings_by_gateway_session_id: HashMap<String, SessionBinding>,
     active_runs: HashMap<String, String>,
+}
+
+impl BridgeState {
+    fn remember_binding(&mut self, acp_session_id: &str, binding: SessionBinding) {
+        self.bindings_by_acp_session_id
+            .insert(acp_session_id.to_owned(), binding.clone());
+        self.bindings_by_session_key
+            .insert(binding.session_key.clone(), binding.clone());
+        self.bindings_by_gateway_session_id
+            .insert(binding.gateway_session_id_ulid.clone(), binding);
+    }
+
+    fn lookup_binding(&self, acp_session_id: &str) -> Option<SessionBinding> {
+        self.bindings_by_acp_session_id
+            .get(acp_session_id)
+            .or_else(|| self.bindings_by_session_key.get(acp_session_id))
+            .or_else(|| self.bindings_by_gateway_session_id.get(acp_session_id))
+            .cloned()
+    }
+
+    fn lookup_binding_for_gateway_session(
+        &self,
+        session: &gateway_v1::SessionSummary,
+    ) -> Option<SessionBinding> {
+        let gateway_session_id = session.session_id.as_ref().map(|value| value.ulid.as_str());
+        let session_key = non_empty(Some(session.session_key.clone()));
+        session_key
+            .as_deref()
+            .and_then(|value| self.bindings_by_session_key.get(value))
+            .or_else(|| {
+                gateway_session_id.and_then(|value| self.bindings_by_gateway_session_id.get(value))
+            })
+            .cloned()
+    }
 }
 
 enum ClientBridgeRequest {
@@ -274,7 +310,7 @@ impl PalyraAcpAgent {
         default_require_existing: bool,
     ) -> acp::Result<SessionBinding> {
         let session_id_value = acp_session_id.0.as_ref().to_owned();
-        if let Some(binding) = self.lock_state()?.sessions.get(&session_id_value).cloned() {
+        if let Some(binding) = self.lock_state()?.lookup_binding(session_id_value.as_str()) {
             if overrides.session_key.is_none()
                 && overrides.session_label.is_none()
                 && overrides.reset_session.is_none()
@@ -302,7 +338,8 @@ impl PalyraAcpAgent {
                 overrides.reset_session.unwrap_or(self.session_defaults.reset_session),
             )
             .await?;
-        self.lock_state()?.sessions.insert(session_id_value, binding.clone());
+        self.lock_state()?
+            .remember_binding(session_id_value.as_str(), binding.clone());
         Ok(binding)
     }
 
@@ -539,7 +576,8 @@ impl acp::Agent for PalyraAcpAgent {
             .await?;
         binding.cwd = arguments.cwd;
 
-        self.lock_state()?.sessions.insert(binding.session_key.clone(), binding.clone());
+        self.lock_state()?
+            .remember_binding(binding.session_key.as_str(), binding.clone());
 
         Ok(acp::NewSessionResponse::new(acp::SessionId::new(binding.session_key)))
     }
@@ -562,7 +600,8 @@ impl acp::Agent for PalyraAcpAgent {
             .await?;
         binding.cwd = arguments.cwd;
 
-        self.lock_state()?.sessions.insert(arguments.session_id.0.as_ref().to_owned(), binding);
+        self.lock_state()?
+            .remember_binding(arguments.session_id.0.as_ref(), binding);
         Ok(acp::LoadSessionResponse::new())
     }
 
@@ -594,7 +633,7 @@ impl acp::Agent for PalyraAcpAgent {
     ) -> acp::Result<acp::ListSessionsResponse> {
         let response = self.list_gateway_sessions(arguments.cursor).await?;
         let state = self.lock_state()?;
-        Ok(map_list_sessions_response(response, &state.sessions, &self.default_cwd))
+        Ok(map_list_sessions_response(response, &state, &self.default_cwd))
     }
 }
 
@@ -776,13 +815,14 @@ fn map_permission_outcome(
 
 fn map_list_sessions_response(
     response: gateway_v1::ListSessionsResponse,
-    session_bindings: &HashMap<String, SessionBinding>,
+    state: &BridgeState,
     default_cwd: &Path,
 ) -> acp::ListSessionsResponse {
     let sessions = response
         .sessions
         .into_iter()
         .map(|session| {
+            let binding = state.lookup_binding_for_gateway_session(&session);
             let session_key = if session.session_key.trim().is_empty() {
                 session
                     .session_id
@@ -792,12 +832,17 @@ fn map_list_sessions_response(
             } else {
                 session.session_key
             };
-            let cwd = session_bindings
-                .get(&session_key)
+            let cwd = binding
+                .as_ref()
                 .map(|binding| binding.cwd.clone())
                 .unwrap_or_else(|| default_cwd.to_path_buf());
             acp::SessionInfo::new(acp::SessionId::new(session_key), cwd)
-                .title(non_empty(Some(session.session_label)))
+                .title(
+                    binding
+                        .as_ref()
+                        .and_then(|binding| binding.session_label.clone())
+                        .or_else(|| non_empty(Some(session.session_label))),
+                )
         })
         .collect::<Vec<_>>();
     acp::ListSessionsResponse::new(sessions)
@@ -869,7 +914,6 @@ mod tests {
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
     use serde_json::json;
     use std::{
-        collections::HashMap,
         path::PathBuf,
         sync::{Arc, Mutex},
     };
@@ -1040,9 +1084,9 @@ mod tests {
     #[test]
     fn map_list_sessions_response_uses_session_key_fallback_and_binding_cwd() {
         let default_cwd = PathBuf::from("C:/workspace/default");
-        let mut session_bindings = HashMap::new();
-        session_bindings.insert(
-            "session-alpha".to_owned(),
+        let mut state = BridgeState::default();
+        state.remember_binding(
+            "session-alpha",
             SessionBinding {
                 gateway_session_id_ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 session_key: "session-alpha".to_owned(),
@@ -1081,7 +1125,7 @@ mod tests {
             next_after_session_key: "  cursor-2  ".to_owned(),
         };
 
-        let mapped = map_list_sessions_response(response, &session_bindings, &default_cwd);
+        let mapped = map_list_sessions_response(response, &state, &default_cwd);
         assert_eq!(mapped.next_cursor.as_deref(), Some("cursor-2"));
         assert_eq!(mapped.sessions.len(), 2);
 
@@ -1092,5 +1136,39 @@ mod tests {
         assert_eq!(mapped.sessions[1].session_id.0.as_ref(), "01ARZ3NDEKTSV4RRFFQ69G5FAZ");
         assert_eq!(mapped.sessions[1].cwd, default_cwd);
         assert_eq!(mapped.sessions[1].title, None);
+    }
+
+    #[test]
+    fn bridge_state_lookup_covers_acp_session_key_and_gateway_session_id() {
+        let binding = SessionBinding {
+            gateway_session_id_ulid: "01ARZ3NDEKTSV4RRFFQ69G5FA1".to_owned(),
+            session_key: "ops:triage".to_owned(),
+            session_label: Some("Ops triage".to_owned()),
+            cwd: PathBuf::from("C:/workspace/triage"),
+        };
+        let mut state = BridgeState::default();
+        state.remember_binding("acp-session-1", binding.clone());
+
+        assert_eq!(
+            state
+                .lookup_binding("acp-session-1")
+                .expect("binding by ACP session id")
+                .cwd,
+            binding.cwd
+        );
+        assert_eq!(
+            state
+                .lookup_binding("ops:triage")
+                .expect("binding by session key")
+                .gateway_session_id_ulid,
+            binding.gateway_session_id_ulid
+        );
+        assert_eq!(
+            state
+                .lookup_binding("01ARZ3NDEKTSV4RRFFQ69G5FA1")
+                .expect("binding by gateway session id")
+                .session_key,
+            binding.session_key
+        );
     }
 }

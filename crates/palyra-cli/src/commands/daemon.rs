@@ -91,12 +91,14 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
             }
 
             if json {
+                let remote_assist = build_remote_dashboard_assist_payload(&target, verify_remote);
                 let output = serde_json::json!({
                     "url": target.url,
                     "mode": target.mode.as_str(),
                     "source": target.source.as_str(),
                     "config_path": target.config_path,
                     "verification": verification_report,
+                    "remote_assist": remote_assist,
                     "opened": open,
                 });
                 println!(
@@ -121,6 +123,9 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
                         verification_report.observed_server_cert_fingerprint_sha256,
                         verification_report.gateway_ca_fingerprint_sha256.as_deref().unwrap_or("none")
                     );
+                }
+                if let Some(remote_assist) = build_remote_dashboard_assist_payload(&target, verify_remote) {
+                    emit_remote_dashboard_assist_lines("daemon.dashboard_url", &remote_assist);
                 }
                 if open {
                     println!("daemon.dashboard_url.opened=true");
@@ -791,6 +796,7 @@ fn build_gateway_discover_payload(
     } else {
         None
     };
+    let remote_assist = build_remote_dashboard_assist_payload(&target, verify_remote);
     Ok(json!({
         "mode": "config_profile_tunnel_first",
         "profile": context.profile_name(),
@@ -805,6 +811,7 @@ fn build_gateway_discover_payload(
             "config_path": target.config_path,
             "verification": verification_report,
         },
+        "remote_assist": remote_assist,
         "remote_access_hint": if matches!(target.mode, DashboardAccessMode::Remote) {
             Some("Prefer `palyra tunnel --ssh <user>@<host> --open` unless you intentionally operate a verified HTTPS dashboard endpoint.")
         } else {
@@ -860,7 +867,76 @@ fn run_gateway_discover(
     if let Some(hint) = payload.get("remote_access_hint").and_then(Value::as_str) {
         println!("gateway.discover.hint={hint}");
     }
+    if let Some(remote_assist) = payload.get("remote_assist") {
+        emit_remote_dashboard_assist_lines("gateway.discover", remote_assist);
+    }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn build_remote_dashboard_assist_payload(
+    target: &DashboardAccessTarget,
+    verify_remote: bool,
+) -> Option<Value> {
+    if !matches!(target.mode, DashboardAccessMode::Remote) {
+        return None;
+    }
+
+    let verification_mode = target
+        .verification
+        .as_ref()
+        .map(|verification| verification.method.as_str().to_owned());
+    let trust_state = match (target.verification.as_ref(), verify_remote) {
+        (Some(_), true) => "verified",
+        (Some(_), false) => "verification_configured",
+        (None, _) => "pin_missing",
+    };
+    Some(json!({
+        "trust_state": trust_state,
+        "verification_mode": verification_mode,
+        "verification_required": target.verification.is_some(),
+        "reverify_recommended": target.verification.is_some() && !verify_remote,
+        "commands": {
+            "verify": "palyra dashboard --verify-remote --json",
+            "discover": "palyra gateway discover --verify-remote --json",
+            "tunnel": "palyra tunnel --ssh <user>@<host> --remote-port 7142 --local-port 7142 --open",
+            "support_bundle": "palyra support-bundle export --output ./artifacts/palyra-support-bundle.zip",
+        },
+        "troubleshooting": [
+            "If trust material changed, rerun remote verification before opening the dashboard again.",
+            "Use the SSH tunnel handoff unless you intentionally maintain a verified HTTPS dashboard endpoint.",
+            "Export a support bundle after repeated handshake or fingerprint failures so recovery has full diagnostics."
+        ],
+    }))
+}
+
+fn emit_remote_dashboard_assist_lines(prefix: &str, payload: &Value) {
+    println!(
+        "{prefix}.remote trust_state={} verification_mode={} verification_required={} reverify_recommended={}",
+        payload.get("trust_state").and_then(Value::as_str).unwrap_or("unknown"),
+        payload.get("verification_mode").and_then(Value::as_str).unwrap_or("none"),
+        payload
+            .get("verification_required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        payload
+            .get("reverify_recommended")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
+    if let Some(commands) = payload.get("commands").and_then(Value::as_object) {
+        for (name, command) in commands {
+            if let Some(command) = command.as_str() {
+                println!("{prefix}.remote.command {name}=\"{command}\"");
+            }
+        }
+    }
+    if let Some(troubleshooting) = payload.get("troubleshooting").and_then(Value::as_array) {
+        for (index, item) in troubleshooting.iter().enumerate() {
+            if let Some(item) = item.as_str() {
+                println!("{prefix}.remote.troubleshooting[{}]={}", index, item);
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

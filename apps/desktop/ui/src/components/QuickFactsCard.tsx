@@ -36,6 +36,17 @@ export function QuickFactsCard({ snapshot, loading }: QuickFactsCardProps) {
       <KeyValueList
         items={[
           {
+            label: "Remote trust",
+            value: textValue(snapshot.quick_facts.dashboard_remote_trust_state, loading),
+          },
+          {
+            label: "Verify mode",
+            value: textValue(
+              snapshot.quick_facts.dashboard_remote_verification_mode ?? "n/a",
+              loading,
+            ),
+          },
+          {
             label: "Version",
             value: textValue(snapshot.quick_facts.gateway_version ?? "Unavailable", loading),
           },

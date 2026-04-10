@@ -552,6 +552,12 @@ function RemoteVerifyCard({
     tone: "default" | "warning" | "danger" | "success" | "accent";
   }>;
 }) {
+  const trustWarning =
+    deployment?.remote_bind_detected && !deployment?.tls.gateway_enabled
+      ? "Remote bind is visible without gateway TLS. Stop here until TLS is enabled and verified."
+      : deployment?.remote_bind_detected
+        ? "Remote bind is active. Re-run verify whenever certificates, pins, or gateway CA material rotates."
+        : "Remote bind is not currently detected.";
   return (
     <WorkspaceSectionCard
       description="Remote verify stays guided in the browser even when the actual certificate or tunnel proof remains an intentional CLI handoff."
@@ -615,6 +621,20 @@ function RemoteVerifyCard({
             cargo run -p palyra-cli -- tunnel --ssh &lt;user&gt;@&lt;host&gt; --remote-port 7142
             --local-port 7142
           </code>
+        </p>
+        <p>
+          <code>cargo run -p palyra-cli -- support-bundle export --output ./artifacts/palyra-support-bundle.zip</code>
+        </p>
+      </WorkspaceInlineNotice>
+
+      <WorkspaceInlineNotice
+        title="Trust and recovery"
+        tone={workspaceToneForState(deployment?.tls.gateway_enabled ? "ready" : "danger")}
+      >
+        <p>{trustWarning}</p>
+        <p>
+          If first-connect still fails after tunnel and pin checks, export a support bundle before
+          retrying so recovery has the handshake diagnostics and recent remote-access attempts.
         </p>
       </WorkspaceInlineNotice>
     </WorkspaceSectionCard>
