@@ -528,7 +528,7 @@ pub(crate) fn validate_runtime_state_root_override(
     Ok(parsed)
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 struct PersistedDesktopStateEnvelope {
     #[serde(default = "default_legacy_schema_version")]
@@ -549,6 +549,22 @@ struct PersistedDesktopStateEnvelope {
     onboarding: DesktopOnboardingState,
     #[serde(default)]
     companion: DesktopCompanionState,
+}
+
+impl std::fmt::Debug for PersistedDesktopStateEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PersistedDesktopStateEnvelope")
+            .field("schema_version", &self.schema_version)
+            .field("legacy_secrets", &self.legacy_secrets)
+            .field("browser_service_enabled", &self.browser_service_enabled)
+            .field("active_profile_name", &self.active_profile_name)
+            .field("recent_profile_names", &self.recent_profile_names)
+            .field("profile_states", &self.profile_states)
+            .field("runtime_state_root", &self.runtime_state_root)
+            .field("onboarding", &self.onboarding)
+            .field("companion", &self.companion)
+            .finish()
+    }
 }
 
 impl Default for PersistedDesktopStateEnvelope {
@@ -785,8 +801,9 @@ fn normalize_profile_name(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DesktopCompanionNotificationKind, DesktopCompanionState,
-        DESKTOP_COMPANION_NOTIFICATION_LIMIT, DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT,
+        DesktopCompanionNotificationKind, DesktopCompanionState, LegacyDesktopSecrets,
+        PersistedDesktopStateEnvelope, DESKTOP_COMPANION_NOTIFICATION_LIMIT,
+        DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT,
     };
 
     #[test]
@@ -838,5 +855,20 @@ mod tests {
             .notifications
             .iter()
             .all(|entry| entry.title != "notification-0" && entry.title != "notification-1"));
+    }
+
+    #[test]
+    fn persisted_state_envelope_debug_redacts_legacy_secrets() {
+        let mut envelope = PersistedDesktopStateEnvelope::default();
+        envelope.legacy_secrets = LegacyDesktopSecrets {
+            admin_token: "admin-secret".to_owned(),
+            browser_auth_token: "browser-secret".to_owned(),
+        };
+
+        let rendered = format!("{envelope:?}");
+
+        assert!(!rendered.contains("admin-secret"));
+        assert!(!rendered.contains("browser-secret"));
+        assert!(rendered.contains("<redacted>"));
     }
 }
