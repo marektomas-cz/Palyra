@@ -730,6 +730,127 @@ describe("M54 web auth surface", () => {
     expect(screen.queryByText("Web actions limited")).not.toBeInTheDocument();
     expect(document.body).toHaveTextContent("anthropic");
   }, 20_000);
+
+  it("runs provider connection and discovery actions from the registry table", async () => {
+    const state = createAuthSurfaceState();
+    let testConnectionBody = "";
+    let discoveryBody = "";
+
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = requestDescriptor(input, init);
+      if (request.path === "/console/v1/auth/session" && request.method === "GET") {
+        return Promise.resolve(sessionResponse());
+      }
+      if (request.path === "/console/v1/approvals" && request.method === "GET") {
+        return Promise.resolve(jsonResponse({ approvals: [] }));
+      }
+      if (request.path === "/console/v1/diagnostics" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(diagnosticsSnapshot(state.profiles, state.defaultProfileId)),
+        );
+      }
+      if (request.path === "/console/v1/auth/profiles" && request.method === "GET") {
+        return Promise.resolve(jsonResponse(authProfilesEnvelope(state.profiles)));
+      }
+      if (request.path === "/console/v1/auth/health" && request.method === "GET") {
+        return Promise.resolve(jsonResponse(authHealthEnvelope(state.healthProfiles)));
+      }
+      if (request.path === "/console/v1/auth/providers/openai" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId)),
+        );
+      }
+      if (request.path === "/console/v1/auth/providers/anthropic" && request.method === "GET") {
+        return Promise.resolve(
+          jsonResponse(providerStateEnvelope(state.profiles, state.defaultProfileId, "anthropic")),
+        );
+      }
+      if (request.path === "/console/v1/models/test-connection" && request.method === "POST") {
+        testConnectionBody = request.body;
+        return Promise.resolve(
+          jsonResponse({
+            contract: controlPlaneContract(),
+            mode: "test_connection",
+            timeout_ms: 5000,
+            provider_count: 1,
+            providers: [
+              {
+                provider_id: "openai-primary",
+                kind: "openai_compatible",
+                enabled: true,
+                endpoint_base_url: "https://api.openai.com/v1",
+                credential_source: "auth_profile",
+                state: "ok",
+                message: "provider connection succeeded",
+                checked_at_unix_ms: 200_000,
+                cache_status: "live",
+                discovery_source: "skipped",
+                discovered_model_ids: [],
+                configured_model_ids: ["gpt-4.1-mini", "text-embedding-3-large"],
+                latency_ms: 812,
+              },
+            ],
+          }),
+        );
+      }
+      if (request.path === "/console/v1/models/discover" && request.method === "POST") {
+        discoveryBody = request.body;
+        return Promise.resolve(
+          jsonResponse({
+            contract: controlPlaneContract(),
+            mode: "discover",
+            timeout_ms: 5000,
+            provider_count: 1,
+            providers: [
+              {
+                provider_id: "openai-primary",
+                kind: "openai_compatible",
+                enabled: true,
+                endpoint_base_url: "https://api.openai.com/v1",
+                credential_source: "auth_profile",
+                state: "ok",
+                message: "provider connection succeeded and discovered 2 model(s)",
+                checked_at_unix_ms: 210_000,
+                cache_status: "live",
+                discovery_source: "live",
+                discovered_model_ids: ["gpt-4.1-mini", "text-embedding-3-large"],
+                configured_model_ids: ["gpt-4.1-mini", "text-embedding-3-large"],
+                latency_ms: 640,
+              },
+            ],
+          }),
+        );
+      }
+      throw new Error(`Unhandled mocked request: ${request.method} ${request.path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Profiles" }));
+
+    const testButtons = await screen.findAllByRole("button", { name: "Test connection" });
+    fireEvent.click(testButtons[0]!);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Connection test for openai-primary: provider connection succeeded"),
+      ).toBeInTheDocument();
+    });
+
+    const discoverButtons = await screen.findAllByRole("button", { name: "Discover models" });
+    fireEvent.click(discoverButtons[0]!);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Discovery for openai-primary: provider connection succeeded and discovered 2 model(s)",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText("640 ms")).toBeInTheDocument();
+    expect(testConnectionBody).toContain('"provider_id":"openai-primary"');
+    expect(discoveryBody).toContain('"provider_id":"openai-primary"');
+  }, 20_000);
 });
 
 function sessionResponse(): Response {

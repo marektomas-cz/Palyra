@@ -1254,6 +1254,36 @@ export interface ProviderApiKeyUpsertRequest {
   set_default?: boolean;
 }
 
+export interface ProviderProbeRequest {
+  provider_id?: string;
+  timeout_ms?: number;
+}
+
+export interface ProviderProbeResult {
+  provider_id: string;
+  kind: string;
+  enabled: boolean;
+  endpoint_base_url?: string;
+  credential_source: string;
+  state: string;
+  message: string;
+  checked_at_unix_ms: number;
+  cache_status: string;
+  discovery_source: string;
+  discovered_model_ids: string[];
+  configured_model_ids: string[];
+  latency_ms?: number;
+}
+
+export interface ProviderProbeEnvelope {
+  contract: ContractDescriptor;
+  mode: string;
+  provider_filter?: string;
+  timeout_ms: number;
+  provider_count: number;
+  providers: ProviderProbeResult[];
+}
+
 export interface OpenAiOAuthBootstrapRequest {
   profile_id?: string;
   profile_name?: string;
@@ -1947,6 +1977,32 @@ export class ConsoleApiClient {
   ): Promise<ProviderAuthActionEnvelope> {
     return this.request(
       "/console/v1/auth/providers/anthropic/default-profile",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async testModelProviderConnection(
+    payload: ProviderProbeRequest = {},
+  ): Promise<ProviderProbeEnvelope> {
+    return this.request(
+      "/console/v1/models/test-connection",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async discoverModelProviderModels(
+    payload: ProviderProbeRequest = {},
+  ): Promise<ProviderProbeEnvelope> {
+    return this.request(
+      "/console/v1/models/discover",
       {
         method: "POST",
         body: JSON.stringify(payload),

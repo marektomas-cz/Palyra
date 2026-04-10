@@ -1993,6 +1993,61 @@ describe("ConsoleApiClient", () => {
     expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(requestBody(calls[2]?.init?.body)).toContain('"profile_id":"anthropic-default"');
   });
+
+  it("posts provider probe actions with CSRF to models endpoints", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        mode: "test_connection",
+        timeout_ms: 5000,
+        provider_count: 1,
+        providers: [],
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        mode: "discover",
+        timeout_ms: 5000,
+        provider_count: 1,
+        providers: [],
+      }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+    const client = new ConsoleApiClient("", fetcher);
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    await client.testModelProviderConnection({ provider_id: "openai-primary", timeout_ms: 5000 });
+    await client.discoverModelProviderModels({ provider_id: "openai-primary", timeout_ms: 5000 });
+
+    expect(requestUrl(calls[1]?.input)).toBe("/console/v1/models/test-connection");
+    expect(calls[1]?.init?.method).toBe("POST");
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+    expect(requestBody(calls[1]?.init?.body)).toContain('"provider_id":"openai-primary"');
+
+    expect(requestUrl(calls[2]?.input)).toBe("/console/v1/models/discover");
+    expect(calls[2]?.init?.method).toBe("POST");
+    expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+    expect(requestBody(calls[2]?.init?.body)).toContain('"provider_id":"openai-primary"');
+  });
 });
 
 function jsonResponse(payload: unknown, status = 200): Response {

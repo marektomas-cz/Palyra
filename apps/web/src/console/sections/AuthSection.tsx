@@ -34,6 +34,8 @@ type AuthSectionProps = {
     | "authHealth"
     | "authProviderState"
     | "authProviderStates"
+    | "authProviderProbeMode"
+    | "authProviderProbeResults"
     | "diagnosticsSnapshot"
     | "authApiKeyDraft"
     | "setAuthApiKeyDraft"
@@ -48,6 +50,7 @@ type AuthSectionProps = {
     | "refreshOpenAiProfile"
     | "revokeProviderProfile"
     | "setDefaultProviderProfile"
+    | "probeProvider"
     | "checkOpenAiCallbackState"
     | "openActiveOauthWindow"
     | "prepareApiKeyRotation"
@@ -283,22 +286,86 @@ export function AuthSection({ app }: AuthSectionProps) {
                 </dl>
                 <WorkspaceTable
                   ariaLabel="Provider registry health"
-                  columns={["Provider", "Kind", "Health", "Discovery", "Binding"]}
+                  columns={["Provider", "Kind", "Health", "Discovery", "Binding", "Actions"]}
                 >
-                  {providerRegistry.providers.map((provider) => (
-                    <tr key={provider.providerId}>
-                      <td>{provider.displayName}</td>
-                      <td>{provider.kind}</td>
-                      <td>
-                        <WorkspaceStatusChip tone={workspaceToneForState(provider.healthState)}>
-                          {provider.healthState}
-                        </WorkspaceStatusChip>
-                      </td>
-                      <td>{provider.discoveryStatus}</td>
-                      <td>{provider.authProfileId ?? provider.credentialSource ?? "unbound"}</td>
-                    </tr>
-                  ))}
+                  {providerRegistry.providers.map((provider) => {
+                    const probe = app.authProviderProbeResults[provider.providerId];
+                    return (
+                      <tr key={provider.providerId}>
+                        <td>
+                          <div className="workspace-table__meta">
+                            <strong>{provider.displayName}</strong>
+                            <span className="chat-muted">
+                              {probe?.checked_at_unix_ms
+                                ? `Checked ${formatUnixMs(probe.checked_at_unix_ms)}`
+                                : "No active probe yet"}
+                            </span>
+                          </div>
+                        </td>
+                        <td>{provider.kind}</td>
+                        <td>
+                          <div className="workspace-table__status">
+                            <WorkspaceStatusChip tone={workspaceToneForState(provider.healthState)}>
+                              {probe?.state ?? provider.healthState}
+                            </WorkspaceStatusChip>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="workspace-table__meta">
+                            <strong>{probe?.discovery_source === "live" ? "live" : provider.discoveryStatus}</strong>
+                            <span className="chat-muted">
+                              {(probe?.discovered_model_ids ?? provider.discoveredModelIds).join(", ") ||
+                                "No models"}
+                            </span>
+                          </div>
+                        </td>
+                        <td>{provider.authProfileId ?? provider.credentialSource ?? "unbound"}</td>
+                        <td>
+                          <div className="workspace-table__actions">
+                            <ActionButton
+                              type="button"
+                              variant="secondary"
+                              onPress={() => void app.probeProvider(provider.providerId, false)}
+                              isDisabled={app.authBusy}
+                            >
+                              Test connection
+                            </ActionButton>
+                            <ActionButton
+                              type="button"
+                              variant="secondary"
+                              onPress={() => void app.probeProvider(provider.providerId, true)}
+                              isDisabled={app.authBusy}
+                            >
+                              Discover models
+                            </ActionButton>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </WorkspaceTable>
+                {Object.values(app.authProviderProbeResults).length > 0 ? (
+                  <WorkspaceTable
+                    ariaLabel="Provider probe results"
+                    columns={["Provider", "Mode", "State", "Latency", "Message"]}
+                  >
+                    {Object.values(app.authProviderProbeResults)
+                      .sort((left, right) => left.provider_id.localeCompare(right.provider_id))
+                      .map((probe) => (
+                        <tr key={probe.provider_id}>
+                          <td>{probe.provider_id}</td>
+                          <td>{app.authProviderProbeMode ?? "probe"}</td>
+                          <td>
+                            <WorkspaceStatusChip tone={workspaceToneForState(probe.state)}>
+                              {probe.state}
+                            </WorkspaceStatusChip>
+                          </td>
+                          <td>{probe.latency_ms === undefined ? "n/a" : `${probe.latency_ms} ms`}</td>
+                          <td>{probe.message}</td>
+                        </tr>
+                      ))}
+                  </WorkspaceTable>
+                ) : null}
               </div>
             )}
           </WorkspaceSectionCard>

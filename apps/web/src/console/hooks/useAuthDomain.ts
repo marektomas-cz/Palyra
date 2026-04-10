@@ -7,6 +7,7 @@ import type {
   ConsoleApiClient,
   OpenAiOAuthBootstrapEnvelope,
   OpenAiOAuthCallbackStateEnvelope,
+  ProviderProbeResult,
   ProviderAuthStateEnvelope,
 } from "../../consoleApi";
 import { emptyToUndefined, toErrorMessage } from "../shared";
@@ -54,6 +55,10 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
   );
   const [authProviderStates, setAuthProviderStates] = useState<
     Record<string, ProviderAuthStateEnvelope>
+  >({});
+  const [authProviderProbeMode, setAuthProviderProbeMode] = useState<string | null>(null);
+  const [authProviderProbeResults, setAuthProviderProbeResults] = useState<
+    Record<string, ProviderProbeResult>
   >({});
   const [authApiKeyDraft, setAuthApiKeyDraft] = useState<AuthApiKeyDraft>(createDefaultApiKeyDraft);
   const [authOAuthDraft, setAuthOAuthDraft] = useState<AuthOAuthDraft>(createDefaultOAuthDraft);
@@ -310,6 +315,40 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     }
   }
 
+  async function probeProvider(providerId: string, discover: boolean): Promise<void> {
+    const normalizedProviderId = emptyToUndefined(providerId);
+    if (normalizedProviderId === undefined) {
+      setError("Provider probe requires a provider id.");
+      return;
+    }
+
+    setAuthBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = discover
+        ? await api.discoverModelProviderModels({ provider_id: normalizedProviderId })
+        : await api.testModelProviderConnection({ provider_id: normalizedProviderId });
+      const nextResults = Object.fromEntries(
+        response.providers.map((result) => [result.provider_id, result] satisfies [string, ProviderProbeResult]),
+      );
+      setAuthProviderProbeMode(response.mode);
+      setAuthProviderProbeResults((current) => ({ ...current, ...nextResults }));
+      const firstResult = response.providers[0];
+      if (firstResult !== undefined) {
+        setNotice(
+          discover
+            ? `Discovery for ${firstResult.provider_id}: ${firstResult.message}`
+            : `Connection test for ${firstResult.provider_id}: ${firstResult.message}`,
+        );
+      }
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function checkOpenAiCallbackState(attemptId?: string): Promise<void> {
     const activeAttemptId = normalizeProfileSelection(
       attemptId ?? oauthAttemptIdRef.current ?? authActiveOauthAttempt?.attempt_id,
@@ -392,6 +431,8 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     setAuthHealth(null);
     setAuthProviderState(null);
     setAuthProviderStates({});
+    setAuthProviderProbeMode(null);
+    setAuthProviderProbeResults({});
     setAuthActiveOauthAttempt(null);
     setAuthOauthCallbackState(null);
     resetAuthApiKeyDraft();
@@ -467,6 +508,8 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     authHealth,
     authProviderState,
     authProviderStates,
+    authProviderProbeMode,
+    authProviderProbeResults,
     authApiKeyDraft,
     setAuthApiKeyDraft,
     authOAuthDraft,
@@ -481,6 +524,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     revokeOpenAiProfile,
     revokeProviderProfile,
     setDefaultProviderProfile,
+    probeProvider,
     checkOpenAiCallbackState,
     openActiveOauthWindow,
     prepareApiKeyRotation,

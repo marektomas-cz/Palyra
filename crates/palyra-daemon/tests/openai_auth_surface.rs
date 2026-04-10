@@ -244,6 +244,175 @@ fn console_anthropic_api_key_flow_persists_vault_refs_and_default_selection() ->
 }
 
 #[test]
+fn console_models_probe_and_discover_publish_live_openai_results() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
+    let mock = OpenAiMockServer::new(None, None)?;
+    mock.allow_token("sk-probe-openai");
+    mock.set_models_response_body(
+        r#"{"data":[{"id":"gpt-4.1-mini"},{"id":"text-embedding-3-large"}]}"#,
+    );
+    wait_for_openai_mock_ready(&mock)?;
+
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
+        ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
+        ("PALYRA_MODEL_PROVIDER_OPENAI_BASE_URL".to_owned(), format!("{}/v1", mock.base_url())),
+    ])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = http_client()?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/auth/providers/openai/api-key",
+        &cookie,
+        &csrf_token,
+        &json!({
+            "profile_name": "OpenAI Probe",
+            "scope": { "kind": "global" },
+            "api_key": "sk-probe-openai",
+            "set_default": true
+        }),
+    )?;
+
+    let probe = post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/models/test-connection",
+        &cookie,
+        &csrf_token,
+        &json!({
+            "provider_id": "openai-primary",
+            "timeout_ms": 5000
+        }),
+    )?;
+    assert_eq!(probe.get("mode").and_then(Value::as_str), Some("test_connection"));
+    assert_eq!(probe.get("provider_count").and_then(Value::as_u64), Some(1));
+    let probe_provider = probe
+        .get("providers")
+        .and_then(Value::as_array)
+        .and_then(|providers| providers.first())
+        .ok_or_else(|| anyhow::anyhow!("probe response missing provider payload"))?;
+    assert_eq!(probe_provider.get("state").and_then(Value::as_str), Some("ok"));
+    assert_eq!(
+        probe_provider.get("message").and_then(Value::as_str),
+        Some("provider connection succeeded")
+    );
+    assert_eq!(
+        probe_provider.get("credential_source").and_then(Value::as_str),
+        Some("auth_profile")
+    );
+
+    let discovery = post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/models/discover",
+        &cookie,
+        &csrf_token,
+        &json!({
+            "provider_id": "openai-primary",
+            "timeout_ms": 5000
+        }),
+    )?;
+    assert_eq!(discovery.get("mode").and_then(Value::as_str), Some("discover"));
+    let discovered_provider = discovery
+        .get("providers")
+        .and_then(Value::as_array)
+        .and_then(|providers| providers.first())
+        .ok_or_else(|| anyhow::anyhow!("discover response missing provider payload"))?;
+    assert_eq!(discovered_provider.get("state").and_then(Value::as_str), Some("ok"));
+    assert_eq!(discovered_provider.get("discovery_source").and_then(Value::as_str), Some("live"));
+    assert_eq!(
+        discovered_provider
+            .get("discovered_model_ids")
+            .and_then(Value::as_array)
+            .map(|entries| entries.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec!["gpt-4.1-mini", "text-embedding-3-large"]),
+    );
+
+    let mock_snapshot = mock.snapshot();
+    assert!(
+        mock_snapshot
+            .model_request_paths
+            .iter()
+            .filter(|path| path.as_str() == "/v1/models")
+            .count()
+            >= 3,
+        "provider validation + probe + discovery should all hit /v1/models: {:?}",
+        mock_snapshot.model_request_paths
+    );
+
+    Ok(())
+}
+
+#[test]
+fn console_models_probe_redacts_provider_auth_failures() -> Result<()> {
+    let _test_guard = lock_openai_auth_surface_test();
+    let mock = OpenAiMockServer::new(None, None)?;
+    mock.allow_token("sk-ant-invalid-secret");
+    wait_for_openai_mock_ready(&mock)?;
+
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
+        ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
+        ("PALYRA_MODEL_PROVIDER_ANTHROPIC_BASE_URL".to_owned(), mock.base_url()),
+    ])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = http_client()?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/auth/providers/anthropic/api-key",
+        &cookie,
+        &csrf_token,
+        &json!({
+            "profile_name": "Anthropic Probe",
+            "scope": { "kind": "global" },
+            "api_key": "sk-ant-invalid-secret",
+            "set_default": true
+        }),
+    )?;
+    mock.remove_token("sk-ant-invalid-secret");
+
+    let probe = post_console_json(
+        &client,
+        admin_port,
+        "/console/v1/models/test-connection",
+        &cookie,
+        &csrf_token,
+        &json!({
+            "provider_id": "anthropic-primary",
+            "timeout_ms": 5000
+        }),
+    )?;
+    let provider = probe
+        .get("providers")
+        .and_then(Value::as_array)
+        .and_then(|providers| providers.first())
+        .ok_or_else(|| anyhow::anyhow!("probe response missing anthropic provider payload"))?;
+    assert_eq!(provider.get("state").and_then(Value::as_str), Some("auth_failed"));
+    let message = provider
+        .get("message")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("probe response missing error message"))?;
+    assert!(
+        message.contains("HTTP 401"),
+        "probe should preserve failure class without exposing the raw secret: {message}"
+    );
+    assert!(
+        !message.contains("sk-ant-invalid-secret"),
+        "probe payload must redact the provider credential: {message}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_openai_default_selection_and_revoke_use_palyra_config_override() -> Result<()> {
     let _test_guard = lock_openai_auth_surface_test();
     let mock = OpenAiMockServer::new(None, None)?;
@@ -1146,6 +1315,7 @@ struct OpenAiMockSnapshot {
 struct OpenAiMockState {
     valid_tokens: HashSet<String>,
     model_request_paths: Vec<String>,
+    models_response_body: Option<String>,
     token_request_bodies: Vec<String>,
     revoke_request_bodies: Vec<String>,
     request_errors: Vec<String>,
@@ -1234,10 +1404,20 @@ impl OpenAiMockServer {
         state.valid_tokens.insert(token.to_owned());
     }
 
+    fn remove_token(&self, token: &str) {
+        let mut state = self.state.lock().expect("OpenAI mock state lock should be available");
+        state.valid_tokens.remove(token);
+    }
+
     fn set_authorization_code_raw_response(&self, status: &str, body: &str) {
         let mut state = self.state.lock().expect("OpenAI mock state lock should be available");
         state.authorization_code_raw_response =
             Some(MockHttpResponse { status: status.to_owned(), body: body.to_owned() });
+    }
+
+    fn set_models_response_body(&self, body: &str) {
+        let mut state = self.state.lock().expect("OpenAI mock state lock should be available");
+        state.models_response_body = Some(body.to_owned());
     }
 
     fn base_url(&self) -> String {
@@ -1302,7 +1482,11 @@ fn handle_openai_mock_request(
             guard.valid_tokens.contains(presented_token)
         };
         if authorized {
-            write_json_response(stream, "200 OK", r#"{"data":[]}"#)?;
+            let body = {
+                let guard = state.lock().expect("OpenAI mock state lock should be available");
+                guard.models_response_body.clone().unwrap_or_else(|| r#"{"data":[]}"#.to_owned())
+            };
+            write_json_response(stream, "200 OK", body.as_str())?;
         } else {
             write_json_response(stream, "401 Unauthorized", r#"{"error":"invalid_api_key"}"#)?;
         }

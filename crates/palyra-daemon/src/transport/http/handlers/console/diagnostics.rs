@@ -2423,6 +2423,8 @@ pub(crate) fn build_capability_catalog() -> Result<control_plane::CapabilityCata
                     "/console/v1/auth/providers/anthropic/api-key",
                     "/console/v1/auth/providers/anthropic/revoke",
                     "/console/v1/auth/providers/anthropic/default-profile",
+                    "/console/v1/models/test-connection",
+                    "/console/v1/models/discover",
                 ],
                 &["crates/palyra-daemon/tests/admin_surface.rs"],
                 &[],
