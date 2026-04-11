@@ -3108,6 +3108,18 @@ fn console_webhooks_support_secret_aware_lifecycle_and_diagnostics() -> Result<(
         Some(1),
         "diagnostics should report the webhook integration as ready"
     );
+    assert_eq!(
+        diagnostics.pointer("/canvas_experiments/structured_contract").and_then(Value::as_str),
+        Some("a2ui.v1"),
+        "diagnostics should publish the structured contract used by native canvas experiments"
+    );
+    assert_eq!(
+        diagnostics
+            .pointer("/canvas_experiments/native_canvas/feature_flag")
+            .and_then(Value::as_str),
+        Some("canvas_host.enabled"),
+        "diagnostics should publish the rollout flag that governs native canvas experiments"
+    );
 
     let deleted = client
         .post(format!("http://127.0.0.1:{admin_port}/console/v1/webhooks/github_repo_a/delete"))

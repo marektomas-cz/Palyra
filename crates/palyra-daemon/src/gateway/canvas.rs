@@ -2,6 +2,37 @@ use super::*;
 use reqwest::Url;
 
 pub(crate) const MAX_CANVAS_SQLITE_VERSION: u64 = i64::MAX as u64;
+pub(crate) const CANVAS_EXPERIMENT_STRUCTURED_CONTRACT: &str = "a2ui.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct CanvasExperimentLimitsSnapshot {
+    pub(crate) max_state_bytes: usize,
+    pub(crate) max_bundle_bytes: usize,
+    pub(crate) max_assets_per_bundle: usize,
+    pub(crate) max_updates_per_minute: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct CanvasExperimentTrackSnapshot {
+    pub(crate) track_id: String,
+    pub(crate) enabled: bool,
+    pub(crate) feature_flag: String,
+    pub(crate) rollout_stage: String,
+    pub(crate) ambient_mode: String,
+    pub(crate) consent_required: bool,
+    pub(crate) support_summary: String,
+    pub(crate) security_review: Vec<String>,
+    pub(crate) exit_criteria: Vec<String>,
+    pub(crate) limits: CanvasExperimentLimitsSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct CanvasExperimentGovernanceSnapshot {
+    pub(crate) structured_contract: String,
+    pub(crate) fail_closed: bool,
+    pub(crate) requires_console_diagnostics: bool,
+    pub(crate) native_canvas: CanvasExperimentTrackSnapshot,
+}
 
 pub(crate) fn ensure_canvas_version_fits_sqlite(field: &str, value: u64) -> Result<(), Status> {
     if value > MAX_CANVAS_SQLITE_VERSION {
@@ -10,6 +41,47 @@ pub(crate) fn ensure_canvas_version_fits_sqlite(field: &str, value: u64) -> Resu
         )));
     }
     Ok(())
+}
+
+#[must_use]
+pub(crate) fn build_canvas_experiment_governance_snapshot(
+    config: &CanvasHostRuntimeConfig,
+) -> CanvasExperimentGovernanceSnapshot {
+    CanvasExperimentGovernanceSnapshot {
+        structured_contract: CANVAS_EXPERIMENT_STRUCTURED_CONTRACT.to_owned(),
+        fail_closed: true,
+        requires_console_diagnostics: true,
+        native_canvas: CanvasExperimentTrackSnapshot {
+            track_id: "native-canvas-preview".to_owned(),
+            enabled: config.enabled,
+            feature_flag: "canvas_host.enabled".to_owned(),
+            rollout_stage: if config.enabled {
+                "operator_preview".to_owned()
+            } else {
+                "disabled".to_owned()
+            },
+            ambient_mode: "disabled".to_owned(),
+            consent_required: false,
+            support_summary: "Native canvas stays behind the bounded canvas host and keeps A2UI as the only structured render contract.".to_owned(),
+            security_review: vec![
+                "Preserve CSP, frame-ancestor allowlists, and token-scoped access.".to_owned(),
+                "Keep state, bundle, and update budgets fail-closed in diagnostics and support flows."
+                    .to_owned(),
+            ],
+            exit_criteria: vec![
+                "Disable immediately if diagnostics, support bundle export, or replay fidelity regress."
+                    .to_owned(),
+                "Retire the experiment if it cannot justify operator value beyond the browser surface."
+                    .to_owned(),
+            ],
+            limits: CanvasExperimentLimitsSnapshot {
+                max_state_bytes: config.max_state_bytes,
+                max_bundle_bytes: config.max_bundle_bytes,
+                max_assets_per_bundle: config.max_assets_per_bundle,
+                max_updates_per_minute: config.max_updates_per_minute,
+            },
+        },
+    }
 }
 
 fn canvas_bundle_message(bundle: &CanvasBundleRecord) -> gateway_v1::CanvasBundle {
@@ -410,4 +482,50 @@ fn percent_encode_canvas(raw: &str, allow_slash: bool) -> String {
 
 pub(crate) fn escape_html_attribute(raw: &str) -> String {
     raw.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_canvas_experiment_governance_snapshot, CanvasHostRuntimeConfig,
+        CANVAS_EXPERIMENT_STRUCTURED_CONTRACT,
+    };
+
+    fn canvas_host_config(enabled: bool) -> CanvasHostRuntimeConfig {
+        CanvasHostRuntimeConfig {
+            enabled,
+            public_base_url: "http://127.0.0.1:7142".to_owned(),
+            token_ttl_ms: 60_000,
+            max_state_bytes: 8_192,
+            max_bundle_bytes: 65_536,
+            max_assets_per_bundle: 8,
+            max_updates_per_minute: 30,
+        }
+    }
+
+    #[test]
+    fn canvas_experiment_snapshot_defaults_to_disabled_rollout() {
+        let snapshot = build_canvas_experiment_governance_snapshot(&canvas_host_config(false));
+
+        assert_eq!(snapshot.structured_contract, CANVAS_EXPERIMENT_STRUCTURED_CONTRACT);
+        assert!(snapshot.fail_closed);
+        assert!(snapshot.requires_console_diagnostics);
+        assert!(!snapshot.native_canvas.enabled);
+        assert_eq!(snapshot.native_canvas.rollout_stage, "disabled");
+        assert_eq!(snapshot.native_canvas.feature_flag, "canvas_host.enabled");
+        assert_eq!(snapshot.native_canvas.ambient_mode, "disabled");
+    }
+
+    #[test]
+    fn canvas_experiment_snapshot_carries_bounded_limits_when_enabled() {
+        let snapshot = build_canvas_experiment_governance_snapshot(&canvas_host_config(true));
+
+        assert!(snapshot.native_canvas.enabled);
+        assert_eq!(snapshot.native_canvas.rollout_stage, "operator_preview");
+        assert_eq!(snapshot.native_canvas.limits.max_state_bytes, 8_192);
+        assert_eq!(snapshot.native_canvas.limits.max_bundle_bytes, 65_536);
+        assert_eq!(snapshot.native_canvas.limits.max_assets_per_bundle, 8);
+        assert_eq!(snapshot.native_canvas.limits.max_updates_per_minute, 30);
+        assert_eq!(snapshot.native_canvas.exit_criteria.len(), 2);
+    }
 }

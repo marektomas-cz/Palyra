@@ -37,6 +37,8 @@ export type DesktopCompanionRollout = {
   companion_shell_enabled: boolean;
   desktop_notifications_enabled: boolean;
   offline_drafts_enabled: boolean;
+  voice_capture_enabled: boolean;
+  tts_playback_enabled: boolean;
   release_channel: string;
 };
 
@@ -123,6 +125,19 @@ export type DesktopCompanionSendMessageResult = {
   run_id?: string;
   status?: string;
   message: string;
+};
+
+export type DesktopCompanionAudioTranscriptionResult = {
+  attachment_id: string;
+  artifact_id: string;
+  transcript_text: string;
+  transcript_summary?: string;
+  transcript_language?: string;
+  transcript_duration_ms?: number;
+  transcript_processing_ms?: number;
+  derived_artifact_id?: string;
+  privacy_note: string;
+  warnings: string[];
 };
 
 export type InventoryCapabilityRecord = {
@@ -309,6 +324,34 @@ export type DiagnosticsSnapshot = {
   generated_at_unix_ms: number | null;
   errors: string[];
   dropped_log_events_total: number;
+  experiments: DesktopExperimentGovernanceSnapshot;
+};
+
+export type DesktopExperimentGovernanceSnapshot = {
+  structured_contract: string;
+  fail_closed: boolean;
+  requires_console_diagnostics: boolean;
+  native_canvas: DesktopExperimentTrackSnapshot;
+};
+
+export type DesktopExperimentTrackSnapshot = {
+  track_id: string;
+  enabled: boolean;
+  feature_flag: string;
+  rollout_stage: string;
+  ambient_mode: string;
+  consent_required: boolean;
+  support_summary: string;
+  security_review: string[];
+  exit_criteria: string[];
+  limits: DesktopExperimentLimitsSnapshot;
+};
+
+export type DesktopExperimentLimitsSnapshot = {
+  max_state_bytes: number;
+  max_bundle_bytes: number;
+  max_assets_per_bundle: number;
+  max_updates_per_minute: number;
 };
 
 export type ServiceProcessSnapshot = {
@@ -372,6 +415,35 @@ export const DESKTOP_PREVIEW_SNAPSHOT: ControlCenterSnapshot = {
     generated_at_unix_ms: Date.UTC(2026, 2, 13, 12, 0, 0),
     errors: [],
     dropped_log_events_total: 0,
+    experiments: {
+      structured_contract: "a2ui.v1",
+      fail_closed: true,
+      requires_console_diagnostics: true,
+      native_canvas: {
+        track_id: "native-canvas-preview",
+        enabled: false,
+        feature_flag: "canvas_host.enabled",
+        rollout_stage: "disabled",
+        ambient_mode: "disabled",
+        consent_required: false,
+        support_summary:
+          "Native canvas stays behind the bounded canvas host and keeps A2UI as the only structured render contract.",
+        security_review: [
+          "Preserve CSP, frame-ancestor allowlists, and token-scoped access.",
+          "Keep state and bundle limits fail-closed in diagnostics and support flows.",
+        ],
+        exit_criteria: [
+          "Disable immediately if diagnostics or replay fidelity regress.",
+          "Retire the track if it cannot justify operator value beyond the browser surface.",
+        ],
+        limits: {
+          max_state_bytes: 8192,
+          max_bundle_bytes: 65536,
+          max_assets_per_bundle: 8,
+          max_updates_per_minute: 30,
+        },
+      },
+    },
   },
   gateway_process: {
     service: "gateway",
@@ -502,6 +574,8 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
     companion_shell_enabled: true,
     desktop_notifications_enabled: true,
     offline_drafts_enabled: true,
+    voice_capture_enabled: false,
+    tts_playback_enabled: false,
     release_channel: "preview",
   },
   preferences: {
@@ -686,6 +760,8 @@ export async function updateDesktopCompanionRollout(payload: {
   companionShellEnabled?: boolean;
   desktopNotificationsEnabled?: boolean;
   offlineDraftsEnabled?: boolean;
+  voiceCaptureEnabled?: boolean;
+  ttsPlaybackEnabled?: boolean;
   releaseChannel?: string;
 }): Promise<ActionResult> {
   return invoke<ActionResult>("update_desktop_companion_rollout", {
@@ -741,6 +817,18 @@ export async function sendDesktopCompanionChatMessage(payload: {
   draftId?: string;
 }): Promise<DesktopCompanionSendMessageResult> {
   return invoke<DesktopCompanionSendMessageResult>("send_desktop_companion_chat_message", {
+    payload,
+  });
+}
+
+export async function transcribeDesktopCompanionAudio(payload: {
+  sessionId: string;
+  filename: string;
+  contentType: string;
+  bytesBase64: string;
+  consentAcknowledged: boolean;
+}): Promise<DesktopCompanionAudioTranscriptionResult> {
+  return invoke<DesktopCompanionAudioTranscriptionResult>("transcribe_desktop_companion_audio", {
     payload,
   });
 }

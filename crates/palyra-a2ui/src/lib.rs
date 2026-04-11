@@ -20,6 +20,10 @@ pub enum A2uiValidationError {
     EmptyField(&'static str),
     #[error("unsupported A2UI version")]
     UnsupportedVersion,
+    #[error("field '{0}' has an unsupported experimental value")]
+    InvalidExperimentalValue(&'static str),
+    #[error("ambient experiments require explicit consent_required=true")]
+    AmbientConsentRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +94,7 @@ pub fn validate_document(document: &Value) -> Result<(), A2uiValidationError> {
     validate_required_version(object)?;
     validate_required_string(object, "surface")?;
     validate_required_array(object, "components")?;
+    validate_optional_experimental_governance(object)?;
     Ok(())
 }
 
@@ -534,6 +539,109 @@ fn validate_required_array(
     Ok(())
 }
 
+fn validate_optional_experimental_governance(
+    object: &Map<String, Value>,
+) -> Result<(), A2uiValidationError> {
+    let Some(experimental_value) = object.get("experimental") else {
+        return Ok(());
+    };
+    let experimental =
+        experimental_value.as_object().ok_or(A2uiValidationError::InvalidType("experimental"))?;
+    validate_required_string_field(experimental, "track_id", "experimental.track_id")?;
+    validate_required_string_field(experimental, "feature_flag", "experimental.feature_flag")?;
+    validate_required_string_field(
+        experimental,
+        "support_summary",
+        "experimental.support_summary",
+    )?;
+    validate_required_string_array_field(
+        experimental,
+        "security_review",
+        "experimental.security_review",
+    )?;
+    validate_required_string_array_field(
+        experimental,
+        "exit_criteria",
+        "experimental.exit_criteria",
+    )?;
+
+    if let Some(rollout_stage) = experimental.get("rollout_stage") {
+        let rollout_stage = rollout_stage
+            .as_str()
+            .ok_or(A2uiValidationError::InvalidType("experimental.rollout_stage"))?;
+        if !matches!(
+            rollout_stage,
+            "disabled" | "dark_launch" | "operator_preview" | "limited_preview"
+        ) {
+            return Err(A2uiValidationError::InvalidExperimentalValue(
+                "experimental.rollout_stage",
+            ));
+        }
+    }
+
+    let ambient_mode = experimental
+        .get("ambient_mode")
+        .map(|value| {
+            value.as_str().ok_or(A2uiValidationError::InvalidType("experimental.ambient_mode"))
+        })
+        .transpose()?
+        .unwrap_or("disabled");
+    if !matches!(ambient_mode, "disabled" | "push_to_talk") {
+        return Err(A2uiValidationError::InvalidExperimentalValue("experimental.ambient_mode"));
+    }
+
+    let consent_required = experimental
+        .get("consent_required")
+        .map(|value| {
+            value.as_bool().ok_or(A2uiValidationError::InvalidType("experimental.consent_required"))
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if ambient_mode == "push_to_talk" && !consent_required {
+        return Err(A2uiValidationError::AmbientConsentRequired);
+    }
+
+    Ok(())
+}
+
+fn validate_required_string_field(
+    object: &Map<String, Value>,
+    key: &'static str,
+    error_key: &'static str,
+) -> Result<(), A2uiValidationError> {
+    let value = object
+        .get(key)
+        .ok_or(A2uiValidationError::MissingField(error_key))?
+        .as_str()
+        .ok_or(A2uiValidationError::InvalidType(error_key))?;
+    if value.trim().is_empty() {
+        return Err(A2uiValidationError::EmptyField(error_key));
+    }
+    Ok(())
+}
+
+fn validate_required_string_array_field(
+    object: &Map<String, Value>,
+    key: &'static str,
+    error_key: &'static str,
+) -> Result<(), A2uiValidationError> {
+    let values = object
+        .get(key)
+        .ok_or(A2uiValidationError::MissingField(error_key))?
+        .as_array()
+        .ok_or(A2uiValidationError::InvalidType(error_key))?;
+    if values.is_empty() {
+        return Err(A2uiValidationError::EmptyField(error_key));
+    }
+    for value in values {
+        let value = value.as_str().ok_or(A2uiValidationError::InvalidType(error_key))?;
+        if value.trim().is_empty() {
+            return Err(A2uiValidationError::EmptyField(error_key));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -596,6 +704,65 @@ mod tests {
 
         let result = validate_document(&invalid_document);
         assert_eq!(result, Err(A2uiValidationError::EmptyField("components")));
+    }
+
+    #[test]
+    fn experimental_governance_requires_exit_criteria_and_security_review() {
+        let invalid_document = json!({
+            "v": 1,
+            "surface": "main",
+            "components": [{"id": "card1"}],
+            "experimental": {
+                "track_id": "native-canvas-preview",
+                "feature_flag": "canvas_host.enabled",
+                "support_summary": "operator preview"
+            }
+        });
+
+        let result = validate_document(&invalid_document);
+        assert_eq!(result, Err(A2uiValidationError::MissingField("experimental.security_review")));
+    }
+
+    #[test]
+    fn experimental_ambient_mode_requires_explicit_consent() {
+        let invalid_document = json!({
+            "v": 1,
+            "surface": "main",
+            "components": [{"id": "card1"}],
+            "experimental": {
+                "track_id": "ambient-companion",
+                "feature_flag": "desktop_companion.voice_capture_enabled",
+                "support_summary": "push to talk pilot",
+                "ambient_mode": "push_to_talk",
+                "security_review": ["stay in the media pipeline"],
+                "exit_criteria": ["disable on unexpected capture"]
+            }
+        });
+
+        let result = validate_document(&invalid_document);
+        assert_eq!(result, Err(A2uiValidationError::AmbientConsentRequired));
+    }
+
+    #[test]
+    fn experimental_governance_accepts_supported_native_canvas_track() {
+        let valid_document = json!({
+            "v": 1,
+            "surface": "main",
+            "components": [{"id": "card1"}],
+            "experimental": {
+                "track_id": "native-canvas-preview",
+                "feature_flag": "canvas_host.enabled",
+                "rollout_stage": "operator_preview",
+                "ambient_mode": "disabled",
+                "consent_required": false,
+                "support_summary": "operator preview only",
+                "security_review": ["keep A2UI as the only UI contract"],
+                "exit_criteria": ["disable if diagnostics degrade"]
+            }
+        });
+
+        let result = validate_document(&valid_document);
+        assert_eq!(result, Ok(()));
     }
 
     #[test]

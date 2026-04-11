@@ -116,6 +116,7 @@ pub(crate) struct DiagnosticsSnapshot {
     pub(crate) errors: Vec<String>,
     pub(crate) dropped_log_events_total: u64,
     pub(crate) observability: DesktopObservabilitySnapshot,
+    pub(crate) experiments: DesktopExperimentGovernanceSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,6 +175,36 @@ pub(crate) struct DesktopFailureClassSummary {
     pub(crate) config_failure: u64,
     pub(crate) upstream_provider_failure: u64,
     pub(crate) product_failure: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DesktopExperimentGovernanceSnapshot {
+    pub(crate) structured_contract: String,
+    pub(crate) fail_closed: bool,
+    pub(crate) requires_console_diagnostics: bool,
+    pub(crate) native_canvas: DesktopExperimentTrackSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DesktopExperimentTrackSnapshot {
+    pub(crate) track_id: String,
+    pub(crate) enabled: bool,
+    pub(crate) feature_flag: String,
+    pub(crate) rollout_stage: String,
+    pub(crate) ambient_mode: String,
+    pub(crate) consent_required: bool,
+    pub(crate) support_summary: String,
+    pub(crate) security_review: Vec<String>,
+    pub(crate) exit_criteria: Vec<String>,
+    pub(crate) limits: DesktopExperimentLimitsSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DesktopExperimentLimitsSnapshot {
+    pub(crate) max_state_bytes: u64,
+    pub(crate) max_bundle_bytes: u64,
+    pub(crate) max_assets_per_bundle: u64,
+    pub(crate) max_updates_per_minute: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -533,8 +564,91 @@ fn build_desktop_observability_snapshot(
     }
 }
 
+fn build_desktop_experiment_governance_snapshot(
+    diagnostics_payload: Option<&Value>,
+) -> DesktopExperimentGovernanceSnapshot {
+    let root = diagnostics_payload
+        .and_then(|payload| payload.get("canvas_experiments"))
+        .and_then(Value::as_object);
+    let native_canvas = root.and_then(|value| value.get("native_canvas")).and_then(Value::as_object);
+    let limits = native_canvas.and_then(|value| value.get("limits")).and_then(Value::as_object);
+
+    DesktopExperimentGovernanceSnapshot {
+        structured_contract: root
+            .and_then(|value| value.get("structured_contract"))
+            .and_then(Value::as_str)
+            .unwrap_or("a2ui.v1")
+            .to_owned(),
+        fail_closed: root
+            .and_then(|value| value.get("fail_closed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        requires_console_diagnostics: root
+            .and_then(|value| value.get("requires_console_diagnostics"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        native_canvas: DesktopExperimentTrackSnapshot {
+            track_id: native_canvas
+                .and_then(|value| value.get("track_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("native-canvas-preview")
+                .to_owned(),
+            enabled: native_canvas
+                .and_then(|value| value.get("enabled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            feature_flag: native_canvas
+                .and_then(|value| value.get("feature_flag"))
+                .and_then(Value::as_str)
+                .unwrap_or("canvas_host.enabled")
+                .to_owned(),
+            rollout_stage: native_canvas
+                .and_then(|value| value.get("rollout_stage"))
+                .and_then(Value::as_str)
+                .unwrap_or("disabled")
+                .to_owned(),
+            ambient_mode: native_canvas
+                .and_then(|value| value.get("ambient_mode"))
+                .and_then(Value::as_str)
+                .unwrap_or("disabled")
+                .to_owned(),
+            consent_required: native_canvas
+                .and_then(|value| value.get("consent_required"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            support_summary: native_canvas
+                .and_then(|value| value.get("support_summary"))
+                .and_then(Value::as_str)
+                .unwrap_or("Native canvas governance is unavailable.")
+                .to_owned(),
+            security_review: read_json_string_array(native_canvas, "security_review"),
+            exit_criteria: read_json_string_array(native_canvas, "exit_criteria"),
+            limits: DesktopExperimentLimitsSnapshot {
+                max_state_bytes: read_json_u64(limits, "max_state_bytes"),
+                max_bundle_bytes: read_json_u64(limits, "max_bundle_bytes"),
+                max_assets_per_bundle: read_json_u64(limits, "max_assets_per_bundle"),
+                max_updates_per_minute: read_json_u64(limits, "max_updates_per_minute"),
+            },
+        },
+    }
+}
+
 fn read_json_u64(record: Option<&serde_json::Map<String, Value>>, key: &str) -> u64 {
     record.and_then(|entry| entry.get(key)).and_then(Value::as_u64).unwrap_or_default()
+}
+
+fn read_json_string_array(record: Option<&serde_json::Map<String, Value>>, key: &str) -> Vec<String> {
+    record
+        .and_then(|entry| entry.get(key))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn read_json_u32(record: Option<&serde_json::Map<String, Value>>, key: &str) -> u32 {
@@ -691,6 +805,7 @@ pub(crate) async fn build_snapshot_from_inputs(
         errors: diagnostics_errors,
         dropped_log_events_total,
         observability: build_desktop_observability_snapshot(diagnostics_payload.as_ref()),
+        experiments: build_desktop_experiment_governance_snapshot(diagnostics_payload.as_ref()),
     };
     if dropped_log_events_total > 0 {
         warnings.push(format!(

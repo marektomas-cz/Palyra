@@ -1020,6 +1020,86 @@ pre {
   word-break: break-word;
 }
 
+.a2ui-experiment-banner {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in oklab, var(--accent) 40%, transparent);
+  border-radius: var(--field-radius);
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in oklab, var(--accent) 10%, var(--surface-secondary)),
+      color-mix(in oklab, var(--surface-secondary) 94%, transparent)
+    );
+}
+
+.a2ui-experiment-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.a2ui-experiment-eyebrow {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.a2ui-experiment-chip {
+  margin: 0;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.a2ui-experiment-summary {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.a2ui-experiment-meta {
+  margin: 0;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+.a2ui-experiment-meta div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.a2ui-experiment-meta dt {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.a2ui-experiment-meta dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.a2ui-experiment-checklists {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+}
+
+.a2ui-experiment-checklist {
+  display: grid;
+  gap: 0.45rem;
+}
+
 .a2ui-component {
   border: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
   border-radius: var(--field-radius);

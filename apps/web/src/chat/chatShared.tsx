@@ -315,6 +315,26 @@ export function collectCanvasFrameUrls(value: JsonValue): string[] {
   return rows;
 }
 
+export function findTranscriptDerivedArtifact(
+  attachments: readonly MediaDerivedArtifactRecord[] | undefined,
+): MediaDerivedArtifactRecord | null {
+  if (attachments === undefined) {
+    return null;
+  }
+  for (const attachment of attachments) {
+    if (attachment.kind === "transcript" && attachment.state === "succeeded") {
+      return attachment;
+    }
+  }
+  return null;
+}
+
+export function extractTranscriptText(
+  attachments: readonly MediaDerivedArtifactRecord[] | undefined,
+): string | null {
+  return findTranscriptDerivedArtifact(attachments)?.content_text?.trim() || null;
+}
+
 function enqueueCanvasScanEntries(
   values: readonly JsonValue[],
   depth: number,

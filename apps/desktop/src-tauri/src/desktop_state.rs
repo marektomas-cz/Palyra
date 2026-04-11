@@ -73,6 +73,8 @@ pub(crate) struct DesktopCompanionRolloutState {
     pub(crate) companion_shell_enabled: bool,
     pub(crate) desktop_notifications_enabled: bool,
     pub(crate) offline_drafts_enabled: bool,
+    pub(crate) voice_capture_enabled: bool,
+    pub(crate) tts_playback_enabled: bool,
     pub(crate) release_channel: String,
 }
 
@@ -82,6 +84,8 @@ impl Default for DesktopCompanionRolloutState {
             companion_shell_enabled: true,
             desktop_notifications_enabled: true,
             offline_drafts_enabled: true,
+            voice_capture_enabled: false,
+            tts_playback_enabled: false,
             release_channel: "preview".to_owned(),
         }
     }

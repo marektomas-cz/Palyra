@@ -36,9 +36,11 @@ import {
   startPalyra,
   stopPalyra,
   switchDesktopCompanionProfile,
+  transcribeDesktopCompanionAudio,
   updateDesktopCompanionPreferences,
   updateDesktopCompanionRollout,
   type ActionResult,
+  type DesktopCompanionAudioTranscriptionResult,
   type DesktopCompanionSection,
   type DesktopSessionTranscriptEnvelope,
   type InventoryDeviceRecord,
@@ -52,6 +54,8 @@ const SECTION_ORDER: DesktopCompanionSection[] = [
   "access",
   "onboarding",
 ];
+const VOICE_CAPTURE_CONSENT_KEY = "palyra.desktop.voice.capture-consent.v1";
+const VOICE_TTS_CONSENT_KEY = "palyra.desktop.voice.tts-consent.v1";
 
 export function App() {
   const { snapshot, loading, error, previewMode, refresh } = useDesktopCompanion();
@@ -66,6 +70,14 @@ export function App() {
   const [composerText, setComposerText] = useState("");
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] =
+    useState<DesktopCompanionAudioTranscriptionResult | null>(null);
+  const [voiceConsentGranted, setVoiceConsentGranted] = useState(false);
+  const [ttsConsentGranted, setTtsConsentGranted] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [nodeActionBusy, setNodeActionBusy] = useState(false);
   const [profileSwitchBusy, setProfileSwitchBusy] = useState(false);
@@ -75,6 +87,11 @@ export function App() {
   );
   const announcedNotificationIdsRef = useRef<Set<string>>(new Set());
   const mainWindowShownRef = useRef(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const recordingStartedAtRef = useRef<number | null>(null);
+  const speechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   const attentionItems = useMemo(
     () => collectAttentionItems(snapshot.control_center),
@@ -102,6 +119,21 @@ export function App() {
     (draft) => draft.session_id === undefined || draft.session_id === activeSessionId,
   );
   const onboardingProgressLabel = `${snapshot.onboarding.progress_completed}/${snapshot.onboarding.progress_total}`;
+  const voiceCaptureSupported =
+    typeof navigator !== "undefined" &&
+    typeof navigator.mediaDevices?.getUserMedia === "function" &&
+    typeof MediaRecorder !== "undefined";
+  const ttsPlaybackSupported =
+    typeof window !== "undefined" &&
+    typeof window.speechSynthesis !== "undefined" &&
+    typeof SpeechSynthesisUtterance !== "undefined";
+  const latestAssistantNarration = useMemo(
+    () => findLatestAssistantNarration(transcript),
+    [transcript],
+  );
+  const nativeCanvasExperiment = snapshot.control_center.diagnostics.experiments.native_canvas;
+  const ambientCompanionEnabled =
+    snapshot.rollout.voice_capture_enabled || snapshot.rollout.tts_playback_enabled;
 
   useEffect(() => {
     const fallbackSessionId =
@@ -145,6 +177,11 @@ export function App() {
   useEffect(() => {
     setSessionLabelDraft(selectedSession?.session_label ?? "");
   }, [selectedSession?.session_id]);
+
+  useEffect(() => {
+    setVoiceConsentGranted(readStoredConsent(VOICE_CAPTURE_CONSENT_KEY));
+    setTtsConsentGranted(readStoredConsent(VOICE_TTS_CONSENT_KEY));
+  }, []);
 
   useEffect(() => {
     if (!isDesktopHostAvailable()) {
@@ -195,6 +232,7 @@ export function App() {
   useEffect(() => {
     if (activeSessionId.trim().length === 0) {
       setTranscript(null);
+      setVoiceTranscript(null);
       return;
     }
     let cancelled = false;
@@ -221,6 +259,49 @@ export function App() {
       cancelled = true;
     };
   }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!voiceRecording) {
+      setRecordingElapsedMs(0);
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      const startedAt = recordingStartedAtRef.current;
+      if (startedAt === null) {
+        setRecordingElapsedMs(0);
+        return;
+      }
+      setRecordingElapsedMs(Math.max(0, Date.now() - startedAt));
+    }, 250);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [voiceRecording]);
+
+  useEffect(() => {
+    if (!snapshot.rollout.voice_capture_enabled && voiceRecording) {
+      void stopVoiceCapture();
+    }
+  }, [snapshot.rollout.voice_capture_enabled, voiceRecording]);
+
+  useEffect(() => {
+    if (!snapshot.rollout.tts_playback_enabled && speaking) {
+      stopSpeechPlayback();
+    }
+  }, [snapshot.rollout.tts_playback_enabled, speaking]);
+
+  useEffect(() => {
+    return () => {
+      const recorder = mediaRecorderRef.current;
+      if (recorder !== null && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+      stopRecordingStream(recordingStreamRef.current);
+      if (typeof window !== "undefined" && typeof window.speechSynthesis !== "undefined") {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
 
   async function runAction(
     action: ActionName,
@@ -328,6 +409,163 @@ export function App() {
     }
   }
 
+  function stopSpeechPlayback(): void {
+    if (!ttsPlaybackSupported) {
+      return;
+    }
+    window.speechSynthesis.cancel();
+    speechUtteranceRef.current = null;
+    setSpeaking(false);
+  }
+
+  async function ensureVoiceConsent(): Promise<boolean> {
+    if (voiceConsentGranted) {
+      return true;
+    }
+    const accepted = window.confirm(
+      "Enable push-to-talk for this desktop profile? Audio is uploaded only after you stop recording, follows existing media retention rules, and ambient listening remains disabled.",
+    );
+    if (!accepted) {
+      return false;
+    }
+    storeConsent(VOICE_CAPTURE_CONSENT_KEY);
+    setVoiceConsentGranted(true);
+    return true;
+  }
+
+  async function ensureTtsConsent(): Promise<boolean> {
+    if (ttsConsentGranted) {
+      return true;
+    }
+    const accepted = window.confirm(
+      "Enable desktop speech playback for this profile? Palyra will only read the selected assistant output when you explicitly ask it to.",
+    );
+    if (!accepted) {
+      return false;
+    }
+    storeConsent(VOICE_TTS_CONSENT_KEY);
+    setTtsConsentGranted(true);
+    return true;
+  }
+
+  async function startVoiceCapture(): Promise<void> {
+    if (selectedSession === null) {
+      setNotice("Create or select a session before recording voice input.");
+      return;
+    }
+    if (!snapshot.rollout.voice_capture_enabled) {
+      setNotice("Voice capture is disabled by rollout configuration.");
+      return;
+    }
+    if (!voiceCaptureSupported) {
+      setNotice("This desktop host does not expose the browser microphone APIs required for voice capture.");
+      return;
+    }
+    if (!(await ensureVoiceConsent())) {
+      setNotice("Voice capture remains disabled until you explicitly grant consent.");
+      return;
+    }
+    setVoiceBusy(true);
+    setVoiceTranscript(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferredMimeType = resolvePreferredVoiceMimeType();
+      const recorder =
+        preferredMimeType === null
+          ? new MediaRecorder(stream)
+          : new MediaRecorder(stream, { mimeType: preferredMimeType });
+      recordingStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      recordingChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordingChunksRef.current.push(event.data);
+        }
+      };
+      recorder.start();
+      recordingStartedAtRef.current = Date.now();
+      setVoiceRecording(true);
+      setNotice("Voice capture started. Recording will upload only after you stop it.");
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      stopRecordingStream(recordingStreamRef.current);
+      mediaRecorderRef.current = null;
+      recordingStreamRef.current = null;
+      setNotice(`Voice capture could not start: ${message}`);
+    } finally {
+      setVoiceBusy(false);
+    }
+  }
+
+  async function stopVoiceCapture(): Promise<void> {
+    const recorder = mediaRecorderRef.current;
+    if (recorder === null) {
+      setVoiceRecording(false);
+      return;
+    }
+    setVoiceBusy(true);
+    try {
+      const audioBlob = await stopRecorderAndCollectBlob(recorder, recordingChunksRef.current);
+      const contentType = audioBlob.type || recorder.mimeType || "audio/webm";
+      const extension = extensionForAudioMimeType(contentType);
+      const result = await transcribeDesktopCompanionAudio({
+        sessionId: activeSessionId,
+        filename: `desktop-voice-${Date.now()}.${extension}`,
+        contentType,
+        bytesBase64: await blobToBase64(audioBlob),
+        consentAcknowledged: true,
+      });
+      setVoiceTranscript(result);
+      setNotice("Voice capture uploaded and transcribed. Review the transcript before sending it.");
+      await refresh();
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setNotice(`Voice transcription failed: ${message}`);
+    } finally {
+      mediaRecorderRef.current = null;
+      recordingChunksRef.current = [];
+      recordingStartedAtRef.current = null;
+      stopRecordingStream(recordingStreamRef.current);
+      recordingStreamRef.current = null;
+      setVoiceRecording(false);
+      setVoiceBusy(false);
+    }
+  }
+
+  async function speakLatestAssistant(): Promise<void> {
+    if (!snapshot.rollout.tts_playback_enabled) {
+      setNotice("TTS playback is disabled by rollout configuration.");
+      return;
+    }
+    if (!ttsPlaybackSupported) {
+      setNotice("This desktop host does not expose speech synthesis.");
+      return;
+    }
+    if (latestAssistantNarration === null) {
+      setNotice("No recent assistant output is available for speech playback.");
+      return;
+    }
+    if (!(await ensureTtsConsent())) {
+      setNotice("Speech playback remains disabled until you explicitly grant consent.");
+      return;
+    }
+
+    stopSpeechPlayback();
+    const utterance = new SpeechSynthesisUtterance(latestAssistantNarration);
+    utterance.onend = () => {
+      speechUtteranceRef.current = null;
+      setSpeaking(false);
+    };
+    utterance.onerror = () => {
+      speechUtteranceRef.current = null;
+      setSpeaking(false);
+      setNotice("Desktop speech playback failed before completion.");
+    };
+    speechUtteranceRef.current = utterance;
+    setSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+  }
+
   async function removeOfflineDraft(draftId: string): Promise<void> {
     try {
       const result = await removeDesktopCompanionOfflineDraft(draftId);
@@ -384,6 +622,8 @@ export function App() {
     companion_shell_enabled?: boolean;
     desktop_notifications_enabled?: boolean;
     offline_drafts_enabled?: boolean;
+    voice_capture_enabled?: boolean;
+    tts_playback_enabled?: boolean;
     release_channel?: string;
   }): Promise<void> {
     try {
@@ -391,6 +631,8 @@ export function App() {
         companionShellEnabled: next.companion_shell_enabled,
         desktopNotificationsEnabled: next.desktop_notifications_enabled,
         offlineDraftsEnabled: next.offline_drafts_enabled,
+        voiceCaptureEnabled: next.voice_capture_enabled,
+        ttsPlaybackEnabled: next.tts_playback_enabled,
         releaseChannel: next.release_channel,
       });
       setNotice(result.message);
@@ -746,6 +988,14 @@ export function App() {
                     label: "Offline drafts",
                     value: snapshot.rollout.offline_drafts_enabled ? "enabled" : "disabled",
                   },
+                  {
+                    label: "Voice capture",
+                    value: snapshot.rollout.voice_capture_enabled ? "enabled" : "disabled",
+                  },
+                  {
+                    label: "TTS playback",
+                    value: snapshot.rollout.tts_playback_enabled ? "enabled" : "disabled",
+                  },
                   { label: "Release channel", value: snapshot.rollout.release_channel },
                   {
                     label: "Current onboarding step",
@@ -775,6 +1025,92 @@ export function App() {
                 >
                   Toggle offline drafts
                 </Button>
+                <Button
+                  variant="secondary"
+                  onPress={() =>
+                    void toggleRollout({
+                      voice_capture_enabled: !snapshot.rollout.voice_capture_enabled,
+                    })
+                  }
+                >
+                  Toggle voice capture
+                </Button>
+                <Button
+                  variant="secondary"
+                  onPress={() =>
+                    void toggleRollout({
+                      tts_playback_enabled: !snapshot.rollout.tts_playback_enabled,
+                    })
+                  }
+                >
+                  Toggle TTS playback
+                </Button>
+              </div>
+            </SectionCard>
+
+            <SectionCard
+              title="Experimental governance"
+              description="Native canvas and ambient companion work stay governed under the same structured A2UI contract with explicit rollback criteria."
+            >
+              <KeyValueList
+                items={[
+                  {
+                    label: "Structured contract",
+                    value: snapshot.control_center.diagnostics.experiments.structured_contract,
+                  },
+                  {
+                    label: "Canvas rollout",
+                    value: formatExperimentStage(nativeCanvasExperiment.rollout_stage),
+                  },
+                  {
+                    label: "Canvas feature flag",
+                    value: nativeCanvasExperiment.feature_flag,
+                  },
+                  {
+                    label: "Ambient companion",
+                    value: ambientCompanionEnabled ? "operator preview" : "dark launch",
+                  },
+                  { label: "Ambient mode", value: "push-to-talk only" },
+                  {
+                    label: "Local consent",
+                    value:
+                      voiceConsentGranted || ttsConsentGranted
+                        ? "granted"
+                        : "required before first use",
+                  },
+                ]}
+              />
+              <InlineNotice
+                title="Fail-closed guardrails"
+                tone={
+                  snapshot.control_center.diagnostics.experiments.fail_closed ? "success" : "warning"
+                }
+              >
+                Ambient listening remains disabled, native canvas can be turned off with{" "}
+                <code>canvas_host.enabled=false</code>, and diagnostics stay in the normal control
+                plane instead of a side channel.
+              </InlineNotice>
+              <InlineNotice
+                title="Canvas support posture"
+                tone={nativeCanvasExperiment.enabled ? "warning" : "default"}
+              >
+                {nativeCanvasExperiment.support_summary}
+              </InlineNotice>
+              <div className="desktop-stack desktop-stack--compact">
+                <strong>Security review checklist</strong>
+                <ul className="desktop-list">
+                  {nativeCanvasExperiment.security_review.map((entry) => (
+                    <li key={entry}>{entry}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="desktop-stack desktop-stack--compact">
+                <strong>Exit criteria</strong>
+                <ul className="desktop-list">
+                  {nativeCanvasExperiment.exit_criteria.map((entry) => (
+                    <li key={entry}>{entry}</li>
+                  ))}
+                </ul>
               </div>
             </SectionCard>
           </section>
@@ -993,6 +1329,114 @@ export function App() {
                   >
                     Refresh transcript
                   </Button>
+                </div>
+                <div className="desktop-stack desktop-stack--compact">
+                  <div className="desktop-inline-row">
+                    <div>
+                      <p className="desktop-label">Voice experiment</p>
+                      <p className="desktop-muted">
+                        Manual push-to-talk only. Ambient listening stays disabled.
+                      </p>
+                    </div>
+                    <StatusChip
+                      tone={
+                        voiceRecording
+                          ? "warning"
+                          : snapshot.rollout.voice_capture_enabled
+                            ? "default"
+                            : "danger"
+                      }
+                    >
+                      {voiceRecording
+                        ? `Mic live · ${formatDurationMs(recordingElapsedMs)}`
+                        : snapshot.rollout.voice_capture_enabled
+                          ? "Ready"
+                          : "Disabled"}
+                    </StatusChip>
+                  </div>
+                  <div className="desktop-inline-row">
+                    <Button
+                      variant="secondary"
+                      isDisabled={
+                        selectedSession === null ||
+                        voiceBusy ||
+                        voiceRecording ||
+                        !snapshot.rollout.voice_capture_enabled
+                      }
+                      onPress={() => void startVoiceCapture()}
+                    >
+                      {voiceBusy && !voiceRecording ? "Starting..." : "Record voice"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      isDisabled={!voiceRecording || voiceBusy}
+                      onPress={() => void stopVoiceCapture()}
+                    >
+                      {voiceBusy && voiceRecording ? "Stopping..." : "Stop recording"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      isDisabled={
+                        latestAssistantNarration === null ||
+                        !snapshot.rollout.tts_playback_enabled ||
+                        speaking
+                      }
+                      onPress={() => void speakLatestAssistant()}
+                    >
+                      Speak latest assistant
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      isDisabled={!speaking}
+                      onPress={() => stopSpeechPlayback()}
+                    >
+                      Stop speaking
+                    </Button>
+                  </div>
+                  {!voiceCaptureSupported ? (
+                    <p className="desktop-muted">
+                      This desktop host does not expose microphone capture APIs.
+                    </p>
+                  ) : null}
+                  {!ttsPlaybackSupported ? (
+                    <p className="desktop-muted">
+                      This desktop host does not expose speech synthesis APIs.
+                    </p>
+                  ) : null}
+                  {voiceTranscript !== null ? (
+                    <article className="desktop-timeline-item">
+                      <div className="desktop-inline-row">
+                        <strong>Latest voice transcript</strong>
+                        <StatusChip tone="success">
+                          {voiceTranscript.transcript_language ?? "unknown language"}
+                        </StatusChip>
+                      </div>
+                      <p>{voiceTranscript.transcript_text}</p>
+                      {voiceTranscript.transcript_summary ? (
+                        <p className="desktop-muted">{voiceTranscript.transcript_summary}</p>
+                      ) : null}
+                      <p className="desktop-muted">{voiceTranscript.privacy_note}</p>
+                      {voiceTranscript.warnings.length > 0 ? (
+                        <ul className="desktop-list">
+                          {voiceTranscript.warnings.map((warning) => (
+                            <li key={warning}>{warning}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      <div className="desktop-inline-row">
+                        <Button
+                          variant="secondary"
+                          isDisabled={sendBusy}
+                          onPress={() => setComposerText(voiceTranscript.transcript_text)}
+                        >
+                          Use transcript
+                        </Button>
+                        <Button variant="ghost" onPress={() => setVoiceTranscript(null)}>
+                          Discard transcript
+                        </Button>
+                      </div>
+                    </article>
+                  ) : null}
                 </div>
               </div>
             }
@@ -1502,6 +1946,19 @@ function labelForSection(section: DesktopCompanionSection): string {
   }
 }
 
+function formatExperimentStage(stage: string): string {
+  switch (stage) {
+    case "disabled":
+      return "disabled";
+    case "operator_preview":
+      return "operator preview";
+    case "limited_preview":
+      return "limited preview";
+    default:
+      return "dark launch";
+  }
+}
+
 function toneForConnection(connectionState: string): "success" | "warning" | "danger" {
   if (connectionState === "connected") {
     return "success";
@@ -1535,6 +1992,25 @@ function toneForDevice(
     return "danger";
   }
   return "warning";
+}
+
+function findLatestAssistantNarration(
+  transcript: DesktopSessionTranscriptEnvelope | null,
+): string | null {
+  if (transcript === null) {
+    return null;
+  }
+  for (let index = transcript.records.length - 1; index >= 0; index -= 1) {
+    const record = transcript.records[index];
+    if (!record.event_type.includes("assistant")) {
+      continue;
+    }
+    const summary = describeTranscriptRecord(record).trim();
+    if (summary.length > 0) {
+      return summary;
+    }
+  }
+  return null;
 }
 
 function readString(value: JsonValue | undefined | null, key: string): string | null {
@@ -1624,4 +2100,101 @@ function parsePayload(payloadJson: string): JsonValue | null {
   } catch {
     return null;
   }
+}
+
+function readStoredConsent(storageKey: string): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem(storageKey) === "granted";
+  } catch {
+    return false;
+  }
+}
+
+function storeConsent(storageKey: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(storageKey, "granted");
+  } catch {
+    // Ignore preference persistence failures; explicit consent is still required in-session.
+  }
+}
+
+function stopRecordingStream(stream: MediaStream | null): void {
+  stream?.getTracks().forEach((track) => track.stop());
+}
+
+async function stopRecorderAndCollectBlob(
+  recorder: MediaRecorder,
+  chunks: Blob[],
+): Promise<Blob> {
+  if (recorder.state === "inactive") {
+    return new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+  }
+  return new Promise<Blob>((resolve, reject) => {
+    recorder.addEventListener(
+      "stop",
+      () => {
+        resolve(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+      },
+      { once: true },
+    );
+    recorder.addEventListener(
+      "error",
+      () => {
+        reject(new Error("voice recorder reported an unexpected media error"));
+      },
+      { once: true },
+    );
+    recorder.stop();
+  });
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, Math.min(index + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function resolvePreferredVoiceMimeType(): string | null {
+  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+    return null;
+  }
+  const preferredMimeTypes = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4",
+    "audio/ogg;codecs=opus",
+  ];
+  return preferredMimeTypes.find((value) => MediaRecorder.isTypeSupported(value)) ?? null;
+}
+
+function extensionForAudioMimeType(contentType: string): string {
+  const normalized = contentType.toLowerCase();
+  if (normalized.includes("ogg")) {
+    return "ogg";
+  }
+  if (normalized.includes("mp4")) {
+    return "m4a";
+  }
+  if (normalized.includes("mpeg")) {
+    return "mp3";
+  }
+  return "webm";
+}
+
+function formatDurationMs(value: number): string {
+  const totalSeconds = Math.max(0, Math.round(value / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }

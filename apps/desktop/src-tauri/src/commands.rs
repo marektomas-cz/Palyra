@@ -10,6 +10,8 @@ use ulid::Ulid;
 use super::companion::{
     build_companion_handoff_url, build_companion_snapshot, decide_companion_approval,
     fetch_companion_transcript, resolve_companion_chat_session, send_companion_chat_message,
+    transcribe_companion_audio, DesktopCompanionAudioTranscriptionRequest,
+    DesktopCompanionAudioTranscriptionResult,
     DesktopCompanionApprovalDecisionRequest, DesktopCompanionNotificationsRequest,
     DesktopCompanionOpenDashboardRequest, DesktopCompanionPreferencesRequest,
     DesktopCompanionResolveSessionRequest, DesktopCompanionRolloutRequest,
@@ -493,6 +495,31 @@ pub(crate) async fn send_desktop_companion_chat_message(
             Err(command_error(error))
         }
     }
+}
+
+#[tauri::command]
+pub(crate) async fn transcribe_desktop_companion_audio(
+    state: State<'_, DesktopAppState>,
+    payload: DesktopCompanionAudioTranscriptionRequest,
+) -> Result<DesktopCompanionAudioTranscriptionResult, String> {
+    let (http_client, runtime, admin_token, voice_enabled) = {
+        let supervisor = state.supervisor.lock().await;
+        (
+            supervisor.http_client.clone(),
+            supervisor.runtime.clone(),
+            supervisor.admin_token.clone(),
+            supervisor.persisted.active_companion().rollout.voice_capture_enabled,
+        )
+    };
+    if !voice_enabled {
+        return Err(
+            "desktop voice capture is disabled by rollout configuration; enable it before recording"
+                .to_owned(),
+        );
+    }
+    transcribe_companion_audio(&http_client, &runtime, admin_token.as_str(), &payload)
+        .await
+        .map_err(command_error)
 }
 
 #[tauri::command]
@@ -1012,6 +1039,7 @@ pub(crate) fn run() {
             resolve_desktop_companion_chat_session,
             get_desktop_companion_session_transcript,
             send_desktop_companion_chat_message,
+            transcribe_desktop_companion_audio,
             decide_desktop_companion_approval,
             get_openai_auth_status,
             connect_openai_api_key_command,

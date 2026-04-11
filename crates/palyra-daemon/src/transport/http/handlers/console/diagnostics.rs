@@ -64,6 +64,15 @@ pub(crate) async fn console_diagnostics_handler(
     let deployment_payload = collect_console_deployment_diagnostics(&state);
     let execution_backends_payload =
         collect_console_execution_backend_diagnostics(&state).map_err(runtime_status_response)?;
+    let canvas_experiments_payload =
+        serde_json::to_value(crate::gateway::build_canvas_experiment_governance_snapshot(
+            &state.runtime.config.canvas_host,
+        ))
+        .map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to serialize canvas experiment diagnostics payload: {error}"
+            )))
+        })?;
     let observability_payload =
         build_observability_payload(&state, &auth_payload, &media_payload).await?;
     let generated_at_unix_ms = unix_ms_now().map_err(|error| {
@@ -99,6 +108,7 @@ pub(crate) async fn console_diagnostics_handler(
         },
         "deployment": deployment_payload,
         "execution_backends": execution_backends_payload,
+        "canvas_experiments": canvas_experiments_payload,
         "observability": observability_payload,
         "memory": {
             "usage": memory_status.usage,

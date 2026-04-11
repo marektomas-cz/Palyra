@@ -8,10 +8,30 @@ export interface JsonObject {
 
 export type A2uiComponentType = "text" | "markdown" | "list" | "table" | "form" | "chart";
 
+export type A2uiExperimentRolloutStage =
+  | "disabled"
+  | "dark_launch"
+  | "operator_preview"
+  | "limited_preview";
+
+export type A2uiExperimentAmbientMode = "disabled" | "push_to_talk";
+
+export interface A2uiExperimentGovernance {
+  readonly trackId: string;
+  readonly featureFlag: string;
+  readonly rolloutStage: A2uiExperimentRolloutStage;
+  readonly ambientMode: A2uiExperimentAmbientMode;
+  readonly consentRequired: boolean;
+  readonly supportSummary: string;
+  readonly securityReview: readonly string[];
+  readonly exitCriteria: readonly string[];
+}
+
 export interface A2uiDocument {
   readonly v: 1;
   readonly surface: string;
   readonly components: readonly A2uiComponent[];
+  readonly experimental?: A2uiExperimentGovernance;
 }
 
 interface A2uiBaseComponent<TType extends A2uiComponentType, TProps> {

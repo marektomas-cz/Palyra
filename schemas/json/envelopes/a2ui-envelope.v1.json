@@ -22,6 +22,94 @@
       "minLength": 1,
       "maxLength": 128
     },
+    "experimental": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "track_id",
+        "feature_flag",
+        "support_summary",
+        "security_review",
+        "exit_criteria"
+      ],
+      "properties": {
+        "track_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "feature_flag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "rollout_stage": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "dark_launch",
+            "operator_preview",
+            "limited_preview"
+          ]
+        },
+        "ambient_mode": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "push_to_talk"
+          ]
+        },
+        "consent_required": {
+          "type": "boolean"
+        },
+        "support_summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "security_review": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "exit_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ambient_mode": {
+                "const": "push_to_talk"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "consent_required": {
+                "const": true
+              }
+            },
+            "required": [
+              "consent_required"
+            ]
+          }
+        }
+      ]
+    },
     "patch": {
       "type": "object",
       "additionalProperties": false,

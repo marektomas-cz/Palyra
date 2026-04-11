@@ -5,6 +5,23 @@ export function createDemoDocument(): A2uiDocument {
   return normalizeA2uiDocument({
     v: 1,
     surface: "web-console-preview",
+    experimental: {
+      track_id: "native-canvas-preview",
+      feature_flag: "canvas_host.enabled",
+      rollout_stage: "operator_preview",
+      ambient_mode: "disabled",
+      consent_required: false,
+      support_summary:
+        "Operator preview only. Keep browser fallback active, monitor diagnostics, and disable immediately if rendering or support signals degrade.",
+      security_review: [
+        "Keep the structured A2UI contract as the only render surface contract.",
+        "Preserve canvas host CSP, origin allowlists, and bounded payload limits.",
+      ],
+      exit_criteria: [
+        "Disable the track if control-plane diagnostics or support bundle export lose fidelity.",
+        "Retire the track if it cannot justify clear operator value after the core roadmap lands.",
+      ],
+    },
     components: [
       {
         id: "status-line",

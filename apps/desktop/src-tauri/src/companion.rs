@@ -123,6 +123,10 @@ pub(crate) struct DesktopCompanionRolloutRequest {
     #[serde(default)]
     pub(crate) offline_drafts_enabled: Option<bool>,
     #[serde(default)]
+    pub(crate) voice_capture_enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) tts_playback_enabled: Option<bool>,
+    #[serde(default)]
     pub(crate) release_channel: Option<String>,
 }
 
@@ -173,6 +177,36 @@ pub(crate) struct DesktopCompanionSendMessageResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) status: Option<String>,
     pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompanionAudioTranscriptionRequest {
+    pub(crate) session_id: String,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) bytes_base64: String,
+    pub(crate) consent_acknowledged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DesktopCompanionAudioTranscriptionResult {
+    pub(crate) attachment_id: String,
+    pub(crate) artifact_id: String,
+    pub(crate) transcript_text: String,
+    #[serde(default)]
+    pub(crate) transcript_summary: Option<String>,
+    #[serde(default)]
+    pub(crate) transcript_language: Option<String>,
+    #[serde(default)]
+    pub(crate) transcript_duration_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) transcript_processing_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) derived_artifact_id: Option<String>,
+    pub(crate) privacy_note: String,
+    #[serde(default)]
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -257,6 +291,44 @@ struct ChatSessionResolveEnvelope {
     session: DesktopResolvedChatSessionRecord,
 }
 
+#[derive(Debug, Deserialize)]
+struct DesktopAttachmentUploadEnvelope {
+    attachment: DesktopAttachmentUploadRecord,
+    #[serde(default)]
+    derived_artifacts: Vec<DesktopAttachmentDerivedArtifactRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopAttachmentUploadRecord {
+    artifact_id: String,
+    attachment_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopAttachmentDerivedArtifactRecord {
+    derived_artifact_id: String,
+    kind: String,
+    state: String,
+    #[serde(default)]
+    content_text: Option<String>,
+    #[serde(default)]
+    summary_text: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    processing_ms: Option<u64>,
+    #[serde(default)]
+    warnings: Vec<DesktopAttachmentDerivedArtifactWarning>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopAttachmentDerivedArtifactWarning {
+    code: String,
+    message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DesktopResolvedChatSessionRecord {
     pub(crate) session_id: String,
@@ -323,6 +395,12 @@ impl ControlCenter {
         }
         if let Some(enabled) = payload.offline_drafts_enabled {
             rollout.offline_drafts_enabled = enabled;
+        }
+        if let Some(enabled) = payload.voice_capture_enabled {
+            rollout.voice_capture_enabled = enabled;
+        }
+        if let Some(enabled) = payload.tts_playback_enabled {
+            rollout.tts_playback_enabled = enabled;
         }
         if let Some(release_channel) =
             payload.release_channel.as_deref().and_then(normalize_optional_text)
@@ -664,6 +742,88 @@ pub(crate) async fn send_companion_chat_message(
         run_id,
         status,
         message: "desktop companion chat turn completed".to_owned(),
+    })
+}
+
+pub(crate) async fn transcribe_companion_audio(
+    http_client: &Client,
+    runtime: &RuntimeConfig,
+    admin_token: &str,
+    payload: &DesktopCompanionAudioTranscriptionRequest,
+) -> Result<DesktopCompanionAudioTranscriptionResult> {
+    const MAX_AUDIO_UPLOAD_BASE64_BYTES: usize = 16 * 1024 * 1024;
+    const TRANSCRIPT_KIND: &str = "transcript";
+    const TRANSCRIPT_STATE_SUCCEEDED: &str = "succeeded";
+
+    if !payload.consent_acknowledged {
+        return Err(anyhow!(
+            "desktop voice capture requires explicit microphone consent acknowledgement"
+        ));
+    }
+    let session_id = normalize_optional_text(payload.session_id.as_str())
+        .ok_or_else(|| anyhow!("desktop voice transcription requires a session_id"))?;
+    let filename = normalize_optional_text(payload.filename.as_str())
+        .ok_or_else(|| anyhow!("desktop voice transcription requires a filename"))?;
+    let content_type = normalize_optional_text(payload.content_type.as_str())
+        .ok_or_else(|| anyhow!("desktop voice transcription requires a content_type"))?;
+    if !content_type.to_ascii_lowercase().starts_with("audio/") {
+        return Err(anyhow!(
+            "desktop voice transcription only accepts audio/* content types"
+        ));
+    }
+    if payload.bytes_base64.trim().is_empty() {
+        return Err(anyhow!("desktop voice transcription requires non-empty audio bytes"));
+    }
+    if payload.bytes_base64.len() > MAX_AUDIO_UPLOAD_BASE64_BYTES {
+        return Err(anyhow!(
+            "desktop voice transcription payload exceeds the temporary desktop upload budget"
+        ));
+    }
+
+    let mut control_plane = build_control_plane_client(http_client.clone(), runtime)?;
+    let _csrf_token = ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
+    let raw = control_plane
+        .post_json_value(
+            format!(
+                "console/v1/chat/sessions/{}/attachments",
+                urlencoding(session_id)
+            ),
+            &json!({
+                "filename": filename,
+                "content_type": content_type,
+                "bytes_base64": payload.bytes_base64,
+            }),
+        )
+        .await?;
+    let envelope: DesktopAttachmentUploadEnvelope = serde_json::from_value(raw)
+        .context("desktop voice attachment upload response did not match the expected contract")?;
+    let transcript = envelope
+        .derived_artifacts
+        .iter()
+        .find(|artifact| artifact.kind == TRANSCRIPT_KIND && artifact.state == TRANSCRIPT_STATE_SUCCEEDED)
+        .ok_or_else(|| anyhow!("desktop voice transcription did not return a completed transcript"))?;
+    let transcript_text = transcript
+        .content_text
+        .as_deref()
+        .and_then(normalize_optional_text)
+        .ok_or_else(|| anyhow!("desktop voice transcription completed without transcript text"))?
+        .to_owned();
+
+    Ok(DesktopCompanionAudioTranscriptionResult {
+        attachment_id: envelope.attachment.attachment_id,
+        artifact_id: envelope.attachment.artifact_id,
+        transcript_text,
+        transcript_summary: transcript.summary_text.clone(),
+        transcript_language: transcript.language.clone(),
+        transcript_duration_ms: transcript.duration_ms,
+        transcript_processing_ms: transcript.processing_ms,
+        derived_artifact_id: Some(transcript.derived_artifact_id.clone()),
+        privacy_note: "Push-to-talk audio is uploaded only after you stop recording, follows the existing media retention/redaction pipeline, and ambient listening remains disabled.".to_owned(),
+        warnings: transcript
+            .warnings
+            .iter()
+            .map(|warning| format!("{}: {}", warning.code, warning.message))
+            .collect(),
     })
 }
 

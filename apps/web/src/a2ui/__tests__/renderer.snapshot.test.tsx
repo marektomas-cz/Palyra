@@ -12,6 +12,9 @@ describe("A2uiRenderer coverage", () => {
     const document = createDemoDocument();
     render(<A2uiRenderer document={document} />);
 
+    expect(screen.getByText("Experimental surface")).toBeInTheDocument();
+    expect(screen.getByText("native-canvas-preview")).toBeInTheDocument();
+    expect(screen.getByText("canvas_host.enabled")).toBeInTheDocument();
     expect(
       screen.getByText("Renderer online. Waiting for incremental patches."),
     ).toBeInTheDocument();
@@ -48,5 +51,30 @@ describe("A2uiRenderer coverage", () => {
     expect(screen.getByText("Renderer online. Snapshot patch applied.")).toBeInTheDocument();
     expect(screen.getByText("Snapshot list extension")).toBeInTheDocument();
     expect(screen.getByText("14")).toBeInTheDocument();
+  });
+
+  it("rejects ambient experiments without explicit consent", () => {
+    expect(() =>
+      normalizeA2uiDocument({
+        v: 1,
+        surface: "ambient-preview",
+        experimental: {
+          track_id: "ambient-companion",
+          feature_flag: "desktop_companion.voice_capture_enabled",
+          rollout_stage: "operator_preview",
+          ambient_mode: "push_to_talk",
+          support_summary: "Manual capture pilot.",
+          security_review: ["Keep uploads in the existing media pipeline."],
+          exit_criteria: ["Disable on unexpected audio capture."],
+        },
+        components: [
+          {
+            id: "status",
+            type: "text",
+            props: { tone: "normal", value: "Ambient draft" },
+          },
+        ],
+      }),
+    ).toThrowError(/consent_required=true/i);
   });
 });

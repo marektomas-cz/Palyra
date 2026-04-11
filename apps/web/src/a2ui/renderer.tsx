@@ -14,6 +14,9 @@ import type {
   A2uiChartComponent,
   A2uiComponent,
   A2uiDocument,
+  A2uiExperimentAmbientMode,
+  A2uiExperimentGovernance,
+  A2uiExperimentRolloutStage,
   A2uiFormComponent,
   A2uiFormField,
   A2uiFormSubmitEvent,
@@ -37,6 +40,7 @@ export function A2uiRenderer({ document, onFormSubmit }: A2uiRendererProps) {
       data-surface={document.surface}
       aria-label={document.surface}
     >
+      {document.experimental ? <ExperimentBanner experiment={document.experimental} /> : null}
       {document.components.map((component) => (
         <article
           key={component.id}
@@ -54,6 +58,58 @@ export function A2uiRenderer({ document, onFormSubmit }: A2uiRendererProps) {
           description="This A2UI document does not contain any renderable components."
         />
       ) : null}
+    </section>
+  );
+}
+
+function ExperimentBanner({ experiment }: { experiment: A2uiExperimentGovernance }) {
+  return (
+    <aside className="a2ui-experiment-banner" data-track-id={experiment.trackId}>
+      <div className="a2ui-experiment-heading">
+        <div>
+          <p className="a2ui-experiment-eyebrow">Experimental surface</p>
+          <h3>{experiment.trackId}</h3>
+        </div>
+        <p className="a2ui-experiment-chip">{formatRolloutStage(experiment.rolloutStage)}</p>
+      </div>
+      <p className="a2ui-experiment-summary">{experiment.supportSummary}</p>
+      <dl className="a2ui-experiment-meta">
+        <div>
+          <dt>Feature flag</dt>
+          <dd>{experiment.featureFlag}</dd>
+        </div>
+        <div>
+          <dt>Ambient mode</dt>
+          <dd>{formatAmbientMode(experiment.ambientMode)}</dd>
+        </div>
+        <div>
+          <dt>Consent</dt>
+          <dd>{experiment.consentRequired ? "required" : "not required"}</dd>
+        </div>
+      </dl>
+      <div className="a2ui-experiment-checklists">
+        <ExperimentChecklist title="Security review" items={experiment.securityReview} />
+        <ExperimentChecklist title="Exit criteria" items={experiment.exitCriteria} />
+      </div>
+    </aside>
+  );
+}
+
+function ExperimentChecklist({
+  title,
+  items,
+}: {
+  title: string;
+  items: readonly string[];
+}) {
+  return (
+    <section className="a2ui-experiment-checklist">
+      <strong>{title}</strong>
+      <ul className="a2ui-list">
+        {items.map((item) => (
+          <li key={`${title}-${item}`}>{item}</li>
+        ))}
+      </ul>
     </section>
   );
 }
@@ -308,4 +364,21 @@ function A2uiBarChart({ component }: A2uiBarChartProps) {
       </div>
     </figure>
   );
+}
+
+function formatRolloutStage(value: A2uiExperimentRolloutStage): string {
+  switch (value) {
+    case "disabled":
+      return "Disabled";
+    case "operator_preview":
+      return "Operator preview";
+    case "limited_preview":
+      return "Limited preview";
+    default:
+      return "Dark launch";
+  }
+}
+
+function formatAmbientMode(value: A2uiExperimentAmbientMode): string {
+  return value === "push_to_talk" ? "Push-to-talk only" : "Disabled";
 }

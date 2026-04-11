@@ -271,6 +271,8 @@ fn companion_offline_draft_queueing_respects_rollout_toggle() {
             companion_shell_enabled: None,
             desktop_notifications_enabled: None,
             offline_drafts_enabled: Some(false),
+            voice_capture_enabled: None,
+            tts_playback_enabled: None,
             release_channel: None,
         })
         .expect("rollout update should persist");
@@ -278,6 +280,28 @@ fn companion_offline_draft_queueing_respects_rollout_toggle() {
         !control_center.companion_offline_drafts_enabled(),
         "offline draft queueing should disable when rollout toggle is false"
     );
+}
+
+#[test]
+fn companion_rollout_persists_voice_and_tts_flags() {
+    let fixture = TempFixtureDir::new();
+    let mut control_center = build_test_control_center(fixture.path());
+
+    control_center
+        .update_companion_rollout(&DesktopCompanionRolloutRequest {
+            companion_shell_enabled: None,
+            desktop_notifications_enabled: None,
+            offline_drafts_enabled: None,
+            voice_capture_enabled: Some(true),
+            tts_playback_enabled: Some(true),
+            release_channel: Some("voice-preview".to_owned()),
+        })
+        .expect("voice rollout update should persist");
+
+    let rollout = &control_center.persisted.active_companion().rollout;
+    assert!(rollout.voice_capture_enabled, "voice capture flag should persist");
+    assert!(rollout.tts_playback_enabled, "tts playback flag should persist");
+    assert_eq!(rollout.release_channel, "voice-preview");
 }
 
 #[test]
@@ -1622,6 +1646,32 @@ async fn snapshot_build_redacts_console_and_connector_diagnostics() {
                     r#"{
                             "generated_at_unix_ms":123,
                             "errors":["provider token=alpha"],
+                            "canvas_experiments":{
+                                "structured_contract":"a2ui.v1",
+                                "fail_closed":true,
+                                "requires_console_diagnostics":true,
+                                "native_canvas":{
+                                    "track_id":"native-canvas-preview",
+                                    "enabled":false,
+                                    "feature_flag":"canvas_host.enabled",
+                                    "rollout_stage":"disabled",
+                                    "ambient_mode":"disabled",
+                                    "consent_required":false,
+                                    "support_summary":"Native canvas stays behind the bounded canvas host.",
+                                    "security_review":[
+                                        "Preserve CSP and token-scoped access."
+                                    ],
+                                    "exit_criteria":[
+                                        "Disable if diagnostics regress."
+                                    ],
+                                    "limits":{
+                                        "max_state_bytes":8192,
+                                        "max_bundle_bytes":65536,
+                                        "max_assets_per_bundle":8,
+                                        "max_updates_per_minute":30
+                                    }
+                                }
+                            },
                             "observability":{
                                 "provider_auth":{
                                     "state":"degraded",
@@ -1750,6 +1800,16 @@ async fn snapshot_build_redacts_console_and_connector_diagnostics() {
     assert_eq!(snapshot.diagnostics.observability.support_bundle.success_rate_bps, 7_500);
     assert_eq!(snapshot.diagnostics.observability.failure_classes.upstream_provider_failure, 2);
     assert_eq!(snapshot.diagnostics.observability.recent_failure_count, 1);
+    assert_eq!(snapshot.diagnostics.experiments.structured_contract, "a2ui.v1");
+    assert!(snapshot.diagnostics.experiments.fail_closed);
+    assert_eq!(
+        snapshot.diagnostics.experiments.native_canvas.feature_flag,
+        "canvas_host.enabled"
+    );
+    assert_eq!(
+        snapshot.diagnostics.experiments.native_canvas.limits.max_state_bytes,
+        8_192
+    );
     assert_eq!(snapshot.quick_facts.discord.saturation_state, "paused");
     assert_eq!(
         snapshot.quick_facts.discord.permission_gap_hint.as_deref(),

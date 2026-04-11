@@ -12,6 +12,9 @@ import type {
   A2uiChartSeriesPoint,
   A2uiComponent,
   A2uiDocument,
+  A2uiExperimentAmbientMode,
+  A2uiExperimentGovernance,
+  A2uiExperimentRolloutStage,
   A2uiFormComponent,
   A2uiFormField,
   A2uiFormFieldType,
@@ -23,6 +26,9 @@ import type {
   RenderInputLimits,
 } from "./types";
 import { isJsonObject } from "./types";
+
+const MAX_EXPERIMENT_CHECKLIST_ITEMS = 6;
+const MAX_EXPERIMENT_ENTRY_LENGTH = 160;
 
 export function normalizeA2uiDocument(
   input: unknown,
@@ -60,10 +66,100 @@ export function normalizeA2uiDocument(
     }
   }
 
+  const experimental = normalizeExperimentalGovernance(input.experimental, limits);
+
   return {
     v: 1,
     surface,
     components,
+    ...(experimental === undefined ? {} : { experimental }),
+  };
+}
+
+function normalizeExperimentalGovernance(
+  value: unknown,
+  limits: RenderInputLimits,
+): A2uiExperimentGovernance | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isJsonObject(value)) {
+    throw new A2uiError("invalid_input", "A2UI experimental governance must be a JSON object.");
+  }
+
+  const trackIdRaw = coerceString(value.track_id ?? value.trackId, "", 64);
+  if (trackIdRaw.length === 0) {
+    throw new A2uiError(
+      "invalid_input",
+      "A2UI experimental governance must include a non-empty track_id.",
+    );
+  }
+  const featureFlag = sanitizeFeatureFlag(value.feature_flag ?? value.featureFlag);
+  if (featureFlag.length === 0) {
+    throw new A2uiError(
+      "invalid_input",
+      "A2UI experimental governance must include a non-empty feature_flag.",
+    );
+  }
+  const supportSummary = coerceString(
+    value.support_summary ?? value.supportSummary,
+    "",
+    Math.min(limits.maxMarkdownLength, 240),
+  );
+  if (supportSummary.length === 0) {
+    throw new A2uiError(
+      "invalid_input",
+      "A2UI experimental governance must include a non-empty support_summary.",
+    );
+  }
+
+  const rolloutStage = resolveExperimentRolloutStage(
+    coerceString(value.rollout_stage ?? value.rolloutStage, "dark_launch", 24).toLowerCase(),
+  );
+  const ambientMode = resolveExperimentAmbientMode(
+    coerceString(value.ambient_mode ?? value.ambientMode, "disabled", 24).toLowerCase(),
+  );
+  const consentRequired = coerceBoolean(
+    value.consent_required ?? value.consentRequired,
+    false,
+  );
+  if (ambientMode === "push_to_talk" && !consentRequired) {
+    throw new A2uiError(
+      "invalid_input",
+      "A2UI ambient experiments require explicit consent_required=true.",
+    );
+  }
+
+  const securityReview = normalizeChecklistEntries(
+    value.security_review ?? value.securityReview,
+    limits,
+  );
+  if (securityReview.length === 0) {
+    throw new A2uiError(
+      "invalid_input",
+      "A2UI experimental governance must include a security_review checklist.",
+    );
+  }
+  const exitCriteria = normalizeChecklistEntries(
+    value.exit_criteria ?? value.exitCriteria,
+    limits,
+  );
+  if (exitCriteria.length === 0) {
+    throw new A2uiError(
+      "invalid_input",
+      "A2UI experimental governance must include explicit exit_criteria.",
+    );
+  }
+
+  return {
+    trackId: sanitizeIdentifier(trackIdRaw, "experimental-track", 64),
+    featureFlag,
+    rolloutStage,
+    ambientMode,
+    consentRequired,
+    supportSummary,
+    securityReview,
+    exitCriteria,
   };
 }
 
@@ -361,6 +457,26 @@ function normalizeChartPoint(value: unknown, index: number): A2uiChartSeriesPoin
   };
 }
 
+function normalizeChecklistEntries(
+  value: unknown,
+  limits: RenderInputLimits,
+): readonly string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .slice(0, MAX_EXPERIMENT_CHECKLIST_ITEMS)
+    .map((entry) =>
+      coerceString(entry, "", Math.min(limits.maxStringLength, MAX_EXPERIMENT_ENTRY_LENGTH)),
+    )
+    .filter((entry) => entry.length > 0);
+}
+
+function sanitizeFeatureFlag(value: unknown): string {
+  const candidate = coerceString(value, "", 96);
+  return candidate.replace(/[^a-zA-Z0-9:._-]/g, "-").replace(/-+/g, "-");
+}
+
 function resolveFormFieldType(value: string): A2uiFormFieldType {
   switch (value) {
     case "email":
@@ -373,6 +489,28 @@ function resolveFormFieldType(value: string): A2uiFormFieldType {
       return "checkbox";
     default:
       return "text";
+  }
+}
+
+function resolveExperimentRolloutStage(value: string): A2uiExperimentRolloutStage {
+  switch (value) {
+    case "disabled":
+      return "disabled";
+    case "operator_preview":
+      return "operator_preview";
+    case "limited_preview":
+      return "limited_preview";
+    default:
+      return "dark_launch";
+  }
+}
+
+function resolveExperimentAmbientMode(value: string): A2uiExperimentAmbientMode {
+  switch (value) {
+    case "push_to_talk":
+      return "push_to_talk";
+    default:
+      return "disabled";
   }
 }
 

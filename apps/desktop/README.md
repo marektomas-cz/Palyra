@@ -60,7 +60,8 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
     repair state remain visible even before the browser console is opened.
 - Persisted local state:
   - rollout flags: `companion_shell_enabled`, `desktop_notifications_enabled`,
-    `offline_drafts_enabled`, `release_channel`,
+    `offline_drafts_enabled`, `voice_capture_enabled`, `tts_playback_enabled`,
+    `release_channel`,
   - companion preferences: active section, session, device, and latest run,
   - bounded notifications and bounded offline draft queue.
 - Trust model:
@@ -71,6 +72,10 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
     `desktop.open_path` require local mediation posture, while `system.health` and
     `system.identity` stay automatic and audit-friendly,
   - offline drafts are stored locally and only sent after explicit operator action.
+  - voice capture is push-to-talk only, uploads only after the operator stops recording, reuses the
+    existing attachment/transcript pipeline, and keeps ambient listening disabled,
+  - TTS playback is a local convenience layer only and stays behind the same rollout/consent
+    posture as the companion shell.
 
 ## Desktop node lifecycle
 
@@ -103,6 +108,14 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
   operator discard.
 - Browser handoff preserves the current `sessionId`, `deviceId`, and optional `runId` whenever a
   destination route supports that context.
+- Experimental governance keeps native canvas and ambient companion work under the same structured
+  A2UI contract:
+  - `/console/v1/diagnostics` publishes native canvas rollout state, bounded limits, security
+    review checklist, and explicit exit criteria,
+  - the desktop UI mirrors that governance locally so operators can see when canvas is in preview
+    and confirm that ambient mode remains `push-to-talk` only,
+  - disabling `canvas_host.enabled` or the local voice/TTS rollout flags cleanly removes the
+    experimental surface without touching the core companion shell.
 
 ## Portable release layout
 
