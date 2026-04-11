@@ -148,9 +148,7 @@ function formatUnixMs(value: number): string {
     .replace(",", "");
 }
 
-function backendTone(
-  value: string,
-): "default" | "success" | "warning" | "accent" {
+function backendTone(value: string): "default" | "success" | "warning" | "accent" {
   switch (value) {
     case "available":
       return "success";
