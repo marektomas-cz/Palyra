@@ -1,19 +1,19 @@
 pub(crate) mod connectors;
 
+use crate::application::channels::providers::{
+    channel_message_policy_action, channel_message_required_permissions,
+    classify_channel_message_mutation_governance,
+};
 use crate::application::channels::{
     build_channel_health_refresh_payload, build_channel_status_payload, build_channel_test_payload,
     build_channel_test_send_payload,
 };
 use crate::journal::{
     ApprovalCreateRequest, ApprovalDecision, ApprovalPolicySnapshot, ApprovalPromptOption,
-    ApprovalPromptRecord, ApprovalRecord, ApprovalRiskLevel, ApprovalSubjectType,
+    ApprovalPromptRecord, ApprovalRecord, ApprovalSubjectType,
 };
 use crate::transport::http::handlers::console::channels::build_channel_router_preview_input;
 use crate::*;
-use palyra_connectors::providers::discord::{
-    discord_permission_labels_for_operation, discord_policy_action_for_operation,
-    DiscordMessageOperation,
-};
 use palyra_connectors::ConnectorMessageRecord;
 
 const CHANNEL_MESSAGE_APPROVAL_TIMEOUT_SECONDS: u32 = 15 * 60;
@@ -333,30 +333,12 @@ async fn resolve_channel_message_mutation_authorization(
             "message preview is unavailable for the requested mutation",
         ))
     })?;
-    let connector =
-        state.channels.status(input.connector_id).map_err(channel_platform_error_response)?;
-    let governance = if connector.kind == palyra_connectors::ConnectorKind::Discord {
-        let instance = state
-            .channels
-            .connector_instance(input.connector_id)
-            .map_err(channel_platform_error_response)?;
-        Some(channels::classify_discord_message_mutation_governance(
-            &instance,
-            preview,
-            input.operation,
-            unix_ms_now().map_err(|error| {
-                runtime_status_response(tonic::Status::internal(sanitize_http_error_message(
-                    error.to_string().as_str(),
-                )))
-            })?,
-        ))
-    } else {
-        Some(channels::DiscordMessageMutationGovernance {
-            risk_level: ApprovalRiskLevel::High,
-            approval_required: true,
-            reason: "non-Discord connector mutation defaults to explicit approval".to_owned(),
-        })
-    };
+    let governance = Some(classify_channel_message_mutation_governance(
+        state,
+        input.connector_id,
+        preview,
+        input.operation,
+    )?);
     let policy_action = channel_message_policy_action(input.operation);
     let subject_id =
         build_channel_message_subject_id(input.connector_id, input.operation, input.locator);
@@ -626,31 +608,6 @@ fn build_channel_message_resource(connector_id: &str, locator: &ConnectorMessage
         "channel:{}:message:{}:{}",
         connector_id, locator.target.conversation_id, locator.message_id
     )
-}
-
-fn channel_message_policy_action(operation: channels::DiscordMessageMutationKind) -> &'static str {
-    let discord_operation = match operation {
-        channels::DiscordMessageMutationKind::Edit => DiscordMessageOperation::Edit,
-        channels::DiscordMessageMutationKind::Delete => DiscordMessageOperation::Delete,
-        channels::DiscordMessageMutationKind::ReactAdd => DiscordMessageOperation::ReactAdd,
-        channels::DiscordMessageMutationKind::ReactRemove => DiscordMessageOperation::ReactRemove,
-    };
-    discord_policy_action_for_operation(discord_operation)
-}
-
-fn channel_message_required_permissions(
-    operation: channels::DiscordMessageMutationKind,
-) -> Vec<String> {
-    let discord_operation = match operation {
-        channels::DiscordMessageMutationKind::Edit => DiscordMessageOperation::Edit,
-        channels::DiscordMessageMutationKind::Delete => DiscordMessageOperation::Delete,
-        channels::DiscordMessageMutationKind::ReactAdd => DiscordMessageOperation::ReactAdd,
-        channels::DiscordMessageMutationKind::ReactRemove => DiscordMessageOperation::ReactRemove,
-    };
-    discord_permission_labels_for_operation(discord_operation)
-        .iter()
-        .map(|value| (*value).to_owned())
-        .collect()
 }
 
 async fn record_channel_message_console_event(
@@ -1226,7 +1183,7 @@ pub(crate) async fn admin_channel_router_pairing_code_mint_handler(
 
 #[cfg(test)]
 mod tests {
-    use crate::application::channels::status::find_matching_message;
+    use crate::application::channels::providers::find_matching_message;
 
     #[test]
     fn find_matching_message_redacts_secret_like_values() {

@@ -1,3 +1,4 @@
+mod providers;
 mod router;
 
 pub(crate) mod connectors {
@@ -5,10 +6,6 @@ pub(crate) mod connectors {
 }
 
 use anyhow::{bail, Context, Result};
-use palyra_connectors::providers::discord::{
-    canonical_discord_channel_identity, canonical_discord_sender_identity,
-    normalize_discord_account_id, normalize_discord_target,
-};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{IsTerminal, Read, Write};
@@ -616,95 +613,32 @@ fn run_channel_lifecycle_upsert(
     channel: Option<String>,
     json_output: bool,
 ) -> Result<()> {
-    match provider {
-        ChannelProviderArg::Discord => {
-            if interactive {
-                if credential.is_some() || credential_stdin || credential_prompt {
-                    bail!(
-                        "channels {action} --interactive cannot be combined with explicit credential input"
-                    );
-                }
-                return connectors::discord::run(crate::args::ChannelsDiscordCommand::Setup {
-                    account_id,
-                    url,
-                    token,
-                    principal,
-                    device_id,
-                    channel,
-                    verify_channel_id,
-                    json: json_output,
-                });
-            }
-
-            let normalized_account_id = normalize_discord_account_id(account_id.as_str())
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let connector_id = connectors::discord::connector_id(normalized_account_id.as_str())?;
-            let credential = load_channel_credential(
-                credential,
-                credential_stdin,
-                credential_prompt,
-                "Discord bot token: ",
-            )?;
-            let mode = normalize_required_text_arg(mode, "mode")?;
-            let inbound_scope = normalize_required_text_arg(inbound_scope, "inbound_scope")?;
-            let mention_patterns = normalize_string_list(mention_patterns);
-            let allow_from = normalize_string_list(allow_from);
-            let deny_from = normalize_string_list(deny_from);
-            let request_context = channels_client::resolve_request_context(
-                url, token, principal, device_id, channel,
-            )?;
-            let client = channels_client::build_client()?;
-
-            let probe_endpoint = format!(
-                "{}/admin/v1/channels/discord/onboarding/probe",
-                request_context.base_url.trim_end_matches('/'),
-            );
-            let _probe_response = channels_client::send_request(
-                client.post(probe_endpoint).json(&connectors::discord::probe_payload(
-                    normalized_account_id.as_str(),
-                    credential.as_str(),
-                    mode.as_str(),
-                    verify_channel_id.as_deref(),
-                )),
-                request_context.clone(),
-                "failed to call discord onboarding probe endpoint",
-            )?;
-
-            let apply_endpoint = format!(
-                "{}/admin/v1/channels/discord/onboarding/apply",
-                request_context.base_url.trim_end_matches('/'),
-            );
-            let broadcast_strategy = broadcast_strategy.unwrap_or_else(|| "deny".to_owned());
-            let response = channels_client::send_request(
-                client.post(apply_endpoint).json(&connectors::discord::apply_payload(
-                    normalized_account_id.as_str(),
-                    credential.as_str(),
-                    mode.as_str(),
-                    inbound_scope.as_str(),
-                    &mention_patterns,
-                    &allow_from,
-                    &deny_from,
-                    require_mention.unwrap_or(true),
-                    direct_message_policy.as_deref(),
-                    concurrency_limit.unwrap_or(2),
-                    broadcast_strategy.as_str(),
-                    confirm_open_guild_channels,
-                    verify_channel_id.as_deref(),
-                )),
-                request_context,
-                "failed to call discord onboarding apply endpoint",
-            )?;
-            connectors::discord::emit_apply_response(connector_id.as_str(), response, json_output)
-        }
-        other => unsupported_provider_action(
-            "channels",
-            action,
-            other,
-            None,
-            json_output,
-            "provider lifecycle is implemented for Discord only in this milestone batch",
-        ),
-    }
+    providers::run_channel_lifecycle_upsert(
+        action,
+        provider,
+        account_id,
+        interactive,
+        credential,
+        credential_stdin,
+        credential_prompt,
+        mode,
+        inbound_scope,
+        allow_from,
+        deny_from,
+        require_mention,
+        mention_patterns,
+        concurrency_limit,
+        direct_message_policy,
+        broadcast_strategy,
+        confirm_open_guild_channels,
+        verify_channel_id,
+        url,
+        token,
+        principal,
+        device_id,
+        channel,
+        json_output,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -720,48 +654,18 @@ fn run_channel_lifecycle_disable(
     channel: Option<String>,
     json_output: bool,
 ) -> Result<()> {
-    match provider {
-        ChannelProviderArg::Discord => {
-            let normalized_account_id = normalize_discord_account_id(account_id.as_str())
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let connector_id = connectors::discord::connector_id(normalized_account_id.as_str())?;
-            let response = post_discord_account_action(
-                normalized_account_id.as_str(),
-                action,
-                json!({ "keep_credential": keep_credential }),
-                url,
-                token,
-                principal,
-                device_id,
-                channel,
-                if action == "logout" {
-                    "failed to call discord account logout endpoint"
-                } else {
-                    "failed to call discord account remove endpoint"
-                },
-            )?;
-            let credential_deleted =
-                response.get("credential_deleted").and_then(Value::as_bool).unwrap_or(false);
-            emit_channel_lifecycle_disable(
-                action,
-                provider,
-                normalized_account_id.as_str(),
-                connector_id.as_str(),
-                keep_credential,
-                credential_deleted,
-                response,
-                json_output,
-            )
-        }
-        other => unsupported_provider_action(
-            "channels",
-            action,
-            other,
-            None,
-            json_output,
-            "provider logout/remove is implemented for Discord only in this milestone batch",
-        ),
-    }
+    providers::run_channel_lifecycle_disable(
+        action,
+        provider,
+        account_id,
+        keep_credential,
+        url,
+        token,
+        principal,
+        device_id,
+        channel,
+        json_output,
+    )
 }
 
 fn build_channel_capabilities_payload(query: ChannelCapabilityQuery) -> Result<Value> {
@@ -770,7 +674,7 @@ fn build_channel_capabilities_payload(query: ChannelCapabilityQuery) -> Result<V
         (Some(connector_id), _, _) => connector_id,
         (None, Some(provider), account_id) => {
             let account_id = account_id.unwrap_or_else(|| "default".to_owned());
-            connector_id_for_provider(provider, account_id.as_str())?
+            providers::connector_id_for_provider(provider, account_id.as_str())?
         }
         (None, None, None) | (None, None, Some(_)) => {
             bail!("channels capabilities requires a connector_id or --provider [--account-id]")
@@ -778,9 +682,9 @@ fn build_channel_capabilities_payload(query: ChannelCapabilityQuery) -> Result<V
     };
 
     let provider = provider
-        .or_else(|| infer_provider_from_connector_id(resolved_connector_id.as_str()))
+        .or_else(|| providers::infer_provider_from_connector_id(resolved_connector_id.as_str()))
         .unwrap_or(ChannelProviderArg::Echo);
-    let provider_name = provider_label(provider);
+    let provider_name = providers::label(provider);
     let message_capabilities = message::load_capabilities(
         resolved_connector_id.as_str(),
         connection.url,
@@ -791,8 +695,8 @@ fn build_channel_capabilities_payload(query: ChannelCapabilityQuery) -> Result<V
     )
     .unwrap_or_else(|_| message::fallback_capabilities(provider_name));
 
-    let lifecycle_actions = provider_supported_lifecycle_actions(provider);
-    let resolve_entities = provider_supported_resolve_entities(provider);
+    let lifecycle_actions = providers::supported_lifecycle_actions(provider);
+    let resolve_entities = providers::supported_resolve_entities(provider);
     Ok(json!({
         "connector_id": resolved_connector_id,
         "provider": provider_name,
@@ -821,12 +725,12 @@ fn build_channel_capabilities_payload(query: ChannelCapabilityQuery) -> Result<V
         },
         "resolve_entities": resolve_entities,
         "pairing": {
-            "supported": provider_pairing_supported(provider),
-            "route_channel": provider_pairing_supported(provider)
+            "supported": providers::pairing_supported(provider),
+            "route_channel": providers::pairing_supported(provider)
                 .then_some(resolved_connector_id.clone()),
-            "qr_text_format": provider_pairing_supported(provider).then_some("pair <code>"),
+            "qr_text_format": providers::pairing_supported(provider).then_some("pair <code>"),
         },
-        "notes": provider_capability_notes(provider),
+        "notes": providers::capability_notes(provider),
     }))
 }
 
@@ -836,48 +740,7 @@ fn build_channel_resolution_payload(
     entity: ChannelResolveEntityArg,
     value: String,
 ) -> Result<Value> {
-    let normalized_input = normalize_required_text_arg(value, "value")?;
-    match provider {
-        ChannelProviderArg::Discord => {
-            let normalized_account_id = normalize_discord_account_id(account_id.as_str())
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let connector_id = connectors::discord::connector_id(normalized_account_id.as_str())?;
-            let (normalized, canonical) = match entity {
-                ChannelResolveEntityArg::User => {
-                    let canonical = canonical_discord_sender_identity(normalized_input.as_str());
-                    (normalized_input.clone(), canonical)
-                }
-                ChannelResolveEntityArg::Channel
-                | ChannelResolveEntityArg::Conversation
-                | ChannelResolveEntityArg::Thread => {
-                    let normalized = normalize_discord_target(normalized_input.as_str())
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    let canonical = canonical_discord_channel_identity(normalized.as_str());
-                    (normalized, canonical)
-                }
-            };
-            Ok(json!({
-                "provider": provider_label(provider),
-                "account_id": normalized_account_id,
-                "connector_id": connector_id,
-                "entity": resolve_entity_label(entity),
-                "input": normalized_input,
-                "normalized": normalized,
-                "canonical": canonical,
-            }))
-        }
-        other => Ok(json!({
-            "provider": provider_label(other),
-            "account_id": account_id,
-            "entity": resolve_entity_label(entity),
-            "input": normalized_input,
-            "supported": false,
-            "reason": format!(
-                "entity resolution is implemented for Discord only (requested provider={})",
-                provider_label(other)
-            ),
-        })),
-    }
+    providers::build_channel_resolution_payload(provider, account_id, entity, value)
 }
 
 fn fetch_router_pairings(
@@ -1134,28 +997,10 @@ fn resolve_connector_selector(
         }
         (None, Some(provider)) => {
             let account_id = account_id.unwrap_or_else(|| "default".to_owned());
-            connector_id_for_provider(provider, account_id.as_str())
+            providers::connector_id_for_provider(provider, account_id.as_str())
         }
         (None, None) => {
             bail!("connector selector requires connector_id or --provider [--account-id]")
-        }
-    }
-}
-
-fn connector_id_for_provider(provider: ChannelProviderArg, account_id: &str) -> Result<String> {
-    match provider {
-        ChannelProviderArg::Discord => connectors::discord::connector_id(account_id),
-        ChannelProviderArg::Echo => {
-            Ok(format!("echo:{}", normalize_generic_account_id(account_id, "account_id")?))
-        }
-        ChannelProviderArg::Slack => {
-            Ok(format!("slack:{}", normalize_generic_account_id(account_id, "account_id")?))
-        }
-        ChannelProviderArg::Telegram => {
-            Ok(format!("telegram:{}", normalize_generic_account_id(account_id, "account_id")?))
-        }
-        ChannelProviderArg::Webhook => {
-            Ok(format!("webhook:{}", normalize_generic_account_id(account_id, "account_id")?))
         }
     }
 }
@@ -1222,80 +1067,8 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn infer_provider_from_connector_id(connector_id: &str) -> Option<ChannelProviderArg> {
-    let prefix = connector_id.trim().split(':').next()?.to_ascii_lowercase();
-    match prefix.as_str() {
-        "discord" => Some(ChannelProviderArg::Discord),
-        "slack" => Some(ChannelProviderArg::Slack),
-        "telegram" => Some(ChannelProviderArg::Telegram),
-        "webhook" => Some(ChannelProviderArg::Webhook),
-        "echo" => Some(ChannelProviderArg::Echo),
-        _ => None,
-    }
-}
-
-fn provider_supported_lifecycle_actions(provider: ChannelProviderArg) -> Vec<&'static str> {
-    match provider {
-        ChannelProviderArg::Discord => vec![
-            "add",
-            "login",
-            "logout",
-            "remove",
-            "status",
-            "health_refresh",
-            "logs",
-            "capabilities",
-            "resolve",
-            "pairings",
-            "pairing_code",
-            "qr",
-        ],
-        ChannelProviderArg::Echo => vec!["status", "logs", "capabilities"],
-        ChannelProviderArg::Slack | ChannelProviderArg::Telegram | ChannelProviderArg::Webhook => {
-            vec!["capabilities"]
-        }
-    }
-}
-
-fn provider_supported_resolve_entities(provider: ChannelProviderArg) -> Vec<&'static str> {
-    match provider {
-        ChannelProviderArg::Discord => vec!["channel", "conversation", "thread", "user"],
-        ChannelProviderArg::Echo
-        | ChannelProviderArg::Slack
-        | ChannelProviderArg::Telegram
-        | ChannelProviderArg::Webhook => Vec::new(),
-    }
-}
-
-fn provider_pairing_supported(provider: ChannelProviderArg) -> bool {
-    matches!(provider, ChannelProviderArg::Discord)
-}
-
-fn provider_capability_notes(provider: ChannelProviderArg) -> Vec<&'static str> {
-    match provider {
-        ChannelProviderArg::Discord => vec![
-            "discord lifecycle reuses the authenticated onboarding flow",
-            "direct outbound send/thread map to the existing discord test-send transport",
-            "pairing QR output emits qr_text suitable for external QR encoding",
-        ],
-        ChannelProviderArg::Echo => vec![
-            "echo remains an internal/runtime diagnostic connector",
-            "provider lifecycle commands are intentionally unavailable for echo",
-        ],
-        ChannelProviderArg::Slack | ChannelProviderArg::Telegram | ChannelProviderArg::Webhook => {
-            vec!["provider contract reserved for a future connector implementation"]
-        }
-    }
-}
-
 fn provider_label(provider: ChannelProviderArg) -> &'static str {
-    match provider {
-        ChannelProviderArg::Discord => "discord",
-        ChannelProviderArg::Slack => "slack",
-        ChannelProviderArg::Telegram => "telegram",
-        ChannelProviderArg::Webhook => "webhook",
-        ChannelProviderArg::Echo => "echo",
-    }
+    providers::label(provider)
 }
 
 fn resolve_entity_label(entity: ChannelResolveEntityArg) -> &'static str {

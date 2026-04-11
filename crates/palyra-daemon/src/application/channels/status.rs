@@ -2,10 +2,9 @@ use serde_json::{json, Value};
 
 use crate::{
     app::state::AppState,
-    application::channels::providers::discord::{
-        build_discord_channel_permission_warnings, build_discord_inbound_monitor_warnings,
-        discord_inbound_monitor_is_alive, load_discord_inbound_monitor_summary,
-        normalize_optional_discord_channel_id, probe_discord_bot_identity,
+    application::channels::providers::{
+        build_channel_provider_health_refresh_payload, build_channel_provider_operations_payload,
+        find_matching_message,
     },
     *,
 };
@@ -44,62 +43,9 @@ pub(crate) async fn build_channel_health_refresh_payload(
     verify_channel_id: Option<String>,
 ) -> Result<Value, Response> {
     let mut payload = build_channel_status_payload(state, connector_id)?;
-    if !connector_id.trim().starts_with("discord:") {
-        payload["health_refresh"] = json!({
-            "supported": false,
-            "message": "health refresh is currently implemented for Discord connectors only",
-        });
-        return Ok(payload);
-    }
-
-    let token = match resolve_discord_connector_token(state, connector_id) {
-        Ok(token) => token,
-        Err(message) => {
-            payload["health_refresh"] = json!({
-                "supported": true,
-                "refreshed": false,
-                "message": message,
-                "required_permissions": discord_required_permission_labels(),
-            });
-            return Ok(payload);
-        }
-    };
-
-    let verify_channel_id = normalize_optional_discord_channel_id(verify_channel_id.as_deref())?;
-    let inbound_monitor = load_discord_inbound_monitor_summary(state, connector_id);
-    let inbound_alive = discord_inbound_monitor_is_alive(&inbound_monitor);
-    let mut warnings = build_discord_inbound_monitor_warnings(&inbound_monitor);
-    match probe_discord_bot_identity(token.as_str(), verify_channel_id.as_deref()).await {
-        Ok((bot, application, channel_permission_check)) => {
-            let permission_warnings =
-                build_discord_channel_permission_warnings(channel_permission_check.as_ref());
-            warnings.extend(permission_warnings.clone());
-            payload["health_refresh"] = json!({
-                "supported": true,
-                "refreshed": true,
-                "bot": bot,
-                "application": application,
-                "required_permissions": discord_required_permission_labels(),
-                "channel_permission_check": channel_permission_check,
-                "permission_warnings": permission_warnings,
-                "inbound_monitor": inbound_monitor,
-                "inbound_alive": inbound_alive,
-                "warnings": warnings,
-            });
-        }
-        Err(error) => {
-            let message = sanitize_http_error_message(error.message());
-            payload["health_refresh"] = json!({
-                "supported": true,
-                "refreshed": false,
-                "message": message,
-                "required_permissions": discord_required_permission_labels(),
-                "inbound_monitor": inbound_monitor,
-                "inbound_alive": inbound_alive,
-                "warnings": warnings,
-            });
-        }
-    }
+    payload["health_refresh"] =
+        build_channel_provider_health_refresh_payload(state, connector_id, verify_channel_id)
+            .await?;
     Ok(payload)
 }
 
@@ -135,24 +81,6 @@ fn build_channel_operations_snapshot(
                 .count()
         })
         .unwrap_or(0);
-    let last_permission_failure = find_matching_message(
-        [
-            connector.last_error.as_deref(),
-            last_runtime_error.as_deref(),
-            recent_dead_letters.first().map(|entry| entry.reason.as_str()),
-        ],
-        &[
-            "missing permissions",
-            "permission",
-            "forbidden",
-            "view channels",
-            "send messages",
-            "read message history",
-            "embed links",
-            "attach files",
-            "send messages in threads",
-        ],
-    );
     let last_auth_failure = find_matching_message(
         [
             connector.last_error.as_deref(),
@@ -201,19 +129,12 @@ fn build_channel_operations_snapshot(
     } else if let Some(error) = &last_runtime_error {
         saturation_reasons.push(format!("runtime_error={error}"));
     }
-    let discord = if connector.kind == palyra_connectors::ConnectorKind::Discord {
-        json!({
-            "required_permissions": discord_required_permission_labels(),
-            "last_permission_failure": last_permission_failure,
-            "exact_gap_check_available": true,
-            "health_refresh_hint": format!(
-                "Run channel health refresh for '{}' with verify_channel_id to confirm channel-specific Discord permission gaps.",
-                connector_id
-            ),
-        })
-    } else {
-        Value::Null
-    };
+    let provider = build_channel_provider_operations_payload(
+        connector_id,
+        connector,
+        runtime,
+        recent_dead_letters,
+    );
     json!({
         "queue": {
             "pending_outbox": queue.pending_outbox,
@@ -237,64 +158,6 @@ fn build_channel_operations_snapshot(
             "active_route_limits": active_route_limits,
             "routes": runtime.and_then(|payload| payload.get("route_rate_limits")).cloned(),
         },
-        "discord": discord,
+        "discord": provider,
     })
-}
-
-pub(crate) fn find_matching_message<'a, I>(messages: I, needles: &[&str]) -> Option<String>
-where
-    I: IntoIterator<Item = Option<&'a str>>,
-{
-    messages.into_iter().flatten().find_map(|message| {
-        let normalized = message.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            return None;
-        }
-        if needles.iter().any(|needle| normalized.contains(needle)) {
-            Some(sanitize_http_error_message(message.trim()))
-        } else {
-            None
-        }
-    })
-}
-
-fn discord_account_id_from_connector_id(connector_id: &str) -> Option<&str> {
-    connector_id.trim().strip_prefix("discord:").map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn resolve_discord_connector_token(state: &AppState, connector_id: &str) -> Result<String, String> {
-    let instance = state.channels.connector_instance(connector_id).map_err(|error| {
-        format!(
-            "failed to load connector instance '{}' for Discord token lookup: {error}",
-            connector_id.trim()
-        )
-    })?;
-    let vault_ref_raw = if let Some(vault_ref) =
-        instance.token_vault_ref.as_deref().map(str::trim).filter(|value| !value.is_empty())
-    {
-        vault_ref.to_owned()
-    } else {
-        let Some(account_id) = discord_account_id_from_connector_id(connector_id) else {
-            return Err(format!("connector '{}' is not a Discord connector", connector_id.trim()));
-        };
-        channels::discord_token_vault_ref(account_id)
-    };
-    let vault_ref = VaultRef::parse(vault_ref_raw.as_str()).map_err(|error| {
-        format!("failed to parse Discord token vault ref '{}': {error}", vault_ref_raw)
-    })?;
-    let value =
-        state.vault.get_secret(&vault_ref.scope, vault_ref.key.as_str()).map_err(|error| {
-            format!("failed to load Discord token from vault ref '{}': {error}", vault_ref_raw)
-        })?;
-    let decoded = String::from_utf8(value).map_err(|error| {
-        format!("Discord token from vault ref '{}' was not valid UTF-8: {error}", vault_ref_raw)
-    })?;
-    let token = decoded.trim().to_owned();
-    if token.is_empty() {
-        return Err(format!(
-            "Discord token vault ref '{}' resolved to an empty secret",
-            vault_ref_raw
-        ));
-    }
-    Ok(token)
 }

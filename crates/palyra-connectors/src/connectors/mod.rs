@@ -4,7 +4,7 @@ mod telegram;
 
 use std::sync::Arc;
 
-use crate::{core::ConnectorAdapter, providers::discord::DiscordConnectorAdapter};
+use crate::{core::ConnectorAdapter, providers};
 
 pub use echo::EchoConnectorAdapter;
 pub use slack::SlackConnectorAdapter;
@@ -12,7 +12,10 @@ pub use telegram::TelegramConnectorAdapter;
 
 #[must_use]
 pub fn default_adapters() -> Vec<Arc<dyn ConnectorAdapter>> {
-    vec![Arc::new(EchoConnectorAdapter::default()), Arc::new(DiscordConnectorAdapter::default())]
+    let mut adapters: Vec<Arc<dyn ConnectorAdapter>> =
+        vec![Arc::new(EchoConnectorAdapter::default())];
+    adapters.extend(providers::default_provider_adapters());
+    adapters
 }
 
 #[cfg(test)]
