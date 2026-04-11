@@ -185,7 +185,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
     try {
       const envelope = await app.api.getAgent(agentId);
       setSelectedAgent(envelope);
-      setExecutionBackends(envelope.execution_backends);
+      setExecutionBackends(envelope.execution_backends ?? []);
     } catch (error) {
       app.setError(error instanceof Error ? error.message : "Failed to load agent detail.");
     } finally {
@@ -199,7 +199,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
     try {
       const envelope: AgentListEnvelope = await app.api.listAgents();
       setAgents(envelope.agents);
-      setExecutionBackends(envelope.execution_backends);
+      setExecutionBackends(envelope.execution_backends ?? []);
       setDefaultAgentId(envelope.default_agent_id ?? null);
 
       const nextSelectedId =
@@ -252,7 +252,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
 
   const validationMessage = validationMessageForStep(wizardStep, draft);
   const detailRecord = selectedAgent?.agent ?? null;
-  const detailBackends = selectedAgent?.execution_backends ?? executionBackends;
+  const detailBackends = selectedAgent?.execution_backends ?? executionBackends ?? [];
   const detailResolvedBackend = selectedAgent?.resolved_execution_backend ?? "automatic";
   const executionBackendOptions = useMemo(
     () => [
@@ -262,7 +262,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
         description:
           "Keep the conservative daemon-host default until an operator explicitly selects a preview backend.",
       },
-      ...executionBackends.map((backend) => ({
+      ...(executionBackends ?? []).map((backend) => ({
         key: backend.backend_id,
         label: backend.label,
         description: `${backend.state} · ${backend.operator_summary}`,
