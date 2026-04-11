@@ -38,6 +38,7 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
   const selectedApprovalId = readString(selectedApproval ?? {}, "approval_id") ?? "";
   const prompt = readObject(selectedApproval ?? {}, "prompt");
   const policySnapshot = readObject(selectedApproval ?? {}, "policy_snapshot");
+  const promptDetails = parsePromptDetails(prompt);
 
   return (
     <main className="workspace-page">
@@ -203,6 +204,19 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                 </div>
               )}
 
+              {promptDetails !== null && (
+                <WorkspaceSectionCard
+                  title="Approval preview payload"
+                  description="Structured preview context from the approval prompt stays visible so operators can distinguish preview-only actions from applied ones."
+                  className="workspace-section-card--nested"
+                >
+                  <PrettyJsonBlock
+                    value={promptDetails}
+                    revealSensitiveValues={app.revealSensitiveValues}
+                  />
+                </WorkspaceSectionCard>
+              )}
+
               <div className="workspace-form-grid">
                 <TextInputField
                   label="Approval ID"
@@ -277,4 +291,22 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
 function readUnixMillis(record: JsonObject, key: string): number | null {
   const value = record[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parsePromptDetails(prompt: JsonObject | null): JsonObject | null {
+  if (prompt === null) {
+    return null;
+  }
+  const detailsRaw = readString(prompt, "details_json");
+  if (detailsRaw === null || detailsRaw.trim().length === 0) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(detailsRaw);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as JsonObject)
+      : null;
+  } catch {
+    return null;
+  }
 }

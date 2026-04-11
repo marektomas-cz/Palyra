@@ -30,6 +30,60 @@ export type ChannelRouterPairingCodePayload = {
   ttl_ms?: number;
 };
 
+export type ChannelMessageReadPayload = {
+  request: {
+    conversation_id: string;
+    thread_id?: string;
+    message_id?: string;
+    before_message_id?: string;
+    after_message_id?: string;
+    around_message_id?: string;
+    limit: number;
+  };
+};
+
+export type ChannelMessageSearchPayload = {
+  request: {
+    conversation_id: string;
+    thread_id?: string;
+    query?: string;
+    author_id?: string;
+    has_attachments?: boolean;
+    before_message_id?: string;
+    limit: number;
+  };
+};
+
+export type ChannelMessageLocatorPayload = {
+  conversation_id: string;
+  thread_id?: string;
+  message_id: string;
+};
+
+export type ChannelMessageEditPayload = {
+  request: {
+    locator: ChannelMessageLocatorPayload;
+    body: string;
+  };
+  approval_id?: string;
+};
+
+export type ChannelMessageDeletePayload = {
+  request: {
+    locator: ChannelMessageLocatorPayload;
+    reason?: string;
+  };
+  approval_id?: string;
+};
+
+export type ChannelMessageReactionPayload = {
+  request: {
+    locator: ChannelMessageLocatorPayload;
+    emoji: string;
+  };
+  approval_id?: string;
+};
+
 export function listChannels(api: ConsoleApiClient) {
   return api.listChannels();
 }
@@ -56,6 +110,54 @@ export function sendChannelTestMessage(
   payload: ChannelTestMessagePayload,
 ) {
   return api.sendChannelTestMessage(connectorId, payload);
+}
+
+export function readChannelMessages(
+  api: ConsoleApiClient,
+  connectorId: string,
+  payload: ChannelMessageReadPayload,
+) {
+  return api.readChannelMessages(connectorId, payload);
+}
+
+export function searchChannelMessages(
+  api: ConsoleApiClient,
+  connectorId: string,
+  payload: ChannelMessageSearchPayload,
+) {
+  return api.searchChannelMessages(connectorId, payload);
+}
+
+export function editChannelMessage(
+  api: ConsoleApiClient,
+  connectorId: string,
+  payload: ChannelMessageEditPayload,
+) {
+  return api.editChannelMessage(connectorId, payload);
+}
+
+export function deleteChannelMessage(
+  api: ConsoleApiClient,
+  connectorId: string,
+  payload: ChannelMessageDeletePayload,
+) {
+  return api.deleteChannelMessage(connectorId, payload);
+}
+
+export function addChannelMessageReaction(
+  api: ConsoleApiClient,
+  connectorId: string,
+  payload: ChannelMessageReactionPayload,
+) {
+  return api.addChannelMessageReaction(connectorId, payload);
+}
+
+export function removeChannelMessageReaction(
+  api: ConsoleApiClient,
+  connectorId: string,
+  payload: ChannelMessageReactionPayload,
+) {
+  return api.removeChannelMessageReaction(connectorId, payload);
 }
 
 export function getChannelRouterRules(api: ConsoleApiClient) {

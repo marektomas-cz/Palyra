@@ -12,6 +12,8 @@ import {
   EntityTable,
   InlineNotice,
   KeyValueList,
+  SelectField,
+  TextAreaField,
   TextInputField,
 } from "../components/ui";
 import {
@@ -24,13 +26,14 @@ import {
   PrettyJsonBlock,
   channelConnectorAvailability,
   readBool,
+  readNumber,
   readObject,
   readString,
   type JsonObject,
 } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
-type ChannelsTab = "connectors" | "router" | "discord";
+type ChannelsTab = "connectors" | "messages" | "router" | "discord";
 
 type ConnectorRow = {
   connector: JsonObject;
@@ -51,6 +54,19 @@ type PairingRow = {
   channel: string;
   principal: string;
   status: string;
+};
+
+type MessageRow = {
+  id: string;
+  conversationId: string;
+  threadId: string;
+  sender: string;
+  body: string;
+  createdAt: string;
+  attachments: number;
+  reactions: string;
+  link: string | null;
+  raw: JsonObject;
 };
 
 export function ChannelsSection({ app }: { app: ConsoleAppState }) {
@@ -115,6 +131,42 @@ export function ChannelsSection({ app }: { app: ConsoleAppState }) {
       }),
     [app.channelRouterPairings],
   );
+  const messageCapabilities = useMemo<JsonObject[]>(() => {
+    const connectorCapabilities = readObject(selectedConnector, "capabilities");
+    const messageCapabilitiesObject =
+      connectorCapabilities !== null ? readObject(connectorCapabilities, "message") : null;
+    const actionDetails = messageCapabilitiesObject?.action_details;
+    return Array.isArray(actionDetails)
+      ? actionDetails.filter((entry): entry is JsonObject => asMaybeJsonObject(entry) !== null)
+      : [];
+  }, [selectedConnector]);
+  const messageReadResult = readObject(app.channelMessageReadResult ?? {}, "result");
+  const messageSearchResult = readObject(app.channelMessageSearchResult ?? {}, "result");
+  const messageMutationResult = app.channelMessageMutationResult ?? null;
+  const messageMutationApproval = readObject(messageMutationResult ?? {}, "approval");
+  const messageMutationPreview = readObject(messageMutationResult ?? {}, "preview");
+  const messageMutationPolicy = readObject(messageMutationResult ?? {}, "policy");
+  const messageMutationAppliedResult = readObject(messageMutationResult ?? {}, "result");
+  const latestMessageCollection =
+    messageSearchResult !== null ? messageSearchResult : messageReadResult;
+  const latestMessageRows = useMemo<MessageRow[]>(() => {
+    const entries = Array.isArray(latestMessageCollection?.messages)
+      ? latestMessageCollection.messages
+      : Array.isArray(latestMessageCollection?.matches)
+        ? latestMessageCollection.matches
+        : [];
+    return entries
+      .map((entry, index) => toMessageRow(entry, index))
+      .filter((row): row is MessageRow => row !== null);
+  }, [latestMessageCollection]);
+
+  function prefillMutationFromRow(row: MessageRow): void {
+    const locator = readObject(row.raw, "locator");
+    app.setChannelMessageConversationId(readString(locator ?? {}, "conversation_id") ?? "");
+    app.setChannelMessageThreadId(readString(locator ?? {}, "thread_id") ?? "");
+    app.setChannelMessageMutationMessageId(readString(locator ?? {}, "message_id") ?? "");
+    app.setChannelMessageMutationBody(readString(row.raw, "body") ?? "");
+  }
 
   return (
     <main className="workspace-page">
@@ -200,6 +252,10 @@ export function ChannelsSection({ app }: { app: ConsoleAppState }) {
           <Tabs.List aria-label="Channels workspace modes" className="w-fit">
             <Tabs.Tab id="connectors">
               Connectors
+              <Tabs.Indicator />
+            </Tabs.Tab>
+            <Tabs.Tab id="messages">
+              Messages
               <Tabs.Indicator />
             </Tabs.Tab>
             <Tabs.Tab id="router">
@@ -497,6 +553,375 @@ export function ChannelsSection({ app }: { app: ConsoleAppState }) {
           </section>
         </Tabs.Panel>
 
+        <Tabs.Panel className="pt-4" id="messages">
+          <section className="workspace-two-column">
+            <WorkspaceSectionCard
+              title="Message read and search"
+              description="Inspect Discord history with bounded filters, then pivot directly into edit, delete, or reaction workflows."
+            >
+              <div className="workspace-stack">
+                <div className="workspace-form-grid">
+                  <TextInputField
+                    label="Conversation ID"
+                    value={app.channelMessageConversationId}
+                    onChange={app.setChannelMessageConversationId}
+                    placeholder="discord:channel:123 or DM conversation"
+                  />
+                  <TextInputField
+                    label="Thread ID"
+                    value={app.channelMessageThreadId}
+                    onChange={app.setChannelMessageThreadId}
+                    placeholder="Optional thread"
+                  />
+                </div>
+
+                <WorkspaceSectionCard
+                  title="Read history"
+                  description="Fetch a single message, surrounding context, or bounded history without dumping the whole channel."
+                  className="workspace-section-card--nested"
+                >
+                  <AppForm onSubmit={(event) => void app.readChannelMessages(event)}>
+                    <div className="workspace-form-grid">
+                      <TextInputField
+                        label="Message ID"
+                        value={app.channelMessageReadMessageId}
+                        onChange={app.setChannelMessageReadMessageId}
+                        placeholder="Exact message lookup"
+                      />
+                      <TextInputField
+                        label="Before message"
+                        value={app.channelMessageReadBeforeMessageId}
+                        onChange={app.setChannelMessageReadBeforeMessageId}
+                      />
+                      <TextInputField
+                        label="After message"
+                        value={app.channelMessageReadAfterMessageId}
+                        onChange={app.setChannelMessageReadAfterMessageId}
+                      />
+                      <TextInputField
+                        label="Around message"
+                        value={app.channelMessageReadAroundMessageId}
+                        onChange={app.setChannelMessageReadAroundMessageId}
+                      />
+                      <TextInputField
+                        label="Limit"
+                        value={app.channelMessageReadLimit}
+                        onChange={app.setChannelMessageReadLimit}
+                        type="number"
+                      />
+                    </div>
+                    <ActionButton type="submit" isDisabled={app.channelsBusy}>
+                      {app.channelsBusy ? "Loading..." : "Read messages"}
+                    </ActionButton>
+                  </AppForm>
+                </WorkspaceSectionCard>
+
+                <WorkspaceSectionCard
+                  title="Search"
+                  description="Filter by text, author, attachments, and pagination cursor to keep the result set reviewable."
+                  className="workspace-section-card--nested"
+                >
+                  <AppForm onSubmit={(event) => void app.searchChannelMessages(event)}>
+                    <div className="workspace-form-grid">
+                      <TextInputField
+                        label="Query"
+                        value={app.channelMessageSearchQuery}
+                        onChange={app.setChannelMessageSearchQuery}
+                      />
+                      <TextInputField
+                        label="Author ID"
+                        value={app.channelMessageSearchAuthorId}
+                        onChange={app.setChannelMessageSearchAuthorId}
+                      />
+                      <SelectField
+                        label="Attachments"
+                        value={app.channelMessageSearchHasAttachments}
+                        onChange={app.setChannelMessageSearchHasAttachments}
+                        options={[
+                          { key: "any", label: "Any" },
+                          { key: "with", label: "With attachments" },
+                          { key: "without", label: "Without attachments" },
+                        ]}
+                      />
+                      <TextInputField
+                        label="Before message"
+                        value={app.channelMessageSearchBeforeMessageId}
+                        onChange={app.setChannelMessageSearchBeforeMessageId}
+                      />
+                      <TextInputField
+                        label="Limit"
+                        value={app.channelMessageSearchLimit}
+                        onChange={app.setChannelMessageSearchLimit}
+                        type="number"
+                      />
+                    </div>
+                    <ActionButton type="submit" isDisabled={app.channelsBusy}>
+                      {app.channelsBusy ? "Searching..." : "Search messages"}
+                    </ActionButton>
+                  </AppForm>
+                </WorkspaceSectionCard>
+
+                {messageCapabilities.length > 0 ? (
+                  <InlineNotice title="Connector message capabilities" tone="default">
+                    <EntityTable
+                      ariaLabel="Connector message capabilities"
+                      columns={[
+                        {
+                          key: "action",
+                          label: "Action",
+                          isRowHeader: true,
+                          render: (row) => (
+                            <strong>{readString(row, "action") ?? "unknown"}</strong>
+                          ),
+                        },
+                        {
+                          key: "support",
+                          label: "Support",
+                          render: (row) => (
+                            <div className="workspace-inline">
+                              <WorkspaceStatusChip
+                                tone={readBool(row, "supported") ? "success" : "warning"}
+                              >
+                                {readBool(row, "supported") ? "supported" : "blocked"}
+                              </WorkspaceStatusChip>
+                              <WorkspaceStatusChip tone="default">
+                                {readString(row, "approval_mode") ?? "n/a"}
+                              </WorkspaceStatusChip>
+                              <WorkspaceStatusChip tone="default">
+                                {readString(row, "risk_level") ?? "n/a"}
+                              </WorkspaceStatusChip>
+                            </div>
+                          ),
+                        },
+                        {
+                          key: "permissions",
+                          label: "Permissions",
+                          render: (row) =>
+                            arrayToText(row.required_permissions, "No explicit permissions"),
+                        },
+                      ]}
+                      rows={messageCapabilities}
+                      getRowId={(row, index) => readString(row, "action") ?? `action-${index}`}
+                    />
+                  </InlineNotice>
+                ) : null}
+              </div>
+            </WorkspaceSectionCard>
+
+            <WorkspaceSectionCard
+              title="Results and mutations"
+              description="Results stay visible with links and metadata, while mutation controls make it explicit whether the action is only a preview or was actually applied."
+            >
+              <div className="workspace-stack">
+                <WorkspaceSectionCard
+                  title="Latest results"
+                  description="Use result rows to prefill the mutation form instead of copying Discord IDs by hand."
+                  className="workspace-section-card--nested"
+                >
+                  {latestMessageRows.length === 0 ? (
+                    <EmptyState
+                      compact
+                      title="No message results yet"
+                      description="Run read or search to inspect history and prefill the mutation form."
+                    />
+                  ) : (
+                    <EntityTable
+                      ariaLabel="Discord message results"
+                      columns={[
+                        {
+                          key: "message",
+                          label: "Message",
+                          isRowHeader: true,
+                          render: (row) => (
+                            <div className="workspace-stack">
+                              <strong>{row.sender}</strong>
+                              <span className="chat-muted">{row.body}</span>
+                            </div>
+                          ),
+                        },
+                        {
+                          key: "meta",
+                          label: "Metadata",
+                          render: (row) => (
+                            <div className="workspace-stack">
+                              <span>{row.createdAt}</span>
+                              <span className="chat-muted">
+                                {row.attachments} attachments · {row.reactions}
+                              </span>
+                              <span className="chat-muted">
+                                {row.threadId === "none"
+                                  ? row.conversationId
+                                  : `${row.conversationId} · ${row.threadId}`}
+                              </span>
+                              {row.link !== null ? (
+                                <a href={row.link} target="_blank" rel="noreferrer">
+                                  Open Discord message
+                                </a>
+                              ) : null}
+                            </div>
+                          ),
+                        },
+                        {
+                          key: "actions",
+                          label: "Actions",
+                          align: "end",
+                          render: (row) => (
+                            <ActionButton
+                              variant="secondary"
+                              size="sm"
+                              onPress={() => prefillMutationFromRow(row)}
+                            >
+                              Prefill mutation
+                            </ActionButton>
+                          ),
+                        },
+                      ]}
+                      rows={latestMessageRows}
+                      getRowId={(row) => row.id}
+                    />
+                  )}
+                  {latestMessageCollection !== null ? (
+                    <PrettyJsonBlock
+                      value={latestMessageCollection}
+                      revealSensitiveValues={app.revealSensitiveValues}
+                    />
+                  ) : null}
+                </WorkspaceSectionCard>
+
+                <WorkspaceSectionCard
+                  title="Mutate message"
+                  description="Edit, delete, and reaction changes share the same locator and approval context, so you can inspect and retry an approval-required action without rebuilding the request."
+                  className="workspace-section-card--nested"
+                >
+                  <div className="workspace-form-grid">
+                    <TextInputField
+                      label="Message ID"
+                      value={app.channelMessageMutationMessageId}
+                      onChange={app.setChannelMessageMutationMessageId}
+                    />
+                    <TextInputField
+                      label="Approval ID"
+                      value={app.channelMessageMutationApprovalId}
+                      onChange={app.setChannelMessageMutationApprovalId}
+                      placeholder="Use returned approval ID to apply"
+                    />
+                    <TextInputField
+                      label="Reaction emoji"
+                      value={app.channelMessageMutationEmoji}
+                      onChange={app.setChannelMessageMutationEmoji}
+                    />
+                    <TextInputField
+                      label="Delete reason"
+                      value={app.channelMessageMutationDeleteReason}
+                      onChange={app.setChannelMessageMutationDeleteReason}
+                    />
+                  </div>
+                  <TextAreaField
+                    label="Edit body"
+                    value={app.channelMessageMutationBody}
+                    onChange={app.setChannelMessageMutationBody}
+                    rows={5}
+                  />
+                  <ActionCluster>
+                    <ActionButton
+                      onPress={() => void app.editChannelMessage()}
+                      isDisabled={app.channelsBusy}
+                    >
+                      Edit message
+                    </ActionButton>
+                    <ActionButton
+                      variant="secondary"
+                      onPress={() => void app.deleteChannelMessage()}
+                      isDisabled={app.channelsBusy}
+                    >
+                      Delete message
+                    </ActionButton>
+                    <ActionButton
+                      variant="secondary"
+                      onPress={() => void app.addChannelMessageReaction()}
+                      isDisabled={app.channelsBusy}
+                    >
+                      Add reaction
+                    </ActionButton>
+                    <ActionButton
+                      variant="secondary"
+                      onPress={() => void app.removeChannelMessageReaction()}
+                      isDisabled={app.channelsBusy}
+                    >
+                      Remove reaction
+                    </ActionButton>
+                  </ActionCluster>
+                </WorkspaceSectionCard>
+
+                {messageMutationResult !== null ? (
+                  <WorkspaceSectionCard
+                    title="Latest mutation outcome"
+                    description="Preview and applied results are intentionally separated so the operator can see whether the platform changed."
+                    className="workspace-section-card--nested"
+                  >
+                    {readBool(messageMutationResult, "approval_required") ? (
+                      <InlineNotice title="Approval required" tone="warning">
+                        <p>
+                          No platform mutation has been applied yet. This response is a preview plus
+                          approval artifact for a follow-up confirmation.
+                        </p>
+                        <KeyValueList
+                          items={[
+                            {
+                              label: "Approval ID",
+                              value:
+                                readString(messageMutationApproval ?? {}, "approval_id") ?? "n/a",
+                            },
+                            {
+                              label: "Policy action",
+                              value: readString(messageMutationPolicy ?? {}, "action") ?? "n/a",
+                            },
+                            {
+                              label: "Policy reason",
+                              value: readString(messageMutationPolicy ?? {}, "reason") ?? "n/a",
+                            },
+                          ]}
+                        />
+                      </InlineNotice>
+                    ) : (
+                      <InlineNotice title="Mutation applied" tone="success">
+                        <p>
+                          The connector returned an applied mutation result. Review the result below
+                          before continuing with follow-up operations.
+                        </p>
+                        <KeyValueList
+                          items={[
+                            {
+                              label: "Status",
+                              value:
+                                readString(messageMutationAppliedResult ?? {}, "status") ?? "n/a",
+                            },
+                            {
+                              label: "Reason",
+                              value:
+                                readString(messageMutationAppliedResult ?? {}, "reason") ?? "none",
+                            },
+                          ]}
+                        />
+                      </InlineNotice>
+                    )}
+                    {messageMutationPreview !== null ? (
+                      <PrettyJsonBlock
+                        value={messageMutationPreview}
+                        revealSensitiveValues={app.revealSensitiveValues}
+                      />
+                    ) : null}
+                    <PrettyJsonBlock
+                      value={messageMutationResult}
+                      revealSensitiveValues={app.revealSensitiveValues}
+                    />
+                  </WorkspaceSectionCard>
+                ) : null}
+              </div>
+            </WorkspaceSectionCard>
+          </section>
+        </Tabs.Panel>
+
         <Tabs.Panel className="pt-4" id="router">
           <section className="workspace-two-column">
             <WorkspaceSectionCard
@@ -756,4 +1181,69 @@ function asJsonObject(value: unknown): JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
     : {};
+}
+
+function asMaybeJsonObject(value: unknown): JsonObject | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonObject)
+    : null;
+}
+
+function arrayToText(value: unknown, fallback: string): string {
+  if (!Array.isArray(value)) {
+    return fallback;
+  }
+  const entries = value.filter(
+    (entry): entry is string => typeof entry === "string" && entry.length > 0,
+  );
+  return entries.length > 0 ? entries.join(", ") : fallback;
+}
+
+function toMessageRow(value: unknown, index: number): MessageRow | null {
+  const record = asMaybeJsonObject(value);
+  const locator = record !== null ? readObject(record, "locator") : null;
+  const messageId = readString(locator ?? {}, "message_id");
+  const conversationId = readString(locator ?? {}, "conversation_id");
+  if (record === null || messageId === null || conversationId === null) {
+    return null;
+  }
+  const sender =
+    readString(record, "sender_display") ?? readString(record, "sender_id") ?? "unknown sender";
+  const body = compactCopy(readString(record, "body") ?? "(empty message)");
+  const reactions = Array.isArray(record.reactions)
+    ? record.reactions
+        .map((entry) => {
+          const reaction = asMaybeJsonObject(entry);
+          if (reaction === null) {
+            return null;
+          }
+          const emoji = readString(reaction, "emoji");
+          if (emoji === null) {
+            return null;
+          }
+          return `${emoji} ${readNumber(reaction, "count") ?? 0}`;
+        })
+        .filter((entry): entry is string => entry !== null)
+        .join(", ")
+    : "";
+  return {
+    id: `${conversationId}:${messageId}:${index}`,
+    conversationId,
+    threadId: readString(locator ?? {}, "thread_id") ?? "none",
+    sender,
+    body,
+    createdAt: displayScalar(record.created_at_unix_ms, "n/a"),
+    attachments: Array.isArray(record.attachments) ? record.attachments.length : 0,
+    reactions: reactions.length > 0 ? reactions : "no reactions",
+    link: readString(record, "link"),
+    raw: record,
+  };
+}
+
+function compactCopy(value: string): string {
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= 160) {
+    return collapsed;
+  }
+  return `${collapsed.slice(0, 157)}...`;
 }

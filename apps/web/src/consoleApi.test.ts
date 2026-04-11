@@ -288,6 +288,108 @@ describe("ConsoleApiClient", () => {
     expect(calls[3]?.init?.method).toBe("POST");
   });
 
+  it("posts Discord message admin operations with CSRF to the expected channel endpoints", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({ result: { messages: [] } }),
+      jsonResponse({ result: { matches: [] } }),
+      jsonResponse({ approval_required: true, approval: { approval_id: "A1" } }),
+      jsonResponse({ result: { status: "deleted" } }),
+      jsonResponse({ result: { status: "reaction_added" } }),
+      jsonResponse({ result: { status: "reaction_removed" } }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+    const client = new ConsoleApiClient("", fetcher);
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    await client.readChannelMessages("discord:default", {
+      request: { conversation_id: "discord:channel:1", limit: 10 },
+    });
+    await client.searchChannelMessages("discord:default", {
+      request: { conversation_id: "discord:channel:1", query: "error", limit: 10 },
+    });
+    await client.editChannelMessage("discord:default", {
+      request: {
+        locator: {
+          conversation_id: "discord:channel:1",
+          message_id: "m1",
+        },
+        body: "updated",
+      },
+    });
+    await client.deleteChannelMessage("discord:default", {
+      request: {
+        locator: {
+          conversation_id: "discord:channel:1",
+          message_id: "m1",
+        },
+      },
+      approval_id: "A1",
+    });
+    await client.addChannelMessageReaction("discord:default", {
+      request: {
+        locator: {
+          conversation_id: "discord:channel:1",
+          message_id: "m1",
+        },
+        emoji: "✅",
+      },
+    });
+    await client.removeChannelMessageReaction("discord:default", {
+      request: {
+        locator: {
+          conversation_id: "discord:channel:1",
+          message_id: "m1",
+        },
+        emoji: "✅",
+      },
+    });
+
+    for (const index of [1, 2, 3, 4, 5, 6]) {
+      const headers = new Headers(calls[index]?.init?.headers);
+      expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
+      expect(calls[index]?.init?.method).toBe("POST");
+    }
+
+    expect(requestUrl(calls[1]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/messages/read",
+    );
+    expect(requestUrl(calls[2]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/messages/search",
+    );
+    expect(requestUrl(calls[3]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/messages/edit",
+    );
+    expect(requestUrl(calls[4]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/messages/delete",
+    );
+    expect(requestUrl(calls[5]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/messages/react-add",
+    );
+    expect(requestUrl(calls[6]?.input)).toBe(
+      "/console/v1/channels/discord%3Adefault/messages/react-remove",
+    );
+  });
+
   it("propagates richer backend error envelopes", async () => {
     const fetcher: typeof fetch = () => {
       return Promise.resolve(

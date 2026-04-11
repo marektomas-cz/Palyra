@@ -2,6 +2,9 @@ import type { Dispatch, FormEvent, SetStateAction } from "react";
 
 import { type ConsoleApiClient, type JsonValue } from "../../../consoleApi";
 import {
+  addChannelMessageReaction as addChannelMessageReactionRequest,
+  deleteChannelMessage as deleteChannelMessageRequest,
+  editChannelMessage as editChannelMessageRequest,
   discardChannelDeadLetter as discardChannelDeadLetterRequest,
   drainChannelQueue as drainChannelQueueRequest,
   getChannelRouterRules,
@@ -13,14 +16,18 @@ import {
   mintChannelRouterPairingCode as mintChannelRouterPairingCodeRequest,
   pauseChannelQueue as pauseChannelQueueRequest,
   previewChannelRoute,
+  readChannelMessages as readChannelMessagesRequest,
   replayChannelDeadLetter as replayChannelDeadLetterRequest,
+  removeChannelMessageReaction as removeChannelMessageReactionRequest,
   resumeChannelQueue as resumeChannelQueueRequest,
+  searchChannelMessages as searchChannelMessagesRequest,
   sendChannelTestMessage,
   setChannelEnabled as setChannelEnabledRequest,
 } from "./api";
 import {
   emptyToUndefined,
   isJsonObject,
+  readObject,
   isVisibleChannelConnector,
   parseInteger,
   readString,
@@ -56,6 +63,23 @@ export type ChannelCoreDomainDeps = {
   channelRouterMintChannel: string;
   channelRouterMintIssuedBy: string;
   channelRouterMintTtlMs: string;
+  channelMessageConversationId: string;
+  channelMessageThreadId: string;
+  channelMessageReadMessageId: string;
+  channelMessageReadBeforeMessageId: string;
+  channelMessageReadAfterMessageId: string;
+  channelMessageReadAroundMessageId: string;
+  channelMessageReadLimit: string;
+  channelMessageSearchQuery: string;
+  channelMessageSearchAuthorId: string;
+  channelMessageSearchHasAttachments: string;
+  channelMessageSearchBeforeMessageId: string;
+  channelMessageSearchLimit: string;
+  channelMessageMutationMessageId: string;
+  channelMessageMutationApprovalId: string;
+  channelMessageMutationBody: string;
+  channelMessageMutationDeleteReason: string;
+  channelMessageMutationEmoji: string;
   setChannelsBusy: Setter<boolean>;
   setError: Setter<string | null>;
   setNotice: Setter<string | null>;
@@ -73,6 +97,13 @@ export type ChannelCoreDomainDeps = {
   setChannelRouterMintChannel: Setter<string>;
   setChannelRouterMintResult: Setter<JsonObject | null>;
   setChannelRouterPairingsFilterChannel: Setter<string>;
+  setChannelMessageConversationId: Setter<string>;
+  setChannelMessageThreadId: Setter<string>;
+  setChannelMessageMutationMessageId: Setter<string>;
+  setChannelMessageMutationApprovalId: Setter<string>;
+  setChannelMessageReadResultPayload: (payload: JsonValue) => void;
+  setChannelMessageSearchResultPayload: (payload: JsonValue) => void;
+  setChannelMessageMutationResultPayload: (payload: JsonValue) => void;
   setSelectedChannelStatusPayload: (payload: JsonValue) => void;
 };
 
@@ -101,6 +132,23 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     channelRouterMintChannel,
     channelRouterMintIssuedBy,
     channelRouterMintTtlMs,
+    channelMessageConversationId,
+    channelMessageThreadId,
+    channelMessageReadMessageId,
+    channelMessageReadBeforeMessageId,
+    channelMessageReadAfterMessageId,
+    channelMessageReadAroundMessageId,
+    channelMessageReadLimit,
+    channelMessageSearchQuery,
+    channelMessageSearchAuthorId,
+    channelMessageSearchHasAttachments,
+    channelMessageSearchBeforeMessageId,
+    channelMessageSearchLimit,
+    channelMessageMutationMessageId,
+    channelMessageMutationApprovalId,
+    channelMessageMutationBody,
+    channelMessageMutationDeleteReason,
+    channelMessageMutationEmoji,
     setChannelsBusy,
     setError,
     setNotice,
@@ -118,6 +166,13 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     setChannelRouterMintChannel,
     setChannelRouterMintResult,
     setChannelRouterPairingsFilterChannel,
+    setChannelMessageConversationId,
+    setChannelMessageThreadId,
+    setChannelMessageMutationMessageId,
+    setChannelMessageMutationApprovalId,
+    setChannelMessageReadResultPayload,
+    setChannelMessageSearchResultPayload,
+    setChannelMessageMutationResultPayload,
     setSelectedChannelStatusPayload,
   } = deps;
 
@@ -504,6 +559,272 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     }
   }
 
+  function normalizedSelectedConnectorId(actionLabel: string): string | null {
+    const connectorId = channelsSelectedConnectorId.trim();
+    if (connectorId.length === 0) {
+      setError(`Select a connector before ${actionLabel}.`);
+      return null;
+    }
+    return connectorId;
+  }
+
+  function normalizedMessageLocator(actionLabel: string): {
+    connectorId: string;
+    conversationId: string;
+    threadId?: string;
+    messageId: string;
+  } | null {
+    const connectorId = normalizedSelectedConnectorId(actionLabel);
+    if (connectorId === null) {
+      return null;
+    }
+    const conversationId = channelMessageConversationId.trim();
+    if (conversationId.length === 0) {
+      setError(`Conversation ID is required before ${actionLabel}.`);
+      return null;
+    }
+    const messageId = channelMessageMutationMessageId.trim();
+    if (messageId.length === 0) {
+      setError(`Message ID is required before ${actionLabel}.`);
+      return null;
+    }
+    return {
+      connectorId,
+      conversationId,
+      threadId: emptyToUndefined(channelMessageThreadId),
+      messageId,
+    };
+  }
+
+  function parsePositiveLimit(raw: string, label: string): number | null {
+    const parsed = parseInteger(raw);
+    if (parsed === null || parsed <= 0) {
+      setError(`${label} must be a positive integer.`);
+      return null;
+    }
+    return parsed;
+  }
+
+  function parseHasAttachmentsFilter(): boolean | undefined {
+    if (channelMessageSearchHasAttachments === "with") {
+      return true;
+    }
+    if (channelMessageSearchHasAttachments === "without") {
+      return false;
+    }
+    return undefined;
+  }
+
+  function seedMutationLocatorFromResult(payload: JsonObject): void {
+    const locator =
+      readObject(payload, "locator") ??
+      readObject(readObject(payload, "message") ?? {}, "locator") ??
+      readObject(readObject(payload, "preview") ?? {}, "locator");
+    if (locator === null) {
+      return;
+    }
+    const conversationId = readString(locator, "conversation_id");
+    const threadId = readString(locator, "thread_id");
+    const messageId = readString(locator, "message_id");
+    if (conversationId !== null) {
+      setChannelMessageConversationId(conversationId);
+    }
+    setChannelMessageThreadId(threadId ?? "");
+    if (messageId !== null) {
+      setChannelMessageMutationMessageId(messageId);
+    }
+  }
+
+  async function readChannelMessages(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const connectorId = normalizedSelectedConnectorId("reading messages");
+    if (connectorId === null) {
+      return;
+    }
+    const conversationId = channelMessageConversationId.trim();
+    if (conversationId.length === 0) {
+      setError("Conversation ID is required before reading messages.");
+      return;
+    }
+    const limit = parsePositiveLimit(channelMessageReadLimit, "Read limit");
+    if (limit === null) {
+      return;
+    }
+
+    setChannelsBusy(true);
+    setError(null);
+    try {
+      const response = await readChannelMessagesRequest(api, connectorId, {
+        request: {
+          conversation_id: conversationId,
+          thread_id: emptyToUndefined(channelMessageThreadId),
+          message_id: emptyToUndefined(channelMessageReadMessageId),
+          before_message_id: emptyToUndefined(channelMessageReadBeforeMessageId),
+          after_message_id: emptyToUndefined(channelMessageReadAfterMessageId),
+          around_message_id: emptyToUndefined(channelMessageReadAroundMessageId),
+          limit,
+        },
+      });
+      setChannelMessageReadResultPayload(response as JsonValue);
+      const result = isJsonObject(response.result) ? response.result : null;
+      const messages = result?.messages;
+      const count = Array.isArray(messages) ? messages.length : 0;
+      setNotice(
+        count === 0
+          ? "Message read completed with no results."
+          : `Loaded ${count} message${count === 1 ? "" : "s"}.`,
+      );
+      setChannelMessageSearchResultPayload(null);
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setChannelsBusy(false);
+    }
+  }
+
+  async function searchChannelMessages(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const connectorId = normalizedSelectedConnectorId("searching messages");
+    if (connectorId === null) {
+      return;
+    }
+    const conversationId = channelMessageConversationId.trim();
+    if (conversationId.length === 0) {
+      setError("Conversation ID is required before searching messages.");
+      return;
+    }
+    const limit = parsePositiveLimit(channelMessageSearchLimit, "Search limit");
+    if (limit === null) {
+      return;
+    }
+
+    setChannelsBusy(true);
+    setError(null);
+    try {
+      const response = await searchChannelMessagesRequest(api, connectorId, {
+        request: {
+          conversation_id: conversationId,
+          thread_id: emptyToUndefined(channelMessageThreadId),
+          query: emptyToUndefined(channelMessageSearchQuery),
+          author_id: emptyToUndefined(channelMessageSearchAuthorId),
+          has_attachments: parseHasAttachmentsFilter(),
+          before_message_id: emptyToUndefined(channelMessageSearchBeforeMessageId),
+          limit,
+        },
+      });
+      setChannelMessageSearchResultPayload(response as JsonValue);
+      const result = isJsonObject(response.result) ? response.result : null;
+      const matches = result?.matches;
+      const count = Array.isArray(matches) ? matches.length : 0;
+      setNotice(
+        count === 0
+          ? "Message search completed with no matches."
+          : `Found ${count} matching message${count === 1 ? "" : "s"}.`,
+      );
+      setChannelMessageReadResultPayload(null);
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setChannelsBusy(false);
+    }
+  }
+
+  async function mutateChannelMessage(
+    action: "edit" | "delete" | "react-add" | "react-remove",
+  ): Promise<void> {
+    const locator = normalizedMessageLocator(
+      action === "edit"
+        ? "editing a message"
+        : action === "delete"
+          ? "deleting a message"
+          : "mutating reactions",
+    );
+    if (locator === null) {
+      return;
+    }
+
+    if (action === "edit" && channelMessageMutationBody.trim().length === 0) {
+      setError("Edit body cannot be empty.");
+      return;
+    }
+    if (
+      (action === "react-add" || action === "react-remove") &&
+      channelMessageMutationEmoji.trim().length === 0
+    ) {
+      setError("Emoji is required for reaction mutations.");
+      return;
+    }
+
+    setChannelsBusy(true);
+    setError(null);
+    try {
+      const payloadLocator = {
+        conversation_id: locator.conversationId,
+        thread_id: locator.threadId,
+        message_id: locator.messageId,
+      };
+      const approvalId = emptyToUndefined(channelMessageMutationApprovalId);
+      const response =
+        action === "edit"
+          ? await editChannelMessageRequest(api, locator.connectorId, {
+              request: {
+                locator: payloadLocator,
+                body: channelMessageMutationBody.trim(),
+              },
+              approval_id: approvalId,
+            })
+          : action === "delete"
+            ? await deleteChannelMessageRequest(api, locator.connectorId, {
+                request: {
+                  locator: payloadLocator,
+                  reason: emptyToUndefined(channelMessageMutationDeleteReason),
+                },
+                approval_id: approvalId,
+              })
+            : action === "react-add"
+              ? await addChannelMessageReactionRequest(api, locator.connectorId, {
+                  request: {
+                    locator: payloadLocator,
+                    emoji: channelMessageMutationEmoji.trim(),
+                  },
+                  approval_id: approvalId,
+                })
+              : await removeChannelMessageReactionRequest(api, locator.connectorId, {
+                  request: {
+                    locator: payloadLocator,
+                    emoji: channelMessageMutationEmoji.trim(),
+                  },
+                  approval_id: approvalId,
+                });
+
+      setChannelMessageMutationResultPayload(response as JsonValue);
+      if (isJsonObject(response)) {
+        seedMutationLocatorFromResult(response);
+      }
+
+      if (response.approval_required === true) {
+        const approvalPayload = response.approval ?? null;
+        const approval = isJsonObject(approvalPayload) ? approvalPayload : null;
+        const approvalIdValue = readString(approval ?? {}, "approval_id");
+        if (approvalIdValue !== null) {
+          setChannelMessageMutationApprovalId(approvalIdValue);
+        }
+        setNotice("Approval required. Preview prepared, no platform change applied yet.");
+      } else {
+        const resultPayload = response.result ?? null;
+        const result = isJsonObject(resultPayload) ? resultPayload : null;
+        const status = readString(result ?? {}, "status") ?? "completed";
+        setNotice(`Message ${action} completed (${status}).`);
+        await refreshChannelLogs(locator.connectorId);
+        await refreshChannels(locator.connectorId);
+      }
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setChannelsBusy(false);
+    }
+  }
+
   return {
     refreshChannelLogs,
     refreshChannelRouter,
@@ -519,5 +840,11 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     drainChannelQueue,
     replayChannelDeadLetter,
     discardChannelDeadLetter,
+    readChannelMessages,
+    searchChannelMessages,
+    editChannelMessage: () => mutateChannelMessage("edit"),
+    deleteChannelMessage: () => mutateChannelMessage("delete"),
+    addChannelMessageReaction: () => mutateChannelMessage("react-add"),
+    removeChannelMessageReaction: () => mutateChannelMessage("react-remove"),
   };
 }

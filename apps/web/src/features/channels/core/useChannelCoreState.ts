@@ -10,6 +10,7 @@ const DEFAULT_CHANNEL_TEST_SENDER_ID = "test-user";
 const DEFAULT_CHANNEL_ROUTER_PREVIEW_TEXT = "pair 000000";
 const DEFAULT_CHANNEL_ROUTER_PREVIEW_MAX_PAYLOAD_BYTES = "2048";
 const DEFAULT_CHANNEL_ROUTER_MINT_TTL_MS = "600000";
+const DEFAULT_CHANNEL_MESSAGE_LIMIT = "25";
 
 export function useChannelCoreState() {
   const [channelsBusy, setChannelsBusy] = useState(false);
@@ -58,9 +59,50 @@ export function useChannelCoreState() {
     DEFAULT_CHANNEL_ROUTER_MINT_TTL_MS,
   );
   const [channelRouterMintResult, setChannelRouterMintResult] = useState<JsonObject | null>(null);
+  const [channelMessageConversationId, setChannelMessageConversationId] = useState("");
+  const [channelMessageThreadId, setChannelMessageThreadId] = useState("");
+  const [channelMessageReadMessageId, setChannelMessageReadMessageId] = useState("");
+  const [channelMessageReadBeforeMessageId, setChannelMessageReadBeforeMessageId] = useState("");
+  const [channelMessageReadAfterMessageId, setChannelMessageReadAfterMessageId] = useState("");
+  const [channelMessageReadAroundMessageId, setChannelMessageReadAroundMessageId] = useState("");
+  const [channelMessageReadLimit, setChannelMessageReadLimit] = useState(
+    DEFAULT_CHANNEL_MESSAGE_LIMIT,
+  );
+  const [channelMessageSearchQuery, setChannelMessageSearchQuery] = useState("");
+  const [channelMessageSearchAuthorId, setChannelMessageSearchAuthorId] = useState("");
+  const [channelMessageSearchHasAttachments, setChannelMessageSearchHasAttachments] =
+    useState("any");
+  const [channelMessageSearchBeforeMessageId, setChannelMessageSearchBeforeMessageId] =
+    useState("");
+  const [channelMessageSearchLimit, setChannelMessageSearchLimit] = useState(
+    DEFAULT_CHANNEL_MESSAGE_LIMIT,
+  );
+  const [channelMessageMutationMessageId, setChannelMessageMutationMessageId] = useState("");
+  const [channelMessageMutationApprovalId, setChannelMessageMutationApprovalId] = useState("");
+  const [channelMessageMutationBody, setChannelMessageMutationBody] = useState("");
+  const [channelMessageMutationDeleteReason, setChannelMessageMutationDeleteReason] = useState("");
+  const [channelMessageMutationEmoji, setChannelMessageMutationEmoji] = useState("✅");
+  const [channelMessageReadResult, setChannelMessageReadResult] = useState<JsonObject | null>(null);
+  const [channelMessageSearchResult, setChannelMessageSearchResult] = useState<JsonObject | null>(
+    null,
+  );
+  const [channelMessageMutationResult, setChannelMessageMutationResult] =
+    useState<JsonObject | null>(null);
 
   function setSelectedChannelStatusPayload(payload: JsonValue): void {
     setChannelsSelectedStatus(isJsonObject(payload) ? payload : null);
+  }
+
+  function setChannelMessageReadResultPayload(payload: JsonValue): void {
+    setChannelMessageReadResult(isJsonObject(payload) ? payload : null);
+  }
+
+  function setChannelMessageSearchResultPayload(payload: JsonValue): void {
+    setChannelMessageSearchResult(isJsonObject(payload) ? payload : null);
+  }
+
+  function setChannelMessageMutationResultPayload(payload: JsonValue): void {
+    setChannelMessageMutationResult(isJsonObject(payload) ? payload : null);
   }
 
   function resetChannelCoreState(): void {
@@ -97,6 +139,26 @@ export function useChannelCoreState() {
     setChannelRouterMintIssuedBy("");
     setChannelRouterMintTtlMs(DEFAULT_CHANNEL_ROUTER_MINT_TTL_MS);
     setChannelRouterMintResult(null);
+    setChannelMessageConversationId("");
+    setChannelMessageThreadId("");
+    setChannelMessageReadMessageId("");
+    setChannelMessageReadBeforeMessageId("");
+    setChannelMessageReadAfterMessageId("");
+    setChannelMessageReadAroundMessageId("");
+    setChannelMessageReadLimit(DEFAULT_CHANNEL_MESSAGE_LIMIT);
+    setChannelMessageSearchQuery("");
+    setChannelMessageSearchAuthorId("");
+    setChannelMessageSearchHasAttachments("any");
+    setChannelMessageSearchBeforeMessageId("");
+    setChannelMessageSearchLimit(DEFAULT_CHANNEL_MESSAGE_LIMIT);
+    setChannelMessageMutationMessageId("");
+    setChannelMessageMutationApprovalId("");
+    setChannelMessageMutationBody("");
+    setChannelMessageMutationDeleteReason("");
+    setChannelMessageMutationEmoji("✅");
+    setChannelMessageReadResult(null);
+    setChannelMessageSearchResult(null);
+    setChannelMessageMutationResult(null);
   }
 
   return {
@@ -165,6 +227,46 @@ export function useChannelCoreState() {
     setChannelRouterMintTtlMs,
     channelRouterMintResult,
     setChannelRouterMintResult,
+    channelMessageConversationId,
+    setChannelMessageConversationId,
+    channelMessageThreadId,
+    setChannelMessageThreadId,
+    channelMessageReadMessageId,
+    setChannelMessageReadMessageId,
+    channelMessageReadBeforeMessageId,
+    setChannelMessageReadBeforeMessageId,
+    channelMessageReadAfterMessageId,
+    setChannelMessageReadAfterMessageId,
+    channelMessageReadAroundMessageId,
+    setChannelMessageReadAroundMessageId,
+    channelMessageReadLimit,
+    setChannelMessageReadLimit,
+    channelMessageSearchQuery,
+    setChannelMessageSearchQuery,
+    channelMessageSearchAuthorId,
+    setChannelMessageSearchAuthorId,
+    channelMessageSearchHasAttachments,
+    setChannelMessageSearchHasAttachments,
+    channelMessageSearchBeforeMessageId,
+    setChannelMessageSearchBeforeMessageId,
+    channelMessageSearchLimit,
+    setChannelMessageSearchLimit,
+    channelMessageMutationMessageId,
+    setChannelMessageMutationMessageId,
+    channelMessageMutationApprovalId,
+    setChannelMessageMutationApprovalId,
+    channelMessageMutationBody,
+    setChannelMessageMutationBody,
+    channelMessageMutationDeleteReason,
+    setChannelMessageMutationDeleteReason,
+    channelMessageMutationEmoji,
+    setChannelMessageMutationEmoji,
+    channelMessageReadResult,
+    setChannelMessageReadResultPayload,
+    channelMessageSearchResult,
+    setChannelMessageSearchResultPayload,
+    channelMessageMutationResult,
+    setChannelMessageMutationResultPayload,
     setSelectedChannelStatusPayload,
     resetChannelCoreState,
   };

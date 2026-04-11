@@ -3666,6 +3666,150 @@ export class ConsoleApiClient {
     );
   }
 
+  async readChannelMessages(
+    connectorId: string,
+    payload: {
+      request: {
+        conversation_id: string;
+        thread_id?: string;
+        message_id?: string;
+        before_message_id?: string;
+        after_message_id?: string;
+        around_message_id?: string;
+        limit: number;
+      };
+    },
+  ): Promise<{ result: JsonValue }> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/messages/read`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async searchChannelMessages(
+    connectorId: string,
+    payload: {
+      request: {
+        conversation_id: string;
+        thread_id?: string;
+        query?: string;
+        author_id?: string;
+        has_attachments?: boolean;
+        before_message_id?: string;
+        limit: number;
+      };
+    },
+  ): Promise<{ result: JsonValue }> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/messages/search`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async editChannelMessage(
+    connectorId: string,
+    payload: {
+      request: {
+        locator: {
+          conversation_id: string;
+          thread_id?: string;
+          message_id: string;
+        };
+        body: string;
+      };
+      approval_id?: string;
+    },
+  ): Promise<{ result?: JsonValue; approval_required?: boolean; approval?: JsonValue }> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/messages/edit`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async deleteChannelMessage(
+    connectorId: string,
+    payload: {
+      request: {
+        locator: {
+          conversation_id: string;
+          thread_id?: string;
+          message_id: string;
+        };
+        reason?: string;
+      };
+      approval_id?: string;
+    },
+  ): Promise<{ result?: JsonValue; approval_required?: boolean; approval?: JsonValue }> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/messages/delete`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async addChannelMessageReaction(
+    connectorId: string,
+    payload: {
+      request: {
+        locator: {
+          conversation_id: string;
+          thread_id?: string;
+          message_id: string;
+        };
+        emoji: string;
+      };
+      approval_id?: string;
+    },
+  ): Promise<{ result?: JsonValue; approval_required?: boolean; approval?: JsonValue }> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/messages/react-add`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async removeChannelMessageReaction(
+    connectorId: string,
+    payload: {
+      request: {
+        locator: {
+          conversation_id: string;
+          thread_id?: string;
+          message_id: string;
+        };
+        emoji: string;
+      };
+      approval_id?: string;
+    },
+  ): Promise<{ result?: JsonValue; approval_required?: boolean; approval?: JsonValue }> {
+    return this.request(
+      `/console/v1/channels/${encodeURIComponent(connectorId)}/messages/react-remove`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
   async sendChannelDiscordTestSend(
     connectorId: string,
     payload: {

@@ -657,6 +657,262 @@ describe("M35 web console app", () => {
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
   });
 
+  it("renders approval prompt preview payload details for Discord message mutations", async () => {
+    const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestUrl(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (path === "/console/v1/auth/session" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:web-console",
+            device_id: "device-1",
+            channel: "web",
+            csrf_token: "csrf-1",
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 300,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/approvals" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            approvals: [
+              {
+                approval_id: "APPROVAL-1",
+                subject_type: "channel_send",
+                subject_id: "discord:default:edit:discord:channel:1:m1",
+                principal: "admin:web-console",
+                requested_at_unix_ms: 100,
+                request_summary: "Approve Discord message edit",
+                prompt: {
+                  title: "Approve Discord message edit",
+                  summary: "Review preview before applying mutation.",
+                  risk_level: "high",
+                  timeout_seconds: 900,
+                  details_json: JSON.stringify({
+                    connector_id: "discord:default",
+                    operation: "edit",
+                    locator: {
+                      conversation_id: "discord:channel:1",
+                      thread_id: "thread-1",
+                      message_id: "m1",
+                    },
+                    mutation: {
+                      body: "Escalated incident summary",
+                    },
+                  }),
+                },
+                policy_snapshot: {
+                  policy_id: "discord.message.mutation.approval.v1",
+                  evaluation_summary: "approval_required=true",
+                },
+              },
+            ],
+          }),
+        );
+      }
+
+      throw new Error(`Unhandled mocked request: ${method} ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Approvals" }));
+
+    expect(await screen.findByRole("heading", { name: "Approvals" })).toBeInTheDocument();
+    expect(await screen.findByText("Approval preview payload")).toBeInTheDocument();
+    expect(document.body).toHaveTextContent("discord:channel:1");
+    expect(document.body).toHaveTextContent("Escalated incident summary");
+  });
+
+  it("keeps Discord message mutation previews visibly distinct from applied changes in channels UI", async () => {
+    const fetchMock = withM56Baseline((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestUrl(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (path === "/console/v1/auth/session" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            principal: "admin:web-console",
+            device_id: "device-1",
+            channel: "web",
+            csrf_token: "csrf-1",
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 300,
+          }),
+        );
+      }
+
+      if (path === "/console/v1/channels" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            connectors: [
+              {
+                connector_id: "discord:default",
+                kind: "discord",
+                enabled: true,
+                readiness: "ready",
+                availability: "supported",
+              },
+            ],
+          }),
+        );
+      }
+
+      if (path === "/console/v1/channels/discord%3Adefault" && method === "GET") {
+        return Promise.resolve(
+          jsonResponse({
+            connector: {
+              connector_id: "discord:default",
+              kind: "discord",
+              enabled: true,
+              readiness: "ready",
+              availability: "supported",
+              capabilities: {
+                message: {
+                  action_details: [
+                    {
+                      action: "read",
+                      supported: true,
+                      approval_mode: "none",
+                      risk_level: "low",
+                      required_permissions: ["ViewChannel", "ReadMessageHistory"],
+                    },
+                    {
+                      action: "edit",
+                      supported: true,
+                      approval_mode: "conditional",
+                      risk_level: "conditional",
+                      required_permissions: ["ViewChannel", "SendMessages"],
+                    },
+                  ],
+                },
+              },
+            },
+            operations: {
+              queue: { paused: false, dead_letters: 0 },
+              saturation: { state: "healthy" },
+            },
+          }),
+        );
+      }
+
+      if (path === "/console/v1/channels/discord%3Adefault/logs" && method === "GET") {
+        return Promise.resolve(jsonResponse({ events: [], dead_letters: [] }));
+      }
+
+      if (path === "/console/v1/channels/router/rules" && method === "GET") {
+        return Promise.resolve(jsonResponse({ rules: {}, config_hash: "router-1" }));
+      }
+
+      if (path === "/console/v1/channels/router/warnings" && method === "GET") {
+        return Promise.resolve(jsonResponse({ warnings: [], config_hash: "router-1" }));
+      }
+
+      if (path === "/console/v1/channels/router/pairings" && method === "GET") {
+        return Promise.resolve(jsonResponse({ pairings: [], config_hash: "router-1" }));
+      }
+
+      if (path === "/console/v1/channels/discord%3Adefault/messages/read" && method === "POST") {
+        return Promise.resolve(
+          jsonResponse({
+            result: {
+              conversation_id: "discord:channel:1",
+              thread_id: "thread-1",
+              messages: [
+                {
+                  locator: {
+                    conversation_id: "discord:channel:1",
+                    thread_id: "thread-1",
+                    message_id: "m1",
+                  },
+                  sender_id: "discord:user:42",
+                  sender_display: "Ops Bot",
+                  body: "Original incident summary",
+                  created_at_unix_ms: 100,
+                  attachments: [],
+                  reactions: [],
+                  link: "https://discord.com/channels/1/2/3",
+                },
+              ],
+              preflight: {
+                allowed: true,
+                policy_action: "channel.message.read",
+                approval_mode: "none",
+                risk_level: "low",
+                required_permissions: ["ViewChannel"],
+              },
+            },
+          }),
+        );
+      }
+
+      if (path === "/console/v1/channels/discord%3Adefault/messages/edit" && method === "POST") {
+        return Promise.resolve(
+          jsonResponse({
+            approval_required: true,
+            approval: {
+              approval_id: "APPROVAL-1",
+            },
+            policy: {
+              action: "channel.message.edit",
+              reason: "explicit approval required",
+            },
+            preview: {
+              locator: {
+                conversation_id: "discord:channel:1",
+                thread_id: "thread-1",
+                message_id: "m1",
+              },
+              message: {
+                locator: {
+                  conversation_id: "discord:channel:1",
+                  thread_id: "thread-1",
+                  message_id: "m1",
+                },
+                sender_id: "discord:user:42",
+                sender_display: "Ops Bot",
+                body: "Original incident summary",
+                created_at_unix_ms: 100,
+                attachments: [],
+                reactions: [],
+              },
+            },
+          }),
+        );
+      }
+
+      throw new Error(`Unhandled mocked request: ${method} ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByText("Channels"));
+    expect(await screen.findByRole("heading", { name: "Channels" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Messages" }));
+    fireEvent.change(await screen.findByLabelText("Conversation ID"), {
+      target: { value: "discord:channel:1" },
+    });
+    fireEvent.change(screen.getByLabelText("Thread ID"), { target: { value: "thread-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Read messages" }));
+
+    expect(await screen.findByText("Original incident summary")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Prefill mutation" }));
+    fireEvent.change(screen.getByLabelText("Edit body"), {
+      target: { value: "Escalated incident summary" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+
+    expect(await screen.findByText("Approval required")).toBeInTheDocument();
+    expect(document.body).toHaveTextContent(
+      "No platform mutation has been applied yet. This response is a preview",
+    );
+    expect(document.body).toHaveTextContent("APPROVAL-1");
+  });
+
   it("supports routine create and pause workflow from UI", async () => {
     const cronJobs = [
       {
