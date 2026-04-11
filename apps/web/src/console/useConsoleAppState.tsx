@@ -1599,7 +1599,9 @@ export function useConsoleAppState() {
           (candidate) => readString(candidate, "candidate_kind") === "procedure",
         ),
       );
-      setSkillBuilderCandidates(toJsonObjectArray(builderResponse.entries as unknown as JsonValue[]));
+      setSkillBuilderCandidates(
+        toJsonObjectArray(builderResponse.entries as unknown as JsonValue[]),
+      );
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -1693,7 +1695,9 @@ export function useConsoleAppState() {
     }
   }
 
-  async function createSkillBuilderCandidate(event?: React.FormEvent<HTMLFormElement>): Promise<void> {
+  async function createSkillBuilderCandidate(
+    event?: React.FormEvent<HTMLFormElement>,
+  ): Promise<void> {
     event?.preventDefault();
     if (skillBuilderPrompt.trim().length === 0) {
       setError("Builder prompt cannot be empty.");
