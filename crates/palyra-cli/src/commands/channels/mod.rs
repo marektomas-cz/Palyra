@@ -789,18 +789,7 @@ fn build_channel_capabilities_payload(query: ChannelCapabilityQuery) -> Result<V
         connection.device_id,
         connection.channel,
     )
-    .unwrap_or_else(|_| message::MessageCapabilities {
-        provider_kind: provider_name.to_owned(),
-        supported_actions: provider_supported_message_actions(provider)
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        unsupported_actions: message::UNSUPPORTED_MESSAGE_ACTIONS
-            .iter()
-            .map(|action| (*action).to_owned())
-            .collect(),
-        action_details: Vec::new(),
-    });
+    .unwrap_or_else(|_| message::fallback_capabilities(provider_name));
 
     let lifecycle_actions = provider_supported_lifecycle_actions(provider);
     let resolve_entities = provider_supported_resolve_entities(provider);
@@ -813,6 +802,22 @@ fn build_channel_capabilities_payload(query: ChannelCapabilityQuery) -> Result<V
             "provider_kind": message_capabilities.provider_kind,
             "supported_actions": message_capabilities.supported_actions,
             "unsupported_actions": message_capabilities.unsupported_actions,
+            "action_details": message_capabilities
+                .action_details
+                .iter()
+                .map(|detail| {
+                    json!({
+                        "action": detail.action,
+                        "supported": detail.supported,
+                        "reason": detail.reason,
+                        "policy_action": detail.policy_action,
+                        "approval_mode": detail.approval_mode,
+                        "risk_level": detail.risk_level,
+                        "audit_event_type": detail.audit_event_type,
+                        "required_permissions": detail.required_permissions,
+                    })
+                })
+                .collect::<Vec<_>>(),
         },
         "resolve_entities": resolve_entities,
         "pairing": {
@@ -1249,16 +1254,6 @@ fn provider_supported_lifecycle_actions(provider: ChannelProviderArg) -> Vec<&'s
         ChannelProviderArg::Slack | ChannelProviderArg::Telegram | ChannelProviderArg::Webhook => {
             vec!["capabilities"]
         }
-    }
-}
-
-fn provider_supported_message_actions(provider: ChannelProviderArg) -> Vec<&'static str> {
-    match provider {
-        ChannelProviderArg::Discord => message::SUPPORTED_MESSAGE_ACTIONS.to_vec(),
-        ChannelProviderArg::Echo
-        | ChannelProviderArg::Slack
-        | ChannelProviderArg::Telegram
-        | ChannelProviderArg::Webhook => Vec::new(),
     }
 }
 

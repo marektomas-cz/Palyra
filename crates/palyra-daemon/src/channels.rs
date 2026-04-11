@@ -8,8 +8,12 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palyra_common::{validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
 use palyra_connectors::{
     connectors::default_adapters, AttachmentKind, AttachmentRef, ConnectorAvailability,
-    ConnectorInstanceSpec, ConnectorKind, ConnectorQueueSnapshot, ConnectorRouter,
-    ConnectorRouterError, ConnectorStatusSnapshot, ConnectorSupervisor, ConnectorSupervisorConfig,
+    ConnectorConversationTarget, ConnectorInstanceSpec, ConnectorKind,
+    ConnectorMessageDeleteRequest, ConnectorMessageEditRequest, ConnectorMessageLocator,
+    ConnectorMessageMutationResult, ConnectorMessageReactionRequest, ConnectorMessageReadRequest,
+    ConnectorMessageReadResult, ConnectorMessageRecord, ConnectorMessageSearchRequest,
+    ConnectorMessageSearchResult, ConnectorQueueSnapshot, ConnectorRouter, ConnectorRouterError,
+    ConnectorStatusSnapshot, ConnectorSupervisor, ConnectorSupervisorConfig,
     ConnectorSupervisorError, DeadLetterRecord, DrainOutcome, InboundIngestOutcome,
     InboundMessageEvent, OutboundA2uiUpdate as ConnectorA2uiUpdate, OutboundAttachment,
     OutboundMessageRequest, RouteInboundResult, RoutedOutboundMessage,
@@ -34,6 +38,10 @@ use crate::transport::grpc::{
 
 mod discord;
 
+pub(crate) use discord::{
+    classify_discord_message_mutation_governance, DiscordMessageMutationGovernance,
+    DiscordMessageMutationKind,
+};
 pub use discord::{
     discord_connector_id, discord_default_egress_allowlist, discord_principal,
     discord_token_vault_ref, normalize_discord_account_id,
@@ -91,6 +99,40 @@ pub struct ChannelDiscordTestSendOutcome {
     pub thread_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_reply_to_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelMessageReadOperation {
+    pub request: ConnectorMessageReadRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelMessageSearchOperation {
+    pub request: ConnectorMessageSearchRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelMessageEditOperation {
+    pub request: ConnectorMessageEditRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelMessageDeleteOperation {
+    pub request: ConnectorMessageDeleteRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelMessageReactionOperation {
+    pub request: ConnectorMessageReactionRequest,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChannelMessageMutationPreview {
+    pub locator: ConnectorMessageLocator,
+    pub message: Option<ConnectorMessageRecord>,
+    pub approved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
 }
 
 pub struct ConsoleChatAttachmentStoreRequestView<'a> {
@@ -472,6 +514,128 @@ impl ChannelPlatform {
                     connector_id.to_owned(),
                 ))
             })
+    }
+
+    pub async fn read_messages(
+        &self,
+        connector_id: &str,
+        operation: ChannelMessageReadOperation,
+    ) -> Result<ConnectorMessageReadResult, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        operation
+            .request
+            .validate()
+            .map_err(|error| ChannelPlatformError::InvalidInput(error.to_string()))?;
+        self.supervisor
+            .read_messages(connector_id, &operation.request)
+            .await
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub async fn search_messages(
+        &self,
+        connector_id: &str,
+        operation: ChannelMessageSearchOperation,
+    ) -> Result<ConnectorMessageSearchResult, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        operation
+            .request
+            .validate()
+            .map_err(|error| ChannelPlatformError::InvalidInput(error.to_string()))?;
+        self.supervisor
+            .search_messages(connector_id, &operation.request)
+            .await
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub async fn edit_message(
+        &self,
+        connector_id: &str,
+        operation: ChannelMessageEditOperation,
+    ) -> Result<ConnectorMessageMutationResult, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        operation
+            .request
+            .validate()
+            .map_err(|error| ChannelPlatformError::InvalidInput(error.to_string()))?;
+        self.supervisor
+            .edit_message(connector_id, &operation.request)
+            .await
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub async fn delete_message(
+        &self,
+        connector_id: &str,
+        operation: ChannelMessageDeleteOperation,
+    ) -> Result<ConnectorMessageMutationResult, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        operation
+            .request
+            .validate()
+            .map_err(|error| ChannelPlatformError::InvalidInput(error.to_string()))?;
+        self.supervisor
+            .delete_message(connector_id, &operation.request)
+            .await
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub async fn add_reaction(
+        &self,
+        connector_id: &str,
+        operation: ChannelMessageReactionOperation,
+    ) -> Result<ConnectorMessageMutationResult, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        operation
+            .request
+            .validate()
+            .map_err(|error| ChannelPlatformError::InvalidInput(error.to_string()))?;
+        self.supervisor
+            .add_reaction(connector_id, &operation.request)
+            .await
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub async fn remove_reaction(
+        &self,
+        connector_id: &str,
+        operation: ChannelMessageReactionOperation,
+    ) -> Result<ConnectorMessageMutationResult, ChannelPlatformError> {
+        self.ensure_operator_visible(connector_id)?;
+        operation
+            .request
+            .validate()
+            .map_err(|error| ChannelPlatformError::InvalidInput(error.to_string()))?;
+        self.supervisor
+            .remove_reaction(connector_id, &operation.request)
+            .await
+            .map_err(ChannelPlatformError::from)
+    }
+
+    pub async fn fetch_message_preview(
+        &self,
+        connector_id: &str,
+        locator: &ConnectorMessageLocator,
+    ) -> Result<Option<ConnectorMessageRecord>, ChannelPlatformError> {
+        let result = self
+            .read_messages(
+                connector_id,
+                ChannelMessageReadOperation {
+                    request: ConnectorMessageReadRequest {
+                        target: ConnectorConversationTarget {
+                            conversation_id: locator.target.conversation_id.clone(),
+                            thread_id: locator.target.thread_id.clone(),
+                        },
+                        message_id: Some(locator.message_id.clone()),
+                        before_message_id: None,
+                        after_message_id: None,
+                        around_message_id: None,
+                        limit: 1,
+                    },
+                },
+            )
+            .await?;
+        Ok(result.messages.into_iter().next())
     }
 
     pub async fn submit_test_message(

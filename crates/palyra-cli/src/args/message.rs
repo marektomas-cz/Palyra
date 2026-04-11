@@ -74,7 +74,19 @@ pub enum MessageCommand {
     Read {
         connector_id: String,
         #[arg(long)]
-        message_id: String,
+        conversation_id: String,
+        #[arg(long)]
+        thread_id: Option<String>,
+        #[arg(long)]
+        message_id: Option<String>,
+        #[arg(long)]
+        before_message_id: Option<String>,
+        #[arg(long)]
+        after_message_id: Option<String>,
+        #[arg(long)]
+        around_message_id: Option<String>,
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]
@@ -91,7 +103,19 @@ pub enum MessageCommand {
     Search {
         connector_id: String,
         #[arg(long)]
-        query: String,
+        conversation_id: String,
+        #[arg(long)]
+        thread_id: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long)]
+        author_id: Option<String>,
+        #[arg(long)]
+        has_attachments: Option<bool>,
+        #[arg(long)]
+        before_message_id: Option<String>,
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]
@@ -108,9 +132,15 @@ pub enum MessageCommand {
     Edit {
         connector_id: String,
         #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        thread_id: Option<String>,
+        #[arg(long)]
         message_id: String,
         #[arg(long)]
         text: String,
+        #[arg(long)]
+        approval_id: Option<String>,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]
@@ -127,7 +157,15 @@ pub enum MessageCommand {
     Delete {
         connector_id: String,
         #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        thread_id: Option<String>,
+        #[arg(long)]
         message_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        approval_id: Option<String>,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]
@@ -144,11 +182,17 @@ pub enum MessageCommand {
     React {
         connector_id: String,
         #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        thread_id: Option<String>,
+        #[arg(long)]
         message_id: String,
         #[arg(long)]
         emoji: String,
         #[arg(long, default_value_t = false)]
         remove: bool,
+        #[arg(long)]
+        approval_id: Option<String>,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]

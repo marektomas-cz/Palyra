@@ -170,7 +170,13 @@ permit(principal, action, resource)
 when {
     context.action == "message.reply" ||
     context.action == "message.broadcast" ||
-    context.action == "channel.send"
+    context.action == "channel.send" ||
+    context.action == "channel.message.read" ||
+    context.action == "channel.message.search" ||
+    context.action == "channel.message.edit" ||
+    context.action == "channel.message.delete" ||
+    context.action == "channel.message.react_add" ||
+    context.action == "channel.message.react_remove"
 };
 
 @id("allow_attachment_metadata_actions")
@@ -437,7 +443,10 @@ fn decision_reason(
         if normalized_action.starts_with("vault.") {
             return "vault action allowed by Cedar policy".to_owned();
         }
-        if normalized_action.starts_with("message.") || normalized_action == "channel.send" {
+        if normalized_action.starts_with("message.")
+            || normalized_action == "channel.send"
+            || normalized_action.starts_with("channel.message.")
+        {
             return "message router action allowed by Cedar policy".to_owned();
         }
         if normalized_action == "attachment.metadata.accept" {
@@ -893,6 +902,45 @@ mod tests {
             evaluation.explanation.reason.contains("message router action allowed"),
             "message action allow reason should reflect dedicated message policy"
         );
+    }
+
+    #[test]
+    fn channel_message_read_action_is_explicitly_allowed() {
+        let request = PolicyRequest {
+            principal: "user:ops".to_owned(),
+            action: "channel.message.read".to_owned(),
+            resource: "channel:discord:default:message:123:456".to_owned(),
+        };
+
+        let evaluation =
+            evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
+
+        assert_eq!(evaluation.decision, PolicyDecision::Allow);
+        assert!(
+            evaluation.explanation.reason.contains("message router action allowed"),
+            "channel message read should use the dedicated message policy allow reason"
+        );
+    }
+
+    #[test]
+    fn channel_message_delete_can_be_marked_sensitive() {
+        let request = PolicyRequest {
+            principal: "user:ops".to_owned(),
+            action: "channel.message.delete".to_owned(),
+            resource: "channel:discord:default:message:123:456".to_owned(),
+        };
+        let config = PolicyEvaluationConfig {
+            sensitive_actions: vec!["channel.message.delete".to_owned()],
+            ..PolicyEvaluationConfig::default()
+        };
+
+        let evaluation = evaluate_with_config(&request, &config).expect("evaluation");
+
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::DenyByDefault { reason: SENSITIVE_DENY_REASON.to_owned() }
+        );
+        assert!(evaluation.explanation.is_sensitive_action);
     }
 
     #[test]

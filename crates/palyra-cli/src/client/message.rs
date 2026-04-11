@@ -13,17 +13,6 @@ pub(crate) const MESSAGE_ACTION_DELETE: &str = "delete";
 pub(crate) const MESSAGE_ACTION_REACT_ADD: &str = "react:add";
 pub(crate) const MESSAGE_ACTION_REACT_REMOVE: &str = "react:remove";
 
-pub(crate) const SUPPORTED_MESSAGE_ACTIONS: &[&str] =
-    &[MESSAGE_ACTION_SEND, MESSAGE_ACTION_THREAD, MESSAGE_ACTION_REPLY];
-pub(crate) const UNSUPPORTED_MESSAGE_ACTIONS: &[&str] = &[
-    MESSAGE_ACTION_READ,
-    MESSAGE_ACTION_SEARCH,
-    MESSAGE_ACTION_EDIT,
-    MESSAGE_ACTION_DELETE,
-    MESSAGE_ACTION_REACT_ADD,
-    MESSAGE_ACTION_REACT_REMOVE,
-];
-
 #[derive(Debug, Clone)]
 pub(crate) struct MessageDispatchOptions {
     pub connector_id: String,
@@ -45,6 +34,11 @@ pub(crate) struct MessageCapabilityDetail {
     pub action: String,
     pub supported: bool,
     pub reason: Option<String>,
+    pub policy_action: Option<String>,
+    pub approval_mode: Option<String>,
+    pub risk_level: Option<String>,
+    pub audit_event_type: Option<String>,
+    pub required_permissions: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,10 +50,77 @@ pub(crate) struct MessageCapabilities {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MessageActionSupportQuery {
-    pub action: String,
+pub(crate) struct MessageReadOptions {
     pub connector_id: String,
-    pub detail: Option<String>,
+    pub conversation_id: String,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub before_message_id: Option<String>,
+    pub after_message_id: Option<String>,
+    pub around_message_id: Option<String>,
+    pub limit: usize,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MessageSearchOptions {
+    pub connector_id: String,
+    pub conversation_id: String,
+    pub thread_id: Option<String>,
+    pub query: Option<String>,
+    pub author_id: Option<String>,
+    pub has_attachments: Option<bool>,
+    pub before_message_id: Option<String>,
+    pub limit: usize,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MessageEditOptions {
+    pub connector_id: String,
+    pub conversation_id: String,
+    pub thread_id: Option<String>,
+    pub message_id: String,
+    pub body: String,
+    pub approval_id: Option<String>,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MessageDeleteOptions {
+    pub connector_id: String,
+    pub conversation_id: String,
+    pub thread_id: Option<String>,
+    pub message_id: String,
+    pub reason: Option<String>,
+    pub approval_id: Option<String>,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MessageReactionOptions {
+    pub connector_id: String,
+    pub conversation_id: String,
+    pub thread_id: Option<String>,
+    pub message_id: String,
+    pub emoji: String,
+    pub approval_id: Option<String>,
     pub url: Option<String>,
     pub token: Option<String>,
     pub principal: String,
@@ -122,32 +183,140 @@ pub(crate) fn send_message(options: MessageDispatchOptions) -> Result<Value> {
     )
 }
 
-pub(crate) fn unsupported_message_action(query: MessageActionSupportQuery) -> Result<Value> {
-    let capabilities = load_capabilities(
-        query.connector_id.as_str(),
-        query.url,
-        query.token,
-        query.principal,
-        query.device_id,
-        query.channel,
+pub(crate) fn read_messages(options: MessageReadOptions) -> Result<Value> {
+    ensure_message_actions_supported(
+        options.connector_id.as_str(),
+        options.url.clone(),
+        options.token.clone(),
+        options.principal.clone(),
+        options.device_id.clone(),
+        options.channel.clone(),
+        vec![MESSAGE_ACTION_READ],
     )?;
-    let detail = message_action_detail(&capabilities, query.action.as_str());
-    Ok(json!({
-        "connector_id": query.connector_id,
-        "provider_kind": capabilities.provider_kind,
-        "action": query.action,
-        "detail": query.detail,
-        "supported": detail.map(|entry| entry.supported).unwrap_or(false),
-        "reason": detail.and_then(|entry| entry.reason.clone()).unwrap_or_else(|| {
-            format!(
-                "message action '{}' is unavailable for provider '{}'",
-                query.action,
-                capabilities.provider_kind
-            )
-        }),
-        "supported_actions": capabilities.supported_actions,
-        "unsupported_actions": capabilities.unsupported_actions,
-    }))
+    post_connector_action(
+        options.connector_id.as_str(),
+        "/messages/read",
+        Some(json!({
+            "conversation_id": options.conversation_id,
+            "thread_id": options.thread_id,
+            "message_id": options.message_id,
+            "before_message_id": options.before_message_id,
+            "after_message_id": options.after_message_id,
+            "around_message_id": options.around_message_id,
+            "limit": options.limit,
+        })),
+        options.url,
+        options.token,
+        options.principal,
+        options.device_id,
+        options.channel,
+        "failed to call message read endpoint",
+    )
+}
+
+pub(crate) fn search_messages(options: MessageSearchOptions) -> Result<Value> {
+    ensure_message_actions_supported(
+        options.connector_id.as_str(),
+        options.url.clone(),
+        options.token.clone(),
+        options.principal.clone(),
+        options.device_id.clone(),
+        options.channel.clone(),
+        vec![MESSAGE_ACTION_SEARCH],
+    )?;
+    post_connector_action(
+        options.connector_id.as_str(),
+        "/messages/search",
+        Some(json!({
+            "conversation_id": options.conversation_id,
+            "thread_id": options.thread_id,
+            "query": options.query,
+            "author_id": options.author_id,
+            "has_attachments": options.has_attachments,
+            "before_message_id": options.before_message_id,
+            "limit": options.limit,
+        })),
+        options.url,
+        options.token,
+        options.principal,
+        options.device_id,
+        options.channel,
+        "failed to call message search endpoint",
+    )
+}
+
+pub(crate) fn edit_message(options: MessageEditOptions) -> Result<Value> {
+    ensure_message_actions_supported(
+        options.connector_id.as_str(),
+        options.url.clone(),
+        options.token.clone(),
+        options.principal.clone(),
+        options.device_id.clone(),
+        options.channel.clone(),
+        vec![MESSAGE_ACTION_EDIT],
+    )?;
+    post_connector_action(
+        options.connector_id.as_str(),
+        "/messages/edit",
+        Some(json!({
+            "locator": {
+                "conversation_id": options.conversation_id,
+                "thread_id": options.thread_id,
+                "message_id": options.message_id,
+            },
+            "body": options.body,
+            "approval_id": options.approval_id,
+        })),
+        options.url,
+        options.token,
+        options.principal,
+        options.device_id,
+        options.channel,
+        "failed to call message edit endpoint",
+    )
+}
+
+pub(crate) fn delete_message(options: MessageDeleteOptions) -> Result<Value> {
+    ensure_message_actions_supported(
+        options.connector_id.as_str(),
+        options.url.clone(),
+        options.token.clone(),
+        options.principal.clone(),
+        options.device_id.clone(),
+        options.channel.clone(),
+        vec![MESSAGE_ACTION_DELETE],
+    )?;
+    post_connector_action(
+        options.connector_id.as_str(),
+        "/messages/delete",
+        Some(json!({
+            "locator": {
+                "conversation_id": options.conversation_id,
+                "thread_id": options.thread_id,
+                "message_id": options.message_id,
+            },
+            "reason": options.reason,
+            "approval_id": options.approval_id,
+        })),
+        options.url,
+        options.token,
+        options.principal,
+        options.device_id,
+        options.channel,
+        "failed to call message delete endpoint",
+    )
+}
+
+pub(crate) fn add_reaction(options: MessageReactionOptions) -> Result<Value> {
+    mutate_reaction(options, "/messages/react-add", MESSAGE_ACTION_REACT_ADD)
+}
+
+pub(crate) fn remove_reaction(options: MessageReactionOptions) -> Result<Value> {
+    mutate_reaction(options, "/messages/react-remove", MESSAGE_ACTION_REACT_REMOVE)
+}
+
+pub(crate) fn fallback_capabilities(provider_kind: &str) -> MessageCapabilities {
+    capabilities_from_status(&Value::Null, provider_kind)
 }
 
 pub(crate) fn encode_capabilities_json(
@@ -167,13 +336,18 @@ pub(crate) fn encode_capabilities_json(
                     "action": detail.action,
                     "supported": detail.supported,
                     "reason": detail.reason,
+                    "policy_action": detail.policy_action,
+                    "approval_mode": detail.approval_mode,
+                    "risk_level": detail.risk_level,
+                    "audit_event_type": detail.audit_event_type,
+                    "required_permissions": detail.required_permissions,
                 })
             })
             .collect::<Vec<_>>(),
         "notes": [
             "message capabilities are sourced from connector status capabilities exposed by the daemon",
             "send and thread currently reuse the authenticated admin channels transport",
-            "read/search/edit/delete/react remain explicitly surfaced as unsupported until dedicated connector APIs exist"
+            "read, search, edit, delete, and reaction operations now expose explicit policy, approval, and permission metadata when the connector supports them"
         ],
     })
 }
@@ -276,33 +450,33 @@ fn fallback_action_details(provider_kind: &str) -> Vec<MessageCapabilityDetail> 
         ),
         (
             MESSAGE_ACTION_READ,
-            false,
-            Some("message read requires a dedicated connector read surface".to_owned()),
+            discord,
+            (!discord).then_some("message read is unavailable for this provider".to_owned()),
         ),
         (
             MESSAGE_ACTION_SEARCH,
-            false,
-            Some("message search requires a dedicated connector search surface".to_owned()),
+            discord,
+            (!discord).then_some("message search is unavailable for this provider".to_owned()),
         ),
         (
             MESSAGE_ACTION_EDIT,
-            false,
-            Some("message edit is not implemented in the current admin surface".to_owned()),
+            discord,
+            (!discord).then_some("message edit is unavailable for this provider".to_owned()),
         ),
         (
             MESSAGE_ACTION_DELETE,
-            false,
-            Some("message delete is not implemented in the current admin surface".to_owned()),
+            discord,
+            (!discord).then_some("message delete is unavailable for this provider".to_owned()),
         ),
         (
             MESSAGE_ACTION_REACT_ADD,
-            false,
-            Some("reaction add is not implemented in the current admin surface".to_owned()),
+            discord,
+            (!discord).then_some("reaction add is unavailable for this provider".to_owned()),
         ),
         (
             MESSAGE_ACTION_REACT_REMOVE,
-            false,
-            Some("reaction remove is not implemented in the current admin surface".to_owned()),
+            discord,
+            (!discord).then_some("reaction remove is unavailable for this provider".to_owned()),
         ),
     ]
     .into_iter()
@@ -310,6 +484,11 @@ fn fallback_action_details(provider_kind: &str) -> Vec<MessageCapabilityDetail> 
         action: action.to_owned(),
         supported,
         reason,
+        policy_action: None,
+        approval_mode: None,
+        risk_level: None,
+        audit_event_type: None,
+        required_permissions: Vec::new(),
     })
     .collect()
 }
@@ -324,6 +503,20 @@ fn build_action_detail(
         action: action.to_owned(),
         supported: payload.get("supported").and_then(Value::as_bool).unwrap_or(false),
         reason: payload.get("reason").and_then(Value::as_str).map(ToOwned::to_owned),
+        policy_action: payload.get("policy_action").and_then(Value::as_str).map(ToOwned::to_owned),
+        approval_mode: payload.get("approval_mode").and_then(Value::as_str).map(ToOwned::to_owned),
+        risk_level: payload.get("risk_level").and_then(Value::as_str).map(ToOwned::to_owned),
+        audit_event_type: payload
+            .get("audit_event_type")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        required_permissions: payload
+            .get("required_permissions")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -334,12 +527,48 @@ fn message_action_detail<'a>(
     capabilities.action_details.iter().find(|detail| detail.action == action)
 }
 
+fn mutate_reaction(
+    options: MessageReactionOptions,
+    endpoint: &'static str,
+    action: &'static str,
+) -> Result<Value> {
+    ensure_message_actions_supported(
+        options.connector_id.as_str(),
+        options.url.clone(),
+        options.token.clone(),
+        options.principal.clone(),
+        options.device_id.clone(),
+        options.channel.clone(),
+        vec![action],
+    )?;
+    post_connector_action(
+        options.connector_id.as_str(),
+        endpoint,
+        Some(json!({
+            "locator": {
+                "conversation_id": options.conversation_id,
+                "thread_id": options.thread_id,
+                "message_id": options.message_id,
+            },
+            "emoji": options.emoji,
+            "approval_id": options.approval_id,
+        })),
+        options.url,
+        options.token,
+        options.principal,
+        options.device_id,
+        options.channel,
+        "failed to call message reaction endpoint",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        capabilities_from_status, MESSAGE_ACTION_DELETE, MESSAGE_ACTION_EDIT,
-        MESSAGE_ACTION_REACT_ADD, MESSAGE_ACTION_REACT_REMOVE, MESSAGE_ACTION_READ,
-        MESSAGE_ACTION_REPLY, MESSAGE_ACTION_SEARCH, MESSAGE_ACTION_SEND, MESSAGE_ACTION_THREAD,
+        capabilities_from_status, fallback_capabilities, MESSAGE_ACTION_DELETE,
+        MESSAGE_ACTION_EDIT, MESSAGE_ACTION_REACT_ADD, MESSAGE_ACTION_REACT_REMOVE,
+        MESSAGE_ACTION_READ, MESSAGE_ACTION_REPLY, MESSAGE_ACTION_SEARCH, MESSAGE_ACTION_SEND,
+        MESSAGE_ACTION_THREAD,
     };
     use serde_json::json;
 
@@ -353,12 +582,12 @@ mod tests {
                         "send": { "supported": true },
                         "thread": { "supported": true },
                         "reply": { "supported": true },
-                        "read": { "supported": false, "reason": "read unavailable" },
-                        "search": { "supported": false, "reason": "search unavailable" },
-                        "edit": { "supported": false, "reason": "edit unavailable" },
-                        "delete": { "supported": false, "reason": "delete unavailable" },
-                        "react_add": { "supported": false, "reason": "react add unavailable" },
-                        "react_remove": { "supported": false, "reason": "react remove unavailable" }
+                        "read": { "supported": true, "policy_action": "channel.message.read", "approval_mode": "none", "risk_level": "low", "audit_event_type": "discord.message.read", "required_permissions": ["ViewChannel", "ReadMessageHistory"] },
+                        "search": { "supported": true, "policy_action": "channel.message.search", "approval_mode": "none", "risk_level": "low", "audit_event_type": "discord.message.search", "required_permissions": ["ViewChannel", "ReadMessageHistory"] },
+                        "edit": { "supported": true, "policy_action": "channel.message.edit", "approval_mode": "conditional", "risk_level": "conditional", "audit_event_type": "discord.message.edit", "required_permissions": ["ViewChannel", "SendMessages"] },
+                        "delete": { "supported": true, "policy_action": "channel.message.delete", "approval_mode": "required", "risk_level": "high", "audit_event_type": "discord.message.delete", "required_permissions": ["ViewChannel", "ManageMessages"] },
+                        "react_add": { "supported": true, "policy_action": "channel.message.react_add", "approval_mode": "conditional", "risk_level": "conditional", "audit_event_type": "discord.message.react_add", "required_permissions": ["ViewChannel", "AddReactions"] },
+                        "react_remove": { "supported": true, "policy_action": "channel.message.react_remove", "approval_mode": "conditional", "risk_level": "conditional", "audit_event_type": "discord.message.react_remove", "required_permissions": ["ViewChannel", "AddReactions"] }
                     }
                 }
             }
@@ -372,11 +601,6 @@ mod tests {
                 MESSAGE_ACTION_SEND.to_owned(),
                 MESSAGE_ACTION_THREAD.to_owned(),
                 MESSAGE_ACTION_REPLY.to_owned(),
-            ]
-        );
-        assert_eq!(
-            capabilities.unsupported_actions,
-            vec![
                 MESSAGE_ACTION_READ.to_owned(),
                 MESSAGE_ACTION_SEARCH.to_owned(),
                 MESSAGE_ACTION_EDIT.to_owned(),
@@ -385,15 +609,39 @@ mod tests {
                 MESSAGE_ACTION_REACT_REMOVE.to_owned(),
             ]
         );
+        assert!(capabilities.unsupported_actions.is_empty());
+        let edit = capabilities
+            .action_details
+            .iter()
+            .find(|detail| detail.action == MESSAGE_ACTION_EDIT)
+            .expect("edit action detail should exist");
+        assert_eq!(edit.policy_action.as_deref(), Some("channel.message.edit"));
+        assert_eq!(edit.approval_mode.as_deref(), Some("conditional"));
+        assert_eq!(edit.risk_level.as_deref(), Some("conditional"));
+        assert_eq!(edit.audit_event_type.as_deref(), Some("discord.message.edit"));
+        assert_eq!(edit.required_permissions, vec!["ViewChannel", "SendMessages"]);
     }
 
     #[test]
     fn capabilities_from_status_falls_back_for_discord_when_capabilities_are_missing() {
-        let capabilities =
-            capabilities_from_status(&json!({"connector": {"kind": "discord"}}), "discord");
+        let capabilities = fallback_capabilities("discord");
 
         assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_SEND.to_owned()));
         assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_THREAD.to_owned()));
         assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_REPLY.to_owned()));
+        assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_READ.to_owned()));
+        assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_SEARCH.to_owned()));
+        assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_EDIT.to_owned()));
+        assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_DELETE.to_owned()));
+        assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_REACT_ADD.to_owned()));
+        assert!(capabilities.supported_actions.contains(&MESSAGE_ACTION_REACT_REMOVE.to_owned()));
+    }
+
+    #[test]
+    fn capabilities_from_status_falls_back_to_all_unsupported_for_non_discord() {
+        let capabilities = fallback_capabilities("slack");
+
+        assert!(capabilities.supported_actions.is_empty());
+        assert_eq!(capabilities.unsupported_actions.len(), 9);
     }
 }

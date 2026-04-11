@@ -448,7 +448,6 @@ fn browser_channels_and_session_workflows_are_regression_tested() -> Result<()> 
         channel_verify_payload.get("status").is_some(),
         "channels discord verify should return status payload"
     );
-
     let browser_status_output = run_cli_json(
         &workdir,
         &[
@@ -815,6 +814,225 @@ fn browser_channels_and_session_workflows_are_regression_tested() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn discord_message_admin_cli_workflows_are_regression_tested() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let fixture = ChannelAdminFixture::new()?;
+
+    let message_capabilities_payload = assert_json_success(
+        run_cli_json(
+            &workdir,
+            &[
+                "message",
+                "capabilities",
+                "discord:default",
+                "--url",
+                fixture.base_url(),
+                "--token",
+                ADMIN_TOKEN,
+                "--principal",
+                "admin:local",
+                "--device-id",
+                DEVICE_ID,
+                "--channel",
+                "cli",
+            ],
+            &[],
+        )?,
+        "message capabilities",
+    )?;
+    let supported_actions = message_capabilities_payload
+        .get("supported_actions")
+        .and_then(Value::as_array)
+        .context("message capabilities should include supported_actions")?;
+    assert!(
+        supported_actions.iter().any(|value| value.as_str() == Some("read"))
+            && supported_actions.iter().any(|value| value.as_str() == Some("search"))
+            && supported_actions.iter().any(|value| value.as_str() == Some("edit"))
+            && supported_actions.iter().any(|value| value.as_str() == Some("delete"))
+            && supported_actions.iter().any(|value| value.as_str() == Some("react:add"))
+            && supported_actions.iter().any(|value| value.as_str() == Some("react:remove")),
+        "discord CLI regression fixture should advertise the full admin message surface"
+    );
+
+    let message_search_payload = assert_json_success(
+        run_cli_json(
+            &workdir,
+            &[
+                "message",
+                "search",
+                "discord:default",
+                "--conversation-id",
+                "1234567890",
+                "--query",
+                "workflow regression verify",
+                "--limit",
+                "5",
+                "--url",
+                fixture.base_url(),
+                "--token",
+                ADMIN_TOKEN,
+                "--principal",
+                "admin:local",
+                "--device-id",
+                DEVICE_ID,
+                "--channel",
+                "cli",
+            ],
+            &[],
+        )?,
+        "message search",
+    )?;
+    let verified_message_id = message_search_payload
+        .pointer("/result/matches/0/locator/message_id")
+        .and_then(Value::as_str)
+        .context("message search should return a locator message id")?;
+    assert_eq!(
+        message_search_payload.pointer("/result/matches/0/body").and_then(Value::as_str),
+        Some("workflow regression verify")
+    );
+
+    let message_read_payload = assert_json_success(
+        run_cli_json(
+            &workdir,
+            &[
+                "message",
+                "read",
+                "discord:default",
+                "--conversation-id",
+                "1234567890",
+                "--message-id",
+                verified_message_id,
+                "--limit",
+                "5",
+                "--url",
+                fixture.base_url(),
+                "--token",
+                ADMIN_TOKEN,
+                "--principal",
+                "admin:local",
+                "--device-id",
+                DEVICE_ID,
+                "--channel",
+                "cli",
+            ],
+            &[],
+        )?,
+        "message read",
+    )?;
+    assert_eq!(
+        message_read_payload.pointer("/result/exact_message_id").and_then(Value::as_str),
+        Some(verified_message_id)
+    );
+
+    let message_edit_payload = assert_json_success(
+        run_cli_json(
+            &workdir,
+            &[
+                "message",
+                "edit",
+                "discord:default",
+                "--conversation-id",
+                "1234567890",
+                "--message-id",
+                verified_message_id,
+                "--text",
+                "workflow regression edit preview",
+                "--url",
+                fixture.base_url(),
+                "--token",
+                ADMIN_TOKEN,
+                "--principal",
+                "admin:local",
+                "--device-id",
+                DEVICE_ID,
+                "--channel",
+                "cli",
+            ],
+            &[],
+        )?,
+        "message edit preview",
+    )?;
+    assert_eq!(message_edit_payload.get("approval_required").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        message_edit_payload.pointer("/preview/locator/message_id").and_then(Value::as_str),
+        Some(verified_message_id)
+    );
+
+    let message_delete_payload = assert_json_success(
+        run_cli_json(
+            &workdir,
+            &[
+                "message",
+                "delete",
+                "discord:default",
+                "--conversation-id",
+                "1234567890",
+                "--message-id",
+                verified_message_id,
+                "--reason",
+                "workflow regression delete preview",
+                "--url",
+                fixture.base_url(),
+                "--token",
+                ADMIN_TOKEN,
+                "--principal",
+                "admin:local",
+                "--device-id",
+                DEVICE_ID,
+                "--channel",
+                "cli",
+            ],
+            &[],
+        )?,
+        "message delete preview",
+    )?;
+    assert_eq!(
+        message_delete_payload.get("approval_required").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        message_delete_payload.pointer("/preview/locator/message_id").and_then(Value::as_str),
+        Some(verified_message_id)
+    );
+
+    let message_react_payload = assert_json_success(
+        run_cli_json(
+            &workdir,
+            &[
+                "message",
+                "react",
+                "discord:default",
+                "--conversation-id",
+                "1234567890",
+                "--message-id",
+                verified_message_id,
+                "--emoji",
+                "thumbsup",
+                "--url",
+                fixture.base_url(),
+                "--token",
+                ADMIN_TOKEN,
+                "--principal",
+                "admin:local",
+                "--device-id",
+                DEVICE_ID,
+                "--channel",
+                "cli",
+            ],
+            &[],
+        )?,
+        "message reaction preview",
+    )?;
+    assert_eq!(message_react_payload.get("approval_required").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        message_react_payload.pointer("/preview/locator/message_id").and_then(Value::as_str),
+        Some(verified_message_id)
+    );
+
+    Ok(())
+}
+
 fn browser_workflow_envs<'a>(
     config_path: &'a str,
     gateway_grpc_url: &'a str,
@@ -997,6 +1215,51 @@ impl Drop for StaticHttpFixture {
     }
 }
 
+struct ChannelAdminFixture {
+    base_url: String,
+    handle: Option<thread::JoinHandle<Result<()>>>,
+}
+
+impl ChannelAdminFixture {
+    fn new() -> Result<Self> {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").context("failed to bind channel admin fixture")?;
+        let address =
+            listener.local_addr().context("failed to resolve channel admin fixture address")?;
+        let handle = thread::spawn(move || -> Result<()> {
+            for _ in 0..11usize {
+                let (mut stream, _) =
+                    listener.accept().context("channel admin fixture failed to accept request")?;
+                let request = read_http_request(&mut stream)?;
+                let request_line = parse_http_request_line(&request)?;
+                let response_body = channel_admin_fixture_response(request_line.as_str())?;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .context("channel admin fixture failed to write response")?;
+                stream.flush().context("channel admin fixture failed to flush response")?;
+            }
+            Ok(())
+        });
+        Ok(Self { base_url: format!("http://{address}"), handle: Some(handle) })
+    }
+
+    fn base_url(&self) -> &str {
+        self.base_url.as_str()
+    }
+}
+
+impl Drop for ChannelAdminFixture {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
@@ -1011,6 +1274,180 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
         }
     }
     Ok(buffer)
+}
+
+fn parse_http_request_line(request: &[u8]) -> Result<String> {
+    let request_text =
+        std::str::from_utf8(request).context("fixture request should be valid UTF-8")?;
+    request_text
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .context("fixture request should contain a request line")
+}
+
+fn channel_admin_fixture_response(request_line: &str) -> Result<String> {
+    let message = json!({
+        "locator": {
+            "conversation_id": "1234567890",
+            "thread_id": null,
+            "message_id": "msg-ops-1"
+        },
+        "sender_id": "discord:user:ops",
+        "sender_display": "Ops",
+        "body": "workflow regression verify",
+        "created_at_unix_ms": 1700000001000_i64,
+        "edited_at_unix_ms": null,
+        "is_direct_message": false,
+        "is_connector_authored": true,
+        "link": "https://discord.com/channels/1/1234567890/msg-ops-1",
+        "attachments": [],
+        "reactions": []
+    });
+    let capabilities = json!({
+        "connector": {
+            "kind": "discord",
+            "capabilities": {
+                "message": {
+                    "send": { "supported": true },
+                    "thread": { "supported": true },
+                    "reply": { "supported": true },
+                    "read": {
+                        "supported": true,
+                        "policy_action": "channel.message.read",
+                        "approval_mode": "none",
+                        "risk_level": "low",
+                        "audit_event_type": "discord.message.read",
+                        "required_permissions": ["ViewChannel", "ReadMessageHistory"]
+                    },
+                    "search": {
+                        "supported": true,
+                        "policy_action": "channel.message.search",
+                        "approval_mode": "none",
+                        "risk_level": "low",
+                        "audit_event_type": "discord.message.search",
+                        "required_permissions": ["ViewChannel", "ReadMessageHistory"]
+                    },
+                    "edit": {
+                        "supported": true,
+                        "policy_action": "channel.message.edit",
+                        "approval_mode": "conditional",
+                        "risk_level": "conditional",
+                        "audit_event_type": "discord.message.edit",
+                        "required_permissions": ["ViewChannel", "ManageMessages"]
+                    },
+                    "delete": {
+                        "supported": true,
+                        "policy_action": "channel.message.delete",
+                        "approval_mode": "required",
+                        "risk_level": "high",
+                        "audit_event_type": "discord.message.delete",
+                        "required_permissions": ["ViewChannel", "ManageMessages"]
+                    },
+                    "react_add": {
+                        "supported": true,
+                        "policy_action": "channel.message.react_add",
+                        "approval_mode": "conditional",
+                        "risk_level": "conditional",
+                        "audit_event_type": "discord.message.react_add",
+                        "required_permissions": ["ViewChannel", "AddReactions"]
+                    },
+                    "react_remove": {
+                        "supported": true,
+                        "policy_action": "channel.message.react_remove",
+                        "approval_mode": "conditional",
+                        "risk_level": "conditional",
+                        "audit_event_type": "discord.message.react_remove",
+                        "required_permissions": ["ViewChannel", "AddReactions"]
+                    }
+                }
+            }
+        }
+    });
+    let read_result = json!({
+        "result": {
+            "preflight": {
+                "allowed": true,
+                "policy_action": "channel.message.read",
+                "approval_mode": "none",
+                "risk_level": "low",
+                "audit_event_type": "discord.message.read",
+                "required_permissions": ["ViewChannel", "ReadMessageHistory"]
+            },
+            "conversation_id": "1234567890",
+            "thread_id": null,
+            "exact_message_id": "msg-ops-1",
+            "messages": [message.clone()],
+            "next_before_message_id": null,
+            "next_after_message_id": null
+        }
+    });
+    let search_result = json!({
+        "result": {
+            "preflight": {
+                "allowed": true,
+                "policy_action": "channel.message.search",
+                "approval_mode": "none",
+                "risk_level": "low",
+                "audit_event_type": "discord.message.search",
+                "required_permissions": ["ViewChannel", "ReadMessageHistory"]
+            },
+            "conversation_id": "1234567890",
+            "thread_id": null,
+            "query": "workflow regression verify",
+            "author_id": null,
+            "has_attachments": null,
+            "matches": [message.clone()],
+            "next_before_message_id": null
+        }
+    });
+    let preview = |policy_action: &str, audit_event_type: &str, approval_id: &str| {
+        json!({
+            "approval_required": true,
+            "approval": {
+                "approval_id": approval_id,
+                "subject_id": format!("{policy_action}:msg-ops-1"),
+                "principal": "admin:local"
+            },
+            "policy": {
+                "action": policy_action,
+                "audit_event_type": audit_event_type,
+                "resource": "channel/discord:default/messages/msg-ops-1",
+                "reason": "discord mutation governance: operation requires approval in the default connector scope",
+                "explanation": "Preview only in the regression fixture"
+            },
+            "preview": {
+                "locator": {
+                    "conversation_id": "1234567890",
+                    "thread_id": null,
+                    "message_id": "msg-ops-1"
+                },
+                "message": message.clone(),
+                "approved": false,
+                "approval_id": approval_id
+            }
+        })
+    };
+
+    let payload = match request_line {
+        "GET /admin/v1/channels/discord:default HTTP/1.1" => capabilities,
+        "POST /admin/v1/channels/discord:default/messages/read HTTP/1.1" => read_result,
+        "POST /admin/v1/channels/discord:default/messages/search HTTP/1.1" => search_result,
+        "POST /admin/v1/channels/discord:default/messages/edit HTTP/1.1" => {
+            preview("channel.message.edit", "discord.message.edit", "apr-edit-1")
+        }
+        "POST /admin/v1/channels/discord:default/messages/delete HTTP/1.1" => {
+            preview("channel.message.delete", "discord.message.delete", "apr-delete-1")
+        }
+        "POST /admin/v1/channels/discord:default/messages/react-add HTTP/1.1" => {
+            preview("channel.message.react_add", "discord.message.react_add", "apr-react-1")
+        }
+        other => anyhow::bail!("channel admin fixture does not implement request line: {other}"),
+    };
+
+    serde_json::to_string_pretty(&payload).context("fixture response should serialize to JSON")
 }
 
 fn latest_browser_session_id(grpc_url: &str, auth_token: &str, principal: &str) -> Result<String> {

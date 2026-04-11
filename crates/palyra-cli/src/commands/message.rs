@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::io::Write;
 
@@ -117,52 +117,13 @@ async fn run_message_async(command: MessageCommand, runtime: OperatorRuntime) ->
         }
         MessageCommand::Read {
             connector_id,
+            conversation_id,
+            thread_id,
             message_id,
-            url,
-            token,
-            principal,
-            device_id,
-            channel,
-            json,
-        } => unsupported_message_action(
-            message::MessageActionSupportQuery {
-                action: message::MESSAGE_ACTION_READ.to_owned(),
-                connector_id,
-                detail: Some(message_id),
-                url,
-                token,
-                principal,
-                device_id,
-                channel,
-            },
-            json,
-        )?,
-        MessageCommand::Search {
-            connector_id,
-            query,
-            url,
-            token,
-            principal,
-            device_id,
-            channel,
-            json,
-        } => unsupported_message_action(
-            message::MessageActionSupportQuery {
-                action: message::MESSAGE_ACTION_SEARCH.to_owned(),
-                connector_id,
-                detail: Some(query),
-                url,
-                token,
-                principal,
-                device_id,
-                channel,
-            },
-            json,
-        )?,
-        MessageCommand::Edit {
-            connector_id,
-            message_id,
-            text,
+            before_message_id,
+            after_message_id,
+            around_message_id,
+            limit,
             url,
             token,
             principal,
@@ -170,48 +131,105 @@ async fn run_message_async(command: MessageCommand, runtime: OperatorRuntime) ->
             channel,
             json,
         } => {
-            let detail = format!("message_id={message_id} text={text}");
-            unsupported_message_action(
-                message::MessageActionSupportQuery {
-                    action: message::MESSAGE_ACTION_EDIT.to_owned(),
-                    connector_id,
-                    detail: Some(detail),
+            ensure_positive_limit("read", limit)?;
+            let conversation_id = normalize_required_text_arg(conversation_id, "conversation_id")?;
+            let response = runtime
+                .read_messages(message::MessageReadOptions {
+                    connector_id: connector_id.clone(),
+                    conversation_id,
+                    thread_id: thread_id.and_then(normalize_optional_text_arg),
+                    message_id: message_id.and_then(normalize_optional_text_arg),
+                    before_message_id: before_message_id.and_then(normalize_optional_text_arg),
+                    after_message_id: after_message_id.and_then(normalize_optional_text_arg),
+                    around_message_id: around_message_id.and_then(normalize_optional_text_arg),
+                    limit,
                     url,
                     token,
                     principal,
                     device_id,
                     channel,
-                },
-                json,
-            )?
+                })
+                .await?;
+            emit_read(connector_id.as_str(), &response, output::preferred_json(json))?;
+        }
+        MessageCommand::Search {
+            connector_id,
+            conversation_id,
+            thread_id,
+            query,
+            author_id,
+            has_attachments,
+            before_message_id,
+            limit,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            ensure_positive_limit("search", limit)?;
+            let conversation_id = normalize_required_text_arg(conversation_id, "conversation_id")?;
+            let response = runtime
+                .search_messages(message::MessageSearchOptions {
+                    connector_id: connector_id.clone(),
+                    conversation_id,
+                    thread_id: thread_id.and_then(normalize_optional_text_arg),
+                    query: query.and_then(normalize_optional_text_arg),
+                    author_id: author_id.and_then(normalize_optional_text_arg),
+                    has_attachments,
+                    before_message_id: before_message_id.and_then(normalize_optional_text_arg),
+                    limit,
+                    url,
+                    token,
+                    principal,
+                    device_id,
+                    channel,
+                })
+                .await?;
+            emit_search(connector_id.as_str(), &response, output::preferred_json(json))?;
+        }
+        MessageCommand::Edit {
+            connector_id,
+            conversation_id,
+            thread_id,
+            message_id,
+            text,
+            approval_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let conversation_id = normalize_required_text_arg(conversation_id, "conversation_id")?;
+            let message_id = normalize_required_text_arg(message_id, "message_id")?;
+            let body = normalize_required_text_arg(text, "text")?;
+            let response = runtime
+                .edit_message(message::MessageEditOptions {
+                    connector_id: connector_id.clone(),
+                    conversation_id,
+                    thread_id: thread_id.and_then(normalize_optional_text_arg),
+                    message_id,
+                    body,
+                    approval_id: approval_id.and_then(normalize_optional_text_arg),
+                    url,
+                    token,
+                    principal,
+                    device_id,
+                    channel,
+                })
+                .await?;
+            emit_mutation("edit", connector_id.as_str(), &response, output::preferred_json(json))?;
         }
         MessageCommand::Delete {
             connector_id,
+            conversation_id,
+            thread_id,
             message_id,
-            url,
-            token,
-            principal,
-            device_id,
-            channel,
-            json,
-        } => unsupported_message_action(
-            message::MessageActionSupportQuery {
-                action: message::MESSAGE_ACTION_DELETE.to_owned(),
-                connector_id,
-                detail: Some(message_id),
-                url,
-                token,
-                principal,
-                device_id,
-                channel,
-            },
-            json,
-        )?,
-        MessageCommand::React {
-            connector_id,
-            message_id,
-            emoji,
-            remove,
+            reason,
+            approval_id,
             url,
             token,
             principal,
@@ -219,25 +237,87 @@ async fn run_message_async(command: MessageCommand, runtime: OperatorRuntime) ->
             channel,
             json,
         } => {
-            let detail = format!("message_id={message_id} emoji={emoji} remove={remove}");
-            let action = if remove {
-                message::MESSAGE_ACTION_REACT_REMOVE
-            } else {
-                message::MESSAGE_ACTION_REACT_ADD
-            };
-            unsupported_message_action(
-                message::MessageActionSupportQuery {
-                    action: action.to_owned(),
-                    connector_id,
-                    detail: Some(detail),
+            let conversation_id = normalize_required_text_arg(conversation_id, "conversation_id")?;
+            let message_id = normalize_required_text_arg(message_id, "message_id")?;
+            let response = runtime
+                .delete_message(message::MessageDeleteOptions {
+                    connector_id: connector_id.clone(),
+                    conversation_id,
+                    thread_id: thread_id.and_then(normalize_optional_text_arg),
+                    message_id,
+                    reason: reason.and_then(normalize_optional_text_arg),
+                    approval_id: approval_id.and_then(normalize_optional_text_arg),
                     url,
                     token,
                     principal,
                     device_id,
                     channel,
-                },
-                json,
-            )?
+                })
+                .await?;
+            emit_mutation(
+                "delete",
+                connector_id.as_str(),
+                &response,
+                output::preferred_json(json),
+            )?;
+        }
+        MessageCommand::React {
+            connector_id,
+            conversation_id,
+            thread_id,
+            message_id,
+            emoji,
+            remove,
+            approval_id,
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            json,
+        } => {
+            let conversation_id = normalize_required_text_arg(conversation_id, "conversation_id")?;
+            let message_id = normalize_required_text_arg(message_id, "message_id")?;
+            let emoji = normalize_required_text_arg(emoji, "emoji")?;
+            let response = if remove {
+                runtime
+                    .remove_reaction(message::MessageReactionOptions {
+                        connector_id: connector_id.clone(),
+                        conversation_id,
+                        thread_id: thread_id.and_then(normalize_optional_text_arg),
+                        message_id,
+                        emoji,
+                        approval_id: approval_id.and_then(normalize_optional_text_arg),
+                        url,
+                        token,
+                        principal,
+                        device_id,
+                        channel,
+                    })
+                    .await?
+            } else {
+                runtime
+                    .add_reaction(message::MessageReactionOptions {
+                        connector_id: connector_id.clone(),
+                        conversation_id,
+                        thread_id: thread_id.and_then(normalize_optional_text_arg),
+                        message_id,
+                        emoji,
+                        approval_id: approval_id.and_then(normalize_optional_text_arg),
+                        url,
+                        token,
+                        principal,
+                        device_id,
+                        channel,
+                    })
+                    .await?
+            };
+            emit_mutation(
+                if remove { "react-remove" } else { "react-add" },
+                connector_id.as_str(),
+                &response,
+                output::preferred_json(json),
+            )?;
         }
     }
 
@@ -251,11 +331,10 @@ fn emit_capabilities(
 ) -> Result<()> {
     let payload = message::encode_capabilities_json(connector_id, capabilities);
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload)
-                .context("failed to encode message capabilities payload as JSON")?
-        );
+        output::print_json_pretty(
+            &payload,
+            "failed to encode message capabilities payload as JSON",
+        )?;
     } else {
         println!(
             "message.capabilities connector_id={} provider_kind={} supported={} unsupported={}",
@@ -266,66 +345,362 @@ fn emit_capabilities(
             } else {
                 capabilities.supported_actions.join(",")
             },
-            capabilities.unsupported_actions.join(",")
+            comma_list(capabilities.unsupported_actions.as_slice())
         );
+        for detail in &capabilities.action_details {
+            println!(
+                "message.capability action={} supported={} policy_action={} approval_mode={} risk_level={} audit_event_type={} required_permissions={} reason=\"{}\"",
+                detail.action,
+                detail.supported,
+                detail.policy_action.as_deref().unwrap_or("none"),
+                detail.approval_mode.as_deref().unwrap_or("none"),
+                detail.risk_level.as_deref().unwrap_or("none"),
+                detail.audit_event_type.as_deref().unwrap_or("none"),
+                comma_list(detail.required_permissions.as_slice()),
+                detail.reason.as_deref().map(compact_text).unwrap_or_else(|| "none".to_owned()),
+            );
+        }
     }
     Ok(())
 }
 
 fn emit_send(action: &str, connector_id: &str, response: Value, json_output: bool) -> Result<()> {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&message::encode_dispatch_json(
-                action,
-                connector_id,
-                response.clone(),
-            ))
-            .context("failed to encode message send payload as JSON")?
+        return output::print_json_pretty(
+            &message::encode_dispatch_json(action, connector_id, response),
+            "failed to encode message send payload as JSON",
         );
-    } else {
-        let dispatch = response.get("dispatch").unwrap_or(&response);
-        println!(
-            "message.{} connector_id={} target={} delivered={} retried={} dead_lettered={} native_message_id={} thread_id={} reply_to={}",
-            action,
-            connector_id,
-            dispatch.get("target").and_then(Value::as_str).unwrap_or("unknown"),
-            dispatch.get("delivered").and_then(Value::as_u64).unwrap_or(0),
-            dispatch.get("retried").and_then(Value::as_u64).unwrap_or(0),
-            dispatch.get("dead_lettered").and_then(Value::as_u64).unwrap_or(0),
-            dispatch
-                .get("native_message_id")
-                .and_then(Value::as_str)
-                .unwrap_or("none"),
-            dispatch.get("thread_id").and_then(Value::as_str).unwrap_or("none"),
-            dispatch
-                .get("in_reply_to_message_id")
-                .and_then(Value::as_str)
-                .unwrap_or("none")
+    }
+
+    let dispatch = response.get("dispatch").unwrap_or(&response);
+    println!(
+        "message.{} connector_id={} target={} delivered={} retried={} dead_lettered={} native_message_id={} thread_id={} reply_to={}",
+        action,
+        connector_id,
+        dispatch.get("target").and_then(Value::as_str).unwrap_or("unknown"),
+        dispatch.get("delivered").and_then(Value::as_u64).unwrap_or(0),
+        dispatch.get("retried").and_then(Value::as_u64).unwrap_or(0),
+        dispatch.get("dead_lettered").and_then(Value::as_u64).unwrap_or(0),
+        dispatch
+            .get("native_message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        dispatch.get("thread_id").and_then(Value::as_str).unwrap_or("none"),
+        dispatch
+            .get("in_reply_to_message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+    );
+    Ok(())
+}
+
+fn emit_read(connector_id: &str, response: &Value, json_output: bool) -> Result<()> {
+    if json_output {
+        return output::print_json_pretty(
+            response,
+            "failed to encode message read payload as JSON",
         );
+    }
+
+    let result = response.pointer("/result").unwrap_or(response);
+    let messages =
+        result.get("messages").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    println!(
+        "message.read connector_id={} conversation_id={} thread_id={} exact_message_id={} count={} next_before={} next_after={} allowed={} policy_action={} approval_mode={} risk_level={} required_permissions={}",
+        connector_id,
+        result
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        result.get("thread_id").and_then(Value::as_str).unwrap_or("none"),
+        result
+            .get("exact_message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        messages.len(),
+        result
+            .get("next_before_message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        result
+            .get("next_after_message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        preflight_bool(result, "allowed"),
+        preflight_text(result, "policy_action"),
+        preflight_text(result, "approval_mode"),
+        preflight_text(result, "risk_level"),
+        preflight_csv(result, "required_permissions"),
+    );
+    for message in messages {
+        emit_message_record("message.read.record", message);
     }
     Ok(())
 }
 
-fn unsupported_message_action(
-    query: message::MessageActionSupportQuery,
-    json_output: bool,
-) -> Result<()> {
-    let payload = message::unsupported_message_action(query)?;
+fn emit_search(connector_id: &str, response: &Value, json_output: bool) -> Result<()> {
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload)
-                .context("failed to encode unsupported message capability payload as JSON")?
-        );
-    } else {
-        println!(
-            "message.unsupported connector_id={} action={} supported={} reason={}",
-            payload.get("connector_id").and_then(Value::as_str).unwrap_or("unknown"),
-            payload.get("action").and_then(Value::as_str).unwrap_or("unknown"),
-            payload.get("supported").and_then(Value::as_bool).unwrap_or(false),
-            payload.get("reason").and_then(Value::as_str).unwrap_or("unknown"),
+        return output::print_json_pretty(
+            response,
+            "failed to encode message search payload as JSON",
         );
     }
+
+    let result = response.pointer("/result").unwrap_or(response);
+    let matches = result.get("matches").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    println!(
+        "message.search connector_id={} conversation_id={} thread_id={} query=\"{}\" author_id={} has_attachments={} count={} next_before={} allowed={} policy_action={} approval_mode={} risk_level={} required_permissions={}",
+        connector_id,
+        result
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        result.get("thread_id").and_then(Value::as_str).unwrap_or("none"),
+        result.get("query").and_then(Value::as_str).map(compact_text).unwrap_or_else(|| "none".to_owned()),
+        result.get("author_id").and_then(Value::as_str).unwrap_or("none"),
+        result
+            .get("has_attachments")
+            .map(bool_like)
+            .unwrap_or("none".to_owned()),
+        matches.len(),
+        result
+            .get("next_before_message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        preflight_bool(result, "allowed"),
+        preflight_text(result, "policy_action"),
+        preflight_text(result, "approval_mode"),
+        preflight_text(result, "risk_level"),
+        preflight_csv(result, "required_permissions"),
+    );
+    for message in matches {
+        emit_message_record("message.search.match", message);
+    }
     Ok(())
+}
+
+fn emit_mutation(
+    action: &str,
+    connector_id: &str,
+    response: &Value,
+    json_output: bool,
+) -> Result<()> {
+    if json_output {
+        return output::print_json_pretty(
+            response,
+            "failed to encode message mutation payload as JSON",
+        );
+    }
+
+    if response.get("approval_required").and_then(Value::as_bool).unwrap_or(false) {
+        let approval = response.get("approval").unwrap_or(&Value::Null);
+        let policy = response.get("policy").unwrap_or(&Value::Null);
+        let preview = response.get("preview").unwrap_or(&Value::Null);
+        println!(
+            "message.{} connector_id={} approval_required=true approval_id={} policy_action={} policy_reason=\"{}\" policy_explanation=\"{}\" preview_message_id={}",
+            action,
+            connector_id,
+            approval.get("approval_id").and_then(Value::as_str).unwrap_or("unknown"),
+            policy.get("action").and_then(Value::as_str).unwrap_or("unknown"),
+            policy
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(compact_text)
+                .unwrap_or_else(|| "none".to_owned()),
+            policy
+                .get("explanation")
+                .and_then(Value::as_str)
+                .map(compact_text)
+                .unwrap_or_else(|| "none".to_owned()),
+            preview
+                .pointer("/locator/message_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+        );
+        if let Some(message) = preview.get("message") {
+            emit_message_record("message.approval.preview", message);
+        }
+        return Ok(());
+    }
+
+    let result = response.pointer("/result").unwrap_or(response);
+    println!(
+        "message.{} connector_id={} conversation_id={} thread_id={} message_id={} status={} allowed={} policy_action={} approval_mode={} risk_level={} reason=\"{}\"",
+        action,
+        connector_id,
+        result
+            .pointer("/locator/conversation_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        result
+            .pointer("/locator/thread_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        result
+            .pointer("/locator/message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        result.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+        preflight_bool(result, "allowed"),
+        preflight_text(result, "policy_action"),
+        preflight_text(result, "approval_mode"),
+        preflight_text(result, "risk_level"),
+        result
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(compact_text)
+            .unwrap_or_else(|| "none".to_owned()),
+    );
+    if let Some(diff) = result.get("diff") {
+        println!(
+            "message.{}.diff before=\"{}\" after=\"{}\"",
+            action,
+            diff.get("before_body")
+                .and_then(Value::as_str)
+                .map(compact_text)
+                .unwrap_or_else(|| "none".to_owned()),
+            diff.get("after_body")
+                .and_then(Value::as_str)
+                .map(compact_text)
+                .unwrap_or_else(|| "none".to_owned()),
+        );
+    }
+    if let Some(message) = result.get("message") {
+        emit_message_record("message.mutation.message", message);
+    }
+    Ok(())
+}
+
+fn emit_message_record(prefix: &str, message: &Value) {
+    println!(
+        "{} conversation_id={} thread_id={} message_id={} sender_id={} sender_display={} direct={} connector_authored={} created_at={} edited_at={} attachments={} reactions={} link={} body=\"{}\"",
+        prefix,
+        message
+            .pointer("/locator/conversation_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        message
+            .pointer("/locator/thread_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        message
+            .pointer("/locator/message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        message.get("sender_id").and_then(Value::as_str).unwrap_or("unknown"),
+        message
+            .get("sender_display")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+        bool_like(message.get("is_direct_message").unwrap_or(&Value::Null)),
+        bool_like(message.get("is_connector_authored").unwrap_or(&Value::Null)),
+        scalar_like(message.get("created_at_unix_ms").unwrap_or(&Value::Null)),
+        scalar_like(message.get("edited_at_unix_ms").unwrap_or(&Value::Null)),
+        message
+            .get("attachments")
+            .and_then(Value::as_array)
+            .map(|value| value.len())
+            .unwrap_or(0),
+        reaction_summary(message.get("reactions")),
+        message.get("link").and_then(Value::as_str).unwrap_or("none"),
+        message
+            .get("body")
+            .and_then(Value::as_str)
+            .map(compact_text)
+            .unwrap_or_else(|| "none".to_owned()),
+    );
+}
+
+fn ensure_positive_limit(action: &str, limit: usize) -> Result<()> {
+    if limit == 0 {
+        bail!("message {action} requires --limit greater than zero");
+    }
+    Ok(())
+}
+
+fn compact_text(value: &str) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let sanitized = collapsed.replace('"', "'");
+    if sanitized.chars().count() > 160 {
+        let truncated = sanitized.chars().take(157).collect::<String>();
+        format!("{truncated}...")
+    } else {
+        sanitized
+    }
+}
+
+fn comma_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(",")
+    }
+}
+
+fn bool_like(value: &Value) -> String {
+    match value {
+        Value::Bool(flag) => flag.to_string(),
+        Value::Null => "none".to_owned(),
+        _ => scalar_like(value),
+    }
+}
+
+fn scalar_like(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Null => "none".to_owned(),
+        other => compact_text(other.to_string().as_str()),
+    }
+}
+
+fn preflight_text(result: &Value, field: &str) -> String {
+    result
+        .get("preflight")
+        .and_then(|preflight| preflight.get(field))
+        .map(scalar_like)
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+fn preflight_bool(result: &Value, field: &str) -> String {
+    result
+        .get("preflight")
+        .and_then(|preflight| preflight.get(field))
+        .map(bool_like)
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+fn preflight_csv(result: &Value, field: &str) -> String {
+    result
+        .get("preflight")
+        .and_then(|preflight| preflight.get(field))
+        .and_then(Value::as_array)
+        .map(|entries| {
+            let values =
+                entries.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect::<Vec<_>>();
+            comma_list(values.as_slice())
+        })
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+fn reaction_summary(value: Option<&Value>) -> String {
+    let Some(reactions) = value.and_then(Value::as_array) else {
+        return "none".to_owned();
+    };
+    if reactions.is_empty() {
+        return "none".to_owned();
+    }
+    reactions
+        .iter()
+        .map(|reaction| {
+            format!(
+                "{}:{}:{}",
+                reaction.get("emoji").and_then(Value::as_str).unwrap_or("?"),
+                reaction.get("count").and_then(Value::as_u64).unwrap_or(0),
+                reaction.get("reacted_by_connector").and_then(Value::as_bool).unwrap_or(false)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }

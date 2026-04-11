@@ -22,9 +22,16 @@ use ulid::Ulid;
 use crate::{
     discord_default_egress_allowlist,
     net::ConnectorNetGuard,
+    permissions::{discord_capability_support, DiscordMessageOperation},
     protocol::{
-        AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorKind, DeliveryOutcome,
-        InboundMessageEvent, OutboundMessageRequest, RetryClass,
+        AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorCapabilitySet,
+        ConnectorConversationTarget, ConnectorKind, ConnectorMessageCapabilitySet,
+        ConnectorMessageDeleteRequest, ConnectorMessageEditRequest, ConnectorMessageLocator,
+        ConnectorMessageMutationDiff, ConnectorMessageMutationResult,
+        ConnectorMessageMutationStatus, ConnectorMessageReactionRecord,
+        ConnectorMessageReactionRequest, ConnectorMessageReadRequest, ConnectorMessageReadResult,
+        ConnectorMessageRecord, ConnectorMessageSearchRequest, ConnectorMessageSearchResult,
+        DeliveryOutcome, InboundMessageEvent, OutboundMessageRequest, RetryClass,
     },
     storage::ConnectorInstanceRecord,
     supervisor::{ConnectorAdapter, ConnectorAdapterError},
@@ -74,6 +81,40 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
 
     fn availability(&self) -> ConnectorAvailability {
         ConnectorAvailability::Supported
+    }
+
+    fn capabilities(&self) -> ConnectorCapabilitySet {
+        ConnectorCapabilitySet {
+            lifecycle: crate::protocol::ConnectorCapabilitySupport::supported(),
+            status: crate::protocol::ConnectorCapabilitySupport::supported(),
+            logs: crate::protocol::ConnectorCapabilitySupport::supported(),
+            health_refresh: crate::protocol::ConnectorCapabilitySupport::supported(),
+            resolve: crate::protocol::ConnectorCapabilitySupport::supported(),
+            pairings: crate::protocol::ConnectorCapabilitySupport::supported(),
+            qr: crate::protocol::ConnectorCapabilitySupport::supported(),
+            webhook_ingress: crate::protocol::ConnectorCapabilitySupport::unsupported(
+                "discord connector does not expose generic webhook ingress management",
+            ),
+            message: ConnectorMessageCapabilitySet {
+                send: discord_capability_support(DiscordMessageOperation::Send, true, None),
+                thread: discord_capability_support(DiscordMessageOperation::Thread, true, None),
+                reply: discord_capability_support(DiscordMessageOperation::Reply, true, None),
+                read: discord_capability_support(DiscordMessageOperation::Read, true, None),
+                search: discord_capability_support(DiscordMessageOperation::Search, true, None),
+                edit: discord_capability_support(DiscordMessageOperation::Edit, true, None),
+                delete: discord_capability_support(DiscordMessageOperation::Delete, true, None),
+                react_add: discord_capability_support(
+                    DiscordMessageOperation::ReactAdd,
+                    true,
+                    None,
+                ),
+                react_remove: discord_capability_support(
+                    DiscordMessageOperation::ReactRemove,
+                    true,
+                    None,
+                ),
+            },
+        }
     }
 
     fn split_outbound(
@@ -429,6 +470,352 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
 
         Ok(DeliveryOutcome::Delivered { native_message_id })
     }
+
+    async fn read_messages(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        request: &ConnectorMessageReadRequest,
+    ) -> Result<ConnectorMessageReadResult, ConnectorAdapterError> {
+        let target_channel_id = effective_channel_id(&request.target);
+        let context = match self
+            .prepare_admin_context(instance, DiscordMessageOperation::Read, &request.target)
+            .await?
+        {
+            Some(context) => context,
+            None => {
+                return Ok(ConnectorMessageReadResult {
+                    preflight: denied_operation_preflight(
+                        DiscordMessageOperation::Read,
+                        "discord target channel is unavailable or permissions are insufficient"
+                            .to_owned(),
+                    ),
+                    target: request.target.clone(),
+                    exact_message_id: request.message_id.clone(),
+                    messages: Vec::new(),
+                    next_before_message_id: None,
+                    next_after_message_id: None,
+                });
+            }
+        };
+        let preflight = context.preflight();
+        if let Some(message_id) = request.message_id.as_deref() {
+            let Some(message) = self
+                .fetch_single_message(
+                    &context,
+                    &request.target,
+                    message_id,
+                    DiscordMessageOperation::Read,
+                )
+                .await?
+            else {
+                return Ok(ConnectorMessageReadResult {
+                    preflight,
+                    target: request.target.clone(),
+                    exact_message_id: Some(message_id.to_owned()),
+                    messages: Vec::new(),
+                    next_before_message_id: None,
+                    next_after_message_id: None,
+                });
+            };
+            return Ok(ConnectorMessageReadResult {
+                preflight,
+                target: request.target.clone(),
+                exact_message_id: Some(message_id.to_owned()),
+                messages: vec![message],
+                next_before_message_id: None,
+                next_after_message_id: None,
+            });
+        }
+
+        let messages = self
+            .fetch_message_page(
+                &context,
+                target_channel_id.as_str(),
+                request.before_message_id.as_deref(),
+                request.after_message_id.as_deref(),
+                request.around_message_id.as_deref(),
+                request.limit,
+                DiscordMessageOperation::Read,
+            )
+            .await?;
+        let next_before_message_id =
+            messages.last().map(|message| message.locator.message_id.clone());
+        let next_after_message_id =
+            messages.first().map(|message| message.locator.message_id.clone());
+        Ok(ConnectorMessageReadResult {
+            preflight,
+            target: request.target.clone(),
+            exact_message_id: None,
+            messages,
+            next_before_message_id,
+            next_after_message_id,
+        })
+    }
+
+    async fn search_messages(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        request: &ConnectorMessageSearchRequest,
+    ) -> Result<ConnectorMessageSearchResult, ConnectorAdapterError> {
+        let target_channel_id = effective_channel_id(&request.target);
+        let context = match self
+            .prepare_admin_context(instance, DiscordMessageOperation::Search, &request.target)
+            .await?
+        {
+            Some(context) => {
+                if !context.preflight_allowed {
+                    return Ok(ConnectorMessageSearchResult {
+                        preflight: context.preflight(),
+                        target: request.target.clone(),
+                        query: request.query.clone(),
+                        author_id: request.author_id.clone(),
+                        has_attachments: request.has_attachments,
+                        matches: Vec::new(),
+                        next_before_message_id: None,
+                    });
+                }
+                context
+            }
+            None => {
+                return Ok(ConnectorMessageSearchResult {
+                    preflight: denied_operation_preflight(
+                        DiscordMessageOperation::Search,
+                        "discord target channel is unavailable or permissions are insufficient"
+                            .to_owned(),
+                    ),
+                    target: request.target.clone(),
+                    query: request.query.clone(),
+                    author_id: request.author_id.clone(),
+                    has_attachments: request.has_attachments,
+                    matches: Vec::new(),
+                    next_before_message_id: None,
+                });
+            }
+        };
+        let scanned_messages = self
+            .fetch_message_page(
+                &context,
+                target_channel_id.as_str(),
+                request.before_message_id.as_deref(),
+                None,
+                None,
+                request.limit,
+                DiscordMessageOperation::Search,
+            )
+            .await?;
+        let matches = scanned_messages
+            .iter()
+            .filter(|message| search_message_matches(message, request))
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_before_message_id =
+            scanned_messages.last().map(|message| message.locator.message_id.clone());
+        Ok(ConnectorMessageSearchResult {
+            preflight: context.preflight(),
+            target: request.target.clone(),
+            query: request.query.clone(),
+            author_id: request.author_id.clone(),
+            has_attachments: request.has_attachments,
+            matches,
+            next_before_message_id,
+        })
+    }
+
+    async fn edit_message(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        request: &ConnectorMessageEditRequest,
+    ) -> Result<ConnectorMessageMutationResult, ConnectorAdapterError> {
+        let context = match self
+            .prepare_admin_context(instance, DiscordMessageOperation::Edit, &request.locator.target)
+            .await?
+        {
+            Some(context) if context.preflight_allowed => context,
+            Some(context) => {
+                return Ok(denied_mutation_result(
+                    DiscordMessageOperation::Edit,
+                    request.locator.clone(),
+                    context
+                        .preflight_reason
+                        .unwrap_or_else(|| "discord edit preflight denied".to_owned()),
+                ));
+            }
+            None => {
+                return Ok(denied_mutation_result(
+                    DiscordMessageOperation::Edit,
+                    request.locator.clone(),
+                    "discord target channel is unavailable or permissions are insufficient"
+                        .to_owned(),
+                ));
+            }
+        };
+        let Some(before) = self
+            .fetch_single_message(
+                &context,
+                &request.locator.target,
+                request.locator.message_id.as_str(),
+                DiscordMessageOperation::Edit,
+            )
+            .await?
+        else {
+            return Ok(denied_mutation_result(
+                DiscordMessageOperation::Edit,
+                request.locator.clone(),
+                "discord message is missing or stale".to_owned(),
+            ));
+        };
+        if !before.is_connector_authored {
+            return Ok(denied_mutation_result(
+                DiscordMessageOperation::Edit,
+                request.locator.clone(),
+                "discord edit is only supported for connector-authored messages".to_owned(),
+            ));
+        }
+        let message_url = build_message_url(
+            &self.config.api_base_url,
+            effective_channel_id(&request.locator.target).as_str(),
+            request.locator.message_id.as_str(),
+        )?;
+        let response = self
+            .patch_discord_json(
+                &context,
+                format!(
+                    "discord:patch:/channels/{}/messages/{}",
+                    effective_channel_id(&request.locator.target),
+                    request.locator.message_id
+                )
+                .as_str(),
+                &message_url,
+                &json!({ "content": request.body }),
+            )
+            .await?;
+        let Some(after) = handle_mutation_message_response(
+            &context,
+            DiscordMessageOperation::Edit,
+            &request.locator,
+            response,
+        )?
+        else {
+            return Ok(denied_mutation_result(
+                DiscordMessageOperation::Edit,
+                request.locator.clone(),
+                "discord edit was rejected by the platform".to_owned(),
+            ));
+        };
+        Ok(ConnectorMessageMutationResult {
+            preflight: context.preflight(),
+            locator: request.locator.clone(),
+            status: ConnectorMessageMutationStatus::Updated,
+            reason: None,
+            message: Some(after.clone()),
+            diff: Some(ConnectorMessageMutationDiff {
+                before_body: Some(before.body),
+                after_body: Some(after.body),
+            }),
+        })
+    }
+
+    async fn delete_message(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        request: &ConnectorMessageDeleteRequest,
+    ) -> Result<ConnectorMessageMutationResult, ConnectorAdapterError> {
+        let context = match self
+            .prepare_admin_context(
+                instance,
+                DiscordMessageOperation::Delete,
+                &request.locator.target,
+            )
+            .await?
+        {
+            Some(context) if context.preflight_allowed => context,
+            Some(context) => {
+                return Ok(denied_mutation_result(
+                    DiscordMessageOperation::Delete,
+                    request.locator.clone(),
+                    context
+                        .preflight_reason
+                        .unwrap_or_else(|| "discord delete preflight denied".to_owned()),
+                ));
+            }
+            None => {
+                return Ok(denied_mutation_result(
+                    DiscordMessageOperation::Delete,
+                    request.locator.clone(),
+                    "discord target channel is unavailable or permissions are insufficient"
+                        .to_owned(),
+                ));
+            }
+        };
+        let before = self
+            .fetch_single_message(
+                &context,
+                &request.locator.target,
+                request.locator.message_id.as_str(),
+                DiscordMessageOperation::Delete,
+            )
+            .await?;
+        let Some(before) = before else {
+            return Ok(denied_mutation_result(
+                DiscordMessageOperation::Delete,
+                request.locator.clone(),
+                "discord message is missing or stale".to_owned(),
+            ));
+        };
+        let message_url = build_message_url(
+            &self.config.api_base_url,
+            effective_channel_id(&request.locator.target).as_str(),
+            request.locator.message_id.as_str(),
+        )?;
+        let status = self
+            .delete_discord_request(
+                &context,
+                format!(
+                    "discord:delete:/channels/{}/messages/{}",
+                    effective_channel_id(&request.locator.target),
+                    request.locator.message_id
+                )
+                .as_str(),
+                &message_url,
+                DiscordMessageOperation::Delete,
+                &request.locator,
+            )
+            .await?;
+        if !status {
+            return Ok(denied_mutation_result(
+                DiscordMessageOperation::Delete,
+                request.locator.clone(),
+                "discord delete was rejected by the platform".to_owned(),
+            ));
+        }
+        Ok(ConnectorMessageMutationResult {
+            preflight: context.preflight(),
+            locator: request.locator.clone(),
+            status: ConnectorMessageMutationStatus::Deleted,
+            reason: request.reason.clone(),
+            message: Some(before.clone()),
+            diff: Some(ConnectorMessageMutationDiff {
+                before_body: Some(before.body),
+                after_body: None,
+            }),
+        })
+    }
+
+    async fn add_reaction(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        request: &ConnectorMessageReactionRequest,
+    ) -> Result<ConnectorMessageMutationResult, ConnectorAdapterError> {
+        self.apply_reaction_mutation(instance, request, true).await
+    }
+
+    async fn remove_reaction(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        request: &ConnectorMessageReactionRequest,
+    ) -> Result<ConnectorMessageMutationResult, ConnectorAdapterError> {
+        self.apply_reaction_mutation(instance, request, false).await
+    }
 }
 
 fn account_id_from_connector_id(connector_id: &str) -> String {
@@ -488,6 +875,29 @@ fn build_messages_url(api_base: &Url, channel_id: &str) -> Result<Url, Connector
     })
 }
 
+fn build_channel_url(api_base: &Url, channel_id: &str) -> Result<Url, ConnectorAdapterError> {
+    let candidate = format!("{}/channels/{}", api_base.as_str().trim_end_matches('/'), channel_id);
+    Url::parse(candidate.as_str()).map_err(|error| {
+        ConnectorAdapterError::Backend(format!("discord API URL invalid: {error}"))
+    })
+}
+
+fn build_message_url(
+    api_base: &Url,
+    channel_id: &str,
+    message_id: &str,
+) -> Result<Url, ConnectorAdapterError> {
+    let candidate = format!(
+        "{}/channels/{}/messages/{}",
+        api_base.as_str().trim_end_matches('/'),
+        channel_id,
+        message_id
+    );
+    Url::parse(candidate.as_str()).map_err(|error| {
+        ConnectorAdapterError::Backend(format!("discord API URL invalid: {error}"))
+    })
+}
+
 fn build_reaction_url(
     api_base: &Url,
     channel_id: &str,
@@ -505,6 +915,118 @@ fn build_reaction_url(
     Url::parse(candidate.as_str()).map_err(|error| {
         ConnectorAdapterError::Backend(format!("discord API URL invalid: {error}"))
     })
+}
+
+fn effective_channel_id(target: &ConnectorConversationTarget) -> String {
+    target
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(target.conversation_id.as_str())
+        .to_owned()
+}
+
+fn parse_discord_permissions_mask(payload: &Value) -> Option<u64> {
+    payload.get("permissions").and_then(|value| {
+        value.as_str().and_then(|raw| raw.trim().parse::<u64>().ok()).or_else(|| value.as_u64())
+    })
+}
+
+fn missing_permission_labels(
+    operation: DiscordMessageOperation,
+    permission_mask: u64,
+) -> Vec<String> {
+    crate::permissions::discord_permissions_for_operation(operation)
+        .iter()
+        .filter_map(|(label, bit)| ((permission_mask & *bit) == 0).then(|| (*label).to_owned()))
+        .collect()
+}
+
+fn operation_name(operation: DiscordMessageOperation) -> &'static str {
+    match operation {
+        DiscordMessageOperation::Send => "send",
+        DiscordMessageOperation::Thread => "thread",
+        DiscordMessageOperation::Reply => "reply",
+        DiscordMessageOperation::Read => "read",
+        DiscordMessageOperation::Search => "search",
+        DiscordMessageOperation::Edit => "edit",
+        DiscordMessageOperation::Delete => "delete",
+        DiscordMessageOperation::ReactAdd => "react_add",
+        DiscordMessageOperation::ReactRemove => "react_remove",
+    }
+}
+
+fn denied_operation_preflight(
+    operation: DiscordMessageOperation,
+    reason: String,
+) -> crate::protocol::ConnectorOperationPreflight {
+    crate::permissions::discord_operation_preflight(operation, false, Some(reason), None, None)
+}
+
+fn denied_mutation_result(
+    operation: DiscordMessageOperation,
+    locator: ConnectorMessageLocator,
+    reason: String,
+) -> ConnectorMessageMutationResult {
+    ConnectorMessageMutationResult {
+        preflight: denied_operation_preflight(operation, reason.clone()),
+        locator,
+        status: ConnectorMessageMutationStatus::Denied,
+        reason: Some(reason),
+        message: None,
+        diff: None,
+    }
+}
+
+fn search_message_matches(
+    message: &ConnectorMessageRecord,
+    request: &ConnectorMessageSearchRequest,
+) -> bool {
+    let query_match = request
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or(true, |query| {
+            message.body.to_ascii_lowercase().contains(query.to_ascii_lowercase().as_str())
+        });
+    let author_match = request
+        .author_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or(true, |author_id| message.sender_id.eq_ignore_ascii_case(author_id));
+    let attachment_match = request
+        .has_attachments
+        .map_or(true, |required| required == !message.attachments.is_empty());
+    query_match && author_match && attachment_match
+}
+
+fn handle_mutation_message_response(
+    context: &DiscordAdminContext,
+    operation: DiscordMessageOperation,
+    locator: &ConnectorMessageLocator,
+    response: DiscordTransportResponse,
+) -> Result<Option<ConnectorMessageRecord>, ConnectorAdapterError> {
+    if response.status == 404 || response.status == 401 || response.status == 403 {
+        return Ok(None);
+    }
+    if !(200..300).contains(&response.status) {
+        return Err(ConnectorAdapterError::Backend(format!(
+            "discord {} failed (status={}): {}",
+            operation_name(operation),
+            response.status,
+            parse_discord_error_summary(response.body.as_str())
+                .unwrap_or_else(|| "unexpected response".to_owned())
+        )));
+    }
+    let payload = serde_json::from_str::<Value>(response.body.as_str()).map_err(|error| {
+        ConnectorAdapterError::Backend(format!(
+            "discord mutation response payload is invalid JSON: {error}"
+        ))
+    })?;
+    Ok(parse_discord_message_record(&payload, context.bot_identity.id.as_str(), &locator.target))
 }
 
 fn percent_encode_component(raw: &str) -> String {
@@ -1108,6 +1630,12 @@ mod tests {
         put_responses: Mutex<
             VecDeque<Result<DiscordTransportResponse, crate::supervisor::ConnectorAdapterError>>,
         >,
+        patch_responses: Mutex<
+            VecDeque<Result<DiscordTransportResponse, crate::supervisor::ConnectorAdapterError>>,
+        >,
+        delete_responses: Mutex<
+            VecDeque<Result<DiscordTransportResponse, crate::supervisor::ConnectorAdapterError>>,
+        >,
         captured: Mutex<Vec<CapturedCall>>,
     }
 
@@ -1327,6 +1855,61 @@ mod tests {
             self.put_responses
                 .lock()
                 .expect("put response lock should not be poisoned")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(DiscordTransportResponse {
+                        status: 204,
+                        headers: Default::default(),
+                        body: String::new(),
+                    })
+                })
+        }
+
+        async fn patch_json(
+            &self,
+            url: &Url,
+            _token: &str,
+            payload: &Value,
+            _timeout_ms: u64,
+        ) -> Result<DiscordTransportResponse, crate::supervisor::ConnectorAdapterError> {
+            self.captured.lock().expect("captured lock should not be poisoned").push(
+                CapturedCall {
+                    method: "PATCH".to_owned(),
+                    url: url.to_string(),
+                    payload: Some(payload.clone()),
+                    multipart_files: Vec::new(),
+                },
+            );
+            self.patch_responses
+                .lock()
+                .expect("patch response lock should not be poisoned")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(DiscordTransportResponse {
+                        status: 200,
+                        headers: Default::default(),
+                        body: "{\"id\":\"native-default\"}".to_owned(),
+                    })
+                })
+        }
+
+        async fn delete(
+            &self,
+            url: &Url,
+            _token: &str,
+            _timeout_ms: u64,
+        ) -> Result<DiscordTransportResponse, crate::supervisor::ConnectorAdapterError> {
+            self.captured.lock().expect("captured lock should not be poisoned").push(
+                CapturedCall {
+                    method: "DELETE".to_owned(),
+                    url: url.to_string(),
+                    payload: None,
+                    multipart_files: Vec::new(),
+                },
+            );
+            self.delete_responses
+                .lock()
+                .expect("delete response lock should not be poisoned")
                 .pop_front()
                 .unwrap_or_else(|| {
                     Ok(DiscordTransportResponse {
@@ -2875,6 +3458,21 @@ pub trait DiscordTransport: Send + Sync {
         token: &str,
         timeout_ms: u64,
     ) -> Result<DiscordTransportResponse, ConnectorAdapterError>;
+
+    async fn patch_json(
+        &self,
+        url: &Url,
+        token: &str,
+        payload: &Value,
+        timeout_ms: u64,
+    ) -> Result<DiscordTransportResponse, ConnectorAdapterError>;
+
+    async fn delete(
+        &self,
+        url: &Url,
+        token: &str,
+        timeout_ms: u64,
+    ) -> Result<DiscordTransportResponse, ConnectorAdapterError>;
 }
 
 #[derive(Clone)]
@@ -2982,6 +3580,44 @@ impl DiscordTransport for ReqwestDiscordTransport {
             .map_err(map_reqwest_error)?;
         response_to_transport(response).await
     }
+
+    async fn patch_json(
+        &self,
+        url: &Url,
+        token: &str,
+        payload: &Value,
+        timeout_ms: u64,
+    ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+        let response = self
+            .client
+            .patch(url.clone())
+            .header("Authorization", format!("Bot {token}"))
+            .header("User-Agent", "palyra-discord-connector/1.0")
+            .timeout(Duration::from_millis(timeout_ms.max(1)))
+            .json(payload)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        response_to_transport(response).await
+    }
+
+    async fn delete(
+        &self,
+        url: &Url,
+        token: &str,
+        timeout_ms: u64,
+    ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+        let response = self
+            .client
+            .delete(url.clone())
+            .header("Authorization", format!("Bot {token}"))
+            .header("User-Agent", "palyra-discord-connector/1.0")
+            .timeout(Duration::from_millis(timeout_ms.max(1)))
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        response_to_transport(response).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3065,6 +3701,28 @@ impl Default for DiscordGatewayInflater {
 
 struct DiscordInboundMonitorHandle {
     receiver: mpsc::Receiver<InboundMessageEvent>,
+}
+
+struct DiscordAdminContext {
+    operation: DiscordMessageOperation,
+    credential: DiscordCredential,
+    guard: ConnectorNetGuard,
+    bot_identity: DiscordBotIdentity,
+    target_channel_id: String,
+    preflight_allowed: bool,
+    preflight_reason: Option<String>,
+}
+
+impl DiscordAdminContext {
+    fn preflight(&self) -> crate::protocol::ConnectorOperationPreflight {
+        crate::permissions::discord_operation_preflight(
+            self.operation,
+            self.preflight_allowed,
+            self.preflight_reason.clone(),
+            None,
+            None,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -3716,6 +4374,449 @@ impl DiscordConnectorAdapter {
             let _ = self.record_route_delivery(route_key.as_str(), response.status);
         }
     }
+
+    async fn prepare_admin_context(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        operation: DiscordMessageOperation,
+        target: &ConnectorConversationTarget,
+    ) -> Result<Option<DiscordAdminContext>, ConnectorAdapterError> {
+        let credential =
+            self.credential_resolver.resolve_credential(instance).await.map_err(|error| {
+                ConnectorAdapterError::Backend(redact_auth_error(error.to_string().as_str()))
+            })?;
+        self.record_credential_metadata(&credential);
+        let guard = self.build_net_guard(instance)?;
+        self.validate_url_target(&guard, &self.config.api_base_url)?;
+
+        let Some(bot_identity) = self.resolve_bot_identity(&guard, &credential).await? else {
+            return Ok(Some(DiscordAdminContext {
+                operation,
+                credential,
+                guard,
+                bot_identity: DiscordBotIdentity {
+                    id: "unknown".to_owned(),
+                    username: "discord-bot".to_owned(),
+                },
+                target_channel_id: effective_channel_id(target),
+                preflight_allowed: false,
+                preflight_reason: Some(
+                    "discord bot identity could not be resolved for admin preflight".to_owned(),
+                ),
+            }));
+        };
+
+        let target_channel_id = effective_channel_id(target);
+        let channel_url = build_channel_url(&self.config.api_base_url, target_channel_id.as_str())?;
+        self.validate_url_target(&guard, &channel_url)?;
+        let channel_response = self
+            .transport
+            .get(&channel_url, credential.token.as_str(), self.config.request_timeout_ms)
+            .await
+            .map_err(|error| {
+                ConnectorAdapterError::Backend(redact_auth_error(error.to_string().as_str()))
+            })?;
+        let now_unix_ms = unix_ms_now();
+        let route_key = format!("discord:get:/channels/{target_channel_id}");
+        let snapshot = parse_rate_limit_snapshot(&channel_response);
+        self.apply_rate_limit_snapshot(route_key.as_str(), &snapshot, now_unix_ms)?;
+
+        if channel_response.status == 404 {
+            return Ok(None);
+        }
+        if channel_response.status == 401 || channel_response.status == 403 {
+            return Ok(Some(DiscordAdminContext {
+                operation,
+                credential,
+                guard,
+                bot_identity,
+                target_channel_id,
+                preflight_allowed: false,
+                preflight_reason: Some(format!(
+                    "discord target channel access denied (status={}): {}",
+                    channel_response.status,
+                    parse_discord_error_summary(channel_response.body.as_str())
+                        .unwrap_or_else(|| "forbidden".to_owned())
+                )),
+            }));
+        }
+        if !(200..300).contains(&channel_response.status) {
+            return Err(ConnectorAdapterError::Backend(format!(
+                "discord channel preflight failed (status={}): {}",
+                channel_response.status,
+                parse_discord_error_summary(channel_response.body.as_str())
+                    .unwrap_or_else(|| "unexpected response".to_owned())
+            )));
+        }
+
+        let channel_payload = serde_json::from_str::<Value>(channel_response.body.as_str())
+            .map_err(|error| {
+                ConnectorAdapterError::Backend(format!(
+                    "discord channel preflight payload is invalid JSON: {error}"
+                ))
+            })?;
+        let Some(permission_mask) = parse_discord_permissions_mask(&channel_payload) else {
+            return Ok(Some(DiscordAdminContext {
+                operation,
+                credential,
+                guard,
+                bot_identity,
+                target_channel_id,
+                preflight_allowed: false,
+                preflight_reason: Some(
+                    "discord channel preflight response did not expose effective permissions"
+                        .to_owned(),
+                ),
+            }));
+        };
+        let missing_permissions = missing_permission_labels(operation, permission_mask);
+        let preflight_allowed = missing_permissions.is_empty();
+        Ok(Some(DiscordAdminContext {
+            operation,
+            credential,
+            guard,
+            bot_identity,
+            target_channel_id,
+            preflight_allowed,
+            preflight_reason: (!preflight_allowed).then(|| {
+                format!(
+                    "discord target is missing required permissions: {}",
+                    missing_permissions.join(", ")
+                )
+            }),
+        }))
+    }
+
+    async fn resolve_bot_identity(
+        &self,
+        guard: &ConnectorNetGuard,
+        credential: &DiscordCredential,
+    ) -> Result<Option<DiscordBotIdentity>, ConnectorAdapterError> {
+        if let Some(outcome) = self.ensure_bot_identity(guard, credential).await? {
+            let reason = match outcome {
+                DeliveryOutcome::Delivered { .. } => None,
+                DeliveryOutcome::Retry { reason, .. }
+                | DeliveryOutcome::PermanentFailure { reason } => Some(reason),
+            };
+            self.record_last_error(
+                reason
+                    .as_deref()
+                    .unwrap_or("discord bot identity lookup returned an unexpected state"),
+            );
+            return Ok(None);
+        }
+        let state = self.lock_state()?;
+        Ok(state.bot_identity.clone())
+    }
+
+    async fn fetch_single_message(
+        &self,
+        context: &DiscordAdminContext,
+        target: &ConnectorConversationTarget,
+        message_id: &str,
+        operation: DiscordMessageOperation,
+    ) -> Result<Option<ConnectorMessageRecord>, ConnectorAdapterError> {
+        let message_url = build_message_url(
+            &self.config.api_base_url,
+            context.target_channel_id.as_str(),
+            message_id,
+        )?;
+        self.validate_url_target(&context.guard, &message_url)?;
+        let route_key =
+            format!("discord:get:/channels/{}/messages/{}", context.target_channel_id, message_id);
+        let response = self
+            .transport
+            .get(&message_url, context.credential.token.as_str(), self.config.request_timeout_ms)
+            .await
+            .map_err(|error| {
+                ConnectorAdapterError::Backend(redact_auth_error(error.to_string().as_str()))
+            })?;
+        let snapshot = parse_rate_limit_snapshot(&response);
+        self.apply_rate_limit_snapshot(route_key.as_str(), &snapshot, unix_ms_now())?;
+        if response.status == 404 {
+            return Ok(None);
+        }
+        if response.status == 401 || response.status == 403 {
+            return Ok(None);
+        }
+        if !(200..300).contains(&response.status) {
+            return Err(ConnectorAdapterError::Backend(format!(
+                "discord {} fetch failed (status={}): {}",
+                operation_name(operation),
+                response.status,
+                parse_discord_error_summary(response.body.as_str())
+                    .unwrap_or_else(|| "unexpected response".to_owned())
+            )));
+        }
+        let payload = serde_json::from_str::<Value>(response.body.as_str()).map_err(|error| {
+            ConnectorAdapterError::Backend(format!(
+                "discord message payload is invalid JSON: {error}"
+            ))
+        })?;
+        Ok(parse_discord_message_record(&payload, context.bot_identity.id.as_str(), target))
+    }
+
+    async fn fetch_message_page(
+        &self,
+        context: &DiscordAdminContext,
+        channel_id: &str,
+        before_message_id: Option<&str>,
+        after_message_id: Option<&str>,
+        around_message_id: Option<&str>,
+        limit: usize,
+        operation: DiscordMessageOperation,
+    ) -> Result<Vec<ConnectorMessageRecord>, ConnectorAdapterError> {
+        let mut url = build_messages_url(&self.config.api_base_url, channel_id)?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("limit", limit.max(1).min(100).to_string().as_str());
+            if let Some(before) = before_message_id {
+                pairs.append_pair("before", before);
+            }
+            if let Some(after) = after_message_id {
+                pairs.append_pair("after", after);
+            }
+            if let Some(around) = around_message_id {
+                pairs.append_pair("around", around);
+            }
+        }
+        self.validate_url_target(&context.guard, &url)?;
+        let route_key = format!("discord:get:/channels/{channel_id}/messages");
+        let response = self
+            .transport
+            .get(&url, context.credential.token.as_str(), self.config.request_timeout_ms)
+            .await
+            .map_err(|error| {
+                ConnectorAdapterError::Backend(redact_auth_error(error.to_string().as_str()))
+            })?;
+        let snapshot = parse_rate_limit_snapshot(&response);
+        self.apply_rate_limit_snapshot(route_key.as_str(), &snapshot, unix_ms_now())?;
+        if !(200..300).contains(&response.status) {
+            return Err(ConnectorAdapterError::Backend(format!(
+                "discord {} history request failed (status={}): {}",
+                operation_name(operation),
+                response.status,
+                parse_discord_error_summary(response.body.as_str())
+                    .unwrap_or_else(|| "unexpected response".to_owned())
+            )));
+        }
+        let payload = serde_json::from_str::<Value>(response.body.as_str()).map_err(|error| {
+            ConnectorAdapterError::Backend(format!(
+                "discord message history payload is invalid JSON: {error}"
+            ))
+        })?;
+        let entries = payload.as_array().ok_or_else(|| {
+            ConnectorAdapterError::Backend(
+                "discord message history payload must be a JSON array".to_owned(),
+            )
+        })?;
+        Ok(entries
+            .iter()
+            .filter_map(|entry| {
+                parse_discord_message_record(
+                    entry,
+                    context.bot_identity.id.as_str(),
+                    &ConnectorConversationTarget {
+                        conversation_id: channel_id.to_owned(),
+                        thread_id: None,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    async fn patch_discord_json(
+        &self,
+        context: &DiscordAdminContext,
+        route_key: &str,
+        url: &Url,
+        payload: &Value,
+    ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+        self.validate_url_target(&context.guard, url)?;
+        let response = self
+            .transport
+            .patch_json(
+                url,
+                context.credential.token.as_str(),
+                payload,
+                self.config.request_timeout_ms,
+            )
+            .await
+            .map_err(|error| {
+                ConnectorAdapterError::Backend(redact_auth_error(error.to_string().as_str()))
+            })?;
+        let snapshot = parse_rate_limit_snapshot(&response);
+        self.apply_rate_limit_snapshot(route_key, &snapshot, unix_ms_now())?;
+        Ok(response)
+    }
+
+    async fn delete_discord_request(
+        &self,
+        context: &DiscordAdminContext,
+        route_key: &str,
+        url: &Url,
+        operation: DiscordMessageOperation,
+        locator: &ConnectorMessageLocator,
+    ) -> Result<bool, ConnectorAdapterError> {
+        self.validate_url_target(&context.guard, url)?;
+        let response = self
+            .transport
+            .delete(url, context.credential.token.as_str(), self.config.request_timeout_ms)
+            .await
+            .map_err(|error| {
+                ConnectorAdapterError::Backend(redact_auth_error(error.to_string().as_str()))
+            })?;
+        let snapshot = parse_rate_limit_snapshot(&response);
+        self.apply_rate_limit_snapshot(route_key, &snapshot, unix_ms_now())?;
+        if response.status == 404 {
+            return Ok(false);
+        }
+        if response.status == 401 || response.status == 403 {
+            return Ok(false);
+        }
+        if !(200..300).contains(&response.status) && response.status != 204 {
+            return Err(ConnectorAdapterError::Backend(format!(
+                "discord {} failed (status={}): {}",
+                operation_name(operation),
+                response.status,
+                parse_discord_error_summary(response.body.as_str())
+                    .unwrap_or_else(|| "unexpected response".to_owned())
+            )));
+        }
+        let _ = locator;
+        Ok(true)
+    }
+
+    async fn apply_reaction_mutation(
+        &self,
+        instance: &ConnectorInstanceRecord,
+        request: &ConnectorMessageReactionRequest,
+        add_reaction: bool,
+    ) -> Result<ConnectorMessageMutationResult, ConnectorAdapterError> {
+        let operation = if add_reaction {
+            DiscordMessageOperation::ReactAdd
+        } else {
+            DiscordMessageOperation::ReactRemove
+        };
+        let context =
+            match self.prepare_admin_context(instance, operation, &request.locator.target).await? {
+                Some(context) if context.preflight_allowed => context,
+                Some(context) => {
+                    return Ok(denied_mutation_result(
+                        operation,
+                        request.locator.clone(),
+                        context
+                            .preflight_reason
+                            .unwrap_or_else(|| "discord reaction preflight denied".to_owned()),
+                    ));
+                }
+                None => {
+                    return Ok(denied_mutation_result(
+                        operation,
+                        request.locator.clone(),
+                        "discord target channel is unavailable or permissions are insufficient"
+                            .to_owned(),
+                    ));
+                }
+            };
+        let before = self
+            .fetch_single_message(
+                &context,
+                &request.locator.target,
+                request.locator.message_id.as_str(),
+                operation,
+            )
+            .await?;
+        let Some(before) = before else {
+            return Ok(denied_mutation_result(
+                operation,
+                request.locator.clone(),
+                "discord message is missing or stale".to_owned(),
+            ));
+        };
+        let reaction_url = build_reaction_url(
+            &self.config.api_base_url,
+            context.target_channel_id.as_str(),
+            request.locator.message_id.as_str(),
+            request.emoji.as_str(),
+        )?;
+        let route_key = if add_reaction {
+            format!(
+                "discord:put:/channels/{}/messages/{}/reactions",
+                context.target_channel_id, request.locator.message_id
+            )
+        } else {
+            format!(
+                "discord:delete:/channels/{}/messages/{}/reactions",
+                context.target_channel_id, request.locator.message_id
+            )
+        };
+        let response = if add_reaction {
+            self.transport
+                .put(
+                    &reaction_url,
+                    context.credential.token.as_str(),
+                    self.config.request_timeout_ms,
+                )
+                .await
+        } else {
+            self.transport
+                .delete(
+                    &reaction_url,
+                    context.credential.token.as_str(),
+                    self.config.request_timeout_ms,
+                )
+                .await
+        }
+        .map_err(|error| {
+            ConnectorAdapterError::Backend(redact_auth_error(error.to_string().as_str()))
+        })?;
+        let snapshot = parse_rate_limit_snapshot(&response);
+        self.apply_rate_limit_snapshot(route_key.as_str(), &snapshot, unix_ms_now())?;
+        if response.status == 404 || response.status == 401 || response.status == 403 {
+            return Ok(denied_mutation_result(
+                operation,
+                request.locator.clone(),
+                format!(
+                    "discord {} was rejected (status={}): {}",
+                    operation_name(operation),
+                    response.status,
+                    parse_discord_error_summary(response.body.as_str())
+                        .unwrap_or_else(|| "request rejected".to_owned())
+                ),
+            ));
+        }
+        if !(200..300).contains(&response.status) && response.status != 204 {
+            return Err(ConnectorAdapterError::Backend(format!(
+                "discord {} failed (status={}): {}",
+                operation_name(operation),
+                response.status,
+                parse_discord_error_summary(response.body.as_str())
+                    .unwrap_or_else(|| "unexpected response".to_owned())
+            )));
+        }
+        let message = self
+            .fetch_single_message(
+                &context,
+                &request.locator.target,
+                request.locator.message_id.as_str(),
+                operation,
+            )
+            .await?
+            .or(Some(before));
+        Ok(ConnectorMessageMutationResult {
+            preflight: context.preflight(),
+            locator: request.locator.clone(),
+            status: if add_reaction {
+                ConnectorMessageMutationStatus::ReactionAdded
+            } else {
+                ConnectorMessageMutationStatus::ReactionRemoved
+            },
+            reason: None,
+            message,
+            diff: None,
+        })
+    }
 }
 
 async fn run_discord_gateway_monitor(context: DiscordGatewayMonitorContext) {
@@ -4186,6 +5287,515 @@ fn summarize_attachment(attachment: &AttachmentRef) -> String {
     )
 }
 
+#[cfg(test)]
+mod admin_operation_tests {
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+
+    use async_trait::async_trait;
+    use reqwest::Url;
+    use serde_json::{json, Value};
+
+    use super::{
+        DiscordAdapterConfig, DiscordConnectorAdapter, DiscordCredential,
+        DiscordCredentialResolver, DiscordTransport, DiscordTransportResponse,
+    };
+    use crate::{
+        protocol::{
+            ConnectorConversationTarget, ConnectorKind, ConnectorMessageEditRequest,
+            ConnectorMessageLocator, ConnectorMessageMutationStatus,
+            ConnectorMessageReactionRequest, ConnectorMessageReadRequest,
+            ConnectorMessageSearchRequest,
+        },
+        storage::ConnectorInstanceRecord,
+        supervisor::{ConnectorAdapter, ConnectorAdapterError},
+    };
+
+    #[derive(Debug, Default)]
+    struct StaticCredentialResolver;
+
+    #[async_trait]
+    impl DiscordCredentialResolver for StaticCredentialResolver {
+        async fn resolve_credential(
+            &self,
+            _instance: &ConnectorInstanceRecord,
+        ) -> Result<DiscordCredential, ConnectorAdapterError> {
+            Ok(DiscordCredential { token: "discord-token".to_owned(), source: "test".to_owned() })
+        }
+    }
+
+    #[derive(Default)]
+    struct AdminFakeTransport {
+        get_responses: Mutex<VecDeque<Result<DiscordTransportResponse, ConnectorAdapterError>>>,
+        patch_responses: Mutex<VecDeque<Result<DiscordTransportResponse, ConnectorAdapterError>>>,
+        delete_responses: Mutex<VecDeque<Result<DiscordTransportResponse, ConnectorAdapterError>>>,
+        put_responses: Mutex<VecDeque<Result<DiscordTransportResponse, ConnectorAdapterError>>>,
+    }
+
+    impl AdminFakeTransport {
+        fn push_get(&self, response: DiscordTransportResponse) {
+            self.get_responses
+                .lock()
+                .expect("get responses lock should be healthy")
+                .push_back(Ok(response));
+        }
+
+        fn push_patch(&self, response: DiscordTransportResponse) {
+            self.patch_responses
+                .lock()
+                .expect("patch responses lock should be healthy")
+                .push_back(Ok(response));
+        }
+
+        fn push_delete(&self, response: DiscordTransportResponse) {
+            self.delete_responses
+                .lock()
+                .expect("delete responses lock should be healthy")
+                .push_back(Ok(response));
+        }
+
+        fn push_put(&self, response: DiscordTransportResponse) {
+            self.put_responses
+                .lock()
+                .expect("put responses lock should be healthy")
+                .push_back(Ok(response));
+        }
+    }
+
+    #[async_trait]
+    impl DiscordTransport for AdminFakeTransport {
+        async fn get(
+            &self,
+            _url: &Url,
+            _token: &str,
+            _timeout_ms: u64,
+        ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+            self.get_responses
+                .lock()
+                .expect("get responses lock should be healthy")
+                .pop_front()
+                .ok_or_else(|| {
+                    ConnectorAdapterError::Backend("missing fake GET response".to_owned())
+                })?
+        }
+
+        async fn post_json(
+            &self,
+            _url: &Url,
+            _token: &str,
+            _payload: &Value,
+            _timeout_ms: u64,
+        ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+            Ok(DiscordTransportResponse {
+                status: 200,
+                headers: Default::default(),
+                body: "{\"id\":\"default\"}".to_owned(),
+            })
+        }
+
+        async fn post_multipart(
+            &self,
+            _url: &Url,
+            _token: &str,
+            _payload: &Value,
+            _files: &[super::DiscordMultipartAttachment],
+            _timeout_ms: u64,
+        ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+            Ok(DiscordTransportResponse {
+                status: 200,
+                headers: Default::default(),
+                body: "{\"id\":\"default\"}".to_owned(),
+            })
+        }
+
+        async fn put(
+            &self,
+            _url: &Url,
+            _token: &str,
+            _timeout_ms: u64,
+        ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+            self.put_responses
+                .lock()
+                .expect("put responses lock should be healthy")
+                .pop_front()
+                .ok_or_else(|| {
+                    ConnectorAdapterError::Backend("missing fake PUT response".to_owned())
+                })?
+        }
+
+        async fn patch_json(
+            &self,
+            _url: &Url,
+            _token: &str,
+            _payload: &Value,
+            _timeout_ms: u64,
+        ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+            self.patch_responses
+                .lock()
+                .expect("patch responses lock should be healthy")
+                .pop_front()
+                .ok_or_else(|| {
+                    ConnectorAdapterError::Backend("missing fake PATCH response".to_owned())
+                })?
+        }
+
+        async fn delete(
+            &self,
+            _url: &Url,
+            _token: &str,
+            _timeout_ms: u64,
+        ) -> Result<DiscordTransportResponse, ConnectorAdapterError> {
+            self.delete_responses
+                .lock()
+                .expect("delete responses lock should be healthy")
+                .pop_front()
+                .ok_or_else(|| {
+                    ConnectorAdapterError::Backend("missing fake DELETE response".to_owned())
+                })?
+        }
+    }
+
+    fn make_adapter(transport: Arc<AdminFakeTransport>) -> DiscordConnectorAdapter {
+        DiscordConnectorAdapter::with_dependencies(
+            DiscordAdapterConfig::default(),
+            transport,
+            Arc::new(StaticCredentialResolver),
+        )
+    }
+
+    fn instance() -> ConnectorInstanceRecord {
+        ConnectorInstanceRecord {
+            connector_id: "discord:default".to_owned(),
+            kind: ConnectorKind::Discord,
+            principal: "channel:discord:default".to_owned(),
+            auth_profile_ref: Some("discord.default".to_owned()),
+            token_vault_ref: Some("global/discord_bot_token".to_owned()),
+            egress_allowlist: vec!["discord.com".to_owned(), "*.discord.com".to_owned()],
+            enabled: true,
+            readiness: crate::protocol::ConnectorReadiness::Ready,
+            liveness: crate::protocol::ConnectorLiveness::Running,
+            restart_count: 0,
+            last_error: None,
+            last_inbound_unix_ms: None,
+            last_outbound_unix_ms: None,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        }
+    }
+
+    fn ok_identity_response() -> DiscordTransportResponse {
+        DiscordTransportResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "{\"id\":\"bot-1\",\"username\":\"Palyra Bot\"}".to_owned(),
+        }
+    }
+
+    fn ok_channel_response() -> DiscordTransportResponse {
+        DiscordTransportResponse {
+            status: 200,
+            headers: Default::default(),
+            body: format!(
+                "{{\"id\":\"chan-1\",\"permissions\":\"{}\"}}",
+                (crate::permissions::DISCORD_PERMISSION_VIEW_CHANNEL
+                    | crate::permissions::DISCORD_PERMISSION_READ_MESSAGE_HISTORY
+                    | crate::permissions::DISCORD_PERMISSION_SEND_MESSAGES
+                    | crate::permissions::DISCORD_PERMISSION_MANAGE_MESSAGES
+                    | crate::permissions::DISCORD_PERMISSION_ADD_REACTIONS)
+            ),
+        }
+    }
+
+    fn sample_message(message_id: &str, author_id: &str, body: &str) -> DiscordTransportResponse {
+        DiscordTransportResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({
+                "id": message_id,
+                "channel_id": "chan-1",
+                "guild_id": "guild-1",
+                "content": body,
+                "author": {
+                    "id": author_id,
+                    "username": "user"
+                },
+                "attachments": [],
+                "reactions": []
+            })
+            .to_string(),
+        }
+    }
+
+    #[test]
+    fn discord_capabilities_publish_admin_metadata() {
+        let capabilities = DiscordConnectorAdapter::default().capabilities();
+        assert!(capabilities.message.read.supported);
+        assert_eq!(
+            capabilities.message.read.policy_action.as_deref(),
+            Some("channel.message.read")
+        );
+        assert_eq!(capabilities.message.delete.audit_event_type.as_deref(), Some("message.delete"));
+        assert_eq!(
+            capabilities.message.edit.approval_mode,
+            Some(crate::protocol::ConnectorApprovalMode::Conditional)
+        );
+        assert!(capabilities
+            .message
+            .react_add
+            .required_permissions
+            .iter()
+            .any(|entry| entry == "Add Reactions"));
+    }
+
+    #[tokio::test]
+    async fn read_messages_fetches_exact_message() {
+        let transport = Arc::new(AdminFakeTransport::default());
+        transport.push_get(ok_identity_response());
+        transport.push_get(ok_channel_response());
+        transport.push_get(sample_message("msg-1", "bot-1", "hello admin read"));
+        let adapter = make_adapter(transport);
+
+        let result = adapter
+            .read_messages(
+                &instance(),
+                &ConnectorMessageReadRequest {
+                    target: ConnectorConversationTarget {
+                        conversation_id: "chan-1".to_owned(),
+                        thread_id: None,
+                    },
+                    message_id: Some("msg-1".to_owned()),
+                    before_message_id: None,
+                    after_message_id: None,
+                    around_message_id: None,
+                    limit: 1,
+                },
+            )
+            .await
+            .expect("read request should succeed");
+
+        assert!(result.preflight.allowed);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].locator.message_id, "msg-1");
+        assert!(result.messages[0].is_connector_authored);
+    }
+
+    #[tokio::test]
+    async fn search_messages_filters_content_and_author() {
+        let transport = Arc::new(AdminFakeTransport::default());
+        transport.push_get(ok_identity_response());
+        transport.push_get(ok_channel_response());
+        transport.push_get(DiscordTransportResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!([
+                {
+                    "id": "msg-1",
+                    "channel_id": "chan-1",
+                    "guild_id": "guild-1",
+                    "content": "deploy complete",
+                    "author": { "id": "bot-1", "username": "bot" },
+                    "attachments": [],
+                    "reactions": []
+                },
+                {
+                    "id": "msg-2",
+                    "channel_id": "chan-1",
+                    "guild_id": "guild-1",
+                    "content": "deploy pending",
+                    "author": { "id": "user-2", "username": "other" },
+                    "attachments": [],
+                    "reactions": []
+                }
+            ])
+            .to_string(),
+        });
+        let adapter = make_adapter(transport);
+
+        let result = adapter
+            .search_messages(
+                &instance(),
+                &ConnectorMessageSearchRequest {
+                    target: ConnectorConversationTarget {
+                        conversation_id: "chan-1".to_owned(),
+                        thread_id: None,
+                    },
+                    query: Some("complete".to_owned()),
+                    author_id: Some("bot-1".to_owned()),
+                    has_attachments: Some(false),
+                    before_message_id: None,
+                    limit: 25,
+                },
+            )
+            .await
+            .expect("search request should succeed");
+
+        assert!(result.preflight.allowed);
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].locator.message_id, "msg-1");
+    }
+
+    #[tokio::test]
+    async fn edit_message_denies_non_connector_authored_messages() {
+        let transport = Arc::new(AdminFakeTransport::default());
+        transport.push_get(ok_identity_response());
+        transport.push_get(ok_channel_response());
+        transport.push_get(sample_message("msg-9", "user-9", "human text"));
+        let adapter = make_adapter(transport);
+
+        let result = adapter
+            .edit_message(
+                &instance(),
+                &ConnectorMessageEditRequest {
+                    locator: ConnectorMessageLocator {
+                        target: ConnectorConversationTarget {
+                            conversation_id: "chan-1".to_owned(),
+                            thread_id: None,
+                        },
+                        message_id: "msg-9".to_owned(),
+                    },
+                    body: "edited".to_owned(),
+                },
+            )
+            .await
+            .expect("edit request should resolve");
+
+        assert_eq!(result.status, ConnectorMessageMutationStatus::Denied);
+        assert!(result
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("connector-authored")));
+    }
+
+    #[tokio::test]
+    async fn edit_message_updates_connector_authored_messages() {
+        let transport = Arc::new(AdminFakeTransport::default());
+        transport.push_get(ok_identity_response());
+        transport.push_get(ok_channel_response());
+        transport.push_get(sample_message("msg-10", "bot-1", "before"));
+        transport.push_patch(DiscordTransportResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({
+                "id": "msg-10",
+                "channel_id": "chan-1",
+                "guild_id": "guild-1",
+                "content": "after",
+                "author": { "id": "bot-1", "username": "bot" },
+                "attachments": [],
+                "reactions": []
+            })
+            .to_string(),
+        });
+        let adapter = make_adapter(transport);
+
+        let result = adapter
+            .edit_message(
+                &instance(),
+                &ConnectorMessageEditRequest {
+                    locator: ConnectorMessageLocator {
+                        target: ConnectorConversationTarget {
+                            conversation_id: "chan-1".to_owned(),
+                            thread_id: None,
+                        },
+                        message_id: "msg-10".to_owned(),
+                    },
+                    body: "after".to_owned(),
+                },
+            )
+            .await
+            .expect("edit request should resolve");
+
+        assert_eq!(result.status, ConnectorMessageMutationStatus::Updated);
+        assert_eq!(
+            result.diff.as_ref().and_then(|diff| diff.before_body.as_deref()),
+            Some("before")
+        );
+        assert_eq!(result.diff.as_ref().and_then(|diff| diff.after_body.as_deref()), Some("after"));
+    }
+
+    #[tokio::test]
+    async fn delete_and_reaction_mutations_succeed() {
+        let transport = Arc::new(AdminFakeTransport::default());
+        transport.push_get(ok_identity_response());
+        transport.push_get(ok_channel_response());
+        transport.push_get(sample_message("msg-11", "bot-1", "delete me"));
+        transport.push_delete(DiscordTransportResponse {
+            status: 204,
+            headers: Default::default(),
+            body: String::new(),
+        });
+        let adapter = make_adapter(Arc::clone(&transport));
+
+        let deleted = adapter
+            .delete_message(
+                &instance(),
+                &crate::protocol::ConnectorMessageDeleteRequest {
+                    locator: ConnectorMessageLocator {
+                        target: ConnectorConversationTarget {
+                            conversation_id: "chan-1".to_owned(),
+                            thread_id: None,
+                        },
+                        message_id: "msg-11".to_owned(),
+                    },
+                    reason: Some("cleanup".to_owned()),
+                },
+            )
+            .await
+            .expect("delete request should resolve");
+        assert_eq!(deleted.status, ConnectorMessageMutationStatus::Deleted);
+
+        let transport = Arc::new(AdminFakeTransport::default());
+        transport.push_get(ok_identity_response());
+        transport.push_get(ok_channel_response());
+        transport.push_get(sample_message("msg-12", "bot-1", "react"));
+        transport.push_put(DiscordTransportResponse {
+            status: 204,
+            headers: Default::default(),
+            body: String::new(),
+        });
+        transport.push_get(DiscordTransportResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({
+                "id": "msg-12",
+                "channel_id": "chan-1",
+                "guild_id": "guild-1",
+                "content": "react",
+                "author": { "id": "bot-1", "username": "bot" },
+                "attachments": [],
+                "reactions": [{
+                    "count": 1,
+                    "me": true,
+                    "emoji": { "name": "thumbsup" }
+                }]
+            })
+            .to_string(),
+        });
+        let adapter = make_adapter(transport);
+
+        let reacted = adapter
+            .add_reaction(
+                &instance(),
+                &ConnectorMessageReactionRequest {
+                    locator: ConnectorMessageLocator {
+                        target: ConnectorConversationTarget {
+                            conversation_id: "chan-1".to_owned(),
+                            thread_id: None,
+                        },
+                        message_id: "msg-12".to_owned(),
+                    },
+                    emoji: "thumbsup".to_owned(),
+                },
+            )
+            .await
+            .expect("reaction add should resolve");
+        assert_eq!(reacted.status, ConnectorMessageMutationStatus::ReactionAdded);
+        assert_eq!(reacted.message.as_ref().map(|value| value.reactions.len()), Some(1));
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DiscordGatewayEnvelope {
     op: i64,
@@ -4362,6 +5972,117 @@ fn deterministic_inbound_envelope_id(connector_id: &str, message_id: &str) -> St
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     Ulid::from_bytes(bytes).to_string()
+}
+
+fn parse_discord_message_record(
+    payload: &Value,
+    bot_user_id: &str,
+    fallback_target: &ConnectorConversationTarget,
+) -> Option<ConnectorMessageRecord> {
+    let fallback_channel_id = effective_channel_id(fallback_target);
+    let message_id = payload.get("id").and_then(Value::as_str).map(str::trim)?;
+    if message_id.is_empty() {
+        return None;
+    }
+    let channel_id = payload
+        .get("channel_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_channel_id.as_str());
+    let author = payload.get("author")?;
+    let sender_id = author.get("id").and_then(Value::as_str).map(str::trim)?;
+    if sender_id.is_empty() {
+        return None;
+    }
+    let thread_id =
+        fallback_target.thread_id.clone().or_else(|| parse_discord_thread_id(payload, channel_id));
+    let attachments = parse_discord_attachments(payload.get("attachments"));
+    let reactions = parse_discord_reactions(payload.get("reactions"));
+    let link = build_discord_message_permalink(
+        payload
+            .get("guild_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        channel_id,
+        message_id,
+    );
+    Some(ConnectorMessageRecord {
+        locator: ConnectorMessageLocator {
+            target: ConnectorConversationTarget {
+                conversation_id: fallback_target.conversation_id.clone(),
+                thread_id,
+            },
+            message_id: message_id.to_owned(),
+        },
+        sender_id: sender_id.to_owned(),
+        sender_display: resolve_discord_sender_display(payload),
+        body: payload
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned(),
+        created_at_unix_ms: parse_discord_snowflake_unix_ms(message_id).unwrap_or_else(unix_ms_now),
+        edited_at_unix_ms: None,
+        is_direct_message: payload.get("guild_id").and_then(Value::as_str).is_none(),
+        is_connector_authored: sender_id.eq_ignore_ascii_case(bot_user_id),
+        link,
+        attachments,
+        reactions,
+    })
+}
+
+fn parse_discord_reactions(raw: Option<&Value>) -> Vec<ConnectorMessageReactionRecord> {
+    let Some(entries) = raw.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let emoji = entry.get("emoji")?;
+            let display = emoji
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    emoji
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                })?;
+            Some(ConnectorMessageReactionRecord {
+                emoji: display,
+                count: entry
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or_default(),
+                reacted_by_connector: entry.get("me").and_then(Value::as_bool).unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+fn build_discord_message_permalink(
+    guild_id: Option<&str>,
+    channel_id: &str,
+    message_id: &str,
+) -> Option<String> {
+    if channel_id.trim().is_empty() || message_id.trim().is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://discord.com/channels/{}/{}/{}",
+        guild_id.unwrap_or("@me"),
+        channel_id,
+        message_id
+    ))
 }
 
 fn normalize_discord_message_create(

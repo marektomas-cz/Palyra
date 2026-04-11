@@ -2,6 +2,9 @@ pub(crate) mod connectors;
 
 use crate::transport::http::handlers::admin::channels::{
     build_channel_health_refresh_payload, build_channel_status_payload,
+    channel_message_delete_response, channel_message_edit_response,
+    channel_message_reaction_response, channel_message_read_response,
+    channel_message_search_response,
 };
 use crate::*;
 
@@ -68,6 +71,96 @@ pub(crate) async fn console_channel_logs_handler(
             None
         ),
     })))
+}
+
+pub(crate) async fn console_channel_message_read_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageReadBody>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    channel_message_read_response(&state, &session.context, connector_id, payload.request).await
+}
+
+pub(crate) async fn console_channel_message_search_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageSearchBody>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    channel_message_search_response(&state, &session.context, connector_id, payload.request).await
+}
+
+pub(crate) async fn console_channel_message_edit_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageEditBody>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    channel_message_edit_response(
+        &state,
+        &session.context,
+        connector_id,
+        payload.request,
+        payload.approval_id,
+    )
+    .await
+}
+
+pub(crate) async fn console_channel_message_delete_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageDeleteBody>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    channel_message_delete_response(
+        &state,
+        &session.context,
+        connector_id,
+        payload.request,
+        payload.approval_id,
+    )
+    .await
+}
+
+pub(crate) async fn console_channel_message_react_add_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageReactionBody>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    channel_message_reaction_response(
+        &state,
+        &session.context,
+        connector_id,
+        payload.request,
+        payload.approval_id,
+        channels::DiscordMessageMutationKind::ReactAdd,
+    )
+    .await
+}
+
+pub(crate) async fn console_channel_message_react_remove_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageReactionBody>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    channel_message_reaction_response(
+        &state,
+        &session.context,
+        connector_id,
+        payload.request,
+        payload.approval_id,
+        channels::DiscordMessageMutationKind::ReactRemove,
+    )
+    .await
 }
 
 pub(crate) async fn console_channel_health_refresh_handler(

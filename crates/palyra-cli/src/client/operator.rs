@@ -296,6 +296,57 @@ impl OperatorRuntime {
             .context("message dispatch worker failed")?
     }
 
+    pub(crate) async fn read_messages(
+        &self,
+        options: message::MessageReadOptions,
+    ) -> Result<Value> {
+        tokio::task::spawn_blocking(move || message::read_messages(options))
+            .await
+            .context("message read worker failed")?
+    }
+
+    pub(crate) async fn search_messages(
+        &self,
+        options: message::MessageSearchOptions,
+    ) -> Result<Value> {
+        tokio::task::spawn_blocking(move || message::search_messages(options))
+            .await
+            .context("message search worker failed")?
+    }
+
+    pub(crate) async fn edit_message(&self, options: message::MessageEditOptions) -> Result<Value> {
+        tokio::task::spawn_blocking(move || message::edit_message(options))
+            .await
+            .context("message edit worker failed")?
+    }
+
+    pub(crate) async fn delete_message(
+        &self,
+        options: message::MessageDeleteOptions,
+    ) -> Result<Value> {
+        tokio::task::spawn_blocking(move || message::delete_message(options))
+            .await
+            .context("message delete worker failed")?
+    }
+
+    pub(crate) async fn add_reaction(
+        &self,
+        options: message::MessageReactionOptions,
+    ) -> Result<Value> {
+        tokio::task::spawn_blocking(move || message::add_reaction(options))
+            .await
+            .context("message reaction-add worker failed")?
+    }
+
+    pub(crate) async fn remove_reaction(
+        &self,
+        options: message::MessageReactionOptions,
+    ) -> Result<Value> {
+        tokio::task::spawn_blocking(move || message::remove_reaction(options))
+            .await
+            .context("message reaction-remove worker failed")?
+    }
+
     pub(crate) fn list_models(&self, path: Option<String>) -> Result<models::ModelsListPayload> {
         models::build_models_list(path)
     }

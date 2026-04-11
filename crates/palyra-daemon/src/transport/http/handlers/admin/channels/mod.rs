@@ -1,5 +1,9 @@
 pub(crate) mod connectors;
 
+use crate::journal::{
+    ApprovalCreateRequest, ApprovalDecision, ApprovalPolicySnapshot, ApprovalPromptOption,
+    ApprovalPromptRecord, ApprovalRecord, ApprovalRiskLevel, ApprovalSubjectType,
+};
 use crate::transport::http::handlers::console::channels::build_channel_router_preview_input;
 use crate::transport::http::handlers::console::channels::connectors::discord::{
     build_discord_channel_permission_warnings, build_discord_inbound_monitor_warnings,
@@ -7,6 +11,13 @@ use crate::transport::http::handlers::console::channels::connectors::discord::{
     normalize_optional_discord_channel_id, probe_discord_bot_identity,
 };
 use crate::*;
+use palyra_connector_discord::{
+    discord_permission_labels_for_operation, discord_policy_action_for_operation,
+    DiscordMessageOperation,
+};
+use palyra_connectors::ConnectorMessageRecord;
+
+const CHANNEL_MESSAGE_APPROVAL_TIMEOUT_SECONDS: u32 = 15 * 60;
 
 pub(crate) async fn admin_channels_list_handler(
     State(state): State<AppState>,
@@ -313,6 +324,613 @@ pub(crate) async fn build_channel_health_refresh_payload(
     Ok(payload)
 }
 
+pub(crate) async fn channel_message_read_response(
+    state: &AppState,
+    context: &RequestContext,
+    connector_id: String,
+    request: ConnectorMessageReadRequest,
+) -> Result<Json<Value>, Response> {
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let result = state
+        .channels
+        .read_messages(connector_id.as_str(), channels::ChannelMessageReadOperation { request })
+        .await
+        .map_err(channel_platform_error_response)?;
+    record_channel_message_console_event(
+        state,
+        context,
+        "channel.message.read",
+        json!({
+            "connector_id": connector_id,
+            "preflight": result.preflight,
+            "target": result.target,
+            "exact_message_id": result.exact_message_id,
+            "message_count": result.messages.len(),
+            "next_before_message_id": result.next_before_message_id,
+            "next_after_message_id": result.next_after_message_id,
+        }),
+    )
+    .await?;
+    Ok(Json(json!({ "result": result })))
+}
+
+pub(crate) async fn channel_message_search_response(
+    state: &AppState,
+    context: &RequestContext,
+    connector_id: String,
+    request: ConnectorMessageSearchRequest,
+) -> Result<Json<Value>, Response> {
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let result = state
+        .channels
+        .search_messages(connector_id.as_str(), channels::ChannelMessageSearchOperation { request })
+        .await
+        .map_err(channel_platform_error_response)?;
+    record_channel_message_console_event(
+        state,
+        context,
+        "channel.message.search",
+        json!({
+            "connector_id": connector_id,
+            "preflight": result.preflight,
+            "target": result.target,
+            "query": result.query,
+            "author_id": result.author_id,
+            "has_attachments": result.has_attachments,
+            "match_count": result.matches.len(),
+            "next_before_message_id": result.next_before_message_id,
+        }),
+    )
+    .await?;
+    Ok(Json(json!({ "result": result })))
+}
+
+pub(crate) async fn channel_message_edit_response(
+    state: &AppState,
+    context: &RequestContext,
+    connector_id: String,
+    request: ConnectorMessageEditRequest,
+    approval_id: Option<String>,
+) -> Result<Json<Value>, Response> {
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let preview = state
+        .channels
+        .fetch_message_preview(connector_id.as_str(), &request.locator)
+        .await
+        .map_err(channel_platform_error_response)?;
+    let authorization = resolve_channel_message_mutation_authorization(
+        state,
+        context,
+        connector_id.as_str(),
+        channels::DiscordMessageMutationKind::Edit,
+        &request.locator,
+        preview.as_ref(),
+        approval_id.as_deref(),
+        json!({
+            "body": request.body,
+            "preview_diff": {
+                "before_body": preview.as_ref().map(|message| message.body.clone()),
+                "after_body": request.body,
+            },
+        }),
+    )
+    .await?;
+    if let Some(response) = authorization.pending_response {
+        return Ok(Json(response));
+    }
+    let result = state
+        .channels
+        .edit_message(connector_id.as_str(), channels::ChannelMessageEditOperation { request })
+        .await
+        .map_err(channel_platform_error_response)?;
+    record_channel_message_console_event(
+        state,
+        context,
+        "channel.message.edit",
+        json!({
+            "connector_id": connector_id,
+            "approval_id": authorization.approval_id,
+            "governance": authorization.governance.map(|value| json!({
+                "risk_level": value.risk_level.as_str(),
+                "approval_required": value.approval_required,
+                "reason": value.reason,
+            })),
+            "result": result,
+        }),
+    )
+    .await?;
+    Ok(Json(json!({ "result": result })))
+}
+
+pub(crate) async fn channel_message_delete_response(
+    state: &AppState,
+    context: &RequestContext,
+    connector_id: String,
+    request: ConnectorMessageDeleteRequest,
+    approval_id: Option<String>,
+) -> Result<Json<Value>, Response> {
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let preview = state
+        .channels
+        .fetch_message_preview(connector_id.as_str(), &request.locator)
+        .await
+        .map_err(channel_platform_error_response)?;
+    let authorization = resolve_channel_message_mutation_authorization(
+        state,
+        context,
+        connector_id.as_str(),
+        channels::DiscordMessageMutationKind::Delete,
+        &request.locator,
+        preview.as_ref(),
+        approval_id.as_deref(),
+        json!({
+            "reason": request.reason,
+            "preview_diff": {
+                "before_body": preview.as_ref().map(|message| message.body.clone()),
+                "after_body": Value::Null,
+            },
+        }),
+    )
+    .await?;
+    if let Some(response) = authorization.pending_response {
+        return Ok(Json(response));
+    }
+    let result = state
+        .channels
+        .delete_message(connector_id.as_str(), channels::ChannelMessageDeleteOperation { request })
+        .await
+        .map_err(channel_platform_error_response)?;
+    record_channel_message_console_event(
+        state,
+        context,
+        "channel.message.delete",
+        json!({
+            "connector_id": connector_id,
+            "approval_id": authorization.approval_id,
+            "governance": authorization.governance.map(|value| json!({
+                "risk_level": value.risk_level.as_str(),
+                "approval_required": value.approval_required,
+                "reason": value.reason,
+            })),
+            "result": result,
+        }),
+    )
+    .await?;
+    Ok(Json(json!({ "result": result })))
+}
+
+pub(crate) async fn channel_message_reaction_response(
+    state: &AppState,
+    context: &RequestContext,
+    connector_id: String,
+    request: ConnectorMessageReactionRequest,
+    approval_id: Option<String>,
+    operation: channels::DiscordMessageMutationKind,
+) -> Result<Json<Value>, Response> {
+    let connector_id = normalize_non_empty_field(connector_id, "connector_id")?;
+    let preview = state
+        .channels
+        .fetch_message_preview(connector_id.as_str(), &request.locator)
+        .await
+        .map_err(channel_platform_error_response)?;
+    let authorization = resolve_channel_message_mutation_authorization(
+        state,
+        context,
+        connector_id.as_str(),
+        operation,
+        &request.locator,
+        preview.as_ref(),
+        approval_id.as_deref(),
+        json!({
+            "emoji": request.emoji,
+            "existing_reactions": preview.as_ref().map(|message| message.reactions.clone()),
+        }),
+    )
+    .await?;
+    if let Some(response) = authorization.pending_response {
+        return Ok(Json(response));
+    }
+    let result = match operation {
+        channels::DiscordMessageMutationKind::ReactAdd => {
+            state
+                .channels
+                .add_reaction(
+                    connector_id.as_str(),
+                    channels::ChannelMessageReactionOperation { request },
+                )
+                .await
+        }
+        channels::DiscordMessageMutationKind::ReactRemove => {
+            state
+                .channels
+                .remove_reaction(
+                    connector_id.as_str(),
+                    channels::ChannelMessageReactionOperation { request },
+                )
+                .await
+        }
+        channels::DiscordMessageMutationKind::Edit
+        | channels::DiscordMessageMutationKind::Delete => {
+            return Err(runtime_status_response(tonic::Status::internal(
+                "invalid reaction mutation dispatch",
+            )));
+        }
+    }
+    .map_err(channel_platform_error_response)?;
+    record_channel_message_console_event(
+        state,
+        context,
+        match operation {
+            channels::DiscordMessageMutationKind::ReactAdd => "channel.message.react_add",
+            channels::DiscordMessageMutationKind::ReactRemove => "channel.message.react_remove",
+            channels::DiscordMessageMutationKind::Edit
+            | channels::DiscordMessageMutationKind::Delete => unreachable!(),
+        },
+        json!({
+            "connector_id": connector_id,
+            "approval_id": authorization.approval_id,
+            "governance": authorization.governance.map(|value| json!({
+                "risk_level": value.risk_level.as_str(),
+                "approval_required": value.approval_required,
+                "reason": value.reason,
+            })),
+            "result": result,
+        }),
+    )
+    .await?;
+    Ok(Json(json!({ "result": result })))
+}
+
+#[derive(Debug, Clone)]
+struct ChannelMessageMutationAuthorization {
+    approval_id: Option<String>,
+    governance: Option<channels::DiscordMessageMutationGovernance>,
+    pending_response: Option<Value>,
+}
+
+async fn resolve_channel_message_mutation_authorization(
+    state: &AppState,
+    context: &RequestContext,
+    connector_id: &str,
+    operation: channels::DiscordMessageMutationKind,
+    locator: &ConnectorMessageLocator,
+    preview: Option<&ConnectorMessageRecord>,
+    approval_id: Option<&str>,
+    mutation_details: Value,
+) -> Result<ChannelMessageMutationAuthorization, Response> {
+    let preview = preview.ok_or_else(|| {
+        runtime_status_response(tonic::Status::not_found(
+            "message preview is unavailable for the requested mutation",
+        ))
+    })?;
+    let connector = state.channels.status(connector_id).map_err(channel_platform_error_response)?;
+    let governance = if connector.kind == palyra_connectors::ConnectorKind::Discord {
+        let instance = state
+            .channels
+            .connector_instance(connector_id)
+            .map_err(channel_platform_error_response)?;
+        Some(channels::classify_discord_message_mutation_governance(
+            &instance,
+            preview,
+            operation,
+            unix_ms_now().map_err(|error| {
+                runtime_status_response(tonic::Status::internal(sanitize_http_error_message(
+                    error.to_string().as_str(),
+                )))
+            })?,
+        ))
+    } else {
+        Some(channels::DiscordMessageMutationGovernance {
+            risk_level: ApprovalRiskLevel::High,
+            approval_required: true,
+            reason: "non-Discord connector mutation defaults to explicit approval".to_owned(),
+        })
+    };
+    let policy_action = channel_message_policy_action(operation);
+    let subject_id = build_channel_message_subject_id(connector_id, operation, locator);
+    let resource = build_channel_message_resource(connector_id, locator);
+    let mut policy_config = PolicyEvaluationConfig::default();
+    if governance.as_ref().is_some_and(|value| value.approval_required) {
+        policy_config.sensitive_actions.push(policy_action.to_owned());
+    }
+    let resolved_approval = if governance.as_ref().is_some_and(|value| value.approval_required) {
+        load_channel_message_approval(
+            state,
+            approval_id,
+            subject_id.as_str(),
+            context.principal.as_str(),
+        )
+        .await?
+    } else {
+        None
+    };
+    if resolved_approval.is_some() {
+        policy_config.allow_sensitive_tools = true;
+    }
+    let evaluation = evaluate_with_context(
+        &PolicyRequest {
+            principal: context.principal.clone(),
+            action: policy_action.to_owned(),
+            resource: resource.clone(),
+        },
+        &PolicyRequestContext {
+            device_id: Some(context.device_id.clone()),
+            channel: context.channel.clone().or_else(|| Some(connector_id.to_owned())),
+            ..PolicyRequestContext::default()
+        },
+        &policy_config,
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to evaluate channel message mutation policy: {error}"
+        )))
+    })?;
+    match evaluation.decision {
+        PolicyDecision::Allow => Ok(ChannelMessageMutationAuthorization {
+            approval_id: resolved_approval.as_ref().map(|record| record.approval_id.clone()),
+            governance,
+            pending_response: None,
+        }),
+        PolicyDecision::DenyByDefault { reason } => {
+            if governance.as_ref().is_some_and(|value| value.approval_required)
+                && evaluation.explanation.is_sensitive_action
+            {
+                let approval = ensure_channel_message_approval(
+                    state,
+                    context,
+                    connector_id,
+                    operation,
+                    locator,
+                    preview,
+                    governance.as_ref().expect("governance should exist for approval"),
+                    mutation_details,
+                )
+                .await?;
+                record_channel_message_console_event(
+                    state,
+                    context,
+                    "channel.message.approval_requested",
+                    json!({
+                        "connector_id": connector_id,
+                        "subject_id": subject_id,
+                        "policy_action": policy_action,
+                        "policy_reason": reason,
+                        "approval_id": approval.approval_id,
+                    }),
+                )
+                .await?;
+                return Ok(ChannelMessageMutationAuthorization {
+                    approval_id: Some(approval.approval_id.clone()),
+                    governance,
+                    pending_response: Some(json!({
+                        "approval_required": true,
+                        "approval": approval,
+                        "policy": {
+                            "action": policy_action,
+                            "resource": resource,
+                            "reason": reason,
+                            "explanation": evaluation.explanation.reason,
+                        },
+                        "preview": channels::ChannelMessageMutationPreview {
+                            locator: locator.clone(),
+                            message: Some(preview.clone()),
+                            approved: false,
+                            approval_id: Some(approval.approval_id.clone()),
+                        },
+                    })),
+                });
+            }
+            Err(runtime_status_response(tonic::Status::permission_denied(format!(
+                "policy denied action '{policy_action}' on '{resource}': {reason}"
+            ))))
+        }
+    }
+}
+
+async fn load_channel_message_approval(
+    state: &AppState,
+    approval_id: Option<&str>,
+    subject_id: &str,
+    principal: &str,
+) -> Result<Option<ApprovalRecord>, Response> {
+    let Some(approval_id) = approval_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let approval = state
+        .runtime
+        .approval_record(approval_id.to_owned())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::permission_denied(format!(
+                "approval '{}' does not exist for this message mutation",
+                approval_id
+            )))
+        })?;
+    if approval.subject_id != subject_id || approval.principal != principal {
+        return Err(runtime_status_response(tonic::Status::permission_denied(
+            "approval subject does not match the requested message mutation",
+        )));
+    }
+    match approval.decision {
+        Some(ApprovalDecision::Allow) => Ok(Some(approval)),
+        Some(ApprovalDecision::Deny) => Err(runtime_status_response(
+            tonic::Status::permission_denied("message mutation approval was explicitly denied"),
+        )),
+        Some(ApprovalDecision::Timeout) => Err(runtime_status_response(
+            tonic::Status::permission_denied("message mutation approval has expired"),
+        )),
+        Some(ApprovalDecision::Error) => Err(runtime_status_response(
+            tonic::Status::permission_denied("message mutation approval is in an error state"),
+        )),
+        None => Err(runtime_status_response(tonic::Status::permission_denied(
+            "message mutation approval is still pending",
+        ))),
+    }
+}
+
+async fn ensure_channel_message_approval(
+    state: &AppState,
+    context: &RequestContext,
+    connector_id: &str,
+    operation: channels::DiscordMessageMutationKind,
+    locator: &ConnectorMessageLocator,
+    preview: &ConnectorMessageRecord,
+    governance: &channels::DiscordMessageMutationGovernance,
+    mutation_details: Value,
+) -> Result<ApprovalRecord, Response> {
+    let subject_id = build_channel_message_subject_id(connector_id, operation, locator);
+    let policy_action = channel_message_policy_action(operation);
+    let details_json = json!({
+        "connector_id": connector_id,
+        "operation": operation.as_str(),
+        "policy_action": policy_action,
+        "locator": locator,
+        "preview_message": preview,
+        "governance": {
+            "risk_level": governance.risk_level.as_str(),
+            "approval_required": governance.approval_required,
+            "reason": governance.reason,
+        },
+        "mutation": mutation_details,
+        "required_permissions": channel_message_required_permissions(operation),
+    })
+    .to_string();
+    let policy_hash = hex::encode(Sha256::digest(details_json.as_bytes()));
+    state
+        .runtime
+        .create_approval_record(ApprovalCreateRequest {
+            approval_id: Ulid::new().to_string(),
+            session_id: Ulid::new().to_string(),
+            run_id: Ulid::new().to_string(),
+            principal: context.principal.clone(),
+            device_id: context.device_id.clone(),
+            channel: context.channel.clone().or_else(|| Some(connector_id.to_owned())),
+            subject_type: ApprovalSubjectType::Tool,
+            subject_id: subject_id.clone(),
+            request_summary: format!(
+                "connector={} operation={} conversation_id={} thread_id={} message_id={}",
+                connector_id,
+                operation.as_str(),
+                locator.target.conversation_id,
+                locator.target.thread_id.as_deref().unwrap_or("-"),
+                locator.message_id
+            ),
+            policy_snapshot: ApprovalPolicySnapshot {
+                policy_id: "discord.message.mutation.approval.v1".to_owned(),
+                policy_hash,
+                evaluation_summary: format!(
+                    "action={} approval_required={} risk_level={} {}",
+                    policy_action,
+                    governance.approval_required,
+                    governance.risk_level.as_str(),
+                    governance.reason
+                ),
+            },
+            prompt: ApprovalPromptRecord {
+                title: format!("Approve Discord message {}", operation.as_str()),
+                risk_level: governance.risk_level,
+                subject_id,
+                summary: format!(
+                    "Connector '{}' wants to {} Discord message '{}'",
+                    connector_id,
+                    operation.as_str(),
+                    locator.message_id
+                ),
+                options: channel_message_approval_options(),
+                timeout_seconds: CHANNEL_MESSAGE_APPROVAL_TIMEOUT_SECONDS,
+                details_json,
+                policy_explanation: format!(
+                    "Discord message mutations stay deny-by-default for higher-risk channel, age, and connector-profile combinations. {}",
+                    governance.reason
+                ),
+            },
+        })
+        .await
+        .map_err(runtime_status_response)
+}
+
+fn channel_message_approval_options() -> Vec<ApprovalPromptOption> {
+    vec![
+        ApprovalPromptOption {
+            option_id: "allow_once".to_owned(),
+            label: "Approve once".to_owned(),
+            description: "Allow this exact Discord message mutation one time.".to_owned(),
+            default_selected: true,
+            decision_scope: ApprovalDecisionScope::Once,
+            timebox_ttl_ms: None,
+        },
+        ApprovalPromptOption {
+            option_id: "deny_once".to_owned(),
+            label: "Keep blocked".to_owned(),
+            description: "Keep the Discord mutation blocked until an operator explicitly retries."
+                .to_owned(),
+            default_selected: false,
+            decision_scope: ApprovalDecisionScope::Once,
+            timebox_ttl_ms: None,
+        },
+    ]
+}
+
+fn build_channel_message_subject_id(
+    connector_id: &str,
+    operation: channels::DiscordMessageMutationKind,
+    locator: &ConnectorMessageLocator,
+) -> String {
+    format!(
+        "channel-message:{}:{}:{}:{}",
+        connector_id,
+        operation.as_str(),
+        locator.target.conversation_id,
+        locator.message_id
+    )
+}
+
+fn build_channel_message_resource(connector_id: &str, locator: &ConnectorMessageLocator) -> String {
+    format!(
+        "channel:{}:message:{}:{}",
+        connector_id, locator.target.conversation_id, locator.message_id
+    )
+}
+
+fn channel_message_policy_action(operation: channels::DiscordMessageMutationKind) -> &'static str {
+    let discord_operation = match operation {
+        channels::DiscordMessageMutationKind::Edit => DiscordMessageOperation::Edit,
+        channels::DiscordMessageMutationKind::Delete => DiscordMessageOperation::Delete,
+        channels::DiscordMessageMutationKind::ReactAdd => DiscordMessageOperation::ReactAdd,
+        channels::DiscordMessageMutationKind::ReactRemove => DiscordMessageOperation::ReactRemove,
+    };
+    discord_policy_action_for_operation(discord_operation)
+}
+
+fn channel_message_required_permissions(
+    operation: channels::DiscordMessageMutationKind,
+) -> Vec<String> {
+    let discord_operation = match operation {
+        channels::DiscordMessageMutationKind::Edit => DiscordMessageOperation::Edit,
+        channels::DiscordMessageMutationKind::Delete => DiscordMessageOperation::Delete,
+        channels::DiscordMessageMutationKind::ReactAdd => DiscordMessageOperation::ReactAdd,
+        channels::DiscordMessageMutationKind::ReactRemove => DiscordMessageOperation::ReactRemove,
+    };
+    discord_permission_labels_for_operation(discord_operation)
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect()
+}
+
+async fn record_channel_message_console_event(
+    state: &AppState,
+    context: &RequestContext,
+    event: &str,
+    details: Value,
+) -> Result<(), Response> {
+    state
+        .runtime
+        .record_console_event(context, event, details)
+        .await
+        .map_err(runtime_status_response)
+}
+
 pub(crate) async fn admin_channel_status_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -370,6 +988,144 @@ pub(crate) async fn admin_channel_logs_handler(
     })?;
     state.runtime.record_admin_status_request();
     admin_channel_logs_response(&state, connector_id, query.limit)
+}
+
+pub(crate) async fn admin_channel_message_read_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageReadBody>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    channel_message_read_response(&state, &context, connector_id, payload.request).await
+}
+
+pub(crate) async fn admin_channel_message_search_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageSearchBody>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    channel_message_search_response(&state, &context, connector_id, payload.request).await
+}
+
+pub(crate) async fn admin_channel_message_edit_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageEditBody>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    channel_message_edit_response(
+        &state,
+        &context,
+        connector_id,
+        payload.request,
+        payload.approval_id,
+    )
+    .await
+}
+
+pub(crate) async fn admin_channel_message_delete_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageDeleteBody>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    channel_message_delete_response(
+        &state,
+        &context,
+        connector_id,
+        payload.request,
+        payload.approval_id,
+    )
+    .await
+}
+
+pub(crate) async fn admin_channel_message_react_add_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageReactionBody>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    channel_message_reaction_response(
+        &state,
+        &context,
+        connector_id,
+        payload.request,
+        payload.approval_id,
+        channels::DiscordMessageMutationKind::ReactAdd,
+    )
+    .await
+}
+
+pub(crate) async fn admin_channel_message_react_remove_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    Json(payload): Json<ChannelMessageReactionBody>,
+) -> Result<Json<Value>, Response> {
+    authorize_headers(&headers, &state.auth).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    let context = request_context_from_headers(&headers).map_err(|error| {
+        state.runtime.record_denied();
+        auth_error_response(error)
+    })?;
+    state.runtime.record_admin_status_request();
+    channel_message_reaction_response(
+        &state,
+        &context,
+        connector_id,
+        payload.request,
+        payload.approval_id,
+        channels::DiscordMessageMutationKind::ReactRemove,
+    )
+    .await
 }
 
 pub(crate) async fn admin_channel_logs_query_handler(

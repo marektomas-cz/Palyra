@@ -40,6 +40,30 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(admin::channels::admin_channel_logs_handler),
         )
         .route(
+            "/admin/v1/channels/{connector_id}/messages/read",
+            post(admin::channels::admin_channel_message_read_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/messages/search",
+            post(admin::channels::admin_channel_message_search_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/messages/edit",
+            post(admin::channels::admin_channel_message_edit_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/messages/delete",
+            post(admin::channels::admin_channel_message_delete_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/messages/react-add",
+            post(admin::channels::admin_channel_message_react_add_handler),
+        )
+        .route(
+            "/admin/v1/channels/{connector_id}/messages/react-remove",
+            post(admin::channels::admin_channel_message_react_remove_handler),
+        )
+        .route(
             "/admin/v1/channels/{connector_id}/operations/health-refresh",
             post(admin::channels::admin_channel_health_refresh_handler),
         )
@@ -748,6 +772,30 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/console/v1/channels/{connector_id}/logs",
             get(console::channels::console_channel_logs_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/messages/read",
+            post(console::channels::console_channel_message_read_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/messages/search",
+            post(console::channels::console_channel_message_search_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/messages/edit",
+            post(console::channels::console_channel_message_edit_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/messages/delete",
+            post(console::channels::console_channel_message_delete_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/messages/react-add",
+            post(console::channels::console_channel_message_react_add_handler),
+        )
+        .route(
+            "/console/v1/channels/{connector_id}/messages/react-remove",
+            post(console::channels::console_channel_message_react_remove_handler),
         )
         .route(
             "/console/v1/channels/{connector_id}/operations/health-refresh",

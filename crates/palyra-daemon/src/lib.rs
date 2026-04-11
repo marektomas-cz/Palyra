@@ -139,6 +139,10 @@ use palyra_connector_discord::{
     discord_required_permissions, DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS,
     DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT, DISCORD_APP_FLAG_GATEWAY_PRESENCE,
 };
+use palyra_connectors::{
+    ConnectorMessageDeleteRequest, ConnectorMessageEditRequest, ConnectorMessageLocator,
+    ConnectorMessageReactionRequest, ConnectorMessageReadRequest, ConnectorMessageSearchRequest,
+};
 use palyra_control_plane as control_plane;
 use palyra_identity::{FilesystemSecretStore, IdentityManager, SecretStore};
 use palyra_policy::{
@@ -756,6 +760,42 @@ struct ChannelTestSendRequest {
 struct ChannelHealthRefreshRequest {
     #[serde(default)]
     verify_channel_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelMessageReadBody {
+    #[serde(flatten)]
+    request: ConnectorMessageReadRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelMessageSearchBody {
+    #[serde(flatten)]
+    request: ConnectorMessageSearchRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelMessageEditBody {
+    #[serde(flatten)]
+    request: ConnectorMessageEditRequest,
+    #[serde(default)]
+    approval_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelMessageDeleteBody {
+    #[serde(flatten)]
+    request: ConnectorMessageDeleteRequest,
+    #[serde(default)]
+    approval_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelMessageReactionBody {
+    #[serde(flatten)]
+    request: ConnectorMessageReactionRequest,
+    #[serde(default)]
+    approval_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

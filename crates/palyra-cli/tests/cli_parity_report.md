@@ -7,19 +7,19 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 
 ## Summary
 
-- Total entries: `109`
-- Verified entries: `109`
+- Total entries: `114`
+- Verified entries: `114`
 - Regression entries: `0`
-- Help snapshot coverage: `109` entries
+- Help snapshot coverage: `114` entries
 
 ### Expected parity status counts
 
-- `done`: `105`
+- `done`: `110`
 - `partial`: `4`
 
 ### Validation status counts
 
-- `verified`: `109`
+- `verified`: `114`
 
 ## Entries
 
@@ -46,6 +46,11 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 | `memory learning review` | `nested_surface` | `done` | `verified` | `memory-learning-review-help.txt` | - | - | - |
 | `memory learning promote-procedure` | `nested_surface` | `done` | `verified` | `memory-learning-promote-procedure-help.txt` | - | - | - |
 | `message` | `top_level` | `done` | `verified` | `message-help.txt` | - | - | - |
+| `message read` | `nested_surface` | `done` | `verified` | `message-read-help.txt` | - | `--conversation-id`, `--message-id`, `--before-message-id`, `--after-message-id`, `--around-message-id`, `--limit` | - |
+| `message search` | `nested_surface` | `done` | `verified` | `message-search-help.txt` | - | `--conversation-id`, `--query`, `--author-id`, `--has-attachments`, `--before-message-id`, `--limit` | - |
+| `message edit` | `nested_surface` | `done` | `verified` | `message-edit-help.txt` | - | `--conversation-id`, `--message-id`, `--text`, `--approval-id` | - |
+| `message delete` | `nested_surface` | `done` | `verified` | `message-delete-help.txt` | - | `--conversation-id`, `--message-id`, `--reason`, `--approval-id` | - |
+| `message react` | `nested_surface` | `done` | `verified` | `message-react-help.txt` | - | `--conversation-id`, `--message-id`, `--emoji`, `--remove`, `--approval-id` | - |
 | `approvals` | `top_level` | `done` | `verified` | `approvals-help.txt` | - | - | - |
 | `sessions` | `top_level` | `done` | `verified` | `sessions-help.txt` | - | - | - |
 | `tui` | `top_level` | `done` | `verified` | `tui-help.txt` | - | - | - |

@@ -220,6 +220,61 @@ path = "message"
 file = "message-help.txt"
 
 [[entries]]
+path = "message read"
+category = "nested_surface"
+status = "done"
+summary = "Read Discord message history by locator, exact message id, or pagination cursor."
+required_flags = ["conversation-id", "message-id", "before-message-id", "after-message-id", "around-message-id", "limit"]
+
+[entries.snapshot]
+path = "message read"
+file = "message-read-help.txt"
+
+[[entries]]
+path = "message search"
+category = "nested_surface"
+status = "done"
+summary = "Search Discord message history with query, author, and attachment filters."
+required_flags = ["conversation-id", "query", "author-id", "has-attachments", "before-message-id", "limit"]
+
+[entries.snapshot]
+path = "message search"
+file = "message-search-help.txt"
+
+[[entries]]
+path = "message edit"
+category = "nested_surface"
+status = "done"
+summary = "Preview or apply Discord message edits through the approval-aware admin flow."
+required_flags = ["conversation-id", "message-id", "text", "approval-id"]
+
+[entries.snapshot]
+path = "message edit"
+file = "message-edit-help.txt"
+
+[[entries]]
+path = "message delete"
+category = "nested_surface"
+status = "done"
+summary = "Preview or apply Discord message deletes with explicit reason and approval linkage."
+required_flags = ["conversation-id", "message-id", "reason", "approval-id"]
+
+[entries.snapshot]
+path = "message delete"
+file = "message-delete-help.txt"
+
+[[entries]]
+path = "message react"
+category = "nested_surface"
+status = "done"
+summary = "Add or remove Discord reactions through the approval-aware message admin surface."
+required_flags = ["conversation-id", "message-id", "emoji", "remove", "approval-id"]
+
+[entries.snapshot]
+path = "message react"
+file = "message-react-help.txt"
+
+[[entries]]
 path = "approvals"
 category = "top_level"
 status = "done"
