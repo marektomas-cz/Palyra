@@ -5,6 +5,10 @@ use serde::{de, Deserialize, Deserializer};
 use crate::{
     agents::{AgentCreateRequest, AgentRecord},
     application::service_authorization::authorize_agent_management_action,
+    execution_backends::{
+        build_execution_backend_inventory, parse_optional_execution_backend_preference,
+        resolve_execution_backend, validate_execution_backend_selection,
+    },
     gateway::{normalize_agent_identifier, record_agent_journal_event},
     *,
 };
@@ -56,10 +60,15 @@ pub(crate) async fn console_agents_list_handler(
         .list_agents(query.after_agent_id, Some(limit))
         .await
         .map_err(runtime_status_response)?;
+    let inventory = backend_inventory(&state).map_err(runtime_status_response)?;
 
     Ok(Json(control_plane::AgentListEnvelope {
         contract: contract_descriptor(),
         agents: page.agents.iter().map(control_plane_agent_from_runtime).collect(),
+        execution_backends: inventory
+            .iter()
+            .map(control_plane_execution_backend_inventory)
+            .collect(),
         default_agent_id: page.default_agent_id,
         page: build_page_info(limit, page.agents.len(), page.next_after_agent_id),
     }))
@@ -76,11 +85,20 @@ pub(crate) async fn console_agent_get_handler(
     let agent_id = normalize_console_agent_id(&state, agent_id.as_str(), "agent_id")?;
     let (agent, is_default) =
         state.runtime.get_agent(agent_id).await.map_err(runtime_status_response)?;
+    let inventory = backend_inventory(&state).map_err(runtime_status_response)?;
+    let resolution = resolve_execution_backend(agent.execution_backend_preference, &inventory);
 
     Ok(Json(control_plane::AgentEnvelope {
         contract: contract_descriptor(),
         agent: control_plane_agent_from_runtime(&agent),
         is_default,
+        execution_backends: inventory
+            .iter()
+            .map(control_plane_execution_backend_inventory)
+            .collect(),
+        resolved_execution_backend: resolution.resolved.as_str().to_owned(),
+        execution_backend_fallback_used: resolution.fallback_used,
+        execution_backend_reason: resolution.reason,
     }))
 }
 
@@ -91,6 +109,17 @@ pub(crate) async fn console_agent_create_handler(
 ) -> Result<Json<control_plane::AgentCreateEnvelope>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
     authorize_console_agent_action(&state, session.context.principal.as_str(), "agent.create")?;
+    let inventory = backend_inventory(&state).map_err(runtime_status_response)?;
+    let execution_backend_preference = parse_optional_execution_backend_preference(
+        payload.execution_backend_preference.as_deref(),
+        "execution_backend_preference",
+    )
+    .map_err(|message| runtime_status_response(tonic::Status::invalid_argument(message)))?;
+    if let Some(preference) = execution_backend_preference {
+        validate_execution_backend_selection(preference, &inventory).map_err(|message| {
+            runtime_status_response(tonic::Status::failed_precondition(message))
+        })?;
+    }
 
     let outcome = state
         .runtime
@@ -102,6 +131,7 @@ pub(crate) async fn console_agent_create_handler(
             default_model_profile: payload
                 .default_model_profile
                 .filter(|value| !value.trim().is_empty()),
+            execution_backend_preference,
             default_tool_allowlist: payload.default_tool_allowlist,
             default_skill_allowlist: payload.default_skill_allowlist,
             set_default: payload.set_default,
@@ -138,10 +168,19 @@ pub(crate) async fn console_agent_create_handler(
         .await;
     }
 
+    let resolution =
+        resolve_execution_backend(outcome.agent.execution_backend_preference, &inventory);
     Ok(Json(control_plane::AgentCreateEnvelope {
         contract: contract_descriptor(),
         agent: control_plane_agent_from_runtime(&outcome.agent),
         default_changed: outcome.default_changed,
+        execution_backends: inventory
+            .iter()
+            .map(control_plane_execution_backend_inventory)
+            .collect(),
+        resolved_execution_backend: resolution.resolved.as_str().to_owned(),
+        execution_backend_fallback_used: resolution.fallback_used,
+        execution_backend_reason: resolution.reason,
         default_agent_id: outcome.default_agent_id,
     }))
 }
@@ -187,11 +226,45 @@ fn control_plane_agent_from_runtime(agent: &AgentRecord) -> control_plane::Agent
         agent_dir: agent.agent_dir.clone(),
         workspace_roots: agent.workspace_roots.clone(),
         default_model_profile: agent.default_model_profile.clone(),
+        execution_backend_preference: agent.execution_backend_preference.as_str().to_owned(),
         default_tool_allowlist: agent.default_tool_allowlist.clone(),
         default_skill_allowlist: agent.default_skill_allowlist.clone(),
         created_at_unix_ms: agent.created_at_unix_ms,
         updated_at_unix_ms: agent.updated_at_unix_ms,
     }
+}
+
+fn control_plane_execution_backend_inventory(
+    backend: &crate::execution_backends::ExecutionBackendInventoryRecord,
+) -> control_plane::ExecutionBackendInventoryRecord {
+    control_plane::ExecutionBackendInventoryRecord {
+        backend_id: backend.backend_id.clone(),
+        label: backend.label.clone(),
+        state: backend.state.as_str().to_owned(),
+        selectable: backend.selectable,
+        selected_by_default: backend.selected_by_default,
+        description: backend.description.clone(),
+        operator_summary: backend.operator_summary.clone(),
+        executor_label: backend.executor_label.clone(),
+        rollout_flag: backend.rollout_flag.clone(),
+        rollout_enabled: backend.rollout_enabled,
+        capabilities: backend.capabilities.clone(),
+        tradeoffs: backend.tradeoffs.clone(),
+        active_node_count: backend.active_node_count,
+        total_node_count: backend.total_node_count,
+    }
+}
+
+fn backend_inventory(
+    state: &AppState,
+) -> Result<Vec<crate::execution_backends::ExecutionBackendInventoryRecord>, tonic::Status> {
+    let now_unix_ms = crate::gateway::current_unix_ms_status()?;
+    let nodes = state.node_runtime.nodes()?;
+    Ok(build_execution_backend_inventory(
+        &state.runtime.config.tool_call.process_runner,
+        nodes.as_slice(),
+        now_unix_ms,
+    ))
 }
 
 #[allow(clippy::result_large_err)]

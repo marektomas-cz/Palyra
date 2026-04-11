@@ -431,6 +431,8 @@ pub mod palyra_gateway_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct DeleteSecretResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ExecutionBackendInventory;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ExportApprovalsRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ExportApprovalsResponse;

@@ -39,6 +39,7 @@ pub(crate) async fn run_agents_async(
                         "agents": response.agents.iter().map(agent_to_json).collect::<Vec<_>>(),
                         "default_agent_id": empty_to_none(response.default_agent_id),
                         "next_after_agent_id": empty_to_none(response.next_after_agent_id),
+                        "execution_backends": response.execution_backends.iter().map(execution_backend_inventory_to_json).collect::<Vec<_>>(),
                     }))?
                 );
             } else if ndjson {
@@ -59,14 +60,16 @@ pub(crate) async fn run_agents_async(
                     text_or_none(response.default_agent_id.as_str()),
                     text_or_none(response.next_after_agent_id.as_str())
                 );
+                print_execution_backend_inventory(response.execution_backends.as_slice());
                 for agent in &response.agents {
                     println!(
-                        "agent id={} name={} dir={} workspaces={} model_profile={}",
+                        "agent id={} name={} dir={} workspaces={} model_profile={} backend_preference={}",
                         agent.agent_id,
                         agent.display_name,
                         agent.agent_dir,
                         agent.workspace_roots.len(),
-                        agent.default_model_profile
+                        agent.default_model_profile,
+                        text_or_none(agent.execution_backend_preference.as_str())
                     );
                 }
             }
@@ -132,17 +135,26 @@ pub(crate) async fn run_agents_async(
                     serde_json::to_string_pretty(&json!({
                         "agent": agent_to_json(&agent),
                         "is_default": response.is_default,
+                        "resolved_execution_backend": empty_to_none(response.resolved_execution_backend),
+                        "execution_backend_fallback_used": response.execution_backend_fallback_used,
+                        "execution_backend_reason": response.execution_backend_reason,
+                        "execution_backends": response.execution_backends.iter().map(execution_backend_inventory_to_json).collect::<Vec<_>>(),
                     }))?
                 );
             } else {
                 println!(
-                    "agents.show id={} name={} dir={} default={} model_profile={}",
+                    "agents.show id={} name={} dir={} default={} model_profile={} backend_preference={} resolved_backend={} fallback={}",
                     agent.agent_id,
                     agent.display_name,
                     agent.agent_dir,
                     response.is_default,
-                    agent.default_model_profile
+                    agent.default_model_profile,
+                    text_or_none(agent.execution_backend_preference.as_str()),
+                    text_or_none(response.resolved_execution_backend.as_str()),
+                    response.execution_backend_fallback_used
                 );
+                println!("agents.show.backend_reason {}", response.execution_backend_reason);
+                print_execution_backend_inventory(response.execution_backends.as_slice());
             }
         }
         AgentsCommand::Bind { agent_id, principal, channel, session_id, json: _ } => {
@@ -228,6 +240,7 @@ pub(crate) async fn run_agents_async(
             agent_dir,
             workspace_root,
             model_profile,
+            execution_backend,
             tool_allow,
             skill_allow,
             set_default,
@@ -242,6 +255,9 @@ pub(crate) async fn run_agents_async(
                     agent_dir: agent_dir.unwrap_or_default(),
                     workspace_roots: workspace_root,
                     default_model_profile: model_profile.unwrap_or_default(),
+                    execution_backend_preference: execution_backend
+                        .and_then(normalize_optional_text_arg)
+                        .unwrap_or_default(),
                     default_tool_allowlist: tool_allow,
                     default_skill_allowlist: skill_allow,
                     set_default,
@@ -256,17 +272,26 @@ pub(crate) async fn run_agents_async(
                         "agent": agent_to_json(&agent),
                         "default_changed": response.default_changed,
                         "default_agent_id": empty_to_none(response.default_agent_id),
+                        "resolved_execution_backend": empty_to_none(response.resolved_execution_backend),
+                        "execution_backend_fallback_used": response.execution_backend_fallback_used,
+                        "execution_backend_reason": response.execution_backend_reason,
+                        "execution_backends": response.execution_backends.iter().map(execution_backend_inventory_to_json).collect::<Vec<_>>(),
                     }))?
                 );
             } else {
                 println!(
-                    "agents.create id={} name={} default_changed={} default={} dir={}",
+                    "agents.create id={} name={} default_changed={} default={} dir={} backend_preference={} resolved_backend={} fallback={}",
                     agent.agent_id,
                     agent.display_name,
                     response.default_changed,
                     text_or_none(response.default_agent_id.as_str()),
-                    agent.agent_dir
+                    agent.agent_dir,
+                    text_or_none(agent.execution_backend_preference.as_str()),
+                    text_or_none(response.resolved_execution_backend.as_str()),
+                    response.execution_backend_fallback_used
                 );
+                println!("agents.create.backend_reason {}", response.execution_backend_reason);
+                print_execution_backend_inventory(response.execution_backends.as_slice());
             }
         }
         AgentsCommand::Delete { agent_id, dry_run, yes, json: _ } => {
@@ -369,16 +394,25 @@ pub(crate) async fn run_agents_async(
                         "source": agent_resolution_source_label(response.source),
                         "binding_created": response.binding_created,
                         "is_default": response.is_default,
+                        "resolved_execution_backend": empty_to_none(response.resolved_execution_backend),
+                        "execution_backend_fallback_used": response.execution_backend_fallback_used,
+                        "execution_backend_reason": response.execution_backend_reason,
+                        "execution_backends": response.execution_backends.iter().map(execution_backend_inventory_to_json).collect::<Vec<_>>(),
                     }))?
                 );
             } else {
                 println!(
-                    "agents.identity agent_id={} source={} binding_created={} default={}",
+                    "agents.identity agent_id={} source={} binding_created={} default={} backend_preference={} resolved_backend={} fallback={}",
                     agent.agent_id,
                     agent_resolution_source_label(response.source),
                     response.binding_created,
-                    response.is_default
+                    response.is_default,
+                    text_or_none(agent.execution_backend_preference.as_str()),
+                    text_or_none(response.resolved_execution_backend.as_str()),
+                    response.execution_backend_fallback_used
                 );
+                println!("agents.identity.backend_reason {}", response.execution_backend_reason);
+                print_execution_backend_inventory(response.execution_backends.as_slice());
             }
         }
     }
@@ -394,6 +428,42 @@ fn agent_binding_to_json(binding: &gateway_v1::AgentBinding) -> Value {
         "session_id": if binding.session_id.is_some() { Value::String(REDACTED.to_owned()) } else { Value::Null },
         "updated_at_unix_ms": binding.updated_at_unix_ms,
     })
+}
+
+fn execution_backend_inventory_to_json(backend: &gateway_v1::ExecutionBackendInventory) -> Value {
+    json!({
+        "backend_id": backend.backend_id,
+        "label": backend.label,
+        "state": backend.state,
+        "selectable": backend.selectable,
+        "selected_by_default": backend.selected_by_default,
+        "description": backend.description,
+        "operator_summary": backend.operator_summary,
+        "executor_label": empty_to_none(backend.executor_label.clone()),
+        "rollout_flag": empty_to_none(backend.rollout_flag.clone()),
+        "rollout_enabled": backend.rollout_enabled,
+        "capabilities": backend.capabilities,
+        "tradeoffs": backend.tradeoffs,
+        "active_node_count": backend.active_node_count,
+        "total_node_count": backend.total_node_count,
+    })
+}
+
+fn print_execution_backend_inventory(backends: &[gateway_v1::ExecutionBackendInventory]) {
+    if backends.is_empty() {
+        return;
+    }
+    for backend in backends {
+        println!(
+            "backend id={} state={} selectable={} rollout_enabled={} active_nodes={}/{}",
+            backend.backend_id,
+            text_or_none(backend.state.as_str()),
+            backend.selectable,
+            backend.rollout_enabled,
+            backend.active_node_count,
+            backend.total_node_count
+        );
+    }
 }
 
 fn text_or_none(value: &str) -> &str {

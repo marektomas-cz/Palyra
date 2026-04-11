@@ -6,6 +6,7 @@ import type {
   AgentEnvelope,
   AgentListEnvelope,
   AgentRecord,
+  ExecutionBackendInventoryRecord,
 } from "../../consoleApi";
 import {
   ActionButton,
@@ -15,6 +16,7 @@ import {
   EntityTable,
   InlineNotice,
   KeyValueList,
+  SelectField,
   TextAreaField,
   TextInputField,
 } from "../components/ui";
@@ -38,6 +40,7 @@ type AgentDraft = {
   agentDir: string;
   workspaceRoots: string;
   defaultModelProfile: string;
+  executionBackendPreference: string;
   defaultToolAllowlist: string;
   defaultSkillAllowlist: string;
   setDefault: boolean;
@@ -79,6 +82,7 @@ function createDefaultDraft(): AgentDraft {
     agentDir: "",
     workspaceRoots: "workspace",
     defaultModelProfile: "gpt-4o-mini",
+    executionBackendPreference: "automatic",
     defaultToolAllowlist: "",
     defaultSkillAllowlist: "",
     setDefault: false,
@@ -126,6 +130,7 @@ function buildCreatePayload(draft: AgentDraft): AgentCreateRequest {
     agent_dir: agentDir.length > 0 ? agentDir : undefined,
     workspace_roots: resolveWorkspaceRoots(draft),
     default_model_profile: defaultModelProfile.length > 0 ? defaultModelProfile : undefined,
+    execution_backend_preference: draft.executionBackendPreference.trim(),
     default_tool_allowlist: parseTextList(draft.defaultToolAllowlist),
     default_skill_allowlist: parseTextList(draft.defaultSkillAllowlist),
     set_default: draft.setDefault,
@@ -143,11 +148,27 @@ function formatUnixMs(value: number): string {
     .replace(",", "");
 }
 
+function backendTone(
+  value: string,
+): "default" | "success" | "warning" | "accent" {
+  switch (value) {
+    case "available":
+      return "success";
+    case "degraded":
+      return "warning";
+    case "disabled":
+      return "default";
+    default:
+      return "accent";
+  }
+}
+
 export function AgentsSection({ app }: AgentsSectionProps) {
   const [agentsBusy, setAgentsBusy] = useState(false);
   const [detailBusy, setDetailBusy] = useState(false);
   const [filter, setFilter] = useState("");
   const [agents, setAgents] = useState<AgentRecord[]>([]);
+  const [executionBackends, setExecutionBackends] = useState<ExecutionBackendInventoryRecord[]>([]);
   const [defaultAgentId, setDefaultAgentId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [selectedAgent, setSelectedAgent] = useState<AgentEnvelope | null>(null);
@@ -166,6 +187,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
     try {
       const envelope = await app.api.getAgent(agentId);
       setSelectedAgent(envelope);
+      setExecutionBackends(envelope.execution_backends);
     } catch (error) {
       app.setError(error instanceof Error ? error.message : "Failed to load agent detail.");
     } finally {
@@ -179,6 +201,7 @@ export function AgentsSection({ app }: AgentsSectionProps) {
     try {
       const envelope: AgentListEnvelope = await app.api.listAgents();
       setAgents(envelope.agents);
+      setExecutionBackends(envelope.execution_backends);
       setDefaultAgentId(envelope.default_agent_id ?? null);
 
       const nextSelectedId =
@@ -231,6 +254,24 @@ export function AgentsSection({ app }: AgentsSectionProps) {
 
   const validationMessage = validationMessageForStep(wizardStep, draft);
   const detailRecord = selectedAgent?.agent ?? null;
+  const detailBackends = selectedAgent?.execution_backends ?? executionBackends;
+  const detailResolvedBackend = selectedAgent?.resolved_execution_backend ?? "automatic";
+  const executionBackendOptions = useMemo(
+    () => [
+      {
+        key: "automatic",
+        label: "Automatic",
+        description:
+          "Keep the conservative daemon-host default until an operator explicitly selects a preview backend.",
+      },
+      ...executionBackends.map((backend) => ({
+        key: backend.backend_id,
+        label: backend.label,
+        description: `${backend.state} · ${backend.operator_summary}`,
+      })),
+    ],
+    [executionBackends],
+  );
 
   function closeWizard(): void {
     setWizardOpen(false);
@@ -284,6 +325,14 @@ export function AgentsSection({ app }: AgentsSectionProps) {
             <WorkspaceStatusChip tone={detailRecord !== null ? "accent" : "default"}>
               {detailRecord?.default_model_profile ?? "No model selected"}
             </WorkspaceStatusChip>
+            <WorkspaceStatusChip
+              tone={backendTone(
+                detailBackends.find((backend) => backend.backend_id === detailResolvedBackend)
+                  ?.state ?? "default",
+              )}
+            >
+              {detailResolvedBackend}
+            </WorkspaceStatusChip>
           </>
         }
         actions={
@@ -321,6 +370,18 @@ export function AgentsSection({ app }: AgentsSectionProps) {
           value={detailRecord?.default_model_profile ?? "n/a"}
           detail="Each agent keeps its own runtime defaults and allowlists."
           tone={detailRecord !== null ? "accent" : "default"}
+        />
+        <WorkspaceMetricCard
+          label="Execution backend"
+          value={detailResolvedBackend}
+          detail={
+            selectedAgent?.execution_backend_reason ??
+            "Automatic stays on the daemon host unless a preview backend becomes selectable."
+          }
+          tone={backendTone(
+            detailBackends.find((backend) => backend.backend_id === detailResolvedBackend)?.state ??
+              "default",
+          )}
         />
       </section>
 
@@ -361,6 +422,15 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                       </WorkspaceStatusChip>
                       <WorkspaceStatusChip tone="accent">
                         {agent.default_model_profile}
+                      </WorkspaceStatusChip>
+                      <WorkspaceStatusChip
+                        tone={backendTone(
+                          executionBackends.find(
+                            (backend) => backend.backend_id === agent.execution_backend_preference,
+                          )?.state ?? "default",
+                        )}
+                      >
+                        {agent.execution_backend_preference || "automatic"}
                       </WorkspaceStatusChip>
                       {agent.isSelected ? (
                         <WorkspaceStatusChip tone="accent">selected</WorkspaceStatusChip>
@@ -429,6 +499,14 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                 <WorkspaceStatusChip tone="accent">
                   {detailRecord.default_model_profile}
                 </WorkspaceStatusChip>
+                <WorkspaceStatusChip
+                  tone={backendTone(
+                    detailBackends.find((backend) => backend.backend_id === detailResolvedBackend)
+                      ?.state ?? "default",
+                  )}
+                >
+                  {detailResolvedBackend}
+                </WorkspaceStatusChip>
               </div>
 
               <KeyValueList
@@ -436,6 +514,14 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                   { label: "Display name", value: detailRecord.display_name },
                   { label: "Agent ID", value: detailRecord.agent_id },
                   { label: "Agent dir", value: detailRecord.agent_dir },
+                  {
+                    label: "Backend preference",
+                    value: detailRecord.execution_backend_preference || "automatic",
+                  },
+                  {
+                    label: "Resolved backend",
+                    value: detailResolvedBackend,
+                  },
                   { label: "Created", value: formatUnixMs(detailRecord.created_at_unix_ms) },
                   { label: "Updated", value: formatUnixMs(detailRecord.updated_at_unix_ms) },
                 ]}
@@ -477,6 +563,19 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                   />
                 </WorkspaceSectionCard>
               </div>
+
+              <WorkspaceSectionCard
+                title="Execution backend inventory"
+                description="Keep rollout flags, health, and trade-offs visible before selecting a preview backend."
+                className="workspace-section-card--nested"
+              >
+                <KeyValueList
+                  items={detailBackends.map((backend) => ({
+                    label: backend.label,
+                    value: `${backend.state} · ${backend.operator_summary}`,
+                  }))}
+                />
+              </WorkspaceSectionCard>
 
               {!selectedAgent?.is_default ? (
                 <ActionButton
@@ -616,6 +715,15 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                           }
                         />
                       </div>
+                      <SelectField
+                        label="Execution backend"
+                        value={draft.executionBackendPreference}
+                        onChange={(executionBackendPreference) =>
+                          setDraft((current) => ({ ...current, executionBackendPreference }))
+                        }
+                        options={executionBackendOptions}
+                        description="Preview backends stay feature-flagged until rollout criteria are met."
+                      />
                       <TextAreaField
                         label="Tool allowlist"
                         rows={3}
@@ -659,6 +767,10 @@ export function AgentsSection({ app }: AgentsSectionProps) {
                         {
                           label: "Model profile",
                           value: draft.defaultModelProfile.trim() || "Backend default",
+                        },
+                        {
+                          label: "Execution backend",
+                          value: draft.executionBackendPreference || "automatic",
                         },
                         {
                           label: "Tool allowlist",

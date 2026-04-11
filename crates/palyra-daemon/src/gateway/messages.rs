@@ -1,5 +1,6 @@
 use super::*;
 use crate::agents::SessionAgentBinding;
+use crate::execution_backends::ExecutionBackendInventoryRecord;
 
 pub(crate) fn session_summary_message(
     session: &OrchestratorSessionRecord,
@@ -47,6 +48,28 @@ pub(crate) fn agent_message(agent: &AgentRecord) -> gateway_v1::Agent {
         default_skill_allowlist: agent.default_skill_allowlist.clone(),
         created_at_unix_ms: agent.created_at_unix_ms,
         updated_at_unix_ms: agent.updated_at_unix_ms,
+        execution_backend_preference: agent.execution_backend_preference.as_str().to_owned(),
+    }
+}
+
+pub(crate) fn execution_backend_inventory_message(
+    backend: &ExecutionBackendInventoryRecord,
+) -> gateway_v1::ExecutionBackendInventory {
+    gateway_v1::ExecutionBackendInventory {
+        backend_id: backend.backend_id.clone(),
+        label: backend.label.clone(),
+        state: backend.state.as_str().to_owned(),
+        selectable: backend.selectable,
+        selected_by_default: backend.selected_by_default,
+        description: backend.description.clone(),
+        operator_summary: backend.operator_summary.clone(),
+        executor_label: backend.executor_label.clone().unwrap_or_default(),
+        rollout_flag: backend.rollout_flag.clone().unwrap_or_default(),
+        rollout_enabled: backend.rollout_enabled,
+        capabilities: backend.capabilities.clone(),
+        tradeoffs: backend.tradeoffs.clone(),
+        active_node_count: u32::try_from(backend.active_node_count).unwrap_or(u32::MAX),
+        total_node_count: u32::try_from(backend.total_node_count).unwrap_or(u32::MAX),
     }
 }
 

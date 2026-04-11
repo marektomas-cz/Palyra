@@ -2929,6 +2929,7 @@ async fn workspace_patch_tool_applies_patch_and_emits_attested_hashes() {
             agent_dir: None,
             workspace_roots: Vec::new(),
             default_model_profile: None,
+            execution_backend_preference: None,
             default_tool_allowlist: Vec::new(),
             default_skill_allowlist: Vec::new(),
             set_default: true,

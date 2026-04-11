@@ -187,6 +187,28 @@ pub struct ConfigMutationEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionBackendInventoryRecord {
+    pub backend_id: String,
+    pub label: String,
+    pub state: String,
+    pub selectable: bool,
+    pub selected_by_default: bool,
+    pub description: String,
+    pub operator_summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollout_flag: Option<String>,
+    pub rollout_enabled: bool,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub tradeoffs: Vec<String>,
+    pub active_node_count: usize,
+    pub total_node_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRecord {
     pub agent_id: String,
     pub display_name: String,
@@ -194,6 +216,8 @@ pub struct AgentRecord {
     #[serde(default)]
     pub workspace_roots: Vec<String>,
     pub default_model_profile: String,
+    #[serde(default)]
+    pub execution_backend_preference: String,
     #[serde(default)]
     pub default_tool_allowlist: Vec<String>,
     #[serde(default)]
@@ -207,6 +231,8 @@ pub struct AgentListEnvelope {
     pub contract: ContractDescriptor,
     #[serde(default)]
     pub agents: Vec<AgentRecord>,
+    #[serde(default)]
+    pub execution_backends: Vec<ExecutionBackendInventoryRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_agent_id: Option<String>,
     pub page: PageInfo,
@@ -217,6 +243,11 @@ pub struct AgentEnvelope {
     pub contract: ContractDescriptor,
     pub agent: AgentRecord,
     pub is_default: bool,
+    #[serde(default)]
+    pub execution_backends: Vec<ExecutionBackendInventoryRecord>,
+    pub resolved_execution_backend: String,
+    pub execution_backend_fallback_used: bool,
+    pub execution_backend_reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +260,8 @@ pub struct AgentCreateRequest {
     pub workspace_roots: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_backend_preference: Option<String>,
     #[serde(default)]
     pub default_tool_allowlist: Vec<String>,
     #[serde(default)]
@@ -244,6 +277,11 @@ pub struct AgentCreateEnvelope {
     pub contract: ContractDescriptor,
     pub agent: AgentRecord,
     pub default_changed: bool,
+    #[serde(default)]
+    pub execution_backends: Vec<ExecutionBackendInventoryRecord>,
+    pub resolved_execution_backend: String,
+    pub execution_backend_fallback_used: bool,
+    pub execution_backend_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_agent_id: Option<String>,
 }

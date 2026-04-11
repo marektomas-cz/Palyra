@@ -6,6 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::execution_backends::ExecutionBackendPreference;
 use palyra_common::{default_state_root, validate_canonical_id};
 use palyra_vault::{ensure_owner_only_dir, ensure_owner_only_file};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,8 @@ pub struct AgentRecord {
     pub agent_dir: String,
     pub workspace_roots: Vec<String>,
     pub default_model_profile: String,
+    #[serde(default)]
+    pub execution_backend_preference: ExecutionBackendPreference,
     pub default_tool_allowlist: Vec<String>,
     pub default_skill_allowlist: Vec<String>,
     pub created_at_unix_ms: i64,
@@ -61,6 +64,7 @@ pub struct AgentCreateRequest {
     pub agent_dir: Option<String>,
     pub workspace_roots: Vec<String>,
     pub default_model_profile: Option<String>,
+    pub execution_backend_preference: Option<ExecutionBackendPreference>,
     pub default_tool_allowlist: Vec<String>,
     pub default_skill_allowlist: Vec<String>,
     pub set_default: bool,
@@ -364,6 +368,7 @@ impl AgentRegistry {
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
             default_model_profile,
+            execution_backend_preference: request.execution_backend_preference.unwrap_or_default(),
             default_tool_allowlist: normalize_allowlist(request.default_tool_allowlist),
             default_skill_allowlist: normalize_allowlist(request.default_skill_allowlist),
             created_at_unix_ms: now,
@@ -1139,6 +1144,7 @@ mod tests {
                 agent_dir: Some("agents/main".to_owned()),
                 workspace_roots: vec!["workspace".to_owned()],
                 default_model_profile: Some("gpt-4o-mini".to_owned()),
+                execution_backend_preference: None,
                 default_tool_allowlist: Vec::new(),
                 default_skill_allowlist: Vec::new(),
                 set_default: true,
@@ -1152,6 +1158,7 @@ mod tests {
             agent_dir: Some("agents/./main".to_owned()),
             workspace_roots: vec!["workspace".to_owned()],
             default_model_profile: Some("gpt-4o-mini".to_owned()),
+            execution_backend_preference: None,
             default_tool_allowlist: Vec::new(),
             default_skill_allowlist: Vec::new(),
             set_default: false,
@@ -1172,6 +1179,7 @@ mod tests {
                 agent_dir: None,
                 workspace_roots: Vec::new(),
                 default_model_profile: None,
+                execution_backend_preference: None,
                 default_tool_allowlist: Vec::new(),
                 default_skill_allowlist: Vec::new(),
                 set_default: true,
@@ -1217,6 +1225,7 @@ mod tests {
                 agent_dir: Some("agents/main".to_owned()),
                 workspace_roots: vec!["workspace".to_owned()],
                 default_model_profile: Some("gpt-4o-mini".to_owned()),
+                execution_backend_preference: None,
                 default_tool_allowlist: Vec::new(),
                 default_skill_allowlist: Vec::new(),
                 set_default: true,
@@ -1233,6 +1242,7 @@ mod tests {
                 agent_dir: Some("agents/review".to_owned()),
                 workspace_roots: vec!["workspace".to_owned()],
                 default_model_profile: Some("gpt-4o-mini".to_owned()),
+                execution_backend_preference: None,
                 default_tool_allowlist: Vec::new(),
                 default_skill_allowlist: Vec::new(),
                 set_default: false,
@@ -1268,6 +1278,7 @@ mod tests {
                 agent_dir: Some("agents/main".to_owned()),
                 workspace_roots: vec!["workspace".to_owned()],
                 default_model_profile: Some("gpt-4o-mini".to_owned()),
+                execution_backend_preference: None,
                 default_tool_allowlist: Vec::new(),
                 default_skill_allowlist: Vec::new(),
                 set_default: true,
@@ -1281,6 +1292,7 @@ mod tests {
                 agent_dir: Some("agents/review".to_owned()),
                 workspace_roots: vec!["workspace-review".to_owned()],
                 default_model_profile: Some("gpt-4o-mini".to_owned()),
+                execution_backend_preference: None,
                 default_tool_allowlist: Vec::new(),
                 default_skill_allowlist: Vec::new(),
                 set_default: false,
@@ -1340,6 +1352,7 @@ mod tests {
             agent_dir: Some(agent_dir.to_string_lossy().into_owned()),
             workspace_roots: vec!["escape".to_owned()],
             default_model_profile: None,
+            execution_backend_preference: None,
             default_tool_allowlist: Vec::new(),
             default_skill_allowlist: Vec::new(),
             set_default: false,

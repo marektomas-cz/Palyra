@@ -2532,6 +2532,7 @@ fn agent_to_json(agent: &gateway_v1::Agent) -> serde_json::Value {
         "agent_dir": agent.agent_dir,
         "workspace_roots": agent.workspace_roots,
         "default_model_profile": agent.default_model_profile,
+        "execution_backend_preference": empty_to_none(agent.execution_backend_preference.clone()),
         "default_tool_allowlist": agent.default_tool_allowlist,
         "default_skill_allowlist": agent.default_skill_allowlist,
         "created_at_unix_ms": agent.created_at_unix_ms,

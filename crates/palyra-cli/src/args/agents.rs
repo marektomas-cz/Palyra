@@ -69,6 +69,8 @@ pub enum AgentsCommand {
         workspace_root: Vec<String>,
         #[arg(long = "model-profile")]
         model_profile: Option<String>,
+        #[arg(long = "execution-backend")]
+        execution_backend: Option<String>,
         #[arg(long = "tool-allow")]
         tool_allow: Vec<String>,
         #[arg(long = "skill-allow")]

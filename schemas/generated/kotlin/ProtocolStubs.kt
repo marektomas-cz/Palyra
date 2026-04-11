@@ -247,6 +247,7 @@ object PalyraGatewayV1 {
     data class DeleteAgentResponse(val placeholder: Int = 0)
     data class DeleteSecretRequest(val placeholder: Int = 0)
     data class DeleteSecretResponse(val placeholder: Int = 0)
+    data class ExecutionBackendInventory(val placeholder: Int = 0)
     data class ExportApprovalsRequest(val placeholder: Int = 0)
     data class ExportApprovalsResponse(val placeholder: Int = 0)
     data class GetAgentRequest(val placeholder: Int = 0)

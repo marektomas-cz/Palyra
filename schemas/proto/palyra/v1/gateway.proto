@@ -550,8 +550,28 @@ message Agent {
   repeated string default_skill_allowlist = 7;
   int64 created_at_unix_ms = 8;
   int64 updated_at_unix_ms = 9;
+  string execution_backend_preference = 17;
 
   reserved 10 to 16;
+}
+
+message ExecutionBackendInventory {
+  string backend_id = 1;
+  string label = 2;
+  string state = 3;
+  bool selectable = 4;
+  bool selected_by_default = 5;
+  string description = 6;
+  string operator_summary = 7;
+  string executor_label = 8;
+  string rollout_flag = 9;
+  bool rollout_enabled = 10;
+  repeated string capabilities = 11;
+  repeated string tradeoffs = 12;
+  uint32 active_node_count = 13;
+  uint32 total_node_count = 14;
+
+  reserved 15 to 20;
 }
 
 message ListAgentsRequest {
@@ -567,6 +587,7 @@ message ListAgentsResponse {
   repeated Agent agents = 2;
   string default_agent_id = 3;
   string next_after_agent_id = 4;
+  repeated ExecutionBackendInventory execution_backends = 13;
 
   reserved 5 to 12;
 }
@@ -582,6 +603,10 @@ message GetAgentResponse {
   uint32 v = 1;
   Agent agent = 2;
   bool is_default = 3;
+  repeated ExecutionBackendInventory execution_backends = 11;
+  string resolved_execution_backend = 12;
+  bool execution_backend_fallback_used = 13;
+  string execution_backend_reason = 14;
 
   reserved 4 to 10;
 }
@@ -597,6 +622,7 @@ message CreateAgentRequest {
   repeated string default_skill_allowlist = 8;
   bool set_default = 9;
   bool allow_absolute_paths = 10;
+  string execution_backend_preference = 21;
 
   reserved 11 to 20;
 }
@@ -606,6 +632,10 @@ message CreateAgentResponse {
   Agent agent = 2;
   bool default_changed = 3;
   string default_agent_id = 4;
+  repeated ExecutionBackendInventory execution_backends = 11;
+  string resolved_execution_backend = 12;
+  bool execution_backend_fallback_used = 13;
+  string execution_backend_reason = 14;
 
   reserved 5 to 10;
 }
@@ -731,6 +761,10 @@ message ResolveAgentForContextResponse {
   AgentResolutionSource source = 3;
   bool binding_created = 4;
   bool is_default = 5;
+  string resolved_execution_backend = 13;
+  bool execution_backend_fallback_used = 14;
+  string execution_backend_reason = 15;
+  repeated ExecutionBackendInventory execution_backends = 16;
 
   reserved 6 to 12;
 }

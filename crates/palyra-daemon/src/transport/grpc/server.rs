@@ -37,7 +37,11 @@ pub(crate) async fn serve(
     node_runtime: Arc<NodeRuntimeState>,
     node_rpc_mtls_required: bool,
 ) -> Result<()> {
-    let gateway_service = services::gateway::GatewayServiceImpl::new(runtime.clone(), auth.clone());
+    let gateway_service = services::gateway::GatewayServiceImpl::new(
+        runtime.clone(),
+        auth.clone(),
+        Arc::clone(&node_runtime),
+    );
     let grpc_gateway_server =
         gateway_v1::gateway_service_server::GatewayServiceServer::new(gateway_service)
             .max_decoding_message_size(crate::GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES)

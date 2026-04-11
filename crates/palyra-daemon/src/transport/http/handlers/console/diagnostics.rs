@@ -62,6 +62,8 @@ pub(crate) async fn console_diagnostics_handler(
     let objectives_payload =
         collect_console_objectives_diagnostics(&state, session.context.principal.as_str())?;
     let deployment_payload = collect_console_deployment_diagnostics(&state);
+    let execution_backends_payload =
+        collect_console_execution_backend_diagnostics(&state).map_err(runtime_status_response)?;
     let observability_payload =
         build_observability_payload(&state, &auth_payload, &media_payload).await?;
     let generated_at_unix_ms = unix_ms_now().map_err(|error| {
@@ -96,6 +98,7 @@ pub(crate) async fn console_diagnostics_handler(
             "telemetry": access_snapshot.telemetry,
         },
         "deployment": deployment_payload,
+        "execution_backends": execution_backends_payload,
         "observability": observability_payload,
         "memory": {
             "usage": memory_status.usage,
@@ -141,6 +144,19 @@ pub(crate) async fn console_diagnostics_handler(
             }
         },
     })))
+}
+
+fn collect_console_execution_backend_diagnostics(state: &AppState) -> Result<Value, tonic::Status> {
+    let now_unix_ms = crate::gateway::current_unix_ms_status()?;
+    let nodes = state.node_runtime.nodes()?;
+    serde_json::to_value(crate::execution_backends::build_execution_backend_inventory(
+        &state.runtime.config.tool_call.process_runner,
+        nodes.as_slice(),
+        now_unix_ms,
+    ))
+    .map_err(|error| {
+        tonic::Status::internal(format!("failed to serialize execution backends: {error}"))
+    })
 }
 
 #[allow(clippy::result_large_err)]

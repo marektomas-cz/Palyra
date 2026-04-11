@@ -25,12 +25,17 @@ use crate::{
         InboundMessage as ChannelInboundMessage, PairingConsumeOutcome, RouteOutcome,
         RoutedMessage as ChannelRoutedMessage,
     },
+    execution_backends::{
+        build_execution_backend_inventory, parse_optional_execution_backend_preference,
+        resolve_execution_backend, validate_execution_backend_selection,
+    },
     gateway::{
         agent_binding_message, agent_message, agent_resolution_source_to_proto, canonical_id,
-        extract_pairing_code_command, finalize_run_failure, non_empty, normalize_agent_identifier,
-        optional_canonical_id, record_agent_journal_event, record_message_router_journal_event,
-        require_supported_version, security_requests_json_mode, session_summary_message,
-        GatewayRuntimeState, ListOrchestratorSessionsRequest, APPROVAL_PROMPT_TIMEOUT_SECONDS,
+        execution_backend_inventory_message, extract_pairing_code_command, finalize_run_failure,
+        non_empty, normalize_agent_identifier, optional_canonical_id, record_agent_journal_event,
+        record_message_router_journal_event, require_supported_version,
+        security_requests_json_mode, session_summary_message, GatewayRuntimeState,
+        ListOrchestratorSessionsRequest, APPROVAL_PROMPT_TIMEOUT_SECONDS,
         SENSITIVE_TOOLS_DENY_REASON,
     },
     journal::{
@@ -39,6 +44,7 @@ use crate::{
         OrchestratorCancelRequest, OrchestratorSessionCleanupRequest,
         OrchestratorSessionResolveRequest,
     },
+    node_runtime::NodeRuntimeState,
     orchestrator::RunStateMachine,
     transport::grpc::{
         auth::{authorize_metadata, GatewayAuthConfig, RequestContext},
@@ -50,12 +56,17 @@ use crate::{
 pub struct GatewayServiceImpl {
     state: Arc<GatewayRuntimeState>,
     auth: GatewayAuthConfig,
+    node_runtime: Arc<NodeRuntimeState>,
 }
 
 impl GatewayServiceImpl {
     #[must_use]
-    pub fn new(state: Arc<GatewayRuntimeState>, auth: GatewayAuthConfig) -> Self {
-        Self { state, auth }
+    pub fn new(
+        state: Arc<GatewayRuntimeState>,
+        auth: GatewayAuthConfig,
+        node_runtime: Arc<NodeRuntimeState>,
+    ) -> Self {
+        Self { state, auth, node_runtime }
     }
 
     #[allow(clippy::result_large_err)]
@@ -69,6 +80,18 @@ impl GatewayServiceImpl {
             warn!(method, error = %error, "gateway rpc authorization denied");
             Status::permission_denied(error.to_string())
         })
+    }
+
+    fn execution_backend_inventory(
+        &self,
+    ) -> Result<Vec<crate::execution_backends::ExecutionBackendInventoryRecord>, Status> {
+        let now_unix_ms = crate::gateway::current_unix_ms_status()?;
+        let nodes = self.node_runtime.nodes()?;
+        Ok(build_execution_backend_inventory(
+            &self.state.config.tool_call.process_runner,
+            nodes.as_slice(),
+            now_unix_ms,
+        ))
     }
 }
 
@@ -801,11 +824,13 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             .state
             .list_agents(non_empty(payload.after_agent_id), Some(payload.limit as usize))
             .await?;
+        let inventory = self.execution_backend_inventory()?;
         Ok(Response::new(gateway_v1::ListAgentsResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
             agents: page.agents.iter().map(agent_message).collect(),
             default_agent_id: page.default_agent_id.unwrap_or_default(),
             next_after_agent_id: page.next_after_agent_id.unwrap_or_default(),
+            execution_backends: inventory.iter().map(execution_backend_inventory_message).collect(),
         }))
     }
 
@@ -829,10 +854,16 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 self.state.counters.agent_validation_failures.fetch_add(1, Ordering::Relaxed);
             })?;
         let (agent, is_default) = self.state.get_agent(agent_id).await?;
+        let inventory = self.execution_backend_inventory()?;
+        let resolution = resolve_execution_backend(agent.execution_backend_preference, &inventory);
         Ok(Response::new(gateway_v1::GetAgentResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
             agent: Some(agent_message(&agent)),
             is_default,
+            execution_backends: inventory.iter().map(execution_backend_inventory_message).collect(),
+            resolved_execution_backend: resolution.resolved.as_str().to_owned(),
+            execution_backend_fallback_used: resolution.fallback_used,
+            execution_backend_reason: resolution.reason,
         }))
     }
 
@@ -851,6 +882,16 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
         .inspect_err(|_error| {
             self.state.record_denied();
         })?;
+        let inventory = self.execution_backend_inventory()?;
+        let execution_backend_preference = parse_optional_execution_backend_preference(
+            non_empty(payload.execution_backend_preference).as_deref(),
+            "execution_backend_preference",
+        )
+        .map_err(Status::invalid_argument)?;
+        if let Some(preference) = execution_backend_preference {
+            validate_execution_backend_selection(preference, &inventory)
+                .map_err(Status::failed_precondition)?;
+        }
         let outcome = self
             .state
             .create_agent(AgentCreateRequest {
@@ -859,6 +900,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 agent_dir: non_empty(payload.agent_dir),
                 workspace_roots: payload.workspace_roots,
                 default_model_profile: non_empty(payload.default_model_profile),
+                execution_backend_preference,
                 default_tool_allowlist: payload.default_tool_allowlist,
                 default_skill_allowlist: payload.default_skill_allowlist,
                 set_default: payload.set_default,
@@ -888,11 +930,17 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             )
             .await;
         }
+        let resolution =
+            resolve_execution_backend(outcome.agent.execution_backend_preference, &inventory);
         Ok(Response::new(gateway_v1::CreateAgentResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
             agent: Some(agent_message(&outcome.agent)),
             default_changed: outcome.default_changed,
             default_agent_id: outcome.default_agent_id.unwrap_or_default(),
+            execution_backends: inventory.iter().map(execution_backend_inventory_message).collect(),
+            resolved_execution_backend: resolution.resolved.as_str().to_owned(),
+            execution_backend_fallback_used: resolution.fallback_used,
+            execution_backend_reason: resolution.reason,
         }))
     }
 
@@ -1174,6 +1222,9 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 persist_session_binding: payload.persist_session_binding,
             })
             .await?;
+        let inventory = self.execution_backend_inventory()?;
+        let resolution =
+            resolve_execution_backend(outcome.agent.execution_backend_preference, &inventory);
         if outcome.binding_created {
             let _ = record_agent_journal_event(
                 &self.state,
@@ -1192,6 +1243,10 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             source: agent_resolution_source_to_proto(outcome.source),
             binding_created: outcome.binding_created,
             is_default: outcome.is_default,
+            resolved_execution_backend: resolution.resolved.as_str().to_owned(),
+            execution_backend_fallback_used: resolution.fallback_used,
+            execution_backend_reason: resolution.reason,
+            execution_backends: inventory.iter().map(execution_backend_inventory_message).collect(),
         }))
     }
 

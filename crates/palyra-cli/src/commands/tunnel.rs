@@ -1,5 +1,7 @@
 use crate::*;
 
+const SSH_TUNNEL_BACKEND_FLAG: &str = "PALYRA_EXPERIMENTAL_EXECUTION_BACKEND_SSH_TUNNEL";
+
 pub(crate) fn run_tunnel(
     ssh: String,
     remote_port: u16,
@@ -10,6 +12,16 @@ pub(crate) fn run_tunnel(
     let ssh = normalize_required_text_arg(ssh, "--ssh")?;
     let identity_file = identity_file.and_then(normalize_optional_text_arg);
     let local_dashboard_url = format!("http://127.0.0.1:{local_port}/");
+    let preview_enabled = std::env::var(SSH_TUNNEL_BACKEND_FLAG)
+        .ok()
+        .map(|value| {
+            matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false);
+    println!(
+        "tunnel.backend_profile=ssh_tunnel preview_enabled={} rollout_flag={} manual_forward_required=true",
+        preview_enabled, SSH_TUNNEL_BACKEND_FLAG
+    );
     println!(
         "tunnel.status=starting ssh_target={} local_dashboard_url={} forward={}=>127.0.0.1:{}",
         ssh, local_dashboard_url, local_port, remote_port

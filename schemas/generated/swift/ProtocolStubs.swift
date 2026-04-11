@@ -606,6 +606,9 @@ public enum PalyraGatewayV1 {
     public struct DeleteSecretResponse: Equatable {
         public init() {}
     }
+    public struct ExecutionBackendInventory: Equatable {
+        public init() {}
+    }
     public struct ExportApprovalsRequest: Equatable {
         public init() {}
     }

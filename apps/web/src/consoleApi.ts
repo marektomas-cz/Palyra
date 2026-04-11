@@ -1729,15 +1729,34 @@ export interface AgentRecord {
   agent_dir: string;
   workspace_roots: string[];
   default_model_profile: string;
+  execution_backend_preference: string;
   default_tool_allowlist: string[];
   default_skill_allowlist: string[];
   created_at_unix_ms: number;
   updated_at_unix_ms: number;
 }
 
+export interface ExecutionBackendInventoryRecord {
+  backend_id: string;
+  label: string;
+  state: string;
+  selectable: boolean;
+  selected_by_default: boolean;
+  description: string;
+  operator_summary: string;
+  executor_label?: string;
+  rollout_flag?: string;
+  rollout_enabled: boolean;
+  capabilities: string[];
+  tradeoffs: string[];
+  active_node_count: number;
+  total_node_count: number;
+}
+
 export interface AgentListEnvelope {
   contract: ContractDescriptor;
   agents: AgentRecord[];
+  execution_backends: ExecutionBackendInventoryRecord[];
   default_agent_id?: string;
   page: PageInfo;
 }
@@ -1746,6 +1765,10 @@ export interface AgentEnvelope {
   contract: ContractDescriptor;
   agent: AgentRecord;
   is_default: boolean;
+  execution_backends: ExecutionBackendInventoryRecord[];
+  resolved_execution_backend: string;
+  execution_backend_fallback_used: boolean;
+  execution_backend_reason: string;
 }
 
 export interface AgentCreateRequest {
@@ -1754,6 +1777,7 @@ export interface AgentCreateRequest {
   agent_dir?: string;
   workspace_roots?: string[];
   default_model_profile?: string;
+  execution_backend_preference?: string;
   default_tool_allowlist?: string[];
   default_skill_allowlist?: string[];
   set_default?: boolean;
@@ -1764,6 +1788,10 @@ export interface AgentCreateEnvelope {
   contract: ContractDescriptor;
   agent: AgentRecord;
   default_changed: boolean;
+  execution_backends: ExecutionBackendInventoryRecord[];
+  resolved_execution_backend: string;
+  execution_backend_fallback_used: boolean;
+  execution_backend_reason: string;
   default_agent_id?: string;
 }
 
