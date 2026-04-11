@@ -380,7 +380,7 @@ describe("M35 web console app", () => {
               identity_fingerprint: "fingerprint-1",
               transcript_hash_hex: "hash-1",
               platform: "windows",
-              capabilities: [{ name: "ping", available: true }],
+              capabilities: [{ name: "ping", available: true, execution_mode: "automatic" }],
               capability_summary: { total: 1, available: 1, unavailable: 0 },
               warnings: ["1 pairing requests still require completion"],
               actions: {
@@ -444,7 +444,7 @@ describe("M35 web console app", () => {
             identity_fingerprint: "fingerprint-1",
             transcript_hash_hex: "hash-1",
             platform: "windows",
-            capabilities: [{ name: "ping", available: true }],
+            capabilities: [{ name: "ping", available: true, execution_mode: "automatic" }],
             capability_summary: { total: 1, available: 1, unavailable: 0 },
             warnings: ["1 pairing requests still require completion"],
             actions: {
@@ -470,6 +470,7 @@ describe("M35 web console app", () => {
               transcript_hash_hex: "hash-1",
             },
           ],
+          capability_requests: [],
         });
       }
 

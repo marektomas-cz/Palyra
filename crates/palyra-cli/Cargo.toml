@@ -42,6 +42,7 @@ tonic.workspace = true
 tonic-prost.workspace = true
 toml.workspace = true
 ulid.workspace = true
+webbrowser.workspace = true
 zip.workspace = true
 
 [build-dependencies]

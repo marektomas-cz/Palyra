@@ -688,6 +688,7 @@ pub struct DeviceClearEnvelope {
 pub struct NodeCapabilityView {
     pub name: String,
     pub available: bool,
+    pub execution_mode: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,6 +729,39 @@ pub struct NodeInvokeEnvelope {
     pub output_json: Option<Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeCapabilityRequestState {
+    Queued,
+    Dispatched,
+    AwaitingLocalMediation,
+    Succeeded,
+    Failed,
+    TimedOut,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCapabilityRequestView {
+    pub request_id: String,
+    pub device_id: String,
+    pub capability: String,
+    pub state: NodeCapabilityRequestState,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatched_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_unix_ms: Option<i64>,
+    pub max_payload_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -858,6 +892,8 @@ pub struct InventoryDeviceDetailEnvelope {
     pub device: InventoryDeviceRecord,
     #[serde(default)]
     pub pairings: Vec<NodePairingRequestView>,
+    #[serde(default)]
+    pub capability_requests: Vec<NodeCapabilityRequestView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

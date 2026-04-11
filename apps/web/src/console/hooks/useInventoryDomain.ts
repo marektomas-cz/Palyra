@@ -231,6 +231,7 @@ export function useInventoryDomain({
     pendingPairings,
     selectedDeviceId,
     setSelectedDeviceId,
+    selectedDetail,
     selectedDevice,
     selectedPairings,
     actionReason,

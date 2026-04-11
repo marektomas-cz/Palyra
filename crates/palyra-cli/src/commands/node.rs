@@ -110,6 +110,20 @@ struct LocalCapabilityResult {
     error: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct NodeCapabilityDescriptor {
+    name: &'static str,
+    requires_local_mediation: bool,
+}
+
+const NODE_CAPABILITY_DESCRIPTORS: [NodeCapabilityDescriptor; 5] = [
+    NodeCapabilityDescriptor { name: "echo", requires_local_mediation: false },
+    NodeCapabilityDescriptor { name: "system.health", requires_local_mediation: false },
+    NodeCapabilityDescriptor { name: "system.identity", requires_local_mediation: false },
+    NodeCapabilityDescriptor { name: "desktop.open_url", requires_local_mediation: true },
+    NodeCapabilityDescriptor { name: "desktop.open_path", requires_local_mediation: true },
+];
+
 pub(crate) fn run_node(command: NodeCommand) -> Result<()> {
     let runtime = build_runtime()?;
     runtime.block_on(run_node_async(command))
@@ -184,8 +198,11 @@ async fn run_node_foreground(config: &NodeHostConfig, json_output: bool) -> Resu
     .await?;
 
     let capabilities = supported_capabilities()
-        .into_iter()
-        .map(|name| node_v1::DeviceCapability { name: name.to_owned(), available: true })
+        .iter()
+        .map(|descriptor| node_v1::DeviceCapability {
+            name: descriptor.name.to_owned(),
+            available: true,
+        })
         .collect::<Vec<_>>();
     let response = client
         .register_node(Request::new(node_v1::RegisterNodeRequest {
@@ -222,7 +239,13 @@ async fn run_node_foreground(config: &NodeHostConfig, json_output: bool) -> Resu
             json!({
                 "device_id": config.device_id,
                 "platform": node_platform_label(),
-                "capabilities": supported_capabilities(),
+                "capabilities": supported_capabilities()
+                    .iter()
+                    .map(|descriptor| json!({
+                        "name": descriptor.name,
+                        "requires_local_mediation": descriptor.requires_local_mediation,
+                    }))
+                    .collect::<Vec<_>>(),
                 "started_at_unix_ms": now_unix_ms(),
             }),
         )?)
@@ -241,6 +264,16 @@ async fn run_node_foreground(config: &NodeHostConfig, json_output: bool) -> Resu
                     anyhow::bail!("node event stream closed unexpectedly");
                 };
                 if let Some(dispatch) = message.dispatch {
+                    if capability_requires_local_mediation(dispatch.capability.as_str()) {
+                        sender
+                            .send(build_node_event_request(
+                                config.device_id.as_str(),
+                                "capability.awaiting_local_mediation",
+                                build_capability_lifecycle_payload(&dispatch, "awaiting_local_mediation")?,
+                            )?)
+                            .await
+                            .context("failed to send capability mediation event to gateway")?;
+                    }
                     let result_payload = execute_dispatched_capability(&dispatch, config, &device)?;
                     sender
                         .send(build_node_event_request(
@@ -437,13 +470,22 @@ async fn ensure_node_pairing_material(
         .ok_or_else(|| {
             anyhow!("node pairing bootstrap requires --pairing-code when local pairing material is absent")
         })?;
-    let gateway_ca_file = gateway_ca_file
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("node pairing bootstrap requires --gateway-ca-file"))?;
-    let gateway_ca_certificate_pem =
-        fs::read_to_string(gateway_ca_file.as_path()).with_context(|| {
-            format!("failed to read gateway CA certificate file {}", gateway_ca_file.display())
-        })?;
+    let gateway_ca_certificate_pem = match gateway_ca_file.map(PathBuf::from) {
+        Some(gateway_ca_file) => {
+            fs::read_to_string(gateway_ca_file.as_path()).with_context(|| {
+                format!("failed to read gateway CA certificate file {}", gateway_ca_file.display())
+            })?
+        }
+        None => {
+            let gateway_identity_store_dir = std::env::var("PALYRA_GATEWAY_IDENTITY_STORE_DIR")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+            load_gateway_ca_certificate_pem(gateway_identity_store_dir).context(
+                "node pairing bootstrap requires --gateway-ca-file or PALYRA_GATEWAY_IDENTITY_STORE_DIR with gateway trust material",
+            )?
+        }
+    };
 
     let store = build_identity_store(Path::new(config.identity_store_dir.as_str()))?;
     let device = DeviceIdentity::generate(config.device_id.as_str())
@@ -769,6 +811,37 @@ fn execute_local_capability(
             }),
             error: String::new(),
         },
+        "desktop.open_url" => match open_url_capability(input_json) {
+            Ok(url) => LocalCapabilityResult {
+                success: true,
+                output_json: json!({
+                    "opened": true,
+                    "url": url,
+                }),
+                error: String::new(),
+            },
+            Err(error) => LocalCapabilityResult {
+                success: false,
+                output_json: Value::Null,
+                error: error.to_string(),
+            },
+        },
+        "desktop.open_path" => match open_path_capability(input_json) {
+            Ok(path) => LocalCapabilityResult {
+                success: true,
+                output_json: json!({
+                    "opened": true,
+                    "path": path.display().to_string(),
+                    "kind": if path.is_dir() { "directory" } else { "file" },
+                }),
+                error: String::new(),
+            },
+            Err(error) => LocalCapabilityResult {
+                success: false,
+                output_json: Value::Null,
+                error: error.to_string(),
+            },
+        },
         other => LocalCapabilityResult {
             success: false,
             output_json: Value::Null,
@@ -807,12 +880,113 @@ fn canonical_id(value: &str) -> common_v1::CanonicalId {
     common_v1::CanonicalId { ulid: value.to_owned() }
 }
 
-fn supported_capabilities() -> [&'static str; 3] {
-    ["echo", "system.health", "system.identity"]
+fn supported_capabilities() -> &'static [NodeCapabilityDescriptor] {
+    &NODE_CAPABILITY_DESCRIPTORS
+}
+
+fn capability_requires_local_mediation(capability: &str) -> bool {
+    supported_capabilities()
+        .iter()
+        .find(|descriptor| descriptor.name == capability.trim())
+        .is_some_and(|descriptor| descriptor.requires_local_mediation)
+}
+
+fn build_capability_lifecycle_payload(
+    dispatch: &node_v1::NodeCapabilityDispatch,
+    state: &str,
+) -> Result<Value> {
+    let request_id = dispatch
+        .request_id
+        .as_ref()
+        .map(|value| value.ulid.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("capability dispatch is missing request_id"))?;
+    Ok(json!({
+        "request_id": request_id,
+        "capability": dispatch.capability,
+        "state": state,
+    }))
 }
 
 fn node_platform_label() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn open_url_capability(input_json: &Value) -> Result<String> {
+    let url = input_json
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("desktop.open_url requires non-empty input_json.url"))?;
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("desktop.open_url received invalid URL {url}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => anyhow::bail!("desktop.open_url only allows http/https URLs, got {other}"),
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("desktop.open_url forbids embedded credentials");
+    }
+    if parsed.fragment().is_some() {
+        anyhow::bail!("desktop.open_url forbids URL fragments");
+    }
+    webbrowser::open(parsed.as_str()).context("desktop.open_url failed to open browser target")?;
+    Ok(parsed.to_string())
+}
+
+fn open_path_capability(input_json: &Value) -> Result<PathBuf> {
+    let raw_path = input_json
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("desktop.open_path requires non-empty input_json.path"))?;
+    let path = PathBuf::from(raw_path);
+    if !path.is_absolute() {
+        anyhow::bail!("desktop.open_path requires an absolute path");
+    }
+    let canonical = fs::canonicalize(path.as_path())
+        .with_context(|| format!("desktop.open_path target {} was not found", path.display()))?;
+    if !canonical.is_file() && !canonical.is_dir() {
+        anyhow::bail!(
+            "desktop.open_path only supports existing files or directories, got {}",
+            canonical.display()
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(canonical.as_os_str());
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(canonical.as_os_str());
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(canonical.as_os_str());
+        command
+    };
+
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("desktop.open_path failed to start platform opener")?;
+    if !status.success() {
+        anyhow::bail!(
+            "desktop.open_path platform opener exited unsuccessfully for {}",
+            canonical.display()
+        );
+    }
+    Ok(canonical)
 }
 
 fn load_node_client_material(config: &NodeHostConfig) -> Result<NodeClientMaterial> {
@@ -1069,7 +1243,14 @@ fn now_unix_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_node_lifecycle_text, NodeLifecyclePayload};
+    use serde_json::json;
+
+    use super::{
+        build_capability_lifecycle_payload, capability_requires_local_mediation,
+        open_path_capability, open_url_capability, render_node_lifecycle_text,
+        NodeLifecyclePayload,
+    };
+    use crate::proto::palyra::{common::v1 as common_v1, node::v1 as node_v1};
 
     #[test]
     fn node_lifecycle_text_redacts_sensitive_values() {
@@ -1117,6 +1298,58 @@ mod tests {
         assert!(
             rendered.contains("node.status.details=available via --json"),
             "rendered output should point operators to explicit detail mode: {rendered}"
+        );
+    }
+
+    #[test]
+    fn node_capability_contract_marks_local_mediation_capabilities() {
+        assert!(capability_requires_local_mediation("desktop.open_url"));
+        assert!(capability_requires_local_mediation("desktop.open_path"));
+        assert!(!capability_requires_local_mediation("system.health"));
+        assert!(!capability_requires_local_mediation("echo"));
+    }
+
+    #[test]
+    fn capability_lifecycle_payload_carries_request_id_and_state() {
+        let payload = build_capability_lifecycle_payload(
+            &node_v1::NodeCapabilityDispatch {
+                request_id: Some(common_v1::CanonicalId {
+                    ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAZ".to_owned(),
+                }),
+                capability: "desktop.open_url".to_owned(),
+                input_json: Vec::new(),
+                max_payload_bytes: 1024,
+            },
+            "awaiting_local_mediation",
+        )
+        .expect("payload should build");
+
+        assert_eq!(
+            payload.get("request_id").and_then(serde_json::Value::as_str),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAZ")
+        );
+        assert_eq!(
+            payload.get("state").and_then(serde_json::Value::as_str),
+            Some("awaiting_local_mediation")
+        );
+    }
+
+    #[test]
+    fn desktop_open_url_rejects_non_http_urls() {
+        let error = open_url_capability(&json!({ "url": "file:///tmp/test.txt" }))
+            .expect_err("non-http URL must be rejected");
+
+        assert!(error.to_string().contains("only allows http/https"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn desktop_open_path_requires_absolute_existing_paths() {
+        let error = open_path_capability(&json!({ "path": "relative/file.txt" }))
+            .expect_err("relative path must be rejected");
+
+        assert!(
+            error.to_string().contains("requires an absolute path"),
+            "unexpected error: {error}"
         );
     }
 }

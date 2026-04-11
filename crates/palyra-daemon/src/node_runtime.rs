@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use palyra_common::redaction::{redact_auth_error, redact_url_segments_in_text};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
@@ -145,6 +146,8 @@ struct PersistedNodeRuntimeState {
     pairing_requests: HashMap<String, DevicePairingRequestRecord>,
     #[serde(default)]
     nodes: HashMap<String, RegisteredNodeRecord>,
+    #[serde(default)]
+    capability_requests: HashMap<String, CapabilityRequestRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +163,34 @@ pub(crate) struct CapabilityExecutionResult {
     pub(crate) success: bool,
     pub(crate) output_json: Vec<u8>,
     pub(crate) error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CapabilityRequestState {
+    Queued,
+    Dispatched,
+    AwaitingLocalMediation,
+    Succeeded,
+    Failed,
+    TimedOut,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CapabilityRequestRecord {
+    pub(crate) request_id: String,
+    pub(crate) device_id: String,
+    pub(crate) capability: String,
+    pub(crate) state: CapabilityRequestState,
+    pub(crate) created_at_unix_ms: i64,
+    pub(crate) updated_at_unix_ms: i64,
+    pub(crate) dispatched_at_unix_ms: Option<i64>,
+    pub(crate) completed_at_unix_ms: Option<i64>,
+    pub(crate) max_payload_bytes: u64,
+    pub(crate) input_summary: Option<String>,
+    pub(crate) output_summary: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Default)]
@@ -474,14 +505,34 @@ impl NodeRuntimeState {
         max_payload_bytes: u64,
         _timeout_ms: Option<u64>,
     ) -> Result<(String, oneshot::Receiver<CapabilityExecutionResult>), Status> {
+        let now = current_unix_ms()?;
         let request_id = Ulid::new().to_string();
         let dispatch = CapabilityDispatchRecord {
             request_id: request_id.clone(),
             capability: capability.to_owned(),
-            input_json,
+            input_json: input_json.clone(),
             max_payload_bytes,
         };
         let (sender, receiver) = oneshot::channel();
+        let request = CapabilityRequestRecord {
+            request_id: request_id.clone(),
+            device_id: device_id.to_owned(),
+            capability: capability.to_owned(),
+            state: CapabilityRequestState::Queued,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            dispatched_at_unix_ms: None,
+            completed_at_unix_ms: None,
+            max_payload_bytes,
+            input_summary: summarize_payload_bytes(input_json.as_slice()),
+            output_summary: None,
+            error: None,
+        };
+        {
+            let mut persisted = lock_mutex(&self.persisted, "node runtime state")?;
+            persisted.capability_requests.insert(request_id.clone(), request);
+            self.persist_locked(&persisted)?;
+        }
         let mut capabilities = lock_mutex(&self.capabilities, "node capability runtime")?;
         capabilities.queued_by_device.entry(device_id.to_owned()).or_default().push_back(dispatch);
         capabilities.waiters_by_request_id.insert(request_id.clone(), sender);
@@ -492,6 +543,7 @@ impl NodeRuntimeState {
         &self,
         device_id: &str,
     ) -> Result<Option<CapabilityDispatchRecord>, Status> {
+        let now = current_unix_ms()?;
         let mut capabilities = lock_mutex(&self.capabilities, "node capability runtime")?;
         let Some(queue) = capabilities.queued_by_device.get_mut(device_id) else {
             return Ok(None);
@@ -500,6 +552,14 @@ impl NodeRuntimeState {
             return Ok(None);
         };
         capabilities.inflight_by_request_id.insert(dispatch.request_id.clone(), dispatch.clone());
+        drop(capabilities);
+        let mut persisted = lock_mutex(&self.persisted, "node runtime state")?;
+        if let Some(request) = persisted.capability_requests.get_mut(dispatch.request_id.as_str()) {
+            request.state = CapabilityRequestState::Dispatched;
+            request.updated_at_unix_ms = now;
+            request.dispatched_at_unix_ms = Some(now);
+        }
+        self.persist_locked(&persisted)?;
         Ok(Some(dispatch))
     }
 
@@ -508,6 +568,22 @@ impl NodeRuntimeState {
         request_id: &str,
         result: CapabilityExecutionResult,
     ) -> Result<bool, Status> {
+        let now = current_unix_ms()?;
+        {
+            let mut persisted = lock_mutex(&self.persisted, "node runtime state")?;
+            if let Some(request) = persisted.capability_requests.get_mut(request_id) {
+                request.state = if result.success {
+                    CapabilityRequestState::Succeeded
+                } else {
+                    CapabilityRequestState::Failed
+                };
+                request.updated_at_unix_ms = now;
+                request.completed_at_unix_ms = Some(now);
+                request.output_summary = summarize_payload_bytes(result.output_json.as_slice());
+                request.error = normalize_summary_text(result.error.as_str());
+            }
+            self.persist_locked(&persisted)?;
+        }
         let mut capabilities = lock_mutex(&self.capabilities, "node capability runtime")?;
         capabilities.inflight_by_request_id.remove(request_id);
         let Some(waiter) = capabilities.waiters_by_request_id.remove(request_id) else {
@@ -515,6 +591,58 @@ impl NodeRuntimeState {
         };
         let _ = waiter.send(result);
         Ok(true)
+    }
+
+    pub(crate) fn mark_capability_timeout(&self, request_id: &str) -> Result<bool, Status> {
+        let now = current_unix_ms()?;
+        let mut persisted = lock_mutex(&self.persisted, "node runtime state")?;
+        let Some(request) = persisted.capability_requests.get_mut(request_id) else {
+            return Ok(false);
+        };
+        request.state = CapabilityRequestState::TimedOut;
+        request.updated_at_unix_ms = now;
+        request.completed_at_unix_ms = Some(now);
+        request.error = Some("timed out waiting for node capability result".to_owned());
+        self.persist_locked(&persisted)?;
+        Ok(true)
+    }
+
+    pub(crate) fn mark_capability_awaiting_local_mediation(
+        &self,
+        request_id: &str,
+    ) -> Result<bool, Status> {
+        let now = current_unix_ms()?;
+        let mut persisted = lock_mutex(&self.persisted, "node runtime state")?;
+        let Some(request) = persisted.capability_requests.get_mut(request_id) else {
+            return Ok(false);
+        };
+        request.state = CapabilityRequestState::AwaitingLocalMediation;
+        request.updated_at_unix_ms = now;
+        request.dispatched_at_unix_ms = Some(request.dispatched_at_unix_ms.unwrap_or(now));
+        self.persist_locked(&persisted)?;
+        Ok(true)
+    }
+
+    pub(crate) fn capability_requests(
+        &self,
+        device_id: Option<&str>,
+    ) -> Result<Vec<CapabilityRequestRecord>, Status> {
+        let persisted = lock_mutex(&self.persisted, "node runtime state")?;
+        let mut requests = persisted
+            .capability_requests
+            .values()
+            .filter(|record| {
+                device_id.is_none_or(|candidate| candidate == record.device_id.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        requests.sort_by(|left, right| {
+            right
+                .created_at_unix_ms
+                .cmp(&left.created_at_unix_ms)
+                .then_with(|| left.request_id.cmp(&right.request_id))
+        });
+        Ok(requests)
     }
 
     fn persist_locked(&self, persisted: &PersistedNodeRuntimeState) -> Result<(), Status> {
@@ -607,19 +735,33 @@ pub(crate) fn current_unix_ms() -> Result<i64, Status> {
     i64::try_from(duration.as_millis()).map_err(|_| Status::internal("timestamp overflow"))
 }
 
+fn normalize_summary_text(raw: &str) -> Option<String> {
+    let trimmed = redact_url_segments_in_text(&redact_auth_error(raw)).trim().to_owned();
+    if trimmed.is_empty() {
+        None
+    } else if trimmed.chars().count() > 240 {
+        Some(format!("{}...", trimmed.chars().take(237).collect::<String>()))
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn summarize_payload_bytes(payload_json: &[u8]) -> Option<String> {
+    if payload_json.is_empty() {
+        return None;
+    }
+    let redacted = crate::journal::redact_payload_json(payload_json)
+        .unwrap_or_else(|_| String::from_utf8_lossy(payload_json).into_owned());
+    normalize_summary_text(redacted.as_str())
+}
+
 pub(crate) fn parse_capability_result_payload(
     payload_json: &[u8],
 ) -> Result<(String, CapabilityExecutionResult), Status> {
     let value: Value = serde_json::from_slice(payload_json).map_err(|error| {
         Status::invalid_argument(format!("invalid capability result payload: {error}"))
     })?;
-    let request_id = value
-        .get("request_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| Status::invalid_argument("capability result payload missing request_id"))?
-        .to_owned();
+    let request_id = parse_capability_request_id(&value)?;
     let success = value.get("success").and_then(Value::as_bool).unwrap_or(false);
     let error = value.get("error").and_then(Value::as_str).unwrap_or_default().to_owned();
     let output_json = value
@@ -627,6 +769,23 @@ pub(crate) fn parse_capability_result_payload(
         .map(|inner| serde_json::to_vec(inner).unwrap_or_default())
         .unwrap_or_default();
     Ok((request_id, CapabilityExecutionResult { success, output_json, error }))
+}
+
+pub(crate) fn parse_capability_request_id_payload(payload_json: &[u8]) -> Result<String, Status> {
+    let value: Value = serde_json::from_slice(payload_json).map_err(|error| {
+        Status::invalid_argument(format!("invalid capability lifecycle payload: {error}"))
+    })?;
+    parse_capability_request_id(&value)
+}
+
+fn parse_capability_request_id(value: &Value) -> Result<String, Status> {
+    value
+        .get("request_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| Status::invalid_argument("capability payload missing request_id"))
 }
 
 #[cfg(test)]
@@ -679,5 +838,113 @@ mod tests {
             encoded.get("mtls_client_private_key_pem").is_none(),
             "runtime state serialization must not persist private keys"
         );
+    }
+
+    #[test]
+    fn capability_request_lifecycle_tracks_queue_dispatch_completion_and_timeout() {
+        let tempdir = tempdir().expect("temp dir should be created");
+        let runtime =
+            NodeRuntimeState::load(tempdir.path()).expect("node runtime should initialize cleanly");
+        runtime
+            .register_node(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                "windows-x86_64",
+                vec![super::DeviceCapabilityView {
+                    name: "system.health".to_owned(),
+                    available: true,
+                }],
+            )
+            .expect("node should register");
+
+        let (request_id, _receiver) = runtime
+            .enqueue_capability_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                "system.health",
+                br#"{"secret":"value","ok":true}"#.to_vec(),
+                4096,
+                Some(30_000),
+            )
+            .expect("capability request should queue");
+        let queued = runtime.capability_requests(Some("01ARZ3NDEKTSV4RRFFQ69G5FAZ")).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].request_id, request_id);
+        assert!(matches!(queued[0].state, super::CapabilityRequestState::Queued));
+        assert_eq!(queued[0].capability, "system.health");
+        assert_eq!(queued[0].max_payload_bytes, 4096);
+        assert!(queued[0].input_summary.is_some());
+        assert!(
+            !queued[0].input_summary.as_deref().unwrap_or_default().contains("value"),
+            "payload summary must remain redacted"
+        );
+
+        let dispatched = runtime
+            .next_capability_dispatch("01ARZ3NDEKTSV4RRFFQ69G5FAZ")
+            .expect("dispatch should succeed")
+            .expect("request should dispatch");
+        assert_eq!(dispatched.request_id, request_id);
+        let dispatched_state =
+            runtime.capability_requests(Some("01ARZ3NDEKTSV4RRFFQ69G5FAZ")).unwrap();
+        assert!(matches!(dispatched_state[0].state, super::CapabilityRequestState::Dispatched));
+        assert!(dispatched_state[0].dispatched_at_unix_ms.is_some());
+
+        runtime
+            .complete_capability_request(
+                request_id.as_str(),
+                super::CapabilityExecutionResult {
+                    success: true,
+                    output_json: br#"{"status":"ok"}"#.to_vec(),
+                    error: String::new(),
+                },
+            )
+            .expect("request completion should succeed");
+        let completed = runtime.capability_requests(Some("01ARZ3NDEKTSV4RRFFQ69G5FAZ")).unwrap();
+        assert!(matches!(completed[0].state, super::CapabilityRequestState::Succeeded));
+        assert_eq!(completed[0].output_summary.as_deref(), Some("{\"status\":\"ok\"}"));
+        assert!(completed[0].completed_at_unix_ms.is_some());
+
+        let (timeout_request_id, _timeout_receiver) = runtime
+            .enqueue_capability_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                "desktop.open_url",
+                br#"{"url":"https://example.com/secret/path"}"#.to_vec(),
+                4096,
+                Some(30_000),
+            )
+            .expect("timeout request should queue");
+        runtime
+            .mark_capability_timeout(timeout_request_id.as_str())
+            .expect("timeout should mark request");
+        let requests = runtime.capability_requests(Some("01ARZ3NDEKTSV4RRFFQ69G5FAZ")).unwrap();
+        let timeout = requests
+            .iter()
+            .find(|record| record.request_id == timeout_request_id)
+            .expect("timed-out request should remain visible");
+        assert!(matches!(timeout.state, super::CapabilityRequestState::TimedOut));
+        assert_eq!(timeout.error.as_deref(), Some("timed out waiting for node capability result"));
+        assert!(timeout.completed_at_unix_ms.is_some());
+
+        let (mediation_request_id, _mediation_receiver) = runtime
+            .enqueue_capability_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                "desktop.open_url",
+                br#"{"url":"https://example.com/open"}"#.to_vec(),
+                4096,
+                Some(30_000),
+            )
+            .expect("mediation request should queue");
+        runtime
+            .next_capability_dispatch("01ARZ3NDEKTSV4RRFFQ69G5FAZ")
+            .expect("dispatch should work")
+            .expect("mediation request should dispatch");
+        runtime
+            .mark_capability_awaiting_local_mediation(mediation_request_id.as_str())
+            .expect("mediation state should persist");
+        let requests = runtime.capability_requests(Some("01ARZ3NDEKTSV4RRFFQ69G5FAZ")).unwrap();
+        let mediation = requests
+            .iter()
+            .find(|record| record.request_id == mediation_request_id)
+            .expect("mediation request should remain visible");
+        assert!(matches!(mediation.state, super::CapabilityRequestState::AwaitingLocalMediation));
+        assert!(mediation.dispatched_at_unix_ms.is_some());
     }
 }

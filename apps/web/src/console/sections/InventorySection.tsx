@@ -222,6 +222,26 @@ export function InventorySection({ app }: InventorySectionProps) {
                 </div>
               </dl>
 
+              {selected.capabilities.length > 0 ? (
+                <WorkspaceSectionCard
+                  description="Capability inventory includes the execution posture published for this device so handoff semantics stay explicit."
+                  title="Capability inventory"
+                >
+                  <WorkspaceTable
+                    ariaLabel="Device capabilities"
+                    columns={["Capability", "Available", "Execution mode"]}
+                  >
+                    {selected.capabilities.map((capability) => (
+                      <tr key={capability.name}>
+                        <td>{capability.name}</td>
+                        <td>{capability.available ? "yes" : "no"}</td>
+                        <td>{capability.execution_mode}</td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
+                </WorkspaceSectionCard>
+              ) : null}
+
               {selected.warnings.length > 0 ? (
                 <WorkspaceInlineNotice title="Warnings" tone="warning">
                   <ul className="console-compact-list">
@@ -352,6 +372,39 @@ export function InventorySection({ app }: InventorySectionProps) {
                       </tr>
                     ))}
                   </WorkspaceTable>
+                )}
+              </WorkspaceSectionCard>
+
+              <WorkspaceSectionCard
+                description="Capability handoff stays visible next to the device so operators can distinguish queued work, local mediation, and completed outcomes."
+                title="Capability requests"
+              >
+                {inventory.selectedDetail?.capability_requests.length ? (
+                  <WorkspaceTable
+                    ariaLabel="Device capability request history"
+                    columns={["Created", "Capability", "State", "Input", "Outcome"]}
+                  >
+                    {inventory.selectedDetail.capability_requests.map((record) => (
+                      <tr key={record.request_id}>
+                        <td>{formatUnixMs(record.created_at_unix_ms)}</td>
+                        <td>
+                          <div className="workspace-stack">
+                            <strong>{record.capability}</strong>
+                            <small className="text-muted">{record.request_id}</small>
+                          </div>
+                        </td>
+                        <td>{record.state}</td>
+                        <td>{record.input_summary ?? "n/a"}</td>
+                        <td>{record.error ?? record.output_summary ?? "pending"}</td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
+                ) : (
+                  <WorkspaceEmptyState
+                    compact
+                    description="Capability request history will appear here after the daemon hands work off to this device."
+                    title="No capability requests"
+                  />
                 )}
               </WorkspaceSectionCard>
             </div>

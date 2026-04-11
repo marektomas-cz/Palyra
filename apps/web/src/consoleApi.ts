@@ -1510,6 +1510,22 @@ export interface NodePairingCodeView {
 export interface NodeCapabilityView {
   name: string;
   available: boolean;
+  execution_mode: string;
+}
+
+export interface NodeCapabilityRequestView {
+  request_id: string;
+  device_id: string;
+  capability: string;
+  state: string;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+  dispatched_at_unix_ms?: number;
+  completed_at_unix_ms?: number;
+  max_payload_bytes: number;
+  input_summary?: string;
+  output_summary?: string;
+  error?: string;
 }
 
 export interface InventoryCapabilitySummary {
@@ -1630,6 +1646,7 @@ export interface InventoryDeviceDetailEnvelope {
   generated_at_unix_ms: number;
   device: InventoryDeviceRecord;
   pairings: NodePairingRequestView[];
+  capability_requests: NodeCapabilityRequestView[];
 }
 
 export interface DeviceEnvelope {

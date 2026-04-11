@@ -896,7 +896,7 @@ describe("ConsoleApiClient", () => {
           transcript_hash_hex: "hash-1",
           current_certificate_fingerprint: "cert-1",
           certificate_fingerprint_history: ["cert-0", "cert-1"],
-          capabilities: [{ name: "ping", available: true }],
+          capabilities: [{ name: "ping", available: true, execution_mode: "automatic" }],
           capability_summary: { total: 1, available: 1, unavailable: 0 },
           warnings: [],
           actions: {
@@ -907,6 +907,7 @@ describe("ConsoleApiClient", () => {
           },
         },
         pairings: [],
+        capability_requests: [],
       }),
       jsonResponse({
         contract: { contract_version: "control-plane.v1" },

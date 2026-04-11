@@ -681,7 +681,18 @@ impl node_v1::node_service_server::NodeService for NodeRpcServiceImpl {
                     }
                 }
 
-                if message.event_name == "capability.result" {
+                if message.event_name == "capability.awaiting_local_mediation" {
+                    match node_runtime::parse_capability_request_id_payload(&message.payload_json) {
+                        Ok(request_id) => {
+                            let _ = node_runtime
+                                .mark_capability_awaiting_local_mediation(request_id.as_str());
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Err(error)).await;
+                            break;
+                        }
+                    }
+                } else if message.event_name == "capability.result" {
                     match node_runtime::parse_capability_result_payload(&message.payload_json) {
                         Ok((request_id, result)) => {
                             let _ = node_runtime
@@ -728,7 +739,7 @@ impl node_v1::node_service_server::NodeService for NodeRpcServiceImpl {
                 "node must register before executing capabilities",
             ));
         }
-        let (_request_id, receiver) = self.node_runtime.enqueue_capability_request(
+        let (request_id, receiver) = self.node_runtime.enqueue_capability_request(
             device_id.as_str(),
             request.get_ref().capability.trim(),
             request.get_ref().input_json.clone(),
@@ -739,6 +750,7 @@ impl node_v1::node_service_server::NodeService for NodeRpcServiceImpl {
             tokio::time::timeout(Duration::from_millis(NODE_CAPABILITY_TIMEOUT_MS), receiver)
                 .await
                 .map_err(|_| {
+                    let _ = self.node_runtime.mark_capability_timeout(request_id.as_str());
                     Status::deadline_exceeded("timed out waiting for node capability result")
                 })?
                 .map_err(|_| Status::internal("node capability result channel closed"))?;

@@ -3,6 +3,13 @@ use std::time::Duration;
 use crate::node_runtime::{CapabilityExecutionResult, RegisteredNodeRecord};
 use crate::*;
 
+fn capability_execution_mode(name: &str) -> &'static str {
+    match name {
+        "desktop.open_url" | "desktop.open_path" => "local_mediation",
+        _ => "automatic",
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ConsoleNodesPendingQuery {
     #[serde(default, alias = "status")]
@@ -100,7 +107,7 @@ pub(crate) async fn console_node_invoke_handler(
     })?;
     let timeout_ms = payload.timeout_ms.unwrap_or(30_000).clamp(1_000, 120_000);
     let max_payload_bytes = payload.max_payload_bytes.unwrap_or(64 * 1024);
-    let (_request_id, receiver) = state
+    let (request_id, receiver) = state
         .node_runtime
         .enqueue_capability_request(
             device_id.as_str(),
@@ -113,6 +120,7 @@ pub(crate) async fn console_node_invoke_handler(
     let result = tokio::time::timeout(Duration::from_millis(timeout_ms), receiver)
         .await
         .map_err(|_| {
+            let _ = state.node_runtime.mark_capability_timeout(request_id.as_str());
             runtime_status_response(tonic::Status::deadline_exceeded(
                 "timed out waiting for node capability result",
             ))
@@ -139,6 +147,7 @@ pub(crate) fn node_record_json(node: &RegisteredNodeRecord) -> control_plane::No
             .map(|capability| control_plane::NodeCapabilityView {
                 name: capability.name.clone(),
                 available: capability.available,
+                execution_mode: capability_execution_mode(capability.name.as_str()).to_owned(),
             })
             .collect(),
         registered_at_unix_ms: node.registered_at_unix_ms,

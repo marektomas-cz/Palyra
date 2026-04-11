@@ -63,13 +63,62 @@ pub(crate) async fn console_inventory_device_detail_handler(
         .filter(|record| record.device_id == device.device_id)
         .collect::<Vec<_>>();
     pairings.sort_by_key(|record| Reverse(record.requested_at_unix_ms));
+    let capability_requests = state
+        .node_runtime
+        .capability_requests(Some(device.device_id.as_str()))
+        .map_err(runtime_status_response)?
+        .into_iter()
+        .map(capability_request_view)
+        .collect::<Vec<_>>();
 
     Ok(Json(control_plane::InventoryDeviceDetailEnvelope {
         contract: contract_descriptor(),
         generated_at_unix_ms,
         device,
         pairings,
+        capability_requests,
     }))
+}
+
+fn capability_request_view(
+    record: crate::node_runtime::CapabilityRequestRecord,
+) -> control_plane::NodeCapabilityRequestView {
+    control_plane::NodeCapabilityRequestView {
+        request_id: record.request_id,
+        device_id: record.device_id,
+        capability: record.capability,
+        state: match record.state {
+            crate::node_runtime::CapabilityRequestState::Queued => {
+                control_plane::NodeCapabilityRequestState::Queued
+            }
+            crate::node_runtime::CapabilityRequestState::Dispatched => {
+                control_plane::NodeCapabilityRequestState::Dispatched
+            }
+            crate::node_runtime::CapabilityRequestState::AwaitingLocalMediation => {
+                control_plane::NodeCapabilityRequestState::AwaitingLocalMediation
+            }
+            crate::node_runtime::CapabilityRequestState::Succeeded => {
+                control_plane::NodeCapabilityRequestState::Succeeded
+            }
+            crate::node_runtime::CapabilityRequestState::Failed => {
+                control_plane::NodeCapabilityRequestState::Failed
+            }
+            crate::node_runtime::CapabilityRequestState::TimedOut => {
+                control_plane::NodeCapabilityRequestState::TimedOut
+            }
+            crate::node_runtime::CapabilityRequestState::Rejected => {
+                control_plane::NodeCapabilityRequestState::Rejected
+            }
+        },
+        created_at_unix_ms: record.created_at_unix_ms,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+        dispatched_at_unix_ms: record.dispatched_at_unix_ms,
+        completed_at_unix_ms: record.completed_at_unix_ms,
+        max_payload_bytes: record.max_payload_bytes,
+        input_summary: record.input_summary,
+        output_summary: record.output_summary,
+        error: record.error,
+    }
 }
 
 fn build_inventory_devices(
@@ -544,6 +593,7 @@ mod tests {
             capabilities: vec![control_plane::NodeCapabilityView {
                 name: "ping".to_owned(),
                 available: true,
+                execution_mode: "automatic".to_owned(),
             }],
             registered_at_unix_ms: 1_000,
             last_seen_at_unix_ms: 1_000,

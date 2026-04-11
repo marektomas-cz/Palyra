@@ -391,7 +391,7 @@ export function inventoryListFixture() {
         current_certificate_fingerprint: "sha256:cert-pending-2",
         certificate_fingerprint_history: ["sha256:cert-pending-1", "sha256:cert-pending-2"],
         platform: "windows",
-        capabilities: [{ name: "ping", available: true }],
+        capabilities: [{ name: "ping", available: true, execution_mode: "automatic" }],
         capability_summary: { total: 1, available: 1, unavailable: 0 },
         current_certificate_expires_at_unix_ms: 1700086401000,
         warnings: ["heartbeat stale"],
@@ -421,7 +421,7 @@ export function inventoryListFixture() {
         current_certificate_fingerprint: "sha256:cert-approved-1",
         certificate_fingerprint_history: ["sha256:cert-approved-1"],
         platform: "macos",
-        capabilities: [{ name: "ping", available: true }],
+        capabilities: [{ name: "ping", available: true, execution_mode: "automatic" }],
         capability_summary: { total: 1, available: 1, unavailable: 0 },
         current_certificate_expires_at_unix_ms: 1700086401200,
         warnings: [],
@@ -488,6 +488,32 @@ export function inventoryDeviceDetailFixture(deviceId = "01ARZ3NDEKTSV4RRFFQ69G5
     device:
       inventory.devices.find((record) => record.device_id === deviceId) ?? inventory.devices[0],
     pairings: nodePairingListFixture().requests.filter((record) => record.device_id === deviceId),
+    capability_requests: [
+      {
+        request_id: "01ARZ3NDEKTSV4RRFFQ69REQ01",
+        device_id: deviceId,
+        capability: "desktop.open_url",
+        state: "succeeded",
+        created_at_unix_ms: 1700000001800,
+        updated_at_unix_ms: 1700000002400,
+        dispatched_at_unix_ms: 1700000001900,
+        completed_at_unix_ms: 1700000002400,
+        max_payload_bytes: 65536,
+        input_summary: "{\"url\":\"https://example.com/node\"}",
+        output_summary: "{\"opened\":true}",
+      },
+      {
+        request_id: "01ARZ3NDEKTSV4RRFFQ69REQ02",
+        device_id: deviceId,
+        capability: "desktop.notify",
+        state: "awaiting_local_mediation",
+        created_at_unix_ms: 1700000002600,
+        updated_at_unix_ms: 1700000002700,
+        dispatched_at_unix_ms: 1700000002700,
+        max_payload_bytes: 65536,
+        input_summary: "{\"title\":\"Review required\"}",
+      },
+    ],
   };
 }
 
