@@ -1,8 +1,11 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
+use palyra_control_plane as control_plane;
 use tauri::{AppHandle, Manager, State};
+use tokio::process::Command;
 use tokio::sync::Mutex;
+use ulid::Ulid;
 
 use super::companion::{
     build_companion_handoff_url, build_companion_snapshot, decide_companion_approval,
@@ -29,13 +32,13 @@ use super::openai_auth::{
     OpenAiProfileActionRequest,
 };
 use super::snapshot::{
-    build_dashboard_open_url, build_snapshot_from_inputs, run_support_bundle_export,
-    sanitize_log_line, ActionResult, ControlCenterSnapshot, DesktopSettingsSnapshot,
-    SupportBundleExportResult,
+    build_control_plane_client, build_dashboard_open_url, build_snapshot_from_inputs,
+    ensure_console_session_with_csrf, run_support_bundle_export, sanitize_log_line, ActionResult,
+    ControlCenterSnapshot, DesktopSettingsSnapshot, SupportBundleExportResult,
 };
 use super::{
     build_onboarding_status, ControlCenter, DesktopOnboardingStep, DiscordOnboardingRequest,
-    SUPERVISOR_TICK_MS,
+    CONSOLE_PRINCIPAL, SUPERVISOR_TICK_MS,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -45,6 +48,14 @@ pub(crate) struct OnboardingStateRootRequest {
     path: Option<String>,
     #[serde(default)]
     confirm_selection: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DesktopNodeLifecyclePayload {
+    installed: bool,
+    #[serde(default)]
+    device_id: Option<String>,
+    detail: String,
 }
 
 pub(crate) struct DesktopAppState {
@@ -249,6 +260,44 @@ pub(crate) async fn restart_palyra(
         Some("Desktop requested a local runtime restart.".to_owned()),
     );
     Ok(ActionResult { ok: true, message: "restart requested".to_owned() })
+}
+
+#[tauri::command]
+pub(crate) async fn enroll_desktop_node(
+    state: State<'_, DesktopAppState>,
+) -> Result<ActionResult, String> {
+    run_desktop_node_enrollment(state, false).await
+}
+
+#[tauri::command]
+pub(crate) async fn repair_desktop_node(
+    state: State<'_, DesktopAppState>,
+) -> Result<ActionResult, String> {
+    run_desktop_node_enrollment(state, true).await
+}
+
+#[tauri::command]
+pub(crate) async fn reset_desktop_node(
+    state: State<'_, DesktopAppState>,
+) -> Result<ActionResult, String> {
+    let runtime_root = {
+        let mut supervisor = state.supervisor.lock().await;
+        supervisor.stop_node_host();
+        supervisor.runtime_root.clone()
+    };
+    let lifecycle = run_palyra_json_command(runtime_root.as_path(), &["node", "uninstall", "--json"])
+        .await
+        .map_err(command_error)?;
+    let detail = lifecycle
+        .get("detail")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("desktop node host reset");
+    {
+        let mut supervisor = state.supervisor.lock().await;
+        supervisor.sync_node_host_desired_state();
+        supervisor.refresh_runtime_state();
+    }
+    Ok(ActionResult { ok: true, message: sanitize_log_line(detail) })
 }
 
 #[tauri::command]
@@ -747,6 +796,179 @@ fn open_browser_result(result: OpenAiOAuthLaunchResult) -> Result<OpenAiOAuthLau
     }
 }
 
+async fn run_desktop_node_enrollment(
+    state: State<'_, DesktopAppState>,
+    repair: bool,
+) -> Result<ActionResult, String> {
+    let (http_client, runtime, admin_token, runtime_root, gateway_running) = {
+        let supervisor = state.supervisor.lock().await;
+        (
+            supervisor.http_client.clone(),
+            supervisor.runtime.clone(),
+            supervisor.admin_token.clone(),
+            supervisor.runtime_root.clone(),
+            supervisor.gateway.child.is_some(),
+        )
+    };
+    if !gateway_running {
+        return Err("desktop node enrollment requires the local gateway to be running".to_owned());
+    }
+
+    let status = read_desktop_node_lifecycle(runtime_root.as_path()).await.map_err(command_error)?;
+    if status.installed && !repair {
+        return Ok(ActionResult {
+            ok: true,
+            message: sanitize_log_line(status.detail.as_str()),
+        });
+    }
+
+    let device_id = status.device_id.unwrap_or_else(|| Ulid::new().to_string());
+    if repair && status.installed {
+        let _ = run_palyra_json_command(runtime_root.as_path(), &["node", "uninstall", "--json"])
+            .await
+            .map_err(command_error)?;
+    }
+
+    let mut control_plane =
+        build_control_plane_client(http_client.clone(), &runtime).map_err(command_error)?;
+    let _csrf = ensure_console_session_with_csrf(&mut control_plane, admin_token.as_str())
+        .await
+        .map_err(command_error)?;
+    let code = control_plane
+        .mint_node_pairing_code(&control_plane::NodePairingCodeMintRequest {
+            method: control_plane::NodePairingMethod::Pin,
+            issued_by: Some(CONSOLE_PRINCIPAL.to_owned()),
+            ttl_ms: Some(10 * 60 * 1_000),
+        })
+        .await
+        .map_err(|error| command_error(anyhow!("failed to mint desktop node pairing code: {error}")))?
+        .code
+        .code;
+    let grpc_url = format!("https://127.0.0.1:{}", runtime.gateway_grpc_port.saturating_add(1));
+    let runtime_root_for_install = runtime_root.clone();
+    let device_id_for_install = device_id.clone();
+    let install_task = tauri::async_runtime::spawn(async move {
+        let args = vec![
+            "node".to_owned(),
+            "install".to_owned(),
+            "--json".to_owned(),
+            "--device-id".to_owned(),
+            device_id_for_install,
+            "--grpc-url".to_owned(),
+            grpc_url,
+            "--method".to_owned(),
+            "pin".to_owned(),
+            "--pairing-code".to_owned(),
+            code,
+        ];
+        run_palyra_json_command_owned(runtime_root_for_install.as_path(), &args).await
+    });
+    let request_id = wait_for_pending_node_pairing_request(&control_plane, device_id.as_str())
+        .await
+        .map_err(command_error)?;
+    control_plane
+        .approve_node_pairing_request(
+            request_id.as_str(),
+            &control_plane::NodePairingDecisionRequest {
+                reason: Some(if repair {
+                    "desktop_control_center_repair_enroll".to_owned()
+                } else {
+                    "desktop_control_center_enroll".to_owned()
+                }),
+            },
+        )
+        .await
+        .map_err(|error| command_error(anyhow!("failed to approve desktop node pairing: {error}")))?;
+    let install_payload = install_task
+        .await
+        .map_err(|error| command_error(anyhow!("desktop node install task failed: {error}")))?
+        .map_err(command_error)?;
+    {
+        let mut supervisor = state.supervisor.lock().await;
+        supervisor.sync_node_host_desired_state();
+        supervisor.refresh_runtime_state();
+    }
+    let detail = install_payload
+        .get("detail")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("desktop node enrolled");
+    Ok(ActionResult { ok: true, message: sanitize_log_line(detail) })
+}
+
+async fn wait_for_pending_node_pairing_request(
+    control_plane: &control_plane::ControlPlaneClient,
+    device_id: &str,
+) -> Result<String> {
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(20) {
+        let envelope = control_plane
+            .list_node_pairing_requests(Some(&control_plane::NodePairingListQuery {
+                client_kind: Some("node".to_owned()),
+                state: Some(control_plane::NodePairingRequestState::PendingApproval),
+            }))
+            .await
+            .map_err(|error| anyhow!("failed to poll desktop node pairing requests: {error}"))?;
+        if let Some(request_id) = envelope
+            .requests
+            .into_iter()
+            .find(|record| record.device_id == device_id)
+            .map(|record| record.request_id)
+        {
+            return Ok(request_id);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(anyhow!(
+        "timed out waiting for desktop node pairing request for device {device_id}"
+    ))
+}
+
+async fn read_desktop_node_lifecycle(runtime_root: &Path) -> Result<DesktopNodeLifecyclePayload> {
+    let payload = run_palyra_json_command(runtime_root, &["node", "status", "--json"]).await?;
+    serde_json::from_value(payload).context("failed to decode desktop node lifecycle payload")
+}
+
+async fn run_palyra_json_command(runtime_root: &Path, args: &[&str]) -> Result<serde_json::Value> {
+    let owned_args = args.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+    run_palyra_json_command_owned(runtime_root, &owned_args).await
+}
+
+async fn run_palyra_json_command_owned(
+    runtime_root: &Path,
+    args: &[String],
+) -> Result<serde_json::Value> {
+    let cli_path = super::resolve_binary_path("palyra", "PALYRA_DESKTOP_PALYRA_BIN")?;
+    let mut command = Command::new(cli_path.as_path());
+    super::configure_background_command(&mut command);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .env("PALYRA_STATE_ROOT", runtime_root.to_string_lossy().into_owned())
+        .env(
+            "PALYRA_GATEWAY_IDENTITY_STORE_DIR",
+            runtime_root.join("identity").to_string_lossy().into_owned(),
+        );
+    for arg in args {
+        command.arg(arg);
+    }
+    let output = command.output().await.with_context(|| {
+        format!("failed to run desktop CLI command `{}`", args.join(" "))
+    })?;
+    let stdout = String::from_utf8_lossy(output.stdout.as_slice()).to_string();
+    let stderr = sanitize_log_line(String::from_utf8_lossy(output.stderr.as_slice()).as_ref());
+    if !output.status.success() {
+        return Err(anyhow!(
+            "desktop CLI command `{}` failed: {}",
+            args.join(" "),
+            stderr
+        ));
+    }
+    serde_json::from_str(stdout.as_str()).with_context(|| {
+        format!("failed to decode desktop CLI JSON output for `{}`", args.join(" "))
+    })
+}
+
 pub(crate) fn run() {
     let control_center = match initialize_control_center(ControlCenter::new) {
         Ok(value) => value,
@@ -781,6 +1003,9 @@ pub(crate) fn run() {
             start_palyra,
             stop_palyra,
             restart_palyra,
+            enroll_desktop_node,
+            repair_desktop_node,
+            reset_desktop_node,
             open_dashboard,
             open_desktop_companion_handoff,
             export_support_bundle,

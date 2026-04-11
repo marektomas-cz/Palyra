@@ -62,6 +62,17 @@ pub(crate) struct BrowserStatusSnapshot {
     pub(crate) last_error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct NodeHostStatusSnapshot {
+    pub(crate) installed: bool,
+    pub(crate) paired: bool,
+    pub(crate) running: bool,
+    pub(crate) device_id: Option<String>,
+    pub(crate) grpc_url: Option<String>,
+    pub(crate) cert_expires_at_unix_ms: Option<u64>,
+    pub(crate) detail: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DashboardAccessMode {
@@ -96,6 +107,7 @@ pub(crate) struct QuickFactsSnapshot {
     pub(crate) gateway_uptime_seconds: Option<u64>,
     pub(crate) discord: DiscordStatusSnapshot,
     pub(crate) browser_service: BrowserStatusSnapshot,
+    pub(crate) node_host: NodeHostStatusSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -180,6 +192,7 @@ pub(crate) struct ControlCenterSnapshot {
     pub(crate) diagnostics: DiagnosticsSnapshot,
     pub(crate) gateway_process: ServiceProcessSnapshot,
     pub(crate) browserd_process: ServiceProcessSnapshot,
+    pub(crate) node_host_process: ServiceProcessSnapshot,
     pub(crate) logs: Vec<LogLine>,
     pub(crate) warnings: Vec<String>,
 }
@@ -206,6 +219,7 @@ pub(crate) struct DashboardOpenInputs {
 #[derive(Debug)]
 pub(crate) struct SnapshotBuildInputs {
     pub(crate) runtime: RuntimeConfig,
+    pub(crate) runtime_root: PathBuf,
     pub(crate) browser_service_enabled: bool,
     pub(crate) admin_token: String,
     pub(crate) browser_last_exit: Option<String>,
@@ -213,6 +227,7 @@ pub(crate) struct SnapshotBuildInputs {
     pub(crate) browser_running: bool,
     pub(crate) gateway_process: ServiceProcessSnapshot,
     pub(crate) browserd_process: ServiceProcessSnapshot,
+    pub(crate) node_host_process: ServiceProcessSnapshot,
     pub(crate) logs: Vec<LogLine>,
     pub(crate) http_client: Client,
     pub(crate) console_session_cache: Arc<Mutex<Option<ConsoleSessionCache>>>,
@@ -240,6 +255,7 @@ impl ControlCenter {
         self.refresh_runtime_state();
         SnapshotBuildInputs {
             runtime: self.runtime.clone(),
+            runtime_root: self.runtime_root.clone(),
             browser_service_enabled: self.persisted.browser_service_enabled,
             admin_token: self.admin_token.clone(),
             browser_last_exit: self.browserd.last_exit.clone(),
@@ -247,6 +263,7 @@ impl ControlCenter {
             browser_running: self.browserd.running(),
             gateway_process: self.process_snapshot(ServiceKind::Gateway),
             browserd_process: self.process_snapshot(ServiceKind::Browserd),
+            node_host_process: self.process_snapshot(ServiceKind::NodeHost),
             logs: self.collect_logs(),
             http_client: self.http_client.clone(),
             console_session_cache: Arc::clone(&self.console_session_cache),
@@ -609,6 +626,7 @@ pub(crate) async fn build_snapshot_from_inputs(
 ) -> Result<ControlCenterSnapshot> {
     let SnapshotBuildInputs {
         runtime,
+        runtime_root,
         browser_service_enabled,
         admin_token,
         browser_last_exit,
@@ -616,6 +634,7 @@ pub(crate) async fn build_snapshot_from_inputs(
         browser_running,
         gateway_process,
         browserd_process,
+        node_host_process,
         logs,
         http_client,
         console_session_cache,
@@ -686,6 +705,24 @@ pub(crate) async fn build_snapshot_from_inputs(
         browser_health.as_ref(),
         browser_last_exit,
     );
+    let node_host = match fetch_node_host_status(runtime_root.as_path()).await {
+        Ok(status) => status,
+        Err(error) => {
+            warnings.push(format!(
+                "node host status check failed: {}",
+                sanitize_log_line(error.to_string().as_str())
+            ));
+            NodeHostStatusSnapshot {
+                installed: false,
+                paired: false,
+                running: node_host_process.running,
+                device_id: None,
+                grpc_url: None,
+                cert_expires_at_unix_ms: None,
+                detail: "node host status unavailable".to_owned(),
+            }
+        }
+    };
 
     let dashboard_access = match resolve_dashboard_access_target(runtime.gateway_admin_port) {
         Ok(target) => target,
@@ -708,13 +745,15 @@ pub(crate) async fn build_snapshot_from_inputs(
         gateway_uptime_seconds: gateway_health.as_ref().map(|value| value.uptime_seconds),
         discord,
         browser_service: browser_status,
+        node_host,
     };
     let browser_healthy = quick_facts.browser_service.healthy;
     let discord_degraded = quick_facts.discord.enabled && !quick_facts.discord.authenticated;
+    let node_host_degraded = quick_facts.node_host.installed && !quick_facts.node_host.running;
 
     let overall_status = if gateway_health.is_none() {
         OverallStatus::Down
-    } else if (browser_service_enabled && !browser_healthy) || discord_degraded {
+    } else if (browser_service_enabled && !browser_healthy) || discord_degraded || node_host_degraded {
         OverallStatus::Degraded
     } else {
         OverallStatus::Healthy
@@ -727,8 +766,66 @@ pub(crate) async fn build_snapshot_from_inputs(
         diagnostics,
         gateway_process,
         browserd_process,
+        node_host_process,
         logs,
         warnings,
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct NodeHostLifecyclePayload {
+    installed: bool,
+    paired: bool,
+    running: bool,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    grpc_url: Option<String>,
+    #[serde(default)]
+    cert_expires_at_unix_ms: Option<u64>,
+    detail: String,
+}
+
+async fn fetch_node_host_status(runtime_root: &Path) -> Result<NodeHostStatusSnapshot> {
+    let config_path = runtime_root.join("node-host").join("node-host.json");
+    if !config_path.is_file() {
+        return Ok(NodeHostStatusSnapshot {
+            installed: false,
+            paired: false,
+            running: false,
+            device_id: None,
+            grpc_url: None,
+            cert_expires_at_unix_ms: None,
+            detail: "node host is not enrolled".to_owned(),
+        });
+    }
+
+    let cli_path = resolve_binary_path("palyra", "PALYRA_DESKTOP_PALYRA_BIN")?;
+    let output = Command::new(cli_path.as_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("node")
+        .arg("status")
+        .arg("--json")
+        .env("PALYRA_STATE_ROOT", runtime_root.to_string_lossy().into_owned())
+        .output()
+        .await
+        .context("failed to run desktop node status command")?;
+    if !output.status.success() {
+        let stderr = sanitize_log_line(String::from_utf8_lossy(output.stderr.as_slice()).as_ref());
+        bail!("desktop node status command failed: {stderr}");
+    }
+    let payload = serde_json::from_slice::<NodeHostLifecyclePayload>(output.stdout.as_slice())
+        .context("failed to decode desktop node lifecycle payload")?;
+    Ok(NodeHostStatusSnapshot {
+        installed: payload.installed,
+        paired: payload.paired,
+        running: payload.running,
+        device_id: payload.device_id,
+        grpc_url: payload.grpc_url,
+        cert_expires_at_unix_ms: payload.cert_expires_at_unix_ms,
+        detail: sanitize_log_line(payload.detail.as_str()),
     })
 }
 

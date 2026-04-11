@@ -29,11 +29,15 @@ use super::{
     GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY, LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE,
 };
 
+const NODE_HOST_STATE_DIR: &str = "node-host";
+const NODE_HOST_CONFIG_FILE_NAME: &str = "node-host.json";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ServiceKind {
     Gateway,
     Browserd,
+    NodeHost,
 }
 
 impl ServiceKind {
@@ -41,6 +45,7 @@ impl ServiceKind {
         match self {
             Self::Gateway => "gateway",
             Self::Browserd => "browserd",
+            Self::NodeHost => "node_host",
         }
     }
 
@@ -48,6 +53,7 @@ impl ServiceKind {
         match self {
             Self::Gateway => "palyrad",
             Self::Browserd => "palyra-browserd",
+            Self::NodeHost => "palyra node host",
         }
     }
 
@@ -59,6 +65,7 @@ impl ServiceKind {
         match self {
             Self::Gateway => "PALYRA_DESKTOP_PALYRAD_BIN",
             Self::Browserd => "PALYRA_DESKTOP_BROWSERD_BIN",
+            Self::NodeHost => "PALYRA_DESKTOP_PALYRA_BIN",
         }
     }
 }
@@ -217,6 +224,7 @@ pub(crate) struct ControlCenter {
     pub(crate) runtime: RuntimeConfig,
     pub(crate) gateway: ManagedService,
     pub(crate) browserd: ManagedService,
+    pub(crate) node_host: ManagedService,
     pub(crate) http_client: Client,
     pub(crate) console_session_cache: Arc<Mutex<Option<ConsoleSessionCache>>>,
     pub(crate) console_payload_cache: Arc<Mutex<ConsolePayloadCache>>,
@@ -265,6 +273,7 @@ impl ControlCenter {
         ]);
         let browserd =
             ManagedService::new(vec![runtime.browser_health_port, runtime.browser_grpc_port]);
+        let node_host = ManagedService::new(Vec::new());
 
         let http_client = build_http_client()?;
 
@@ -286,6 +295,7 @@ impl ControlCenter {
             runtime,
             gateway,
             browserd,
+            node_host,
             http_client,
             console_session_cache: Arc::new(Mutex::new(None)),
             console_payload_cache: Arc::new(Mutex::new(ConsolePayloadCache::default())),
@@ -629,8 +639,11 @@ impl ControlCenter {
     pub(crate) fn start_all(&mut self) {
         self.gateway.desired_running = true;
         self.browserd.desired_running = self.persisted.browser_service_enabled;
+        self.node_host.desired_running = self.node_host_installed();
         self.gateway.next_restart_unix_ms = Some(unix_ms_now());
         self.browserd.next_restart_unix_ms = Some(unix_ms_now());
+        self.node_host.next_restart_unix_ms =
+            self.node_host.desired_running.then_some(unix_ms_now());
         self.append_supervisor_log(ServiceKind::Gateway, "start requested for gateway sidecar");
         if self.persisted.browser_service_enabled {
             self.append_supervisor_log(
@@ -638,9 +651,16 @@ impl ControlCenter {
                 "start requested for browser sidecar",
             );
         }
+        if self.node_host.desired_running {
+            self.append_supervisor_log(
+                ServiceKind::NodeHost,
+                "start requested for desktop node host sidecar",
+            );
+        }
     }
 
     pub(crate) fn stop_all(&mut self) {
+        self.stop_service(ServiceKind::NodeHost);
         self.stop_service(ServiceKind::Browserd);
         self.stop_service(ServiceKind::Gateway);
     }
@@ -692,8 +712,10 @@ impl ControlCenter {
         self.drain_log_events();
         self.check_process_exit(ServiceKind::Gateway);
         self.check_process_exit(ServiceKind::Browserd);
+        self.check_process_exit(ServiceKind::NodeHost);
         self.reconcile_service(ServiceKind::Gateway);
         self.reconcile_service(ServiceKind::Browserd);
+        self.reconcile_service(ServiceKind::NodeHost);
     }
 
     fn drain_log_events(&mut self) {
@@ -844,6 +866,14 @@ impl ControlCenter {
                     command.env(key, value);
                 }
             }
+            ServiceKind::NodeHost => {
+                command.arg("node").arg("run").arg("--json");
+                command.env("PALYRA_STATE_ROOT", self.runtime_root.to_string_lossy().into_owned());
+                command.env(
+                    "PALYRA_GATEWAY_IDENTITY_STORE_DIR",
+                    self.runtime_root.join("identity").to_string_lossy().into_owned(),
+                );
+            }
         }
 
         let mut child =
@@ -931,16 +961,22 @@ impl ControlCenter {
         }
         self.gateway.logs.clear();
         self.browserd.logs.clear();
+        self.node_host.logs.clear();
         self.gateway.last_exit = None;
         self.browserd.last_exit = None;
+        self.node_host.last_exit = None;
         self.gateway.pid = None;
         self.browserd.pid = None;
+        self.node_host.pid = None;
         self.gateway.last_start_unix_ms = None;
         self.browserd.last_start_unix_ms = None;
+        self.node_host.last_start_unix_ms = None;
         self.gateway.restart_attempt = 0;
         self.browserd.restart_attempt = 0;
+        self.node_host.restart_attempt = 0;
         self.gateway.next_restart_unix_ms = None;
         self.browserd.next_restart_unix_ms = None;
+        self.node_host.next_restart_unix_ms = None;
         Ok(())
     }
 
@@ -948,6 +984,7 @@ impl ControlCenter {
         match kind {
             ServiceKind::Gateway => &mut self.gateway,
             ServiceKind::Browserd => &mut self.browserd,
+            ServiceKind::NodeHost => &mut self.node_host,
         }
     }
 
@@ -955,6 +992,7 @@ impl ControlCenter {
         match kind {
             ServiceKind::Gateway => &self.gateway,
             ServiceKind::Browserd => &self.browserd,
+            ServiceKind::NodeHost => &self.node_host,
         }
     }
 
@@ -1005,9 +1043,32 @@ impl ControlCenter {
         let mut combined = Vec::new();
         combined.extend(self.gateway.logs.iter().cloned());
         combined.extend(self.browserd.logs.iter().cloned());
+        combined.extend(self.node_host.logs.iter().cloned());
         combined.sort_by(|left, right| right.unix_ms.cmp(&left.unix_ms));
         combined.truncate(250);
         combined
+    }
+
+    pub(crate) fn sync_node_host_desired_state(&mut self) {
+        let should_run = self.gateway.desired_running && self.node_host_installed();
+        self.node_host.desired_running = should_run;
+        if should_run && !self.node_host.running() {
+            self.node_host.next_restart_unix_ms = Some(unix_ms_now());
+        }
+        if !should_run {
+            self.node_host.next_restart_unix_ms = None;
+        }
+    }
+
+    pub(crate) fn node_host_installed(&self) -> bool {
+        self.runtime_root
+            .join(NODE_HOST_STATE_DIR)
+            .join(NODE_HOST_CONFIG_FILE_NAME)
+            .is_file()
+    }
+
+    pub(crate) fn stop_node_host(&mut self) {
+        self.stop_service(ServiceKind::NodeHost);
     }
 
     pub(crate) fn open_dashboard(&self, url: &str) -> Result<String> {

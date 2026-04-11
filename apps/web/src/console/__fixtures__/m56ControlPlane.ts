@@ -499,8 +499,8 @@ export function inventoryDeviceDetailFixture(deviceId = "01ARZ3NDEKTSV4RRFFQ69G5
         dispatched_at_unix_ms: 1700000001900,
         completed_at_unix_ms: 1700000002400,
         max_payload_bytes: 65536,
-        input_summary: "{\"url\":\"https://example.com/node\"}",
-        output_summary: "{\"opened\":true}",
+        input_summary: '{"url":"https://example.com/node"}',
+        output_summary: '{"opened":true}',
       },
       {
         request_id: "01ARZ3NDEKTSV4RRFFQ69REQ02",
@@ -511,7 +511,7 @@ export function inventoryDeviceDetailFixture(deviceId = "01ARZ3NDEKTSV4RRFFQ69G5
         updated_at_unix_ms: 1700000002700,
         dispatched_at_unix_ms: 1700000002700,
         max_payload_bytes: 65536,
-        input_summary: "{\"title\":\"Review required\"}",
+        input_summary: '{"title":"Review required"}',
       },
     ],
   };

@@ -7,6 +7,7 @@ import { KeyValueList, SectionCard, StatusChip } from "./ui";
 type ProcessMonitorCardProps = {
   gatewayProcess: ServiceProcessSnapshot;
   browserdProcess: ServiceProcessSnapshot;
+  nodeHostProcess: ServiceProcessSnapshot;
   loading: boolean;
 };
 
@@ -73,6 +74,7 @@ function ProcessPane({ title, process, loading }: ProcessPaneProps) {
 export function ProcessMonitorCard({
   gatewayProcess,
   browserdProcess,
+  nodeHostProcess,
   loading,
 }: ProcessMonitorCardProps) {
   return (
@@ -89,6 +91,7 @@ export function ProcessMonitorCard({
       <div className="desktop-panel-grid">
         <ProcessPane title="Gateway" process={gatewayProcess} loading={loading} />
         <ProcessPane title="Browserd" process={browserdProcess} loading={loading} />
+        <ProcessPane title="Node host" process={nodeHostProcess} loading={loading} />
       </div>
     </SectionCard>
   );

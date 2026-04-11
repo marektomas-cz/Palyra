@@ -128,6 +128,7 @@ export type DesktopCompanionSendMessageResult = {
 export type InventoryCapabilityRecord = {
   name: string;
   available: boolean;
+  execution_mode?: string;
   summary?: string;
 };
 
@@ -282,6 +283,16 @@ export type BrowserServiceSnapshot = {
   last_error: string | null;
 };
 
+export type NodeHostStatusSnapshot = {
+  installed: boolean;
+  paired: boolean;
+  running: boolean;
+  device_id?: string | null;
+  grpc_url?: string | null;
+  cert_expires_at_unix_ms?: number | null;
+  detail: string;
+};
+
 export type QuickFactsSnapshot = {
   dashboard_url: string;
   dashboard_access_mode: string;
@@ -291,6 +302,7 @@ export type QuickFactsSnapshot = {
   gateway_git_hash: string | null;
   gateway_uptime_seconds: number | null;
   browser_service: BrowserServiceSnapshot;
+  node_host: NodeHostStatusSnapshot;
 };
 
 export type DiagnosticsSnapshot = {
@@ -319,6 +331,7 @@ export type ControlCenterSnapshot = {
   diagnostics: DiagnosticsSnapshot;
   gateway_process: ServiceProcessSnapshot;
   browserd_process: ServiceProcessSnapshot;
+  node_host_process: ServiceProcessSnapshot;
   warnings: string[];
 };
 
@@ -344,6 +357,15 @@ export const DESKTOP_PREVIEW_SNAPSHOT: ControlCenterSnapshot = {
       status: "running",
       uptime_seconds: 141,
       last_error: null,
+    },
+    node_host: {
+      installed: true,
+      paired: true,
+      running: true,
+      device_id: "01ARZ3NDEKTSV4RRFFQ69NODE0",
+      grpc_url: "https://127.0.0.1:7444",
+      cert_expires_at_unix_ms: Date.UTC(2026, 2, 20, 12, 0, 0),
+      detail: "Desktop node host is enrolled and attached to the local gateway.",
     },
   },
   diagnostics: {
@@ -374,6 +396,18 @@ export const DESKTOP_PREVIEW_SNAPSHOT: ControlCenterSnapshot = {
     restart_attempt: 0,
     next_restart_unix_ms: null,
     bound_ports: [9222],
+  },
+  node_host_process: {
+    service: "node_host",
+    desired_running: true,
+    running: true,
+    liveness: "running",
+    pid: 7342,
+    last_start_unix_ms: Date.UTC(2026, 2, 13, 11, 58, 6),
+    last_exit: null,
+    restart_attempt: 0,
+    next_restart_unix_ms: null,
+    bound_ports: [],
   },
   warnings: [],
 };
@@ -570,11 +604,22 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
         certificate_fingerprint_history: ["SHA256:cert-preview"],
         platform: "windows",
         capabilities: [
-          { name: "presence", available: true, summary: "Publishes desktop presence." },
-          { name: "dashboard_handoff", available: true, summary: "Opens scoped browser handoff." },
+          {
+            name: "presence",
+            available: true,
+            execution_mode: "automatic",
+            summary: "Publishes desktop presence.",
+          },
+          {
+            name: "dashboard_handoff",
+            available: true,
+            execution_mode: "local_mediation",
+            summary: "Opens scoped browser handoff.",
+          },
           {
             name: "local_notifications",
             available: true,
+            execution_mode: "local_mediation",
             summary: "Raises desktop notifications.",
           },
         ],
@@ -728,6 +773,18 @@ export async function stopPalyra(): Promise<ActionResult> {
 
 export async function restartPalyra(): Promise<ActionResult> {
   return invoke<ActionResult>("restart_palyra");
+}
+
+export async function enrollDesktopNode(): Promise<ActionResult> {
+  return invoke<ActionResult>("enroll_desktop_node");
+}
+
+export async function repairDesktopNode(): Promise<ActionResult> {
+  return invoke<ActionResult>("repair_desktop_node");
+}
+
+export async function resetDesktopNode(): Promise<ActionResult> {
+  return invoke<ActionResult>("reset_desktop_node");
 }
 
 export async function openDashboard(): Promise<ActionResult> {

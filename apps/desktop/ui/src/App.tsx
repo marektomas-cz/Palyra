@@ -20,11 +20,14 @@ import {
 import { useDesktopCompanion } from "./hooks/useDesktopCompanion";
 import {
   decideDesktopCompanionApproval,
+  enrollDesktopNode,
   getDesktopCompanionSessionTranscript,
   isDesktopHostAvailable,
   markDesktopCompanionNotificationsRead,
   openDashboard,
   openDesktopCompanionHandoff,
+  repairDesktopNode,
+  resetDesktopNode,
   removeDesktopCompanionOfflineDraft,
   resolveDesktopCompanionChatSession,
   restartPalyra,
@@ -64,6 +67,7 @@ export function App() {
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState(false);
+  const [nodeActionBusy, setNodeActionBusy] = useState(false);
   const [profileSwitchBusy, setProfileSwitchBusy] = useState(false);
   const [transcript, setTranscript] = useState<DesktopSessionTranscriptEnvelope | null>(null);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
@@ -235,6 +239,20 @@ export function App() {
       setNotice(message);
     } finally {
       setActionState(null);
+    }
+  }
+
+  async function runNodeAction(execute: () => Promise<ActionResult>): Promise<void> {
+    setNodeActionBusy(true);
+    try {
+      const result = await execute();
+      setNotice(result.message);
+      await refresh();
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setNotice(message);
+    } finally {
+      setNodeActionBusy(false);
     }
   }
 
@@ -764,8 +782,81 @@ export function App() {
           <ProcessMonitorCard
             browserdProcess={snapshot.control_center.browserd_process}
             gatewayProcess={snapshot.control_center.gateway_process}
+            nodeHostProcess={snapshot.control_center.node_host_process}
             loading={loading}
           />
+
+          <section className="desktop-grid desktop-grid--details">
+            <SectionCard
+              title="Desktop node host"
+              description="This first-party node client keeps native capability handoff bound to the local desktop instead of pretending everything happens in the backend."
+              actions={
+                <ButtonGroup className="desktop-action-group">
+                  <Button
+                    variant="secondary"
+                    isDisabled={
+                      nodeActionBusy || snapshot.control_center.quick_facts.node_host.installed
+                    }
+                    onPress={() => void runNodeAction(enrollDesktopNode)}
+                  >
+                    Enroll node
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    isDisabled={
+                      nodeActionBusy || !snapshot.control_center.quick_facts.node_host.installed
+                    }
+                    onPress={() => void runNodeAction(repairDesktopNode)}
+                  >
+                    Repair node
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    isDisabled={
+                      nodeActionBusy || !snapshot.control_center.quick_facts.node_host.installed
+                    }
+                    onPress={() => void runNodeAction(resetDesktopNode)}
+                  >
+                    Reset local node
+                  </Button>
+                </ButtonGroup>
+              }
+            >
+              <KeyValueList
+                items={[
+                  {
+                    label: "Enrollment",
+                    value: snapshot.control_center.quick_facts.node_host.installed
+                      ? snapshot.control_center.quick_facts.node_host.paired
+                        ? "paired"
+                        : "installed"
+                      : "not enrolled",
+                  },
+                  {
+                    label: "Running",
+                    value: snapshot.control_center.quick_facts.node_host.running ? "yes" : "no",
+                  },
+                  {
+                    label: "Device ID",
+                    value: snapshot.control_center.quick_facts.node_host.device_id ?? "n/a",
+                  },
+                  {
+                    label: "Node RPC",
+                    value: snapshot.control_center.quick_facts.node_host.grpc_url ?? "n/a",
+                  },
+                  {
+                    label: "Certificate expiry",
+                    value: formatUnixMs(
+                      snapshot.control_center.quick_facts.node_host.cert_expires_at_unix_ms,
+                    ),
+                  },
+                ]}
+              />
+              <p className="desktop-muted">
+                {snapshot.control_center.quick_facts.node_host.detail}
+              </p>
+            </SectionCard>
+          </section>
         </>
       ) : null}
 

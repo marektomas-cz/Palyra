@@ -157,6 +157,7 @@ fn build_test_control_center(root: &Path) -> ControlCenter {
     ]);
     let browserd =
         ManagedService::new(vec![runtime.browser_health_port, runtime.browser_grpc_port]);
+    let node_host = ManagedService::new(Vec::new());
     let http_client = Client::builder()
         .cookie_store(true)
         .timeout(Duration::from_secs(4))
@@ -181,6 +182,7 @@ fn build_test_control_center(root: &Path) -> ControlCenter {
         runtime,
         gateway,
         browserd,
+        node_host,
         http_client,
         console_session_cache: Arc::new(Mutex::new(None)),
         console_payload_cache: Arc::new(Mutex::new(ConsolePayloadCache::default())),

@@ -18,17 +18,19 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
 
 - Starts/stops/restarts `palyrad` sidecar process.
 - Optionally starts/stops/restarts `palyra-browserd` sidecar process.
+- Starts/stops/restarts the first-party `palyra node` host when the local desktop node is enrolled.
 - Shows a runtime launcher and monitor surface with:
   - gateway version + git hash,
   - uptime,
   - dashboard URL + access mode (`local`/`remote`),
-  - gateway and browserd process state,
+  - gateway, browserd, and node-host process state,
   - browser service status.
 - Hosts the desktop companion shell with:
   - session-aware chat,
   - approval inbox actions,
   - desktop/system notifications,
   - inventory and capability detail,
+  - desktop node enrollment, repair, and local reset controls,
   - reconnect-safe offline drafts,
   - onboarding and rollout state summary.
 - Shows the current warning/diagnostics queue sourced from `/console/v1/diagnostics`.
@@ -48,6 +50,14 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
   - desktop reads the same chat session catalog, transcript, approvals, and inventory APIs as the
     web console,
   - desktop handoff targets the browser console instead of reimplementing every advanced surface.
+- First-party node host:
+  - the desktop supervises the existing CLI-managed `palyra node` lifecycle instead of duplicating
+    pairing or capability runtime logic inside Tauri,
+  - enrollment mints a node pairing code through `/console/v1/pairing/requests/code`, runs
+    `palyra node install`, approves the resulting request through the authenticated control-plane
+    session, and then lets the supervisor keep `palyra node run --json` alive,
+  - node status is read locally from `palyra node status --json`, so enrollment, trust expiry, and
+    repair state remain visible even before the browser console is opened.
 - Persisted local state:
   - rollout flags: `companion_shell_enabled`, `desktop_notifications_enabled`,
     `offline_drafts_enabled`, `release_channel`,
@@ -55,7 +65,32 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
   - bounded notifications and bounded offline draft queue.
 - Trust model:
   - desktop companion never bypasses existing approval or browser handoff trust boundaries,
+  - desktop node enrollment still uses the same pairing + mTLS trust chain as any other node
+    client; the desktop only automates the already-authenticated operator path,
+  - native capability execution stays intentionally narrow in v1: `desktop.open_url` and
+    `desktop.open_path` require local mediation posture, while `system.health` and
+    `system.identity` stay automatic and audit-friendly,
   - offline drafts are stored locally and only sent after explicit operator action.
+
+## Desktop node lifecycle
+
+- Enrollment:
+  - requires the local gateway to be running,
+  - uses the local gateway identity store via `PALYRA_GATEWAY_IDENTITY_STORE_DIR`,
+  - stores node-host config and identity material under `<runtime_root>/node-host/`.
+- Runtime:
+  - the node host publishes capability inventory during registration,
+  - dispatched capability requests move through `queued`, `dispatched`,
+    `awaiting_local_mediation`, `succeeded`, `failed`, or `timed_out`,
+  - inventory detail in the web console and the desktop companion both surface the active device,
+    capability posture, and recent request outcomes.
+- Repair and reset:
+  - `Repair node` re-runs the local install flow with the existing device id when possible and is
+    intended for trust mismatch or expired local material,
+  - `Reset local node` removes only local node-host state; remote revoke/remove remains an explicit
+    operator action through inventory and approvals surfaces,
+  - a stopped or missing enrolled node host degrades the desktop runtime snapshot instead of
+    pretending the local desktop capability path is still available.
 
 ## Rollout and reconnect behavior
 
@@ -95,6 +130,8 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
 - App-local desktop state is stored in `<state_root>/desktop-control-center/state.json`.
 - Desktop runtime state defaults to `<state_root>/desktop-control-center/runtime` and can be
   confirmed or overridden during onboarding.
+- Desktop node-host trust material is stored under the runtime root and continues to rely on the
+  existing mTLS certificate issuance and approval model; there is no desktop-only bypass path.
 - Linux `glib` advisory mitigation is documented in:
   - `src-tauri/docs/security/advisories/GHSA-wrw7-89jp-8q8g.md`
   - `src-tauri/docs/security/dependency-graph/glib.md`
@@ -167,6 +204,13 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
   - sending while online creates a run and refreshes transcript,
   - sending while control plane is unavailable queues an offline draft instead of silently losing
     input.
+- Desktop node:
+  - `Enroll node` pairs a desktop-first node client and the process monitor shows `node_host`,
+  - `Repair node` recovers from missing local trust material without bypassing pairing approvals,
+  - `Reset local node` removes local node-host state and leaves a clear handoff to remote
+    revoke/remove actions,
+  - capability inventory shows execution posture (`automatic` vs `local_mediation`) and capability
+    request history shows queued, mediation, success, failure, and timeout outcomes.
 - Approval flow:
   - pending approvals are visible on desktop,
   - approve/deny actions call the same protected API as the browser console,

@@ -75,6 +75,26 @@ export function HealthStrip({ snapshot, attentionCount, loading }: HealthStripPr
       />
 
       <MetricCard
+        label="Node host"
+        tone={processTone(snapshot.node_host_process)}
+        value={metricValue(
+          snapshot.quick_facts.node_host.installed
+            ? snapshot.quick_facts.node_host.running
+              ? "Running"
+              : "Installed"
+            : "Not enrolled",
+          loading,
+        )}
+        detail={
+          loading ? (
+            <Skeleton className="desktop-skeleton desktop-skeleton--detail" />
+          ) : (
+            <p className="desktop-muted">{snapshot.quick_facts.node_host.detail}</p>
+          )
+        }
+      />
+
+      <MetricCard
         label="Browser service"
         tone={browserTone(snapshot.quick_facts.browser_service)}
         value={metricValue(snapshot.quick_facts.browser_service.status, loading)}

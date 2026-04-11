@@ -76,6 +76,21 @@ export function QuickFactsCard({ snapshot, loading }: QuickFactsCardProps) {
             ),
           },
           {
+            label: "Node host",
+            value: textValue(snapshot.quick_facts.node_host.detail, loading),
+          },
+          {
+            label: "Node device",
+            value: textValue(snapshot.quick_facts.node_host.device_id ?? "n/a", loading),
+          },
+          {
+            label: "Node certificate",
+            value: textValue(
+              formatUnixMs(snapshot.quick_facts.node_host.cert_expires_at_unix_ms ?? null),
+              loading,
+            ),
+          },
+          {
             label: "Diagnostics time",
             value: textValue(formatUnixMs(snapshot.diagnostics.generated_at_unix_ms), loading),
           },
