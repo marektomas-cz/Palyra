@@ -84,6 +84,7 @@ if (Test-Path -LiteralPath $stateRoot) {
     Remove-Item -LiteralPath $stateRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+$configPath = Ensure-PortableConfigFile -ConfigPath (Resolve-PortableConfigPath -StateRoot $stateRoot)
 
 $installOutput = & (Join-Path $repoRoot "scripts/release/install-desktop-package.ps1") `
     -ArchivePath $archivePath `
@@ -119,9 +120,11 @@ Set-StrictMode -Version Latest
 
 `$installRoot = Split-Path -Parent `$MyInvocation.MyCommand.Path
 `$stateRoot = "$stateRoot"
+`$configPath = "$configPath"
 New-Item -ItemType Directory -Path `$stateRoot -Force | Out-Null
 
 `$env:PALYRA_STATE_ROOT = `$stateRoot
+`$env:PALYRA_CONFIG = `$configPath
 `$env:PALYRA_DESKTOP_PALYRAD_BIN = Join-Path `$installRoot "$daemonExecutable"
 `$env:PALYRA_DESKTOP_BROWSERD_BIN = Join-Path `$installRoot "$browserExecutable"
 `$env:PALYRA_DESKTOP_PALYRA_BIN = Join-Path `$installRoot "$cliExecutable"
@@ -143,6 +146,7 @@ $installSummary = [ordered]@{
     artifacts_root = $artifactsRoot
     archive_path = $archivePath
     install_root = $resolvedInstallRoot
+    config_path = $configPath
     state_root = $stateRoot
     cli_command_root = $resolvedCliCommandRoot
     launcher_path = $launcherPath
@@ -158,6 +162,7 @@ if ($Launch) {
 Write-Output "workspace_root=$workspaceRoot"
 Write-Output "archive_path=$archivePath"
 Write-Output "install_root=$resolvedInstallRoot"
+Write-Output "config_path=$configPath"
 Write-Output "state_root=$stateRoot"
 Write-Output "cli_command_root=$resolvedCliCommandRoot"
 Write-Output "launcher_path=$launcherPath"

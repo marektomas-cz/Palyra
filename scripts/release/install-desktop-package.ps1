@@ -31,16 +31,20 @@ Set-ExecutablePermissions -Path $cliBinary
 Set-ExecutablePermissions -Path $daemonBinary
 Set-ExecutablePermissions -Path $browserBinary
 
-$cliExposure = Install-PalyraCliExposure `
-    -TargetBinaryPath $cliBinary `
-    -CommandRoot $CliCommandRoot `
-    -PersistPath:(-not $NoPersistCliPath)
-
 $resolvedStateRoot = $null
+$resolvedConfigPath = $null
 if (-not [string]::IsNullOrWhiteSpace($StateRoot)) {
     $resolvedStateRoot = [IO.Path]::GetFullPath($StateRoot)
     New-Item -ItemType Directory -Path $resolvedStateRoot -Force | Out-Null
+    $resolvedConfigPath = Ensure-PortableConfigFile -ConfigPath (Resolve-PortableConfigPath -StateRoot $resolvedStateRoot)
 }
+
+$cliExposure = Install-PalyraCliExposure `
+    -TargetBinaryPath $cliBinary `
+    -CommandRoot $CliCommandRoot `
+    -StateRoot $resolvedStateRoot `
+    -ConfigPath $resolvedConfigPath `
+    -PersistPath:(-not $NoPersistCliPath)
 
 $previousStateRoot = $env:PALYRA_STATE_ROOT
 $previousConfigPath = $env:PALYRA_CONFIG
@@ -49,7 +53,11 @@ try {
         $env:PALYRA_STATE_ROOT = $resolvedStateRoot
     }
 
-    Remove-Item Env:PALYRA_CONFIG -ErrorAction SilentlyContinue
+    if ($null -ne $resolvedConfigPath) {
+        $env:PALYRA_CONFIG = $resolvedConfigPath
+    } else {
+        Remove-Item Env:PALYRA_CONFIG -ErrorAction SilentlyContinue
+    }
     Invoke-CommandQuiet -Command $cliBinary -Arguments @("version")
     Invoke-CommandQuiet -Command $daemonBinary -Arguments @("--help")
     Invoke-CommandQuiet -Command $browserBinary -Arguments @("--help")
@@ -84,12 +92,16 @@ $metadata = [ordered]@{
     installed_at_utc = (Get-Date).ToUniversalTime().ToString("o")
     archive_path = $archivePath
     install_root = $installRoot
+    config_path = $resolvedConfigPath
     state_root = $resolvedStateRoot
     cli_exposure = $cliExposure
 }
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $installRoot "install-metadata.json")
 
 Write-Output "install_root=$installRoot"
+if ($null -ne $resolvedConfigPath) {
+    Write-Output "config_path=$resolvedConfigPath"
+}
 if ($null -ne $resolvedStateRoot) {
     Write-Output "state_root=$resolvedStateRoot"
 }

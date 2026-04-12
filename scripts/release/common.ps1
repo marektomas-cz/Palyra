@@ -651,17 +651,56 @@ function Test-DirectoryEmpty {
     return -not (Get-ChildItem -LiteralPath $Path -Force | Select-Object -First 1)
 }
 
+function Resolve-PortableConfigPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StateRoot
+    )
+
+    $resolvedStateRoot = [IO.Path]::GetFullPath($StateRoot)
+    return Join-Path $resolvedStateRoot "config/palyra.toml"
+}
+
+function Ensure-PortableConfigFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigPath
+    )
+
+    $resolvedConfigPath = [IO.Path]::GetFullPath($ConfigPath)
+    $configParent = Split-Path -Parent $resolvedConfigPath
+    if (-not [string]::IsNullOrWhiteSpace($configParent)) {
+        New-Item -ItemType Directory -Path $configParent -Force | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $resolvedConfigPath)) {
+        Set-Content -LiteralPath $resolvedConfigPath -Value "" -NoNewline
+    }
+
+    return $resolvedConfigPath
+}
+
 function Install-PalyraCliExposure {
     param(
         [Parameter(Mandatory = $true)]
         [string]$TargetBinaryPath,
         [string]$CommandRoot,
+        [string]$StateRoot,
+        [string]$ConfigPath,
         [bool]$PersistPath = $true
     )
 
     $resolvedTargetBinary = Assert-FileExists -Path $TargetBinaryPath -Label "CLI binary"
     $resolvedCommandRoot = Get-PalyraCliCommandRoot -CommandRootOverride $CommandRoot
     New-Item -ItemType Directory -Path $resolvedCommandRoot -Force | Out-Null
+    $resolvedStateRoot = $null
+    if (-not [string]::IsNullOrWhiteSpace($StateRoot)) {
+        $resolvedStateRoot = [IO.Path]::GetFullPath($StateRoot)
+    }
+    $resolvedConfigPath = $null
+    if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+        $resolvedConfigPath = [IO.Path]::GetFullPath($ConfigPath)
+    }
 
     $commandName = "palyra"
     $shimPaths = New-Object System.Collections.Generic.List[string]
@@ -671,6 +710,8 @@ function Install-PalyraCliExposure {
         $cmdShimBody =
 @"
 @echo off
+$(if ($null -ne $resolvedStateRoot) { 'set "PALYRA_STATE_ROOT=' + $resolvedStateRoot + '"' })
+$(if ($null -ne $resolvedConfigPath) { 'set "PALYRA_CONFIG=' + $resolvedConfigPath + '"' })
 "$resolvedTargetBinary" %*
 "@
         Set-Content -LiteralPath $cmdShimPath -Value $cmdShimBody -NoNewline
@@ -681,6 +722,8 @@ function Install-PalyraCliExposure {
 @"
 Set-StrictMode -Version Latest
 `$ErrorActionPreference = "Stop"
+$(if ($null -ne $resolvedStateRoot) { '$env:PALYRA_STATE_ROOT = "' + $resolvedStateRoot + '"' })
+$(if ($null -ne $resolvedConfigPath) { '$env:PALYRA_CONFIG = "' + $resolvedConfigPath + '"' })
 & "$resolvedTargetBinary" @args
 exit `$LASTEXITCODE
 "@
@@ -692,6 +735,8 @@ exit `$LASTEXITCODE
 @"
 #!/usr/bin/env sh
 set -eu
+$(if ($null -ne $resolvedStateRoot) { 'export PALYRA_STATE_ROOT="' + $resolvedStateRoot + '"' })
+$(if ($null -ne $resolvedConfigPath) { 'export PALYRA_CONFIG="' + $resolvedConfigPath + '"' })
 exec "$resolvedTargetBinary" "$@"
 "@
         Set-Content -LiteralPath $shimPath -Value $shimBody -NoNewline
@@ -722,6 +767,8 @@ exec "$resolvedTargetBinary" "$@"
         command_path = $shimPaths[0]
         shim_paths = @($shimPaths)
         target_binary_path = $resolvedTargetBinary
+        state_root = $resolvedStateRoot
+        config_path = $resolvedConfigPath
         session_path_updated = $sessionPathUpdated
         persistent_path_requested = $PersistPath
         persistence_strategy = $persistenceStrategy

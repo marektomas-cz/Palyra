@@ -47,6 +47,8 @@ Set-ExecutablePermissions -Path $browserBinary
 $cliExposure = Install-PalyraCliExposure `
     -TargetBinaryPath $cliBinary `
     -CommandRoot $CliCommandRoot `
+    -StateRoot $resolvedStateRoot `
+    -ConfigPath $resolvedConfigPath `
     -PersistPath:(-not $NoPersistCliPath)
 
 $previousStateRoot = $env:PALYRA_STATE_ROOT
