@@ -2543,31 +2543,24 @@ fn agent_to_json(agent: &gateway_v1::Agent) -> serde_json::Value {
 fn open_url_in_default_browser(url: &str) -> Result<()> {
     let normalized_url = normalize_browser_open_url(url)?;
 
-    #[cfg(target_os = "windows")]
-    let status = Command::new("explorer.exe")
-        .arg(normalized_url.as_str())
-        .status()
-        .context("failed to invoke `explorer.exe`")?;
-
-    #[cfg(target_os = "macos")]
-    let status = Command::new("open")
-        .arg(normalized_url.as_str())
-        .status()
-        .context("failed to invoke `open`")?;
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let status = Command::new("xdg-open")
-        .arg(normalized_url.as_str())
-        .status()
-        .context("failed to invoke `xdg-open`")?;
-
-    if !status.success() {
-        anyhow::bail!(
-            "browser open command exited with status {}",
-            status.code().map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_owned())
-        );
+    let commands = browser_open_commands(normalized_url.as_str());
+    let mut failures = Vec::with_capacity(commands.len());
+    for command in commands {
+        match Command::new(command.program).args(&command.args).status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => failures.push(format!(
+                "{} exited with status {}",
+                command.display(),
+                status.code().map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_owned())
+            )),
+            Err(error) => failures.push(format!("{} failed: {error}", command.display())),
+        }
     }
-    Ok(())
+
+    anyhow::bail!(
+        "browser open command failed; tried {}",
+        failures.join("; ")
+    )
 }
 
 fn normalize_browser_open_url(raw: &str) -> Result<String> {
@@ -2579,6 +2572,60 @@ fn normalize_browser_open_url(raw: &str) -> Result<String> {
         anyhow::bail!("browser open URL must not include embedded credentials");
     }
     Ok(parsed.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserOpenCommand {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+impl BrowserOpenCommand {
+    fn display(&self) -> String {
+        if self.args.is_empty() {
+            return format!("`{}`", self.program);
+        }
+        format!("`{} {}`", self.program, self.args.join(" "))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn browser_open_commands(url: &str) -> Vec<BrowserOpenCommand> {
+    build_windows_browser_open_commands(url)
+}
+
+#[cfg(target_os = "macos")]
+fn browser_open_commands(url: &str) -> Vec<BrowserOpenCommand> {
+    vec![BrowserOpenCommand {
+        program: "open",
+        args: vec![url.to_owned()],
+    }]
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn browser_open_commands(url: &str) -> Vec<BrowserOpenCommand> {
+    vec![BrowserOpenCommand {
+        program: "xdg-open",
+        args: vec![url.to_owned()],
+    }]
+}
+
+fn build_windows_browser_open_commands(url: &str) -> Vec<BrowserOpenCommand> {
+    vec![
+        BrowserOpenCommand {
+            program: "cmd",
+            args: vec![
+                "/C".to_owned(),
+                "start".to_owned(),
+                "\"\"".to_owned(),
+                url.to_owned(),
+            ],
+        },
+        BrowserOpenCommand {
+            program: "explorer.exe",
+            args: vec![url.to_owned()],
+        },
+    ]
 }
 
 fn execute_agent_stream(
@@ -6842,7 +6889,8 @@ struct SkillStatusResponse {
 mod cli_v1_tests {
     use super::{
         build_journal_checkpoint_attestation, build_support_bundle_diagnostics_snapshot,
-        compare_semver_versions, ensure_remote_registry_same_origin, fetch_limited_bytes,
+        build_windows_browser_open_commands, compare_semver_versions,
+        ensure_remote_registry_same_origin, fetch_limited_bytes,
         fetch_remote_registry_entries_with_fetcher, is_retryable_grpc_error,
         memory_embeddings_model_configured, normalize_browser_open_url, normalize_client_socket,
         normalize_installed_skills_index, normalize_prompt_secret_value,
@@ -6853,11 +6901,11 @@ mod cli_v1_tests {
         process_runner_tier_c_windows_backend_supported, registry_key_id_for,
         resolve_dashboard_access_target, sha256_hex, trust_store_integrity_vault_key,
         validate_registry_index, verify_or_initialize_trust_store_integrity, write_file_atomically,
-        DashboardAccessMode, DashboardAccessSource, InstalledSkillRecord, InstalledSkillSource,
-        InstalledSkillsIndex, JournalCheckpointAttestationRequest, JournalCheckpointModeArg,
-        RegistrySignature, RootFileConfig, SignedSkillRegistryIndex, SkillRegistryEntry,
-        SkillRegistryIndex, REGISTRY_INDEX_SCHEMA_VERSION, REGISTRY_SIGNATURE_ALGORITHM,
-        REGISTRY_SIGNED_INDEX_SCHEMA_VERSION,
+        BrowserOpenCommand, DashboardAccessMode, DashboardAccessSource, InstalledSkillRecord,
+        InstalledSkillSource, InstalledSkillsIndex, JournalCheckpointAttestationRequest,
+        JournalCheckpointModeArg, RegistrySignature, RootFileConfig, SignedSkillRegistryIndex,
+        SkillRegistryEntry, SkillRegistryIndex, REGISTRY_INDEX_SCHEMA_VERSION,
+        REGISTRY_SIGNATURE_ALGORITHM, REGISTRY_SIGNED_INDEX_SCHEMA_VERSION,
     };
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -7203,6 +7251,33 @@ pinned_gateway_ca_fingerprint_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         let normalized = normalize_browser_open_url("https://dashboard.example.com/palyra/")
             .expect("safe dashboard URL should normalize");
         assert_eq!(normalized, "https://dashboard.example.com/palyra/");
+    }
+
+    #[test]
+    fn windows_browser_open_commands_try_cmd_start_before_explorer() {
+        let commands = build_windows_browser_open_commands("http://127.0.0.1:7142/");
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].program, "cmd");
+        assert_eq!(commands[0].args, vec!["/C", "start", "\"\"", "http://127.0.0.1:7142/"]);
+        assert_eq!(commands[1].program, "explorer.exe");
+        assert_eq!(commands[1].args, vec!["http://127.0.0.1:7142/"]);
+    }
+
+    #[test]
+    fn browser_open_command_display_includes_program_and_arguments() {
+        let command = BrowserOpenCommand {
+            program: "cmd",
+            args: vec![
+                "/C".to_owned(),
+                "start".to_owned(),
+                "\"\"".to_owned(),
+                "http://127.0.0.1:7142/".to_owned(),
+            ],
+        };
+        assert_eq!(
+            command.display(),
+            "`cmd /C start \"\" http://127.0.0.1:7142/`"
+        );
     }
 
     #[test]
