@@ -2915,7 +2915,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn strict_profile_blocks_local_shell() -> bool {
     app::current_root_context()
-        .map(|context| context.strict_profile_mode() && !context.allow_strict_profile_actions())
+        .map(|context| context.strict_profile_mode() && !context.allow_strict_profile_actions)
         .unwrap_or(false)
 }
 

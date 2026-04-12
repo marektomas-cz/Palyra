@@ -380,7 +380,7 @@ fn enforce_profile_guardrails(command: &CliCommand) -> Result<()> {
     let Some(profile) = context.active_profile_context() else {
         return Ok(());
     };
-    if !profile.strict_mode || context.allow_strict_profile_actions() {
+    if !profile.strict_mode || context.allow_strict_profile_actions {
         return Ok(());
     }
     if !is_strict_profile_blocked_command(command) {

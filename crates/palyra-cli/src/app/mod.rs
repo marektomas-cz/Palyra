@@ -42,7 +42,7 @@ pub(crate) struct RootCommandContext {
     trace_id: String,
     profile: Option<CliConnectionProfile>,
     config_defaults: ConfigConnectionDefaults,
-    allow_strict_profile_actions: bool,
+    pub(crate) allow_strict_profile_actions: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,19 +194,11 @@ impl RootCommandContext {
     }
 
     pub(crate) fn strict_profile_mode(&self) -> bool {
-        self.active_profile_context().map(|profile| profile.strict_mode).unwrap_or(false)
-    }
-
-    pub(crate) fn allow_strict_profile_actions(&self) -> bool {
-        self.allow_strict_profile_actions
+        self.active_profile_context().is_some_and(|profile| profile.strict_mode)
     }
 
     pub(crate) fn state_root(&self) -> &Path {
         self.state_root.as_path()
-    }
-
-    pub(crate) fn cli_state_root(&self) -> &Path {
-        self.cli_state_root.as_path()
     }
 
     pub(crate) fn config_path(&self) -> Option<&Path> {
@@ -446,7 +438,7 @@ fn load_profiles_document(path: Option<&Path>) -> Result<CliProfilesDocument> {
 
 pub(crate) fn cli_profiles_registry_path() -> Result<PathBuf> {
     let base_state_root = current_root_context()
-        .map(|context| context.cli_state_root().to_path_buf())
+        .map(|context| context.cli_state_root.to_path_buf())
         .unwrap_or(resolve_cli_state_root(None)?);
     resolve_profiles_storage_path(base_state_root.as_path())
 }
