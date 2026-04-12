@@ -4603,6 +4603,9 @@ fn resolve_skills_root(raw: Option<&str>) -> Result<PathBuf> {
         }
         return Ok(PathBuf::from(raw));
     }
+    if let Some(context) = app::current_root_context() {
+        return Ok(context.state_root().join("skills"));
+    }
     let identity_root =
         default_identity_store_root().context("failed to resolve default identity store root")?;
     let state_root =
@@ -7035,6 +7038,24 @@ mod cli_v1_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn resolve_skills_root_prefers_installed_root_context_state_root() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        crate::app::clear_root_context_for_tests();
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let state_root = tempdir.path().join("portable-state");
+        let state_root_string = state_root.to_string_lossy().into_owned();
+        let context = crate::app::install_root_context(crate::args::RootOptions {
+            state_root: Some(state_root_string),
+            ..crate::args::RootOptions::default()
+        })
+        .expect("root context should install");
+
+        let skills_root = super::resolve_skills_root(None).expect("skills root should resolve");
+        assert_eq!(skills_root, context.state_root().join("skills"));
+        crate::app::clear_root_context_for_tests();
     }
 
     #[test]

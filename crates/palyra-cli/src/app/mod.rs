@@ -160,6 +160,13 @@ pub(crate) fn current_root_context() -> Option<RootCommandContext> {
     context_cell().lock().ok().and_then(|guard| guard.as_ref().cloned())
 }
 
+#[cfg(test)]
+pub(crate) fn clear_root_context_for_tests() {
+    if let Ok(mut guard) = context_cell().lock() {
+        *guard = None;
+    }
+}
+
 impl RootCommandContext {
     pub(crate) fn output_format(&self) -> OutputFormatArg {
         self.output_format
