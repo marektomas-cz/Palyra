@@ -2611,6 +2611,7 @@ fn browser_open_commands(url: &str) -> Vec<BrowserOpenCommand> {
     vec![BrowserOpenCommand { program: "xdg-open", args: vec![url.to_owned()] }]
 }
 
+#[cfg(target_os = "windows")]
 fn build_windows_browser_open_commands(url: &str) -> Vec<BrowserOpenCommand> {
     vec![
         BrowserOpenCommand {
