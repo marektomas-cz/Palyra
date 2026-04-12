@@ -2253,7 +2253,6 @@ mod support_bundle_root_tests {
         let portable_state_root_string = portable_state_root.to_string_lossy().into_owned();
         let _state_root =
             ScopedEnvVar::set("PALYRA_STATE_ROOT", portable_state_root_string.as_str());
-
         let support_root =
             resolve_support_bundle_root().expect("support bundle root should resolve");
         assert_eq!(support_root, portable_state_root.join("support-bundles"));

@@ -1146,11 +1146,7 @@ export function useConsoleAppState() {
       );
       const firstCandidate = candidates[0];
       const nextCandidateId =
-        memoryLearningCandidateId.trim().length > 0
-          ? memoryLearningCandidateId.trim()
-          : firstCandidate !== undefined
-            ? (readString(firstCandidate, "candidate_id") ?? "")
-            : "";
+        memoryLearningCandidateId.trim() || readString(firstCandidate ?? {}, "candidate_id") || "";
       setMemoryLearningCandidateId(nextCandidateId);
       if (nextCandidateId.length > 0) {
         const historyResponse = await api.getLearningCandidateHistory(nextCandidateId);
@@ -1225,8 +1221,7 @@ export function useConsoleAppState() {
       const documents = toJsonObjectArray(response.documents as unknown as JsonValue[]);
       setMemoryWorkspaceDocuments(documents);
       if (memoryWorkspaceTitle.trim().length === 0 && memoryWorkspaceContent.trim().length === 0) {
-        const firstDocument = documents[0];
-        const firstPath = firstDocument !== undefined ? readString(firstDocument, "path") : null;
+        const firstPath = readString(documents[0] ?? {}, "path");
         if (firstPath !== null) {
           void selectWorkspaceDocument(firstPath);
         }
