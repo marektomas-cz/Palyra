@@ -61,15 +61,6 @@ impl ConnectorKind {
             _ => None,
         }
     }
-
-    #[must_use]
-    pub const fn default_availability(self) -> ConnectorAvailability {
-        match self {
-            Self::Discord => ConnectorAvailability::Supported,
-            Self::Echo => ConnectorAvailability::InternalTestOnly,
-            Self::Telegram | Self::Slack => ConnectorAvailability::Deferred,
-        }
-    }
 }
 
 impl Display for ConnectorKind {
@@ -717,134 +708,6 @@ impl ConnectorMessageMutationResult {
     }
 }
 
-impl ConnectorCapabilitySet {
-    #[must_use]
-    pub fn for_connector(kind: ConnectorKind, availability: ConnectorAvailability) -> Self {
-        match kind {
-            ConnectorKind::Discord => Self {
-                lifecycle: ConnectorCapabilitySupport::supported(),
-                status: ConnectorCapabilitySupport::supported(),
-                logs: ConnectorCapabilitySupport::supported(),
-                health_refresh: ConnectorCapabilitySupport::supported(),
-                resolve: ConnectorCapabilitySupport::supported(),
-                pairings: ConnectorCapabilitySupport::supported(),
-                qr: ConnectorCapabilitySupport::supported(),
-                webhook_ingress: ConnectorCapabilitySupport::unsupported(
-                    "discord connector does not expose generic webhook ingress management",
-                ),
-                message: ConnectorMessageCapabilitySet {
-                    send: ConnectorCapabilitySupport::supported(),
-                    thread: ConnectorCapabilitySupport::supported(),
-                    reply: ConnectorCapabilitySupport::supported(),
-                    read: ConnectorCapabilitySupport::unsupported(
-                        "message read requires a dedicated Discord read surface that is not implemented yet",
-                    ),
-                    search: ConnectorCapabilitySupport::unsupported(
-                        "message search requires a dedicated Discord search surface that is not implemented yet",
-                    ),
-                    edit: ConnectorCapabilitySupport::unsupported(
-                        "message edit is not implemented for Discord in the current admin surface",
-                    ),
-                    delete: ConnectorCapabilitySupport::unsupported(
-                        "message delete is not implemented for Discord in the current admin surface",
-                    ),
-                    react_add: ConnectorCapabilitySupport::unsupported(
-                        "reaction add is not implemented in the current admin surface",
-                    ),
-                    react_remove: ConnectorCapabilitySupport::unsupported(
-                        "reaction remove requires transport delete support that is not implemented yet",
-                    ),
-                },
-            },
-            ConnectorKind::Echo => Self {
-                lifecycle: ConnectorCapabilitySupport::unsupported(
-                    "echo connector is internal-test-only and is not a managed account surface",
-                ),
-                status: ConnectorCapabilitySupport::supported(),
-                logs: ConnectorCapabilitySupport::supported(),
-                health_refresh: ConnectorCapabilitySupport::unsupported(
-                    "health refresh is only implemented for Discord connectors",
-                ),
-                resolve: ConnectorCapabilitySupport::unsupported(
-                    "echo connector has no provider-specific entity resolution surface",
-                ),
-                pairings: ConnectorCapabilitySupport::unsupported(
-                    "pairings are intended for user-facing providers, not the echo test connector",
-                ),
-                qr: ConnectorCapabilitySupport::unsupported(
-                    "QR pairing output is unavailable for the echo test connector",
-                ),
-                webhook_ingress: ConnectorCapabilitySupport::unsupported(
-                    "echo connector does not expose webhook ingress management",
-                ),
-                message: ConnectorMessageCapabilitySet {
-                    send: ConnectorCapabilitySupport::unsupported(
-                        "echo connector is reserved for internal diagnostics and not exposed as a user-facing message provider",
-                    ),
-                    thread: ConnectorCapabilitySupport::unsupported(
-                        "echo connector does not model user-facing thread delivery",
-                    ),
-                    reply: ConnectorCapabilitySupport::unsupported(
-                        "echo connector does not model reply semantics for user-facing workflows",
-                    ),
-                    read: ConnectorCapabilitySupport::unsupported(
-                        "echo connector does not persist readable message history",
-                    ),
-                    search: ConnectorCapabilitySupport::unsupported(
-                        "echo connector does not index message history for search",
-                    ),
-                    edit: ConnectorCapabilitySupport::unsupported(
-                        "echo connector does not support editing delivered messages",
-                    ),
-                    delete: ConnectorCapabilitySupport::unsupported(
-                        "echo connector does not support deleting delivered messages",
-                    ),
-                    react_add: ConnectorCapabilitySupport::unsupported(
-                        "echo connector does not support message reactions",
-                    ),
-                    react_remove: ConnectorCapabilitySupport::unsupported(
-                        "echo connector does not support message reactions",
-                    ),
-                },
-            },
-            ConnectorKind::Slack | ConnectorKind::Telegram => {
-                let deferred_reason = if availability == ConnectorAvailability::Deferred {
-                    format!(
-                        "{} connector is deferred in the roadmap and unavailable in the current runtime",
-                        kind.as_str()
-                    )
-                } else {
-                    format!(
-                        "{} connector is unavailable in the current runtime",
-                        kind.as_str()
-                    )
-                };
-                Self {
-                    lifecycle: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                    status: ConnectorCapabilitySupport::supported(),
-                    logs: ConnectorCapabilitySupport::supported(),
-                    health_refresh: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                    resolve: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                    pairings: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                    qr: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                    webhook_ingress: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                    message: ConnectorMessageCapabilitySet {
-                        send: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                        thread: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                        reply: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                        read: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                        search: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                        edit: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                        delete: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                        react_add: ConnectorCapabilitySupport::unsupported(deferred_reason.clone()),
-                        react_remove: ConnectorCapabilitySupport::unsupported(deferred_reason),
-                    },
-                }
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorInstanceSpec {
     pub connector_id: String,
@@ -1294,8 +1157,8 @@ fn validate_permission_labels(values: &[String], field: &'static str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorInstanceSpec, ConnectorKind,
-        InboundMessageEvent, OutboundA2uiUpdate, OutboundMessageRequest, ProtocolError,
+        AttachmentKind, AttachmentRef, ConnectorInstanceSpec, ConnectorKind, InboundMessageEvent,
+        OutboundA2uiUpdate, OutboundMessageRequest, ProtocolError,
     };
 
     #[test]
@@ -1316,17 +1179,6 @@ mod tests {
                 reason: "host pattern contains unsupported characters",
             })
         );
-    }
-
-    #[test]
-    fn connector_kind_default_availability_matches_discord_first_runtime_scope() {
-        assert_eq!(ConnectorKind::Discord.default_availability(), ConnectorAvailability::Supported);
-        assert_eq!(
-            ConnectorKind::Echo.default_availability(),
-            ConnectorAvailability::InternalTestOnly
-        );
-        assert_eq!(ConnectorKind::Slack.default_availability(), ConnectorAvailability::Deferred);
-        assert_eq!(ConnectorKind::Telegram.default_availability(), ConnectorAvailability::Deferred);
     }
 
     #[test]

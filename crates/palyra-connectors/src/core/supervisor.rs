@@ -9,6 +9,8 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 
+use crate::providers::{provider_availability, provider_capabilities};
+
 use super::{
     protocol::{
         ConnectorAvailability, ConnectorCapabilitySet, ConnectorInstanceSpec, ConnectorKind,
@@ -140,10 +142,12 @@ pub trait ConnectorRouter: Send + Sync {
 pub trait ConnectorAdapter: Send + Sync {
     fn kind(&self) -> ConnectorKind;
 
-    fn availability(&self) -> ConnectorAvailability;
+    fn availability(&self) -> ConnectorAvailability {
+        provider_availability(self.kind())
+    }
 
     fn capabilities(&self) -> ConnectorCapabilitySet {
-        ConnectorCapabilitySet::for_connector(self.kind(), self.availability())
+        provider_capabilities(self.kind())
     }
 
     fn split_outbound(
@@ -301,7 +305,7 @@ impl ConnectorSupervisor {
             Some(&json!({
                 "connector_id": spec.connector_id,
                 "kind": spec.kind.as_str(),
-                "availability": spec.kind.default_availability().as_str(),
+                "availability": provider_availability(spec.kind).as_str(),
                 "enabled": spec.enabled,
             })),
             now,
@@ -579,13 +583,14 @@ impl ConnectorSupervisor {
         self.adapters
             .get(&kind)
             .map(|adapter| adapter.availability())
-            .unwrap_or_else(|| kind.default_availability())
+            .unwrap_or_else(|| provider_availability(kind))
     }
 
     fn connector_capabilities(&self, kind: ConnectorKind) -> ConnectorCapabilitySet {
-        self.adapters.get(&kind).map(|adapter| adapter.capabilities()).unwrap_or_else(|| {
-            ConnectorCapabilitySet::for_connector(kind, kind.default_availability())
-        })
+        self.adapters
+            .get(&kind)
+            .map(|adapter| adapter.capabilities())
+            .unwrap_or_else(|| provider_capabilities(kind))
     }
 
     fn instance_and_adapter(

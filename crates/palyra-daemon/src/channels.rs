@@ -7,16 +7,17 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palyra_common::{validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
 use palyra_connectors::{
-    providers::default_adapters, AttachmentKind, AttachmentRef, ConnectorAvailability,
-    ConnectorConversationTarget, ConnectorInstanceSpec, ConnectorKind,
-    ConnectorMessageDeleteRequest, ConnectorMessageEditRequest, ConnectorMessageLocator,
-    ConnectorMessageMutationResult, ConnectorMessageReactionRequest, ConnectorMessageReadRequest,
-    ConnectorMessageReadResult, ConnectorMessageRecord, ConnectorMessageSearchRequest,
-    ConnectorMessageSearchResult, ConnectorQueueSnapshot, ConnectorRouter, ConnectorRouterError,
-    ConnectorStatusSnapshot, ConnectorSupervisor, ConnectorSupervisorConfig,
-    ConnectorSupervisorError, DeadLetterRecord, DrainOutcome, InboundIngestOutcome,
-    InboundMessageEvent, OutboundA2uiUpdate as ConnectorA2uiUpdate, OutboundAttachment,
-    RouteInboundResult, RoutedOutboundMessage,
+    providers::{default_adapters, default_instance_specs},
+    AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorConversationTarget,
+    ConnectorInstanceSpec, ConnectorKind, ConnectorMessageDeleteRequest,
+    ConnectorMessageEditRequest, ConnectorMessageLocator, ConnectorMessageMutationResult,
+    ConnectorMessageReactionRequest, ConnectorMessageReadRequest, ConnectorMessageReadResult,
+    ConnectorMessageRecord, ConnectorMessageSearchRequest, ConnectorMessageSearchResult,
+    ConnectorQueueSnapshot, ConnectorRouter, ConnectorRouterError, ConnectorStatusSnapshot,
+    ConnectorSupervisor, ConnectorSupervisorConfig, ConnectorSupervisorError, DeadLetterRecord,
+    DrainOutcome, InboundIngestOutcome, InboundMessageEvent,
+    OutboundA2uiUpdate as ConnectorA2uiUpdate, OutboundAttachment, RouteInboundResult,
+    RoutedOutboundMessage,
 };
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -926,18 +927,7 @@ fn media_content_root_from_connector_db_path(connector_db_path: &std::path::Path
 }
 
 fn default_connector_specs() -> Vec<ConnectorInstanceSpec> {
-    vec![
-        ConnectorInstanceSpec {
-            connector_id: "echo:default".to_owned(),
-            kind: ConnectorKind::Echo,
-            principal: "channel:echo:default".to_owned(),
-            auth_profile_ref: None,
-            token_vault_ref: None,
-            egress_allowlist: Vec::new(),
-            enabled: true,
-        },
-        discord::discord_connector_spec("default", false),
-    ]
+    default_instance_specs()
 }
 
 struct GrpcChannelRouter {
@@ -1272,6 +1262,7 @@ fn unix_ms_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use palyra_connectors::{
+        providers::provider_availability,
         AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorInstanceSpec, ConnectorKind,
         ConnectorSupervisorConfig, ConnectorSupervisorError,
     };
@@ -1538,7 +1529,7 @@ mod tests {
         let specs = default_connector_specs();
         let inventory = specs
             .iter()
-            .map(|spec| (spec.connector_id.clone(), spec.kind, spec.kind.default_availability()))
+            .map(|spec| (spec.connector_id.clone(), spec.kind, provider_availability(spec.kind)))
             .collect::<Vec<_>>();
 
         assert_eq!(

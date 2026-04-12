@@ -22,10 +22,9 @@ use ulid::Ulid;
 use crate::{
     discord_default_egress_allowlist,
     net::ConnectorNetGuard,
-    permissions::{discord_capability_support, DiscordMessageOperation},
+    permissions::DiscordMessageOperation,
     protocol::{
-        AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorCapabilitySet,
-        ConnectorConversationTarget, ConnectorKind, ConnectorMessageCapabilitySet,
+        AttachmentKind, AttachmentRef, ConnectorConversationTarget, ConnectorKind,
         ConnectorMessageDeleteRequest, ConnectorMessageEditRequest, ConnectorMessageLocator,
         ConnectorMessageMutationDiff, ConnectorMessageMutationResult,
         ConnectorMessageMutationStatus, ConnectorMessageReactionRecord,
@@ -77,44 +76,6 @@ pub struct DiscordAdapterConfig {
 impl ConnectorAdapter for DiscordConnectorAdapter {
     fn kind(&self) -> ConnectorKind {
         ConnectorKind::Discord
-    }
-
-    fn availability(&self) -> ConnectorAvailability {
-        ConnectorAvailability::Supported
-    }
-
-    fn capabilities(&self) -> ConnectorCapabilitySet {
-        ConnectorCapabilitySet {
-            lifecycle: crate::protocol::ConnectorCapabilitySupport::supported(),
-            status: crate::protocol::ConnectorCapabilitySupport::supported(),
-            logs: crate::protocol::ConnectorCapabilitySupport::supported(),
-            health_refresh: crate::protocol::ConnectorCapabilitySupport::supported(),
-            resolve: crate::protocol::ConnectorCapabilitySupport::supported(),
-            pairings: crate::protocol::ConnectorCapabilitySupport::supported(),
-            qr: crate::protocol::ConnectorCapabilitySupport::supported(),
-            webhook_ingress: crate::protocol::ConnectorCapabilitySupport::unsupported(
-                "discord connector does not expose generic webhook ingress management",
-            ),
-            message: ConnectorMessageCapabilitySet {
-                send: discord_capability_support(DiscordMessageOperation::Send, true, None),
-                thread: discord_capability_support(DiscordMessageOperation::Thread, true, None),
-                reply: discord_capability_support(DiscordMessageOperation::Reply, true, None),
-                read: discord_capability_support(DiscordMessageOperation::Read, true, None),
-                search: discord_capability_support(DiscordMessageOperation::Search, true, None),
-                edit: discord_capability_support(DiscordMessageOperation::Edit, true, None),
-                delete: discord_capability_support(DiscordMessageOperation::Delete, true, None),
-                react_add: discord_capability_support(
-                    DiscordMessageOperation::ReactAdd,
-                    true,
-                    None,
-                ),
-                react_remove: discord_capability_support(
-                    DiscordMessageOperation::ReactRemove,
-                    true,
-                    None,
-                ),
-            },
-        }
     }
 
     fn split_outbound(

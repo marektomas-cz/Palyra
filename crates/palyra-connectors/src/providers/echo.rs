@@ -9,11 +9,15 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     protocol::{
-        ConnectorAvailability, ConnectorKind, DeliveryOutcome, OutboundMessageRequest, RetryClass,
+        ConnectorAvailability, ConnectorCapabilitySet, ConnectorCapabilitySupport,
+        ConnectorInstanceSpec, ConnectorKind, ConnectorMessageCapabilitySet, DeliveryOutcome,
+        OutboundMessageRequest, RetryClass,
     },
     storage::ConnectorInstanceRecord,
     supervisor::{ConnectorAdapter, ConnectorAdapterError},
 };
+
+use super::ConnectorProviderDescriptor;
 
 const CRASH_ONCE_MARKER: &str = "[connector-crash-once]";
 
@@ -30,14 +34,85 @@ impl EchoConnectorAdapter {
     }
 }
 
+pub(crate) fn provider_descriptor() -> ConnectorProviderDescriptor {
+    ConnectorProviderDescriptor {
+        kind: ConnectorKind::Echo,
+        availability: ConnectorAvailability::InternalTestOnly,
+        capabilities: echo_capabilities(),
+        default_instance_spec: Some(default_connector_spec),
+    }
+}
+
+fn echo_capabilities() -> ConnectorCapabilitySet {
+    ConnectorCapabilitySet {
+        lifecycle: ConnectorCapabilitySupport::unsupported(
+            "echo connector is internal-test-only and is not a managed account surface",
+        ),
+        status: ConnectorCapabilitySupport::supported(),
+        logs: ConnectorCapabilitySupport::supported(),
+        health_refresh: ConnectorCapabilitySupport::unsupported(
+            "health refresh is only implemented for Discord connectors",
+        ),
+        resolve: ConnectorCapabilitySupport::unsupported(
+            "echo connector has no provider-specific entity resolution surface",
+        ),
+        pairings: ConnectorCapabilitySupport::unsupported(
+            "pairings are intended for user-facing providers, not the echo test connector",
+        ),
+        qr: ConnectorCapabilitySupport::unsupported(
+            "QR pairing output is unavailable for the echo test connector",
+        ),
+        webhook_ingress: ConnectorCapabilitySupport::unsupported(
+            "echo connector does not expose webhook ingress management",
+        ),
+        message: ConnectorMessageCapabilitySet {
+            send: ConnectorCapabilitySupport::unsupported(
+                "echo connector is reserved for internal diagnostics and not exposed as a user-facing message provider",
+            ),
+            thread: ConnectorCapabilitySupport::unsupported(
+                "echo connector does not model user-facing thread delivery",
+            ),
+            reply: ConnectorCapabilitySupport::unsupported(
+                "echo connector does not model reply semantics for user-facing workflows",
+            ),
+            read: ConnectorCapabilitySupport::unsupported(
+                "echo connector does not persist readable message history",
+            ),
+            search: ConnectorCapabilitySupport::unsupported(
+                "echo connector does not index message history for search",
+            ),
+            edit: ConnectorCapabilitySupport::unsupported(
+                "echo connector does not support editing delivered messages",
+            ),
+            delete: ConnectorCapabilitySupport::unsupported(
+                "echo connector does not support deleting delivered messages",
+            ),
+            react_add: ConnectorCapabilitySupport::unsupported(
+                "echo connector does not support message reactions",
+            ),
+            react_remove: ConnectorCapabilitySupport::unsupported(
+                "echo connector does not support message reactions",
+            ),
+        },
+    }
+}
+
+fn default_connector_spec() -> ConnectorInstanceSpec {
+    ConnectorInstanceSpec {
+        connector_id: "echo:default".to_owned(),
+        kind: ConnectorKind::Echo,
+        principal: "channel:echo:default".to_owned(),
+        auth_profile_ref: None,
+        token_vault_ref: None,
+        egress_allowlist: Vec::new(),
+        enabled: true,
+    }
+}
+
 #[async_trait]
 impl ConnectorAdapter for EchoConnectorAdapter {
     fn kind(&self) -> ConnectorKind {
         ConnectorKind::Echo
-    }
-
-    fn availability(&self) -> ConnectorAvailability {
-        ConnectorAvailability::InternalTestOnly
     }
 
     async fn send_outbound(

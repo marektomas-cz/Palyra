@@ -5,14 +5,17 @@ mod ids;
 mod normalize;
 pub(crate) mod permissions;
 
+use super::ConnectorProviderDescriptor;
+
 pub use crate::core::net::{ConnectorNetGuard, ConnectorNetGuardError};
 pub use crate::core::{
     net, protocol, storage, supervisor, AttachmentKind, AttachmentRef, ConnectorAdapter,
-    ConnectorAdapterError, ConnectorApprovalMode, ConnectorAvailability,
-    ConnectorConversationTarget, ConnectorEventRecord, ConnectorInstanceRecord,
-    ConnectorInstanceSpec, ConnectorKind, ConnectorLiveness, ConnectorMessageDeleteRequest,
-    ConnectorMessageEditRequest, ConnectorMessageLocator, ConnectorMessageMutationDiff,
-    ConnectorMessageMutationResult, ConnectorMessageMutationStatus, ConnectorMessageReactionRecord,
+    ConnectorAdapterError, ConnectorApprovalMode, ConnectorAvailability, ConnectorCapabilitySet,
+    ConnectorCapabilitySupport, ConnectorConversationTarget, ConnectorEventRecord,
+    ConnectorInstanceRecord, ConnectorInstanceSpec, ConnectorKind, ConnectorLiveness,
+    ConnectorMessageCapabilitySet, ConnectorMessageDeleteRequest, ConnectorMessageEditRequest,
+    ConnectorMessageLocator, ConnectorMessageMutationDiff, ConnectorMessageMutationResult,
+    ConnectorMessageMutationStatus, ConnectorMessageReactionRecord,
     ConnectorMessageReactionRequest, ConnectorMessageReadRequest, ConnectorMessageReadResult,
     ConnectorMessageRecord, ConnectorMessageSearchRequest, ConnectorMessageSearchResult,
     ConnectorOperationPreflight, ConnectorQueueDepth, ConnectorQueueSnapshot, ConnectorReadiness,
@@ -53,3 +56,47 @@ pub use permissions::{
     DISCORD_PERMISSION_SEND_MESSAGES, DISCORD_PERMISSION_SEND_MESSAGES_IN_THREADS,
     DISCORD_PERMISSION_VIEW_CHANNEL,
 };
+
+pub(crate) fn provider_descriptor() -> ConnectorProviderDescriptor {
+    ConnectorProviderDescriptor {
+        kind: ConnectorKind::Discord,
+        availability: ConnectorAvailability::Supported,
+        capabilities: discord_capabilities(),
+        default_instance_spec: Some(default_connector_spec),
+    }
+}
+
+fn default_connector_spec() -> ConnectorInstanceSpec {
+    discord_connector_spec("default", false)
+        .expect("default discord provider descriptor must remain valid")
+}
+
+fn discord_capabilities() -> ConnectorCapabilitySet {
+    ConnectorCapabilitySet {
+        lifecycle: ConnectorCapabilitySupport::supported(),
+        status: ConnectorCapabilitySupport::supported(),
+        logs: ConnectorCapabilitySupport::supported(),
+        health_refresh: ConnectorCapabilitySupport::supported(),
+        resolve: ConnectorCapabilitySupport::supported(),
+        pairings: ConnectorCapabilitySupport::supported(),
+        qr: ConnectorCapabilitySupport::supported(),
+        webhook_ingress: ConnectorCapabilitySupport::unsupported(
+            "discord connector does not expose generic webhook ingress management",
+        ),
+        message: ConnectorMessageCapabilitySet {
+            send: discord_capability_support(DiscordMessageOperation::Send, true, None),
+            thread: discord_capability_support(DiscordMessageOperation::Thread, true, None),
+            reply: discord_capability_support(DiscordMessageOperation::Reply, true, None),
+            read: discord_capability_support(DiscordMessageOperation::Read, true, None),
+            search: discord_capability_support(DiscordMessageOperation::Search, true, None),
+            edit: discord_capability_support(DiscordMessageOperation::Edit, true, None),
+            delete: discord_capability_support(DiscordMessageOperation::Delete, true, None),
+            react_add: discord_capability_support(DiscordMessageOperation::ReactAdd, true, None),
+            react_remove: discord_capability_support(
+                DiscordMessageOperation::ReactRemove,
+                true,
+                None,
+            ),
+        },
+    }
+}
