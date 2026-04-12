@@ -34,8 +34,9 @@ use super::{
     collect_redacted_errors, compute_backoff_ms, executable_file_name,
     load_or_initialize_state_file, load_runtime_secrets,
     migrate_legacy_runtime_secrets_from_state_file, mpsc, parse_discord_status,
-    parse_remote_dashboard_base_url, resolve_binary_path, resolve_desktop_state_root,
-    sanitize_log_line, try_enqueue_log_event, validate_runtime_state_root_override,
+    parse_remote_dashboard_base_url, prepare_control_center_for_launch, resolve_binary_path,
+    resolve_desktop_state_root, sanitize_log_line, try_enqueue_log_event,
+    validate_runtime_state_root_override,
     BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode, DesktopOnboardingStep,
     DesktopSecretStore, DesktopStateFile, LogEvent, LogStream, ManagedService, RuntimeConfig,
     ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
@@ -231,6 +232,18 @@ fn backoff_uses_exponential_growth_with_cap() {
     assert_eq!(compute_backoff_ms(2), 4_000);
     assert_eq!(compute_backoff_ms(5), 30_000);
     assert_eq!(compute_backoff_ms(9), 30_000);
+}
+
+#[test]
+fn launch_preparation_requests_gateway_and_enabled_browser_start() {
+    let fixture = TempFixtureDir::new();
+    let mut control_center = build_test_control_center(fixture.path());
+    control_center.persisted.browser_service_enabled = true;
+
+    prepare_control_center_for_launch(&mut control_center);
+
+    assert!(control_center.gateway.desired_running, "launch should request gateway start");
+    assert!(control_center.browserd.desired_running, "launch should request browserd start");
 }
 
 #[test]

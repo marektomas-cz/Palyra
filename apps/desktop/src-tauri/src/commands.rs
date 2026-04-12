@@ -777,6 +777,11 @@ pub(crate) fn initialize_control_center(
     init().map_err(|error| format_control_center_init_error(&error))
 }
 
+pub(crate) fn prepare_control_center_for_launch(control_center: &mut ControlCenter) {
+    control_center.start_all();
+    control_center.refresh_runtime_state();
+}
+
 pub(crate) fn command_error(error: impl ToString) -> String {
     sanitize_log_line(error.to_string().as_str())
 }
@@ -997,13 +1002,14 @@ async fn run_palyra_json_command_owned(
 }
 
 pub(crate) fn run() {
-    let control_center = match initialize_control_center(ControlCenter::new) {
+    let mut control_center = match initialize_control_center(ControlCenter::new) {
         Ok(value) => value,
         Err(message) => {
             eprintln!("{message}");
             return;
         }
     };
+    prepare_control_center_for_launch(&mut control_center);
 
     tauri::Builder::default()
         .manage(DesktopAppState { supervisor: Arc::new(Mutex::new(control_center)) })

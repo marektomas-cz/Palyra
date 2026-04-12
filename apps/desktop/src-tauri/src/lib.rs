@@ -49,6 +49,8 @@ pub(crate) use supervisor::{
 #[cfg(test)]
 pub(crate) use reqwest::Client;
 #[cfg(test)]
+pub(crate) use commands::prepare_control_center_for_launch;
+#[cfg(test)]
 pub(crate) use snapshot::{
     build_snapshot_from_inputs, collect_redacted_errors, parse_discord_status,
     parse_remote_dashboard_base_url, BrowserStatusSnapshot, DashboardAccessMode,
