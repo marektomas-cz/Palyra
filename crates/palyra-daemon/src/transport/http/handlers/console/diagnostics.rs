@@ -2192,10 +2192,71 @@ pub(crate) fn resolve_console_cli_binary_path() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn resolve_support_bundle_root() -> Result<PathBuf, String> {
+    if let Some(raw) = std::env::var_os("PALYRA_STATE_ROOT") {
+        if raw.is_empty() {
+            return Err("PALYRA_STATE_ROOT must not be empty".to_owned());
+        }
+        return Ok(PathBuf::from(raw).join("support-bundles"));
+    }
     let identity_root = default_identity_store_root().map_err(|error| error.to_string())?;
     let state_root =
         identity_root.parent().map(FsPath::to_path_buf).unwrap_or_else(|| identity_root.clone());
     Ok(state_root.join("support-bundles"))
+}
+
+#[cfg(test)]
+mod support_bundle_root_tests {
+    use super::resolve_support_bundle_root;
+    use std::{
+        ffi::OsString,
+        sync::{Mutex, OnceLock},
+    };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_support_bundle_root_prefers_explicit_state_root_env() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let portable_state_root = std::env::temp_dir().join("palyra-portable-state");
+        let portable_state_root_string = portable_state_root.to_string_lossy().into_owned();
+        let _state_root = ScopedEnvVar::set("PALYRA_STATE_ROOT", portable_state_root_string.as_str());
+
+        let support_root =
+            resolve_support_bundle_root().expect("support bundle root should resolve");
+        assert_eq!(support_root, portable_state_root.join("support-bundles"));
+    }
 }
 
 #[allow(clippy::result_large_err)]
