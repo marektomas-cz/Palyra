@@ -236,13 +236,12 @@ mod tests {
     use serde_json::{json, Value};
 
     fn sample_connector() -> ConnectorStatusSnapshot {
+        let kind = ConnectorKind::parse("discord").expect("discord connector kind should parse");
         ConnectorStatusSnapshot {
             connector_id: "discord:default".to_owned(),
-            kind: ConnectorKind::Discord,
+            kind,
             availability: ConnectorAvailability::Supported,
-            capabilities: palyra_connectors::providers::provider_capabilities(
-                ConnectorKind::Discord,
-            ),
+            capabilities: palyra_connectors::providers::provider_capabilities(kind),
             principal: "channel:discord".to_owned(),
             enabled: true,
             readiness: ConnectorReadiness::Ready,
