@@ -133,7 +133,10 @@ New-Item -ItemType Directory -Path `$stateRoot -Force | Out-Null
 if (`$Wait) {
     & `$desktopBinary
 } else {
-    Start-Process -FilePath `$desktopBinary -WorkingDirectory `$installRoot | Out-Null
+    `$process = Start-Process -FilePath `$desktopBinary -WorkingDirectory `$installRoot -PassThru
+    if (`$process.WaitForExit(2000)) {
+        throw "Palyra desktop exited immediately with code `$(`$process.ExitCode). Re-run Launch-Palyra-Test.ps1 with -Wait to surface the startup error directly."
+    }
 }
 "@
 
