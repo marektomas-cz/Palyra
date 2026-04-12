@@ -1,23 +1,19 @@
 use std::{
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palyra_common::{validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
 use palyra_connectors::{
-    providers::{default_adapters, default_instance_specs},
-    AttachmentKind, AttachmentRef, ConnectorAvailability, ConnectorConversationTarget,
-    ConnectorInstanceSpec, ConnectorKind, ConnectorMessageDeleteRequest,
-    ConnectorMessageEditRequest, ConnectorMessageLocator, ConnectorMessageMutationResult,
-    ConnectorMessageReactionRequest, ConnectorMessageReadRequest, ConnectorMessageReadResult,
-    ConnectorMessageRecord, ConnectorMessageSearchRequest, ConnectorMessageSearchResult,
-    ConnectorQueueSnapshot, ConnectorRouter, ConnectorRouterError, ConnectorStatusSnapshot,
-    ConnectorSupervisor, ConnectorSupervisorConfig, ConnectorSupervisorError, DeadLetterRecord,
-    DrainOutcome, InboundIngestOutcome, InboundMessageEvent,
-    OutboundA2uiUpdate as ConnectorA2uiUpdate, OutboundAttachment, RouteInboundResult,
-    RoutedOutboundMessage,
+    providers::default_adapters, ConnectorAvailability, ConnectorConversationTarget, ConnectorKind,
+    ConnectorMessageDeleteRequest, ConnectorMessageEditRequest, ConnectorMessageLocator,
+    ConnectorMessageMutationResult, ConnectorMessageReactionRequest, ConnectorMessageReadRequest,
+    ConnectorMessageReadResult, ConnectorMessageRecord, ConnectorMessageSearchRequest,
+    ConnectorMessageSearchResult, ConnectorQueueSnapshot, ConnectorRouter, ConnectorRouterError,
+    ConnectorStatusSnapshot, ConnectorSupervisor, ConnectorSupervisorConfig,
+    ConnectorSupervisorError, DeadLetterRecord, DrainOutcome, InboundIngestOutcome,
+    InboundMessageEvent, RouteInboundResult, RoutedOutboundMessage,
 };
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -27,17 +23,34 @@ use tracing::warn;
 use ulid::Ulid;
 
 use crate::media::{
-    ConsoleAttachmentStoreRequest, InboundAttachmentIngestRequest, MediaArtifactPayload,
-    MediaArtifactStore, MediaDerivedArtifactRecord, MediaDerivedArtifactSelection,
-    MediaDerivedArtifactUpsertRequest, MediaDerivedStatsSnapshot,
-    MediaFailedDerivedArtifactUpsertRequest, MediaRuntimeConfig,
+    ConsoleAttachmentStoreRequest, MediaArtifactPayload, MediaArtifactStore,
+    MediaDerivedArtifactRecord, MediaDerivedArtifactSelection, MediaDerivedArtifactUpsertRequest,
+    MediaDerivedStatsSnapshot, MediaFailedDerivedArtifactUpsertRequest, MediaRuntimeConfig,
 };
 use crate::transport::grpc::{
     auth::{GatewayAuthConfig, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL},
     proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
 };
 
+mod attachments;
+mod defaults;
 mod discord;
+mod gateway_auth;
+mod media;
+mod proto;
+
+use attachments::{
+    prepare_outbound_attachments, preprocess_discord_inbound_attachments, with_attachment_context,
+};
+use defaults::{
+    default_connector_specs, media_content_root_from_connector_db_path,
+    media_db_path_from_connector_db_path, route_message_max_payload_bytes, unix_ms_now,
+};
+use gateway_auth::resolve_connector_gateway_auth;
+use proto::{
+    from_proto_a2ui_update, from_proto_message_attachments, non_empty, non_empty_bytes,
+    to_proto_message_attachments,
+};
 
 pub(crate) use discord::{
     classify_discord_message_mutation_governance, ChannelDiscordTestSendRequest,
@@ -218,182 +231,6 @@ impl ChannelPlatform {
             }),
             None => json!({ "media": media }),
         }))
-    }
-
-    pub fn media_snapshot(&self) -> Result<Value, ChannelPlatformError> {
-        serde_json::to_value(self.media_store.build_global_snapshot()?).map_err(|error| {
-            ChannelPlatformError::InvalidInput(format!(
-                "failed to serialize media diagnostics snapshot: {error}"
-            ))
-        })
-    }
-
-    pub fn store_console_chat_attachment(
-        &self,
-        request: ConsoleChatAttachmentStoreRequestView<'_>,
-    ) -> Result<MediaArtifactPayload, ChannelPlatformError> {
-        let attachment_id = Ulid::new().to_string();
-        self.media_store
-            .store_console_attachment(ConsoleAttachmentStoreRequest {
-                connector_id: "console_chat",
-                session_id: request.session_id,
-                principal: request.principal,
-                device_id: request.device_id,
-                channel: request.channel,
-                attachment_id: attachment_id.as_str(),
-                filename: request.filename,
-                declared_content_type: request.declared_content_type,
-                bytes: request.bytes,
-            })
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn load_console_chat_attachment(
-        &self,
-        artifact_id: &str,
-        session_id: &str,
-        principal: &str,
-        device_id: &str,
-        channel: Option<&str>,
-    ) -> Result<Option<MediaArtifactPayload>, ChannelPlatformError> {
-        self.media_store
-            .load_console_attachment(artifact_id, session_id, principal, device_id, channel)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn list_console_chat_attachments(
-        &self,
-        session_id: &str,
-        principal: &str,
-        device_id: &str,
-        channel: Option<&str>,
-    ) -> Result<Vec<MediaArtifactPayload>, ChannelPlatformError> {
-        self.media_store
-            .list_console_attachment_payloads(session_id, principal, device_id, channel)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn upsert_console_chat_derived_artifact(
-        &self,
-        request: MediaDerivedArtifactUpsertRequest<'_>,
-    ) -> Result<MediaDerivedArtifactRecord, ChannelPlatformError> {
-        self.media_store.upsert_derived_artifact(request).map_err(ChannelPlatformError::from)
-    }
-
-    pub fn upsert_console_chat_failed_derived_artifact(
-        &self,
-        request: MediaFailedDerivedArtifactUpsertRequest<'_>,
-    ) -> Result<MediaDerivedArtifactRecord, ChannelPlatformError> {
-        self.media_store.upsert_failed_derived_artifact(request).map_err(ChannelPlatformError::from)
-    }
-
-    pub fn list_console_chat_derived_artifacts(
-        &self,
-        session_id: &str,
-        principal: &str,
-        device_id: &str,
-        channel: Option<&str>,
-    ) -> Result<Vec<MediaDerivedArtifactRecord>, ChannelPlatformError> {
-        self.media_store
-            .list_session_derived_artifacts(session_id, principal, device_id, channel)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn list_attachment_derived_artifacts(
-        &self,
-        source_artifact_id: &str,
-    ) -> Result<Vec<MediaDerivedArtifactRecord>, ChannelPlatformError> {
-        self.media_store
-            .list_attachment_derived_artifacts(source_artifact_id)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn get_derived_artifact(
-        &self,
-        derived_artifact_id: &str,
-    ) -> Result<Option<MediaDerivedArtifactRecord>, ChannelPlatformError> {
-        self.media_store
-            .get_derived_artifact(derived_artifact_id)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn list_linked_derived_artifacts(
-        &self,
-        workspace_document_id: Option<&str>,
-        memory_item_id: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<MediaDerivedArtifactRecord>, ChannelPlatformError> {
-        self.media_store
-            .list_linked_derived_artifacts(workspace_document_id, memory_item_id, limit)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn link_derived_artifact_targets(
-        &self,
-        derived_artifact_id: &str,
-        workspace_document_id: Option<&str>,
-        memory_item_id: Option<&str>,
-    ) -> Result<(), ChannelPlatformError> {
-        self.media_store
-            .link_derived_artifact_targets(
-                derived_artifact_id,
-                workspace_document_id,
-                memory_item_id,
-            )
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn select_console_chat_derived_chunks(
-        &self,
-        source_artifact_ids: &[String],
-        query: &str,
-        selection_budget_chars: Option<usize>,
-    ) -> Result<Vec<MediaDerivedArtifactSelection>, ChannelPlatformError> {
-        self.media_store
-            .select_derived_prompt_chunks(source_artifact_ids, query, selection_budget_chars)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn quarantine_derived_artifact(
-        &self,
-        derived_artifact_id: &str,
-        reason: Option<&str>,
-    ) -> Result<Option<MediaDerivedArtifactRecord>, ChannelPlatformError> {
-        self.media_store
-            .quarantine_derived_artifact(derived_artifact_id, reason)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn release_derived_artifact(
-        &self,
-        derived_artifact_id: &str,
-    ) -> Result<Option<MediaDerivedArtifactRecord>, ChannelPlatformError> {
-        self.media_store
-            .release_derived_artifact(derived_artifact_id)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn mark_derived_artifact_recompute_required(
-        &self,
-        derived_artifact_id: &str,
-        required: bool,
-    ) -> Result<Option<MediaDerivedArtifactRecord>, ChannelPlatformError> {
-        self.media_store
-            .mark_derived_artifact_recompute_required(derived_artifact_id, required)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn purge_derived_artifact(
-        &self,
-        derived_artifact_id: &str,
-    ) -> Result<Option<MediaDerivedArtifactRecord>, ChannelPlatformError> {
-        self.media_store
-            .purge_derived_artifact(derived_artifact_id)
-            .map_err(ChannelPlatformError::from)
-    }
-
-    pub fn derived_stats(&self) -> Result<MediaDerivedStatsSnapshot, ChannelPlatformError> {
-        self.media_store.derived_stats().map_err(ChannelPlatformError::from)
     }
 
     pub fn set_enabled(
@@ -755,181 +592,6 @@ impl ChannelPlatform {
     }
 }
 
-async fn preprocess_discord_inbound_attachments(
-    media_store: &Arc<MediaArtifactStore>,
-    event: &InboundMessageEvent,
-) -> Result<Vec<AttachmentRef>, crate::media::MediaStoreError> {
-    let total_declared_bytes =
-        event.attachments.iter().filter_map(|attachment| attachment.size_bytes).sum::<u64>();
-    let mut prepared = Vec::with_capacity(event.attachments.len());
-    for (attachment_index, attachment) in event.attachments.iter().enumerate() {
-        prepared.push(
-            media_store
-                .ingest_inbound_attachment(InboundAttachmentIngestRequest {
-                    connector_id: event.connector_id.as_str(),
-                    envelope_id: event.envelope_id.as_str(),
-                    conversation_id: event.conversation_id.as_str(),
-                    adapter_message_id: event.adapter_message_id.as_deref(),
-                    attachment,
-                    attachment_index,
-                    attachment_count: event.attachments.len(),
-                    total_declared_bytes,
-                })
-                .await?,
-        );
-    }
-    Ok(prepared)
-}
-
-fn prepare_outbound_attachments(
-    media_store: &Arc<MediaArtifactStore>,
-    connector_id: &str,
-    attachments: Vec<OutboundAttachment>,
-) -> Result<Vec<OutboundAttachment>, crate::media::MediaStoreError> {
-    let config = media_store.config().clone();
-    let mut prepared = Vec::with_capacity(attachments.len());
-    for mut attachment in attachments {
-        if !attachment.upload_requested {
-            prepared.push(attachment);
-            continue;
-        }
-        if !config.outbound_upload_enabled {
-            block_outbound_upload_attachment(
-                media_store,
-                connector_id,
-                &mut attachment,
-                "attachment.upload disabled by config",
-            )?;
-            prepared.push(attachment);
-            continue;
-        }
-        if attachment.inline_base64.is_none() {
-            match attachment.artifact_ref.as_deref() {
-                Some(artifact_id) => match media_store.load_artifact_payload(artifact_id)? {
-                    Some(payload) => {
-                        attachment.inline_base64 =
-                            Some(BASE64_STANDARD.encode(payload.bytes.as_slice()));
-                        attachment.artifact_ref.get_or_insert_with(|| payload.artifact_id.clone());
-                        attachment.filename.get_or_insert_with(|| payload.filename.clone());
-                        attachment.content_type.get_or_insert_with(|| payload.content_type.clone());
-                        attachment.size_bytes.get_or_insert(payload.size_bytes);
-                        attachment.content_hash.get_or_insert(payload.sha256.clone());
-                        attachment.width_px = attachment.width_px.or(payload.width_px);
-                        attachment.height_px = attachment.height_px.or(payload.height_px);
-                    }
-                    None => {
-                        block_outbound_upload_attachment(
-                            media_store,
-                            connector_id,
-                            &mut attachment,
-                            "attachment.upload artifact_ref not found",
-                        )?;
-                        prepared.push(attachment);
-                        continue;
-                    }
-                },
-                None => {
-                    block_outbound_upload_attachment(
-                        media_store,
-                        connector_id,
-                        &mut attachment,
-                        "attachment.upload requires inline content or artifact_ref",
-                    )?;
-                    prepared.push(attachment);
-                    continue;
-                }
-            }
-        }
-        let Some(content_type) = attachment
-            .content_type
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-        else {
-            block_outbound_upload_attachment(
-                media_store,
-                connector_id,
-                &mut attachment,
-                "attachment.upload content_type is required",
-            )?;
-            prepared.push(attachment);
-            continue;
-        };
-        if !config.outbound_allowed_content_types.iter().any(|allowed| allowed == &content_type) {
-            block_outbound_upload_attachment(
-                media_store,
-                connector_id,
-                &mut attachment,
-                format!("attachment.upload content type '{content_type}' is blocked by policy")
-                    .as_str(),
-            )?;
-            prepared.push(attachment);
-            continue;
-        }
-        let decoded_size = attachment
-            .inline_base64
-            .as_deref()
-            .map(|value| {
-                BASE64_STANDARD.decode(value).map(|bytes| bytes.len()).unwrap_or(usize::MAX)
-            })
-            .unwrap_or_default();
-        if decoded_size > config.outbound_max_upload_bytes {
-            block_outbound_upload_attachment(
-                media_store,
-                connector_id,
-                &mut attachment,
-                format!(
-                    "attachment.upload exceeds max_upload_bytes ({decoded_size}/{})",
-                    config.outbound_max_upload_bytes
-                )
-                .as_str(),
-            )?;
-        }
-        prepared.push(attachment);
-    }
-    Ok(prepared)
-}
-
-fn block_outbound_upload_attachment(
-    media_store: &Arc<MediaArtifactStore>,
-    connector_id: &str,
-    attachment: &mut OutboundAttachment,
-    reason: &str,
-) -> Result<(), crate::media::MediaStoreError> {
-    attachment.policy_context = Some(reason.to_owned());
-    attachment.upload_requested = false;
-    attachment.inline_base64 = None;
-    media_store.record_upload_failure(
-        connector_id,
-        attachment.artifact_ref.as_deref(),
-        attachment.filename.as_deref(),
-        reason,
-    )
-}
-
-fn media_db_path_from_connector_db_path(connector_db_path: &std::path::Path) -> PathBuf {
-    let parent = connector_db_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    parent.join("media.sqlite3")
-}
-
-fn media_content_root_from_connector_db_path(connector_db_path: &std::path::Path) -> PathBuf {
-    let parent = connector_db_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    parent.join("media")
-}
-
-fn default_connector_specs() -> Vec<ConnectorInstanceSpec> {
-    default_instance_specs()
-}
-
 struct GrpcChannelRouter {
     grpc_url: String,
     auth: GatewayAuthConfig,
@@ -1071,194 +733,6 @@ impl ConnectorRouter for GrpcChannelRouter {
     }
 }
 
-fn route_message_max_payload_bytes(config: &ConnectorSupervisorConfig) -> u64 {
-    u64::try_from(config.max_outbound_body_bytes).unwrap_or(u64::MAX)
-}
-
-#[allow(clippy::result_large_err)]
-fn resolve_connector_gateway_auth(
-    auth: &GatewayAuthConfig,
-    connector_principal: &str,
-) -> Result<(String, Option<String>), ConnectorSupervisorError> {
-    if !auth.require_auth {
-        return Ok((connector_principal.to_owned(), None));
-    }
-    let connector_token = auth.connector_token.as_deref().ok_or_else(|| {
-        ConnectorSupervisorError::Router(
-            "connector_token is required for RouteMessage when gateway auth is enabled".to_owned(),
-        )
-    })?;
-    Ok((connector_principal.to_owned(), Some(format!("Bearer {connector_token}"))))
-}
-
-fn non_empty(raw: String) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-fn non_empty_bytes(raw: Vec<u8>) -> Option<Vec<u8>> {
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw)
-    }
-}
-
-fn with_attachment_context(text: &str, attachments: &[AttachmentRef]) -> String {
-    let Some(summary) = render_attachment_context(attachments) else {
-        return text.to_owned();
-    };
-    let trimmed = text.trim_end();
-    if trimmed.is_empty() {
-        summary
-    } else {
-        format!("{trimmed}\n\n{summary}")
-    }
-}
-
-fn render_attachment_context(attachments: &[AttachmentRef]) -> Option<String> {
-    if attachments.is_empty() {
-        return None;
-    }
-    let mut lines = Vec::with_capacity(attachments.len().saturating_add(1));
-    lines.push("[attachment-metadata]".to_owned());
-    for (index, attachment) in attachments.iter().enumerate() {
-        lines.push(format!("- {}: {}", index.saturating_add(1), summarize_attachment(attachment)));
-    }
-    Some(lines.join("\n"))
-}
-
-fn summarize_attachment(attachment: &AttachmentRef) -> String {
-    let kind = match attachment.kind {
-        AttachmentKind::Image => "image",
-        AttachmentKind::File => "file",
-    };
-    let source = attachment
-        .url
-        .as_deref()
-        .or(attachment.artifact_ref.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    let filename = attachment
-        .filename
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    let content_type = attachment
-        .content_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    let size = attachment
-        .size_bytes
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
-    format!(
-        "kind={kind}, filename={filename}, content_type={content_type}, size_bytes={size}, source={source}"
-    )
-}
-
-fn to_proto_message_attachments(
-    attachments: &[AttachmentRef],
-) -> Vec<common_v1::MessageAttachment> {
-    attachments
-        .iter()
-        .map(|attachment| {
-            let artifact_id = attachment
-                .artifact_ref
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| common_v1::CanonicalId { ulid: value.to_owned() });
-            common_v1::MessageAttachment {
-                kind: attachment_kind_to_proto(attachment.kind),
-                artifact_id,
-                size_bytes: attachment.size_bytes.unwrap_or_default(),
-                attachment_id: attachment.attachment_id.clone().unwrap_or_default(),
-                filename: attachment.filename.clone().unwrap_or_default(),
-                declared_content_type: attachment.content_type.clone().unwrap_or_default(),
-                source_url: attachment.url.clone().unwrap_or_default(),
-                content_hash: attachment.content_hash.clone().unwrap_or_default(),
-                origin: attachment.origin.clone().unwrap_or_default(),
-                policy_context: attachment.policy_context.clone().unwrap_or_default(),
-                inline_bytes: attachment
-                    .inline_base64
-                    .as_deref()
-                    .and_then(|value| BASE64_STANDARD.decode(value).ok())
-                    .unwrap_or_default(),
-                upload_requested: attachment.upload_requested,
-                width_px: attachment.width_px.unwrap_or_default(),
-                height_px: attachment.height_px.unwrap_or_default(),
-            }
-        })
-        .collect()
-}
-
-fn from_proto_message_attachments(
-    attachments: &[common_v1::MessageAttachment],
-) -> Vec<OutboundAttachment> {
-    attachments
-        .iter()
-        .map(|attachment| OutboundAttachment {
-            kind: attachment_kind_from_proto(attachment.kind),
-            attachment_id: non_empty(attachment.attachment_id.clone()),
-            url: non_empty(attachment.source_url.clone()),
-            artifact_ref: attachment.artifact_id.as_ref().map(|value| value.ulid.clone()),
-            filename: non_empty(attachment.filename.clone()),
-            content_type: non_empty(attachment.declared_content_type.clone()),
-            size_bytes: if attachment.size_bytes > 0 { Some(attachment.size_bytes) } else { None },
-            content_hash: non_empty(attachment.content_hash.clone()),
-            origin: non_empty(attachment.origin.clone()),
-            policy_context: non_empty(attachment.policy_context.clone()),
-            upload_requested: attachment.upload_requested,
-            inline_base64: if attachment.inline_bytes.is_empty() {
-                None
-            } else {
-                Some(BASE64_STANDARD.encode(attachment.inline_bytes.as_slice()))
-            },
-            width_px: if attachment.width_px > 0 { Some(attachment.width_px) } else { None },
-            height_px: if attachment.height_px > 0 { Some(attachment.height_px) } else { None },
-        })
-        .collect()
-}
-
-fn from_proto_a2ui_update(update: Option<common_v1::A2uiUpdate>) -> Option<ConnectorA2uiUpdate> {
-    let update = update?;
-    let surface = update.surface.trim();
-    if surface.is_empty() || update.patch_json.is_empty() {
-        return None;
-    }
-    Some(ConnectorA2uiUpdate { surface: surface.to_owned(), patch_json: update.patch_json })
-}
-
-fn attachment_kind_to_proto(kind: AttachmentKind) -> i32 {
-    match kind {
-        AttachmentKind::Image => common_v1::message_attachment::AttachmentKind::Image as i32,
-        AttachmentKind::File => common_v1::message_attachment::AttachmentKind::File as i32,
-    }
-}
-
-fn attachment_kind_from_proto(kind: i32) -> AttachmentKind {
-    match common_v1::message_attachment::AttachmentKind::try_from(kind).ok() {
-        Some(common_v1::message_attachment::AttachmentKind::Image) => AttachmentKind::Image,
-        _ => AttachmentKind::File,
-    }
-}
-
-fn unix_ms_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().try_into().unwrap_or(i64::MAX))
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use palyra_connectors::{
@@ -1267,12 +741,12 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    use super::attachments::render_attachment_context;
     use super::{
         default_connector_specs, discord, discord_connector_id, discord_token_vault_ref,
-        from_proto_a2ui_update, normalize_discord_account_id, render_attachment_context,
-        resolve_connector_gateway_auth, route_message_max_payload_bytes,
-        to_proto_message_attachments, with_attachment_context, ChannelPlatform,
-        ChannelPlatformError,
+        from_proto_a2ui_update, normalize_discord_account_id, resolve_connector_gateway_auth,
+        route_message_max_payload_bytes, to_proto_message_attachments, with_attachment_context,
+        ChannelPlatform, ChannelPlatformError,
     };
     use crate::gateway::GatewayAuthConfig;
     use crate::media::MediaRuntimeConfig;
