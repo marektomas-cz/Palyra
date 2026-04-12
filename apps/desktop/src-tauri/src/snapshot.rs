@@ -1192,7 +1192,7 @@ pub(crate) async fn request_console_session(
         Err(control_plane::ControlPlaneClientError::Http { status: 401 | 403, .. }) => {
             control_plane
                 .login(&control_plane::ConsoleLoginRequest {
-                    admin_token: admin_token.to_owned(),
+                    admin_token: Some(admin_token.to_owned()),
                     principal: CONSOLE_PRINCIPAL.to_owned(),
                     device_id: CONSOLE_DEVICE_ID.to_owned(),
                     channel: None,
@@ -1340,7 +1340,7 @@ async fn login_console_session(
 ) -> Result<()> {
     let session = control_plane
         .login(&control_plane::ConsoleLoginRequest {
-            admin_token: admin_token.to_owned(),
+            admin_token: Some(admin_token.to_owned()),
             principal: CONSOLE_PRINCIPAL.to_owned(),
             device_id: CONSOLE_DEVICE_ID.to_owned(),
             channel: None,

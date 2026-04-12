@@ -1002,7 +1002,10 @@ async fn run_palyra_json_command_owned(
 }
 
 pub(crate) fn run() {
-    let mut control_center = match initialize_control_center(ControlCenter::new) {
+    let mut control_center = match initialize_control_center(|| {
+        super::bootstrap_portable_install_environment()?;
+        ControlCenter::new()
+    }) {
         Ok(value) => value,
         Err(message) => {
             eprintln!("{message}");

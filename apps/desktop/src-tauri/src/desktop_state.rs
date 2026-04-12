@@ -20,6 +20,7 @@ const DESKTOP_ONBOARDING_EVENT_LIMIT: usize = 40;
 const DESKTOP_COMPANION_NOTIFICATION_LIMIT: usize = 40;
 const DESKTOP_COMPANION_OFFLINE_DRAFT_LIMIT: usize = 20;
 const DESKTOP_RECENT_PROFILE_LIMIT: usize = 6;
+const DESKTOP_INSTALL_METADATA_FILE_NAME: &str = "install-metadata.json";
 pub(crate) const IMPLICIT_DESKTOP_PROFILE_NAME: &str = "desktop-local";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -710,6 +711,39 @@ const fn default_browser_service_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PortableDesktopInstallMetadata {
+    artifact_kind: Option<String>,
+    state_root: Option<String>,
+    config_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct PortableDesktopInstallPaths {
+    state_root: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+}
+
+pub(crate) fn bootstrap_portable_install_environment() -> Result<()> {
+    let Ok(current_exe) = std::env::current_exe() else {
+        return Ok(());
+    };
+    bootstrap_portable_install_environment_for_executable(current_exe.as_path())
+}
+
+pub(crate) fn bootstrap_portable_install_environment_for_executable(
+    executable_path: &Path,
+) -> Result<()> {
+    let Some(paths) = load_portable_desktop_install_paths(executable_path)? else {
+        return Ok(());
+    };
+
+    seed_missing_env_path("PALYRA_STATE_ROOT", paths.state_root.as_deref());
+    seed_missing_env_path("PALYRA_CONFIG", paths.config_path.as_deref());
+    Ok(())
+}
+
 pub(crate) fn resolve_desktop_state_root() -> Result<PathBuf> {
     if let Ok(raw) = std::env::var("PALYRA_STATE_ROOT") {
         if let Some(value) = normalize_optional_text(raw.as_str()) {
@@ -723,9 +757,102 @@ pub(crate) fn resolve_desktop_state_root() -> Result<PathBuf> {
         }
     }
 
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(paths) = load_portable_desktop_install_paths(current_exe.as_path())? {
+            if let Some(state_root) = paths.state_root {
+                return Ok(state_root);
+            }
+        }
+    }
+
     palyra_common::default_state_root().map_err(|error| {
         anyhow!("failed to resolve default state root for desktop control center: {}", error)
     })
+}
+
+fn load_portable_desktop_install_paths(executable_path: &Path) -> Result<Option<PortableDesktopInstallPaths>> {
+    let Some(install_root) = executable_path.parent() else {
+        return Ok(None);
+    };
+    let metadata_path = install_root.join(DESKTOP_INSTALL_METADATA_FILE_NAME);
+    if !metadata_path.is_file() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(metadata_path.as_path()).with_context(|| {
+        format!(
+            "failed to read desktop install metadata {}",
+            metadata_path.display()
+        )
+    })?;
+    let metadata: PortableDesktopInstallMetadata = serde_json::from_str(raw.as_str()).with_context(
+        || {
+            format!(
+                "failed to parse desktop install metadata {}",
+                metadata_path.display()
+            )
+        },
+    )?;
+
+    if metadata
+        .artifact_kind
+        .as_deref()
+        .and_then(normalize_optional_text)
+        .is_some_and(|value| !value.eq_ignore_ascii_case("desktop"))
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(PortableDesktopInstallPaths {
+        state_root: parse_install_metadata_path(
+            metadata.state_root.as_deref(),
+            "state_root",
+            metadata_path.as_path(),
+        )?,
+        config_path: parse_install_metadata_path(
+            metadata.config_path.as_deref(),
+            "config_path",
+            metadata_path.as_path(),
+        )?,
+    }))
+}
+
+fn parse_install_metadata_path(
+    raw: Option<&str>,
+    field_name: &str,
+    metadata_path: &Path,
+) -> Result<Option<PathBuf>> {
+    let Some(value) = raw.and_then(normalize_optional_text) else {
+        return Ok(None);
+    };
+    let candidate = PathBuf::from(value);
+    if !candidate.is_absolute() {
+        return Err(anyhow!(
+            "desktop install metadata field '{}' in {} must be an absolute path",
+            field_name,
+            metadata_path.display()
+        ));
+    }
+    Ok(Some(candidate))
+}
+
+fn seed_missing_env_path(env_key: &str, value: Option<&Path>) {
+    if std::env::var(env_key)
+        .ok()
+        .as_deref()
+        .and_then(normalize_optional_text)
+        .is_some()
+    {
+        return;
+    }
+    let Some(path) = value else {
+        return;
+    };
+
+    // SAFETY: desktop startup hydrates process env before worker threads are spawned.
+    unsafe {
+        std::env::set_var(env_key, path.as_os_str());
+    }
 }
 
 pub(crate) fn load_or_initialize_state_file(path: &Path) -> Result<DesktopStateFile> {

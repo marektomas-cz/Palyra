@@ -30,9 +30,9 @@ use super::profile_registry::{implicit_profile, DesktopProfileCatalog};
 use super::snapshot::{resolve_dashboard_access_target, OverallStatus};
 use super::supervisor::ConsolePayloadCache;
 use super::{
-    build_desktop_refresh_payload, build_onboarding_status, build_snapshot_from_inputs,
-    collect_redacted_errors, compute_backoff_ms, executable_file_name,
-    load_or_initialize_state_file, load_runtime_secrets,
+    bootstrap_portable_install_environment_for_executable, build_desktop_refresh_payload,
+    build_onboarding_status, build_snapshot_from_inputs, collect_redacted_errors,
+    compute_backoff_ms, executable_file_name, load_or_initialize_state_file, load_runtime_secrets,
     migrate_legacy_runtime_secrets_from_state_file, mpsc, parse_discord_status,
     parse_remote_dashboard_base_url, prepare_control_center_for_launch, resolve_binary_path,
     resolve_desktop_state_root, sanitize_log_line, try_enqueue_log_event,
@@ -62,6 +62,15 @@ impl ScopedEnvVar {
         // SAFETY: tests serialize environment mutations with env_lock().
         unsafe {
             std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests serialize environment mutations with env_lock().
+        unsafe {
+            std::env::remove_var(key);
         }
         Self { key, previous }
     }
@@ -937,6 +946,98 @@ fn desktop_state_root_rejects_relative_palyra_state_root_override() {
     let error =
         resolve_desktop_state_root().expect_err("relative PALYRA_STATE_ROOT should be rejected");
     assert!(error.to_string().contains("must be an absolute path"));
+}
+
+#[test]
+fn portable_install_metadata_bootstraps_missing_env_paths() {
+    let _env_guard = lock_env();
+    let _state_root_override = ScopedEnvVar::unset("PALYRA_STATE_ROOT");
+    let _config_override = ScopedEnvVar::unset("PALYRA_CONFIG");
+    let fixture = TempFixtureDir::new();
+    let install_root = fixture.path().join("install");
+    let state_root = fixture.path().join("portable-state");
+    let config_path = state_root.join("palyra.toml");
+    let executable_path = install_root.join(executable_file_name("palyra-desktop-control-center"));
+
+    std::fs::create_dir_all(install_root.as_path())
+        .expect("install root should exist for metadata bootstrap test");
+    std::fs::create_dir_all(state_root.as_path())
+        .expect("state root should exist for metadata bootstrap test");
+    std::fs::write(executable_path.as_path(), b"desktop")
+        .expect("desktop executable stub should be created");
+    std::fs::write(config_path.as_path(), "daemon.bind = \"127.0.0.1\"")
+        .expect("config stub should be created");
+    std::fs::write(
+        install_root.join("install-metadata.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 2,
+            "artifact_kind": "desktop",
+            "state_root": state_root,
+            "config_path": config_path,
+        }))
+        .expect("install metadata should serialize"),
+    )
+    .expect("install metadata should be written");
+
+    bootstrap_portable_install_environment_for_executable(executable_path.as_path())
+        .expect("portable install bootstrap should succeed");
+
+    assert_eq!(
+        std::env::var_os("PALYRA_STATE_ROOT").map(PathBuf::from),
+        Some(state_root.clone())
+    );
+    assert_eq!(
+        std::env::var_os("PALYRA_CONFIG").map(PathBuf::from),
+        Some(config_path)
+    );
+}
+
+#[test]
+fn portable_install_metadata_does_not_override_explicit_env_paths() {
+    let _env_guard = lock_env();
+    let fixture = TempFixtureDir::new();
+    let install_root = fixture.path().join("install");
+    let state_root = fixture.path().join("portable-state");
+    let config_path = state_root.join("palyra.toml");
+    let explicit_state_root = fixture.path().join("explicit-state");
+    let explicit_config_path = fixture.path().join("explicit.toml");
+    let executable_path = install_root.join(executable_file_name("palyra-desktop-control-center"));
+    let _state_root_override =
+        ScopedEnvVar::set("PALYRA_STATE_ROOT", explicit_state_root.to_string_lossy().as_ref());
+    let _config_override =
+        ScopedEnvVar::set("PALYRA_CONFIG", explicit_config_path.to_string_lossy().as_ref());
+
+    std::fs::create_dir_all(install_root.as_path())
+        .expect("install root should exist for metadata bootstrap test");
+    std::fs::create_dir_all(state_root.as_path())
+        .expect("state root should exist for metadata bootstrap test");
+    std::fs::write(executable_path.as_path(), b"desktop")
+        .expect("desktop executable stub should be created");
+    std::fs::write(config_path.as_path(), "daemon.bind = \"127.0.0.1\"")
+        .expect("config stub should be created");
+    std::fs::write(
+        install_root.join("install-metadata.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 2,
+            "artifact_kind": "desktop",
+            "state_root": state_root,
+            "config_path": config_path,
+        }))
+        .expect("install metadata should serialize"),
+    )
+    .expect("install metadata should be written");
+
+    bootstrap_portable_install_environment_for_executable(executable_path.as_path())
+        .expect("portable install bootstrap should succeed");
+
+    assert_eq!(
+        std::env::var_os("PALYRA_STATE_ROOT").map(PathBuf::from),
+        Some(explicit_state_root)
+    );
+    assert_eq!(
+        std::env::var_os("PALYRA_CONFIG").map(PathBuf::from),
+        Some(explicit_config_path)
+    );
 }
 
 #[test]
