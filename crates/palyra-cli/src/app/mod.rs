@@ -32,6 +32,7 @@ const PROFILE_CONFIG_FILE_NAME: &str = "palyra.toml";
 
 #[derive(Debug, Clone)]
 pub(crate) struct RootCommandContext {
+    cli_state_root: PathBuf,
     state_root: PathBuf,
     config_path: Option<PathBuf>,
     profile_name: Option<String>,
@@ -204,6 +205,10 @@ impl RootCommandContext {
         self.state_root.as_path()
     }
 
+    pub(crate) fn cli_state_root(&self) -> &Path {
+        self.cli_state_root.as_path()
+    }
+
     pub(crate) fn config_path(&self) -> Option<&Path> {
         self.config_path.as_deref()
     }
@@ -370,6 +375,7 @@ fn build_root_context(root: RootOptions) -> Result<RootCommandContext> {
     )?;
 
     Ok(RootCommandContext {
+        cli_state_root: bootstrap_state_root,
         output_format: resolve_output_format(&root),
         log_level: resolve_log_level(&root),
         no_color: root.no_color,
@@ -440,7 +446,7 @@ fn load_profiles_document(path: Option<&Path>) -> Result<CliProfilesDocument> {
 
 pub(crate) fn cli_profiles_registry_path() -> Result<PathBuf> {
     let base_state_root = current_root_context()
-        .map(|context| context.state_root().to_path_buf())
+        .map(|context| context.cli_state_root().to_path_buf())
         .unwrap_or(resolve_cli_state_root(None)?);
     resolve_profiles_storage_path(base_state_root.as_path())
 }
