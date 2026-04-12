@@ -18,10 +18,12 @@ export type CronForm = {
   channel: string;
 };
 
+export const DEFAULT_LOGIN_DEVICE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
 export const DEFAULT_LOGIN_FORM: LoginForm = {
   adminToken: "",
   principal: "admin:local-browser",
-  deviceId: "local-browser",
+  deviceId: DEFAULT_LOGIN_DEVICE_ID,
   channel: "",
 };
 

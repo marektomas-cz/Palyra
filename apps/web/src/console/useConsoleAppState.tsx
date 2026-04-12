@@ -153,6 +153,10 @@ function clearDesktopHandoffTokenFromAddressBar(): void {
   window.history.replaceState(window.history.state, "", next);
 }
 
+function isExpectedUnauthenticatedSessionError(error: unknown): boolean {
+  return error instanceof ControlPlaneApiError && (error.status === 401 || error.status === 403);
+}
+
 function toWorkspaceSlug(value: string): string {
   const normalized = value
     .trim()
@@ -649,7 +653,9 @@ export function useConsoleAppState() {
       } catch (failure) {
         if (!cancelled && !isAbortError(failure)) {
           setSession(null);
-          setError(toErrorMessage(failure));
+          if (!isExpectedUnauthenticatedSessionError(failure)) {
+            setError(toErrorMessage(failure));
+          }
         }
       } finally {
         if (!cancelled) {
@@ -694,7 +700,7 @@ export function useConsoleAppState() {
             applyConsoleSession(current);
             return;
           } catch (failure) {
-            if (!cancelled) {
+            if (!cancelled && !isExpectedUnauthenticatedSessionError(failure)) {
               setError(toErrorMessage(failure));
             }
             if (attempt >= DESKTOP_SESSION_RECOVERY_ATTEMPTS) {
@@ -704,7 +710,11 @@ export function useConsoleAppState() {
           }
         }
       } catch (failure) {
-        if (!cancelled && !isAbortError(failure)) {
+        if (
+          !cancelled &&
+          !isAbortError(failure) &&
+          !isExpectedUnauthenticatedSessionError(failure)
+        ) {
           setError(toErrorMessage(failure));
         }
       }

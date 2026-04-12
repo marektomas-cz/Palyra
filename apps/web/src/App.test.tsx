@@ -19,7 +19,9 @@ afterEach(() => {
 describe("M35 web console app", () => {
   it("requires authentication before showing privileged pages", async () => {
     window.localStorage.removeItem("palyra.console.theme");
-    const fetchMock = createQueuedFetch([jsonResponse({ error: "missing session" }, 403)]);
+    const fetchMock = createQueuedFetch(
+      Array.from({ length: 16 }, () => jsonResponse({ error: "missing session" }, 403)),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
@@ -31,8 +33,31 @@ describe("M35 web console app", () => {
       { timeout: 4_000 },
     );
     expect(screen.queryByRole("button", { name: "Approvals" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Sign-in failed")).not.toBeInTheDocument();
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.classList.contains("dark")).toBe(true);
+  });
+
+  it("prefills a canonical device id for the advanced login form", async () => {
+    window.localStorage.removeItem("palyra.console.theme");
+    const fetchMock = createQueuedFetch(
+      Array.from({ length: 16 }, () => jsonResponse({ error: "missing session" }, 403)),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await waitFor(
+      () => {
+        expect(screen.getByRole("heading", { name: "Operator Dashboard" })).toBeInTheDocument();
+      },
+      { timeout: 4_000 },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Advanced session identity" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Device label")).toHaveValue("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    });
   });
 
   it("retries bootstrap session before falling back to the auth screen", async () => {
