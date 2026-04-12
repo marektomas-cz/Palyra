@@ -1,3 +1,8 @@
+//! Central provider dispatch for CLI channel workflows.
+//!
+//! The CLI keeps generic argument normalization here and delegates
+//! provider-specific lifecycle behavior to submodules.
+
 pub(super) mod discord;
 
 use anyhow::Result;

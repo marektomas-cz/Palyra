@@ -58,6 +58,9 @@ run_fast_profile() {
   echo "Checking local-only tracked paths..."
   bash "$ROOT_DIR/scripts/check-local-only-tracked-files.sh"
 
+  echo "Running module budget and connector boundary ratchet..."
+  bash "$ROOT_DIR/scripts/dev/report-module-budgets.sh" --strict
+
   echo "Checking desktop glib patch governance..."
   bash "$ROOT_DIR/scripts/check-desktop-glib-patch.sh"
 
@@ -79,6 +82,9 @@ run_full_profile() {
 
   echo "Checking local-only tracked paths..."
   bash "$ROOT_DIR/scripts/check-local-only-tracked-files.sh"
+
+  echo "Running module budget and connector boundary ratchet..."
+  bash "$ROOT_DIR/scripts/dev/report-module-budgets.sh" --strict
 
   echo "Checking desktop glib patch governance..."
   bash "$ROOT_DIR/scripts/check-desktop-glib-patch.sh"

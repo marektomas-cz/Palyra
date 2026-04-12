@@ -88,6 +88,12 @@ performance-smoke:
 module-budgets:
     bash scripts/dev/report-module-budgets.sh
 
+module-budgets-strict:
+    bash scripts/dev/report-module-budgets.sh --strict
+
+connector-boundaries:
+    bash scripts/check-channel-provider-boundaries.sh
+
 deterministic-fixtures-update:
     bash scripts/test/update-deterministic-fixtures.sh
 

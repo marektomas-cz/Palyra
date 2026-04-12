@@ -1,3 +1,8 @@
+//! Central provider dispatch for daemon channel application flows.
+//!
+//! Provider-specific behavior is delegated into submodules so generic handlers
+//! do not accumulate scattered Discord branching over time.
+
 use serde_json::{json, Value};
 
 use crate::{app::state::AppState, journal::ApprovalRiskLevel, *};

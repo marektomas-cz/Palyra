@@ -593,7 +593,7 @@ impl ControlPlaneClient {
         self.request_json(Method::GET, path, None::<&Value>, false).await
     }
 
-    pub async fn post_json_value<T: serde::Serialize + ?Sized>(
+    pub async fn post_json_value<T: Serialize + ?Sized>(
         &self,
         path: impl AsRef<str>,
         request: &T,

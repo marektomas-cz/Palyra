@@ -52,11 +52,11 @@ impl Default for WorkspacePatchRedactionPolicy {
         Self {
             redaction_patterns: DEFAULT_REDACTION_PATTERNS
                 .iter()
-                .map(|value| value.to_string())
+                .map(|value| (*value).to_string())
                 .collect(),
             secret_file_markers: DEFAULT_SECRET_FILE_MARKERS
                 .iter()
-                .map(|value| value.to_string())
+                .map(|value| (*value).to_string())
                 .collect(),
         }
     }

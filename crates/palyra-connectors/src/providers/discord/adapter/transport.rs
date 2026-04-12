@@ -40,12 +40,12 @@ pub(super) fn token_suffix(token: &str) -> Option<String> {
 }
 
 pub(super) fn normalize_discord_target(raw: &str) -> Result<String, ConnectorAdapterError> {
-    crate::normalize_discord_target(raw).map_err(|error| {
+    super::super::normalize_discord_target(raw).map_err(|error| {
         let message = match error {
-            crate::DiscordSemanticsError::EmptyTarget => {
+            super::super::DiscordSemanticsError::EmptyTarget => {
                 "discord target conversation id cannot be empty".to_owned()
             }
-            crate::DiscordSemanticsError::InvalidTarget => {
+            super::super::DiscordSemanticsError::InvalidTarget => {
                 "discord target conversation id contains unsupported characters".to_owned()
             }
             other => other.to_string(),

@@ -1,3 +1,8 @@
+//! Discord-owned daemon channel application helpers.
+//!
+//! This module contains the provider-specific onboarding, governance, and
+//! payload assembly that backs the generic channel application layer.
+
 mod lifecycle;
 mod onboarding;
 

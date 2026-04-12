@@ -175,6 +175,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 2
 
       - name: Enforce pinned GitHub Actions
         run: bash scripts/check-gh-actions-pinned.sh
@@ -187,6 +189,9 @@ jobs:
 
       - name: Guard local-only tracked paths
         run: bash scripts/check-local-only-tracked-files.sh
+
+      - name: Module budget and connector boundary checks
+        run: bash scripts/dev/report-module-budgets.sh --strict
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain

@@ -4,7 +4,6 @@ use serde_json::Value;
 
 use crate::{
     net::ConnectorNetGuard,
-    permissions::DiscordMessageOperation,
     protocol::{
         ConnectorConversationTarget, ConnectorMessageLocator, ConnectorMessageMutationResult,
         ConnectorMessageMutationStatus, ConnectorMessageReactionRequest, ConnectorMessageRecord,
@@ -15,6 +14,7 @@ use crate::{
 };
 
 use super::{
+    super::permissions::{self, DiscordMessageOperation},
     records::parse_discord_message_record,
     runtime::DiscordBotIdentity,
     transport::{
@@ -45,7 +45,7 @@ fn missing_permission_labels(
     operation: DiscordMessageOperation,
     permission_mask: u64,
 ) -> Vec<String> {
-    crate::permissions::discord_permissions_for_operation(operation)
+    permissions::discord_permissions_for_operation(operation)
         .iter()
         .filter(|&(_, bit)| (permission_mask & *bit) == 0)
         .map(|(label, _)| (*label).to_owned())
@@ -70,7 +70,7 @@ pub(super) fn denied_operation_preflight(
     operation: DiscordMessageOperation,
     reason: String,
 ) -> crate::protocol::ConnectorOperationPreflight {
-    crate::permissions::discord_operation_preflight(operation, false, Some(reason), None, None)
+    permissions::discord_operation_preflight(operation, false, Some(reason), None, None)
 }
 
 pub(super) fn denied_mutation_result(
@@ -154,7 +154,7 @@ pub(super) struct DiscordAdminContext {
 
 impl DiscordAdminContext {
     pub(super) fn preflight(&self) -> crate::protocol::ConnectorOperationPreflight {
-        crate::permissions::discord_operation_preflight(
+        permissions::discord_operation_preflight(
             self.operation,
             self.preflight_allowed,
             self.preflight_reason.clone(),

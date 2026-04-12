@@ -203,11 +203,11 @@ fn ok_channel_response() -> DiscordTransportResponse {
         headers: Default::default(),
         body: format!(
             "{{\"id\":\"chan-1\",\"permissions\":\"{}\"}}",
-            (crate::permissions::DISCORD_PERMISSION_VIEW_CHANNEL
-                | crate::permissions::DISCORD_PERMISSION_READ_MESSAGE_HISTORY
-                | crate::permissions::DISCORD_PERMISSION_SEND_MESSAGES
-                | crate::permissions::DISCORD_PERMISSION_MANAGE_MESSAGES
-                | crate::permissions::DISCORD_PERMISSION_ADD_REACTIONS)
+            (super::super::permissions::DISCORD_PERMISSION_VIEW_CHANNEL
+                | super::super::permissions::DISCORD_PERMISSION_READ_MESSAGE_HISTORY
+                | super::super::permissions::DISCORD_PERMISSION_SEND_MESSAGES
+                | super::super::permissions::DISCORD_PERMISSION_MANAGE_MESSAGES
+                | super::super::permissions::DISCORD_PERMISSION_ADD_REACTIONS)
         ),
     }
 }

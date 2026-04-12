@@ -170,7 +170,7 @@ pub fn build_server_endpoint(
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
     server_config.transport = Arc::new(build_transport_config(limits)?);
 
-    quinn::Endpoint::server(server_config, bind_addr).map_err(|error| {
+    Endpoint::server(server_config, bind_addr).map_err(|error| {
         QuicTransportError::EndpointBindFailed { bind_addr, message: error.to_string() }
     })
 }
@@ -216,7 +216,7 @@ pub fn build_client_endpoint(
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
     client_config.transport_config(Arc::new(build_transport_config(limits)?));
 
-    let mut endpoint = quinn::Endpoint::client(bind_addr).map_err(|error| {
+    let mut endpoint = Endpoint::client(bind_addr).map_err(|error| {
         QuicTransportError::EndpointBindFailed { bind_addr, message: error.to_string() }
     })?;
     endpoint.set_default_client_config(client_config);

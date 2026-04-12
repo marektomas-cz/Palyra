@@ -5,6 +5,9 @@ edition.workspace = true
 license-file.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 palyra-common = { version = "0.1.0", path = "../palyra-common" }
 palyra-vault = { version = "0.1.0", path = "../palyra-vault" }

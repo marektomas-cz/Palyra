@@ -1,3 +1,8 @@
+//! Discord provider surface owned by `palyra-connectors`.
+//!
+//! This module localizes Discord-specific IDs, defaults, normalization rules,
+//! permissions, and adapter wiring behind one provider-owned boundary.
+
 mod adapter;
 mod defaults;
 mod error;

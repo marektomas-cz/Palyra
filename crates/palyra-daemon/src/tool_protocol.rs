@@ -223,7 +223,7 @@ pub fn decide_tool_call(
         sensitive_tool_names: sensitive_allowlisted_tool_names(config.allowed_tools.as_slice()),
         sensitive_capability_names: SENSITIVE_CAPABILITY_POLICY_NAMES
             .iter()
-            .map(|value| value.to_string())
+            .map(|value| (*value).to_string())
             .collect(),
         ..PolicyEvaluationConfig::default()
     };

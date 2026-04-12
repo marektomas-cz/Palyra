@@ -55,7 +55,7 @@ pub fn audit_skill_artifact_security(
         checks.push(pass_audit_check(
             "wasm_module_presence",
             format!("artifact includes {} wasm module(s)", module_paths.len()),
-            Some(json!({ "modules": module_paths.clone() })),
+            Some(json!({ "modules": &module_paths })),
         ));
     }
 

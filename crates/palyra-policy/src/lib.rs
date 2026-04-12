@@ -265,7 +265,7 @@ pub fn evaluate_with_context(
     let mut constructed_entities =
         entities.iter().map(|entity| entity.uid().to_string()).collect::<Vec<_>>();
     constructed_entities.sort();
-
+    let request_capabilities = normalized_request_context.capabilities.clone();
     let context = Context::from_json_value(
         json!({
             "action": normalized_action,
@@ -274,10 +274,10 @@ pub fn evaluate_with_context(
             "device_id": normalized_request_context.device_id.clone().unwrap_or_default(),
             "channel": normalized_request_context.channel.clone().unwrap_or_default(),
             "session_id": normalized_request_context.session_id.clone().unwrap_or_default(),
-            "run_id": normalized_request_context.run_id.clone().unwrap_or_default(),
+            "run_id": normalized_request_context.run_id.as_deref().unwrap_or_default(),
             "tool_name": requested_tool.clone().unwrap_or_default(),
             "skill_id": requested_skill.clone().unwrap_or_default(),
-            "capabilities": normalized_request_context.capabilities.clone(),
+            "capabilities": &request_capabilities,
             "is_sensitive_action": is_sensitive_action,
             "is_allowlisted_tool": is_allowlisted_tool,
             "is_allowlisted_skill": is_allowlisted_skill,
@@ -330,9 +330,9 @@ pub fn evaluate_with_context(
             is_allowlisted_skill,
             is_tool_execute_principal_allowed,
             is_tool_execute_channel_allowed,
-            requested_tool: requested_tool.clone(),
-            requested_skill: requested_skill.clone(),
-            request_capabilities: normalized_request_context.capabilities,
+            requested_tool,
+            requested_skill,
+            request_capabilities,
             constructed_entities,
         },
     })

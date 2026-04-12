@@ -50,6 +50,24 @@ CHECKS = [
             "crates/palyra-connectors/src/lib.rs",
         ],
     },
+    {
+        "name": "legacy-connector-architecture-names",
+        "pattern": r"palyra-connector-core|palyra-connector-discord|palyra_connector_core|palyra_connector_discord",
+        "paths": [
+            "AGENTS.md",
+            "Cargo.toml",
+            "crates",
+            "apps",
+            ".github",
+            "scripts",
+            "justfile",
+            "Makefile",
+        ],
+        "allow_prefixes": [
+            "scripts/check-channel-provider-boundaries.sh",
+            "scripts/dev/report-connector-leakage.sh",
+        ],
+    },
 ]
 
 

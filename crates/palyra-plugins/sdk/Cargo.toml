@@ -5,6 +5,9 @@ edition.workspace = true
 license-file.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 name = "palyra_plugins_sdk"
 path = "src/lib.rs"

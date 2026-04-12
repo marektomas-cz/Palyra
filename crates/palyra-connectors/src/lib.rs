@@ -7,10 +7,6 @@ pub mod core;
 pub mod providers;
 
 pub use crate::core::*;
-pub(crate) use crate::providers::discord::permissions;
-pub(crate) use crate::providers::discord::{
-    discord_default_egress_allowlist, normalize_discord_target, DiscordSemanticsError,
-};
 
 #[cfg(test)]
 mod tests {

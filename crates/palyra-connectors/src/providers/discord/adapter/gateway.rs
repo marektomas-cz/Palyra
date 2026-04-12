@@ -16,11 +16,12 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use ulid::Ulid;
 
 use crate::{
-    discord_default_egress_allowlist, net::ConnectorNetGuard, protocol::InboundMessageEvent,
-    storage::ConnectorInstanceRecord, supervisor::ConnectorAdapterError,
+    net::ConnectorNetGuard, protocol::InboundMessageEvent, storage::ConnectorInstanceRecord,
+    supervisor::ConnectorAdapterError,
 };
 
 use super::{
+    super::discord_default_egress_allowlist,
     records::normalize_discord_message_create,
     runtime::{DiscordGatewayInflater, DiscordGatewayResumeState, DiscordRuntimeState},
     transport::{parse_discord_error_summary, DiscordCredentialResolver, DiscordTransport},

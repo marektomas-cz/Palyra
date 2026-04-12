@@ -1,3 +1,9 @@
+//! Provider registry and default adapter inventory for `palyra-connectors`.
+//!
+//! Provider-owned semantics stay in the corresponding submodule while this
+//! module remains the generic place that enumerates built-in providers and
+//! publishes their runtime descriptors.
+
 use std::sync::{Arc, OnceLock};
 
 use crate::core::{

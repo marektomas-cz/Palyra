@@ -1,0 +1,10 @@
+# Vendored desktop patch set tracked for upstream advisory governance.
+apps/desktop/src-tauri/third_party/*
+
+# Large characterization and regression suites that are intentionally preserved
+# until later maintainability passes outside this connector refactor.
+crates/palyra-daemon/tests/*
+crates/palyra-cli/tests/*
+crates/palyra-browserd/src/support/tests.rs
+apps/web/src/*.test.ts
+apps/web/src/*.test.tsx

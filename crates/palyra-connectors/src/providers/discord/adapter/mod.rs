@@ -52,8 +52,8 @@ use transport::{
 };
 pub use transport::{DiscordCredential, DiscordCredentialResolver, EnvDiscordCredentialResolver};
 
+use super::permissions::DiscordMessageOperation;
 use crate::{
-    permissions::DiscordMessageOperation,
     protocol::{
         ConnectorKind, ConnectorMessageDeleteRequest, ConnectorMessageEditRequest,
         ConnectorMessageMutationDiff, ConnectorMessageMutationResult,

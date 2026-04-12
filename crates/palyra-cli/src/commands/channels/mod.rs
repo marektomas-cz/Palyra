@@ -1,3 +1,8 @@
+//! CLI entrypoint for channel and connector operations.
+//!
+//! Generic command dispatch stays here while provider-owned lifecycle and
+//! resolution logic is localized under [`providers`] and [`connectors`].
+
 mod capabilities;
 mod common;
 mod lifecycle;
