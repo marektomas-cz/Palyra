@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from shutil import which
 
 CHECKS = [
     {
@@ -72,7 +73,10 @@ CHECKS = [
 
 
 def run_rg(pattern: str, paths: list[str]) -> list[str]:
-    command = ["rg", "-n", pattern, *paths]
+    if which("rg"):
+        command = ["rg", "-n", pattern, *paths]
+    else:
+        command = ["grep", "-R", "-n", "-E", "-I", pattern, *paths]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode not in (0, 1):
         sys.stderr.write(result.stderr)
