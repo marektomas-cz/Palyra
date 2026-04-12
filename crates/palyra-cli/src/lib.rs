@@ -507,6 +507,8 @@ fn generate_admin_token() -> String {
     format!("palyra_admin_{}_{}", Ulid::new(), Ulid::new())
 }
 
+const DEFAULT_ADMIN_BOUND_PRINCIPAL: &str = "admin:local";
+
 fn build_init_config_document(
     mode: InitMode,
     identity_store_dir: &Path,
@@ -577,6 +579,11 @@ fn build_init_config_document(
         &mut document,
         "admin.auth_token",
         toml::Value::String(admin_token.to_owned()),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "admin.bound_principal",
+        toml::Value::String(DEFAULT_ADMIN_BOUND_PRINCIPAL.to_owned()),
     )?;
     set_value_at_path(
         &mut document,
@@ -8016,7 +8023,7 @@ tier = "c"
 mod init_command_tests {
     use std::path::PathBuf;
 
-    use super::{build_init_config_document, InitMode};
+    use super::{build_init_config_document, InitMode, DEFAULT_ADMIN_BOUND_PRINCIPAL};
 
     fn read_string(document: &toml::Value, key: &str) -> Option<String> {
         let mut cursor = document;
@@ -8051,6 +8058,10 @@ mod init_command_tests {
             Some("loopback_only")
         );
         assert_eq!(read_string(&document, "admin.auth_token").as_deref(), Some("token-local"));
+        assert_eq!(
+            read_string(&document, "admin.bound_principal").as_deref(),
+            Some(DEFAULT_ADMIN_BOUND_PRINCIPAL)
+        );
         assert_eq!(read_bool(&document, "admin.require_auth"), Some(true));
         assert_eq!(read_bool(&document, "gateway.tls.enabled"), None);
     }

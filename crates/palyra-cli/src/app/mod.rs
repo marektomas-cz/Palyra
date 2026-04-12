@@ -989,6 +989,57 @@ admin_token_env = "PALYRA_PROFILE_ADMIN_TOKEN"
     }
 
     #[test]
+    fn config_bound_principal_overrides_user_defaults_when_flags_are_absent() -> Result<()> {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_env();
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state");
+        fs::create_dir_all(&state_root)?;
+        let config_path = temp.path().join("palyra.toml");
+        fs::write(
+            &config_path,
+            r#"
+[daemon]
+bind_addr = "127.0.0.1"
+port = 7142
+
+[gateway]
+grpc_bind_addr = "127.0.0.1"
+grpc_port = 50051
+
+[admin]
+auth_token = "config-token"
+bound_principal = "admin:local"
+"#,
+        )?;
+
+        let context = build_root_context(RootOptions {
+            profile: None,
+            expect_profile: None,
+            config_path: Some(config_path.display().to_string()),
+            state_root: Some(state_root.display().to_string()),
+            verbose: 0,
+            log_level: LogLevelArg::Info,
+            output_format: OutputFormatArg::Text,
+            plain: false,
+            no_color: true,
+            allow_profile_mismatch: false,
+            allow_strict_profile_actions: false,
+        })?;
+
+        let grpc =
+            context.resolve_grpc_connection(ConnectionOverrides::default(), ConnectionDefaults::USER)?;
+        let http =
+            context.resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::USER)?;
+
+        assert_eq!(grpc.token.as_deref(), Some("config-token"));
+        assert_eq!(grpc.principal, "admin:local");
+        assert_eq!(http.token.as_deref(), Some("config-token"));
+        assert_eq!(http.principal, "admin:local");
+        Ok(())
+    }
+
+    #[test]
     fn expected_profile_fails_closed_on_mismatch() {
         let _guard = env_lock().lock().expect("env lock");
         clear_env();
