@@ -2465,13 +2465,9 @@ mod tests {
             device_id: "device-1".to_owned(),
             channel: Some("cli".to_owned()),
         };
-
         let encoded = serde_json::to_value(&request).expect("console login request should encode");
-
+        let principal = encoded.get("principal").and_then(serde_json::Value::as_str);
         assert!(encoded.get("admin_token").is_none());
-        assert_eq!(
-            encoded.get("principal").and_then(serde_json::Value::as_str),
-            Some("admin:test")
-        );
+        assert_eq!(principal, Some("admin:test"));
     }
 }
