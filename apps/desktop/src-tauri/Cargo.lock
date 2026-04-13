@@ -2550,6 +2550,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glib",
+ "libc",
  "palyra-common",
  "palyra-control-plane",
  "palyra-vault",

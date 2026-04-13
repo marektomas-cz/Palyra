@@ -135,6 +135,10 @@ if (`$Wait) {
 } else {
     `$process = Start-Process -FilePath `$desktopBinary -WorkingDirectory `$installRoot -PassThru
     if (`$process.WaitForExit(2000)) {
+        if (`$process.ExitCode -eq 0) {
+            Write-Host "Palyra desktop exited cleanly before the launcher timeout. If no new window appeared, another instance may already be running."
+            return
+        }
         throw "Palyra desktop exited immediately with code `$(`$process.ExitCode). Re-run Launch-Palyra-Test.ps1 with -Wait to surface the startup error directly."
     }
 }

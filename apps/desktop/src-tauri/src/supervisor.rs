@@ -25,9 +25,9 @@ use super::{
     load_or_initialize_state_file, load_runtime_secrets,
     migrate_legacy_runtime_secrets_from_state_file, sanitize_log_line,
     validate_runtime_state_root_override, DesktopOnboardingStep, DesktopSecretStore,
-    DesktopStateFile, BROWSER_GRPC_PORT,
-    BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL, GATEWAY_ADMIN_PORT, GATEWAY_GRPC_PORT,
-    GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY, LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE,
+    DesktopStateFile, BROWSER_GRPC_PORT, BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL,
+    GATEWAY_ADMIN_PORT, GATEWAY_GRPC_PORT, GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY,
+    LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE,
 };
 
 const NODE_HOST_STATE_DIR: &str = "node-host";
@@ -1065,10 +1065,7 @@ impl ControlCenter {
     }
 
     pub(crate) fn node_host_installed(&self) -> bool {
-        self.runtime_root
-            .join(NODE_HOST_STATE_DIR)
-            .join(NODE_HOST_CONFIG_FILE_NAME)
-            .is_file()
+        self.runtime_root.join(NODE_HOST_STATE_DIR).join(NODE_HOST_CONFIG_FILE_NAME).is_file()
     }
 
     pub(crate) fn stop_node_host(&mut self) {
@@ -1089,30 +1086,96 @@ pub(crate) struct DesktopInstanceLock {
 impl DesktopInstanceLock {
     pub(crate) fn acquire(state_dir: &Path) -> Result<Self> {
         let path = state_dir.join("instance.lock");
-        let mut file = match fs::OpenOptions::new().write(true).create_new(true).open(path.as_path())
-        {
+        let mut file = match create_instance_lock_file(path.as_path()) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                bail!(
-                    "desktop control center is already running for state root {}",
-                    state_dir.display()
-                );
+                if recover_stale_instance_lock(path.as_path())? {
+                    create_instance_lock_file(path.as_path()).with_context(|| {
+                        format!(
+                            "failed to recreate desktop instance lock {} after stale recovery",
+                            path.display()
+                        )
+                    })?
+                } else {
+                    bail!(
+                        "desktop control center is already running for state root {}",
+                        state_dir.display()
+                    );
+                }
             }
             Err(error) => {
                 return Err(error).with_context(|| format!("failed to create {}", path.display()));
             }
         };
-        writeln!(
-            file,
-            "pid={}\nstarted_at_unix_ms={}",
-            std::process::id(),
-            unix_ms_now()
-        )
-        .with_context(|| format!("failed to write desktop instance lock {}", path.display()))?;
+        writeln!(file, "pid={}\nstarted_at_unix_ms={}", std::process::id(), unix_ms_now())
+            .with_context(|| format!("failed to write desktop instance lock {}", path.display()))?;
         file.sync_all()
             .with_context(|| format!("failed to flush desktop instance lock {}", path.display()))?;
         Ok(Self { path })
     }
+}
+
+fn create_instance_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+fn recover_stale_instance_lock(path: &Path) -> Result<bool> {
+    if !instance_lock_is_stale(path)? {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error).with_context(|| {
+            format!("failed to remove stale desktop instance lock {}", path.display())
+        }),
+    }
+}
+
+fn instance_lock_is_stale(path: &Path) -> Result<bool> {
+    let Some(pid) = read_instance_lock_pid(path)? else {
+        return Ok(true);
+    };
+    Ok(!desktop_process_is_alive(pid)?)
+}
+
+fn read_instance_lock_pid(path: &Path) -> Result<Option<u32>> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read desktop instance lock {}", path.display()))?;
+    let Some(raw_pid) = contents.lines().find_map(|line| line.strip_prefix("pid=").map(str::trim))
+    else {
+        return Ok(None);
+    };
+    let pid = raw_pid.parse::<u32>().with_context(|| {
+        format!("failed to parse PID from desktop instance lock {}", path.display())
+    })?;
+    Ok(Some(pid))
+}
+
+#[cfg(windows)]
+fn desktop_process_is_alive(pid: u32) -> Result<bool> {
+    palyra_common::windows_security::process_is_alive(pid)
+        .with_context(|| format!("failed to probe desktop instance lock PID {pid}"))
+}
+
+#[cfg(unix)]
+fn desktop_process_is_alive(pid: u32) -> Result<bool> {
+    let pid = i32::try_from(pid).context("desktop instance lock PID exceeds platform range")?;
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error).with_context(|| format!("failed to probe desktop instance lock PID {pid}")),
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn desktop_process_is_alive(_pid: u32) -> Result<bool> {
+    Ok(true)
 }
 
 impl Drop for DesktopInstanceLock {
@@ -1169,6 +1232,25 @@ mod instance_lock_tests {
 
         DesktopInstanceLock::acquire(state_dir.as_path())
             .expect("lock should be reacquirable after prior guard drops");
+        let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn desktop_instance_lock_recovers_stale_lock_for_missing_process() {
+        let state_dir = temp_state_dir();
+        let lock_path = state_dir.join("instance.lock");
+        fs::write(lock_path.as_path(), "pid=2147483647\nstarted_at_unix_ms=1\n")
+            .expect("stale desktop instance lock should be written");
+
+        let _guard = DesktopInstanceLock::acquire(state_dir.as_path())
+            .expect("stale desktop instance lock should be recovered");
+
+        let contents = fs::read_to_string(lock_path.as_path())
+            .expect("recovered desktop instance lock should be readable");
+        assert!(
+            contents.contains(format!("pid={}", std::process::id()).as_str()),
+            "recovered desktop instance lock should be rewritten for the current process: {contents}"
+        );
         let _ = fs::remove_dir_all(state_dir);
     }
 }
