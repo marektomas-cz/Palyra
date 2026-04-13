@@ -3,6 +3,7 @@ use palyra_control_plane::{self as control_plane};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
 use super::desktop_state::{
     DesktopCompanionNotificationKind, DesktopCompanionOfflineDraft, DesktopCompanionRolloutState,
@@ -10,9 +11,10 @@ use super::desktop_state::{
 };
 use super::onboarding::{DesktopRefreshPayload, OnboardingStatusInputs};
 use super::snapshot::{
-    build_control_plane_client, build_dashboard_open_url, ensure_console_session_with_csrf,
-    request_console_session, sanitize_log_line, DashboardOpenInputs,
+    build_control_plane_client, build_dashboard_open_url, ensure_console_session_with_cache,
+    ensure_console_session_with_csrf, sanitize_log_line, DashboardOpenInputs,
 };
+use super::supervisor::ConsoleSessionCache;
 use super::{normalize_optional_text, unix_ms_now, ControlCenter, RuntimeConfig};
 
 const CHAT_SESSION_LIMIT: usize = 16;
@@ -25,6 +27,7 @@ pub(crate) struct DesktopCompanionInputs {
     pub(crate) runtime: RuntimeConfig,
     pub(crate) admin_token: String,
     pub(crate) http_client: Client,
+    pub(crate) console_session_cache: Arc<Mutex<Option<ConsoleSessionCache>>>,
     pub(crate) active_profile: DesktopCompanionProfileRecord,
     pub(crate) profiles: Vec<DesktopCompanionProfileRecord>,
     pub(crate) recent_profiles: Vec<String>,
@@ -356,6 +359,7 @@ impl ControlCenter {
             runtime: self.runtime.clone(),
             admin_token: self.admin_token.clone(),
             http_client: self.http_client.clone(),
+            console_session_cache: Arc::clone(&self.console_session_cache),
             active_profile: self.current_profile_record(),
             profiles: self.profile_records(),
             recent_profiles: self.persisted.recent_profile_names().to_vec(),
@@ -529,6 +533,7 @@ pub(crate) async fn build_companion_snapshot(
         runtime,
         admin_token,
         http_client,
+        console_session_cache,
         active_profile,
         profiles,
         recent_profiles,
@@ -545,7 +550,14 @@ pub(crate) async fn build_companion_snapshot(
     let mut inventory = None;
 
     if companion_state.rollout.companion_shell_enabled {
-        match fetch_companion_console_data(&http_client, &runtime, admin_token.as_str()).await {
+        match fetch_companion_console_data(
+            &http_client,
+            &runtime,
+            admin_token.as_str(),
+            console_session_cache.as_ref(),
+        )
+        .await
+        {
             Ok(data) => {
                 console_session = Some(data.console_session);
                 session_catalog = data.session_catalog.sessions;
@@ -767,9 +779,7 @@ pub(crate) async fn transcribe_companion_audio(
     let content_type = normalize_optional_text(payload.content_type.as_str())
         .ok_or_else(|| anyhow!("desktop voice transcription requires a content_type"))?;
     if !content_type.to_ascii_lowercase().starts_with("audio/") {
-        return Err(anyhow!(
-            "desktop voice transcription only accepts audio/* content types"
-        ));
+        return Err(anyhow!("desktop voice transcription only accepts audio/* content types"));
     }
     if payload.bytes_base64.trim().is_empty() {
         return Err(anyhow!("desktop voice transcription requires non-empty audio bytes"));
@@ -784,10 +794,7 @@ pub(crate) async fn transcribe_companion_audio(
     let _csrf_token = ensure_console_session_with_csrf(&mut control_plane, admin_token).await?;
     let raw = control_plane
         .post_json_value(
-            format!(
-                "console/v1/chat/sessions/{}/attachments",
-                urlencoding(session_id)
-            ),
+            format!("console/v1/chat/sessions/{}/attachments", urlencoding(session_id)),
             &json!({
                 "filename": filename,
                 "content_type": content_type,
@@ -800,8 +807,12 @@ pub(crate) async fn transcribe_companion_audio(
     let transcript = envelope
         .derived_artifacts
         .iter()
-        .find(|artifact| artifact.kind == TRANSCRIPT_KIND && artifact.state == TRANSCRIPT_STATE_SUCCEEDED)
-        .ok_or_else(|| anyhow!("desktop voice transcription did not return a completed transcript"))?;
+        .find(|artifact| {
+            artifact.kind == TRANSCRIPT_KIND && artifact.state == TRANSCRIPT_STATE_SUCCEEDED
+        })
+        .ok_or_else(|| {
+            anyhow!("desktop voice transcription did not return a completed transcript")
+        })?;
     let transcript_text = transcript
         .content_text
         .as_deref()
@@ -881,10 +892,12 @@ async fn fetch_companion_console_data(
     http_client: &Client,
     runtime: &RuntimeConfig,
     admin_token: &str,
+    console_session_cache: &Mutex<Option<ConsoleSessionCache>>,
 ) -> Result<FetchedCompanionConsoleData> {
     let mut control_plane = build_control_plane_client(http_client.clone(), runtime)?;
-    let console_session = request_console_session(&mut control_plane, admin_token).await?;
-    control_plane.set_csrf_token(Some(console_session.csrf_token.clone()));
+    let console_session =
+        ensure_console_session_with_cache(&mut control_plane, admin_token, console_session_cache)
+            .await?;
     let session_catalog_future = control_plane.list_session_catalog(vec![
         ("limit", Some(CHAT_SESSION_LIMIT.to_string())),
         ("sort", Some("updated_desc".to_owned())),

@@ -18,7 +18,7 @@ use super::openai_auth::{
     load_openai_auth_status, OpenAiAuthStatusSnapshot, OpenAiControlPlaneInputs,
 };
 use super::snapshot::{
-    build_control_plane_client, build_snapshot_from_inputs, ensure_console_session,
+    build_control_plane_client, build_snapshot_from_inputs, ensure_console_session_with_cache,
     sanitize_log_line, ControlCenterSnapshot, SnapshotBuildInputs,
 };
 use super::{
@@ -182,6 +182,7 @@ pub(crate) async fn build_desktop_refresh_payload(
         browser_running,
         browser_service_enabled,
     } = inputs;
+    let console_session_cache = snapshot_inputs.console_session_cache.clone();
 
     let (snapshot, openai_status) = tokio::join!(
         build_snapshot_from_inputs(snapshot_inputs),
@@ -212,8 +213,14 @@ pub(crate) async fn build_desktop_refresh_payload(
         &snapshot,
         dashboard_reachable,
     );
-    let operator_auth =
-        probe_operator_auth(&http_client, &runtime, admin_token.as_str(), &snapshot).await;
+    let operator_auth = probe_operator_auth(
+        &http_client,
+        &runtime,
+        admin_token.as_str(),
+        console_session_cache.as_ref(),
+        &snapshot,
+    )
+    .await;
     let openai_ready = is_openai_ready(&openai_status);
     let onboarding = persisted.active_onboarding().clone();
     let discord_summary = derive_discord_onboarding_summary(&snapshot, &onboarding.discord);
@@ -659,6 +666,7 @@ async fn probe_operator_auth(
     http_client: &reqwest::Client,
     runtime: &super::RuntimeConfig,
     admin_token: &str,
+    console_session_cache: &std::sync::Mutex<Option<super::supervisor::ConsoleSessionCache>>,
     snapshot: &ControlCenterSnapshot,
 ) -> OnboardingOperatorAuthSnapshot {
     if snapshot.quick_facts.gateway_version.is_none() {
@@ -679,8 +687,10 @@ async fn probe_operator_auth(
         }
     };
 
-    match ensure_console_session(&mut control_plane, admin_token).await {
-        Ok(()) => OnboardingOperatorAuthSnapshot {
+    match ensure_console_session_with_cache(&mut control_plane, admin_token, console_session_cache)
+        .await
+    {
+        Ok(_) => OnboardingOperatorAuthSnapshot {
             ready: true,
             note: "Desktop console session bootstrap succeeded against the local gateway."
                 .to_owned(),

@@ -12,7 +12,7 @@ use std::{
 
 use serde_json::json;
 
-use crate::companion::DesktopCompanionRolloutRequest;
+use crate::companion::{build_companion_snapshot, DesktopCompanionRolloutRequest};
 
 use super::commands::initialize_control_center;
 use super::features::onboarding::connectors::discord::{
@@ -36,10 +36,10 @@ use super::{
     migrate_legacy_runtime_secrets_from_state_file, mpsc, parse_discord_status,
     parse_remote_dashboard_base_url, prepare_control_center_for_launch, resolve_binary_path,
     resolve_desktop_state_root, sanitize_log_line, try_enqueue_log_event,
-    validate_runtime_state_root_override, DesktopInstanceLock,
-    BrowserStatusSnapshot, Client, ControlCenter, DashboardAccessMode, DesktopOnboardingStep,
-    DesktopSecretStore, DesktopStateFile, LogEvent, LogStream, ManagedService, RuntimeConfig,
-    ServiceKind, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
+    validate_runtime_state_root_override, BrowserStatusSnapshot, Client, ControlCenter,
+    DashboardAccessMode, DesktopInstanceLock, DesktopOnboardingStep, DesktopSecretStore,
+    DesktopStateFile, LogEvent, LogStream, ManagedService, RuntimeConfig, ServiceKind, Ulid,
+    LOG_EVENT_CHANNEL_CAPACITY,
 };
 
 fn env_lock() -> &'static Mutex<()> {
@@ -884,8 +884,8 @@ fn state_file_migration_moves_plaintext_tokens_to_secret_store() {
         .expect("legacy desktop secrets should reload idempotently");
     let loaded_again = load_or_initialize_state_file(state_path.as_path())
         .expect("migrated desktop state should load from secret store");
-    let runtime_secrets_again =
-        load_runtime_secrets(&secret_store).expect("runtime secrets should reload from secret store");
+    let runtime_secrets_again = load_runtime_secrets(&secret_store)
+        .expect("runtime secrets should reload from secret store");
     assert_eq!(runtime_secrets_again.admin_token, runtime_secrets.admin_token);
     assert_eq!(runtime_secrets_again.browser_auth_token, runtime_secrets.browser_auth_token);
     assert_eq!(loaded_again.browser_service_enabled, loaded.browser_service_enabled);
@@ -982,14 +982,8 @@ fn portable_install_metadata_bootstraps_missing_env_paths() {
     bootstrap_portable_install_environment_for_executable(executable_path.as_path())
         .expect("portable install bootstrap should succeed");
 
-    assert_eq!(
-        std::env::var_os("PALYRA_STATE_ROOT").map(PathBuf::from),
-        Some(state_root.clone())
-    );
-    assert_eq!(
-        std::env::var_os("PALYRA_CONFIG").map(PathBuf::from),
-        Some(config_path)
-    );
+    assert_eq!(std::env::var_os("PALYRA_STATE_ROOT").map(PathBuf::from), Some(state_root.clone()));
+    assert_eq!(std::env::var_os("PALYRA_CONFIG").map(PathBuf::from), Some(config_path));
 }
 
 #[test]
@@ -1030,14 +1024,8 @@ fn portable_install_metadata_does_not_override_explicit_env_paths() {
     bootstrap_portable_install_environment_for_executable(executable_path.as_path())
         .expect("portable install bootstrap should succeed");
 
-    assert_eq!(
-        std::env::var_os("PALYRA_STATE_ROOT").map(PathBuf::from),
-        Some(explicit_state_root)
-    );
-    assert_eq!(
-        std::env::var_os("PALYRA_CONFIG").map(PathBuf::from),
-        Some(explicit_config_path)
-    );
+    assert_eq!(std::env::var_os("PALYRA_STATE_ROOT").map(PathBuf::from), Some(explicit_state_root));
+    assert_eq!(std::env::var_os("PALYRA_CONFIG").map(PathBuf::from), Some(explicit_config_path));
 }
 
 #[test]
@@ -1541,6 +1529,211 @@ async fn snapshot_build_reuses_console_session_until_expiry() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn companion_snapshot_polling_does_not_rebootstrap_console_auth_after_first_refresh() {
+    let fixture = TempFixtureDir::new();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+    let port = listener.local_addr().expect("listener address should resolve").port();
+    let login_requests = Arc::new(AtomicU64::new(0));
+    let session_requests = Arc::new(AtomicU64::new(0));
+    let login_requests_server = Arc::clone(&login_requests);
+    let session_requests_server = Arc::clone(&session_requests);
+
+    let server = std::thread::spawn(move || {
+        listener.set_nonblocking(true).expect("listener should support nonblocking mode");
+        let mut idle_since = Instant::now();
+        loop {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => {
+                    idle_since = Instant::now();
+                    connection
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if idle_since.elapsed() >= Duration::from_millis(400) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("listener should accept request: {error}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("accepted stream should switch back to blocking mode");
+
+            let mut buffer = [0_u8; 8192];
+            let read = stream.read(&mut buffer).expect("request should be readable");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let request_line = request.lines().next().unwrap_or_default().to_owned();
+            let has_cookie = request.contains("palyra_console_session=session-companion");
+
+            if request_line.starts_with("GET /healthz ") {
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"status":"ok","version":"0.1.0","git_hash":"desktop-test","uptime_seconds":42}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("GET / ") {
+                write_json_response(&mut stream, "200 OK", r#"{"ok":true}"#, &[]);
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/auth/session ") {
+                session_requests_server.fetch_add(1, Ordering::Relaxed);
+                if has_cookie {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"principal":"admin:desktop-control-center","device_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","csrf_token":"csrf-companion","issued_at_unix_ms":1,"expires_at_unix_ms":4102444800000}"#,
+                        &[],
+                    );
+                } else {
+                    write_json_response(
+                        &mut stream,
+                        "403 Forbidden",
+                        r#"{"error":"console session cookie is missing"}"#,
+                        &[],
+                    );
+                }
+                continue;
+            }
+            if request_line.starts_with("POST /console/v1/auth/login ") {
+                login_requests_server.fetch_add(1, Ordering::Relaxed);
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"principal":"admin:desktop-control-center","device_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","csrf_token":"csrf-companion","issued_at_unix_ms":1,"expires_at_unix_ms":4102444800000}"#,
+                    &["Set-Cookie: palyra_console_session=session-companion; Path=/; HttpOnly; SameSite=Strict"],
+                );
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/diagnostics ") {
+                if has_cookie {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"generated_at_unix_ms":1700000000000,"observability":{},"errors":[]}"#,
+                        &[],
+                    );
+                } else {
+                    write_json_response(
+                        &mut stream,
+                        "403 Forbidden",
+                        r#"{"error":"console session cookie is missing"}"#,
+                        &[],
+                    );
+                }
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/channels/discord%3Adefault ") {
+                if has_cookie {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"connector":{"connector_id":"discord:default","enabled":false,"readiness":"disabled","liveness":"stopped"}}"#,
+                        &[],
+                    );
+                } else {
+                    write_json_response(
+                        &mut stream,
+                        "403 Forbidden",
+                        r#"{"error":"console session cookie is missing"}"#,
+                        &[],
+                    );
+                }
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/auth/providers/openai ") {
+                assert!(has_cookie, "OpenAI provider state should reuse the console session");
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"provider":"openai","state":"connected","note":"OpenAI is ready.","default_profile_id":"openai-default","oauth_supported":true,"bootstrap_supported":true,"callback_supported":true,"reconnect_supported":true,"revoke_supported":true,"default_selection_supported":true}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/auth/health?include_profiles=true ") {
+                assert!(has_cookie, "OpenAI auth health should reuse the console session");
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"profiles":[],"refresh_metrics":{"attempts":0,"successes":0,"failures":0,"by_provider":[{"provider":"openai","attempts":0,"successes":0,"failures":0}]}}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line
+                .starts_with("GET /console/v1/auth/profiles?provider_kind=openai&limit=100 ")
+            {
+                assert!(has_cookie, "OpenAI profile listing should reuse the console session");
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"profiles":[],"page":{"limit":100,"returned":0,"next_cursor":null,"has_more":false}}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/sessions?") {
+                assert!(has_cookie, "session catalog should reuse the console session");
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"sessions":[],"summary":{"active_sessions":0,"archived_sessions":0,"sessions_with_pending_approvals":0,"sessions_with_active_runs":0},"page":{"limit":16,"returned":0,"next_cursor":null,"has_more":false}}"#,
+                    &[],
+                );
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/approvals?limit=24 ") {
+                assert!(has_cookie, "approvals listing should reuse the console session");
+                write_json_response(&mut stream, "200 OK", r#"{"approvals":[]}"#, &[]);
+                continue;
+            }
+            if request_line.starts_with("GET /console/v1/inventory ") {
+                assert!(has_cookie, "inventory listing should reuse the console session");
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"generated_at_unix_ms":1700000000000,"summary":{"devices":0,"trusted_devices":0,"pending_pairings":0,"ok_devices":0,"stale_devices":0,"degraded_devices":0,"offline_devices":0,"ok_instances":0,"stale_instances":0,"degraded_instances":0,"offline_instances":0},"devices":[]}"#,
+                    &[],
+                );
+                continue;
+            }
+            panic!("unexpected companion snapshot request: {request_line}");
+        }
+    });
+
+    let mut control_center = build_test_control_center(fixture.path());
+    control_center.persisted.browser_service_enabled = false;
+    control_center.runtime.gateway_admin_port = port;
+
+    let _first = build_companion_snapshot(control_center.capture_companion_inputs())
+        .await
+        .expect("first companion snapshot should build");
+    let first_session_requests = session_requests.load(Ordering::Relaxed);
+    let first_login_requests = login_requests.load(Ordering::Relaxed);
+
+    let _second = build_companion_snapshot(control_center.capture_companion_inputs())
+        .await
+        .expect("second companion snapshot should build");
+
+    assert_eq!(
+        session_requests.load(Ordering::Relaxed),
+        first_session_requests,
+        "subsequent companion refreshes should not hit /console/v1/auth/session once the desktop session is cached",
+    );
+    assert_eq!(
+        login_requests.load(Ordering::Relaxed),
+        first_login_requests,
+        "subsequent companion refreshes should not re-login while the cached desktop session remains valid",
+    );
+
+    server.join().expect("test server thread should exit");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn onboarding_preflight_accepts_healthy_runtime_already_bound_to_expected_ports() {
     fn write_http_response(
         stream: &mut std::net::TcpStream,
@@ -1918,14 +2111,8 @@ async fn snapshot_build_redacts_console_and_connector_diagnostics() {
     assert_eq!(snapshot.diagnostics.observability.recent_failure_count, 1);
     assert_eq!(snapshot.diagnostics.experiments.structured_contract, "a2ui.v1");
     assert!(snapshot.diagnostics.experiments.fail_closed);
-    assert_eq!(
-        snapshot.diagnostics.experiments.native_canvas.feature_flag,
-        "canvas_host.enabled"
-    );
-    assert_eq!(
-        snapshot.diagnostics.experiments.native_canvas.limits.max_state_bytes,
-        8_192
-    );
+    assert_eq!(snapshot.diagnostics.experiments.native_canvas.feature_flag, "canvas_host.enabled");
+    assert_eq!(snapshot.diagnostics.experiments.native_canvas.limits.max_state_bytes, 8_192);
     assert_eq!(snapshot.quick_facts.discord.saturation_state, "paused");
     assert_eq!(
         snapshot.quick_facts.discord.permission_gap_hint.as_deref(),

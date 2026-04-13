@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use palyra_control_plane as control_plane;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -171,8 +172,7 @@ impl Default for RuntimeConfig {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConsoleSessionCache {
-    pub(crate) csrf_token: String,
-    pub(crate) expires_at_unix_ms: i64,
+    pub(crate) session: control_plane::ConsoleSession,
 }
 
 #[derive(Debug, Clone, Default)]

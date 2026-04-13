@@ -570,7 +570,8 @@ fn build_desktop_experiment_governance_snapshot(
     let root = diagnostics_payload
         .and_then(|payload| payload.get("canvas_experiments"))
         .and_then(Value::as_object);
-    let native_canvas = root.and_then(|value| value.get("native_canvas")).and_then(Value::as_object);
+    let native_canvas =
+        root.and_then(|value| value.get("native_canvas")).and_then(Value::as_object);
     let limits = native_canvas.and_then(|value| value.get("limits")).and_then(Value::as_object);
 
     DesktopExperimentGovernanceSnapshot {
@@ -637,16 +638,15 @@ fn read_json_u64(record: Option<&serde_json::Map<String, Value>>, key: &str) -> 
     record.and_then(|entry| entry.get(key)).and_then(Value::as_u64).unwrap_or_default()
 }
 
-fn read_json_string_array(record: Option<&serde_json::Map<String, Value>>, key: &str) -> Vec<String> {
+fn read_json_string_array(
+    record: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Vec<String> {
     record
         .and_then(|entry| entry.get(key))
         .and_then(Value::as_array)
         .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
+            values.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect::<Vec<_>>()
         })
         .unwrap_or_default()
 }
@@ -868,7 +868,10 @@ pub(crate) async fn build_snapshot_from_inputs(
 
     let overall_status = if gateway_health.is_none() {
         OverallStatus::Down
-    } else if (browser_service_enabled && !browser_healthy) || discord_degraded || node_host_degraded {
+    } else if (browser_service_enabled && !browser_healthy)
+        || discord_degraded
+        || node_host_degraded
+    {
         OverallStatus::Degraded
     } else {
         OverallStatus::Healthy
@@ -1146,18 +1149,36 @@ pub(crate) fn build_control_plane_client(
         .map_err(|error| anyhow!("failed to build control-plane client: {error}"))
 }
 
-pub(crate) async fn ensure_console_session(
-    control_plane: &mut ControlPlaneClient,
-    admin_token: &str,
-) -> Result<()> {
-    request_console_session(control_plane, admin_token).await.map(|_| ())
-}
-
 pub(crate) async fn ensure_console_session_with_csrf(
     control_plane: &mut ControlPlaneClient,
     admin_token: &str,
 ) -> Result<String> {
     request_console_session(control_plane, admin_token).await.map(|session| session.csrf_token)
+}
+
+pub(crate) async fn ensure_console_session_with_cache(
+    control_plane: &mut ControlPlaneClient,
+    admin_token: &str,
+    console_session_cache: &Mutex<Option<ConsoleSessionCache>>,
+) -> Result<control_plane::ConsoleSession> {
+    if let Some(session) = load_cached_console_session(console_session_cache) {
+        control_plane.set_csrf_token(Some(session.csrf_token.clone()));
+        return Ok(session);
+    }
+
+    let session = request_console_session(control_plane, admin_token).await?;
+    cache_console_session(console_session_cache, &session);
+    Ok(session)
+}
+
+pub(crate) async fn ensure_console_session_with_cached_csrf(
+    control_plane: &mut ControlPlaneClient,
+    admin_token: &str,
+    console_session_cache: &Mutex<Option<ConsoleSessionCache>>,
+) -> Result<String> {
+    ensure_console_session_with_cache(control_plane, admin_token, console_session_cache)
+        .await
+        .map(|session| session.csrf_token)
 }
 
 pub(crate) async fn build_dashboard_open_url(
@@ -1294,19 +1315,10 @@ fn restore_console_session_state(
     control_plane: &mut ControlPlaneClient,
     console_session_cache: &Mutex<Option<ConsoleSessionCache>>,
 ) {
-    let Ok(cache) = console_session_cache.lock() else {
+    let Some(session) = load_cached_console_session(console_session_cache) else {
         return;
     };
-    let Some(session) = cache.as_ref() else {
-        return;
-    };
-    if session.expires_at_unix_ms <= unix_ms_now() {
-        return;
-    }
-    if session.csrf_token.trim().is_empty() {
-        return;
-    }
-    control_plane.set_csrf_token(Some(session.csrf_token.clone()));
+    control_plane.set_csrf_token(Some(session.csrf_token));
 }
 
 fn cache_console_session(
@@ -1319,11 +1331,12 @@ fn cache_console_session(
     } else {
         now.saturating_add(CONSOLE_SESSION_EXPIRY_SKEW_MS)
     };
+    let mut cached_session = session.clone();
+    cached_session.expires_at_unix_ms = expires_at_unix_ms;
     let Ok(mut cache) = console_session_cache.lock() else {
         return;
     };
-    *cache =
-        Some(ConsoleSessionCache { csrf_token: session.csrf_token.clone(), expires_at_unix_ms });
+    *cache = Some(ConsoleSessionCache { session: cached_session });
 }
 
 fn clear_console_session_cache(console_session_cache: &Mutex<Option<ConsoleSessionCache>>) {
@@ -1349,6 +1362,22 @@ async fn login_console_session(
         .map_err(|error| anyhow!("console login failed: {error}"))?;
     cache_console_session(console_session_cache, &session);
     Ok(())
+}
+
+fn load_cached_console_session(
+    console_session_cache: &Mutex<Option<ConsoleSessionCache>>,
+) -> Option<control_plane::ConsoleSession> {
+    let Ok(cache) = console_session_cache.lock() else {
+        return None;
+    };
+    let session = cache.as_ref()?.session.clone();
+    if session.expires_at_unix_ms <= unix_ms_now() {
+        return None;
+    }
+    if session.csrf_token.trim().is_empty() {
+        return None;
+    }
+    Some(session)
 }
 
 pub(crate) async fn run_support_bundle_export(

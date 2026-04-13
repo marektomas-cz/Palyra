@@ -5,11 +5,13 @@ use palyra_control_plane::{self as control_plane, AuthCredentialView};
 use reqwest::{Client, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
 use super::snapshot::{
-    build_control_plane_client, ensure_console_session, ensure_console_session_with_csrf,
-    loopback_url, sanitize_log_line, ActionResult,
+    build_control_plane_client, ensure_console_session_with_cache,
+    ensure_console_session_with_cached_csrf, loopback_url, sanitize_log_line, ActionResult,
 };
+use super::supervisor::ConsoleSessionCache;
 use super::{normalize_optional_text, ControlCenter, RuntimeConfig};
 
 const OPENAI_PROVIDER: &str = "openai";
@@ -19,6 +21,7 @@ pub(crate) struct OpenAiControlPlaneInputs {
     pub(crate) runtime: RuntimeConfig,
     pub(crate) admin_token: String,
     pub(crate) http_client: Client,
+    pub(crate) console_session_cache: Arc<Mutex<Option<ConsoleSessionCache>>>,
 }
 
 impl OpenAiControlPlaneInputs {
@@ -27,6 +30,7 @@ impl OpenAiControlPlaneInputs {
             runtime: control_center.runtime.clone(),
             admin_token: control_center.admin_token.clone(),
             http_client: control_center.http_client.clone(),
+            console_session_cache: Arc::clone(&control_center.console_session_cache),
         }
     }
 }
@@ -303,7 +307,12 @@ pub(crate) async fn load_openai_auth_status(
 ) -> Result<OpenAiAuthStatusSnapshot> {
     let mut control_plane =
         build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
-    ensure_console_session(&mut control_plane, inputs.admin_token.as_str()).await?;
+    ensure_console_session_with_cache(
+        &mut control_plane,
+        inputs.admin_token.as_str(),
+        inputs.console_session_cache.as_ref(),
+    )
+    .await?;
 
     let provider_state = control_plane
         .get_openai_provider_state()
@@ -390,7 +399,12 @@ pub(crate) async fn connect_openai_api_key(
 ) -> Result<ActionResult> {
     let mut control_plane =
         build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
-    ensure_console_session(&mut control_plane, inputs.admin_token.as_str()).await?;
+    ensure_console_session_with_cache(
+        &mut control_plane,
+        inputs.admin_token.as_str(),
+        inputs.console_session_cache.as_ref(),
+    )
+    .await?;
 
     let profile_name =
         normalize_optional_text(request.profile_name.as_str()).unwrap_or("OpenAI").to_owned();
@@ -414,7 +428,12 @@ pub(crate) async fn start_openai_oauth_bootstrap(
 ) -> Result<OpenAiOAuthLaunchResult> {
     let mut control_plane =
         build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
-    ensure_console_session(&mut control_plane, inputs.admin_token.as_str()).await?;
+    ensure_console_session_with_cache(
+        &mut control_plane,
+        inputs.admin_token.as_str(),
+        inputs.console_session_cache.as_ref(),
+    )
+    .await?;
 
     let client_id = normalize_optional_owned(request.client_id)
         .ok_or_else(|| anyhow!("OpenAI OAuth client_id is required"))?;
@@ -443,8 +462,12 @@ pub(crate) async fn reconnect_openai_oauth(
 ) -> Result<OpenAiOAuthLaunchResult> {
     let mut control_plane =
         build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
-    let csrf_token =
-        ensure_console_session_with_csrf(&mut control_plane, inputs.admin_token.as_str()).await?;
+    let csrf_token = ensure_console_session_with_cached_csrf(
+        &mut control_plane,
+        inputs.admin_token.as_str(),
+        inputs.console_session_cache.as_ref(),
+    )
+    .await?;
     let profile_id = normalize_profile_id(request.profile_id.as_str())?;
 
     let response = post_console_json::<control_plane::OpenAiOAuthBootstrapEnvelope, _>(
@@ -465,7 +488,12 @@ pub(crate) async fn get_openai_oauth_callback_state(
 ) -> Result<OpenAiOAuthCallbackStateSnapshot> {
     let mut control_plane =
         build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
-    ensure_console_session(&mut control_plane, inputs.admin_token.as_str()).await?;
+    ensure_console_session_with_cache(
+        &mut control_plane,
+        inputs.admin_token.as_str(),
+        inputs.console_session_cache.as_ref(),
+    )
+    .await?;
 
     let envelope =
         control_plane
@@ -523,7 +551,12 @@ async fn run_provider_action(
 ) -> Result<ActionResult> {
     let mut control_plane =
         build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
-    ensure_console_session(&mut control_plane, inputs.admin_token.as_str()).await?;
+    ensure_console_session_with_cache(
+        &mut control_plane,
+        inputs.admin_token.as_str(),
+        inputs.console_session_cache.as_ref(),
+    )
+    .await?;
     let profile_id = normalize_profile_id(request.profile_id.as_str())?;
 
     let response = control_plane
