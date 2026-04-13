@@ -32,6 +32,15 @@ fn parse_version_subcommand() {
 }
 
 #[test]
+fn parse_gateway_status_with_json_flag() {
+    let parsed = Cli::parse_from(["palyra", "gateway", "status", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Gateway { command: DaemonCommand::Status { url: None, json: true } }
+    );
+}
+
+#[test]
 fn parse_profile_create_with_guided_defaults() {
     let parsed = Cli::parse_from([
         "palyra",
@@ -3561,7 +3570,10 @@ fn parse_daemon_status_with_url() {
     assert_eq!(
         parsed.command,
         Command::Gateway {
-            command: DaemonCommand::Status { url: Some("http://127.0.0.1:7142".to_owned()) }
+            command: DaemonCommand::Status {
+                url: Some("http://127.0.0.1:7142".to_owned()),
+                json: false,
+            }
         }
     );
 }

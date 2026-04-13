@@ -69,7 +69,7 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
         DaemonCommand::Logs { db_path, lines, follow, poll_interval_ms } => {
             super::logs::run_logs(db_path, lines, follow, poll_interval_ms)
         }
-        DaemonCommand::Status { url } => run_gateway_status(url),
+        DaemonCommand::Status { url, json } => run_gateway_status(url, json),
         DaemonCommand::DashboardUrl { path, verify_remote, identity_store_dir, open, json } => {
             let target = resolve_dashboard_access_target(path)?;
             let verification_report = if verify_remote {
@@ -657,7 +657,7 @@ fn emit_gateway_service_status(
     std::io::stdout().flush().context("stdout flush failed")
 }
 
-fn run_gateway_status(url: Option<String>) -> Result<()> {
+fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
     let context = root_context()?;
     let connection = context.resolve_http_connection(
         app::ConnectionOverrides { daemon_url: url, ..app::ConnectionOverrides::default() },
@@ -697,13 +697,13 @@ fn run_gateway_status(url: Option<String>) -> Result<()> {
 
     let report =
         GatewayStatusReport { daemon_url: connection.base_url, health, health_error, service };
-    if context.prefers_json() {
+    if output::preferred_json(json) {
         return output::print_json_pretty(
             &report,
             "failed to encode gateway status output as JSON",
         );
     }
-    if context.prefers_ndjson() {
+    if output::preferred_ndjson(json, false) {
         output::print_json_line(&report, "failed to encode gateway status output as NDJSON")?;
         return std::io::stdout().flush().context("stdout flush failed");
     }

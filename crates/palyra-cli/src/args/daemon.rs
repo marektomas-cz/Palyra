@@ -98,6 +98,8 @@ pub enum DaemonCommand {
     Status {
         #[arg(long)]
         url: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     AdminStatus {
         #[arg(long)]
