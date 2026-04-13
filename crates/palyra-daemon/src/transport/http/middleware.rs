@@ -125,6 +125,24 @@ fn consume_admin_rate_limit(state: &AppState, remote_addr: SocketAddr) -> bool {
     consume_admin_rate_limit_with_now(&state.admin_rate_limit, remote_addr.ip(), Instant::now())
 }
 
+pub(crate) fn is_loopback_admin_rate_limit_exempt(
+    remote_ip: IpAddr,
+    method: &Method,
+    path: &str,
+) -> bool {
+    if !remote_ip.is_loopback() {
+        return false;
+    }
+    matches!(
+        (method, path),
+        (&Method::POST, "/console/v1/auth/login")
+            | (&Method::GET, "/console/v1/auth/session")
+            | (&Method::POST, "/console/v1/auth/browser-handoff")
+            | (&Method::GET, "/console/v1/auth/browser-handoff/consume")
+            | (&Method::POST, "/console/v1/auth/browser-handoff/session")
+    )
+}
+
 fn admin_rate_limit_budget(remote_ip: IpAddr) -> u32 {
     if remote_ip.is_loopback() {
         return ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW;
@@ -175,9 +193,11 @@ pub(crate) async fn admin_rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let method = request.method().as_str().to_owned();
+    let method = request.method().clone();
     let path = request.uri().path().to_owned();
-    if !consume_admin_rate_limit(&state, remote_addr) {
+    if !is_loopback_admin_rate_limit_exempt(remote_addr.ip(), &method, path.as_str())
+        && !consume_admin_rate_limit(&state, remote_addr)
+    {
         state.runtime.record_denied();
         let response = runtime_status_response(tonic::Status::resource_exhausted(format!(
             "admin API rate limit exceeded for {}",

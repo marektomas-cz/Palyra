@@ -33,7 +33,7 @@ use super::openai_auth::{
     OpenAiOAuthBootstrapRequest, OpenAiOAuthCallbackStateRequest, OpenAiProfileActionRequest,
     OpenAiScopeInput,
 };
-use super::snapshot::{resolve_dashboard_access_target, OverallStatus};
+use super::snapshot::{build_dashboard_open_url, resolve_dashboard_access_target, OverallStatus};
 use super::{
     bootstrap_portable_install_environment_for_executable, build_desktop_refresh_payload,
     build_onboarding_status, build_snapshot_from_inputs, collect_redacted_errors,
@@ -703,6 +703,68 @@ async fn snapshot_keeps_launcher_status_stable_when_optional_diagnostics_fetch_f
             .any(|entry| entry.contains("diagnostics payload") && entry.contains("429")),
         "diagnostics failure warning should be surfaced: {:?}",
         snapshot.warnings
+    );
+
+    server.join().expect("test server thread should exit");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dashboard_open_url_reuses_cached_console_session_for_local_browser_handoff() {
+    let fixture = TempFixtureDir::new();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+    let port = listener.local_addr().expect("listener address should resolve").port();
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("listener should accept request");
+        let mut buffer = [0_u8; 8192];
+        let read = stream.read(&mut buffer).expect("request should be readable");
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let request_line = request.lines().next().unwrap_or_default().to_owned();
+        assert!(
+            request_line.starts_with("POST /console/v1/auth/browser-handoff "),
+            "dashboard open should go straight to browser handoff when the console session is cached: {request_line}"
+        );
+        assert!(
+            request.contains("x-palyra-csrf-token: csrf-dashboard"),
+            "dashboard handoff must reuse the cached CSRF token"
+        );
+        write_json_response(
+            &mut stream,
+            "200 OK",
+            r#"{"handoff_url":"http://127.0.0.1:7142/console/v1/auth/browser-handoff/consume?token=dashboard-token","expires_at_unix_ms":1700000000000}"#,
+            &[],
+        );
+    });
+
+    let control_center = build_test_control_center(fixture.path());
+    let now = super::unix_ms_now();
+    if let Ok(mut session_cache) = control_center.console_session_cache.lock() {
+        *session_cache = Some(super::supervisor::ConsoleSessionCache {
+            session: palyra_control_plane::ConsoleSession {
+                principal: "admin:desktop-control-center".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: None,
+                profile: None,
+                csrf_token: "csrf-dashboard".to_owned(),
+                issued_at_unix_ms: now.saturating_sub(10_000),
+                expires_at_unix_ms: now.saturating_add(120_000),
+            },
+        });
+    }
+
+    let mut dashboard_inputs = control_center.capture_dashboard_open_inputs();
+    dashboard_inputs.runtime.gateway_admin_port = port;
+    let handoff_url = build_dashboard_open_url(
+        dashboard_inputs,
+        "http://127.0.0.1:7142/#/control/overview",
+        "local",
+    )
+    .await
+    .expect("dashboard handoff URL should build from cached session");
+
+    assert_eq!(
+        handoff_url,
+        "http://127.0.0.1:7142/console/v1/auth/browser-handoff/consume?token=dashboard-token"
     );
 
     server.join().expect("test server thread should exit");

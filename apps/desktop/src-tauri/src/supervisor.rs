@@ -185,6 +185,9 @@ pub(crate) struct CachedConsolePayload {
 pub(crate) struct ConsolePayloadCache {
     pub(crate) diagnostics: CachedConsolePayload,
     pub(crate) discord: CachedConsolePayload,
+    pub(crate) companion_session_catalog: CachedConsolePayload,
+    pub(crate) companion_approvals: CachedConsolePayload,
+    pub(crate) companion_inventory: CachedConsolePayload,
 }
 
 #[derive(Debug, Serialize)]

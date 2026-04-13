@@ -245,6 +245,7 @@ pub(crate) struct DashboardOpenInputs {
     pub(crate) runtime: RuntimeConfig,
     pub(crate) admin_token: String,
     pub(crate) http_client: Client,
+    pub(crate) console_session_cache: Arc<Mutex<Option<ConsoleSessionCache>>>,
 }
 
 #[derive(Debug)]
@@ -307,6 +308,7 @@ impl ControlCenter {
             runtime: self.runtime.clone(),
             admin_token: self.admin_token.clone(),
             http_client: self.http_client.clone(),
+            console_session_cache: Arc::clone(&self.console_session_cache),
         }
     }
 
@@ -1193,8 +1195,12 @@ pub(crate) async fn build_dashboard_open_url(
     let redirect_path = dashboard_redirect_path_from_url(dashboard_url)?;
     let mut control_plane =
         build_control_plane_client(inputs.http_client.clone(), &inputs.runtime)?;
-    let _csrf_token =
-        ensure_console_session_with_csrf(&mut control_plane, inputs.admin_token.as_str()).await?;
+    let _csrf_token = ensure_console_session_with_cached_csrf(
+        &mut control_plane,
+        inputs.admin_token.as_str(),
+        inputs.console_session_cache.as_ref(),
+    )
+    .await?;
     let handoff = control_plane
         .create_browser_handoff(&control_plane::ConsoleBrowserHandoffRequest {
             redirect_path: Some(redirect_path),

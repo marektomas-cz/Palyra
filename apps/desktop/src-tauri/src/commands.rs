@@ -352,13 +352,7 @@ pub(crate) async fn open_desktop_companion_handoff(
     };
     let control_center_snapshot =
         build_companion_snapshot(companion_inputs).await.map_err(command_error)?.control_center;
-    let handoff_url = build_companion_handoff_url(
-        &dashboard_inputs.http_client,
-        &dashboard_inputs.runtime,
-        dashboard_inputs.admin_token.as_str(),
-        &control_center_snapshot,
-        &payload,
-    )
+    let handoff_url = build_companion_handoff_url(dashboard_inputs, &control_center_snapshot, &payload)
     .await
     .map_err(command_error)?;
     let mut supervisor = state.supervisor.lock().await;
