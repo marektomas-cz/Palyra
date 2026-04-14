@@ -89,6 +89,34 @@ describe("ConsoleApiClient", () => {
     expect(calls[2]?.init?.credentials).toBe("include");
   });
 
+  it("uses GET without CSRF for onboarding posture requests", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      return Promise.resolve(
+        jsonResponse({
+          contract: { contract_version: "control-plane.v1" },
+          flow: "advanced_setup",
+          flow_variant: "remote",
+          status: "in_progress",
+          config_path: "./palyra.toml",
+          resume_supported: true,
+          ready_for_first_success: false,
+          counts: { todo: 1, in_progress: 1, blocked: 0, done: 1, skipped: 0 },
+          available_flows: ["quick_start", "advanced_setup"],
+          steps: [],
+        }),
+      );
+    };
+    const client = new ConsoleApiClient("", fetcher);
+
+    await client.getOnboardingPosture(new URLSearchParams({ flow: "remote" }));
+
+    expect(requestUrl(calls[0]?.input)).toBe("/console/v1/onboarding/posture?flow=remote");
+    expect(calls[0]?.init?.method ?? "GET").toBe("GET");
+    expect(new Headers(calls[0]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+  });
+
   it("fails closed when CSRF token is missing for mutating request", async () => {
     const fetcher: typeof fetch = () => {
       return Promise.resolve(jsonResponse({ jobs: [] }));

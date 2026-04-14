@@ -34,7 +34,7 @@ import {
   objectiveWorkspaceDocumentPath,
   resolveObjectiveId,
 } from "../objectiveLinks";
-import { getSectionPath } from "../navigation";
+import { findSectionByPath, getSectionPath } from "../navigation";
 import {
   emptyToUndefined,
   formatUnixMs,
@@ -48,6 +48,12 @@ import {
   toStringArray,
   type JsonObject,
 } from "../shared";
+import type {
+  OnboardingPostureEnvelope,
+  OnboardingStepAction,
+  OnboardingStepView,
+} from "../../consoleApi";
+import { FIRST_SUCCESS_PROMPTS, queueChatStarterPrompt } from "../../chat/starterPrompts";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
 type OverviewSectionProps = {
@@ -56,6 +62,7 @@ type OverviewSectionProps = {
     | "api"
     | "overviewBusy"
     | "overviewDeployment"
+    | "overviewOnboarding"
     | "overviewApprovals"
     | "overviewDiagnostics"
     | "overviewUsageInsights"
@@ -121,6 +128,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
   const [selectedObjectiveId, setSelectedObjectiveId] = useState("");
 
   const deployment = app.overviewDeployment;
+  const onboarding = app.overviewOnboarding;
   const diagnostics = app.overviewDiagnostics;
   const usageInsights = app.overviewUsageInsights;
   const observability = readObject(diagnostics ?? {}, "observability");
@@ -140,6 +148,18 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     readString(providerAuth ?? {}, "state") ??
     readString(readObject(diagnostics ?? {}, "auth_profiles") ?? {}, "state") ??
     "unknown";
+  const onboardingSteps = onboarding?.steps ?? [];
+  const recommendedOnboardingStep =
+    onboardingSteps.find((step) => step.step_id === onboarding?.recommended_step_id) ??
+    onboardingSteps.find((step) => step.status !== "done" && step.status !== "skipped") ??
+    null;
+  const onboardingChecklistItems = buildOnboardingChecklist(onboarding);
+  const uxAggregate = app.uxTelemetryAggregate;
+  const onboardingTroubleshootingItems = buildOnboardingTroubleshootingItems(
+    onboarding,
+    uxAggregate,
+  );
+  const firstSuccessPrompts = buildFirstSuccessPrompts(onboarding);
   const activeObjectiveCount = objectives.filter(
     (objective) => readString(objective, "state") === "active",
   ).length;
@@ -165,7 +185,6 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     objectiveAttentionCount,
   });
   const busy = app.overviewBusy || objectivesBusy || objectiveMutationBusy;
-  const uxAggregate = app.uxTelemetryAggregate;
   const objectiveRows = useMemo(
     () =>
       objectives.map((objective) => ({
@@ -353,52 +372,130 @@ export function OverviewSection({ app }: OverviewSectionProps) {
 
       <section className="workspace-two-column">
         <NextActionCard
-          ctaLabel={app.uiMode === "basic" ? app.t("nav.switchAdvanced") : app.t("nav.switchBasic")}
-          description={app.t("overview.modeGuidanceBody")}
-          title={app.t("overview.modeGuidanceTitle")}
-          onCta={() => app.setUiMode(app.uiMode === "basic" ? "advanced" : "basic")}
+          ctaLabel={recommendedOnboardingStep?.action?.label ?? "Refresh overview"}
+          description={describeOnboardingPosture(onboarding)}
+          title="Next onboarding step"
+          onCta={() => {
+            if (recommendedOnboardingStep?.action !== undefined) {
+              executeOnboardingAction(recommendedOnboardingStep.action, {
+                navigate,
+                setNotice: app.setNotice,
+                setSection: app.setSection,
+              });
+              return;
+            }
+            void refreshSurface();
+          }}
         >
-          <p className="chat-muted">
-            {app.t(app.uiMode === "basic" ? "mode.basic.description" : "mode.advanced.description")}
-          </p>
+          <div className="grid gap-2">
+            <p className="chat-muted">
+              {recommendedOnboardingStep?.summary ??
+                "The control plane has not published a recommended onboarding step yet."}
+            </p>
+            {recommendedOnboardingStep?.blocked !== undefined ? (
+              <p className="chat-muted">
+                {recommendedOnboardingStep.blocked.detail} Repair:{" "}
+                {recommendedOnboardingStep.blocked.repair_hint}
+              </p>
+            ) : null}
+            <p className="chat-muted">
+              Flow: {formatOnboardingVariant(onboarding?.flow_variant)}. Status:{" "}
+              {formatOnboardingStatus(onboarding?.status)}.
+            </p>
+          </div>
         </NextActionCard>
         <OnboardingChecklistCard
-          description={app.t("overview.telemetryBody")}
-          items={buildTelemetryChecklist(uxAggregate)}
-          title={app.t("overview.telemetryTitle")}
+          description={describeOnboardingChecklist(onboarding)}
+          items={onboardingChecklistItems}
+          title="Onboarding checklist"
         />
       </section>
 
       <section className="workspace-two-column">
         <TroubleshootingCard
-          description={app.uxTelemetryBusy ? "Refreshing current journal-backed UX baseline." : ""}
-          items={buildTelemetryFrictionItems(uxAggregate)}
-          title={app.t("guidance.troubleshooting")}
+          description={
+            onboarding?.counts.blocked
+              ? `${onboarding.counts.blocked} onboarding blocker${onboarding.counts.blocked === 1 ? "" : "s"} currently need repair.`
+              : app.uxTelemetryBusy
+                ? "Refreshing current journal-backed UX baseline."
+                : "No hard onboarding blockers detected; telemetry still shows where operators hit friction."
+          }
+          items={onboardingTroubleshootingItems}
+          title="Troubleshooting"
         />
         <ScenarioCard
-          ctaLabel={app.t("guidance.cta")}
-          description={app.t("overview.telemetryBody")}
-          title={app.t("guidance.scenario")}
-          onCta={() =>
-            app.setSection(
-              (uxAggregate?.countsByName["ux.approval.resolved"] ?? 0) > 0 ? "approvals" : "chat",
-            )
+          ctaLabel={onboarding?.ready_for_first_success ? "Open chat" : "Review next step"}
+          description={
+            onboarding?.ready_for_first_success
+              ? onboarding.first_success_hint ??
+                "Open chat and validate the first end-to-end operator task."
+              : "Finish the remaining guided steps, then use a starter prompt to verify the workspace."
           }
+          title="First success"
+          onCta={() => {
+            if (onboarding?.ready_for_first_success) {
+              app.setSection("chat");
+              void navigate(getSectionPath("chat"));
+              return;
+            }
+            if (recommendedOnboardingStep?.action !== undefined) {
+              executeOnboardingAction(recommendedOnboardingStep.action, {
+                navigate,
+                setNotice: app.setNotice,
+                setSection: app.setSection,
+              });
+            }
+          }}
         >
-          <dl className="workspace-key-value-grid">
-            <div>
-              <dt>{app.t("overview.telemetryFunnel")}</dt>
-              <dd>{buildFunnelSummary(uxAggregate)}</dd>
+          {onboarding?.ready_for_first_success ? (
+            <div className="grid gap-3">
+              <div className="workspace-inline-actions">
+                {firstSuccessPrompts.map((prompt) => (
+                  <ActionButton
+                    key={prompt}
+                    type="button"
+                    variant="secondary"
+                    onPress={() => {
+                      queueChatStarterPrompt(prompt);
+                      app.setSection("chat");
+                      void navigate(getSectionPath("chat"));
+                    }}
+                  >
+                    {prompt}
+                  </ActionButton>
+                ))}
+              </div>
+              <dl className="workspace-key-value-grid">
+                <div>
+                  <dt>{app.t("overview.telemetryFunnel")}</dt>
+                  <dd>{buildFunnelSummary(uxAggregate)}</dd>
+                </div>
+                <div>
+                  <dt>{app.t("overview.telemetryApprovals")}</dt>
+                  <dd>{buildApprovalSummary(uxAggregate)}</dd>
+                </div>
+                <div>
+                  <dt>{app.t("overview.telemetryFriction")}</dt>
+                  <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
+                </div>
+              </dl>
             </div>
-            <div>
-              <dt>{app.t("overview.telemetryApprovals")}</dt>
-              <dd>{buildApprovalSummary(uxAggregate)}</dd>
-            </div>
-            <div>
-              <dt>{app.t("overview.telemetryFriction")}</dt>
-              <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
-            </div>
-          </dl>
+          ) : (
+            <dl className="workspace-key-value-grid">
+              <div>
+                <dt>Completed</dt>
+                <dd>{onboarding?.counts.done ?? 0}</dd>
+              </div>
+              <div>
+                <dt>Remaining</dt>
+                <dd>{remainingOnboardingSteps(onboarding)}</dd>
+              </div>
+              <div>
+                <dt>Telemetry friction</dt>
+                <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
+              </div>
+            </dl>
+          )}
           <ActionButton type="button" variant="ghost" onPress={() => void app.refreshUxTelemetry()}>
             {app.uxTelemetryBusy ? "Refreshing baseline..." : "Refresh baseline"}
           </ActionButton>
@@ -1059,16 +1156,58 @@ function objectiveModeDescription(kind: ObjectiveKindValue): string {
   }
 }
 
-function buildTelemetryChecklist(aggregate: ConsoleAppState["uxTelemetryAggregate"]): string[] {
-  if (aggregate === null || aggregate.totalEvents === 0) {
-    return ["Console baseline is waiting for the first journal-backed UX events."];
+function describeOnboardingPosture(posture: OnboardingPostureEnvelope | null): string {
+  if (posture === null) {
+    return "Waiting for the control plane to publish onboarding posture.";
   }
-  return [
-    `Session starts recorded: ${aggregate.funnel.setup_started}`,
-    `First prompts recorded: ${aggregate.funnel.first_prompt_sent}`,
-    `Approvals resolved: ${aggregate.funnel.first_approval_resolved}`,
-    `Runs inspected: ${aggregate.funnel.first_run_inspected}`,
-  ];
+  if (posture.ready_for_first_success) {
+    return "Required onboarding steps are complete. Validate the first real operator workflow now.";
+  }
+  if (posture.counts.blocked > 0) {
+    return "At least one onboarding step is blocked and needs repair before first success.";
+  }
+  return `Flow ${formatOnboardingVariant(posture.flow_variant)} is in progress with ${remainingOnboardingSteps(posture)} required step${remainingOnboardingSteps(posture) === 1 ? "" : "s"} remaining.`;
+}
+
+function describeOnboardingChecklist(posture: OnboardingPostureEnvelope | null): string {
+  if (posture === null) {
+    return "The checklist will appear after the onboarding posture loads.";
+  }
+  return `${posture.counts.done} done, ${remainingOnboardingSteps(posture)} remaining, ${posture.counts.blocked} blocked.`;
+}
+
+function buildOnboardingChecklist(posture: OnboardingPostureEnvelope | null): string[] {
+  if (posture === null) {
+    return ["Loading onboarding posture from the control plane."];
+  }
+  if (posture.steps.length === 0) {
+    return ["No onboarding steps are currently published."];
+  }
+  return posture.steps.map((step) => {
+    const base = `${formatOnboardingStepStatus(step.status)} ${step.title}`;
+    return step.optional ? `${base} (optional)` : base;
+  });
+}
+
+function buildOnboardingTroubleshootingItems(
+  posture: OnboardingPostureEnvelope | null,
+  aggregate: ConsoleAppState["uxTelemetryAggregate"],
+): string[] {
+  const blockedItems =
+    posture?.steps
+      .filter((step) => step.blocked !== undefined)
+      .map((step) => `${step.title}: ${step.blocked?.repair_hint ?? step.summary}`) ?? [];
+  if (blockedItems.length > 0) {
+    return blockedItems;
+  }
+  return buildTelemetryFrictionItems(aggregate);
+}
+
+function buildFirstSuccessPrompts(posture: OnboardingPostureEnvelope | null): readonly string[] {
+  if (posture?.ready_for_first_success) {
+    return FIRST_SUCCESS_PROMPTS;
+  }
+  return [];
 }
 
 function buildTelemetryFrictionItems(aggregate: ConsoleAppState["uxTelemetryAggregate"]): string[] {
@@ -1108,6 +1247,106 @@ function buildTopFrictionSurface(aggregate: ConsoleAppState["uxTelemetryAggregat
     (left, right) => right[1] - left[1],
   )[0] ?? ["web", 0];
   return count === 0 ? "No blocked or error outcomes recorded." : `${surface} (${count})`;
+}
+
+function formatOnboardingVariant(value: string | undefined): string {
+  switch (value) {
+    case "quickstart":
+      return "quickstart";
+    case "manual":
+      return "manual";
+    case "remote":
+      return "remote";
+    default:
+      return "default";
+  }
+}
+
+function formatOnboardingStatus(
+  value: OnboardingPostureEnvelope["status"] | undefined,
+): string {
+  switch (value) {
+    case "not_started":
+      return "not started";
+    case "in_progress":
+      return "in progress";
+    case "blocked":
+      return "blocked";
+    case "ready":
+      return "ready";
+    case "complete":
+      return "complete";
+    default:
+      return "unknown";
+  }
+}
+
+function formatOnboardingStepStatus(status: OnboardingStepView["status"]): string {
+  switch (status) {
+    case "done":
+      return "Done:";
+    case "blocked":
+      return "Blocked:";
+    case "in_progress":
+      return "In progress:";
+    case "skipped":
+      return "Skipped:";
+    case "todo":
+    default:
+      return "Todo:";
+  }
+}
+
+function remainingOnboardingSteps(posture: OnboardingPostureEnvelope | null): number {
+  if (posture === null) {
+    return 0;
+  }
+  return posture.steps.filter(
+    (step) =>
+      !step.optional && step.status !== "done" && step.status !== "skipped",
+  ).length;
+}
+
+function executeOnboardingAction(
+  action: OnboardingStepAction,
+  handlers: {
+    navigate: ReturnType<typeof useNavigate>;
+    setNotice: (message: string | null) => void;
+    setSection: (section: ConsoleAppState["section"]) => void;
+  },
+): void {
+  switch (action.kind) {
+    case "open_console_path": {
+      const path = normalizeConsoleTarget(action.target);
+      const section = findSectionByPath(path);
+      if (section !== null) {
+        handlers.setSection(section);
+      }
+      void handlers.navigate(path);
+      return;
+    }
+    case "run_cli_command":
+      handlers.setSection("operations");
+      handlers.setNotice(`Run in terminal: ${action.target}`);
+      return;
+    case "open_desktop_section":
+      handlers.setNotice(`Open the desktop companion section '${action.target}'.`);
+      return;
+    case "read_docs":
+      handlers.setNotice(`Open documentation: ${action.target}`);
+      return;
+  }
+}
+
+function normalizeConsoleTarget(target: string): string {
+  const trimmed = target.trim();
+  if (trimmed.startsWith("/#/")) {
+    return trimmed.slice(2);
+  }
+  if (trimmed.startsWith("#/")) {
+    return trimmed.slice(1);
+  }
+  return trimmed.length > 0 ? trimmed : getSectionPath("overview");
 }
 
 function buildObjectivePayload(

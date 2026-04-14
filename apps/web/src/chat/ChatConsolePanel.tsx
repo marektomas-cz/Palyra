@@ -59,6 +59,8 @@ import {
   buildSessionsSidebarProps,
   describeSelectedSessionTitle,
 } from "./chatWorkspaceSessionBindings";
+import { FIRST_SUCCESS_PROMPTS } from "./starterPrompts";
+import { useStarterPromptHandoff } from "./useStarterPromptHandoff";
 import type { UxTelemetryEvent } from "../console/contracts";
 import { parseConsoleHandoff } from "../console/contracts";
 import type { Section } from "../console/sectionMetadata";
@@ -301,6 +303,11 @@ export function ChatConsolePanel({
     delegationCatalog,
     streaming,
     setError,
+  });
+  useStarterPromptHandoff({
+    activeSessionId: sessions.activeSessionId,
+    setNotice,
+    updateComposerDraft,
   });
   usePhase4DeepLinks({
     activeSessionId: sessions.activeSessionId,
@@ -974,6 +981,9 @@ export function ChatConsolePanel({
           ]);
         }}
         onSetAllowSensitiveTools={setAllowSensitiveTools}
+        onUseStarterPrompt={(prompt) => {
+          updateComposerDraft(prompt);
+        }}
         pendingApprovalCount={pendingApprovalCount}
         runActionBusy={runActionBusy}
         selectedObjectiveFocus={selectedObjectiveFocus}
@@ -999,6 +1009,9 @@ export function ChatConsolePanel({
             void archiveSessionAndTranscript();
           },
         })}
+        showStarterPrompts={transcriptRecords.length === 0 && composerText.trim().length === 0}
+        starterPromptHint="Use a starter prompt to confirm the control plane is responsive before branching into a real task."
+        starterPrompts={FIRST_SUCCESS_PROMPTS}
         streaming={streaming}
         toolPayloadCount={toolPayloadCount}
         transcriptBusy={transcriptBusy}

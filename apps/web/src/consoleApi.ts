@@ -1234,6 +1234,67 @@ export interface DeploymentPostureSummary {
   warnings: string[];
 }
 
+export type OnboardingFlow = "quick_start" | "advanced_setup";
+export type OnboardingPostureState =
+  | "not_started"
+  | "in_progress"
+  | "blocked"
+  | "ready"
+  | "complete";
+export type OnboardingStepStatus = "todo" | "in_progress" | "blocked" | "done" | "skipped";
+export type OnboardingActionKind =
+  | "open_console_path"
+  | "run_cli_command"
+  | "open_desktop_section"
+  | "read_docs";
+
+export interface OnboardingStepAction {
+  label: string;
+  kind: OnboardingActionKind;
+  surface: string;
+  target: string;
+}
+
+export interface OnboardingBlockedReason {
+  code: string;
+  detail: string;
+  repair_hint: string;
+}
+
+export interface OnboardingStepView {
+  step_id: string;
+  title: string;
+  summary: string;
+  status: OnboardingStepStatus;
+  optional?: boolean;
+  verification_state?: string;
+  blocked?: OnboardingBlockedReason;
+  action?: OnboardingStepAction;
+}
+
+export interface OnboardingStepCounts {
+  todo: number;
+  in_progress: number;
+  blocked: number;
+  done: number;
+  skipped: number;
+}
+
+export interface OnboardingPostureEnvelope {
+  contract: ContractDescriptor;
+  flow: OnboardingFlow;
+  flow_variant: string;
+  status: OnboardingPostureState;
+  config_path: string;
+  resume_supported: boolean;
+  ready_for_first_success: boolean;
+  recommended_step_id?: string;
+  first_success_hint?: string;
+  counts: OnboardingStepCounts;
+  available_flows: OnboardingFlow[];
+  steps: OnboardingStepView[];
+}
+
 export interface AuthProfileProvider {
   kind: string;
   custom_name?: string;
@@ -2019,6 +2080,15 @@ export class ConsoleApiClient {
 
   async getDeploymentPosture(): Promise<DeploymentPostureSummary> {
     return this.request("/console/v1/deployment/posture");
+  }
+
+  async getOnboardingPosture(params?: URLSearchParams): Promise<OnboardingPostureEnvelope> {
+    const query = params?.toString();
+    const path =
+      query !== undefined && query.length > 0
+        ? `/console/v1/onboarding/posture?${query}`
+        : "/console/v1/onboarding/posture";
+    return this.request(path);
   }
 
   async listAuthProfiles(params?: URLSearchParams): Promise<AuthProfileListEnvelope> {

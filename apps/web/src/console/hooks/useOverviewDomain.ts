@@ -1,6 +1,11 @@
 import { useState } from "react";
 
-import type { ConsoleApiClient, JsonValue, UsageInsightsEnvelope } from "../../consoleApi";
+import type {
+  ConsoleApiClient,
+  JsonValue,
+  OnboardingPostureEnvelope,
+  UsageInsightsEnvelope,
+} from "../../consoleApi";
 import { isJsonObject, toErrorMessage, toJsonObjectArray, type JsonObject } from "../shared";
 
 type UseOverviewDomainArgs = {
@@ -12,6 +17,9 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
   const [overviewBusy, setOverviewBusy] = useState(false);
   const [overviewCatalog, setOverviewCatalog] = useState<JsonObject | null>(null);
   const [overviewDeployment, setOverviewDeployment] = useState<JsonObject | null>(null);
+  const [overviewOnboarding, setOverviewOnboarding] = useState<OnboardingPostureEnvelope | null>(
+    null,
+  );
   const [overviewApprovals, setOverviewApprovals] = useState<JsonObject[]>([]);
   const [overviewDiagnostics, setOverviewDiagnostics] = useState<JsonObject | null>(null);
   const [overviewUsageInsights, setOverviewUsageInsights] = useState<UsageInsightsEnvelope | null>(
@@ -24,10 +32,11 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     if (options?.clearError !== false) {
       setError(null);
     }
-    const [catalog, deployment, approvals, diagnostics, usageInsights, jobs] =
+    const [catalog, deployment, onboarding, approvals, diagnostics, usageInsights, jobs] =
       await Promise.allSettled([
         api.getCapabilityCatalog(),
         api.getDeploymentPosture(),
+        api.getOnboardingPosture(),
         api.listApprovals(),
         api.getDiagnostics(),
         api.getUsageInsights(),
@@ -47,6 +56,9 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
           ? (deployment.value as unknown as JsonObject)
           : null,
       );
+    }
+    if (onboarding.status === "fulfilled") {
+      setOverviewOnboarding(onboarding.value);
     }
     if (approvals.status === "fulfilled") {
       setOverviewApprovals(
@@ -73,7 +85,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
       );
     }
 
-    const firstFailure = firstRejectedReason([catalog, deployment, jobs]);
+    const firstFailure = firstRejectedReason([catalog, deployment, onboarding, jobs]);
     if (firstFailure !== undefined && options?.clearError !== false) {
       setError(toErrorMessage(firstFailure));
     }
@@ -84,6 +96,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     setOverviewBusy(false);
     setOverviewCatalog(null);
     setOverviewDeployment(null);
+    setOverviewOnboarding(null);
     setOverviewApprovals([]);
     setOverviewDiagnostics(null);
     setOverviewUsageInsights(null);
@@ -94,6 +107,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     overviewBusy,
     overviewCatalog,
     overviewDeployment,
+    overviewOnboarding,
     overviewApprovals,
     overviewDiagnostics,
     overviewUsageInsights,

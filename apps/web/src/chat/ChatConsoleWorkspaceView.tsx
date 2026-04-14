@@ -32,6 +32,7 @@ interface ChatConsoleWorkspaceViewProps {
   readonly onOpenRunDetails: () => void;
   readonly onRefresh: () => void;
   readonly onSetAllowSensitiveTools: (next: boolean) => void;
+  readonly onUseStarterPrompt: (prompt: string) => void;
   readonly pendingApprovalCount: number;
   readonly runActionBusy: boolean;
   readonly selectedObjectiveFocus?: string | null;
@@ -41,6 +42,9 @@ interface ChatConsoleWorkspaceViewProps {
   readonly selectedSessionTitle: string;
   readonly sessionsBusy: boolean;
   readonly sessionsSidebarProps: ComponentProps<typeof ChatSessionsSidebar>;
+  readonly showStarterPrompts: boolean;
+  readonly starterPromptHint?: string | null;
+  readonly starterPrompts: readonly string[];
   readonly streaming: boolean;
   readonly toolPayloadCount: number;
   readonly transcriptBusy: boolean;
@@ -59,6 +63,7 @@ export function ChatConsoleWorkspaceView({
   onOpenRunDetails,
   onRefresh,
   onSetAllowSensitiveTools,
+  onUseStarterPrompt,
   pendingApprovalCount,
   runActionBusy,
   selectedObjectiveFocus,
@@ -68,6 +73,9 @@ export function ChatConsoleWorkspaceView({
   selectedSessionTitle,
   sessionsBusy,
   sessionsSidebarProps,
+  showStarterPrompts,
+  starterPromptHint,
+  starterPrompts,
   streaming,
   toolPayloadCount,
   transcriptBusy,
@@ -182,6 +190,26 @@ export function ChatConsoleWorkspaceView({
         >
           <div className="chat-panel__body">
             <ChatTranscript {...transcriptProps} />
+            {showStarterPrompts ? (
+              <div className="grid gap-3">
+                <p className="chat-muted">
+                  {starterPromptHint ??
+                    "Use one of these prompts to validate the workspace before writing your first custom request."}
+                </p>
+                <div className="workspace-inline-actions">
+                  {starterPrompts.map((prompt) => (
+                    <ActionButton
+                      key={prompt}
+                      type="button"
+                      variant="secondary"
+                      onPress={() => onUseStarterPrompt(prompt)}
+                    >
+                      {prompt}
+                    </ActionButton>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <ChatComposer {...composerProps} />
           </div>
         </SectionCard>
