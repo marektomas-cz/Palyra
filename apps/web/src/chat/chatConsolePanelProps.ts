@@ -3,7 +3,7 @@ import type { ComponentProps } from "react";
 import type { ConsoleApiClient, ChatTranscriptRecord } from "../consoleApi";
 
 import type { DetailPanelState } from "./ChatInspectorColumn";
-import { ChatConsoleWorkspaceView } from "./ChatConsoleWorkspaceView";
+import type { ChatConsoleWorkspaceView } from "./ChatConsoleWorkspaceView";
 import {
   inspectBackgroundTaskDetail,
   inspectDerivedArtifactDetail,
@@ -58,8 +58,6 @@ interface BuildInspectorPropsArgs {
   readonly closeRunDrawer: InspectorProps["closeRunDrawer"];
   readonly openBrowserSessionWorkbench: InspectorProps["openBrowserSessionWorkbench"];
   readonly transcriptRecords: ChatTranscriptRecord[];
-  readonly sessionAttachments: TranscriptProps["sessionAttachments"];
-  readonly sessionDerivedArtifacts: TranscriptProps["sessionDerivedArtifacts"];
   readonly inspectCompaction: (artifactId: string) => void;
   readonly inspectCheckpoint: (checkpointId: string) => void;
   readonly restoreCheckpoint: (
@@ -113,8 +111,6 @@ export function buildInspectorProps({
   closeRunDrawer,
   openBrowserSessionWorkbench,
   transcriptRecords,
-  sessionAttachments,
-  sessionDerivedArtifacts,
   inspectCompaction,
   inspectCheckpoint,
   restoreCheckpoint,

@@ -24,10 +24,7 @@ import {
   runChatCompactionFlow,
   searchChatTranscript,
 } from "./chatConsoleOperations";
-import {
-  inspectBackgroundTaskDetail,
-  useChatAttachmentUploadHandler,
-} from "./chatInspectorActions";
+import { useChatAttachmentUploadHandler } from "./chatInspectorActions";
 import { buildInspectorProps, buildTranscriptProps } from "./chatConsolePanelProps";
 import {
   buildSessionLineageHint,
@@ -941,8 +938,6 @@ export function ChatConsolePanel({
           closeRunDrawer,
           openBrowserSessionWorkbench,
           transcriptRecords,
-          sessionAttachments,
-          sessionDerivedArtifacts,
           inspectCompaction: async (artifactId) => {
             await inspectCompaction(artifactId);
           },
