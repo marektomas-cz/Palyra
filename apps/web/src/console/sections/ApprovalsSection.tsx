@@ -316,7 +316,7 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
     <main className="workspace-page">
       <WorkspacePageHeader
         eyebrow="Control"
-        title="Tool Permissions"
+        title="Approvals"
         description="Explainable permissions center for per-tool posture, friction, presets, and the approval inbox."
         status={
           <>
