@@ -481,9 +481,22 @@ export function useChatRunStream({
       return;
     }
 
+    if (event.event_type === "tool_decision") {
+      const decision = asObject(event.tool_decision);
+      appendTranscriptEntry({
+        id: `${event.event_type}-${Date.now()}`,
+        kind: "tool",
+        created_at_unix_ms: Date.now(),
+        run_id: runId,
+        title: prettifyEventType(event.event_type),
+        text: summarizeToolDecision(decision),
+        payload: decision ?? event,
+      });
+      return;
+    }
+
     if (
       event.event_type === "tool_proposal" ||
-      event.event_type === "tool_decision" ||
       event.event_type === "tool_result" ||
       event.event_type === "tool_attestation"
     ) {
@@ -576,8 +589,26 @@ export function useChatRunStream({
     if (streamFlushHandleRef.current !== null) {
       globalThis.clearTimeout(streamFlushHandleRef.current);
       streamFlushHandleRef.current = null;
-    }
   }
+}
+
+function summarizeToolDecision(value: Record<string, JsonValue> | null): string | undefined {
+  if (value === null) {
+    return undefined;
+  }
+  const reason = asString(value.reason);
+  const kind = asString(value.kind);
+  if (reason === null && kind === null) {
+    return undefined;
+  }
+  if (reason === null) {
+    return `Decision: ${kind}`;
+  }
+  if (kind === null) {
+    return reason;
+  }
+  return `${kind}: ${reason}`;
+}
 
   function flushPendingStreamUpdates(): void {
     cancelScheduledStreamFlush();

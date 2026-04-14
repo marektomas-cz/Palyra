@@ -209,6 +209,7 @@ interface BuildTranscriptPropsArgs {
   readonly selectedDetailId: TranscriptProps["selectedDetailId"];
   readonly updateApprovalDraft: TranscriptProps["updateApprovalDraft"];
   readonly decideInlineApproval: TranscriptProps["decideInlineApproval"];
+  readonly openToolPermissions?: TranscriptProps["openToolPermissions"];
   readonly openRunDetails: TranscriptProps["openRunDetails"];
   readonly refreshSessionTranscript: () => Promise<void>;
   readonly setDetailPanel: (next: DetailPanelState | null) => void;
@@ -229,6 +230,7 @@ export function buildTranscriptProps({
   selectedDetailId,
   updateApprovalDraft,
   decideInlineApproval,
+  openToolPermissions,
   openRunDetails,
   refreshSessionTranscript,
   setDetailPanel,
@@ -247,6 +249,7 @@ export function buildTranscriptProps({
     selectedDetailId,
     updateApprovalDraft,
     decideInlineApproval,
+    openToolPermissions,
     openRunDetails,
     inspectPayload: (entry) => {
       inspectLiveEntryDetail(entry, setDetailPanel);

@@ -34,6 +34,7 @@ export type UxTelemetryEvent = {
     | "ux.onboarding.step"
     | "ux.chat.prompt_submitted"
     | "ux.approval.resolved"
+    | "ux.tool_posture.recommendation"
     | "ux.run.inspected"
     | "ux.session.resumed"
     | "ux.voice.entry"
@@ -46,6 +47,8 @@ export type UxTelemetryEvent = {
   outcome?: "ok" | "blocked" | "error" | "cancelled";
   step?: string;
   toolName?: string;
+  recommendationAction?: "accepted" | "dismissed" | "deferred";
+  scopeKind?: string;
   sessionId?: string;
   runId?: string;
   deviceId?: string;
@@ -71,6 +74,7 @@ export type UxTelemetryAggregate = {
   countsByName: Record<string, number>;
   approvalFatigueByTool: Record<string, number>;
   approvalFatigueBySession: Record<string, number>;
+  recommendationActionsByState: Record<"accepted" | "dismissed" | "deferred", number>;
   frictionBySurface: Record<TelemetrySurface, number>;
   funnel: Record<
     | "setup_started"
@@ -193,6 +197,8 @@ export function toSystemEventPayload(event: UxTelemetryEvent): {
     outcome: event.outcome,
     step: event.step,
     toolName: event.toolName,
+    recommendationAction: event.recommendationAction,
+    scopeKind: event.scopeKind,
     sessionId: event.sessionId,
     runId: event.runId,
     deviceId: event.deviceId,
@@ -215,6 +221,7 @@ export function aggregateUxTelemetry(records: SystemEventRecord[]): UxTelemetryA
     countsByName: {},
     approvalFatigueByTool: {},
     approvalFatigueBySession: {},
+    recommendationActionsByState: { accepted: 0, dismissed: 0, deferred: 0 },
     frictionBySurface: { web: 0, desktop: 0, tui: 0, mobile: 0 },
     funnel: {
       setup_started: 0,
@@ -248,6 +255,12 @@ export function aggregateUxTelemetry(records: SystemEventRecord[]): UxTelemetryA
         readString(details.sessionId) ?? readString(record.session_id) ?? "unknown-session";
       aggregate.approvalFatigueBySession[sessionId] =
         (aggregate.approvalFatigueBySession[sessionId] ?? 0) + 1;
+    }
+    if (name === "ux.tool_posture.recommendation") {
+      const action = readRecommendationAction(details.recommendationAction);
+      if (action !== null) {
+        aggregate.recommendationActionsByState[action] += 1;
+      }
     }
     if (name === "ux.onboarding.step") {
       const step = readString(details.step);
@@ -293,6 +306,19 @@ function readSurface(value: JsonValue): TelemetrySurface {
       return value;
     default:
       return "web";
+  }
+}
+
+function readRecommendationAction(
+  value: JsonValue | undefined,
+): "accepted" | "dismissed" | "deferred" | null {
+  switch (value) {
+    case "accepted":
+    case "dismissed":
+    case "deferred":
+      return value;
+    default:
+      return null;
   }
 }
 

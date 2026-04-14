@@ -6,6 +6,7 @@ import {
   AppForm,
   SectionCard,
   SelectField,
+  StatusChip,
   TextInputField,
 } from "../console/components/ui";
 import type { JsonValue, MediaDerivedArtifactRecord, SessionCatalogRecord } from "../consoleApi";
@@ -133,16 +134,20 @@ type PrettyJsonBlockProps = {
 
 type ApprovalRequestControlsProps = {
   approvalId: string;
+  entry?: TranscriptEntry;
   draft?: ApprovalDraft;
   onDraftChange: (next: ApprovalDraft) => void;
   onDecision: (approved: boolean) => void;
+  onOpenToolPermissions?: (toolName: string) => void;
 };
 
 export function ApprovalRequestControls({
   approvalId,
+  entry,
   draft,
   onDraftChange,
   onDecision,
+  onOpenToolPermissions,
 }: ApprovalRequestControlsProps) {
   const effectiveDraft = draft ?? {
     scope: DEFAULT_APPROVAL_SCOPE,
@@ -150,6 +155,7 @@ export function ApprovalRequestControls({
     ttl_ms: DEFAULT_APPROVAL_TTL_MS,
     busy: false,
   };
+  const explainability = buildApprovalExplainability(entry);
 
   return (
     <SectionCard
@@ -157,6 +163,51 @@ export function ApprovalRequestControls({
       description={`Approval ID: ${approvalId}`}
       title="Approval required"
     >
+      {explainability !== null && (
+        <div className="workspace-stack">
+          <div className="workspace-inline-actions">
+            {explainability.toolName !== null && (
+              <StatusChip tone="warning">{explainability.toolName}</StatusChip>
+            )}
+            {explainability.riskLevel !== null && (
+              <StatusChip tone={toneForApprovalRisk(explainability.riskLevel)}>
+                Risk {explainability.riskLevel}
+              </StatusChip>
+            )}
+          </div>
+          <p className="chat-muted">
+            {explainability.policyExplanation ??
+              explainability.summary ??
+              "This action fell into approval mode because the current tool posture does not permit silent execution."}
+          </p>
+          {explainability.subjectId !== null || explainability.skillId !== null ? (
+            <div className="workspace-inline-actions">
+              {explainability.subjectId !== null && (
+                <StatusChip tone="default">Subject {explainability.subjectId}</StatusChip>
+              )}
+              {explainability.skillId !== null && (
+                <StatusChip tone="default">Skill {explainability.skillId}</StatusChip>
+              )}
+            </div>
+          ) : null}
+          <div className="workspace-inline-actions">
+            <span className="chat-muted">
+              Approve once, widen the scope for this session, or inspect tool permissions before
+              making a broader change.
+            </span>
+            {explainability.toolName !== null && onOpenToolPermissions !== undefined && (
+              <ActionButton
+                size="sm"
+                type="button"
+                variant="secondary"
+                onPress={() => onOpenToolPermissions(explainability.toolName as string)}
+              >
+                Open tool permissions
+              </ActionButton>
+            )}
+          </div>
+        </div>
+      )}
       <AppForm className="console-grid-3">
         <SelectField
           disabled={effectiveDraft.busy}
@@ -218,6 +269,45 @@ export function ApprovalRequestControls({
       </AppForm>
     </SectionCard>
   );
+}
+
+type ApprovalExplainability = {
+  toolName: string | null;
+  riskLevel: string | null;
+  summary: string | null;
+  policyExplanation: string | null;
+  subjectId: string | null;
+  skillId: string | null;
+};
+
+function buildApprovalExplainability(entry: TranscriptEntry | undefined): ApprovalExplainability | null {
+  if (entry?.kind !== "approval_request") {
+    return null;
+  }
+  const request = asObject(entry.payload);
+  const prompt = asObject(request?.prompt);
+  const details = asObject(prompt?.details_json);
+  return {
+    toolName: entry.tool_name ?? asString(request?.tool_name) ?? asString(details?.tool_name),
+    riskLevel: asString(prompt?.risk_level),
+    summary: asString(prompt?.summary),
+    policyExplanation: asString(prompt?.policy_explanation),
+    subjectId: asString(prompt?.subject_id) ?? asString(details?.subject_id),
+    skillId: asString(details?.skill_id),
+  };
+}
+
+function toneForApprovalRisk(riskLevel: string): "default" | "success" | "warning" | "danger" {
+  switch (riskLevel.trim().toLowerCase()) {
+    case "low":
+      return "success";
+    case "medium":
+      return "warning";
+    case "high":
+      return "danger";
+    default:
+      return "default";
+  }
 }
 
 export function retainTranscriptWindow(values: TranscriptEntry[]): TranscriptEntry[] {

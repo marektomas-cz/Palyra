@@ -15,6 +15,7 @@ type ChatTranscriptProps = {
   selectedDetailId: string | null;
   updateApprovalDraft: (approvalId: string, next: ApprovalDraft) => void;
   decideInlineApproval: (approvalId: string, approved: boolean) => void;
+  openToolPermissions?: (toolName: string) => void;
   openRunDetails: (runId: string) => void;
   inspectPayload: (entry: TranscriptEntry) => void;
   inspectDerivedArtifact?: (derivedArtifactId: string) => void;
@@ -35,6 +36,7 @@ export function ChatTranscript({
   selectedDetailId,
   updateApprovalDraft,
   decideInlineApproval,
+  openToolPermissions = () => undefined,
   openRunDetails,
   inspectPayload,
   inspectDerivedArtifact = () => undefined,
@@ -186,11 +188,13 @@ export function ChatTranscript({
                 {entry.kind === "approval_request" && entry.approval_id !== undefined && (
                   <ApprovalRequestControls
                     approvalId={entry.approval_id}
+                    entry={entry}
                     draft={approvalDrafts[entry.approval_id]}
                     onDraftChange={(next) => updateApprovalDraft(entry.approval_id as string, next)}
                     onDecision={(approved) =>
                       decideInlineApproval(entry.approval_id as string, approved)
                     }
+                    onOpenToolPermissions={openToolPermissions}
                   />
                 )}
 

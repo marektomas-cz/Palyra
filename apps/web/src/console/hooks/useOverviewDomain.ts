@@ -4,6 +4,7 @@ import type {
   ConsoleApiClient,
   JsonValue,
   OnboardingPostureEnvelope,
+  ToolPermissionsEnvelope,
   UsageInsightsEnvelope,
 } from "../../consoleApi";
 import { isJsonObject, toErrorMessage, toJsonObjectArray, type JsonObject } from "../shared";
@@ -30,6 +31,8 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     null,
   );
   const [overviewSupportJobs, setOverviewSupportJobs] = useState<JsonObject[]>([]);
+  const [overviewToolPermissions, setOverviewToolPermissions] =
+    useState<ToolPermissionsEnvelope | null>(null);
 
   async function refreshOverview(options?: {
     clearError?: boolean;
@@ -43,7 +46,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     if (onboardingFlow !== overviewOnboardingFlow) {
       setOverviewOnboardingFlow(onboardingFlow);
     }
-    const [catalog, deployment, onboarding, approvals, diagnostics, usageInsights, jobs] =
+    const [catalog, deployment, onboarding, approvals, diagnostics, usageInsights, jobs, tools] =
       await Promise.allSettled([
         api.getCapabilityCatalog(),
         api.getDeploymentPosture(),
@@ -52,6 +55,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
         api.getDiagnostics(),
         api.getUsageInsights(),
         api.listSupportBundleJobs(),
+        api.getToolPermissions(),
       ]);
 
     if (catalog.status === "fulfilled") {
@@ -95,8 +99,11 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
         ),
       );
     }
+    if (tools.status === "fulfilled") {
+      setOverviewToolPermissions(tools.value);
+    }
 
-    const firstFailure = firstRejectedReason([catalog, deployment, onboarding, jobs]);
+    const firstFailure = firstRejectedReason([catalog, deployment, onboarding, jobs, tools]);
     if (firstFailure !== undefined && options?.clearError !== false) {
       setError(toErrorMessage(firstFailure));
     }
@@ -117,6 +124,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     setOverviewDiagnostics(null);
     setOverviewUsageInsights(null);
     setOverviewSupportJobs([]);
+    setOverviewToolPermissions(null);
   }
 
   return {
@@ -129,6 +137,7 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     overviewDiagnostics,
     overviewUsageInsights,
     overviewSupportJobs,
+    overviewToolPermissions,
     refreshOverview,
     selectOverviewOnboardingFlow,
     resetOverviewDomain,

@@ -1,5 +1,6 @@
 import { Button } from "@heroui/react";
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import type {
   ConsoleApiClient,
@@ -20,6 +21,7 @@ import {
 } from "../components/workspace/WorkspaceChrome";
 import { PrettyJsonBlock, formatUnixMs, readObject, readString, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
+import { emitUxSystemEvent } from "../uxTelemetry";
 
 type ApprovalsSectionProps = {
   app: Pick<
@@ -42,6 +44,7 @@ type ApprovalsSectionProps = {
 };
 
 export function ApprovalsSection({ app }: ApprovalsSectionProps) {
+  const [searchParams] = useSearchParams();
   const [permissionsBusy, setPermissionsBusy] = useState(false);
   const [detailBusy, setDetailBusy] = useState(false);
   const [mutationBusy, setMutationBusy] = useState(false);
@@ -60,6 +63,7 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
   const [presetPreview, setPresetPreview] = useState<ToolPermissionPresetPreviewEnvelope | null>(
     null,
   );
+  const requestedToolName = searchParams.get("tool")?.trim() ?? "";
 
   const pendingApprovals = useMemo(
     () => app.approvals.filter((approval) => readString(approval, "decision") === null),
@@ -81,7 +85,7 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
 
   useEffect(() => {
     void refreshPermissions();
-  }, [scopeKind, scopeId, search, category, stateFilter, lockedOnly, highFrictionOnly]);
+  }, [scopeKind, scopeId, search, category, stateFilter, lockedOnly, highFrictionOnly, requestedToolName]);
 
   useEffect(() => {
     if (selectedToolName.trim().length === 0) {
@@ -108,6 +112,10 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
       setPermissions(response);
       const nextToolName =
         preferredToolName?.trim() ||
+        (requestedToolName.length > 0 &&
+        response.tools.some((tool) => tool.tool_name === requestedToolName)
+          ? requestedToolName
+          : "") ||
         (response.tools.some((tool) => tool.tool_name === selectedToolName) ? selectedToolName : "") ||
         response.tools[0]?.tool_name ||
         "";
@@ -272,6 +280,15 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
         scope_kind: recommendation.scope_kind,
         scope_id: recommendation.scope_kind === "global" ? undefined : recommendation.scope_id,
         action,
+      });
+      await emitUxSystemEvent(app.api, {
+        name: "ux.tool_posture.recommendation",
+        surface: "web",
+        section: "approvals",
+        toolName: recommendation.tool_name,
+        recommendationAction: action,
+        scopeKind: recommendation.scope_kind,
+        summary: `Tool posture recommendation ${action} for ${recommendation.tool_name}`,
       });
       app.setNotice(`Recommendation ${action} for ${recommendation.tool_name}.`);
       await refreshPermissions(recommendation.tool_name);

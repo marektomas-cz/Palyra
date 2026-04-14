@@ -64,6 +64,7 @@ import { useStarterPromptGuidance } from "./useStarterPromptGuidance";
 import { useStarterPromptHandoff } from "./useStarterPromptHandoff";
 import type { UxTelemetryEvent } from "../console/contracts";
 import { parseConsoleHandoff } from "../console/contracts";
+import { getSectionPath } from "../console/navigation";
 import type { Section } from "../console/sectionMetadata";
 import { buildObjectiveOverviewHref } from "../console/objectiveLinks";
 import { readString } from "../console/shared";
@@ -1028,6 +1029,12 @@ export function ChatConsolePanel({
           updateApprovalDraft: updateApprovalDraftValue,
           decideInlineApproval: async (approvalId, approved) =>
             await decideInlineApproval(approvalId, approved),
+          openToolPermissions: (toolName) => {
+            setConsoleSection("approvals");
+            void navigate(
+              `${getSectionPath("approvals")}?${new URLSearchParams([["tool", toolName]]).toString()}`,
+            );
+          },
           openRunDetails,
           refreshSessionTranscript,
           setDetailPanel,

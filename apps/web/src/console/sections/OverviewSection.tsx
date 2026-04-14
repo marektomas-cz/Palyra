@@ -52,6 +52,8 @@ import type {
   OnboardingPostureEnvelope,
   OnboardingStepAction,
   OnboardingStepView,
+  ToolPermissionRecord,
+  ToolPermissionsEnvelope,
 } from "../../consoleApi";
 import { readFirstSuccessCompleted } from "../../chat/firstSuccessState";
 import { FIRST_SUCCESS_PROMPTS, queueChatStarterPrompt } from "../../chat/starterPrompts";
@@ -68,6 +70,7 @@ type OverviewSectionProps = {
     | "overviewOnboardingFlow"
     | "overviewApprovals"
     | "overviewDiagnostics"
+    | "overviewToolPermissions"
     | "overviewUsageInsights"
     | "overviewSupportJobs"
     | "refreshOverview"
@@ -135,6 +138,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
   const deployment = app.overviewDeployment;
   const onboarding = app.overviewOnboarding;
   const diagnostics = app.overviewDiagnostics;
+  const toolPermissions = app.overviewToolPermissions;
   const usageInsights = app.overviewUsageInsights;
   const observability = readObject(diagnostics ?? {}, "observability");
   const connector = readObject(observability ?? {}, "connector");
@@ -165,6 +169,10 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     uxAggregate,
   );
   const firstSuccessPrompts = buildFirstSuccessPrompts(onboarding, readFirstSuccessCompleted());
+  const topToolRecommendation = useMemo(
+    () => buildTopToolRecommendation(toolPermissions),
+    [toolPermissions],
+  );
   const activeObjectiveCount = objectives.filter(
     (objective) => readString(objective, "state") === "active",
   ).length;
@@ -574,13 +582,36 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                     </div>
                     <div>
                       <dt>{app.t("overview.telemetryApprovals")}</dt>
-                      <dd>{buildApprovalSummary(uxAggregate)}</dd>
+                      <dd>{buildApprovalSummary(uxAggregate, toolPermissions)}</dd>
                     </div>
                     <div>
                       <dt>{app.t("overview.telemetryFriction")}</dt>
                       <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
                     </div>
                   </dl>
+                  {topToolRecommendation !== null && (
+                    <WorkspaceInlineNotice title="Tool posture recommendation" tone="warning">
+                      {topToolRecommendation.recommendation.reason}
+                    </WorkspaceInlineNotice>
+                  )}
+                  {topToolRecommendation !== null && (
+                    <div className="workspace-inline-actions">
+                      <ActionButton
+                        type="button"
+                        variant="ghost"
+                        onPress={() => {
+                          app.setSection("approvals");
+                          void navigate(
+                            `${getSectionPath("approvals")}?${new URLSearchParams([
+                              ["tool", topToolRecommendation.tool_name],
+                            ]).toString()}`,
+                          );
+                        }}
+                      >
+                        Open tool permissions
+                      </ActionButton>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="grid gap-3">
@@ -1393,9 +1424,18 @@ function buildFunnelSummary(aggregate: ConsoleAppState["uxTelemetryAggregate"]):
   return `${aggregate.funnel.setup_started} started · ${aggregate.funnel.first_prompt_sent} prompted · ${aggregate.funnel.first_run_inspected} inspected`;
 }
 
-function buildApprovalSummary(aggregate: ConsoleAppState["uxTelemetryAggregate"]): string {
+function buildApprovalSummary(
+  aggregate: ConsoleAppState["uxTelemetryAggregate"],
+  permissions: ToolPermissionsEnvelope | null,
+): string {
+  const topRecommendation = buildTopToolRecommendation(permissions);
+  if (topRecommendation !== null) {
+    return `${topRecommendation.tool_name} triggered ${topRecommendation.recommendation.approvals_14d} approvals in 14 days. Recommended: ${toolStateLabel(topRecommendation.recommendation.current_state)} -> ${toolStateLabel(topRecommendation.recommendation.recommended_state)}.`;
+  }
   if (aggregate === null || Object.keys(aggregate.approvalFatigueByTool).length === 0) {
-    return "No approval fatigue signal yet.";
+    return permissions === null
+      ? "No approval fatigue signal yet."
+      : `${permissions.summary.approval_requests_14d} approval requests recorded in the last 14 days.`;
   }
   const [toolName, count] = Object.entries(aggregate.approvalFatigueByTool).sort(
     (left, right) => right[1] - left[1],
@@ -1411,6 +1451,43 @@ function buildTopFrictionSurface(aggregate: ConsoleAppState["uxTelemetryAggregat
     (left, right) => right[1] - left[1],
   )[0] ?? ["web", 0];
   return count === 0 ? "No blocked or error outcomes recorded." : `${surface} (${count})`;
+}
+
+function buildTopToolRecommendation(
+  permissions: ToolPermissionsEnvelope | null,
+): (ToolPermissionRecord & { recommendation: NonNullable<ToolPermissionRecord["recommendation"]> }) | null {
+  if (permissions === null) {
+    return null;
+  }
+  const candidates = permissions.tools.filter(
+    (
+      tool,
+    ): tool is ToolPermissionRecord & {
+      recommendation: NonNullable<ToolPermissionRecord["recommendation"]>;
+    } => tool.recommendation !== undefined && tool.recommendation.action === undefined,
+  );
+  candidates.sort((left, right) => {
+    const byApprovals =
+      right.recommendation.approvals_14d - left.recommendation.approvals_14d;
+    if (byApprovals !== 0) {
+      return byApprovals;
+    }
+    return right.friction.requested_14d - left.friction.requested_14d;
+  });
+  return candidates[0] ?? null;
+}
+
+function toolStateLabel(value: string): string {
+  switch (value) {
+    case "always_allow":
+      return "always allow";
+    case "ask_each_time":
+      return "ask each time";
+    case "disabled":
+      return "disabled";
+    default:
+      return value.replaceAll("_", " ");
+  }
 }
 
 function formatOnboardingVariant(value: string | undefined): string {
