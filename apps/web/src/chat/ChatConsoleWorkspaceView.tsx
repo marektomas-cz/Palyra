@@ -28,10 +28,12 @@ interface ChatConsoleWorkspaceViewProps {
   readonly contextBudget: ChatContextBudgetSummary;
   readonly inspectorProps: ComponentProps<typeof ChatInspectorColumn>;
   readonly onAbortRun: () => void;
+  readonly onHideStarterPrompts: () => void;
   readonly onOpenObjective?: (() => void) | null;
   readonly onOpenRunDetails: () => void;
   readonly onRefresh: () => void;
   readonly onSetAllowSensitiveTools: (next: boolean) => void;
+  readonly onShowStarterPrompts: () => void;
   readonly onUseStarterPrompt: (prompt: string) => void;
   readonly pendingApprovalCount: number;
   readonly runActionBusy: boolean;
@@ -43,6 +45,7 @@ interface ChatConsoleWorkspaceViewProps {
   readonly sessionsBusy: boolean;
   readonly sessionsSidebarProps: ComponentProps<typeof ChatSessionsSidebar>;
   readonly showStarterPrompts: boolean;
+  readonly starterPromptsHidden: boolean;
   readonly starterPromptHint?: string | null;
   readonly starterPrompts: readonly string[];
   readonly streaming: boolean;
@@ -59,10 +62,12 @@ export function ChatConsoleWorkspaceView({
   contextBudget,
   inspectorProps,
   onAbortRun,
+  onHideStarterPrompts,
   onOpenObjective,
   onOpenRunDetails,
   onRefresh,
   onSetAllowSensitiveTools,
+  onShowStarterPrompts,
   onUseStarterPrompt,
   pendingApprovalCount,
   runActionBusy,
@@ -74,6 +79,7 @@ export function ChatConsoleWorkspaceView({
   sessionsBusy,
   sessionsSidebarProps,
   showStarterPrompts,
+  starterPromptsHidden,
   starterPromptHint,
   starterPrompts,
   streaming,
@@ -207,7 +213,16 @@ export function ChatConsoleWorkspaceView({
                       {prompt}
                     </ActionButton>
                   ))}
+                  <ActionButton type="button" variant="ghost" onPress={onHideStarterPrompts}>
+                    Hide guidance
+                  </ActionButton>
                 </div>
+              </div>
+            ) : starterPromptsHidden ? (
+              <div className="workspace-inline-actions">
+                <ActionButton type="button" variant="ghost" onPress={onShowStarterPrompts}>
+                  Show starter prompts
+                </ActionButton>
               </div>
             ) : null}
             <ChatComposer {...composerProps} />

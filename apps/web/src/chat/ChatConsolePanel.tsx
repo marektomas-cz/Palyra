@@ -60,6 +60,7 @@ import {
   describeSelectedSessionTitle,
 } from "./chatWorkspaceSessionBindings";
 import { FIRST_SUCCESS_PROMPTS } from "./starterPrompts";
+import { useStarterPromptGuidance } from "./useStarterPromptGuidance";
 import { useStarterPromptHandoff } from "./useStarterPromptHandoff";
 import type { UxTelemetryEvent } from "../console/contracts";
 import { parseConsoleHandoff } from "../console/contracts";
@@ -133,10 +134,11 @@ export function ChatConsolePanel({
     setNotice,
     preferredSessionId,
   });
-  const handlePromptSubmitted = useCallback(
-    (sessionId: string) => emitPromptSubmitted(emitUxEvent, sessionId),
-    [emitUxEvent],
-  );
+  const starterPromptGuidance = useStarterPromptGuidance();
+  const handlePromptSubmitted = useCallback((sessionId: string) => {
+    starterPromptGuidance.markFirstSuccessCompleted();
+    return emitPromptSubmitted(emitUxEvent, sessionId);
+  }, [emitUxEvent, starterPromptGuidance]);
   const handleRunInspected = useCallback(
     (runId: string) => emitRunInspected(emitUxEvent, runId),
     [emitUxEvent],
@@ -981,9 +983,9 @@ export function ChatConsolePanel({
           ]);
         }}
         onSetAllowSensitiveTools={setAllowSensitiveTools}
-        onUseStarterPrompt={(prompt) => {
-          updateComposerDraft(prompt);
-        }}
+        onHideStarterPrompts={starterPromptGuidance.hideStarterPrompts}
+        onShowStarterPrompts={starterPromptGuidance.showStarterPrompts}
+        onUseStarterPrompt={updateComposerDraft}
         pendingApprovalCount={pendingApprovalCount}
         runActionBusy={runActionBusy}
         selectedObjectiveFocus={selectedObjectiveFocus}
@@ -1009,7 +1011,8 @@ export function ChatConsolePanel({
             void archiveSessionAndTranscript();
           },
         })}
-        showStarterPrompts={transcriptRecords.length === 0 && composerText.trim().length === 0}
+        showStarterPrompts={!starterPromptGuidance.firstSuccessCompleted && !starterPromptGuidance.starterPromptsHidden && transcriptRecords.length === 0 && composerText.trim().length === 0}
+        starterPromptsHidden={starterPromptGuidance.starterPromptsHidden}
         starterPromptHint="Use a starter prompt to confirm the control plane is responsive before branching into a real task."
         starterPrompts={FIRST_SUCCESS_PROMPTS}
         streaming={streaming}

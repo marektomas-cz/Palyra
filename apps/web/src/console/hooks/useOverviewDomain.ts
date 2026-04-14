@@ -8,6 +8,8 @@ import type {
 } from "../../consoleApi";
 import { isJsonObject, toErrorMessage, toJsonObjectArray, type JsonObject } from "../shared";
 
+export type OverviewOnboardingFlow = "quickstart" | "manual" | "remote";
+
 type UseOverviewDomainArgs = {
   api: ConsoleApiClient;
   setError: (message: string | null) => void;
@@ -20,6 +22,8 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
   const [overviewOnboarding, setOverviewOnboarding] = useState<OnboardingPostureEnvelope | null>(
     null,
   );
+  const [overviewOnboardingFlow, setOverviewOnboardingFlow] =
+    useState<OverviewOnboardingFlow>("quickstart");
   const [overviewApprovals, setOverviewApprovals] = useState<JsonObject[]>([]);
   const [overviewDiagnostics, setOverviewDiagnostics] = useState<JsonObject | null>(null);
   const [overviewUsageInsights, setOverviewUsageInsights] = useState<UsageInsightsEnvelope | null>(
@@ -27,16 +31,23 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
   );
   const [overviewSupportJobs, setOverviewSupportJobs] = useState<JsonObject[]>([]);
 
-  async function refreshOverview(options?: { clearError?: boolean }): Promise<void> {
+  async function refreshOverview(options?: {
+    clearError?: boolean;
+    onboardingFlow?: OverviewOnboardingFlow;
+  }): Promise<void> {
+    const onboardingFlow = options?.onboardingFlow ?? overviewOnboardingFlow;
     setOverviewBusy(true);
     if (options?.clearError !== false) {
       setError(null);
+    }
+    if (onboardingFlow !== overviewOnboardingFlow) {
+      setOverviewOnboardingFlow(onboardingFlow);
     }
     const [catalog, deployment, onboarding, approvals, diagnostics, usageInsights, jobs] =
       await Promise.allSettled([
         api.getCapabilityCatalog(),
         api.getDeploymentPosture(),
-        api.getOnboardingPosture(),
+        api.getOnboardingPosture(new URLSearchParams([["flow", onboardingFlow]])),
         api.listApprovals(),
         api.getDiagnostics(),
         api.getUsageInsights(),
@@ -92,11 +103,16 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     setOverviewBusy(false);
   }
 
+  async function selectOverviewOnboardingFlow(next: OverviewOnboardingFlow): Promise<void> {
+    await refreshOverview({ clearError: false, onboardingFlow: next });
+  }
+
   function resetOverviewDomain(): void {
     setOverviewBusy(false);
     setOverviewCatalog(null);
     setOverviewDeployment(null);
     setOverviewOnboarding(null);
+    setOverviewOnboardingFlow("quickstart");
     setOverviewApprovals([]);
     setOverviewDiagnostics(null);
     setOverviewUsageInsights(null);
@@ -108,11 +124,13 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     overviewCatalog,
     overviewDeployment,
     overviewOnboarding,
+    overviewOnboardingFlow,
     overviewApprovals,
     overviewDiagnostics,
     overviewUsageInsights,
     overviewSupportJobs,
     refreshOverview,
+    selectOverviewOnboardingFlow,
     resetOverviewDomain,
   };
 }

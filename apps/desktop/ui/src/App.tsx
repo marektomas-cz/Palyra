@@ -50,6 +50,10 @@ import {
   type OnboardingPostureEnvelope,
   type OnboardingStepAction,
 } from "./lib/desktopApi";
+import {
+  markDesktopFirstSuccessCompleted,
+  readDesktopFirstSuccessCompleted,
+} from "./firstSuccessState";
 import { formatDesktopDateTime, translateDesktopMessage } from "./i18n";
 import { readStoredDesktopLocale, type DesktopLocale } from "./preferences";
 
@@ -82,6 +86,9 @@ export function App() {
   const [composerText, setComposerText] = useState("");
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
+  const [firstSuccessCompleted, setFirstSuccessCompleted] = useState(() =>
+    readDesktopFirstSuccessCompleted(),
+  );
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceTranscript, setVoiceTranscript] =
@@ -465,6 +472,8 @@ export function App() {
       setNotice(result.message);
       if (!result.queued_offline && draftId === undefined) {
         setComposerText("");
+        markDesktopFirstSuccessCompleted();
+        setFirstSuccessCompleted(true);
       }
       await refresh();
       const nextTranscript = await getDesktopCompanionSessionTranscript(activeSessionId);
@@ -2049,6 +2058,17 @@ export function App() {
                   Advanced setup
                 </Button>
                 <Button
+                  variant="secondary"
+                  onPress={() =>
+                    void openScopedHandoff("operations", {
+                      intent: "inspect_diagnostics",
+                      source: "desktop",
+                    })
+                  }
+                >
+                  Open diagnostics
+                </Button>
+                <Button
                   variant="ghost"
                   onPress={() =>
                     void toggleRollout({
@@ -2100,7 +2120,7 @@ export function App() {
                 ))}
               </div>
             ) : null}
-            {sharedOnboarding?.ready_for_first_success ? (
+            {sharedOnboarding?.ready_for_first_success && !firstSuccessCompleted ? (
               <ButtonGroup className="desktop-action-group">
                 {DESKTOP_FIRST_SUCCESS_PROMPTS.map((prompt) => (
                   <Button
@@ -2115,6 +2135,12 @@ export function App() {
                     {prompt}
                   </Button>
                 ))}
+                <Button
+                  variant="ghost"
+                  onPress={() => setActiveSection("approvals")}
+                >
+                  Review approvals
+                </Button>
               </ButtonGroup>
             ) : null}
           </SectionCard>

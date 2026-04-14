@@ -53,7 +53,9 @@ import type {
   OnboardingStepAction,
   OnboardingStepView,
 } from "../../consoleApi";
+import { readFirstSuccessCompleted } from "../../chat/firstSuccessState";
 import { FIRST_SUCCESS_PROMPTS, queueChatStarterPrompt } from "../../chat/starterPrompts";
+import { readGuidanceHidden, writeGuidanceHidden } from "../guidancePreferences";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
 type OverviewSectionProps = {
@@ -63,11 +65,13 @@ type OverviewSectionProps = {
     | "overviewBusy"
     | "overviewDeployment"
     | "overviewOnboarding"
+    | "overviewOnboardingFlow"
     | "overviewApprovals"
     | "overviewDiagnostics"
     | "overviewUsageInsights"
     | "overviewSupportJobs"
     | "refreshOverview"
+    | "selectOverviewOnboardingFlow"
     | "setError"
     | "setNotice"
     | "setSection"
@@ -119,6 +123,7 @@ const DEFAULT_OBJECTIVE_FORM: ObjectiveEditorForm = {
 export function OverviewSection({ app }: OverviewSectionProps) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const [guidanceHidden, setGuidanceHidden] = useState(() => readGuidanceHidden("overview"));
   const preferredObjectiveId = searchParams.get("objectiveId");
   const [objectivesBusy, setObjectivesBusy] = useState(false);
   const [objectiveMutationBusy, setObjectiveMutationBusy] = useState(false);
@@ -159,7 +164,10 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     onboarding,
     uxAggregate,
   );
-  const firstSuccessPrompts = buildFirstSuccessPrompts(onboarding);
+  const firstSuccessPrompts = buildFirstSuccessPrompts(
+    onboarding,
+    readFirstSuccessCompleted(),
+  );
   const activeObjectiveCount = objectives.filter(
     (objective) => readString(objective, "state") === "active",
   ).length;
@@ -252,7 +260,15 @@ export function OverviewSection({ app }: OverviewSectionProps) {
   }
 
   async function refreshSurface(): Promise<void> {
-    await Promise.all([app.refreshOverview(), loadObjectives()]);
+    await Promise.all([
+      app.refreshOverview({ onboardingFlow: app.overviewOnboardingFlow }),
+      loadObjectives(),
+    ]);
+  }
+
+  function updateGuidanceHidden(hidden: boolean): void {
+    setGuidanceHidden(hidden);
+    writeGuidanceHidden("overview", hidden);
   }
 
   async function saveObjective(): Promise<void> {
@@ -370,6 +386,31 @@ export function OverviewSection({ app }: OverviewSectionProps) {
         }
       />
 
+      {guidanceHidden ? (
+        <section className="workspace-two-column">
+          <NextActionCard
+            ctaLabel="Show guidance"
+            description="Starter prompts, onboarding cards, and runtime repair hints are currently hidden."
+            title="Guidance hidden"
+            onCta={() => updateGuidanceHidden(false)}
+          >
+            <p className="chat-muted">
+              Reopen the guidance surface whenever you want the recommended next action, blocker
+              repairs, or first-success prompts.
+            </p>
+          </NextActionCard>
+          <TroubleshootingCard
+            description="The current onboarding track stays visible even while the guidance cards are collapsed."
+            items={[
+              `Track: ${labelForOnboardingTrack(app.overviewOnboardingFlow)}`,
+              `${countRequiredOnboardingSteps(onboarding)} required steps`,
+              `${countOptionalOnboardingSteps(onboarding)} optional steps`,
+            ]}
+            title="Current track"
+          />
+        </section>
+      ) : (
+        <>
       <section className="workspace-two-column">
         <NextActionCard
           ctaLabel={recommendedOnboardingStep?.action?.label ?? "Refresh overview"}
@@ -402,6 +443,38 @@ export function OverviewSection({ app }: OverviewSectionProps) {
               Flow: {formatOnboardingVariant(onboarding?.flow_variant)}. Status:{" "}
               {formatOnboardingStatus(onboarding?.status)}.
             </p>
+            <p className="chat-muted">
+              {describeOnboardingTrack(app.overviewOnboardingFlow, deployment)} Required:{" "}
+              {countRequiredOnboardingSteps(onboarding)}. Optional:{" "}
+              {countOptionalOnboardingSteps(onboarding)}.
+            </p>
+            <div className="workspace-inline-actions">
+              <ActionButton
+                type="button"
+                variant={app.overviewOnboardingFlow === "quickstart" ? "primary" : "ghost"}
+                onPress={() => void app.selectOverviewOnboardingFlow("quickstart")}
+              >
+                Quick Start
+              </ActionButton>
+              <ActionButton
+                type="button"
+                variant={app.overviewOnboardingFlow !== "quickstart" ? "primary" : "ghost"}
+                onPress={() =>
+                  void app.selectOverviewOnboardingFlow(
+                    isRemoteDeployment(deployment) ? "remote" : "manual",
+                  )
+                }
+              >
+                Advanced setup
+              </ActionButton>
+              <ActionButton
+                type="button"
+                variant="ghost"
+                onPress={() => updateGuidanceHidden(true)}
+              >
+                Hide guidance
+              </ActionButton>
+            </div>
           </div>
         </NextActionCard>
         <OnboardingChecklistCard
@@ -465,6 +538,38 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                   </ActionButton>
                 ))}
               </div>
+              <div className="workspace-inline-actions">
+                <ActionButton
+                  type="button"
+                  variant="ghost"
+                  onPress={() => {
+                    app.setSection("approvals");
+                    void navigate(getSectionPath("approvals"));
+                  }}
+                >
+                  Review approvals
+                </ActionButton>
+                <ActionButton
+                  type="button"
+                  variant="ghost"
+                  onPress={() => {
+                    app.setSection("operations");
+                    void navigate(getSectionPath("operations"));
+                  }}
+                >
+                  Inspect diagnostics
+                </ActionButton>
+                <ActionButton
+                  type="button"
+                  variant="ghost"
+                  onPress={() => {
+                    app.setSection("chat");
+                    void navigate(getSectionPath("chat"));
+                  }}
+                >
+                  Open sessions
+                </ActionButton>
+              </div>
               <dl className="workspace-key-value-grid">
                 <div>
                   <dt>{app.t("overview.telemetryFunnel")}</dt>
@@ -481,26 +586,53 @@ export function OverviewSection({ app }: OverviewSectionProps) {
               </dl>
             </div>
           ) : (
-            <dl className="workspace-key-value-grid">
-              <div>
-                <dt>Completed</dt>
-                <dd>{onboarding?.counts.done ?? 0}</dd>
+            <div className="grid gap-3">
+              <dl className="workspace-key-value-grid">
+                <div>
+                  <dt>Completed</dt>
+                  <dd>{onboarding?.counts.done ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>Remaining</dt>
+                  <dd>{remainingOnboardingSteps(onboarding)}</dd>
+                </div>
+                <div>
+                  <dt>Telemetry friction</dt>
+                  <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
+                </div>
+              </dl>
+              <div className="workspace-inline-actions">
+                <ActionButton
+                  type="button"
+                  variant="ghost"
+                  onPress={() => {
+                    app.setSection("operations");
+                    void navigate(getSectionPath("operations"));
+                  }}
+                >
+                  Open diagnostics
+                </ActionButton>
+                <ActionButton
+                  type="button"
+                  variant="ghost"
+                  onPress={() =>
+                    void app.selectOverviewOnboardingFlow(
+                      isRemoteDeployment(deployment) ? "remote" : "manual",
+                    )
+                  }
+                >
+                  Switch to advanced
+                </ActionButton>
               </div>
-              <div>
-                <dt>Remaining</dt>
-                <dd>{remainingOnboardingSteps(onboarding)}</dd>
-              </div>
-              <div>
-                <dt>Telemetry friction</dt>
-                <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
-              </div>
-            </dl>
+            </div>
           )}
           <ActionButton type="button" variant="ghost" onPress={() => void app.refreshUxTelemetry()}>
             {app.uxTelemetryBusy ? "Refreshing baseline..." : "Refresh baseline"}
           </ActionButton>
         </ScenarioCard>
       </section>
+        </>
+      )}
 
       <section className="workspace-metric-grid">
         <WorkspaceMetricCard
@@ -1203,11 +1335,42 @@ function buildOnboardingTroubleshootingItems(
   return buildTelemetryFrictionItems(aggregate);
 }
 
-function buildFirstSuccessPrompts(posture: OnboardingPostureEnvelope | null): readonly string[] {
-  if (posture?.ready_for_first_success) {
+function buildFirstSuccessPrompts(
+  posture: OnboardingPostureEnvelope | null,
+  completed: boolean,
+): readonly string[] {
+  if (posture?.ready_for_first_success && !completed) {
     return FIRST_SUCCESS_PROMPTS;
   }
   return [];
+}
+
+function labelForOnboardingTrack(flow: ConsoleAppState["overviewOnboardingFlow"]): string {
+  return flow === "quickstart" ? "Quick Start" : "Advanced setup";
+}
+
+function describeOnboardingTrack(
+  flow: ConsoleAppState["overviewOnboardingFlow"],
+  deployment: JsonObject | null,
+): string {
+  if (flow === "quickstart") {
+    return "Quick Start keeps the path narrow: config, provider, verification, and first success.";
+  }
+  return isRemoteDeployment(deployment)
+    ? "Advanced setup follows the remote-safe branch with access posture and verification before handoff."
+    : "Advanced setup exposes workspace, access posture, and deeper control-plane preparation before the first run.";
+}
+
+function countRequiredOnboardingSteps(posture: OnboardingPostureEnvelope | null): number {
+  return posture?.steps.filter((step) => !step.optional).length ?? 0;
+}
+
+function countOptionalOnboardingSteps(posture: OnboardingPostureEnvelope | null): number {
+  return posture?.steps.filter((step) => step.optional).length ?? 0;
+}
+
+function isRemoteDeployment(deployment: JsonObject | null): boolean {
+  return readString(deployment ?? {}, "mode") === "remote_vps";
 }
 
 function buildTelemetryFrictionItems(aggregate: ConsoleAppState["uxTelemetryAggregate"]): string[] {
