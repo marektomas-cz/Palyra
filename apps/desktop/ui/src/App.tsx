@@ -824,6 +824,21 @@ export function App() {
 
   const selectedApprovalPrompt = readObject(selectedApproval, "prompt");
   const selectedApprovalPolicy = readObject(selectedApproval, "policy_snapshot");
+  const selectedApprovalPromptDetails = readObject(selectedApprovalPrompt, "details_json");
+  const selectedApprovalToolName =
+    readString(selectedApproval, "tool_name") ?? readString(selectedApprovalPromptDetails, "tool_name");
+  const selectedApprovalRiskLevel = readString(selectedApprovalPrompt, "risk_level") ?? "unspecified";
+  const selectedApprovalPolicyExplanation =
+    readString(selectedApprovalPrompt, "policy_explanation") ??
+    "This action requires an explicit operator decision under the current tool posture.";
+  const selectedApprovalNextStep = buildDesktopApprovalNextStep({
+    toolName: selectedApprovalToolName,
+    riskLevel: selectedApprovalRiskLevel,
+  });
+  const selectedApprovalSubjectId =
+    readString(selectedApprovalPrompt, "subject_id") ??
+    readString(selectedApprovalPromptDetails, "subject_id");
+  const selectedApprovalSkillId = readString(selectedApprovalPromptDetails, "skill_id");
 
   const onboardingItems = useMemo(
     () => [
@@ -1777,7 +1792,7 @@ export function App() {
                     })
                   }
                 >
-                  Open in browser
+                  Open permissions in browser
                 </Button>
               )
             }
@@ -1849,10 +1864,24 @@ export function App() {
                       label: "Decision",
                       value: readString(selectedApproval, "decision") ?? "pending",
                     },
+                    {
+                      label: "Tool",
+                      value: selectedApprovalToolName ?? "n/a",
+                    },
+                    {
+                      label: "Risk",
+                      value: selectedApprovalRiskLevel,
+                    },
                   ]}
                 />
                 <InlineNotice title="Request summary" tone="warning">
                   {readString(selectedApproval, "request_summary") ?? "No summary published."}
+                </InlineNotice>
+                <InlineNotice title="Why this approval appeared" tone="default">
+                  {selectedApprovalPolicyExplanation}
+                </InlineNotice>
+                <InlineNotice title="Next safe action" tone="default">
+                  {selectedApprovalNextStep}
                 </InlineNotice>
                 {selectedApprovalPrompt !== null ? (
                   <KeyValueList
@@ -1874,6 +1903,14 @@ export function App() {
                       {
                         label: "Timeout",
                         value: `${readString(selectedApprovalPrompt, "timeout_seconds") ?? "n/a"}s`,
+                      },
+                      {
+                        label: "Subject",
+                        value: selectedApprovalSubjectId ?? "n/a",
+                      },
+                      {
+                        label: "Skill",
+                        value: selectedApprovalSkillId ?? "n/a",
                       },
                     ]}
                   />
@@ -2292,6 +2329,17 @@ function formatUnixMs(value: number | null | undefined): string {
     return "-";
   }
   return new Date(value).toLocaleString();
+}
+
+function buildDesktopApprovalNextStep(args: {
+  toolName: string | null;
+  riskLevel: string;
+}): string {
+  const toolLabel = args.toolName ?? "this tool";
+  if (args.riskLevel === "high") {
+    return `Review the request carefully before approving ${toolLabel}. If it repeats often, open the permissions center in the browser and decide whether a safer long-lived posture is justified.`;
+  }
+  return `Approve once if this request is expected, or open the permissions center in the browser to decide whether ${toolLabel} should stay ask-each-time or move to a broader posture.`;
 }
 
 function prettyEventName(value: string | null | undefined): string {

@@ -387,6 +387,13 @@ impl App {
                 approval.tool_name = sanitize_terminal_text(approval.tool_name.as_str());
                 approval.request_summary =
                     sanitize_terminal_text(approval.request_summary.as_str());
+                if let Some(prompt) = approval.prompt.as_mut() {
+                    prompt.title = sanitize_terminal_text(prompt.title.as_str());
+                    prompt.subject_id = sanitize_terminal_text(prompt.subject_id.as_str());
+                    prompt.summary = sanitize_terminal_text(prompt.summary.as_str());
+                    prompt.policy_explanation =
+                        sanitize_terminal_text(prompt.policy_explanation.as_str());
+                }
                 self.status_line = sanitize_terminal_text(
                     text::approval_required(
                         self.locale,
@@ -3161,9 +3168,9 @@ fn percent_encode_component(value: &str) -> String {
 }
 
 fn render_approval_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let popup = centered_rect(72, 10, area);
+    let popup = centered_rect(88, 14, area);
     let body = if let Some(approval) = app.pending_approval.as_ref() {
-        Text::from(vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled(
                     "Tool ",
@@ -3173,12 +3180,30 @@ fn render_approval_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ]),
             Line::default(),
             Line::from(sanitize_terminal_text(approval.request_summary.as_str())),
-            Line::default(),
-            Line::from("y / Enter = allow once"),
-            Line::from("n / Esc   = deny"),
-        ])
+        ];
+        if let Some(prompt) = approval.prompt.as_ref() {
+            lines.push(Line::from(text::approval_risk(
+                app.locale,
+                approval_risk_level_to_text(prompt.risk_level),
+            )));
+            if !prompt.policy_explanation.trim().is_empty() {
+                lines.push(Line::from(text::approval_policy(
+                    app.locale,
+                    prompt.policy_explanation.as_str(),
+                )));
+            }
+            if !prompt.summary.trim().is_empty() {
+                lines.push(Line::from(prompt.summary.clone()));
+            }
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(text::approval_manage_posture_hint(app.locale)));
+        lines.push(Line::default());
+        lines.push(Line::from(text::approval_allow_once_hint(app.locale)));
+        lines.push(Line::from(text::approval_deny_hint(app.locale)));
+        Text::from(lines)
     } else {
-        Text::from("Approval request is no longer available.")
+        Text::from(text::approval_request_unavailable(app.locale))
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
@@ -3187,6 +3212,18 @@ fn render_approval_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn approval_risk_level_to_text(raw: i32) -> &'static str {
+    match common_v1::ApprovalRiskLevel::try_from(raw)
+        .unwrap_or(common_v1::ApprovalRiskLevel::Unspecified)
+    {
+        common_v1::ApprovalRiskLevel::Low => "low",
+        common_v1::ApprovalRiskLevel::Medium => "medium",
+        common_v1::ApprovalRiskLevel::High => "high",
+        common_v1::ApprovalRiskLevel::Critical => "critical",
+        common_v1::ApprovalRiskLevel::Unspecified => "unspecified",
+    }
 }
 
 fn render_picker_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {

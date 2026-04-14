@@ -58,6 +58,33 @@ pub(crate) fn approval_required(locale: TuiLocale, tool_name: &str) -> String {
     render(locale, format!("Approval required for {tool_name}").as_str())
 }
 
+pub(crate) fn approval_risk(locale: TuiLocale, risk_level: &str) -> String {
+    render(locale, format!("Risk: {risk_level}").as_str())
+}
+
+pub(crate) fn approval_policy(locale: TuiLocale, explanation: &str) -> String {
+    render(locale, format!("Why: {explanation}").as_str())
+}
+
+pub(crate) fn approval_manage_posture_hint(locale: TuiLocale) -> String {
+    render(
+        locale,
+        "If this repeats, review Tool Permissions in the web console before widening posture",
+    )
+}
+
+pub(crate) fn approval_allow_once_hint(locale: TuiLocale) -> String {
+    render(locale, "y / Enter = allow once")
+}
+
+pub(crate) fn approval_deny_hint(locale: TuiLocale) -> String {
+    render(locale, "n / Esc   = deny")
+}
+
+pub(crate) fn approval_request_unavailable(locale: TuiLocale) -> String {
+    render(locale, "Approval request is no longer available.")
+}
+
 pub(crate) fn run_already_in_progress(locale: TuiLocale) -> String {
     render(locale, "A run is already in progress")
 }
