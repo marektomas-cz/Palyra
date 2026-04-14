@@ -3,10 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type {
-  ConsoleApiClient,
   ToolPermissionDetailEnvelope,
   ToolPermissionPresetPreviewEnvelope,
-  ToolPermissionRecord,
   ToolPermissionsEnvelope,
   ToolPostureRecommendationAction,
   ToolPostureScopeKind,
@@ -81,11 +79,21 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
     permissions?.tools.find((tool) => tool.tool_name === selectedToolName) ??
     permissions?.tools[0] ??
     null;
-  const effectiveDetail = toolDetail?.tool.tool_name === selectedTool?.tool_name ? toolDetail : null;
+  const effectiveDetail =
+    toolDetail?.tool.tool_name === selectedTool?.tool_name ? toolDetail : null;
 
   useEffect(() => {
     void refreshPermissions();
-  }, [scopeKind, scopeId, search, category, stateFilter, lockedOnly, highFrictionOnly, requestedToolName]);
+  }, [
+    scopeKind,
+    scopeId,
+    search,
+    category,
+    stateFilter,
+    lockedOnly,
+    highFrictionOnly,
+    requestedToolName,
+  ]);
 
   useEffect(() => {
     if (selectedToolName.trim().length === 0) {
@@ -100,15 +108,17 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
     setPresetPreview(null);
     app.setError(null);
     try {
-      const response = await app.api.getToolPermissions(buildToolPermissionQuery({
-        scopeKind,
-        scopeId,
-        search,
-        category,
-        stateFilter,
-        lockedOnly,
-        highFrictionOnly,
-      }));
+      const response = await app.api.getToolPermissions(
+        buildToolPermissionQuery({
+          scopeKind,
+          scopeId,
+          search,
+          category,
+          stateFilter,
+          lockedOnly,
+          highFrictionOnly,
+        }),
+      );
       setPermissions(response);
       const nextToolName =
         preferredToolName?.trim() ||
@@ -116,7 +126,9 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
         response.tools.some((tool) => tool.tool_name === requestedToolName)
           ? requestedToolName
           : "") ||
-        (response.tools.some((tool) => tool.tool_name === selectedToolName) ? selectedToolName : "") ||
+        (response.tools.some((tool) => tool.tool_name === selectedToolName)
+          ? selectedToolName
+          : "") ||
         response.tools[0]?.tool_name ||
         "";
       setSelectedToolName(nextToolName);
@@ -319,7 +331,9 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
         actions={
           <Button
             variant="secondary"
-            onPress={() => void Promise.all([refreshPermissions(selectedToolName), app.refreshApprovals()])}
+            onPress={() =>
+              void Promise.all([refreshPermissions(selectedToolName), app.refreshApprovals()])
+            }
             isDisabled={permissionsBusy || app.approvalsBusy}
           >
             {permissionsBusy || app.approvalsBusy ? "Refreshing..." : "Refresh"}
@@ -438,13 +452,21 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
           </div>
 
           <div className="console-inline-actions">
-            <Button variant="secondary" onPress={() => void previewPreset()} isDisabled={mutationBusy}>
+            <Button
+              variant="secondary"
+              onPress={() => void previewPreset()}
+              isDisabled={mutationBusy}
+            >
               Preview preset
             </Button>
             <Button onPress={() => void applyPreset()} isDisabled={mutationBusy}>
               Apply preset
             </Button>
-            <Button variant="danger-soft" onPress={() => void resetScope()} isDisabled={mutationBusy}>
+            <Button
+              variant="danger-soft"
+              onPress={() => void resetScope()}
+              isDisabled={mutationBusy}
+            >
               Reset scope overrides
             </Button>
           </div>
@@ -465,7 +487,9 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                         {toolStateLabel(entry.proposed_state)}
                       </p>
                     </div>
-                    <WorkspaceStatusChip tone={entry.locked ? "danger" : entry.changed ? "warning" : "default"}>
+                    <WorkspaceStatusChip
+                      tone={entry.locked ? "danger" : entry.changed ? "warning" : "default"}
+                    >
                       {entry.locked ? "locked" : entry.changed ? "changes" : "no-op"}
                     </WorkspaceStatusChip>
                   </div>
@@ -500,14 +524,19 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                     <div>
                       <strong>{tool.title}</strong>
                       <p className="chat-muted">
-                        {tool.tool_name} · {tool.category} · {tool.effective_posture.source_scope_label}
+                        {tool.tool_name} · {tool.category} ·{" "}
+                        {tool.effective_posture.source_scope_label}
                       </p>
                     </div>
                     <div className="workspace-inline">
-                      <WorkspaceStatusChip tone={toolStateTone(tool.effective_posture.effective_state)}>
+                      <WorkspaceStatusChip
+                        tone={toolStateTone(tool.effective_posture.effective_state)}
+                      >
                         {toolStateLabel(tool.effective_posture.effective_state)}
                       </WorkspaceStatusChip>
-                      <WorkspaceStatusChip tone={tool.effective_posture.lock_reason ? "danger" : "default"}>
+                      <WorkspaceStatusChip
+                        tone={tool.effective_posture.lock_reason ? "danger" : "default"}
+                      >
                         {tool.effective_posture.lock_reason ? "locked" : tool.risk_level}
                       </WorkspaceStatusChip>
                     </div>
@@ -533,7 +562,9 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                     <p className="chat-muted">{selectedTool.description}</p>
                   </div>
                   <div className="workspace-inline">
-                    <WorkspaceStatusChip tone={toolStateTone(selectedTool.effective_posture.effective_state)}>
+                    <WorkspaceStatusChip
+                      tone={toolStateTone(selectedTool.effective_posture.effective_state)}
+                    >
                       {toolStateLabel(selectedTool.effective_posture.effective_state)}
                     </WorkspaceStatusChip>
                     <WorkspaceStatusChip tone="default">
@@ -570,7 +601,11 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                 >
                   Disable
                 </Button>
-                <Button variant="ghost" onPress={() => void resetSelectedTool()} isDisabled={mutationBusy}>
+                <Button
+                  variant="ghost"
+                  onPress={() => void resetSelectedTool()}
+                  isDisabled={mutationBusy}
+                >
                   Reset tool
                 </Button>
               </div>
@@ -607,7 +642,10 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                 >
                   <p>{effectiveDetail.tool.recommendation.reason}</p>
                   <div className="console-inline-actions">
-                    <Button onPress={() => void actOnRecommendation("accepted")} isDisabled={mutationBusy}>
+                    <Button
+                      onPress={() => void actOnRecommendation("accepted")}
+                      isDisabled={mutationBusy}
+                    >
                       Accept
                     </Button>
                     <Button
@@ -634,22 +672,25 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                 className="workspace-section-card--nested"
               >
                 <div className="workspace-list">
-                  {(effectiveDetail?.tool.effective_posture.chain ?? selectedTool.effective_posture.chain).map(
-                    (entry) => (
-                      <div key={`${entry.kind}:${entry.scope_id}`} className="workspace-list-item">
-                        <div>
-                          <strong>{entry.label}</strong>
-                          <p className="chat-muted">
-                            {entry.kind} · {entry.scope_id}
-                            {entry.source ? ` · ${entry.source}` : ""}
-                          </p>
-                        </div>
-                        <WorkspaceStatusChip tone={entry.state ? toolStateTone(entry.state) : "default"}>
-                          {entry.state ? toolStateLabel(entry.state) : "inherited"}
-                        </WorkspaceStatusChip>
+                  {(
+                    effectiveDetail?.tool.effective_posture.chain ??
+                    selectedTool.effective_posture.chain
+                  ).map((entry) => (
+                    <div key={`${entry.kind}:${entry.scope_id}`} className="workspace-list-item">
+                      <div>
+                        <strong>{entry.label}</strong>
+                        <p className="chat-muted">
+                          {entry.kind} · {entry.scope_id}
+                          {entry.source ? ` · ${entry.source}` : ""}
+                        </p>
                       </div>
-                    ),
-                  )}
+                      <WorkspaceStatusChip
+                        tone={entry.state ? toolStateTone(entry.state) : "default"}
+                      >
+                        {entry.state ? toolStateLabel(entry.state) : "inherited"}
+                      </WorkspaceStatusChip>
+                    </div>
+                  ))}
                 </div>
               </WorkspaceSectionCard>
 
@@ -665,7 +706,13 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                     selectedTool.recent_approvals.map((approval, index) => {
                       const record = approval as JsonObject;
                       return (
-                        <div key={readString(record, "approval_id") ?? `${selectedTool.tool_name}-${index}`} className="workspace-list-item">
+                        <div
+                          key={
+                            readString(record, "approval_id") ??
+                            `${selectedTool.tool_name}-${index}`
+                          }
+                          className="workspace-list-item"
+                        >
                           <div>
                             <strong>{readString(record, "request_summary") ?? "Approval"}</strong>
                             <p className="chat-muted">
@@ -757,7 +804,9 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
           description="Keep the selected request, context, explainability, and decision controls on one surface."
         >
           {selectedApproval === null ? (
-            <p className="chat-muted">Select an approval to inspect request context and decide it.</p>
+            <p className="chat-muted">
+              Select an approval to inspect request context and decide it.
+            </p>
           ) : (
             <div className="workspace-stack">
               <div className="workspace-callout">
@@ -766,7 +815,9 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                     <p className="console-label">Selected approval</p>
                     <strong>{selectedApprovalId}</strong>
                   </div>
-                  <WorkspaceStatusChip tone={readString(selectedApproval, "decision") === null ? "warning" : "default"}>
+                  <WorkspaceStatusChip
+                    tone={readString(selectedApproval, "decision") === null ? "warning" : "default"}
+                  >
                     {readString(selectedApproval, "decision") ?? "pending"}
                   </WorkspaceStatusChip>
                 </div>
@@ -814,7 +865,9 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                       : `This tool currently resolves to ${toolStateLabel(permissionFromApproval.effective_posture.effective_state)} from ${permissionFromApproval.effective_posture.source_scope_label}.`}
                   </p>
                   <div className="workspace-inline">
-                    <WorkspaceStatusChip tone={toolStateTone(permissionFromApproval.effective_posture.effective_state)}>
+                    <WorkspaceStatusChip
+                      tone={toolStateTone(permissionFromApproval.effective_posture.effective_state)}
+                    >
                       {toolStateLabel(permissionFromApproval.effective_posture.effective_state)}
                     </WorkspaceStatusChip>
                     <WorkspaceStatusChip tone="default">
@@ -822,7 +875,10 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                     </WorkspaceStatusChip>
                   </div>
                   <div className="console-inline-actions">
-                    <Button variant="secondary" onPress={() => setSelectedToolName(permissionFromApproval.tool_name)}>
+                    <Button
+                      variant="secondary"
+                      onPress={() => setSelectedToolName(permissionFromApproval.tool_name)}
+                    >
                       Open tool detail
                     </Button>
                   </div>
@@ -837,7 +893,12 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
               )}
 
               <div className="workspace-form-grid">
-                <TextInputField label="Approval ID" value={selectedApprovalId} readOnly onChange={() => {}} />
+                <TextInputField
+                  label="Approval ID"
+                  value={selectedApprovalId}
+                  readOnly
+                  onChange={() => {}}
+                />
                 <TextInputField
                   label="Reason"
                   value={app.approvalReason}
@@ -967,7 +1028,9 @@ function toErrorMessage(error: unknown): string {
 }
 
 function scopeLabel(scopeKind: ToolPostureScopeKind, scopeId: string): string {
-  return scopeKind === "global" ? "global default" : `${scopeKind} ${scopeId.trim() || "(missing id)"}`;
+  return scopeKind === "global"
+    ? "global default"
+    : `${scopeKind} ${scopeId.trim() || "(missing id)"}`;
 }
 
 function toolStateLabel(state: ToolPostureState): string {
