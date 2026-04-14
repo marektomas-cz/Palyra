@@ -12,21 +12,24 @@ export function useStarterPromptGuidance() {
   const [firstSuccessCompleted, setFirstSuccessCompleted] = useState(() =>
     readFirstSuccessCompleted(),
   );
+  const markFirstSuccessCompletedState = () => {
+    setFirstSuccessCompleted(true);
+    markFirstSuccessCompleted();
+  };
+  const hideStarterPrompts = () => {
+    setStarterPromptsHidden(true);
+    writeGuidanceHidden(STARTER_PROMPTS_SCOPE, true);
+  };
+  const showStarterPrompts = () => {
+    setStarterPromptsHidden(false);
+    writeGuidanceHidden(STARTER_PROMPTS_SCOPE, false);
+  };
 
   return {
     firstSuccessCompleted,
     starterPromptsHidden,
-    markFirstSuccessCompleted() {
-      setFirstSuccessCompleted(true);
-      markFirstSuccessCompleted();
-    },
-    hideStarterPrompts() {
-      setStarterPromptsHidden(true);
-      writeGuidanceHidden(STARTER_PROMPTS_SCOPE, true);
-    },
-    showStarterPrompts() {
-      setStarterPromptsHidden(false);
-      writeGuidanceHidden(STARTER_PROMPTS_SCOPE, false);
-    },
+    hideStarterPrompts,
+    markFirstSuccessCompleted: markFirstSuccessCompletedState,
+    showStarterPrompts,
   };
 }

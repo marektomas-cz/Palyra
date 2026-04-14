@@ -2135,10 +2135,7 @@ export function App() {
                     {prompt}
                   </Button>
                 ))}
-                <Button
-                  variant="ghost"
-                  onPress={() => setActiveSection("approvals")}
-                >
+                <Button variant="ghost" onPress={() => setActiveSection("approvals")}>
                   Review approvals
                 </Button>
               </ButtonGroup>

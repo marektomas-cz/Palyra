@@ -164,10 +164,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     onboarding,
     uxAggregate,
   );
-  const firstSuccessPrompts = buildFirstSuccessPrompts(
-    onboarding,
-    readFirstSuccessCompleted(),
-  );
+  const firstSuccessPrompts = buildFirstSuccessPrompts(onboarding, readFirstSuccessCompleted());
   const activeObjectiveCount = objectives.filter(
     (objective) => readString(objective, "state") === "active",
   ).length;
@@ -411,226 +408,230 @@ export function OverviewSection({ app }: OverviewSectionProps) {
         </section>
       ) : (
         <>
-      <section className="workspace-two-column">
-        <NextActionCard
-          ctaLabel={recommendedOnboardingStep?.action?.label ?? "Refresh overview"}
-          description={describeOnboardingPosture(onboarding)}
-          title="Next onboarding step"
-          onCta={() => {
-            if (recommendedOnboardingStep?.action !== undefined) {
-              executeOnboardingAction(recommendedOnboardingStep.action, {
-                navigate,
-                setNotice: app.setNotice,
-                setSection: app.setSection,
-              });
-              return;
-            }
-            void refreshSurface();
-          }}
-        >
-          <div className="grid gap-2">
-            <p className="chat-muted">
-              {recommendedOnboardingStep?.summary ??
-                "The control plane has not published a recommended onboarding step yet."}
-            </p>
-            {recommendedOnboardingStep?.blocked !== undefined ? (
-              <p className="chat-muted">
-                {recommendedOnboardingStep.blocked.detail} Repair:{" "}
-                {recommendedOnboardingStep.blocked.repair_hint}
-              </p>
-            ) : null}
-            <p className="chat-muted">
-              Flow: {formatOnboardingVariant(onboarding?.flow_variant)}. Status:{" "}
-              {formatOnboardingStatus(onboarding?.status)}.
-            </p>
-            <p className="chat-muted">
-              {describeOnboardingTrack(app.overviewOnboardingFlow, deployment)} Required:{" "}
-              {countRequiredOnboardingSteps(onboarding)}. Optional:{" "}
-              {countOptionalOnboardingSteps(onboarding)}.
-            </p>
-            <div className="workspace-inline-actions">
-              <ActionButton
-                type="button"
-                variant={app.overviewOnboardingFlow === "quickstart" ? "primary" : "ghost"}
-                onPress={() => void app.selectOverviewOnboardingFlow("quickstart")}
-              >
-                Quick Start
-              </ActionButton>
-              <ActionButton
-                type="button"
-                variant={app.overviewOnboardingFlow !== "quickstart" ? "primary" : "ghost"}
-                onPress={() =>
-                  void app.selectOverviewOnboardingFlow(
-                    isRemoteDeployment(deployment) ? "remote" : "manual",
-                  )
+          <section className="workspace-two-column">
+            <NextActionCard
+              ctaLabel={recommendedOnboardingStep?.action?.label ?? "Refresh overview"}
+              description={describeOnboardingPosture(onboarding)}
+              title="Next onboarding step"
+              onCta={() => {
+                if (recommendedOnboardingStep?.action !== undefined) {
+                  executeOnboardingAction(recommendedOnboardingStep.action, {
+                    navigate,
+                    setNotice: app.setNotice,
+                    setSection: app.setSection,
+                  });
+                  return;
                 }
-              >
-                Advanced setup
-              </ActionButton>
+                void refreshSurface();
+              }}
+            >
+              <div className="grid gap-2">
+                <p className="chat-muted">
+                  {recommendedOnboardingStep?.summary ??
+                    "The control plane has not published a recommended onboarding step yet."}
+                </p>
+                {recommendedOnboardingStep?.blocked !== undefined ? (
+                  <p className="chat-muted">
+                    {recommendedOnboardingStep.blocked.detail} Repair:{" "}
+                    {recommendedOnboardingStep.blocked.repair_hint}
+                  </p>
+                ) : null}
+                <p className="chat-muted">
+                  Flow: {formatOnboardingVariant(onboarding?.flow_variant)}. Status:{" "}
+                  {formatOnboardingStatus(onboarding?.status)}.
+                </p>
+                <p className="chat-muted">
+                  {describeOnboardingTrack(app.overviewOnboardingFlow, deployment)} Required:{" "}
+                  {countRequiredOnboardingSteps(onboarding)}. Optional:{" "}
+                  {countOptionalOnboardingSteps(onboarding)}.
+                </p>
+                <div className="workspace-inline-actions">
+                  <ActionButton
+                    type="button"
+                    variant={app.overviewOnboardingFlow === "quickstart" ? "primary" : "ghost"}
+                    onPress={() => void app.selectOverviewOnboardingFlow("quickstart")}
+                  >
+                    Quick Start
+                  </ActionButton>
+                  <ActionButton
+                    type="button"
+                    variant={app.overviewOnboardingFlow !== "quickstart" ? "primary" : "ghost"}
+                    onPress={() =>
+                      void app.selectOverviewOnboardingFlow(
+                        isRemoteDeployment(deployment) ? "remote" : "manual",
+                      )
+                    }
+                  >
+                    Advanced setup
+                  </ActionButton>
+                  <ActionButton
+                    type="button"
+                    variant="ghost"
+                    onPress={() => updateGuidanceHidden(true)}
+                  >
+                    Hide guidance
+                  </ActionButton>
+                </div>
+              </div>
+            </NextActionCard>
+            <OnboardingChecklistCard
+              description={describeOnboardingChecklist(onboarding)}
+              items={onboardingChecklistItems}
+              title="Onboarding checklist"
+            />
+          </section>
+
+          <section className="workspace-two-column">
+            <TroubleshootingCard
+              description={
+                onboarding?.counts.blocked
+                  ? `${onboarding.counts.blocked} onboarding blocker${onboarding.counts.blocked === 1 ? "" : "s"} currently need repair.`
+                  : app.uxTelemetryBusy
+                    ? "Refreshing current journal-backed UX baseline."
+                    : "No hard onboarding blockers detected; telemetry still shows where operators hit friction."
+              }
+              items={onboardingTroubleshootingItems}
+              title="Troubleshooting"
+            />
+            <ScenarioCard
+              ctaLabel={onboarding?.ready_for_first_success ? "Open chat" : "Review next step"}
+              description={
+                onboarding?.ready_for_first_success
+                  ? (onboarding.first_success_hint ??
+                    "Open chat and validate the first end-to-end operator task.")
+                  : "Finish the remaining guided steps, then use a starter prompt to verify the workspace."
+              }
+              title="First success"
+              onCta={() => {
+                if (onboarding?.ready_for_first_success) {
+                  app.setSection("chat");
+                  void navigate(getSectionPath("chat"));
+                  return;
+                }
+                if (recommendedOnboardingStep?.action !== undefined) {
+                  executeOnboardingAction(recommendedOnboardingStep.action, {
+                    navigate,
+                    setNotice: app.setNotice,
+                    setSection: app.setSection,
+                  });
+                }
+              }}
+            >
+              {onboarding?.ready_for_first_success ? (
+                <div className="grid gap-3">
+                  <div className="workspace-inline-actions">
+                    {firstSuccessPrompts.map((prompt) => (
+                      <ActionButton
+                        key={prompt}
+                        type="button"
+                        variant="secondary"
+                        onPress={() => {
+                          queueChatStarterPrompt(prompt);
+                          app.setSection("chat");
+                          void navigate(getSectionPath("chat"));
+                        }}
+                      >
+                        {prompt}
+                      </ActionButton>
+                    ))}
+                  </div>
+                  <div className="workspace-inline-actions">
+                    <ActionButton
+                      type="button"
+                      variant="ghost"
+                      onPress={() => {
+                        app.setSection("approvals");
+                        void navigate(getSectionPath("approvals"));
+                      }}
+                    >
+                      Review approvals
+                    </ActionButton>
+                    <ActionButton
+                      type="button"
+                      variant="ghost"
+                      onPress={() => {
+                        app.setSection("operations");
+                        void navigate(getSectionPath("operations"));
+                      }}
+                    >
+                      Inspect diagnostics
+                    </ActionButton>
+                    <ActionButton
+                      type="button"
+                      variant="ghost"
+                      onPress={() => {
+                        app.setSection("chat");
+                        void navigate(getSectionPath("chat"));
+                      }}
+                    >
+                      Open sessions
+                    </ActionButton>
+                  </div>
+                  <dl className="workspace-key-value-grid">
+                    <div>
+                      <dt>{app.t("overview.telemetryFunnel")}</dt>
+                      <dd>{buildFunnelSummary(uxAggregate)}</dd>
+                    </div>
+                    <div>
+                      <dt>{app.t("overview.telemetryApprovals")}</dt>
+                      <dd>{buildApprovalSummary(uxAggregate)}</dd>
+                    </div>
+                    <div>
+                      <dt>{app.t("overview.telemetryFriction")}</dt>
+                      <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
+                    </div>
+                  </dl>
+                </div>
+              ) : (
+                <div className="grid gap-3">
+                  <dl className="workspace-key-value-grid">
+                    <div>
+                      <dt>Completed</dt>
+                      <dd>{onboarding?.counts.done ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>Remaining</dt>
+                      <dd>{remainingOnboardingSteps(onboarding)}</dd>
+                    </div>
+                    <div>
+                      <dt>Telemetry friction</dt>
+                      <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
+                    </div>
+                  </dl>
+                  <div className="workspace-inline-actions">
+                    <ActionButton
+                      type="button"
+                      variant="ghost"
+                      onPress={() => {
+                        app.setSection("operations");
+                        void navigate(getSectionPath("operations"));
+                      }}
+                    >
+                      Open diagnostics
+                    </ActionButton>
+                    <ActionButton
+                      type="button"
+                      variant="ghost"
+                      onPress={() =>
+                        void app.selectOverviewOnboardingFlow(
+                          isRemoteDeployment(deployment) ? "remote" : "manual",
+                        )
+                      }
+                    >
+                      Switch to advanced
+                    </ActionButton>
+                  </div>
+                </div>
+              )}
               <ActionButton
                 type="button"
                 variant="ghost"
-                onPress={() => updateGuidanceHidden(true)}
+                onPress={() => void app.refreshUxTelemetry()}
               >
-                Hide guidance
+                {app.uxTelemetryBusy ? "Refreshing baseline..." : "Refresh baseline"}
               </ActionButton>
-            </div>
-          </div>
-        </NextActionCard>
-        <OnboardingChecklistCard
-          description={describeOnboardingChecklist(onboarding)}
-          items={onboardingChecklistItems}
-          title="Onboarding checklist"
-        />
-      </section>
-
-      <section className="workspace-two-column">
-        <TroubleshootingCard
-          description={
-            onboarding?.counts.blocked
-              ? `${onboarding.counts.blocked} onboarding blocker${onboarding.counts.blocked === 1 ? "" : "s"} currently need repair.`
-              : app.uxTelemetryBusy
-                ? "Refreshing current journal-backed UX baseline."
-                : "No hard onboarding blockers detected; telemetry still shows where operators hit friction."
-          }
-          items={onboardingTroubleshootingItems}
-          title="Troubleshooting"
-        />
-        <ScenarioCard
-          ctaLabel={onboarding?.ready_for_first_success ? "Open chat" : "Review next step"}
-          description={
-            onboarding?.ready_for_first_success
-              ? onboarding.first_success_hint ??
-                "Open chat and validate the first end-to-end operator task."
-              : "Finish the remaining guided steps, then use a starter prompt to verify the workspace."
-          }
-          title="First success"
-          onCta={() => {
-            if (onboarding?.ready_for_first_success) {
-              app.setSection("chat");
-              void navigate(getSectionPath("chat"));
-              return;
-            }
-            if (recommendedOnboardingStep?.action !== undefined) {
-              executeOnboardingAction(recommendedOnboardingStep.action, {
-                navigate,
-                setNotice: app.setNotice,
-                setSection: app.setSection,
-              });
-            }
-          }}
-        >
-          {onboarding?.ready_for_first_success ? (
-            <div className="grid gap-3">
-              <div className="workspace-inline-actions">
-                {firstSuccessPrompts.map((prompt) => (
-                  <ActionButton
-                    key={prompt}
-                    type="button"
-                    variant="secondary"
-                    onPress={() => {
-                      queueChatStarterPrompt(prompt);
-                      app.setSection("chat");
-                      void navigate(getSectionPath("chat"));
-                    }}
-                  >
-                    {prompt}
-                  </ActionButton>
-                ))}
-              </div>
-              <div className="workspace-inline-actions">
-                <ActionButton
-                  type="button"
-                  variant="ghost"
-                  onPress={() => {
-                    app.setSection("approvals");
-                    void navigate(getSectionPath("approvals"));
-                  }}
-                >
-                  Review approvals
-                </ActionButton>
-                <ActionButton
-                  type="button"
-                  variant="ghost"
-                  onPress={() => {
-                    app.setSection("operations");
-                    void navigate(getSectionPath("operations"));
-                  }}
-                >
-                  Inspect diagnostics
-                </ActionButton>
-                <ActionButton
-                  type="button"
-                  variant="ghost"
-                  onPress={() => {
-                    app.setSection("chat");
-                    void navigate(getSectionPath("chat"));
-                  }}
-                >
-                  Open sessions
-                </ActionButton>
-              </div>
-              <dl className="workspace-key-value-grid">
-                <div>
-                  <dt>{app.t("overview.telemetryFunnel")}</dt>
-                  <dd>{buildFunnelSummary(uxAggregate)}</dd>
-                </div>
-                <div>
-                  <dt>{app.t("overview.telemetryApprovals")}</dt>
-                  <dd>{buildApprovalSummary(uxAggregate)}</dd>
-                </div>
-                <div>
-                  <dt>{app.t("overview.telemetryFriction")}</dt>
-                  <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
-                </div>
-              </dl>
-            </div>
-          ) : (
-            <div className="grid gap-3">
-              <dl className="workspace-key-value-grid">
-                <div>
-                  <dt>Completed</dt>
-                  <dd>{onboarding?.counts.done ?? 0}</dd>
-                </div>
-                <div>
-                  <dt>Remaining</dt>
-                  <dd>{remainingOnboardingSteps(onboarding)}</dd>
-                </div>
-                <div>
-                  <dt>Telemetry friction</dt>
-                  <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
-                </div>
-              </dl>
-              <div className="workspace-inline-actions">
-                <ActionButton
-                  type="button"
-                  variant="ghost"
-                  onPress={() => {
-                    app.setSection("operations");
-                    void navigate(getSectionPath("operations"));
-                  }}
-                >
-                  Open diagnostics
-                </ActionButton>
-                <ActionButton
-                  type="button"
-                  variant="ghost"
-                  onPress={() =>
-                    void app.selectOverviewOnboardingFlow(
-                      isRemoteDeployment(deployment) ? "remote" : "manual",
-                    )
-                  }
-                >
-                  Switch to advanced
-                </ActionButton>
-              </div>
-            </div>
-          )}
-          <ActionButton type="button" variant="ghost" onPress={() => void app.refreshUxTelemetry()}>
-            {app.uxTelemetryBusy ? "Refreshing baseline..." : "Refresh baseline"}
-          </ActionButton>
-        </ScenarioCard>
-      </section>
+            </ScenarioCard>
+          </section>
         </>
       )}
 
@@ -1425,9 +1426,7 @@ function formatOnboardingVariant(value: string | undefined): string {
   }
 }
 
-function formatOnboardingStatus(
-  value: OnboardingPostureEnvelope["status"] | undefined,
-): string {
+function formatOnboardingStatus(value: OnboardingPostureEnvelope["status"] | undefined): string {
   switch (value) {
     case "not_started":
       return "not started";
@@ -1465,8 +1464,7 @@ function remainingOnboardingSteps(posture: OnboardingPostureEnvelope | null): nu
     return 0;
   }
   return posture.steps.filter(
-    (step) =>
-      !step.optional && step.status !== "done" && step.status !== "skipped",
+    (step) => !step.optional && step.status !== "done" && step.status !== "skipped",
   ).length;
 }
 

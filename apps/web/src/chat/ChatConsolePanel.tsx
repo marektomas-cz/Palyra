@@ -135,15 +135,17 @@ export function ChatConsolePanel({
     preferredSessionId,
   });
   const starterPromptGuidance = useStarterPromptGuidance();
-  const handlePromptSubmitted = useCallback((sessionId: string) => {
-    starterPromptGuidance.markFirstSuccessCompleted();
-    return emitPromptSubmitted(emitUxEvent, sessionId);
-  }, [emitUxEvent, starterPromptGuidance]);
+  const handlePromptSubmitted = useCallback(
+    (sessionId: string) => {
+      starterPromptGuidance.markFirstSuccessCompleted();
+      return emitPromptSubmitted(emitUxEvent, sessionId);
+    },
+    [emitUxEvent, starterPromptGuidance],
+  );
   const handleRunInspected = useCallback(
     (runId: string) => emitRunInspected(emitUxEvent, runId),
     [emitUxEvent],
   );
-
   const {
     composerText,
     setComposerText,
@@ -207,9 +209,10 @@ export function ChatConsolePanel({
     (runDrawerId.trim().length > 0 ? runDrawerId.trim() : null) ??
     knownRunIds[0] ??
     null;
-  const toolPayloadCount = useMemo(() => {
-    return visibleTranscript.filter((entry) => entry.payload !== undefined).length;
-  }, [visibleTranscript]);
+  const toolPayloadCount = useMemo(
+    () => visibleTranscript.filter((entry) => entry.payload !== undefined).length,
+    [visibleTranscript],
+  );
   const recentTranscriptRecords = [...transcriptRecords].slice(-8).reverse();
   const deferredSearchQuery = useDeferredValue(transcriptSearchQuery);
   const selectedSessionLineage = useMemo(
@@ -243,7 +246,6 @@ export function ChatConsolePanel({
             session_label: sessions.selectedSession.session_label ?? undefined,
           },
   });
-
   useEffect(() => {
     const signature = searchParams.toString();
     if (signature.length === 0 || handoffTelemetryRef.current === signature) {
@@ -952,9 +954,7 @@ export function ChatConsolePanel({
           setNotice,
           setPhase4BusyKey,
         })}
-        onAbortRun={() => {
-          void interruptCurrentRun("");
-        }}
+        onAbortRun={() => void interruptCurrentRun("")}
         onOpenObjective={
           selectedObjective === null
             ? null
@@ -998,20 +998,17 @@ export function ChatConsolePanel({
         sessionsBusy={sessions.sessionsBusy}
         sessionsSidebarProps={buildSessionsSidebarProps({
           sessions,
-          createSession: () => {
-            void sessions.createSession();
-          },
-          renameSession: () => {
-            void sessions.renameSession();
-          },
-          resetSession: () => {
-            void resetSessionAndTranscript();
-          },
-          archiveSession: () => {
-            void archiveSessionAndTranscript();
-          },
+          createSession: () => void sessions.createSession(),
+          renameSession: () => void sessions.renameSession(),
+          resetSession: () => void resetSessionAndTranscript(),
+          archiveSession: () => void archiveSessionAndTranscript(),
         })}
-        showStarterPrompts={!starterPromptGuidance.firstSuccessCompleted && !starterPromptGuidance.starterPromptsHidden && transcriptRecords.length === 0 && composerText.trim().length === 0}
+        showStarterPrompts={
+          !starterPromptGuidance.firstSuccessCompleted &&
+          !starterPromptGuidance.starterPromptsHidden &&
+          transcriptRecords.length === 0 &&
+          composerText.trim().length === 0
+        }
         starterPromptsHidden={starterPromptGuidance.starterPromptsHidden}
         starterPromptHint="Use a starter prompt to confirm the control plane is responsive before branching into a real task."
         starterPrompts={FIRST_SUCCESS_PROMPTS}
@@ -1029,9 +1026,8 @@ export function ChatConsolePanel({
           a2uiDocuments,
           selectedDetailId: detailPanel?.id ?? null,
           updateApprovalDraft: updateApprovalDraftValue,
-          decideInlineApproval: async (approvalId, approved) => {
-            await decideInlineApproval(approvalId, approved);
-          },
+          decideInlineApproval: async (approvalId, approved) =>
+            await decideInlineApproval(approvalId, approved),
           openRunDetails,
           refreshSessionTranscript,
           setDetailPanel,
