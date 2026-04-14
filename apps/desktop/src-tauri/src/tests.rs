@@ -1384,6 +1384,16 @@ async fn companion_snapshot_polling_does_not_rebootstrap_console_auth_after_firs
                 );
                 continue;
             }
+            if request_line.starts_with("GET /console/v1/onboarding/posture ") {
+                assert!(has_cookie, "onboarding posture should reuse the console session");
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    r#"{"contract":{"contract_version":"control-plane.v1"},"flow":"quick_start","flow_variant":"quickstart","status":"ready","config_path":"./palyra.toml","resume_supported":true,"ready_for_first_success":true,"recommended_step_id":"first_success","first_success_hint":"Open chat and send the first real operator request.","counts":{"todo":0,"in_progress":0,"blocked":0,"done":2,"skipped":0},"available_flows":["quick_start","advanced_setup"],"steps":[{"step_id":"runtime","title":"Start local runtime","summary":"Gateway is healthy.","status":"done"},{"step_id":"first_success","title":"Run the first operator task","summary":"Open chat and send the first real operator request.","status":"done","action":{"label":"Open chat","kind":"open_console_path","surface":"web","target":"/#/chat"}}]}"#,
+                    &[],
+                );
+                continue;
+            }
             panic!("unexpected companion snapshot request: {request_line}");
         }
     });

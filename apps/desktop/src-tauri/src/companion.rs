@@ -12,8 +12,8 @@ use super::desktop_state::{
 };
 use super::onboarding::{DesktopRefreshPayload, OnboardingStatusInputs};
 use super::snapshot::{
-    build_control_plane_client, build_dashboard_open_url, ensure_console_session_with_csrf,
-    sanitize_log_line, DashboardOpenInputs,
+    build_control_plane_client, build_dashboard_open_url, ensure_console_session_with_cache,
+    ensure_console_session_with_csrf, sanitize_log_line, DashboardOpenInputs,
 };
 use super::supervisor::{ConsolePayloadCache, ConsoleSessionCache};
 use super::{normalize_optional_text, unix_ms_now, ControlCenter, RuntimeConfig};
@@ -82,6 +82,8 @@ pub(crate) struct DesktopCompanionSnapshot {
     pub(crate) generated_at_unix_ms: i64,
     pub(crate) control_center: super::snapshot::ControlCenterSnapshot,
     pub(crate) onboarding: super::onboarding::OnboardingStatusSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shared_onboarding: Option<control_plane::OnboardingPostureEnvelope>,
     pub(crate) openai_status: super::openai_auth::OpenAiAuthStatusSnapshot,
     pub(crate) active_profile: DesktopCompanionProfileRecord,
     pub(crate) profiles: Vec<DesktopCompanionProfileRecord>,
@@ -578,10 +580,23 @@ pub(crate) async fn build_companion_snapshot(
 
     let mut warnings = Vec::new();
     let mut console_session = None;
+    let mut shared_onboarding = None;
     let mut session_catalog = Vec::new();
     let mut session_summary = None;
     let mut approvals = Vec::new();
     let mut inventory = None;
+
+    match fetch_shared_onboarding_posture(
+        &http_client,
+        &runtime,
+        admin_token.as_str(),
+        console_session_cache.as_ref(),
+    )
+    .await
+    {
+        Ok(posture) => shared_onboarding = Some(posture),
+        Err(error) => warnings.push(sanitize_log_line(error.to_string().as_str())),
+    }
 
     if companion_state.rollout.companion_shell_enabled {
         match fetch_companion_console_data(
@@ -641,6 +656,7 @@ pub(crate) async fn build_companion_snapshot(
         generated_at_unix_ms: unix_ms_now(),
         control_center: snapshot,
         onboarding: onboarding_status,
+        shared_onboarding,
         openai_status,
         active_profile,
         profiles,
@@ -675,6 +691,21 @@ pub(crate) async fn build_companion_snapshot(
             stale_devices,
         },
     })
+}
+
+async fn fetch_shared_onboarding_posture(
+    http_client: &Client,
+    runtime: &RuntimeConfig,
+    admin_token: &str,
+    console_session_cache: &Mutex<Option<ConsoleSessionCache>>,
+) -> Result<control_plane::OnboardingPostureEnvelope> {
+    let mut control_plane = build_control_plane_client(http_client.clone(), runtime)?;
+    ensure_console_session_with_cache(&mut control_plane, admin_token, console_session_cache)
+        .await?;
+    control_plane
+        .get_onboarding_posture(Vec::new())
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 pub(crate) async fn resolve_companion_chat_session(
@@ -985,9 +1016,13 @@ fn build_companion_redirect_path(payload: &DesktopCompanionOpenDashboardRequest)
     let base_path = match section {
         "chat" => "/#/chat",
         "approvals" => "/#/control/approvals",
+        "browser" => "/#/control/browser",
+        "channels" => "/#/control/channels",
         "access" => "/#/settings/access",
-        "browser" => "/#/browser",
-        "onboarding" => "/#/settings/profiles",
+        "auth" | "onboarding" => "/#/settings/profiles",
+        "config" => "/#/settings/config",
+        "secrets" => "/#/settings/secrets",
+        "operations" => "/#/settings/diagnostics",
         "overview" | "home" => "/#/control/overview",
         other if other.starts_with('/') => other,
         other => return format!("/#/control/{other}"),
@@ -1077,7 +1112,7 @@ mod tests {
         let redirect = build_companion_redirect_path(&payload);
         assert_eq!(
             redirect,
-            "/#/browser?sessionId=session-1&runId=run-1&canvasId=canvas-1&intent=reopen_canvas&source=desktop"
+            "/#/control/browser?sessionId=session-1&runId=run-1&canvasId=canvas-1&intent=reopen_canvas&source=desktop"
         );
     }
 

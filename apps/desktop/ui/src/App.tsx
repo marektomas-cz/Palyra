@@ -27,6 +27,7 @@ import {
   markDesktopCompanionNotificationsRead,
   openDashboard,
   openDesktopCompanionHandoff,
+  openExternalUrl,
   repairDesktopNode,
   resetDesktopNode,
   removeDesktopCompanionOfflineDraft,
@@ -46,6 +47,8 @@ import {
   type DesktopSessionTranscriptEnvelope,
   type InventoryDeviceRecord,
   type JsonValue,
+  type OnboardingPostureEnvelope,
+  type OnboardingStepAction,
 } from "./lib/desktopApi";
 import { formatDesktopDateTime, translateDesktopMessage } from "./i18n";
 import { readStoredDesktopLocale, type DesktopLocale } from "./preferences";
@@ -59,6 +62,11 @@ const SECTION_ORDER: DesktopCompanionSection[] = [
 ];
 const VOICE_CAPTURE_CONSENT_KEY = "palyra.desktop.voice.capture-consent.v1";
 const VOICE_TTS_CONSENT_KEY = "palyra.desktop.voice.tts-consent.v1";
+const DESKTOP_FIRST_SUCCESS_PROMPTS = [
+  "Summarize the current runtime posture and tell me what needs attention first.",
+  "Verify my provider and model setup, then list anything still blocking a real run.",
+  "Give me a safe first operator workflow I can run end-to-end from this environment.",
+] as const;
 
 export function App() {
   const { snapshot, loading, error, previewMode, refresh } = useDesktopCompanion();
@@ -714,6 +722,38 @@ export function App() {
     }
   }
 
+  async function runSharedOnboardingAction(action: OnboardingStepAction): Promise<void> {
+    try {
+      switch (action.kind) {
+        case "open_console_path":
+          await openScopedHandoff(mapConsolePathToDesktopHandoffSection(action.target), {
+            intent: "onboarding",
+            source: "desktop",
+          });
+          return;
+        case "run_cli_command":
+          setNotice(`Run in terminal: ${action.target}`);
+          return;
+        case "open_desktop_section":
+          if (isDesktopCompanionSection(action.target)) {
+            setActiveSection(action.target);
+            setNotice(`Opened desktop section: ${action.label}.`);
+          } else {
+            setNotice(`Desktop action target is not available: ${action.target}`);
+          }
+          return;
+        case "read_docs": {
+          const result = await openExternalUrl(action.target);
+          setNotice(result.message);
+          return;
+        }
+      }
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setNotice(message);
+    }
+  }
+
   async function toggleRollout(next: {
     companion_shell_enabled?: boolean;
     desktop_notifications_enabled?: boolean;
@@ -797,6 +837,16 @@ export function App() {
       },
     ],
     [onboardingProgressLabel, snapshot],
+  );
+  const sharedOnboarding = snapshot.shared_onboarding ?? null;
+  const sharedRecommendedStep =
+    sharedOnboarding?.steps.find((step) => step.step_id === sharedOnboarding.recommended_step_id) ??
+    sharedOnboarding?.steps.find((step) => step.status !== "done" && step.status !== "skipped") ??
+    null;
+  const sharedRecommendedAction = sharedRecommendedStep?.action ?? null;
+  const sharedOnboardingItems = useMemo(
+    () => buildSharedOnboardingItems(sharedOnboarding),
+    [sharedOnboarding],
   );
 
   return (
@@ -1984,8 +2034,19 @@ export function App() {
             description={t("desktop.onboarding.description")}
             actions={
               <ButtonGroup className="desktop-action-group">
+                {sharedRecommendedAction !== null ? (
+                  <Button
+                    variant="primary"
+                    onPress={() => void runSharedOnboardingAction(sharedRecommendedAction)}
+                  >
+                    {sharedRecommendedAction.label}
+                  </Button>
+                ) : null}
                 <Button variant="secondary" onPress={() => void openScopedHandoff("overview")}>
                   {t("desktop.onboarding.browserHandoff")}
+                </Button>
+                <Button variant="secondary" onPress={() => void openScopedHandoff("onboarding")}>
+                  Advanced setup
                 </Button>
                 <Button
                   variant="ghost"
@@ -2001,16 +2062,60 @@ export function App() {
             }
           >
             <KeyValueList items={onboardingItems} />
+            {sharedOnboardingItems.length > 0 ? (
+              <KeyValueList items={sharedOnboardingItems} />
+            ) : null}
             <InlineNotice
               title={snapshot.onboarding.current_step_title}
               tone={snapshot.onboarding.dashboard_handoff_completed ? "success" : "warning"}
             >
               {snapshot.onboarding.current_step_detail}
             </InlineNotice>
+            {sharedOnboarding ? (
+              <InlineNotice
+                title={`${formatDesktopOnboardingStatus(sharedOnboarding.status)} · ${sharedRecommendedStep?.title ?? "Shared onboarding"}`}
+                tone={toneForDesktopOnboardingStatus(sharedOnboarding.status)}
+              >
+                {sharedRecommendedStep?.blocked?.repair_hint ??
+                  sharedRecommendedStep?.summary ??
+                  sharedOnboarding.first_success_hint ??
+                  "Desktop is following the shared onboarding posture from the control plane."}
+              </InlineNotice>
+            ) : null}
             {snapshot.onboarding.recovery?.message ? (
               <InlineNotice title={t("desktop.onboarding.recoveryHint")} tone="warning">
                 {snapshot.onboarding.recovery.message}
               </InlineNotice>
+            ) : null}
+            {sharedOnboarding?.steps.length ? (
+              <div className="desktop-stack">
+                {sharedOnboarding.steps.map((step) => (
+                  <InlineNotice
+                    key={step.step_id}
+                    title={`${formatDesktopOnboardingStepStatus(step.status)} · ${step.title}`}
+                    tone={toneForDesktopOnboardingStepStatus(step.status)}
+                  >
+                    {step.blocked?.repair_hint ?? step.summary}
+                  </InlineNotice>
+                ))}
+              </div>
+            ) : null}
+            {sharedOnboarding?.ready_for_first_success ? (
+              <ButtonGroup className="desktop-action-group">
+                {DESKTOP_FIRST_SUCCESS_PROMPTS.map((prompt) => (
+                  <Button
+                    key={prompt}
+                    variant="secondary"
+                    onPress={() => {
+                      setActiveSection("chat");
+                      setComposerText(prompt);
+                      setNotice("Starter prompt loaded into the desktop chat composer.");
+                    }}
+                  >
+                    {prompt}
+                  </Button>
+                ))}
+              </ButtonGroup>
             ) : null}
           </SectionCard>
 
@@ -2311,4 +2416,115 @@ function formatDurationMs(value: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function buildSharedOnboardingItems(
+  posture: OnboardingPostureEnvelope | null,
+): Array<{ label: string; value: string }> {
+  if (posture === null) {
+    return [];
+  }
+  return [
+    { label: "Shared flow", value: posture.flow_variant },
+    { label: "Shared status", value: posture.status },
+    {
+      label: "Shared progress",
+      value: `${posture.counts.done}/${posture.steps.length}`,
+    },
+    {
+      label: "Blocked steps",
+      value: String(posture.counts.blocked),
+    },
+  ];
+}
+
+function formatDesktopOnboardingStatus(status: OnboardingPostureEnvelope["status"]): string {
+  switch (status) {
+    case "not_started":
+      return "Not started";
+    case "in_progress":
+      return "In progress";
+    case "blocked":
+      return "Blocked";
+    case "ready":
+      return "Ready";
+    case "complete":
+      return "Complete";
+  }
+}
+
+function toneForDesktopOnboardingStatus(
+  status: OnboardingPostureEnvelope["status"],
+): "default" | "success" | "warning" | "danger" {
+  switch (status) {
+    case "blocked":
+      return "danger";
+    case "ready":
+    case "complete":
+      return "success";
+    case "in_progress":
+      return "warning";
+    default:
+      return "default";
+  }
+}
+
+function formatDesktopOnboardingStepStatus(status: string): string {
+  switch (status) {
+    case "done":
+      return "Done";
+    case "blocked":
+      return "Blocked";
+    case "in_progress":
+      return "In progress";
+    case "skipped":
+      return "Skipped";
+    default:
+      return "Todo";
+  }
+}
+
+function toneForDesktopOnboardingStepStatus(
+  status: string,
+): "default" | "success" | "warning" | "danger" {
+  switch (status) {
+    case "done":
+      return "success";
+    case "blocked":
+      return "danger";
+    case "in_progress":
+      return "warning";
+    default:
+      return "default";
+  }
+}
+
+function mapConsolePathToDesktopHandoffSection(target: string): string {
+  const normalized = target.trim();
+  if (normalized.includes("/#/chat")) {
+    return "chat";
+  }
+  if (normalized.includes("/#/control/approvals")) {
+    return "approvals";
+  }
+  if (normalized.includes("/#/settings/access")) {
+    return "access";
+  }
+  if (normalized.includes("/#/settings/profiles")) {
+    return "onboarding";
+  }
+  if (normalized.includes("/#/control/browser")) {
+    return "browser";
+  }
+  if (normalized.includes("/#/control/channels")) {
+    return "channels";
+  }
+  if (normalized.includes("/#/settings/diagnostics")) {
+    return "operations";
+  }
+  return "overview";
+}
+
+function isDesktopCompanionSection(value: string): value is DesktopCompanionSection {
+  return SECTION_ORDER.includes(value as DesktopCompanionSection);
 }

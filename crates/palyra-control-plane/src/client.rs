@@ -619,6 +619,19 @@ impl ControlPlaneClient {
         .await
     }
 
+    pub async fn get_onboarding_posture(
+        &self,
+        query: Vec<(&str, Option<String>)>,
+    ) -> Result<OnboardingPostureEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            build_query_path("console/v1/onboarding/posture", query),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
     pub async fn inspect_config(
         &self,
         request: &ConfigInspectRequest,

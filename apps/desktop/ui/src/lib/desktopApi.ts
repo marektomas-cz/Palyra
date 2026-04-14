@@ -223,6 +223,67 @@ export type OnboardingStatusSnapshot = {
   } | null;
 };
 
+export type OnboardingFlow = "quick_start" | "advanced_setup";
+export type OnboardingPostureState =
+  | "not_started"
+  | "in_progress"
+  | "blocked"
+  | "ready"
+  | "complete";
+export type OnboardingStepStatus = "todo" | "in_progress" | "blocked" | "done" | "skipped";
+export type OnboardingActionKind =
+  | "open_console_path"
+  | "run_cli_command"
+  | "open_desktop_section"
+  | "read_docs";
+
+export type OnboardingStepAction = {
+  label: string;
+  kind: OnboardingActionKind;
+  surface: string;
+  target: string;
+};
+
+export type OnboardingBlockedReason = {
+  code: string;
+  detail: string;
+  repair_hint: string;
+};
+
+export type OnboardingStepView = {
+  step_id: string;
+  title: string;
+  summary: string;
+  status: OnboardingStepStatus;
+  optional?: boolean;
+  verification_state?: string;
+  blocked?: OnboardingBlockedReason;
+  action?: OnboardingStepAction;
+};
+
+export type OnboardingStepCounts = {
+  todo: number;
+  in_progress: number;
+  blocked: number;
+  done: number;
+  skipped: number;
+};
+
+export type OnboardingPostureEnvelope = {
+  contract: { contract_version: string };
+  flow: OnboardingFlow;
+  flow_variant: string;
+  status: OnboardingPostureState;
+  config_path: string;
+  resume_supported: boolean;
+  ready_for_first_success: boolean;
+  recommended_step_id?: string;
+  first_success_hint?: string;
+  counts: OnboardingStepCounts;
+  available_flows: OnboardingFlow[];
+  steps: OnboardingStepView[];
+};
+
 export type OpenAiAuthStatusSnapshot = {
   ready: boolean;
   state?: string;
@@ -272,6 +333,7 @@ export type DesktopCompanionSnapshot = {
   generated_at_unix_ms: number;
   control_center: ControlCenterSnapshot;
   onboarding: OnboardingStatusSnapshot;
+  shared_onboarding?: OnboardingPostureEnvelope;
   openai_status: OpenAiAuthStatusSnapshot;
   active_profile: DesktopCompanionProfileRecord;
   profiles: DesktopCompanionProfileRecord[];
@@ -497,6 +559,64 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
     dashboard_handoff_completed: true,
     completion_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms,
     recovery: null,
+  },
+  shared_onboarding: {
+    contract: { contract_version: "control-plane.v1" },
+    flow: "quick_start",
+    flow_variant: "quickstart",
+    status: "ready",
+    config_path: "./palyra.toml",
+    resume_supported: true,
+    ready_for_first_success: true,
+    recommended_step_id: "first_success",
+    first_success_hint: "Open chat and send the first real operator request.",
+    counts: { todo: 0, in_progress: 0, blocked: 0, done: 4, skipped: 1 },
+    available_flows: ["quick_start", "advanced_setup"],
+    steps: [
+      {
+        step_id: "runtime",
+        title: "Start local runtime",
+        summary: "Gateway and desktop sidecars are healthy.",
+        status: "done",
+        action: {
+          label: "Open overview",
+          kind: "open_console_path",
+          surface: "web",
+          target: "/#/control/overview",
+        },
+      },
+      {
+        step_id: "provider",
+        title: "Connect provider",
+        summary: "OpenAI default profile is ready for the first run.",
+        status: "done",
+        action: {
+          label: "Open profiles",
+          kind: "open_console_path",
+          surface: "web",
+          target: "/#/settings/profiles",
+        },
+      },
+      {
+        step_id: "channels",
+        title: "Optional channel setup",
+        summary: "Configure browser relay or channels later if needed.",
+        status: "skipped",
+        optional: true,
+      },
+      {
+        step_id: "first_success",
+        title: "Run the first operator task",
+        summary: "Use a starter prompt in chat and inspect the result.",
+        status: "done",
+        action: {
+          label: "Open chat",
+          kind: "open_desktop_section",
+          surface: "desktop",
+          target: "chat",
+        },
+      },
+    ],
   },
   openai_status: {
     ready: true,
@@ -900,4 +1020,8 @@ export async function resetDesktopNode(): Promise<ActionResult> {
 
 export async function openDashboard(): Promise<ActionResult> {
   return invoke<ActionResult>("open_dashboard");
+}
+
+export async function openExternalUrl(url: string): Promise<ActionResult> {
+  return invoke<ActionResult>("open_external_url_command", { url });
 }
