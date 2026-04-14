@@ -2728,6 +2728,31 @@ fn console_m52_control_plane_domains_publish_contract_metadata() -> Result<()> {
         "deployment posture should expose bind addresses"
     );
 
+    let onboarding = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/onboarding/posture"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to fetch onboarding posture")?
+        .error_for_status()
+        .context("onboarding posture returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse onboarding posture response json")?;
+    assert_eq!(
+        onboarding
+            .get("contract")
+            .and_then(|value| value.get("contract_version"))
+            .and_then(Value::as_str),
+        Some("control-plane.v1")
+    );
+    assert!(
+        onboarding.get("steps").and_then(Value::as_array).is_some(),
+        "onboarding posture should expose shared step state"
+    );
+    assert!(
+        onboarding.get("counts").and_then(Value::as_object).is_some(),
+        "onboarding posture should publish normalized step counts"
+    );
+
     let auth_profiles = client
         .get(format!("http://127.0.0.1:{admin_port}/console/v1/auth/profiles"))
         .header("Cookie", cookie.clone())

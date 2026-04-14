@@ -154,4 +154,12 @@ pub enum OnboardingCommand {
         #[command(flatten)]
         options: WizardOverridesArg,
     },
+    Status {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, value_enum)]
+        flow: Option<OnboardingFlowArg>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }

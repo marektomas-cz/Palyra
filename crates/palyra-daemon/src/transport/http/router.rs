@@ -232,6 +232,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/deployment/posture",
             get(console::auth::console_deployment_posture_handler),
         )
+        .route(
+            "/console/v1/onboarding/posture",
+            get(console::onboarding::console_onboarding_posture_handler),
+        )
         .route("/console/v1/agents", get(console::agents::console_agents_list_handler))
         .route("/console/v1/agents", post(console::agents::console_agent_create_handler))
         .route("/console/v1/agents/{agent_id}", get(console::agents::console_agent_get_handler))

@@ -47,6 +47,102 @@ pub struct DangerousRemoteBindAckSummary {
     pub env_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingFlow {
+    QuickStart,
+    AdvancedSetup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingPostureState {
+    NotStarted,
+    InProgress,
+    Blocked,
+    Ready,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingStepStatus {
+    Todo,
+    InProgress,
+    Blocked,
+    Done,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingActionKind {
+    OpenConsolePath,
+    RunCliCommand,
+    OpenDesktopSection,
+    ReadDocs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardingStepAction {
+    pub label: String,
+    pub kind: OnboardingActionKind,
+    pub surface: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardingBlockedReason {
+    pub code: String,
+    pub detail: String,
+    pub repair_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardingStepView {
+    pub step_id: String,
+    pub title: String,
+    pub summary: String,
+    pub status: OnboardingStepStatus,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<OnboardingBlockedReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<OnboardingStepAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OnboardingStepCounts {
+    pub todo: usize,
+    pub in_progress: usize,
+    pub blocked: usize,
+    pub done: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardingPostureEnvelope {
+    pub contract: ContractDescriptor,
+    pub flow: OnboardingFlow,
+    pub flow_variant: String,
+    pub status: OnboardingPostureState,
+    pub config_path: String,
+    pub resume_supported: bool,
+    pub ready_for_first_success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_success_hint: Option<String>,
+    pub counts: OnboardingStepCounts,
+    #[serde(default)]
+    pub available_flows: Vec<OnboardingFlow>,
+    #[serde(default)]
+    pub steps: Vec<OnboardingStepView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAdminAccessAttempt {
     pub observed_at_unix_ms: i64,
