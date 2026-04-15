@@ -1,4 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import type {
   ChatAttachmentRecord,
@@ -26,12 +26,7 @@ import {
 } from "./chatConsoleOperations";
 import { useChatAttachmentUploadHandler } from "./chatInspectorActions";
 import { buildInspectorProps, buildTranscriptProps } from "./chatConsolePanelProps";
-import {
-  buildSessionLineageHint,
-  describeBranchState,
-  toErrorMessage,
-  type ComposerAttachment,
-} from "./chatShared";
+import { describeBranchState, toErrorMessage, type ComposerAttachment } from "./chatShared";
 import { emitPromptSubmitted, emitRunInspected, emitSessionResumed } from "./chatConsoleTelemetry";
 import {
   createUndoCheckpoint,
@@ -54,8 +49,8 @@ import { useChatSessions } from "./useChatSessions";
 import { useChatSlashPalette } from "./useChatSlashPalette";
 import { usePhase4DeepLinks } from "./usePhase4DeepLinks";
 import { useChatObjectives } from "./useChatObjectives";
+import { useChatPanelViewState } from "./useChatPanelViewState";
 import { useChatPanelBootstrap } from "./useChatPanelBootstrap";
-import { useChatSessionQuickControls } from "./useChatSessionQuickControls";
 import {
   buildWorkspaceHeaderSessionState,
   buildSessionsSidebarProps,
@@ -193,49 +188,32 @@ export function ChatConsolePanel({
     filteredHiddenTranscriptItems,
     sessionQuickControlHeaderProps,
     sessionQuickControlPanelProps,
-  } = useChatSessionQuickControls({
+    pendingApprovalCount,
+    a2uiSurfaces,
+    knownRunIds,
+    inspectorVisible,
+    actionableRunId,
+    toolPayloadCount,
+    recentTranscriptRecords,
+    deferredSearchQuery,
+    selectedSessionLineage,
+  } = useChatPanelViewState({
     api,
     selectedSession: sessions.selectedSession,
+    upsertSession: sessions.upsertSession,
     visibleTranscript,
     hiddenTranscriptItems,
+    a2uiDocuments,
+    runIds,
+    sessionRuns,
+    runDrawerOpen,
+    activeRunId,
+    runDrawerId,
+    transcriptSearchQuery,
+    transcriptRecords,
     setError,
     setNotice,
-    upsertSession: sessions.upsertSession,
   });
-  const pendingApprovalCount = useMemo(
-    () =>
-      filteredTranscript.filter(
-        (entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string",
-      ).length,
-    [filteredTranscript],
-  );
-  const a2uiSurfaces = useMemo(() => Object.keys(a2uiDocuments), [a2uiDocuments]);
-  const knownRunIds = useMemo(() => {
-    const ordered = new Set<string>();
-    for (const runId of runIds) {
-      ordered.add(runId);
-    }
-    for (const run of [...sessionRuns].reverse()) {
-      ordered.add(run.run_id);
-    }
-    return Array.from(ordered);
-  }, [runIds, sessionRuns]);
-  const inspectorVisible = runDrawerOpen || knownRunIds.length > 0;
-  const actionableRunId =
-    activeRunId ??
-    (runDrawerId.trim().length > 0 ? runDrawerId.trim() : null) ??
-    knownRunIds[0] ??
-    null;
-  const toolPayloadCount = useMemo(
-    () => filteredTranscript.filter((entry) => entry.payload !== undefined).length,
-    [filteredTranscript],
-  );
-  const recentTranscriptRecords = [...transcriptRecords].slice(-8).reverse();
-  const deferredSearchQuery = useDeferredValue(transcriptSearchQuery);
-  const selectedSessionLineage = useMemo(
-    () => buildSessionLineageHint(sessions.selectedSession),
-    [sessions.selectedSession],
-  );
   const attachSelectedFiles = useChatAttachmentUploadHandler({
     api,
     sessionId: sessions.activeSessionId.trim(),
