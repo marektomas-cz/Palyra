@@ -2408,6 +2408,30 @@ fn admin_channel_health_refresh_and_dead_letter_recovery_publish_operator_state(
         "body-based logs query should resolve the same dead-letter record as the legacy path route"
     );
 
+    let paused = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/queue/pause"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin queue pause endpoint before dead-letter replay")?
+        .error_for_status()
+        .context("admin queue pause endpoint returned non-success status before dead-letter replay")?
+        .json::<Value>()
+        .context("failed to parse admin queue pause response json before dead-letter replay")?;
+    assert_eq!(
+        paused
+            .get("operations")
+            .and_then(|value| value.get("queue"))
+            .and_then(|value| value.get("paused"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "queue pause should hold the replayed item in outbox until the explicit forced drain"
+    );
+
     let replayed = client
         .post(format!(
             "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/dead-letters/{dead_letter_id}/replay"

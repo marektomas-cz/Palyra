@@ -24,16 +24,29 @@ use crate::{
     transport::grpc::auth::RequestContext,
 };
 
+pub(crate) struct WorkspacePatchToolRequest<'a> {
+    pub(crate) principal: &'a str,
+    pub(crate) device_id: &'a str,
+    pub(crate) channel: Option<&'a str>,
+    pub(crate) session_id: &'a str,
+    pub(crate) run_id: &'a str,
+    pub(crate) proposal_id: &'a str,
+    pub(crate) input_json: &'a [u8],
+}
+
 pub(crate) async fn execute_workspace_patch_tool(
     runtime_state: &Arc<GatewayRuntimeState>,
-    principal: &str,
-    device_id: &str,
-    channel: Option<&str>,
-    session_id: &str,
-    run_id: &str,
-    proposal_id: &str,
-    input_json: &[u8],
+    request: WorkspacePatchToolRequest<'_>,
 ) -> ToolExecutionOutcome {
+    let WorkspacePatchToolRequest {
+        principal,
+        device_id,
+        channel,
+        session_id,
+        run_id,
+        proposal_id,
+        input_json,
+    } = request;
     if input_json.len() > MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES {
         return workspace_patch_tool_execution_outcome(
             proposal_id,

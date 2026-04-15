@@ -1139,9 +1139,11 @@ pub(crate) async fn console_chat_workspace_compare_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
     let left =
-        parse_workspace_compare_anchor(payload.left_run_id, payload.left_checkpoint_id, "left")?;
+        parse_workspace_compare_anchor(payload.left_run_id, payload.left_checkpoint_id, "left")
+            .map_err(runtime_status_response)?;
     let right =
-        parse_workspace_compare_anchor(payload.right_run_id, payload.right_checkpoint_id, "right")?;
+        parse_workspace_compare_anchor(payload.right_run_id, payload.right_checkpoint_id, "right")
+            .map_err(runtime_status_response)?;
     authorize_workspace_compare_anchor(&state, &session.context, &left).await?;
     authorize_workspace_compare_anchor(&state, &session.context, &right).await?;
     let diff = crate::application::workspace_observability::compare_workspace_anchors(
@@ -2897,36 +2899,32 @@ fn parse_workspace_compare_anchor(
     run_id: Option<String>,
     checkpoint_id: Option<String>,
     side: &str,
-) -> Result<crate::application::workspace_observability::WorkspaceCompareAnchor, Response> {
+) -> Result<crate::application::workspace_observability::WorkspaceCompareAnchor, tonic::Status> {
     let run_id = run_id.and_then(trim_to_option);
     let checkpoint_id = checkpoint_id.and_then(trim_to_option);
     match (run_id, checkpoint_id) {
         (Some(run_id), None) => {
             validate_canonical_id(run_id.as_str()).map_err(|_| {
-                runtime_status_response(tonic::Status::invalid_argument(format!(
-                    "{side}_run_id must be a canonical ULID"
-                )))
+                tonic::Status::invalid_argument(format!("{side}_run_id must be a canonical ULID"))
             })?;
             Ok(crate::application::workspace_observability::WorkspaceCompareAnchor::Run(run_id))
         }
         (None, Some(checkpoint_id)) => {
             validate_canonical_id(checkpoint_id.as_str()).map_err(|_| {
-                runtime_status_response(tonic::Status::invalid_argument(format!(
+                tonic::Status::invalid_argument(format!(
                     "{side}_checkpoint_id must be a canonical ULID"
-                )))
+                ))
             })?;
             Ok(crate::application::workspace_observability::WorkspaceCompareAnchor::Checkpoint(
                 checkpoint_id,
             ))
         }
-        (Some(_), Some(_)) => {
-            Err(runtime_status_response(tonic::Status::invalid_argument(format!(
-                "{side} compare anchor must set only one of {side}_run_id or {side}_checkpoint_id"
-            ))))
-        }
-        (None, None) => Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+        (Some(_), Some(_)) => Err(tonic::Status::invalid_argument(format!(
+            "{side} compare anchor must set only one of {side}_run_id or {side}_checkpoint_id"
+        ))),
+        (None, None) => Err(tonic::Status::invalid_argument(format!(
             "{side} compare anchor requires {side}_run_id or {side}_checkpoint_id"
-        )))),
+        ))),
     }
 }
 

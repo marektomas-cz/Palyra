@@ -5938,23 +5938,19 @@ impl JournalStore {
                     file.moved_from_path,
                     file.change_kind,
                     file.before_content_sha256,
-                    file.before_size_bytes.map(|value| i64::try_from(value)).transpose().map_err(
-                        |_| {
-                            JournalError::InvalidArgument(
-                                "workspace checkpoint before size exceeds sqlite integer range"
-                                    .to_owned(),
-                            )
-                        }
-                    )?,
+                    file.before_size_bytes.map(i64::try_from).transpose().map_err(|_| {
+                        JournalError::InvalidArgument(
+                            "workspace checkpoint before size exceeds sqlite integer range"
+                                .to_owned(),
+                        )
+                    })?,
                     file.after_content_sha256,
-                    file.after_size_bytes.map(|value| i64::try_from(value)).transpose().map_err(
-                        |_| {
-                            JournalError::InvalidArgument(
-                                "workspace checkpoint after size exceeds sqlite integer range"
-                                    .to_owned(),
-                            )
-                        }
-                    )?,
+                    file.after_size_bytes.map(i64::try_from).transpose().map_err(|_| {
+                        JournalError::InvalidArgument(
+                            "workspace checkpoint after size exceeds sqlite integer range"
+                                .to_owned(),
+                        )
+                    })?,
                     blob_sha256,
                     file.content_type,
                     i64::from(u8::from(file.is_text)),
