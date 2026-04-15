@@ -54,6 +54,16 @@ describe("ChatConsolePanel bootstrap effects", () => {
       contract,
       catalog: { profiles: [], templates: [] },
     }));
+    const listAgents = vi.fn(async () => ({
+      contract,
+      agents: [],
+      execution_backends: [],
+      page: {
+        limit: 100,
+        returned: 0,
+        has_more: false,
+      },
+    }));
     const listObjectives = vi.fn(async () => ({
       contract,
       objectives: [],
@@ -71,6 +81,7 @@ describe("ChatConsolePanel bootstrap effects", () => {
       listSessionCatalog,
       getSessionTranscript,
       getDelegationCatalog,
+      listAgents,
       listObjectives,
       listAuthProfiles,
       listBrowserProfiles,
@@ -94,6 +105,7 @@ describe("ChatConsolePanel bootstrap effects", () => {
     await waitFor(() => {
       expect(listSessionCatalog).toHaveBeenCalledTimes(1);
       expect(getDelegationCatalog).toHaveBeenCalledTimes(1);
+      expect(listAgents).toHaveBeenCalledTimes(1);
       expect(listObjectives).toHaveBeenCalledTimes(1);
       expect(listAuthProfiles).toHaveBeenCalledTimes(1);
       expect(listBrowserProfiles).toHaveBeenCalledTimes(1);
@@ -148,6 +160,16 @@ describe("ChatConsolePanel bootstrap effects", () => {
       contract,
       catalog: { profiles: [], templates: [] },
     }));
+    const listAgents = vi.fn(async () => ({
+      contract,
+      agents: [],
+      execution_backends: [],
+      page: {
+        limit: 100,
+        returned: 0,
+        has_more: false,
+      },
+    }));
     const listObjectives = vi.fn(async () => ({
       contract,
       objectives: [],
@@ -166,6 +188,7 @@ describe("ChatConsolePanel bootstrap effects", () => {
       listSessionCatalog,
       getSessionTranscript,
       getDelegationCatalog,
+      listAgents,
       listObjectives,
       listAuthProfiles,
       listBrowserProfiles,

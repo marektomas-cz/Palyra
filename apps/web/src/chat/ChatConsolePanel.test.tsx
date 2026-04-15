@@ -435,6 +435,14 @@ describe("Chat web UX primitives", () => {
         selectedSessionLineage="Root session"
         selectedSessionTitle="Operator workspace"
         selectedSessionTitleState="Auto title ready"
+        sessionQuickControlHeaderProps={{
+          session: null,
+          busy: false,
+          onToggleThinking: vi.fn(),
+          onToggleTrace: vi.fn(),
+          onToggleVerbose: vi.fn(),
+          onReset: vi.fn(),
+        }}
         sessionsBusy={false}
         sessionsSidebarProps={baseSessionsSidebarProps()}
         showStarterPrompts={false}
@@ -543,6 +551,20 @@ function baseInspectorProps() {
     runIds: [],
     selectedSession: null,
     selectedSessionLineage: "Root session",
+    sessionQuickControlPanelProps: {
+      session: null,
+      agents: [],
+      busy: false,
+      modelDraft: "",
+      setModelDraft: vi.fn(),
+      onSelectAgent: vi.fn(),
+      onApplyModel: vi.fn(),
+      onClearModel: vi.fn(),
+      onToggleThinking: vi.fn(),
+      onToggleTrace: vi.fn(),
+      onToggleVerbose: vi.fn(),
+      onReset: vi.fn(),
+    },
     contextBudgetEstimatedTokens: 900,
     transcriptBusy: false,
     transcriptSearchQuery: "",

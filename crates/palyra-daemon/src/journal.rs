@@ -1160,6 +1160,18 @@ pub struct OrchestratorSessionTitleUpdateRequest {
     pub manual_title_locked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OrchestratorSessionQuickControlsUpdateRequest {
+    pub session_id: String,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+    pub model_profile_override: Option<Option<String>>,
+    pub thinking_override: Option<Option<bool>>,
+    pub trace_override: Option<Option<bool>>,
+    pub verbose_override: Option<Option<bool>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrchestratorSessionCleanupRequest {
     pub session_id: Option<String>,
@@ -1197,6 +1209,14 @@ pub struct OrchestratorSessionRecord {
     pub manual_title_locked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manual_title_updated_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_profile_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_override: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_override: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbose_override: Option<bool>,
     pub title: String,
     pub title_source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3060,6 +3080,22 @@ const MIGRATIONS: &[Migration] = &[
                 ON orchestrator_sessions(manual_title_locked, updated_at_unix_ms DESC);
         "#,
     },
+    Migration {
+        version: 22,
+        name: "orchestrator_session_quick_controls_phase4",
+        sql: r#"
+            ALTER TABLE orchestrator_sessions
+                ADD COLUMN model_profile_override TEXT;
+            ALTER TABLE orchestrator_sessions
+                ADD COLUMN thinking_override INTEGER;
+            ALTER TABLE orchestrator_sessions
+                ADD COLUMN trace_override INTEGER;
+            ALTER TABLE orchestrator_sessions
+                ADD COLUMN verbose_override INTEGER;
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_sessions_model_profile_override
+                ON orchestrator_sessions(model_profile_override, updated_at_unix_ms DESC);
+        "#,
+    },
 ];
 
 fn serialize_json_field<T: Serialize>(
@@ -3343,8 +3379,12 @@ impl JournalStore {
                     updated_at_unix_ms,
                     title_generation_state,
                     manual_title_locked,
-                    manual_title_updated_at_unix_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, ?10)
+                    manual_title_updated_at_unix_ms,
+                    model_profile_override,
+                    thinking_override,
+                    trace_override,
+                    verbose_override
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, ?10, NULL, NULL, NULL, NULL)
                 ON CONFLICT(session_ulid) DO UPDATE SET
                     updated_at_unix_ms = excluded.updated_at_unix_ms,
                     session_label = COALESCE(excluded.session_label, orchestrator_sessions.session_label),
@@ -3546,8 +3586,12 @@ impl JournalStore {
                     last_run_ulid,
                     title_generation_state,
                     manual_title_locked,
-                    manual_title_updated_at_unix_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL, ?8, ?9, ?10)
+                    manual_title_updated_at_unix_ms,
+                    model_profile_override,
+                    thinking_override,
+                    trace_override,
+                    verbose_override
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL, ?8, ?9, ?10, NULL, NULL, NULL, NULL)
             "#,
             params![
                 session_id,
@@ -3589,6 +3633,10 @@ impl JournalStore {
             },
             manual_title_locked: request.session_label.is_some(),
             manual_title_updated_at_unix_ms: request.session_label.as_ref().map(|_| now),
+            model_profile_override: None,
+            thinking_override: None,
+            trace_override: None,
+            verbose_override: None,
             title: String::new(),
             title_source: String::new(),
             title_generator_version: None,
@@ -3663,6 +3711,94 @@ impl JournalStore {
         } else {
             ORCHESTRATOR_TITLE_GENERATION_STATE_IDLE.to_owned()
         };
+        hydrate_orchestrator_session(&guard, session, None)
+    }
+
+    pub fn orchestrator_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<OrchestratorSessionRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_orchestrator_session_by_id(&guard, session_id)?
+            .map(|session| hydrate_orchestrator_session(&guard, session, None))
+            .transpose()
+    }
+
+    pub fn update_orchestrator_session_quick_controls(
+        &self,
+        request: &OrchestratorSessionQuickControlsUpdateRequest,
+    ) -> Result<OrchestratorSessionRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let mut session = load_orchestrator_session_by_id(&guard, request.session_id.as_str())?
+            .ok_or_else(|| JournalError::SessionNotFound {
+                selector: request.session_id.clone(),
+            })?;
+        if session.principal != request.principal
+            || session.device_id != request.device_id
+            || session.channel != request.channel
+        {
+            return Err(JournalError::SessionIdentityMismatch { session_id: session.session_id });
+        }
+
+        let model_profile_override = request
+            .model_profile_override
+            .clone()
+            .map(|value| value.and_then(normalize_optional_session_field));
+        let thinking_override = request.thinking_override;
+        let trace_override = request.trace_override;
+        let verbose_override = request.verbose_override;
+
+        guard.execute(
+            r#"
+                UPDATE orchestrator_sessions
+                SET
+                    model_profile_override = CASE
+                        WHEN ?2 = 1 THEN ?3
+                        ELSE model_profile_override
+                    END,
+                    thinking_override = CASE
+                        WHEN ?4 = 1 THEN ?5
+                        ELSE thinking_override
+                    END,
+                    trace_override = CASE
+                        WHEN ?6 = 1 THEN ?7
+                        ELSE trace_override
+                    END,
+                    verbose_override = CASE
+                        WHEN ?8 = 1 THEN ?9
+                        ELSE verbose_override
+                    END,
+                    updated_at_unix_ms = ?10
+                WHERE session_ulid = ?1
+            "#,
+            params![
+                request.session_id,
+                if model_profile_override.is_some() { 1_i64 } else { 0_i64 },
+                model_profile_override.clone().flatten(),
+                if thinking_override.is_some() { 1_i64 } else { 0_i64 },
+                thinking_override.flatten().map(|value| if value { 1_i64 } else { 0_i64 }),
+                if trace_override.is_some() { 1_i64 } else { 0_i64 },
+                trace_override.flatten().map(|value| if value { 1_i64 } else { 0_i64 }),
+                if verbose_override.is_some() { 1_i64 } else { 0_i64 },
+                verbose_override.flatten().map(|value| if value { 1_i64 } else { 0_i64 }),
+                now,
+            ],
+        )?;
+
+        if let Some(value) = model_profile_override {
+            session.model_profile_override = value;
+        }
+        if let Some(value) = thinking_override {
+            session.thinking_override = value;
+        }
+        if let Some(value) = trace_override {
+            session.trace_override = value;
+        }
+        if let Some(value) = verbose_override {
+            session.verbose_override = value;
+        }
+        session.updated_at_unix_ms = now;
         hydrate_orchestrator_session(&guard, session, None)
     }
 
@@ -9349,6 +9485,10 @@ fn map_orchestrator_session_row(
         title_generation_state: row.get(14)?,
         manual_title_locked: row.get::<_, i64>(15)? != 0,
         manual_title_updated_at_unix_ms: row.get(16)?,
+        model_profile_override: row.get(17)?,
+        thinking_override: row.get::<_, Option<i64>>(18)?.map(|value| value != 0),
+        trace_override: row.get::<_, Option<i64>>(19)?.map(|value| value != 0),
+        verbose_override: row.get::<_, Option<i64>>(20)?.map(|value| value != 0),
         title: String::new(),
         title_source: String::new(),
         title_generator_version: None,
@@ -9356,9 +9496,9 @@ fn map_orchestrator_session_row(
         last_intent: None,
         last_summary: None,
         match_snippet: None,
-        branch_state: row.get(17)?,
-        parent_session_id: row.get(18)?,
-        branch_origin_run_id: row.get(19)?,
+        branch_state: row.get(21)?,
+        parent_session_id: row.get(22)?,
+        branch_origin_run_id: row.get(23)?,
         last_run_state: None,
     })
 }
@@ -9387,6 +9527,10 @@ fn load_orchestrator_session_by_id(
                 title_generation_state,
                 manual_title_locked,
                 manual_title_updated_at_unix_ms,
+                model_profile_override,
+                thinking_override,
+                trace_override,
+                verbose_override,
                 branch_state,
                 parent_session_ulid,
                 branch_origin_run_ulid
@@ -9425,6 +9569,10 @@ fn load_orchestrator_session_by_key(
                 title_generation_state,
                 manual_title_locked,
                 manual_title_updated_at_unix_ms,
+                model_profile_override,
+                thinking_override,
+                trace_override,
+                verbose_override,
                 branch_state,
                 parent_session_ulid,
                 branch_origin_run_ulid
@@ -9463,6 +9611,10 @@ fn load_orchestrator_session_by_label(
                 title_generation_state,
                 manual_title_locked,
                 manual_title_updated_at_unix_ms,
+                model_profile_override,
+                thinking_override,
+                trace_override,
+                verbose_override,
                 branch_state,
                 parent_session_ulid,
                 branch_origin_run_ulid
@@ -9508,6 +9660,10 @@ fn load_orchestrator_sessions_page(
                 title_generation_state,
                 manual_title_locked,
                 manual_title_updated_at_unix_ms,
+                model_profile_override,
+                thinking_override,
+                trace_override,
+                verbose_override,
                 branch_state,
                 parent_session_ulid,
                 branch_origin_run_ulid

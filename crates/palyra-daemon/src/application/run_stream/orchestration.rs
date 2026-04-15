@@ -405,6 +405,15 @@ pub(crate) async fn process_run_stream_message(
     })
     .await?;
 
+    let session_model_override = if routing_decision.mode == "enforced" {
+        None
+    } else {
+        runtime_state
+            .orchestrator_session_by_id(session_id.clone())
+            .await?
+            .and_then(|session| session.model_profile_override)
+    };
+
     let provider_response = match execute_run_stream_provider_request(
         sender,
         runtime_state,
@@ -414,8 +423,11 @@ pub(crate) async fn process_run_stream_message(
             input_text: prepared_provider_input.provider_input_text,
             json_mode: json_mode_requested,
             vision_inputs: prepared_provider_input.vision_inputs,
-            model_override: (routing_decision.mode == "enforced")
-                .then(|| routing_decision.actual_model_id.clone()),
+            model_override: if routing_decision.mode == "enforced" {
+                Some(routing_decision.actual_model_id.clone())
+            } else {
+                session_model_override
+            },
         },
         tape_seq,
     )

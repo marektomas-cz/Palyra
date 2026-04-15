@@ -1,5 +1,5 @@
 import { Chip } from "@heroui/react";
-
+import type { ComponentProps } from "react";
 import type {
   ChatBackgroundTaskRecord,
   ChatPinRecord,
@@ -22,6 +22,7 @@ import {
 } from "../console/components/ui";
 
 import { ChatRunDrawer } from "./ChatRunDrawer";
+import { ChatSessionQuickControlPanel } from "./ChatSessionQuickControls";
 import {
   PrettyJsonBlock,
   describeBranchState,
@@ -62,6 +63,7 @@ type ChatInspectorColumnProps = {
   runIds: string[];
   selectedSession: SessionCatalogRecord | null;
   selectedSessionLineage: string;
+  sessionQuickControlPanelProps: ComponentProps<typeof ChatSessionQuickControlPanel>;
   contextBudgetEstimatedTokens: number;
   transcriptBusy: boolean;
   transcriptSearchQuery: string;
@@ -113,6 +115,7 @@ export function ChatInspectorColumn({
   runIds,
   selectedSession,
   selectedSessionLineage,
+  sessionQuickControlPanelProps,
   contextBudgetEstimatedTokens,
   transcriptBusy,
   transcriptSearchQuery,
@@ -164,6 +167,12 @@ export function ChatInspectorColumn({
         description="Branch lineage, queue backlog, and persisted transcript tools stay visible without turning the main conversation into a debug dump."
         title="Workspace signals"
       >
+        <div className="grid gap-4">
+          <div>
+            <p className="workspace-kicker">Session quick controls</p>
+            <ChatSessionQuickControlPanel {...sessionQuickControlPanelProps} />
+          </div>
+        </div>
         <div className="workspace-tag-row">
           <Chip color={pendingApprovalCount > 0 ? "warning" : "success"} variant="soft">
             {pendingApprovalCount} approval{pendingApprovalCount === 1 ? "" : "s"}

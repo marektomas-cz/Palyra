@@ -729,6 +729,29 @@ pub struct SessionCatalogDetailEnvelope {
     pub session: SessionCatalogRecord,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCatalogMutationEnvelope {
+    pub contract: ContractDescriptor,
+    pub session: SessionCatalogRecord,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionQuickControlsUpdateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_profile: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Option<bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Option<bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbose: Option<Option<bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_to_default: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogListQuery {
     #[serde(skip_serializing_if = "Option::is_none")]

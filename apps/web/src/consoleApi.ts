@@ -3146,6 +3146,27 @@ export class ConsoleApiClient {
     );
   }
 
+  async updateSessionQuickControls(
+    sessionId: string,
+    payload: {
+      agent_id?: string | null;
+      model_profile?: string | null;
+      thinking?: boolean | null;
+      trace?: boolean | null;
+      verbose?: boolean | null;
+      reset_to_default?: boolean;
+    },
+  ): Promise<{ session: SessionCatalogRecord; action: string; contract: ContractDescriptor }> {
+    return this.request(
+      `/console/v1/sessions/${encodeURIComponent(sessionId)}/quick-controls`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
   async abortSessionRun(
     runId: string,
     payload: { reason?: string } = {},

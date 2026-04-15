@@ -55,6 +55,7 @@ import { useChatSlashPalette } from "./useChatSlashPalette";
 import { usePhase4DeepLinks } from "./usePhase4DeepLinks";
 import { useChatObjectives } from "./useChatObjectives";
 import { useChatPanelBootstrap } from "./useChatPanelBootstrap";
+import { useChatSessionQuickControls } from "./useChatSessionQuickControls";
 import { buildWorkspaceHeaderSessionState, buildSessionsSidebarProps, describeSelectedSessionTitle } from "./chatWorkspaceSessionBindings";
 import { FIRST_SUCCESS_PROMPTS } from "./starterPrompts";
 import { useStarterPromptGuidance } from "./useStarterPromptGuidance";
@@ -121,10 +122,7 @@ export function ChatConsolePanel({
   const [exportBusy, setExportBusy] = useState<"json" | "markdown" | null>(null);
   const [phase4BusyKey, setPhase4BusyKey] = useState<string | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
-  const handleSessionActivated = useCallback(
-    (sessionId: string) => emitSessionResumed(emitUxEvent, sessionId),
-    [emitUxEvent],
-  );
+  const handleSessionActivated = useCallback((sessionId: string) => emitSessionResumed(emitUxEvent, sessionId), [emitUxEvent]);
   const sessions = useChatSessions({
     api,
     onSessionActivated: handleSessionActivated,
@@ -133,17 +131,11 @@ export function ChatConsolePanel({
     preferredSessionId,
   });
   const starterPromptGuidance = useStarterPromptGuidance();
-  const handlePromptSubmitted = useCallback(
-    (sessionId: string) => {
-      starterPromptGuidance.markFirstSuccessCompleted();
-      return emitPromptSubmitted(emitUxEvent, sessionId);
-    },
-    [emitUxEvent, starterPromptGuidance],
-  );
-  const handleRunInspected = useCallback(
-    (runId: string) => emitRunInspected(emitUxEvent, runId),
-    [emitUxEvent],
-  );
+  const handlePromptSubmitted = useCallback((sessionId: string) => {
+    starterPromptGuidance.markFirstSuccessCompleted();
+    return emitPromptSubmitted(emitUxEvent, sessionId);
+  }, [emitUxEvent, starterPromptGuidance]);
+  const handleRunInspected = useCallback((runId: string) => emitRunInspected(emitUxEvent, runId), [emitUxEvent]);
   const {
     composerText,
     setComposerText,
@@ -183,12 +175,23 @@ export function ChatConsolePanel({
     setError,
     setNotice,
   });
+  const {
+    filteredTranscript,
+    filteredHiddenTranscriptItems,
+    sessionQuickControlHeaderProps,
+    sessionQuickControlPanelProps,
+  } = useChatSessionQuickControls({
+    api,
+    selectedSession: sessions.selectedSession,
+    visibleTranscript,
+    hiddenTranscriptItems,
+    setError,
+    setNotice,
+    upsertSession: sessions.upsertSession,
+  });
   const pendingApprovalCount = useMemo(
-    () =>
-      visibleTranscript.filter(
-        (entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string",
-      ).length,
-    [visibleTranscript],
+    () => filteredTranscript.filter((entry) => entry.kind === "approval_request" && typeof entry.approval_id === "string").length,
+    [filteredTranscript],
   );
   const a2uiSurfaces = useMemo(() => Object.keys(a2uiDocuments), [a2uiDocuments]);
   const knownRunIds = useMemo(() => {
@@ -207,16 +210,10 @@ export function ChatConsolePanel({
     (runDrawerId.trim().length > 0 ? runDrawerId.trim() : null) ??
     knownRunIds[0] ??
     null;
-  const toolPayloadCount = useMemo(
-    () => visibleTranscript.filter((entry) => entry.payload !== undefined).length,
-    [visibleTranscript],
-  );
+  const toolPayloadCount = useMemo(() => filteredTranscript.filter((entry) => entry.payload !== undefined).length, [filteredTranscript]);
   const recentTranscriptRecords = [...transcriptRecords].slice(-8).reverse();
   const deferredSearchQuery = useDeferredValue(transcriptSearchQuery);
-  const selectedSessionLineage = useMemo(
-    () => buildSessionLineageHint(sessions.selectedSession),
-    [sessions.selectedSession],
-  );
+  const selectedSessionLineage = useMemo(() => buildSessionLineageHint(sessions.selectedSession), [sessions.selectedSession]);
   const attachSelectedFiles = useChatAttachmentUploadHandler({
     api,
     sessionId: sessions.activeSessionId.trim(),
@@ -899,6 +896,7 @@ export function ChatConsolePanel({
           runIds: knownRunIds,
           selectedSession: sessions.selectedSession,
           selectedSessionLineage,
+          sessionQuickControlPanelProps,
           contextBudgetEstimatedTokens: contextBudget.estimated_total_tokens,
           transcriptBusy,
           transcriptSearchQuery,
@@ -991,6 +989,7 @@ export function ChatConsolePanel({
         runActionBusy={runActionBusy}
         selectedObjectiveFocus={selectedObjectiveFocus}
         selectedObjectiveLabel={selectedObjectiveLabel}
+        sessionQuickControlHeaderProps={sessionQuickControlHeaderProps}
         {...buildWorkspaceHeaderSessionState(sessions.selectedSession)}
         selectedSessionLineage={selectedSessionLineage}
         selectedSessionTitle={describeSelectedSessionTitle(sessions.selectedSession)}
@@ -1016,10 +1015,10 @@ export function ChatConsolePanel({
         transcriptBusy={transcriptBusy}
         transcriptProps={buildTranscriptProps({
           api,
-          visibleTranscript,
+          visibleTranscript: filteredTranscript,
           sessionAttachments,
           sessionDerivedArtifacts,
-          hiddenTranscriptItems,
+          hiddenTranscriptItems: filteredHiddenTranscriptItems,
           transcriptBoxRef,
           approvalDrafts,
           a2uiDocuments,

@@ -2502,6 +2502,50 @@ impl GatewayRuntimeState {
     }
 
     #[allow(clippy::result_large_err)]
+    fn orchestrator_session_by_id_blocking(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<OrchestratorSessionRecord>, Status> {
+        self.journal_store
+            .orchestrator_session_by_id(session_id)
+            .map_err(|error| map_orchestrator_store_error("load orchestrator session by id", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn orchestrator_session_by_id(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<Option<OrchestratorSessionRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.orchestrator_session_by_id_blocking(&session_id))
+            .await
+            .map_err(|_| Status::internal("orchestrator session lookup worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn update_orchestrator_session_quick_controls_blocking(
+        &self,
+        request: &crate::journal::OrchestratorSessionQuickControlsUpdateRequest,
+    ) -> Result<OrchestratorSessionRecord, Status> {
+        self.journal_store.update_orchestrator_session_quick_controls(request).map_err(|error| {
+            map_orchestrator_store_error("update orchestrator session quick controls", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn update_orchestrator_session_quick_controls(
+        self: &Arc<Self>,
+        request: crate::journal::OrchestratorSessionQuickControlsUpdateRequest,
+    ) -> Result<OrchestratorSessionRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.update_orchestrator_session_quick_controls_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator session quick controls worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
     fn list_orchestrator_sessions_blocking(
         &self,
         request: &ListOrchestratorSessionsRequest,

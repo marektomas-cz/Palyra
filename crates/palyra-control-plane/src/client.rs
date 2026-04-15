@@ -586,6 +586,20 @@ impl ControlPlaneClient {
         .await
     }
 
+    pub async fn update_session_quick_controls(
+        &self,
+        session_id: &str,
+        request: &SessionQuickControlsUpdateRequest,
+    ) -> Result<SessionCatalogMutationEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/sessions/{}/quick-controls", urlencoding(session_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
     pub async fn get_json_value(
         &self,
         path: impl AsRef<str>,

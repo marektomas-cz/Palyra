@@ -145,15 +145,15 @@
   },
   {
     "name": "model",
-    "synopsis": "/model [model-id]",
-    "description": "Switch the preferred model or open the model picker when omitted.",
+    "synopsis": "/model [model-id|default]",
+    "description": "Set or clear the active session model override, or open the model picker when omitted.",
     "example": "/model gpt-5.4",
     "category": "model",
     "execution": "server",
     "surfaces": ["tui"],
-    "capability_tags": ["model", "picker"],
+    "capability_tags": ["model", "picker", "quick_controls"],
     "entity_targets": ["model"],
-    "keywords": ["model", "switch", "picker"]
+    "keywords": ["model", "switch", "picker", "session", "override", "default"]
   },
   {
     "name": "undo",
@@ -374,27 +374,39 @@
   },
   {
     "name": "tools",
-    "synopsis": "/tools on|off",
-    "description": "Toggle tool cards in the TUI transcript.",
+    "synopsis": "/tools on|off|default",
+    "description": "Set or clear the active session trace override and sync tool-card visibility with it.",
     "example": "/tools off",
     "category": "local_ui",
-    "execution": "local",
+    "execution": "server",
     "surfaces": ["tui"],
-    "capability_tags": ["tools", "toggle"],
+    "capability_tags": ["tools", "toggle", "quick_controls"],
     "entity_targets": [],
-    "keywords": ["tools", "toggle", "transcript"]
+    "keywords": ["tools", "toggle", "trace", "session", "default"]
   },
   {
     "name": "thinking",
-    "synopsis": "/thinking on|off",
-    "description": "Toggle thinking and status lines in the TUI transcript.",
+    "synopsis": "/thinking on|off|default",
+    "description": "Set or clear the active session thinking override and sync transcript visibility with it.",
     "example": "/thinking off",
     "category": "local_ui",
-    "execution": "local",
+    "execution": "server",
     "surfaces": ["tui"],
-    "capability_tags": ["thinking", "toggle"],
+    "capability_tags": ["thinking", "toggle", "quick_controls"],
     "entity_targets": [],
-    "keywords": ["thinking", "toggle", "transcript"]
+    "keywords": ["thinking", "toggle", "session", "default"]
+  },
+  {
+    "name": "verbose",
+    "synopsis": "/verbose on|off|default",
+    "description": "Set or clear the active session verbose override and control system-line visibility in the TUI transcript.",
+    "example": "/verbose off",
+    "category": "local_ui",
+    "execution": "server",
+    "surfaces": ["tui"],
+    "capability_tags": ["verbose", "toggle", "quick_controls"],
+    "entity_targets": [],
+    "keywords": ["verbose", "toggle", "system", "session", "default"]
   },
   {
     "name": "shell",

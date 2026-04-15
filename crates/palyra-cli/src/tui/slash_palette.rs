@@ -319,6 +319,10 @@ fn build_entity_suggestions(
         "compact" => {
             build_static_suggestions(command, active_token, &["preview", "apply", "history"])
         }
+        "tools" | "thinking" | "verbose" => {
+            build_static_suggestions(command, active_token, &["on", "off", "default"])
+        }
+        "shell" => build_static_suggestions(command, active_token, &["on", "off"]),
         "export" => build_static_suggestions(command, active_token, &["json", "markdown"]),
         _ => Vec::new(),
     }

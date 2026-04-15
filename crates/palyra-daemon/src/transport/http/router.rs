@@ -414,6 +414,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/sessions/{session_id}",
             get(console::sessions::console_session_detail_handler),
         )
+        .route(
+            "/console/v1/sessions/{session_id}/quick-controls",
+            post(console::sessions::console_session_quick_controls_update_handler),
+        )
         .route("/console/v1/usage/summary", get(console::usage::console_usage_summary_handler))
         .route("/console/v1/usage/sessions", get(console::usage::console_usage_sessions_handler))
         .route(

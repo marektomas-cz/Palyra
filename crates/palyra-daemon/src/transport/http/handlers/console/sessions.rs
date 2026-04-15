@@ -6,7 +6,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agents::{AgentBindingQuery, AgentRecord, SessionAgentBinding},
+    agents::{
+        AgentBindingQuery, AgentBindingRequest, AgentRecord, AgentUnbindRequest,
+        SessionAgentBinding,
+    },
     *,
 };
 
@@ -79,6 +82,22 @@ pub(crate) struct SessionCatalogMutationEnvelope {
     contract: control_plane::ContractDescriptor,
     session: SessionCatalogRecord,
     action: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConsoleSessionQuickControlsUpdateRequest {
+    #[serde(default)]
+    agent_id: Option<Option<String>>,
+    #[serde(default)]
+    model_profile: Option<Option<String>>,
+    #[serde(default)]
+    thinking: Option<Option<bool>>,
+    #[serde(default)]
+    trace: Option<Option<bool>>,
+    #[serde(default)]
+    verbose: Option<Option<bool>>,
+    #[serde(default)]
+    reset_to_default: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -451,6 +470,153 @@ pub(crate) async fn console_session_archive_handler(
     }))
 }
 
+pub(crate) async fn console_session_quick_controls_update_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleSessionQuickControlsUpdateRequest>,
+) -> Result<Json<SessionCatalogMutationEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let existing_session =
+        load_scoped_session(&state, &session.context, session_id.as_str()).await?;
+    let reset_to_default = payload.reset_to_default.unwrap_or(false);
+    let requested_agent_id = payload.agent_id.map(|value| value.and_then(trim_to_option));
+    let requested_model_profile = payload.model_profile.map(|value| value.and_then(trim_to_option));
+    let requested_thinking = payload.thinking;
+    let requested_trace = payload.trace;
+    let requested_verbose = payload.verbose;
+    if !reset_to_default
+        && requested_agent_id.is_none()
+        && requested_model_profile.is_none()
+        && requested_thinking.is_none()
+        && requested_trace.is_none()
+        && requested_verbose.is_none()
+    {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "quick controls update request must include at least one override change",
+        )));
+    }
+
+    if reset_to_default {
+        state
+            .runtime
+            .unbind_agent_for_context(AgentUnbindRequest {
+                principal: session.context.principal.clone(),
+                channel: session.context.channel.clone(),
+                session_id: session_id.clone(),
+            })
+            .await
+            .map_err(runtime_status_response)?;
+    } else if let Some(agent_id) = requested_agent_id.clone() {
+        match agent_id {
+            Some(agent_id) => {
+                state
+                    .runtime
+                    .bind_agent_for_context(AgentBindingRequest {
+                        agent_id,
+                        principal: session.context.principal.clone(),
+                        channel: session.context.channel.clone(),
+                        session_id: session_id.clone(),
+                    })
+                    .await
+                    .map_err(runtime_status_response)?;
+            }
+            None => {
+                state
+                    .runtime
+                    .unbind_agent_for_context(AgentUnbindRequest {
+                        principal: session.context.principal.clone(),
+                        channel: session.context.channel.clone(),
+                        session_id: session_id.clone(),
+                    })
+                    .await
+                    .map_err(runtime_status_response)?;
+            }
+        }
+    }
+
+    let updated_session = state
+        .runtime
+        .update_orchestrator_session_quick_controls(
+            journal::OrchestratorSessionQuickControlsUpdateRequest {
+                session_id: session_id.clone(),
+                principal: session.context.principal.clone(),
+                device_id: session.context.device_id.clone(),
+                channel: session.context.channel.clone(),
+                model_profile_override: if reset_to_default {
+                    Some(None)
+                } else {
+                    requested_model_profile.clone()
+                },
+                thinking_override: if reset_to_default { Some(None) } else { requested_thinking },
+                trace_override: if reset_to_default { Some(None) } else { requested_trace },
+                verbose_override: if reset_to_default { Some(None) } else { requested_verbose },
+            },
+        )
+        .await
+        .map_err(runtime_status_response)?;
+
+    let base_sessions = load_scoped_sessions(
+        &state,
+        session.context.principal.as_str(),
+        session.context.device_id.as_str(),
+        session.context.channel.as_deref(),
+        true,
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let refreshed_session = base_sessions
+        .iter()
+        .find(|record| record.session_id == updated_session.session_id)
+        .cloned()
+        .unwrap_or(updated_session);
+    let catalog_context =
+        load_session_catalog_context(&state, &session.context, &base_sessions).await?;
+    let detail_context = load_session_detail_context(
+        &state,
+        &session.context,
+        refreshed_session.session_id.as_str(),
+    )
+    .await?;
+    let record = build_session_catalog_record(
+        &state,
+        &catalog_context,
+        refreshed_session,
+        Some(detail_context),
+    )
+    .await?;
+    let _ = crate::gateway::record_agent_journal_event(
+        &state.runtime,
+        &session.context,
+        json!({
+            "event": "session.quick_controls.updated",
+            "session_id": session_id,
+            "reset_to_default": reset_to_default,
+            "requested_agent_id": requested_agent_id,
+            "requested_model_profile": requested_model_profile,
+            "requested_thinking": requested_thinking,
+            "requested_trace": requested_trace,
+            "requested_verbose": requested_verbose,
+            "previous_model_profile_override": existing_session.model_profile_override,
+            "previous_thinking_override": existing_session.thinking_override,
+            "previous_trace_override": existing_session.trace_override,
+            "previous_verbose_override": existing_session.verbose_override,
+            "quick_controls": record.quick_controls,
+        }),
+    )
+    .await;
+    Ok(Json(SessionCatalogMutationEnvelope {
+        contract: contract_descriptor(),
+        session: record,
+        action: if reset_to_default { "quick_controls_reset" } else { "quick_controls_updated" },
+    }))
+}
+
 pub(crate) async fn console_session_run_abort_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -558,6 +724,30 @@ async fn load_scoped_pending_approvals(
     }
 
     Ok(approvals)
+}
+
+async fn load_scoped_session(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    session_id: &str,
+) -> Result<journal::OrchestratorSessionRecord, Response> {
+    let session = state
+        .runtime
+        .orchestrator_session_by_id(session_id.to_owned())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found("session was not found"))
+        })?;
+    if session.principal != context.principal
+        || session.device_id != context.device_id
+        || session.channel.as_deref() != context.channel.as_deref()
+    {
+        return Err(runtime_status_response(tonic::Status::permission_denied(
+            "session does not belong to the authenticated console session context",
+        )));
+    }
+    Ok(session)
 }
 
 async fn load_session_catalog_context(
@@ -872,7 +1062,7 @@ async fn build_session_catalog_record(
             }
         });
     let detail_context = detail_context.unwrap_or_default();
-    let quick_controls = build_session_quick_controls(context, session.session_id.as_str());
+    let quick_controls = build_session_quick_controls(context, &session);
     let agent_id = quick_controls.agent.value.clone();
     let model_profile = quick_controls.model.value.clone();
     let session_id = session.session_id.clone();
@@ -952,8 +1142,9 @@ async fn build_session_catalog_record(
 
 fn build_session_quick_controls(
     context: &SessionCatalogContext,
-    session_id: &str,
+    session: &journal::OrchestratorSessionRecord,
 ) -> SessionCatalogQuickControlsRecord {
+    let session_id = session.session_id.as_str();
     let binding = context.bindings_by_session.get(session_id);
     let bound_agent = binding.and_then(|record| context.agents_by_id.get(record.agent_id.as_str()));
     let inherited_agent =
@@ -994,26 +1185,48 @@ fn build_session_quick_controls(
         },
     };
 
-    let (model_value, model_display, model_source, inherited_model, model_override_active) =
-        match (bound_agent, inherited_agent) {
-            (Some(agent), inherited) => (
-                Some(agent.default_model_profile.clone()),
-                agent.default_model_profile.clone(),
-                "agent_default_model_profile".to_owned(),
-                inherited.map(|entry| entry.default_model_profile.clone()),
-                inherited
-                    .map(|entry| entry.default_model_profile != agent.default_model_profile)
+    let inherited_model =
+        bound_agent.or(inherited_agent).map(|agent| agent.default_model_profile.clone());
+    let (model_value, model_display, model_source, model_override_active) =
+        if let Some(model_profile_override) = session.model_profile_override.as_ref() {
+            (
+                Some(model_profile_override.clone()),
+                model_profile_override.clone(),
+                "session_override".to_owned(),
+                inherited_model
+                    .as_ref()
+                    .map(|entry| entry != model_profile_override)
                     .unwrap_or(true),
-            ),
-            (None, Some(agent)) => (
-                Some(agent.default_model_profile.clone()),
-                agent.default_model_profile.clone(),
-                "default_agent_model_profile".to_owned(),
-                Some(agent.default_model_profile.clone()),
-                false,
-            ),
-            _ => (None, "Inherited default".to_owned(), "unassigned".to_owned(), None, false),
+            )
+        } else {
+            match (bound_agent, inherited_agent) {
+                (Some(agent), inherited) => (
+                    Some(agent.default_model_profile.clone()),
+                    agent.default_model_profile.clone(),
+                    "agent_default_model_profile".to_owned(),
+                    inherited
+                        .map(|entry| entry.default_model_profile != agent.default_model_profile)
+                        .unwrap_or(true),
+                ),
+                (None, Some(agent)) => (
+                    Some(agent.default_model_profile.clone()),
+                    agent.default_model_profile.clone(),
+                    "default_agent_model_profile".to_owned(),
+                    false,
+                ),
+                _ => (None, "Inherited default".to_owned(), "unassigned".to_owned(), false),
+            }
         };
+
+    let thinking_inherited = true;
+    let trace_inherited = false;
+    let verbose_inherited = false;
+    let thinking_override_active =
+        session.thinking_override.map(|value| value != thinking_inherited).unwrap_or(false);
+    let trace_override_active =
+        session.trace_override.map(|value| value != trace_inherited).unwrap_or(false);
+    let verbose_override_active =
+        session.verbose_override.map(|value| value != verbose_inherited).unwrap_or(false);
 
     SessionCatalogQuickControlsRecord {
         agent,
@@ -1021,28 +1234,44 @@ fn build_session_quick_controls(
             value: model_value,
             display_value: model_display,
             source: model_source,
-            inherited_value: inherited_model,
+            inherited_value: inherited_model.clone(),
             override_active: model_override_active,
         },
         thinking: SessionCatalogToggleControlRecord {
-            value: true,
-            source: "surface_default".to_owned(),
-            inherited_value: true,
-            override_active: false,
+            value: session.thinking_override.unwrap_or(thinking_inherited),
+            source: if session.thinking_override.is_some() {
+                "session_override".to_owned()
+            } else {
+                "surface_default".to_owned()
+            },
+            inherited_value: thinking_inherited,
+            override_active: thinking_override_active,
         },
         trace: SessionCatalogToggleControlRecord {
-            value: false,
-            source: "surface_default".to_owned(),
-            inherited_value: false,
-            override_active: false,
+            value: session.trace_override.unwrap_or(trace_inherited),
+            source: if session.trace_override.is_some() {
+                "session_override".to_owned()
+            } else {
+                "surface_default".to_owned()
+            },
+            inherited_value: trace_inherited,
+            override_active: trace_override_active,
         },
         verbose: SessionCatalogToggleControlRecord {
-            value: false,
-            source: "surface_default".to_owned(),
-            inherited_value: false,
-            override_active: false,
+            value: session.verbose_override.unwrap_or(verbose_inherited),
+            source: if session.verbose_override.is_some() {
+                "session_override".to_owned()
+            } else {
+                "surface_default".to_owned()
+            },
+            inherited_value: verbose_inherited,
+            override_active: verbose_override_active,
         },
-        reset_to_default_available: binding.is_some(),
+        reset_to_default_available: binding.is_some()
+            || session.model_profile_override.is_some()
+            || session.thinking_override.is_some()
+            || session.trace_override.is_some()
+            || session.verbose_override.is_some(),
     }
 }
 

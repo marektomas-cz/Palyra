@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use palyra_control_plane::{
-    ApprovalDecisionEnvelope, ApprovalDecisionRequest, SessionCatalogListEnvelope,
+    ApprovalDecisionEnvelope, ApprovalDecisionRequest, SessionCatalogDetailEnvelope,
+    SessionCatalogListEnvelope, SessionCatalogMutationEnvelope, SessionQuickControlsUpdateRequest,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -264,6 +265,47 @@ impl OperatorRuntime {
         context.client.list_session_catalog(query).await.context("failed to list session catalog")
     }
 
+    pub(crate) async fn get_session_catalog_entry(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionCatalogDetailEnvelope> {
+        let context = control_plane::connect_admin_console(app::ConnectionOverrides {
+            grpc_url: Some(self.connection.grpc_url.clone()),
+            daemon_url: None,
+            token: self.connection.token.clone(),
+            principal: Some(self.connection.principal.clone()),
+            device_id: Some(self.connection.device_id.clone()),
+            channel: Some(self.connection.channel.clone()),
+        })
+        .await?;
+        context
+            .client
+            .get_session_catalog_entry(session_id)
+            .await
+            .with_context(|| format!("failed to load session catalog entry {session_id}"))
+    }
+
+    pub(crate) async fn update_session_quick_controls(
+        &self,
+        session_id: &str,
+        request: &SessionQuickControlsUpdateRequest,
+    ) -> Result<SessionCatalogMutationEnvelope> {
+        let context = control_plane::connect_admin_console(app::ConnectionOverrides {
+            grpc_url: Some(self.connection.grpc_url.clone()),
+            daemon_url: None,
+            token: self.connection.token.clone(),
+            principal: Some(self.connection.principal.clone()),
+            device_id: Some(self.connection.device_id.clone()),
+            channel: Some(self.connection.channel.clone()),
+        })
+        .await?;
+        context
+            .client
+            .update_session_quick_controls(session_id, request)
+            .await
+            .with_context(|| format!("failed to update quick controls for session {session_id}"))
+    }
+
     pub(crate) async fn message_capabilities(
         &self,
         connector_id: String,
@@ -349,14 +391,5 @@ impl OperatorRuntime {
 
     pub(crate) fn list_models(&self, path: Option<String>) -> Result<models::ModelsListPayload> {
         models::build_models_list(path)
-    }
-
-    pub(crate) fn set_text_model(
-        &self,
-        path: Option<String>,
-        backups: usize,
-        model: String,
-    ) -> Result<models::ModelsMutationPayload> {
-        models::mutate_model_defaults(path, backups, "text", model, None)
     }
 }

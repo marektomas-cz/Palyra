@@ -49,6 +49,7 @@ import {
   type JsonValue,
   type OnboardingPostureEnvelope,
   type OnboardingStepAction,
+  type SessionCatalogRecord,
 } from "./lib/desktopApi";
 import {
   markDesktopFirstSuccessCompleted,
@@ -1451,11 +1452,24 @@ export function App() {
                             {session.pending_approvals} approvals
                           </StatusChip>
                         </div>
+                        {buildDesktopSessionListBadges(session).length > 0 ? (
+                          <div className="desktop-inline-row">
+                            {buildDesktopSessionListBadges(session).map((badge) => (
+                              <StatusChip
+                                key={`${session.session_id}:${badge.label}`}
+                                tone={badge.tone}
+                              >
+                                {badge.label}
+                              </StatusChip>
+                            ))}
+                          </div>
+                        ) : null}
                         <p className="desktop-muted">
                           {session.preview ?? "No transcript preview published yet."}
                         </p>
                         <small className="desktop-muted">
-                          {session.device_id} · {formatUnixMs(session.updated_at_unix_ms)}
+                          {session.device_id} · {buildDesktopSessionMeta(session)} ·{" "}
+                          {formatUnixMs(session.updated_at_unix_ms)}
                         </small>
                       </div>
                     </button>
@@ -1645,6 +1659,24 @@ export function App() {
                     Updated {formatUnixMs(selectedSession.updated_at_unix_ms)}
                   </small>
                 </div>
+                {buildDesktopSessionDetailBadges(selectedSession).length > 0 ? (
+                  <div className="desktop-inline-row">
+                    {buildDesktopSessionDetailBadges(selectedSession).map((badge) => (
+                      <StatusChip
+                        key={`${selectedSession.session_id}:${badge.label}`}
+                        tone={badge.tone}
+                      >
+                        {badge.label}
+                      </StatusChip>
+                    ))}
+                  </div>
+                ) : null}
+                <KeyValueList items={buildDesktopSessionDetailItems(selectedSession)} />
+                {buildDesktopSessionRecap(selectedSession) ? (
+                  <InlineNotice title="Resume recap" tone="default">
+                    {buildDesktopSessionRecap(selectedSession)}
+                  </InlineNotice>
+                ) : null}
                 <ScrollShadow
                   className="desktop-scroll-list desktop-transcript"
                   hideScrollBar
@@ -2264,6 +2296,151 @@ function toneForDevice(
     return "danger";
   }
   return "warning";
+}
+
+function buildDesktopSessionListBadges(
+  session: SessionCatalogRecord,
+): Array<{ label: string; tone: "default" | "success" | "warning" | "danger" | "accent" }> {
+  const badges: Array<{ label: string; tone: "default" | "success" | "warning" | "danger" | "accent" }> = [];
+  if (session.manual_title_locked) {
+    badges.push({ label: "manual title", tone: "accent" });
+  }
+  if (session.family.family_size > 1) {
+    badges.push({
+      label: `family ${session.family.sequence}/${session.family.family_size}`,
+      tone: "default",
+    });
+  }
+  if (session.has_context_files) {
+    badges.push({ label: "context", tone: "accent" });
+  }
+  if (session.quick_controls.model.override_active) {
+    badges.push({
+      label: `model ${session.quick_controls.model.display_value}`,
+      tone: "accent",
+    });
+  }
+  return badges.slice(0, 4);
+}
+
+function buildDesktopSessionMeta(session: SessionCatalogRecord): string {
+  const parts = [formatDesktopBranchState(session.branch_state)];
+  if (session.quick_controls.agent.override_active) {
+    parts.push(`agent ${session.quick_controls.agent.display_value}`);
+  }
+  if (session.quick_controls.trace.override_active) {
+    parts.push(`trace ${session.quick_controls.trace.value ? "on" : "off"}`);
+  }
+  return parts.join(" · ");
+}
+
+function buildDesktopSessionDetailBadges(
+  session: SessionCatalogRecord,
+): Array<{ label: string; tone: "default" | "success" | "warning" | "danger" | "accent" }> {
+  return [
+    {
+      label: formatDesktopBranchState(session.branch_state),
+      tone: session.branch_state === "root" ? "default" : "accent",
+    },
+    {
+      label: session.manual_title_locked ? "manual title" : session.title_generation_state,
+      tone: session.manual_title_locked ? "accent" : "default",
+    },
+    {
+      label: `family ${session.family.sequence}/${session.family.family_size}`,
+      tone: session.family.family_size > 1 ? "accent" : "default",
+    },
+    {
+      label: session.has_context_files
+        ? `${session.recap.active_context_files.length || 1} context`
+        : "no context",
+      tone: session.has_context_files ? "accent" : "default",
+    },
+    {
+      label: session.quick_controls.thinking.value ? "thinking on" : "thinking off",
+      tone: toneForDesktopQuickToggle(session.quick_controls.thinking.value),
+    },
+    {
+      label: session.quick_controls.trace.value ? "trace on" : "trace off",
+      tone: toneForDesktopQuickToggle(session.quick_controls.trace.value),
+    },
+    {
+      label: session.quick_controls.verbose.value ? "verbose on" : "verbose off",
+      tone: toneForDesktopQuickToggle(session.quick_controls.verbose.value),
+    },
+  ];
+}
+
+function buildDesktopSessionDetailItems(
+  session: SessionCatalogRecord,
+): Array<{ label: string; value: string }> {
+  return [
+    {
+      label: "Family root",
+      value: session.family.root_title,
+    },
+    {
+      label: "Agent",
+      value: `${session.quick_controls.agent.display_value} (${session.quick_controls.agent.source})`,
+    },
+    {
+      label: "Model",
+      value: `${session.quick_controls.model.display_value} (${session.quick_controls.model.source})`,
+    },
+    {
+      label: "Context",
+      value: session.last_context_file ?? (session.has_context_files ? "active files attached" : "none"),
+    },
+    {
+      label: "Artifacts",
+      value: String(session.artifact_count),
+    },
+    {
+      label: "Summary state",
+      value: session.last_summary_state,
+    },
+  ];
+}
+
+function buildDesktopSessionRecap(session: SessionCatalogRecord): string | null {
+  const segments: string[] = [];
+  if (session.last_summary?.trim()) {
+    segments.push(session.last_summary.trim());
+  }
+  if (session.recap.touched_files.length > 0) {
+    segments.push(`Touched files: ${session.recap.touched_files.slice(0, 3).join(", ")}`);
+  }
+  if (session.recap.active_context_files.length > 0) {
+    segments.push(
+      `Active context: ${session.recap.active_context_files.slice(0, 2).join(", ")}`,
+    );
+  }
+  if (session.recap.ctas.length > 0) {
+    segments.push(`Next steps: ${session.recap.ctas.slice(0, 2).join(", ")}`);
+  }
+  return segments.length > 0 ? segments.join(" ") : null;
+}
+
+function formatDesktopBranchState(branchState: string): string {
+  switch (branchState) {
+    case "root":
+      return "root";
+    case "active_branch":
+    case "branched":
+      return "branch";
+    case "branch_source":
+      return "branch source";
+    case "missing":
+      return "no lineage";
+    default:
+      return branchState.replaceAll("_", " ");
+  }
+}
+
+function toneForDesktopQuickToggle(
+  value: boolean,
+): "default" | "success" | "warning" | "danger" | "accent" {
+  return value ? "success" : "warning";
 }
 
 function findLatestAssistantNarration(

@@ -11,6 +11,7 @@ import {
 
 import { ChatComposer } from "./ChatComposer";
 import { ChatInspectorColumn } from "./ChatInspectorColumn";
+import { ChatSessionQuickControlHeader } from "./ChatSessionQuickControls";
 import { ChatSessionsSidebar } from "./ChatSessionsSidebar";
 import { ChatTranscript } from "./ChatTranscript";
 
@@ -45,6 +46,7 @@ interface ChatConsoleWorkspaceViewProps {
   readonly selectedSessionLineage: string;
   readonly selectedSessionTitle: string;
   readonly selectedSessionTitleState: string;
+  readonly sessionQuickControlHeaderProps: ComponentProps<typeof ChatSessionQuickControlHeader>;
   readonly sessionsBusy: boolean;
   readonly sessionsSidebarProps: ComponentProps<typeof ChatSessionsSidebar>;
   readonly showStarterPrompts: boolean;
@@ -82,6 +84,7 @@ export function ChatConsoleWorkspaceView({
   selectedSessionLineage,
   selectedSessionTitle,
   selectedSessionTitleState,
+  sessionQuickControlHeaderProps,
   sessionsBusy,
   sessionsSidebarProps,
   showStarterPrompts,
@@ -130,6 +133,7 @@ export function ChatConsoleWorkspaceView({
                 {selectedSessionContextFileCount === 1 ? "" : "s"}
               </Chip>
             ) : null}
+            <ChatSessionQuickControlHeader {...sessionQuickControlHeaderProps} />
           </>
         }
         actions={

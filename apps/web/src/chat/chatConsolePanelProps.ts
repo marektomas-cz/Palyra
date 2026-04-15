@@ -25,6 +25,7 @@ interface BuildInspectorPropsArgs {
   readonly runIds: InspectorProps["runIds"];
   readonly selectedSession: InspectorProps["selectedSession"];
   readonly selectedSessionLineage: InspectorProps["selectedSessionLineage"];
+  readonly sessionQuickControlPanelProps: InspectorProps["sessionQuickControlPanelProps"];
   readonly contextBudgetEstimatedTokens: InspectorProps["contextBudgetEstimatedTokens"];
   readonly transcriptBusy: InspectorProps["transcriptBusy"];
   readonly transcriptSearchQuery: InspectorProps["transcriptSearchQuery"];
@@ -78,6 +79,7 @@ export function buildInspectorProps({
   runIds,
   selectedSession,
   selectedSessionLineage,
+  sessionQuickControlPanelProps,
   contextBudgetEstimatedTokens,
   transcriptBusy,
   transcriptSearchQuery,
@@ -126,6 +128,7 @@ export function buildInspectorProps({
     runIds,
     selectedSession,
     selectedSessionLineage,
+    sessionQuickControlPanelProps,
     contextBudgetEstimatedTokens,
     transcriptBusy,
     transcriptSearchQuery,

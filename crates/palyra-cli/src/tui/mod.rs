@@ -9,6 +9,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
+use palyra_control_plane::{SessionCatalogRecord, SessionQuickControlsUpdateRequest};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -81,6 +82,7 @@ enum PickerKind {
 enum SettingsItem {
     ShowTools,
     ShowThinking,
+    ShowVerbose,
     LocalShell,
 }
 
@@ -126,6 +128,7 @@ struct ShellResult {
 struct App {
     runtime: OperatorRuntime,
     session: gateway_v1::SessionSummary,
+    current_session_catalog: Option<SessionCatalogRecord>,
     current_agent: Option<gateway_v1::Agent>,
     current_agent_source: &'static str,
     models: Option<ModelsListPayload>,
@@ -144,6 +147,7 @@ struct App {
     mode: Mode,
     show_tools: bool,
     show_thinking: bool,
+    show_verbose: bool,
     local_shell_enabled: bool,
     allow_sensitive_tools: bool,
     include_archived_sessions: bool,
@@ -232,6 +236,7 @@ impl App {
         let mut app = Self {
             runtime,
             session,
+            current_session_catalog: None,
             current_agent: None,
             current_agent_source: "unresolved",
             models: None,
@@ -250,6 +255,7 @@ impl App {
             mode: Mode::Chat,
             show_tools: true,
             show_thinking: true,
+            show_verbose: true,
             local_shell_enabled: false,
             allow_sensitive_tools: options.allow_sensitive_tools,
             include_archived_sessions: options.include_archived_sessions,
@@ -755,8 +761,30 @@ impl App {
                 self.handle_doctor_command(arguments).await?;
             }
             "settings" => self.mode = Mode::Settings,
-            "tools" => self.show_tools = parse_toggle(parts.next(), self.show_tools)?,
-            "thinking" => self.show_thinking = parse_toggle(parts.next(), self.show_thinking)?,
+            "tools" => {
+                let next = parts.next();
+                if next.is_some_and(quick_control_reset_requested) {
+                    self.clear_trace_override().await?;
+                } else {
+                    self.set_trace_enabled(parse_toggle(next, self.show_tools)?).await?;
+                }
+            }
+            "thinking" => {
+                let next = parts.next();
+                if next.is_some_and(quick_control_reset_requested) {
+                    self.clear_thinking_override().await?;
+                } else {
+                    self.set_thinking_enabled(parse_toggle(next, self.show_thinking)?).await?;
+                }
+            }
+            "verbose" => {
+                let next = parts.next();
+                if next.is_some_and(quick_control_reset_requested) {
+                    self.clear_verbose_override().await?;
+                } else {
+                    self.set_verbose_enabled(parse_toggle(next, self.show_verbose)?).await?;
+                }
+            }
             "shell" => {
                 let enabled = parse_toggle(parts.next(), self.local_shell_enabled)?;
                 if enabled && !self.local_shell_enabled {
@@ -797,6 +825,7 @@ impl App {
         let source = agent_resolution_source_label(response.source);
         self.current_agent = Some(agent.clone());
         self.current_agent_source = source;
+        self.refresh_current_session_catalog().await?;
         self.push_entry(
             EntryKind::System,
             "Agent",
@@ -1416,21 +1445,36 @@ impl App {
                 ("include_archived", self.include_archived_sessions.then(|| "true".to_owned())),
             ])
             .await?;
+        let active_session_id = self.active_session_id().ok();
+        let mut current_session_catalog = None;
         self.slash_entity_catalog.sessions = response
             .sessions
             .into_iter()
-            .map(|session| TuiSlashSessionRecord {
-                session_id: session.session_id,
-                title: session.title,
-                session_key: session.session_key,
-                archived: session.archived,
-                preview: session.preview.unwrap_or_default(),
-                root_title: session.family.root_title,
-                last_summary: session.last_summary.unwrap_or_default(),
-                branch_state: session.branch_state,
-                family_size: session.family.family_size,
+            .map(|session| {
+                if active_session_id.as_deref() == Some(session.session_id.as_str()) {
+                    current_session_catalog = Some(session.clone());
+                }
+                TuiSlashSessionRecord {
+                    session_id: session.session_id,
+                    title: session.title,
+                    session_key: session.session_key,
+                    archived: session.archived,
+                    preview: session.preview.unwrap_or_default(),
+                    root_title: session.family.root_title,
+                    last_summary: session.last_summary.unwrap_or_default(),
+                    branch_state: session.branch_state,
+                    family_size: session.family.family_size,
+                }
             })
             .collect();
+        if let Some(session) = current_session_catalog {
+            self.current_session_catalog = Some(session);
+            self.sync_session_quick_controls_from_catalog();
+        } else if active_session_id.is_some() {
+            self.refresh_current_session_catalog().await?;
+        } else {
+            self.current_session_catalog = None;
+        }
         Ok(())
     }
 
@@ -2537,7 +2581,11 @@ impl App {
             PickerKind::Session => unreachable!(),
             PickerKind::Model => {
                 let models = self.runtime.list_models(None)?;
-                let current_model = models.status.text_model.clone();
+                let current_model = self
+                    .current_session_catalog
+                    .as_ref()
+                    .and_then(|session| session.quick_controls.model.value.clone())
+                    .or_else(|| models.status.text_model.clone());
                 let items = models
                     .models
                     .iter()
@@ -2657,16 +2705,173 @@ impl App {
     }
 
     async fn set_model(&mut self, model_id: String) -> Result<()> {
-        self.runtime.set_text_model(None, 1, model_id.clone())?;
+        let (request, message) = if quick_control_reset_requested(model_id.as_str()) {
+            (
+                SessionQuickControlsUpdateRequest {
+                    model_profile: Some(None),
+                    ..SessionQuickControlsUpdateRequest::default()
+                },
+                "Session model returned to the inherited default.".to_owned(),
+            )
+        } else {
+            (
+                SessionQuickControlsUpdateRequest {
+                    model_profile: Some(Some(model_id.clone())),
+                    ..SessionQuickControlsUpdateRequest::default()
+                },
+                format!("Session model override set to {model_id}."),
+            )
+        };
+        self.update_current_session_quick_controls(request).await?;
         self.models = Some(self.runtime.list_models(None)?);
-        self.push_entry(
-            EntryKind::System,
-            "Model",
-            format!("Configured default text model to {model_id}."),
-        );
-        self.status_line = format!("Model set to {model_id}");
-        self.mode = Mode::Chat;
+        self.push_entry(EntryKind::System, "Model", message.clone());
+        self.status_line = message;
         Ok(())
+    }
+
+    async fn set_thinking_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.update_current_session_quick_controls(SessionQuickControlsUpdateRequest {
+            thinking: Some(Some(enabled)),
+            ..SessionQuickControlsUpdateRequest::default()
+        })
+        .await?;
+        let message = format!("Session thinking {}.", if enabled { "enabled" } else { "disabled" });
+        self.push_entry(EntryKind::System, "Thinking", message.clone());
+        self.status_line = message;
+        Ok(())
+    }
+
+    async fn clear_thinking_override(&mut self) -> Result<()> {
+        self.update_current_session_quick_controls(SessionQuickControlsUpdateRequest {
+            thinking: Some(None),
+            ..SessionQuickControlsUpdateRequest::default()
+        })
+        .await?;
+        let message = "Session thinking returned to the inherited default.".to_owned();
+        self.push_entry(EntryKind::System, "Thinking", message.clone());
+        self.status_line = message;
+        Ok(())
+    }
+
+    async fn set_trace_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.update_current_session_quick_controls(SessionQuickControlsUpdateRequest {
+            trace: Some(Some(enabled)),
+            ..SessionQuickControlsUpdateRequest::default()
+        })
+        .await?;
+        let message = format!("Session trace {}.", if enabled { "enabled" } else { "disabled" });
+        self.push_entry(EntryKind::System, "Trace", message.clone());
+        self.status_line = message;
+        Ok(())
+    }
+
+    async fn clear_trace_override(&mut self) -> Result<()> {
+        self.update_current_session_quick_controls(SessionQuickControlsUpdateRequest {
+            trace: Some(None),
+            ..SessionQuickControlsUpdateRequest::default()
+        })
+        .await?;
+        let message = "Session trace returned to the inherited default.".to_owned();
+        self.push_entry(EntryKind::System, "Trace", message.clone());
+        self.status_line = message;
+        Ok(())
+    }
+
+    async fn set_verbose_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.update_current_session_quick_controls(SessionQuickControlsUpdateRequest {
+            verbose: Some(Some(enabled)),
+            ..SessionQuickControlsUpdateRequest::default()
+        })
+        .await?;
+        let message = format!("Session verbose {}.", if enabled { "enabled" } else { "disabled" });
+        self.push_entry(EntryKind::System, "Verbose", message.clone());
+        self.status_line = message;
+        Ok(())
+    }
+
+    async fn clear_verbose_override(&mut self) -> Result<()> {
+        self.update_current_session_quick_controls(SessionQuickControlsUpdateRequest {
+            verbose: Some(None),
+            ..SessionQuickControlsUpdateRequest::default()
+        })
+        .await?;
+        let message = "Session verbose returned to the inherited default.".to_owned();
+        self.push_entry(EntryKind::System, "Verbose", message.clone());
+        self.status_line = message;
+        Ok(())
+    }
+
+    async fn update_current_session_quick_controls(
+        &mut self,
+        request: SessionQuickControlsUpdateRequest,
+    ) -> Result<()> {
+        let session_id = self.active_session_id()?;
+        let refresh_agent_identity =
+            request.agent_id.is_some() || request.reset_to_default == Some(true);
+        let response =
+            self.runtime.update_session_quick_controls(session_id.as_str(), &request).await?;
+        self.current_session_catalog = Some(response.session);
+        self.sync_session_quick_controls_from_catalog();
+        if refresh_agent_identity {
+            self.refresh_agent_identity(None, false).await?;
+        }
+        Ok(())
+    }
+
+    async fn refresh_current_session_catalog(&mut self) -> Result<()> {
+        let session_id = self.active_session_id()?;
+        let response = self.runtime.get_session_catalog_entry(session_id.as_str()).await?;
+        self.current_session_catalog = Some(response.session);
+        self.sync_session_quick_controls_from_catalog();
+        Ok(())
+    }
+
+    fn sync_session_quick_controls_from_catalog(&mut self) {
+        let Some(session) = self.current_session_catalog.as_ref() else {
+            return;
+        };
+        self.show_tools = session.quick_controls.trace.value;
+        self.show_thinking = session.quick_controls.thinking.value;
+        self.show_verbose = session.quick_controls.verbose.value;
+    }
+
+    fn current_session_model_display(&self) -> String {
+        self.current_session_catalog
+            .as_ref()
+            .map(|session| session.quick_controls.model.display_value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                self.models
+                    .as_ref()
+                    .and_then(|models| models.status.text_model.as_deref())
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "none".to_owned())
+    }
+
+    fn current_session_agent_display(&self) -> String {
+        self.current_session_catalog
+            .as_ref()
+            .map(|session| session.quick_controls.agent.display_value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| self.current_agent.as_ref().map(|agent| agent.agent_id.clone()))
+            .unwrap_or_else(|| "none".to_owned())
+    }
+
+    fn current_session_model_override_active(&self) -> bool {
+        self.current_session_catalog
+            .as_ref()
+            .map(|session| session.quick_controls.model.override_active)
+            .unwrap_or(false)
+    }
+
+    fn current_session_agent_override_active(&self) -> bool {
+        self.current_session_catalog
+            .as_ref()
+            .map(|session| session.quick_controls.agent.override_active)
+            .unwrap_or(false)
     }
 
     async fn refresh_agent_identity(
@@ -2710,7 +2915,7 @@ impl App {
         let profile =
             app::current_root_context().and_then(|context| context.active_profile_context());
         format!(
-            "profile={} env={} risk={} strict={} session={} branch={} agent={} source={} model={} tools={} thinking={} shell={} active_run={} handoff={}",
+            "profile={} env={} risk={} strict={} session={} branch={} agent={} source={} model={} model_source={} agent_source={} trace={} thinking={} verbose={} shell={} active_run={} handoff={}",
             profile.as_ref().map(|value| value.label.as_str()).unwrap_or("none"),
             profile.as_ref().map(|value| value.environment.as_str()).unwrap_or("none"),
             profile.as_ref().map(|value| value.risk_level.as_str()).unwrap_or("none"),
@@ -2724,14 +2929,22 @@ impl App {
             } else {
                 self.session.branch_state.as_str()
             },
-            self.current_agent.as_ref().map(|agent| agent.agent_id.as_str()).unwrap_or("none"),
+            self.current_session_agent_display(),
             self.current_agent_source,
-            self.models
-                .as_ref()
-                .and_then(|models| models.status.text_model.as_deref())
-                .unwrap_or("none"),
+            self.current_session_model_display(),
+            if self.current_session_model_override_active() {
+                "session"
+            } else {
+                "inherited"
+            },
+            if self.current_session_agent_override_active() {
+                "session"
+            } else {
+                "inherited"
+            },
             self.show_tools,
             self.show_thinking,
+            self.show_verbose,
             self.local_shell_enabled,
             self.active_stream
                 .as_ref()
@@ -2754,7 +2967,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         },
         Mode::Approval => handle_approval_key(app, key).await?,
         Mode::ShellConfirm => handle_shell_confirm_key(app, key).await?,
-        Mode::Settings => handle_settings_key(app, key),
+        Mode::Settings => handle_settings_key(app, key).await?,
         Mode::Picker(_) => handle_picker_key(app, key).await?,
         Mode::Chat => handle_chat_key(app, key).await?,
     }
@@ -2935,7 +3148,7 @@ async fn handle_shell_confirm_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_settings_key(app: &mut App, key: KeyEvent) {
+async fn handle_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let items = settings_items();
     match key.code {
         KeyCode::Esc => app.mode = Mode::Chat,
@@ -2944,8 +3157,9 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
             app.settings_selected = (app.settings_selected + 1).min(items.len().saturating_sub(1));
         }
         KeyCode::Enter | KeyCode::Char(' ') => match items[app.settings_selected] {
-            SettingsItem::ShowTools => app.show_tools = !app.show_tools,
-            SettingsItem::ShowThinking => app.show_thinking = !app.show_thinking,
+            SettingsItem::ShowTools => app.set_trace_enabled(!app.show_tools).await?,
+            SettingsItem::ShowThinking => app.set_thinking_enabled(!app.show_thinking).await?,
+            SettingsItem::ShowVerbose => app.set_verbose_enabled(!app.show_verbose).await?,
             SettingsItem::LocalShell => {
                 if strict_profile_blocks_local_shell() {
                     app.status_line = text::local_shell_blocked(app.locale);
@@ -2961,6 +3175,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         },
         _ => {}
     }
+    Ok(())
 }
 
 async fn handle_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -3035,17 +3250,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ]);
     let status_line = Line::from(vec![
         Span::styled("Agent ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw(
-            app.current_agent.as_ref().map(|agent| agent.agent_id.as_str()).unwrap_or("none"),
-        ),
+        Span::raw(app.current_session_agent_display()),
         Span::raw("  "),
         Span::styled("Model ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::raw(
-            app.models
-                .as_ref()
-                .and_then(|models| models.status.text_model.as_deref())
-                .unwrap_or("none"),
-        ),
+        Span::raw(app.current_session_model_display()),
         Span::raw("  "),
         Span::styled("Status ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
         Span::raw(sanitize_terminal_text(app.status_line.as_str())),
@@ -3097,6 +3305,9 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, app: &App) {
             continue;
         }
         if matches!(entry.kind, EntryKind::Thinking) && !app.show_thinking {
+            continue;
+        }
+        if matches!(entry.kind, EntryKind::System) && !app.show_verbose {
             continue;
         }
         let style = entry_style(&entry.kind);
@@ -3464,7 +3675,7 @@ fn render_slash_palette_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_settings_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let popup = centered_rect(56, 10, area);
+    let popup = centered_rect(56, 12, area);
     let items = settings_items();
     let mut lines = Vec::new();
     for (index, item) in items.iter().enumerate() {
@@ -3473,6 +3684,7 @@ fn render_settings_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let (label, enabled) = match item {
             SettingsItem::ShowTools => ("Show tool cards", app.show_tools),
             SettingsItem::ShowThinking => ("Show thinking/status lines", app.show_thinking),
+            SettingsItem::ShowVerbose => ("Show verbose/system lines", app.show_verbose),
             SettingsItem::LocalShell => ("Enable local shell", app.local_shell_enabled),
         };
         lines.push(Line::from(Span::styled(
@@ -3529,8 +3741,13 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     vertical[1]
 }
 
-fn settings_items() -> [SettingsItem; 3] {
-    [SettingsItem::ShowTools, SettingsItem::ShowThinking, SettingsItem::LocalShell]
+fn settings_items() -> [SettingsItem; 4] {
+    [
+        SettingsItem::ShowTools,
+        SettingsItem::ShowThinking,
+        SettingsItem::ShowVerbose,
+        SettingsItem::LocalShell,
+    ]
 }
 
 fn entry_style(kind: &EntryKind) -> Style {
@@ -3581,6 +3798,10 @@ fn parse_toggle(value: Option<&str>, current: bool) -> Result<bool> {
         "off" | "false" | "no" => Ok(false),
         other => Err(anyhow!("unsupported toggle value: {other}")),
     }
+}
+
+fn quick_control_reset_requested(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "default" | "reset" | "inherit")
 }
 
 fn looks_like_canonical_ulid(value: &str) -> bool {
@@ -3714,8 +3935,8 @@ fn format_shell_result(result: &ShellResult) -> String {
 mod tests {
     use super::{
         display_session_identity, parse_toggle, parse_tui_objective_create_spec,
-        parse_tui_objective_kind, sanitize_terminal_text, App, Focus, Mode, TuiLocale,
-        TuiSlashEntityCatalog, TuiUxMetrics,
+        parse_tui_objective_kind, quick_control_reset_requested, sanitize_terminal_text, App,
+        Focus, Mode, TuiLocale, TuiSlashEntityCatalog, TuiUxMetrics,
     };
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
 
@@ -3730,6 +3951,7 @@ mod tests {
                 trace_id: "trace-1".to_owned(),
             }),
             session: gateway_v1::SessionSummary::default(),
+            current_session_catalog: None,
             current_agent: None,
             current_agent_source: "test",
             models: None,
@@ -3748,6 +3970,7 @@ mod tests {
             mode: Mode::Chat,
             show_tools: true,
             show_thinking: true,
+            show_verbose: true,
             local_shell_enabled: false,
             allow_sensitive_tools: false,
             include_archived_sessions: false,
@@ -3771,6 +3994,14 @@ mod tests {
     fn parse_toggle_accepts_explicit_values() {
         assert!(parse_toggle(Some("on"), false).expect("on should parse"));
         assert!(!parse_toggle(Some("off"), true).expect("off should parse"));
+    }
+
+    #[test]
+    fn quick_control_reset_requested_accepts_default_synonyms() {
+        assert!(quick_control_reset_requested("default"));
+        assert!(quick_control_reset_requested("reset"));
+        assert!(quick_control_reset_requested("inherit"));
+        assert!(!quick_control_reset_requested("on"));
     }
 
     #[test]

@@ -61,9 +61,66 @@ export type ChatSessionRecord = {
   last_run_id?: string;
 };
 
+export type SessionCatalogFamilyRelative = {
+  session_id: string;
+  title: string;
+  branch_state: string;
+  relation: string;
+};
+
+export type SessionCatalogFamilyRecord = {
+  root_title: string;
+  sequence: number;
+  family_size: number;
+  parent_session_id?: string;
+  parent_title?: string;
+  relatives: SessionCatalogFamilyRelative[];
+};
+
+export type SessionCatalogArtifactRecord = {
+  artifact_id: string;
+  kind: string;
+  label: string;
+};
+
+export type SessionCatalogRecapRecord = {
+  touched_files: string[];
+  active_context_files: string[];
+  recent_artifacts: SessionCatalogArtifactRecord[];
+  ctas: string[];
+};
+
+export type SessionCatalogQuickControlRecord = {
+  value?: string;
+  display_value: string;
+  source: string;
+  inherited_value?: string;
+  override_active: boolean;
+};
+
+export type SessionCatalogToggleControlRecord = {
+  value: boolean;
+  source: string;
+  inherited_value: boolean;
+  override_active: boolean;
+};
+
+export type SessionCatalogQuickControlsRecord = {
+  agent: SessionCatalogQuickControlRecord;
+  model: SessionCatalogQuickControlRecord;
+  thinking: SessionCatalogToggleControlRecord;
+  trace: SessionCatalogToggleControlRecord;
+  verbose: SessionCatalogToggleControlRecord;
+  reset_to_default_available: boolean;
+};
+
 export type SessionCatalogRecord = ChatSessionRecord & {
   title: string;
   title_source: string;
+  title_generation_state: string;
+  manual_title_locked: boolean;
+  auto_title_updated_at_unix_ms?: number;
+  manual_title_updated_at_unix_ms?: number;
   preview?: string;
   preview_state: string;
   last_intent?: string;
@@ -72,6 +129,7 @@ export type SessionCatalogRecord = ChatSessionRecord & {
   last_summary_state: string;
   branch_state: string;
   parent_session_id?: string;
+  branch_origin_run_id?: string;
   last_run_state?: string;
   last_run_started_at_unix_ms?: number;
   prompt_tokens: number;
@@ -80,6 +138,14 @@ export type SessionCatalogRecord = ChatSessionRecord & {
   archived: boolean;
   archived_at_unix_ms?: number;
   pending_approvals: number;
+  has_context_files: boolean;
+  last_context_file?: string;
+  agent_id?: string;
+  model_profile?: string;
+  artifact_count: number;
+  family: SessionCatalogFamilyRecord;
+  recap: SessionCatalogRecapRecord;
+  quick_controls: SessionCatalogQuickControlsRecord;
 };
 
 export type SessionCatalogSummary = {
@@ -87,6 +153,7 @@ export type SessionCatalogSummary = {
   archived_sessions: number;
   sessions_with_pending_approvals: number;
   sessions_with_active_runs: number;
+  sessions_with_context_files: number;
 };
 
 export type DesktopTranscriptRecord = {
@@ -728,6 +795,10 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
       last_run_id: "preview-run",
       title: "Preview conversation",
       title_source: "label",
+      title_generation_state: "ready",
+      manual_title_locked: true,
+      auto_title_updated_at_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms - 20_000,
+      manual_title_updated_at_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms - 10_000,
       preview: "Companion preview keeps session context and approvals in one desktop shell.",
       preview_state: "ready",
       last_intent: "daily companion flow",
@@ -735,6 +806,7 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
       last_summary: "Preview state is healthy.",
       last_summary_state: "ready",
       branch_state: "root",
+      branch_origin_run_id: "preview-run",
       last_run_state: "completed",
       last_run_started_at_unix_ms: DESKTOP_PREVIEW_SNAPSHOT.generated_at_unix_ms - 10_000,
       prompt_tokens: 120,
@@ -742,6 +814,69 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
       total_tokens: 460,
       archived: false,
       pending_approvals: 1,
+      has_context_files: true,
+      last_context_file: "docs/desktop/companion-preview.md",
+      agent_id: "desktop-companion",
+      model_profile: "gpt-5.4",
+      artifact_count: 2,
+      family: {
+        root_title: "Preview conversation",
+        sequence: 1,
+        family_size: 1,
+        relatives: [],
+      },
+      recap: {
+        touched_files: ["apps/desktop/ui/src/App.tsx", "docs/desktop/companion-preview.md"],
+        active_context_files: ["docs/desktop/companion-preview.md"],
+        recent_artifacts: [
+          {
+            artifact_id: "preview-artifact-1",
+            kind: "summary",
+            label: "Preview summary",
+          },
+          {
+            artifact_id: "preview-artifact-2",
+            kind: "note",
+            label: "Companion note",
+          },
+        ],
+        ctas: ["Resume chat", "Open diagnostics"],
+      },
+      quick_controls: {
+        agent: {
+          value: "desktop-companion",
+          display_value: "desktop-companion",
+          source: "session",
+          inherited_value: "default",
+          override_active: true,
+        },
+        model: {
+          value: "gpt-5.4",
+          display_value: "gpt-5.4",
+          source: "session",
+          inherited_value: "gpt-5.4-mini",
+          override_active: true,
+        },
+        thinking: {
+          value: true,
+          source: "inherited",
+          inherited_value: true,
+          override_active: false,
+        },
+        trace: {
+          value: true,
+          source: "session",
+          inherited_value: false,
+          override_active: true,
+        },
+        verbose: {
+          value: false,
+          source: "session",
+          inherited_value: true,
+          override_active: true,
+        },
+        reset_to_default_available: true,
+      },
     },
   ],
   session_summary: {
@@ -749,6 +884,7 @@ export const DESKTOP_PREVIEW_COMPANION_SNAPSHOT: DesktopCompanionSnapshot = {
     archived_sessions: 0,
     sessions_with_pending_approvals: 1,
     sessions_with_active_runs: 0,
+    sessions_with_context_files: 1,
   },
   approvals: [
     {

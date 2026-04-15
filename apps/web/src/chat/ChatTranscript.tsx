@@ -47,7 +47,7 @@ export function ChatTranscript({
     <>
       {hiddenTranscriptItems > 0 && (
         <p className="chat-muted">
-          Showing latest 120 items. {hiddenTranscriptItems} older items are retained but not
+          Showing latest 120 items. {hiddenTranscriptItems} retained items are not currently
           rendered.
         </p>
       )}
