@@ -4,12 +4,12 @@ This report is generated from the shared slash-command registry consumed by the 
 
 ## Summary
 
-- Total commands: `34`
-- Shared across web and TUI: `19`
-- Web-visible commands: `21`
-- TUI-visible commands: `32`
+- Total commands: `36`
+- Shared across web and TUI: `20`
+- Web-visible commands: `22`
+- TUI-visible commands: `34`
 - Web-only commands: `2`
-- TUI-only commands: `13`
+- TUI-only commands: `14`
 
 ## Entries
 
@@ -26,7 +26,8 @@ This report is generated from the shared slash-command registry consumed by the 
 | `/program` | `/program list|show|select|fire|pause|resume|archive|create` | `objective` | `server` | `tui` | - | `objective`, `program` | `objective` |
 | `/history` | `/history [query]` | `session` | `local` | `web`, `tui` | - | `session`, `history`, `search` | `session` |
 | `/resume` | `/resume [session-id-or-key]` | `session` | `server` | `web`, `tui` | - | `session`, `resume` | `session` |
-| `/model` | `/model [model-id]` | `model` | `server` | `tui` | - | `model`, `picker` | `model` |
+| `/title` | `/title [label]` | `session` | `server` | `web`, `tui` | - | `session`, `title`, `rename` | `session` |
+| `/model` | `/model [model-id|default]` | `model` | `server` | `tui` | - | `model`, `picker`, `quick_controls` | `model` |
 | `/undo` | `/undo [checkpoint-id]` | `session` | `server` | `web`, `tui` | - | `undo`, `checkpoint`, `restore` | `checkpoint`, `session`, `run` |
 | `/interrupt` | `/interrupt [soft|force] [redirect-prompt]` | `run` | `server` | `web`, `tui` | `/abort`, `/cancel` | `run`, `interrupt`, `cancel`, `redirect` | `run` |
 | `/reset` | `/reset` | `session` | `server` | `web`, `tui` | - | `session`, `reset` | `session` |
@@ -45,7 +46,8 @@ This report is generated from the shared slash-command registry consumed by the 
 | `/search` | `/search <query>` | `search` | `server` | `web` | - | `search`, `transcript` | `session` |
 | `/export` | `/export [json|markdown]` | `export` | `local_capability` | `web` | - | `export`, `download` | `session` |
 | `/settings` | `/settings` | `local_ui` | `local` | `tui` | - | `settings`, `overlay` | - |
-| `/tools` | `/tools on|off` | `local_ui` | `local` | `tui` | - | `tools`, `toggle` | - |
-| `/thinking` | `/thinking on|off` | `local_ui` | `local` | `tui` | - | `thinking`, `toggle` | - |
+| `/tools` | `/tools on|off|default` | `local_ui` | `server` | `tui` | - | `tools`, `toggle`, `quick_controls` | - |
+| `/thinking` | `/thinking on|off|default` | `local_ui` | `server` | `tui` | - | `thinking`, `toggle`, `quick_controls` | - |
+| `/verbose` | `/verbose on|off|default` | `local_ui` | `server` | `tui` | - | `verbose`, `toggle`, `quick_controls` | - |
 | `/shell` | `/shell on|off` | `local_capability` | `local_capability` | `tui` | - | `shell`, `toggle`, `local_capability` | - |
 | `/exit` | `/exit` | `navigation` | `local` | `tui` | `/quit` | `exit`, `quit` | - |

@@ -2640,16 +2640,11 @@ impl App {
                     } else {
                         session.title_generation_state.as_str()
                     };
-                    let family_hint = (session.family.family_size > 1)
-                        .then(|| {
-                            format!(
-                                "family {}/{}",
-                                session.family.sequence, session.family.family_size
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            describe_branch_state_label(session.branch_state.as_str())
-                        });
+                    let family_hint = if session.family.family_size > 1 {
+                        format!("family {}/{}", session.family.sequence, session.family.family_size)
+                    } else {
+                        describe_branch_state_label(session.branch_state.as_str())
+                    };
                     let workspace_hint = if session.has_context_files {
                         format!(
                             "{} context file{}",
