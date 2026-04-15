@@ -4015,7 +4015,9 @@ export class ConsoleApiClient {
   }
 
   async getWorkspaceCheckpoint(checkpointId: string): Promise<WorkspaceCheckpointDetailEnvelope> {
-    return this.request(`/console/v1/chat/workspace-checkpoints/${encodeURIComponent(checkpointId)}`);
+    return this.request(
+      `/console/v1/chat/workspace-checkpoints/${encodeURIComponent(checkpointId)}`,
+    );
   }
 
   async restoreWorkspaceCheckpoint(

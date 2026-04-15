@@ -16,7 +16,6 @@ import type {
   ConsoleApiClient,
   JsonValue,
   WorkspaceArtifactDetail,
-  WorkspaceArtifactRecord,
   WorkspaceCheckpointDetailEnvelope,
   WorkspaceCheckpointSummary,
   WorkspaceCompareEnvelope,
@@ -75,9 +74,8 @@ export function ChatRunWorkspaceTab({
   const [selectedArtifactId, setSelectedArtifactId] = useState("");
   const [selectedCheckpointId, setSelectedCheckpointId] = useState("");
   const [checkpointBusy, setCheckpointBusy] = useState(false);
-  const [checkpointEnvelope, setCheckpointEnvelope] = useState<WorkspaceCheckpointDetailEnvelope | null>(
-    null,
-  );
+  const [checkpointEnvelope, setCheckpointEnvelope] =
+    useState<WorkspaceCheckpointDetailEnvelope | null>(null);
   const [selectedReportId, setSelectedReportId] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
   const [reportEnvelope, setReportEnvelope] = useState<WorkspaceRestoreReportEnvelope | null>(null);
@@ -130,11 +128,10 @@ export function ChatRunWorkspaceTab({
     );
   }, [artifacts, changedOnly]);
 
-  const anchorOptions = useMemo(() => buildAnchorOptions(runId, runIds, checkpoints), [
-    checkpoints,
-    runId,
-    runIds,
-  ]);
+  const anchorOptions = useMemo(
+    () => buildAnchorOptions(runId, runIds, checkpoints),
+    [checkpoints, runId, runIds],
+  );
 
   useEffect(() => {
     setWorkspaceEnvelope(null);
@@ -271,7 +268,10 @@ export function ChatRunWorkspaceTab({
     }
   }
 
-  async function previewDiff(leftAnchorValue = leftAnchor, rightAnchorValue = rightAnchor): Promise<void> {
+  async function previewDiff(
+    leftAnchorValue = leftAnchor,
+    rightAnchorValue = rightAnchor,
+  ): Promise<void> {
     const left = parseAnchor(leftAnchorValue);
     const right = parseAnchor(rightAnchorValue);
     if (left === null || right === null) {
@@ -326,7 +326,11 @@ export function ChatRunWorkspaceTab({
       });
       setLastRestore(response);
       setSelectedReportId(response.restore.report.report_id);
-      await Promise.all([refreshWorkspace(), loadCheckpoint(checkpointId), loadReport(response.restore.report.report_id)]);
+      await Promise.all([
+        refreshWorkspace(),
+        loadCheckpoint(checkpointId),
+        loadReport(response.restore.report.report_id),
+      ]);
       await onWorkspaceRestore(response);
     } catch (error) {
       setError(toMessage(error));
@@ -360,7 +364,9 @@ export function ChatRunWorkspaceTab({
     }
   }
 
-  async function attachSupport(sourceKey = artifactDetail?.artifact.artifact_id ?? "rollback"): Promise<void> {
+  async function attachSupport(
+    sourceKey = artifactDetail?.artifact.artifact_id ?? "rollback",
+  ): Promise<void> {
     setPromotionBusyKey(`support:${sourceKey}`);
     try {
       const response = await api.createSupportBundleJob({ retain_jobs: 20 });
@@ -380,7 +386,12 @@ export function ChatRunWorkspaceTab({
   return (
     <div className="workspace-stack">
       <ActionCluster>
-        <ActionButton isDisabled={workspaceBusy} type="button" variant="primary" onPress={() => void refreshWorkspace()}>
+        <ActionButton
+          isDisabled={workspaceBusy}
+          type="button"
+          variant="primary"
+          onPress={() => void refreshWorkspace()}
+        >
           {workspaceBusy ? "Refreshing..." : "Refresh workspace"}
         </ActionButton>
         <ActionButton
@@ -405,7 +416,9 @@ export function ChatRunWorkspaceTab({
           variant="secondary"
           onPress={() => void restore("workspace")}
         >
-          {restoreBusyKey === `workspace:${selectedCheckpointId}` ? "Restoring..." : "Restore workspace"}
+          {restoreBusyKey === `workspace:${selectedCheckpointId}`
+            ? "Restoring..."
+            : "Restore workspace"}
         </ActionButton>
         <ActionButton
           isDisabled={selectedArtifact === null}
@@ -413,7 +426,8 @@ export function ChatRunWorkspaceTab({
           variant="secondary"
           onPress={() => void restore("file")}
         >
-          {restoreBusyKey === `file:${selectedCheckpointId || selectedArtifact?.latest_checkpoint_id || ""}`
+          {restoreBusyKey ===
+          `file:${selectedCheckpointId || selectedArtifact?.latest_checkpoint_id || ""}`
             ? "Restoring..."
             : "Restore selected file"}
         </ActionButton>
@@ -448,7 +462,10 @@ export function ChatRunWorkspaceTab({
       ) : null}
 
       {lastRestore !== null ? (
-        <InlineNotice title="Latest restore reconciliation" tone={lastRestore.restore.failed_paths.length > 0 ? "warning" : "success"}>
+        <InlineNotice
+          title="Latest restore reconciliation"
+          tone={lastRestore.restore.failed_paths.length > 0 ? "warning" : "success"}
+        >
           <p>{lastRestore.restore.report.reconciliation_summary}</p>
           <p>{lastRestore.restore.report.reconciliation_prompt}</p>
           {lastRestore.project_context_refresh_error ? (
@@ -504,7 +521,9 @@ export function ChatRunWorkspaceTab({
                           setSelectedCheckpointId(row.checkpointId);
                         }}
                       >
-                        {artifactBusy && selectedArtifactId === row.artifactId ? "Loading..." : "Preview"}
+                        {artifactBusy && selectedArtifactId === row.artifactId
+                          ? "Loading..."
+                          : "Preview"}
                       </ActionButton>
                       <ActionButton
                         size="sm"
@@ -556,7 +575,9 @@ export function ChatRunWorkspaceTab({
                   variant="secondary"
                   onPress={() => void promote("memory")}
                 >
-                  {promotionBusyKey === `memory:${artifactDetail.artifact.artifact_id}` ? "Promoting..." : "Promote to Memory"}
+                  {promotionBusyKey === `memory:${artifactDetail.artifact.artifact_id}`
+                    ? "Promoting..."
+                    : "Promote to Memory"}
                 </ActionButton>
                 <ActionButton
                   isDisabled={promotionBusyKey !== null}
@@ -565,7 +586,9 @@ export function ChatRunWorkspaceTab({
                   variant="secondary"
                   onPress={() => void promote("named")}
                 >
-                  {promotionBusyKey === `named:${artifactDetail.artifact.artifact_id}` ? "Promoting..." : "Mark as named artifact"}
+                  {promotionBusyKey === `named:${artifactDetail.artifact.artifact_id}`
+                    ? "Promoting..."
+                    : "Mark as named artifact"}
                 </ActionButton>
                 <ActionButton
                   isDisabled={promotionBusyKey !== null}
@@ -574,7 +597,9 @@ export function ChatRunWorkspaceTab({
                   variant="secondary"
                   onPress={() => void attachSupport(artifactDetail.artifact.artifact_id)}
                 >
-                  {promotionBusyKey === `support:${artifactDetail.artifact.artifact_id}` ? "Queueing..." : "Attach to Support bundle"}
+                  {promotionBusyKey === `support:${artifactDetail.artifact.artifact_id}`
+                    ? "Queueing..."
+                    : "Attach to Support bundle"}
                 </ActionButton>
                 <ActionButton
                   size="sm"
@@ -595,7 +620,10 @@ export function ChatRunWorkspaceTab({
                   Open in Canvas
                 </ActionButton>
               </ActionCluster>
-              <ArtifactPreview detail={artifactDetail} revealSensitiveValues={revealSensitiveValues} />
+              <ArtifactPreview
+                detail={artifactDetail}
+                revealSensitiveValues={revealSensitiveValues}
+              />
             </div>
           )}
         </SectionCard>
@@ -609,11 +637,27 @@ export function ChatRunWorkspaceTab({
         >
           <div className="workspace-stack">
             <div className="workspace-field-grid workspace-field-grid--double">
-              <SelectField label="Left anchor" options={anchorOptions} value={leftAnchor} onChange={setLeftAnchor} />
-              <SelectField label="Right anchor" options={anchorOptions} value={rightAnchor} onChange={setRightAnchor} />
+              <SelectField
+                label="Left anchor"
+                options={anchorOptions}
+                value={leftAnchor}
+                onChange={setLeftAnchor}
+              />
+              <SelectField
+                label="Right anchor"
+                options={anchorOptions}
+                value={rightAnchor}
+                onChange={setRightAnchor}
+              />
             </div>
             <ActionCluster>
-              <ActionButton isDisabled={compareBusy || !rightAnchor} size="sm" type="button" variant="primary" onPress={() => void previewDiff()}>
+              <ActionButton
+                isDisabled={compareBusy || !rightAnchor}
+                size="sm"
+                type="button"
+                variant="primary"
+                onPress={() => void previewDiff()}
+              >
                 {compareBusy ? "Comparing..." : "Preview rollback diff"}
               </ActionButton>
               <ActionButton
@@ -643,17 +687,24 @@ export function ChatRunWorkspaceTab({
               />
             ) : compareEnvelope.diff.files.length === 0 ? (
               <InlineNotice title="No changed paths" tone="default">
-                The selected workspace anchors resolved successfully, but there are no changed paths to preview.
+                The selected workspace anchors resolved successfully, but there are no changed paths
+                to preview.
               </InlineNotice>
             ) : (
               <div className="workspace-two-column">
                 <div className="chat-tape-list">
                   {compareEnvelope.diff.files.map((file) => (
-                    <article key={`${file.workspace_root_index}:${file.path}`} className="chat-ops-card">
+                    <article
+                      key={`${file.workspace_root_index}:${file.path}`}
+                      className="chat-ops-card"
+                    >
                       <div className="chat-ops-card__copy">
                         <strong>{file.display_path}</strong>
                         <span>{file.diff_kind}</span>
-                        <p>{file.left?.change_kind ?? "missing"} → {file.right?.change_kind ?? "missing"}</p>
+                        <p>
+                          {file.left?.change_kind ?? "missing"} →{" "}
+                          {file.right?.change_kind ?? "missing"}
+                        </p>
                       </div>
                       <div className="chat-ops-card__actions">
                         <ActionButton
@@ -691,15 +742,22 @@ export function ChatRunWorkspaceTab({
                         items={[
                           { label: "Path", value: selectedDiff.display_path },
                           { label: "Diff kind", value: selectedDiff.diff_kind },
-                          { label: "Left hash", value: selectedDiff.left?.content_sha256 ?? "none" },
-                          { label: "Right hash", value: selectedDiff.right?.content_sha256 ?? "none" },
+                          {
+                            label: "Left hash",
+                            value: selectedDiff.left?.content_sha256 ?? "none",
+                          },
+                          {
+                            label: "Right hash",
+                            value: selectedDiff.right?.content_sha256 ?? "none",
+                          },
                         ]}
                       />
                       {selectedDiff.diff_text ? (
                         <pre className="workspace-code-panel">{selectedDiff.diff_text}</pre>
                       ) : (
                         <InlineNotice title="Metadata-only diff" tone="default">
-                          Binary or metadata-only changes are available here without rendering raw content inline.
+                          Binary or metadata-only changes are available here without rendering raw
+                          content inline.
                         </InlineNotice>
                       )}
                     </>
@@ -728,18 +786,29 @@ export function ChatRunWorkspaceTab({
                   <article key={checkpoint.checkpoint_id} className="chat-ops-card">
                     <div className="chat-ops-card__copy">
                       <strong>{checkpoint.source_label}</strong>
-                      <span>{checkpoint.tool_name ?? checkpoint.source_kind} · {shortId(checkpoint.checkpoint_id)}</span>
+                      <span>
+                        {checkpoint.tool_name ?? checkpoint.source_kind} ·{" "}
+                        {shortId(checkpoint.checkpoint_id)}
+                      </span>
                       <p>{checkpoint.summary_text}</p>
                     </div>
                     <div className="chat-ops-card__actions">
                       <ActionButton
-                        isDisabled={checkpointBusy && selectedCheckpointId === checkpoint.checkpoint_id}
+                        isDisabled={
+                          checkpointBusy && selectedCheckpointId === checkpoint.checkpoint_id
+                        }
                         size="sm"
                         type="button"
-                        variant={selectedCheckpointId === checkpoint.checkpoint_id ? "primary" : "secondary"}
+                        variant={
+                          selectedCheckpointId === checkpoint.checkpoint_id
+                            ? "primary"
+                            : "secondary"
+                        }
                         onPress={() => setSelectedCheckpointId(checkpoint.checkpoint_id)}
                       >
-                        {checkpointBusy && selectedCheckpointId === checkpoint.checkpoint_id ? "Loading..." : "Inspect"}
+                        {checkpointBusy && selectedCheckpointId === checkpoint.checkpoint_id
+                          ? "Loading..."
+                          : "Inspect"}
                       </ActionButton>
                       <ActionButton
                         size="sm"
@@ -762,11 +831,22 @@ export function ChatRunWorkspaceTab({
                 <div className="workspace-stack">
                   <KeyValueList
                     items={[
-                      { label: "Checkpoint", value: shortId(checkpointEnvelope.checkpoint.checkpoint_id) },
+                      {
+                        label: "Checkpoint",
+                        value: shortId(checkpointEnvelope.checkpoint.checkpoint_id),
+                      },
                       { label: "Run", value: shortId(checkpointEnvelope.checkpoint.run_id) },
                       { label: "Device", value: checkpointEnvelope.checkpoint.device_id },
-                      { label: "Tool", value: checkpointEnvelope.checkpoint.tool_name ?? checkpointEnvelope.checkpoint.source_kind },
-                      { label: "Restore count", value: checkpointEnvelope.checkpoint.restore_count },
+                      {
+                        label: "Tool",
+                        value:
+                          checkpointEnvelope.checkpoint.tool_name ??
+                          checkpointEnvelope.checkpoint.source_kind,
+                      },
+                      {
+                        label: "Restore count",
+                        value: checkpointEnvelope.checkpoint.restore_count,
+                      },
                     ]}
                   />
                   <PrettyJsonBlock
@@ -781,7 +861,9 @@ export function ChatRunWorkspaceTab({
                       variant="primary"
                       onPress={() => void restore("workspace")}
                     >
-                      {restoreBusyKey === `workspace:${checkpointEnvelope.checkpoint.checkpoint_id}` ? "Restoring..." : "Restore workspace"}
+                      {restoreBusyKey === `workspace:${checkpointEnvelope.checkpoint.checkpoint_id}`
+                        ? "Restoring..."
+                        : "Restore workspace"}
                     </ActionButton>
                     <ActionButton
                       isDisabled={selectedArtifact === null || restoreBusyKey !== null}
@@ -790,26 +872,49 @@ export function ChatRunWorkspaceTab({
                       variant="secondary"
                       onPress={() => void restore("file")}
                     >
-                      {restoreBusyKey === `file:${checkpointEnvelope.checkpoint.checkpoint_id}` ? "Restoring..." : "Restore selected file"}
+                      {restoreBusyKey === `file:${checkpointEnvelope.checkpoint.checkpoint_id}`
+                        ? "Restoring..."
+                        : "Restore selected file"}
                     </ActionButton>
-                    <ActionButton size="sm" type="button" variant="ghost" onPress={() => onOpenRun(checkpointEnvelope.checkpoint.run_id, "workspace")}>
+                    <ActionButton
+                      size="sm"
+                      type="button"
+                      variant="ghost"
+                      onPress={() => onOpenRun(checkpointEnvelope.checkpoint.run_id, "workspace")}
+                    >
                       Open run
                     </ActionButton>
                   </ActionCluster>
                   <ActionCluster>
                     {workspace?.compactions
-                      .filter((artifact) => artifact.run_id === checkpointEnvelope.checkpoint.run_id)
+                      .filter(
+                        (artifact) => artifact.run_id === checkpointEnvelope.checkpoint.run_id,
+                      )
                       .slice(0, 3)
                       .map((artifact) => (
-                        <ActionButton key={artifact.artifact_id} size="sm" type="button" variant="secondary" onPress={() => onInspectCompaction(artifact.artifact_id)}>
+                        <ActionButton
+                          key={artifact.artifact_id}
+                          size="sm"
+                          type="button"
+                          variant="secondary"
+                          onPress={() => onInspectCompaction(artifact.artifact_id)}
+                        >
                           Compaction {shortId(artifact.artifact_id)}
                         </ActionButton>
                       ))}
                     {workspace?.session_checkpoints
-                      .filter((checkpoint) => checkpoint.run_id === checkpointEnvelope.checkpoint.run_id)
+                      .filter(
+                        (checkpoint) => checkpoint.run_id === checkpointEnvelope.checkpoint.run_id,
+                      )
                       .slice(0, 3)
                       .map((checkpoint) => (
-                        <ActionButton key={checkpoint.checkpoint_id} size="sm" type="button" variant="secondary" onPress={() => onInspectSessionCheckpoint(checkpoint.checkpoint_id)}>
+                        <ActionButton
+                          key={checkpoint.checkpoint_id}
+                          size="sm"
+                          type="button"
+                          variant="secondary"
+                          onPress={() => onInspectSessionCheckpoint(checkpoint.checkpoint_id)}
+                        >
                           Session checkpoint {shortId(checkpoint.checkpoint_id)}
                         </ActionButton>
                       ))}
@@ -840,7 +945,9 @@ export function ChatRunWorkspaceTab({
                   <article key={report.report_id} className="chat-ops-card">
                     <div className="chat-ops-card__copy">
                       <strong>{report.result_state}</strong>
-                      <span>{report.scope_kind} · {shortId(report.report_id)}</span>
+                      <span>
+                        {report.scope_kind} · {shortId(report.report_id)}
+                      </span>
                       <p>{report.reconciliation_summary}</p>
                     </div>
                     <div className="chat-ops-card__actions">
@@ -851,7 +958,9 @@ export function ChatRunWorkspaceTab({
                         variant={selectedReportId === report.report_id ? "primary" : "secondary"}
                         onPress={() => setSelectedReportId(report.report_id)}
                       >
-                        {reportBusy && selectedReportId === report.report_id ? "Loading..." : "Inspect"}
+                        {reportBusy && selectedReportId === report.report_id
+                          ? "Loading..."
+                          : "Inspect"}
                       </ActionButton>
                     </div>
                   </article>
@@ -863,14 +972,23 @@ export function ChatRunWorkspaceTab({
                     <KeyValueList
                       items={[
                         { label: "Report", value: shortId(reportEnvelope.detail.report.report_id) },
-                        { label: "Checkpoint", value: shortId(reportEnvelope.detail.report.checkpoint_id) },
+                        {
+                          label: "Checkpoint",
+                          value: shortId(reportEnvelope.detail.report.checkpoint_id),
+                        },
                         { label: "Scope", value: reportEnvelope.detail.report.scope_kind },
                         { label: "Result", value: reportEnvelope.detail.report.result_state },
-                        { label: "Restored paths", value: reportEnvelope.detail.restored_paths.length },
+                        {
+                          label: "Restored paths",
+                          value: reportEnvelope.detail.restored_paths.length,
+                        },
                         { label: "Failed paths", value: reportEnvelope.detail.failed_paths.length },
                       ]}
                     />
-                    <InlineNotice title="Reconciliation summary" tone={reportEnvelope.detail.failed_paths.length > 0 ? "warning" : "success"}>
+                    <InlineNotice
+                      title="Reconciliation summary"
+                      tone={reportEnvelope.detail.failed_paths.length > 0 ? "warning" : "success"}
+                    >
                       <p>{reportEnvelope.detail.report.reconciliation_summary}</p>
                       <p>{reportEnvelope.detail.report.reconciliation_prompt}</p>
                     </InlineNotice>
@@ -1107,7 +1225,8 @@ function ArtifactPreview({
 
   if (detail.text_content !== undefined) {
     const looksLikeJson =
-      detail.artifact.content_type === "application/json" || basename(detail.artifact.path).endsWith(".json");
+      detail.artifact.content_type === "application/json" ||
+      basename(detail.artifact.path).endsWith(".json");
     return (
       <div className="workspace-stack">
         {looksLikeJson ? (
@@ -1132,7 +1251,8 @@ function ArtifactPreview({
       <div className="workspace-stack">
         <pre className="workspace-code-panel">{detail.artifact.preview_text}</pre>
         <InlineNotice title="Metadata fallback" tone="default">
-          This artifact does not publish safe inline bytes, so only the recorded preview text is shown.
+          This artifact does not publish safe inline bytes, so only the recorded preview text is
+          shown.
         </InlineNotice>
       </div>
     );
@@ -1140,7 +1260,8 @@ function ArtifactPreview({
 
   return (
     <InlineNotice title="Binary artifact" tone="default">
-      Binary artifacts stay metadata-only unless the workspace API marks them safe for inline preview.
+      Binary artifacts stay metadata-only unless the workspace API marks them safe for inline
+      preview.
     </InlineNotice>
   );
 }

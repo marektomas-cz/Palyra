@@ -231,7 +231,9 @@ export function InventorySection({ app }: InventorySectionProps) {
                     <dl className="workspace-key-value-grid">
                       <div>
                         <dt>Checkpoints</dt>
-                        <dd>{inventory.selectedDetail.workspace_activity.summary.checkpoint_count}</dd>
+                        <dd>
+                          {inventory.selectedDetail.workspace_activity.summary.checkpoint_count}
+                        </dd>
                       </div>
                       <div>
                         <dt>Restore reports</dt>
@@ -303,7 +305,8 @@ export function InventorySection({ app }: InventorySectionProps) {
                       />
                     )}
 
-                    {inventory.selectedDetail.workspace_activity.recent_restore_reports.length > 0 ? (
+                    {inventory.selectedDetail.workspace_activity.recent_restore_reports.length >
+                    0 ? (
                       <WorkspaceTable
                         ariaLabel="Recent workspace restore reports"
                         columns={["Report", "Created", "Result", "Scope"]}

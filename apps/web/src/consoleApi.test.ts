@@ -2021,7 +2021,9 @@ describe("ConsoleApiClient", () => {
     expect(new Headers(calls[6]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
     expect(requestBody(calls[6]?.init?.body)).toContain('"session_label":"Checkpoint restore"');
 
-    expect(requestUrl(calls[7]?.input)).toBe("/console/v1/chat/runs/run-1/workspace?q=notes&limit=5");
+    expect(requestUrl(calls[7]?.input)).toBe(
+      "/console/v1/chat/runs/run-1/workspace?q=notes&limit=5",
+    );
     expect(new Headers(calls[7]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
 
     expect(requestUrl(calls[8]?.input)).toBe(

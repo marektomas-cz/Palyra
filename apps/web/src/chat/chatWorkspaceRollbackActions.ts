@@ -11,9 +11,7 @@ import type { DetailPanelState } from "./ChatInspectorColumn";
 import type { RunDrawerTab } from "./ChatRunDrawer";
 import type { ComposerAttachment, TranscriptEntry } from "./chatShared";
 
-type SetAttachments = Dispatch<
-  SetStateAction<ComposerAttachment[]>
->;
+type SetAttachments = Dispatch<SetStateAction<ComposerAttachment[]>>;
 
 type AppendLocalEntry = (entry: Omit<TranscriptEntry, "id" | "created_at_unix_ms">) => void;
 
@@ -21,7 +19,10 @@ type OpenRunDetails = (runId: string, tab?: RunDrawerTab) => void;
 
 export async function reconcileWorkspaceRestoreAction(args: {
   response: WorkspaceRestoreResponseEnvelope;
-  upsertSession: (session: WorkspaceRestoreResponseEnvelope["session"], options?: { select?: boolean }) => void;
+  upsertSession: (
+    session: WorkspaceRestoreResponseEnvelope["session"],
+    options?: { select?: boolean },
+  ) => void;
   clearTranscriptState: () => void;
   setAttachments: SetAttachments;
   setDetailPanel: (next: DetailPanelState | null) => void;
@@ -48,10 +49,7 @@ export async function reconcileWorkspaceRestoreAction(args: {
   clearTranscriptState();
   setAttachments([]);
   setDetailPanel(null);
-  await Promise.all([
-    refreshSessions(),
-    refreshSessionTranscript(response.session.session_id),
-  ]);
+  await Promise.all([refreshSessions(), refreshSessionTranscript(response.session.session_id)]);
   appendLocalEntry({
     kind: "status",
     session_id: response.session.session_id,
@@ -112,7 +110,7 @@ export async function openWorkspaceRollbackInspectorAction(args: {
   const targetRunId =
     (requested.length > 0 && sessionRuns.some((run) => run.run_id === requested)
       ? requested
-      : actionableRunId ?? selectedLastRunId ?? knownRunIds[0]) ?? null;
+      : (actionableRunId ?? selectedLastRunId ?? knownRunIds[0])) ?? null;
   if (targetRunId === null) {
     setError("No run is available for workspace rollback.");
     return;
