@@ -34,6 +34,24 @@ pub(crate) struct WorkspacePatchToolRequest<'a> {
     pub(crate) input_json: &'a [u8],
 }
 
+impl<'a> WorkspacePatchToolRequest<'a> {
+    pub(crate) fn from_runtime_context(
+        context: crate::gateway::ToolRuntimeExecutionContext<'a>,
+        proposal_id: &'a str,
+        input_json: &'a [u8],
+    ) -> Self {
+        Self {
+            principal: context.principal,
+            device_id: context.device_id,
+            channel: context.channel,
+            session_id: context.session_id,
+            run_id: context.run_id,
+            proposal_id,
+            input_json,
+        }
+    }
+}
+
 pub(crate) async fn execute_workspace_patch_tool(
     runtime_state: &Arc<GatewayRuntimeState>,
     request: WorkspacePatchToolRequest<'_>,

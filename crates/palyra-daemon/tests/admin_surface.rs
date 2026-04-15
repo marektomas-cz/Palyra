@@ -2180,20 +2180,8 @@ fn admin_channel_queue_pause_resume_preserves_enabled_connector_state() -> Resul
         .context("failed to build HTTP client")?;
     let connector_id = "echo:default";
 
-    let paused = client
-        .post(format!(
-            "http://127.0.0.1:{admin_port}/admin/v1/channels/{connector_id}/operations/queue/pause"
-        ))
-        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
-        .header("x-palyra-principal", "user:ops")
-        .header("x-palyra-device-id", DEVICE_ID)
-        .header("x-palyra-channel", "cli")
-        .send()
-        .context("failed to call admin queue pause endpoint")?
-        .error_for_status()
-        .context("admin queue pause endpoint returned non-success status")?
-        .json::<Value>()
-        .context("failed to parse admin queue pause response json")?;
+    let paused =
+        post_admin_channel_operation_json(&client, admin_port, connector_id, "queue/pause")?;
     assert_eq!(
         paused.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
         Some("queue_pause"),
@@ -2223,20 +2211,8 @@ fn admin_channel_queue_pause_resume_preserves_enabled_connector_state() -> Resul
         "queue pause should expose the operator reason"
     );
 
-    let resumed = client
-        .post(format!(
-            "http://127.0.0.1:{admin_port}/admin/v1/channels/{connector_id}/operations/queue/resume"
-        ))
-        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
-        .header("x-palyra-principal", "user:ops")
-        .header("x-palyra-device-id", DEVICE_ID)
-        .header("x-palyra-channel", "cli")
-        .send()
-        .context("failed to call admin queue resume endpoint")?
-        .error_for_status()
-        .context("admin queue resume endpoint returned non-success status")?
-        .json::<Value>()
-        .context("failed to parse admin queue resume response json")?;
+    let resumed =
+        post_admin_channel_operation_json(&client, admin_port, connector_id, "queue/resume")?;
     assert_eq!(
         resumed.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
         Some("queue_resume"),
@@ -2408,20 +2384,12 @@ fn admin_channel_health_refresh_and_dead_letter_recovery_publish_operator_state(
         "body-based logs query should resolve the same dead-letter record as the legacy path route"
     );
 
-    let paused = client
-        .post(format!(
-            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/queue/pause"
-        ))
-        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
-        .header("x-palyra-principal", "user:ops")
-        .header("x-palyra-device-id", DEVICE_ID)
-        .header("x-palyra-channel", "cli")
-        .send()
-        .context("failed to call admin queue pause endpoint before dead-letter replay")?
-        .error_for_status()
-        .context("admin queue pause endpoint returned non-success status before dead-letter replay")?
-        .json::<Value>()
-        .context("failed to parse admin queue pause response json before dead-letter replay")?;
+    let paused = post_admin_channel_operation_json(
+        &client,
+        admin_port,
+        discord_connector_id,
+        "queue/pause",
+    )?;
     assert_eq!(
         paused
             .get("operations")
@@ -2432,20 +2400,12 @@ fn admin_channel_health_refresh_and_dead_letter_recovery_publish_operator_state(
         "queue pause should hold the replayed item in outbox until the explicit forced drain"
     );
 
-    let replayed = client
-        .post(format!(
-            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/dead-letters/{dead_letter_id}/replay"
-        ))
-        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
-        .header("x-palyra-principal", "user:ops")
-        .header("x-palyra-device-id", DEVICE_ID)
-        .header("x-palyra-channel", "cli")
-        .send()
-        .context("failed to call admin dead-letter replay endpoint")?
-        .error_for_status()
-        .context("admin dead-letter replay endpoint returned non-success status")?
-        .json::<Value>()
-        .context("failed to parse admin dead-letter replay response json")?;
+    let replayed = post_admin_channel_operation_json(
+        &client,
+        admin_port,
+        discord_connector_id,
+        format!("dead-letters/{dead_letter_id}/replay"),
+    )?;
     assert_eq!(
         replayed.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
         Some("dead_letter_replay"),
@@ -2461,20 +2421,12 @@ fn admin_channel_health_refresh_and_dead_letter_recovery_publish_operator_state(
         "replay should remove the item from dead letters"
     );
 
-    let drained = client
-        .post(format!(
-            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/queue/drain"
-        ))
-        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
-        .header("x-palyra-principal", "user:ops")
-        .header("x-palyra-device-id", DEVICE_ID)
-        .header("x-palyra-channel", "cli")
-        .send()
-        .context("failed to call admin queue drain endpoint")?
-        .error_for_status()
-        .context("admin queue drain endpoint returned non-success status")?
-        .json::<Value>()
-        .context("failed to parse admin queue drain response json")?;
+    let drained = post_admin_channel_operation_json(
+        &client,
+        admin_port,
+        discord_connector_id,
+        "queue/drain",
+    )?;
     assert_eq!(
         drained.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
         Some("queue_drain"),
@@ -2512,20 +2464,12 @@ fn admin_channel_health_refresh_and_dead_letter_recovery_publish_operator_state(
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow::anyhow!("expected forced drain to recreate a dead-letter entry"))?;
 
-    let discarded = client
-        .post(format!(
-            "http://127.0.0.1:{admin_port}/admin/v1/channels/{discord_connector_id}/operations/dead-letters/{dead_letter_id}/discard"
-        ))
-        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
-        .header("x-palyra-principal", "user:ops")
-        .header("x-palyra-device-id", DEVICE_ID)
-        .header("x-palyra-channel", "cli")
-        .send()
-        .context("failed to call admin dead-letter discard endpoint")?
-        .error_for_status()
-        .context("admin dead-letter discard endpoint returned non-success status")?
-        .json::<Value>()
-        .context("failed to parse admin dead-letter discard response json")?;
+    let discarded = post_admin_channel_operation_json(
+        &client,
+        admin_port,
+        discord_connector_id,
+        format!("dead-letters/{dead_letter_id}/discard"),
+    )?;
     assert_eq!(
         discarded.get("action").and_then(|value| value.get("type")).and_then(Value::as_str),
         Some("dead_letter_discard"),
@@ -4150,6 +4094,31 @@ fn login_console_session(
         .ok_or_else(|| anyhow::anyhow!("console login response missing csrf_token"))?
         .to_owned();
     Ok((cookie, csrf_token))
+}
+
+fn post_admin_channel_operation_json(
+    client: &Client,
+    admin_port: u16,
+    connector_id: &str,
+    operation_path: impl AsRef<str>,
+) -> Result<Value> {
+    let operation_path = operation_path.as_ref();
+    client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/channels/{connector_id}/operations/{operation_path}"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .with_context(|| format!("failed to call admin channel operation endpoint: {operation_path}"))?
+        .error_for_status()
+        .with_context(|| {
+            format!("admin channel operation endpoint returned non-success status: {operation_path}")
+        })?
+        .json::<Value>()
+        .with_context(|| format!("failed to parse admin channel operation response json: {operation_path}"))
 }
 
 fn assert_admin_console_security_headers(headers: &reqwest::header::HeaderMap) -> Result<()> {

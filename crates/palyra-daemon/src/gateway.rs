@@ -508,15 +508,11 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
     } else if tool_name == WORKSPACE_PATCH_TOOL_NAME {
         crate::application::tool_runtime::workspace_patch::execute_workspace_patch_tool(
             runtime_state,
-            crate::application::tool_runtime::workspace_patch::WorkspacePatchToolRequest {
-                principal: context.principal,
-                device_id: context.device_id,
-                channel: context.channel,
-                session_id: context.session_id,
-                run_id: context.run_id,
+            crate::application::tool_runtime::workspace_patch::WorkspacePatchToolRequest::from_runtime_context(
+                context,
                 proposal_id,
                 input_json,
-            },
+            ),
         )
         .await
     } else {

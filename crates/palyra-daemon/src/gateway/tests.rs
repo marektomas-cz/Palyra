@@ -2919,6 +2919,21 @@ async fn session_compaction_apply_rolls_back_workspace_writes_on_partial_failure
     assert!(checkpoints.is_empty(), "no checkpoint should persist after a failed write phase");
 }
 
+fn workspace_patch_test_request<'a>(
+    proposal_id: &'a str,
+    input_json: &'a [u8],
+) -> crate::application::tool_runtime::workspace_patch::WorkspacePatchToolRequest<'a> {
+    crate::application::tool_runtime::workspace_patch::WorkspacePatchToolRequest {
+        principal: "user:ops",
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+        channel: Some("cli"),
+        session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBA",
+        proposal_id,
+        input_json,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn workspace_patch_tool_applies_patch_and_emits_attested_hashes() {
     let state = build_test_runtime_state(false);
@@ -2945,15 +2960,7 @@ async fn workspace_patch_tool_applies_patch_and_emits_attested_hashes() {
         serde_json::to_vec(&json!({ "patch": patch })).expect("patch input should serialize");
     let outcome = execute_workspace_patch_tool(
         &state,
-        crate::application::tool_runtime::workspace_patch::WorkspacePatchToolRequest {
-            principal: "user:ops",
-            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAA",
-            channel: Some("cli"),
-            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBA",
-            proposal_id: "01ARZ3NDEKTSV4RRFFQ69G5FB1",
-            input_json: input_json.as_slice(),
-        },
+        workspace_patch_test_request("01ARZ3NDEKTSV4RRFFQ69G5FB1", input_json.as_slice()),
     )
     .await;
     assert!(outcome.success, "patch tool should apply valid patch");
@@ -3010,15 +3017,7 @@ async fn workspace_patch_tool_rejects_oversized_input_payload() {
     let oversized = vec![b'a'; super::MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES + 1];
     let outcome = execute_workspace_patch_tool(
         &state,
-        crate::application::tool_runtime::workspace_patch::WorkspacePatchToolRequest {
-            principal: "user:ops",
-            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAA",
-            channel: Some("cli"),
-            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBA",
-            proposal_id: "01ARZ3NDEKTSV4RRFFQ69G5FB2",
-            input_json: oversized.as_slice(),
-        },
+        workspace_patch_test_request("01ARZ3NDEKTSV4RRFFQ69G5FB2", oversized.as_slice()),
     )
     .await;
     assert!(!outcome.success, "oversized payload must be rejected");
