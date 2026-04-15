@@ -415,6 +415,30 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(console::sessions::console_session_detail_handler),
         )
         .route(
+            "/console/v1/sessions/{session_id}/project-context",
+            get(console::sessions::console_session_project_context_handler),
+        )
+        .route(
+            "/console/v1/sessions/{session_id}/project-context/refresh",
+            post(console::sessions::console_session_project_context_refresh_handler),
+        )
+        .route(
+            "/console/v1/sessions/{session_id}/project-context/entries/{entry_id}/disable",
+            post(console::sessions::console_session_project_context_disable_handler),
+        )
+        .route(
+            "/console/v1/sessions/{session_id}/project-context/entries/{entry_id}/enable",
+            post(console::sessions::console_session_project_context_enable_handler),
+        )
+        .route(
+            "/console/v1/sessions/{session_id}/project-context/entries/{entry_id}/approve",
+            post(console::sessions::console_session_project_context_approve_handler),
+        )
+        .route(
+            "/console/v1/sessions/{session_id}/project-context/scaffold",
+            post(console::sessions::console_session_project_context_scaffold_handler),
+        )
+        .route(
             "/console/v1/sessions/{session_id}/quick-controls",
             post(console::sessions::console_session_quick_controls_update_handler),
         )
@@ -515,6 +539,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/console/v1/chat/sessions/{session_id}/references/preview",
             post(console::chat::console_chat_context_reference_preview_handler),
+        )
+        .route(
+            "/console/v1/chat/sessions/{session_id}/project-context/preview",
+            post(console::chat::console_chat_project_context_preview_handler),
         )
         .route(
             "/console/v1/chat/delegation/catalog",

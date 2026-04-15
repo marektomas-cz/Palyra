@@ -1386,6 +1386,12 @@ struct ConsoleChatContextReferencePreviewRequest {
     text: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct ConsoleChatProjectContextPreviewRequest {
+    #[serde(default)]
+    text: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ConsoleChatRunEventsQuery {
     after_seq: Option<i64>,
@@ -1407,6 +1413,14 @@ struct ConsoleChatRetryRequest {
 struct ConsoleChatBranchRequest {
     #[serde(default)]
     session_label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ConsoleSessionProjectContextScaffoldRequest {
+    #[serde(default)]
+    project_name: Option<String>,
+    #[serde(default)]
+    force: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]

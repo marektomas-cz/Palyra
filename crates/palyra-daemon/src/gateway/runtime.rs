@@ -20,10 +20,12 @@ use crate::journal::{
     OrchestratorSessionLineageUpdateRequest, OrchestratorSessionPinCreateRequest,
     OrchestratorSessionPinRecord, OrchestratorSessionRecord, OrchestratorSessionTitleUpdateRequest,
     OrchestratorSessionTranscriptRecord, OrchestratorUsageQuery, OrchestratorUsageRunRecord,
-    OrchestratorUsageSessionRecord, OrchestratorUsageSummary, WorkspaceBootstrapOutcome,
-    WorkspaceBootstrapRequest, WorkspaceDocumentDeleteRequest, WorkspaceDocumentListFilter,
-    WorkspaceDocumentMoveRequest, WorkspaceDocumentRecord, WorkspaceDocumentVersionRecord,
-    WorkspaceDocumentWriteRequest, WorkspaceSearchHit, WorkspaceSearchRequest,
+    OrchestratorUsageSessionRecord, OrchestratorUsageSummary,
+    SessionProjectContextStateCopyRequest, SessionProjectContextStateRecord,
+    SessionProjectContextStateUpsertRequest, WorkspaceBootstrapOutcome, WorkspaceBootstrapRequest,
+    WorkspaceDocumentDeleteRequest, WorkspaceDocumentListFilter, WorkspaceDocumentMoveRequest,
+    WorkspaceDocumentRecord, WorkspaceDocumentVersionRecord, WorkspaceDocumentWriteRequest,
+    WorkspaceSearchHit, WorkspaceSearchRequest,
 };
 use crate::self_healing::{
     IncidentDomain, RemediationAttemptStatus, RuntimeIncidentHistoryEntry,
@@ -2520,6 +2522,75 @@ impl GatewayRuntimeState {
         tokio::task::spawn_blocking(move || state.orchestrator_session_by_id_blocking(&session_id))
             .await
             .map_err(|_| Status::internal("orchestrator session lookup worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn session_project_context_state_blocking(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionProjectContextStateRecord>, Status> {
+        self.journal_store.session_project_context_state(session_id).map_err(|error| {
+            map_orchestrator_store_error("load session project context state", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn session_project_context_state(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<Option<SessionProjectContextStateRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.session_project_context_state_blocking(session_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("session project context state worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn upsert_session_project_context_state_blocking(
+        &self,
+        request: &SessionProjectContextStateUpsertRequest,
+    ) -> Result<SessionProjectContextStateRecord, Status> {
+        self.journal_store.upsert_session_project_context_state(request).map_err(|error| {
+            map_orchestrator_store_error("upsert session project context state", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn upsert_session_project_context_state(
+        self: &Arc<Self>,
+        request: SessionProjectContextStateUpsertRequest,
+    ) -> Result<SessionProjectContextStateRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.upsert_session_project_context_state_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("session project context upsert worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn copy_session_project_context_state_blocking(
+        &self,
+        request: &SessionProjectContextStateCopyRequest,
+    ) -> Result<Option<SessionProjectContextStateRecord>, Status> {
+        self.journal_store.copy_session_project_context_state(request).map_err(|error| {
+            map_orchestrator_store_error("copy session project context state", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn copy_session_project_context_state(
+        self: &Arc<Self>,
+        request: SessionProjectContextStateCopyRequest,
+    ) -> Result<Option<SessionProjectContextStateRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.copy_session_project_context_state_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("session project context copy worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

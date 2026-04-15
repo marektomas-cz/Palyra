@@ -184,6 +184,15 @@ pub(crate) async fn console_chat_message_stream_handler(
         attachments.as_slice(),
     )
     .map_err(|response| *response)?;
+    let parameter_delta = build_console_project_context_parameter_delta(
+        &state,
+        &session.context,
+        session_id.as_str(),
+        text.as_str(),
+        parameter_delta,
+    )
+    .await
+    .map_err(runtime_status_response)?;
     let parameter_delta = build_console_context_reference_parameter_delta(
         &state,
         &session.context,
@@ -438,6 +447,37 @@ pub(crate) async fn console_chat_context_reference_preview_handler(
         "total_estimated_tokens": preview.total_estimated_tokens,
         "warnings": preview.warnings,
         "errors": preview.errors,
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_chat_project_context_preview_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleChatProjectContextPreviewRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let preview = crate::application::project_context::preview_project_context(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+        payload.text.trim(),
+        false,
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "preview": preview.clone(),
+        "prompt_preview": crate::application::project_context::render_project_context_prompt(
+            &preview,
+            "{{user_prompt}}",
+        ),
         "contract": contract_descriptor(),
     })))
 }
@@ -1178,6 +1218,13 @@ pub(crate) async fn console_chat_branch_handler(
         })
         .await
         .map_err(runtime_status_response)?;
+    crate::application::project_context::copy_project_context_state(
+        &state.runtime,
+        source_session.session_id.as_str(),
+        branched.session.session_id.as_str(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
     let branch_session = load_console_chat_session(
         &state,
         &session.context,
@@ -1498,6 +1545,13 @@ pub(crate) async fn console_chat_checkpoint_restore_handler(
         })
         .await
         .map_err(runtime_status_response)?;
+    crate::application::project_context::copy_project_context_state(
+        &state.runtime,
+        source_session.session_id.as_str(),
+        restored.session.session_id.as_str(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
     let restored_session = load_console_chat_session(
         &state,
         &session.context,
@@ -2322,6 +2376,37 @@ fn build_console_attachment_parameter_delta(
                 "chunks": selected_chunks,
             }),
         );
+    }
+    Ok(Some(next_delta))
+}
+
+async fn build_console_project_context_parameter_delta(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    session_id: &str,
+    text: &str,
+    parameter_delta: Option<Value>,
+) -> Result<Option<Value>, tonic::Status> {
+    let preview = crate::application::project_context::preview_project_context(
+        &state.runtime,
+        context,
+        session_id,
+        text,
+        true,
+    )
+    .await?;
+    if preview.entries.is_empty() && preview.warnings.is_empty() {
+        return Ok(parameter_delta);
+    }
+    let mut next_delta = parameter_delta.unwrap_or_else(|| json!({}));
+    if !next_delta.is_object() {
+        next_delta = json!({ "prior_parameter_delta": next_delta });
+    }
+    if let Some(object) = next_delta.as_object_mut() {
+        let preview_value = serde_json::to_value(&preview).map_err(|error| {
+            tonic::Status::internal(format!("failed to encode project context preview: {error}"))
+        })?;
+        object.insert("project_context".to_owned(), preview_value);
     }
     Ok(Some(next_delta))
 }

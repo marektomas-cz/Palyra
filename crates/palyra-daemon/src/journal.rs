@@ -1181,6 +1181,46 @@ pub struct OrchestratorSessionCleanupRequest {
     pub channel: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProjectContextStateUpsertRequest {
+    pub session_id: String,
+    pub focus_paths: Vec<String>,
+    pub disabled_entry_ids: Vec<String>,
+    pub approved_entry_ids: Vec<String>,
+    pub last_refreshed_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProjectContextStateCopyRequest {
+    pub source_session_id: String,
+    pub target_session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionProjectContextStateRecord {
+    pub session_id: String,
+    pub focus_paths: Vec<String>,
+    pub disabled_entry_ids: Vec<String>,
+    pub approved_entry_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refreshed_at_unix_ms: Option<i64>,
+    pub updated_at_unix_ms: i64,
+}
+
+impl SessionProjectContextStateRecord {
+    #[must_use]
+    pub fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            focus_paths: Vec::new(),
+            disabled_entry_ids: Vec::new(),
+            approved_entry_ids: Vec::new(),
+            last_refreshed_at_unix_ms: None,
+            updated_at_unix_ms: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OrchestratorSessionRecord {
     pub session_id: String,
@@ -3096,6 +3136,21 @@ const MIGRATIONS: &[Migration] = &[
                 ON orchestrator_sessions(model_profile_override, updated_at_unix_ms DESC);
         "#,
     },
+    Migration {
+        version: 23,
+        name: "session_project_context_state_phase5",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS session_project_context_state (
+                session_ulid TEXT PRIMARY KEY,
+                focus_paths_json TEXT NOT NULL DEFAULT '[]',
+                disabled_entry_ids_json TEXT NOT NULL DEFAULT '[]',
+                approved_entry_ids_json TEXT NOT NULL DEFAULT '[]',
+                last_refreshed_at_unix_ms INTEGER,
+                updated_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(session_ulid) REFERENCES orchestrator_sessions(session_ulid) ON DELETE CASCADE
+            );
+        "#,
+    },
 ];
 
 fn serialize_json_field<T: Serialize>(
@@ -3722,6 +3777,68 @@ impl JournalStore {
         load_orchestrator_session_by_id(&guard, session_id)?
             .map(|session| hydrate_orchestrator_session(&guard, session, None))
             .transpose()
+    }
+
+    pub fn session_project_context_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionProjectContextStateRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_session_project_context_state(&guard, session_id)
+    }
+
+    pub fn upsert_session_project_context_state(
+        &self,
+        request: &SessionProjectContextStateUpsertRequest,
+    ) -> Result<SessionProjectContextStateRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        guard.execute(
+            r#"
+                INSERT INTO session_project_context_state (
+                    session_ulid,
+                    focus_paths_json,
+                    disabled_entry_ids_json,
+                    approved_entry_ids_json,
+                    last_refreshed_at_unix_ms,
+                    updated_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(session_ulid) DO UPDATE SET
+                    focus_paths_json = excluded.focus_paths_json,
+                    disabled_entry_ids_json = excluded.disabled_entry_ids_json,
+                    approved_entry_ids_json = excluded.approved_entry_ids_json,
+                    last_refreshed_at_unix_ms = excluded.last_refreshed_at_unix_ms,
+                    updated_at_unix_ms = excluded.updated_at_unix_ms
+            "#,
+            params![
+                request.session_id,
+                serde_json::to_string(&request.focus_paths)?,
+                serde_json::to_string(&request.disabled_entry_ids)?,
+                serde_json::to_string(&request.approved_entry_ids)?,
+                request.last_refreshed_at_unix_ms,
+                now,
+            ],
+        )?;
+        load_session_project_context_state(&guard, request.session_id.as_str())?
+            .ok_or_else(|| JournalError::SessionNotFound { selector: request.session_id.clone() })
+    }
+
+    pub fn copy_session_project_context_state(
+        &self,
+        request: &SessionProjectContextStateCopyRequest,
+    ) -> Result<Option<SessionProjectContextStateRecord>, JournalError> {
+        let source = self.session_project_context_state(request.source_session_id.as_str())?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        self.upsert_session_project_context_state(&SessionProjectContextStateUpsertRequest {
+            session_id: request.target_session_id.clone(),
+            focus_paths: source.focus_paths,
+            disabled_entry_ids: source.disabled_entry_ids,
+            approved_entry_ids: source.approved_entry_ids,
+            last_refreshed_at_unix_ms: source.last_refreshed_at_unix_ms,
+        })
+        .map(Some)
     }
 
     pub fn update_orchestrator_session_quick_controls(
@@ -9501,6 +9618,42 @@ fn map_orchestrator_session_row(
         branch_origin_run_id: row.get(23)?,
         last_run_state: None,
     })
+}
+
+fn load_session_project_context_state(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<SessionProjectContextStateRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                session_ulid,
+                focus_paths_json,
+                disabled_entry_ids_json,
+                approved_entry_ids_json,
+                last_refreshed_at_unix_ms,
+                updated_at_unix_ms
+            FROM session_project_context_state
+            WHERE session_ulid = ?1
+            LIMIT 1
+        "#,
+    )?;
+    statement
+        .query_row(params![session_id], |row| {
+            Ok(SessionProjectContextStateRecord {
+                session_id: row.get(0)?,
+                focus_paths: serde_json::from_str(row.get::<_, String>(1)?.as_str())
+                    .unwrap_or_default(),
+                disabled_entry_ids: serde_json::from_str(row.get::<_, String>(2)?.as_str())
+                    .unwrap_or_default(),
+                approved_entry_ids: serde_json::from_str(row.get::<_, String>(3)?.as_str())
+                    .unwrap_or_default(),
+                last_refreshed_at_unix_ms: row.get(4)?,
+                updated_at_unix_ms: row.get(5)?,
+            })
+        })
+        .optional()
+        .map_err(Into::into)
 }
 
 fn load_orchestrator_session_by_id(

@@ -11,6 +11,7 @@ use crate::{
         render_context_reference_prompt, ContextReferencePreviewEnvelope,
     },
     application::learning::render_preference_prompt_context,
+    application::project_context::{render_project_context_prompt, ProjectContextPreviewEnvelope},
     application::service_authorization::authorize_memory_action,
     application::session_compaction::{
         apply_session_compaction, preview_session_compaction, render_compaction_prompt_block,
@@ -94,6 +95,8 @@ struct ParameterDeltaEnvelope {
     attachment_recall: Option<AttachmentRecallSelection>,
     #[serde(default)]
     context_references: Option<ContextReferencePreviewEnvelope>,
+    #[serde(default)]
+    project_context: Option<ProjectContextPreviewEnvelope>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -378,6 +381,62 @@ fn parse_context_reference_preview(
     serde_json::from_str::<ParameterDeltaEnvelope>(raw)
         .ok()
         .and_then(|value| value.context_references)
+}
+
+fn parse_project_context_preview(
+    parameter_delta_json: Option<&str>,
+) -> Option<ProjectContextPreviewEnvelope> {
+    let raw = parameter_delta_json?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<ParameterDeltaEnvelope>(raw).ok().and_then(|value| value.project_context)
+}
+
+#[allow(clippy::result_large_err)]
+async fn build_project_context_prompt(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    parameter_delta_json: Option<&str>,
+    fallback_prompt: &str,
+) -> Result<Option<String>, Status> {
+    let Some(preview) = parse_project_context_preview(parameter_delta_json) else {
+        return Ok(None);
+    };
+    if preview.entries.iter().all(|entry| !entry.active) {
+        return Ok(None);
+    }
+
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "project_context".to_owned(),
+            payload_json: json!({
+                "generated_at_unix_ms": preview.generated_at_unix_ms,
+                "warnings": preview.warnings,
+                "focus_paths": preview.focus_paths,
+                "active_estimated_tokens": preview.active_estimated_tokens,
+                "entries": preview.entries.iter().map(|entry| {
+                    json!({
+                        "entry_id": entry.entry_id,
+                        "order": entry.order,
+                        "path": entry.path,
+                        "source_kind": entry.source_kind,
+                        "status": entry.status,
+                        "content_hash": entry.content_hash,
+                        "warnings": entry.warnings,
+                        "risk": entry.risk,
+                    })
+                }).collect::<Vec<_>>(),
+            })
+            .to_string(),
+        })
+        .await?;
+    *tape_seq = tape_seq.saturating_add(1);
+
+    Ok(render_project_context_prompt(&preview, fallback_prompt))
 }
 
 #[allow(clippy::result_large_err)]
@@ -750,7 +809,7 @@ pub(crate) async fn prepare_model_provider_input(
         input_with_recent_context.as_str(),
     )
     .await?;
-    let input_with_attachment_recall = match build_attachment_recall_prompt(
+    let input_with_project_context = match build_project_context_prompt(
         runtime_state,
         run_id,
         tape_seq,
@@ -761,6 +820,18 @@ pub(crate) async fn prepare_model_provider_input(
     {
         Some(value) => value,
         None => input_with_compaction,
+    };
+    let input_with_attachment_recall = match build_attachment_recall_prompt(
+        runtime_state,
+        run_id,
+        tape_seq,
+        parameter_delta_json,
+        input_with_project_context.as_str(),
+    )
+    .await?
+    {
+        Some(value) => value,
+        None => input_with_project_context,
     };
     if let Some(provider_input_text) = build_explicit_recall_prompt(
         runtime_state,

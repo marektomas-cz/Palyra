@@ -8,6 +8,7 @@ mod ids;
 mod net;
 pub mod netguard;
 pub mod process_runner_input;
+pub mod project_context;
 pub mod redaction;
 mod webhook;
 #[cfg(windows)]

@@ -84,6 +84,16 @@ pub(crate) struct SessionCatalogMutationEnvelope {
     action: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct SessionProjectContextEnvelope {
+    contract: control_plane::ContractDescriptor,
+    session: SessionCatalogRecord,
+    preview: crate::application::project_context::ProjectContextPreviewEnvelope,
+    action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scaffold: Option<crate::application::project_context::ProjectContextScaffoldOutcome>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConsoleSessionQuickControlsUpdateRequest {
     #[serde(default)]
@@ -210,6 +220,8 @@ struct SessionCatalogRecapRecord {
     touched_files: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     active_context_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_context: Option<SessionProjectContextRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     recent_artifacts: Vec<SessionCatalogArtifactRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -252,10 +264,57 @@ struct SessionCatalogToggleControlRecord {
     override_active: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SessionProjectContextRecord {
+    generated_at_unix_ms: i64,
+    active_entries: usize,
+    blocked_entries: usize,
+    approval_required_entries: usize,
+    disabled_entries: usize,
+    active_estimated_tokens: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    focus_paths: Vec<SessionProjectContextFocusRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    entries: Vec<SessionProjectContextEntryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionProjectContextFocusRecord {
+    path: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionProjectContextEntryRecord {
+    entry_id: String,
+    order: usize,
+    path: String,
+    source_kind: String,
+    source_label: String,
+    precedence_label: String,
+    depth: usize,
+    root: bool,
+    active: bool,
+    disabled: bool,
+    approved: bool,
+    status: String,
+    content_hash: String,
+    loaded_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at_unix_ms: Option<i64>,
+    estimated_tokens: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    discovery_reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+    preview_text: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct SessionWorkspaceSummary {
     touched_files: Vec<String>,
-    active_context_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -268,6 +327,8 @@ struct SessionDetailContext {
 struct SessionCatalogContext {
     pending_approvals_by_session: HashMap<String, usize>,
     workspace_by_session: HashMap<String, SessionWorkspaceSummary>,
+    project_context_by_session:
+        HashMap<String, crate::application::project_context::ProjectContextPreviewEnvelope>,
     family_by_session: HashMap<String, SessionCatalogFamilyRecord>,
     bindings_by_session: HashMap<String, SessionAgentBinding>,
     agents_by_id: HashMap<String, AgentRecord>,
@@ -414,26 +475,215 @@ pub(crate) async fn console_session_detail_handler(
             "session_id must be a canonical ULID",
         ))
     })?;
-    let base_sessions = load_scoped_sessions(
-        &state,
-        session.context.principal.as_str(),
-        session.context.device_id.as_str(),
-        session.context.channel.as_deref(),
-        true,
+    let record = load_session_catalog_record(&state, &session.context, session_id.as_str()).await?;
+    Ok(Json(SessionCatalogDetailEnvelope { contract: contract_descriptor(), session: record }))
+}
+
+pub(crate) async fn console_session_project_context_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionProjectContextEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let _session_record =
+        load_scoped_session(&state, &session.context, session_id.as_str()).await?;
+    let preview = crate::application::project_context::preview_project_context(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+        "",
+        false,
     )
     .await
     .map_err(runtime_status_response)?;
-    let base =
-        base_sessions.iter().find(|record| record.session_id == session_id).cloned().ok_or_else(
-            || runtime_status_response(tonic::Status::not_found("session was not found")),
-        )?;
-    let catalog_context =
-        load_session_catalog_context(&state, &session.context, &base_sessions).await?;
-    let detail_context =
-        load_session_detail_context(&state, &session.context, base.session_id.as_str()).await?;
-    let record =
-        build_session_catalog_record(&state, &catalog_context, base, Some(detail_context)).await?;
-    Ok(Json(SessionCatalogDetailEnvelope { contract: contract_descriptor(), session: record }))
+    let envelope = build_session_project_context_envelope(
+        &state,
+        &session.context,
+        session_id.as_str(),
+        preview,
+        "inspect",
+        None,
+    )
+    .await?;
+    Ok(Json(envelope))
+}
+
+pub(crate) async fn console_session_project_context_refresh_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionProjectContextEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let _session_record =
+        load_scoped_session(&state, &session.context, session_id.as_str()).await?;
+    let preview = crate::application::project_context::refresh_project_context(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let envelope = build_session_project_context_envelope(
+        &state,
+        &session.context,
+        session_id.as_str(),
+        preview,
+        "refresh",
+        None,
+    )
+    .await?;
+    Ok(Json(envelope))
+}
+
+pub(crate) async fn console_session_project_context_disable_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, entry_id)): Path<(String, String)>,
+) -> Result<Json<SessionProjectContextEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let _session_record =
+        load_scoped_session(&state, &session.context, session_id.as_str()).await?;
+    let preview = crate::application::project_context::disable_project_context_entry(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+        entry_id.as_str(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let envelope = build_session_project_context_envelope(
+        &state,
+        &session.context,
+        session_id.as_str(),
+        preview,
+        "disable",
+        None,
+    )
+    .await?;
+    Ok(Json(envelope))
+}
+
+pub(crate) async fn console_session_project_context_enable_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, entry_id)): Path<(String, String)>,
+) -> Result<Json<SessionProjectContextEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let _session_record =
+        load_scoped_session(&state, &session.context, session_id.as_str()).await?;
+    let preview = crate::application::project_context::enable_project_context_entry(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+        entry_id.as_str(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let envelope = build_session_project_context_envelope(
+        &state,
+        &session.context,
+        session_id.as_str(),
+        preview,
+        "enable",
+        None,
+    )
+    .await?;
+    Ok(Json(envelope))
+}
+
+pub(crate) async fn console_session_project_context_approve_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, entry_id)): Path<(String, String)>,
+) -> Result<Json<SessionProjectContextEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let _session_record =
+        load_scoped_session(&state, &session.context, session_id.as_str()).await?;
+    let preview = crate::application::project_context::approve_project_context_entry(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+        entry_id.as_str(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let envelope = build_session_project_context_envelope(
+        &state,
+        &session.context,
+        session_id.as_str(),
+        preview,
+        "approve",
+        None,
+    )
+    .await?;
+    Ok(Json(envelope))
+}
+
+pub(crate) async fn console_session_project_context_scaffold_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ConsoleSessionProjectContextScaffoldRequest>,
+) -> Result<Json<SessionProjectContextEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    validate_canonical_id(session_id.as_str()).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    let _session_record =
+        load_scoped_session(&state, &session.context, session_id.as_str()).await?;
+    let scaffold = crate::application::project_context::scaffold_project_context_file(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+        payload.project_name.as_deref(),
+        payload.force.unwrap_or(false),
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let preview = crate::application::project_context::refresh_project_context(
+        &state.runtime,
+        &session.context,
+        session_id.as_str(),
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let envelope = build_session_project_context_envelope(
+        &state,
+        &session.context,
+        session_id.as_str(),
+        preview,
+        "scaffold",
+        Some(scaffold),
+    )
+    .await?;
+    Ok(Json(envelope))
 }
 
 pub(crate) async fn console_session_archive_handler(
@@ -750,6 +1000,48 @@ async fn load_scoped_session(
     Ok(session)
 }
 
+async fn load_session_catalog_record(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    session_id: &str,
+) -> Result<SessionCatalogRecord, Response> {
+    let base_sessions = load_scoped_sessions(
+        state,
+        context.principal.as_str(),
+        context.device_id.as_str(),
+        context.channel.as_deref(),
+        true,
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    let base =
+        base_sessions.iter().find(|record| record.session_id == session_id).cloned().ok_or_else(
+            || runtime_status_response(tonic::Status::not_found("session was not found")),
+        )?;
+    let catalog_context = load_session_catalog_context(state, context, &base_sessions).await?;
+    let detail_context =
+        load_session_detail_context(state, context, base.session_id.as_str()).await?;
+    build_session_catalog_record(state, &catalog_context, base, Some(detail_context)).await
+}
+
+async fn build_session_project_context_envelope(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    session_id: &str,
+    preview: crate::application::project_context::ProjectContextPreviewEnvelope,
+    action: &'static str,
+    scaffold: Option<crate::application::project_context::ProjectContextScaffoldOutcome>,
+) -> Result<SessionProjectContextEnvelope, Response> {
+    let session = load_session_catalog_record(state, context, session_id).await?;
+    Ok(SessionProjectContextEnvelope {
+        contract: contract_descriptor(),
+        session,
+        preview,
+        action,
+        scaffold,
+    })
+}
+
 async fn load_session_catalog_context(
     state: &AppState,
     context: &gateway::RequestContext,
@@ -764,6 +1056,8 @@ async fn load_session_catalog_context(
     }
 
     let workspace_by_session = load_session_workspace_summaries(state, context).await?;
+    let project_context_by_session =
+        load_session_project_context_summaries(state, context, base_sessions).await?;
     let (bindings_by_session, agents_by_id, default_agent_id) =
         load_session_agent_metadata(state, context).await?;
     let family_by_session = build_session_family_metadata(base_sessions);
@@ -771,6 +1065,7 @@ async fn load_session_catalog_context(
     Ok(SessionCatalogContext {
         pending_approvals_by_session,
         workspace_by_session,
+        project_context_by_session,
         family_by_session,
         bindings_by_session,
         agents_by_id,
@@ -796,41 +1091,49 @@ async fn load_session_workspace_summaries(
         .map_err(runtime_status_response)?;
 
     let mut touched_files = HashMap::<String, HashSet<String>>::new();
-    let mut active_context_files = HashMap::<String, HashSet<String>>::new();
 
     for document in documents {
         let Some(session_id) = document.latest_session_id.clone() else {
             continue;
         };
-        touched_files.entry(session_id.clone()).or_default().insert(document.path.clone());
-        if document.pinned || document.kind.eq_ignore_ascii_case("context") {
-            active_context_files.entry(session_id).or_default().insert(document.path);
-        }
+        touched_files.entry(session_id).or_default().insert(document.path);
     }
 
-    let session_ids =
-        touched_files.keys().chain(active_context_files.keys()).cloned().collect::<HashSet<_>>();
-
-    Ok(session_ids
+    Ok(touched_files
         .into_iter()
-        .map(|session_id| {
-            let touched = sorted_limited_paths(
-                touched_files.remove(session_id.as_str()).unwrap_or_default(),
-                SESSION_CATALOG_RECAP_ITEMS_LIMIT,
-            );
-            let mut active = sorted_limited_paths(
-                active_context_files.remove(session_id.as_str()).unwrap_or_default(),
-                SESSION_CATALOG_RECAP_ITEMS_LIMIT,
-            );
-            if active.is_empty() {
-                active = touched.iter().take(SESSION_CATALOG_RECAP_ITEMS_LIMIT).cloned().collect();
-            }
+        .map(|(session_id, touched)| {
             (
                 session_id,
-                SessionWorkspaceSummary { touched_files: touched, active_context_files: active },
+                SessionWorkspaceSummary {
+                    touched_files: sorted_limited_paths(touched, SESSION_CATALOG_RECAP_ITEMS_LIMIT),
+                },
             )
         })
         .collect())
+}
+
+async fn load_session_project_context_summaries(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    sessions: &[journal::OrchestratorSessionRecord],
+) -> Result<
+    HashMap<String, crate::application::project_context::ProjectContextPreviewEnvelope>,
+    Response,
+> {
+    let mut previews = HashMap::new();
+    for session in sessions {
+        let preview = crate::application::project_context::preview_project_context(
+            &state.runtime,
+            context,
+            session.session_id.as_str(),
+            "",
+            false,
+        )
+        .await
+        .map_err(runtime_status_response)?;
+        previews.insert(session.session_id.clone(), preview);
+    }
+    Ok(previews)
 }
 
 async fn load_session_agent_metadata(
@@ -1062,6 +1365,20 @@ async fn build_session_catalog_record(
             }
         });
     let detail_context = detail_context.unwrap_or_default();
+    let project_context =
+        context.project_context_by_session.get(session.session_id.as_str()).cloned();
+    let active_project_context_paths = project_context
+        .as_ref()
+        .map(|preview| {
+            preview
+                .entries
+                .iter()
+                .filter(|entry| entry.active)
+                .map(|entry| entry.path.clone())
+                .take(SESSION_CATALOG_RECAP_ITEMS_LIMIT)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let quick_controls = build_session_quick_controls(context, &session);
     let agent_id = quick_controls.agent.value.clone();
     let model_profile = quick_controls.model.value.clone();
@@ -1084,7 +1401,8 @@ async fn build_session_catalog_record(
         run_snapshot.as_ref().map(|run| run.state.clone()).or(session.last_run_state.clone());
     let recap = SessionCatalogRecapRecord {
         touched_files: workspace.touched_files.clone(),
-        active_context_files: workspace.active_context_files.clone(),
+        active_context_files: active_project_context_paths.clone(),
+        project_context: project_context.as_ref().map(build_session_project_context_record),
         recent_artifacts: detail_context.recent_artifacts.clone(),
         ctas: build_session_recap_ctas(
             pending_approvals,
@@ -1125,9 +1443,8 @@ async fn build_session_catalog_record(
         archived: session.archived_at_unix_ms.is_some(),
         archived_at_unix_ms: session.archived_at_unix_ms,
         pending_approvals,
-        has_context_files: !workspace.active_context_files.is_empty(),
-        last_context_file: workspace
-            .active_context_files
+        has_context_files: !active_project_context_paths.is_empty(),
+        last_context_file: active_project_context_paths
             .first()
             .cloned()
             .or_else(|| workspace.touched_files.first().cloned()),
@@ -1138,6 +1455,53 @@ async fn build_session_catalog_record(
         recap,
         quick_controls,
     })
+}
+
+fn build_session_project_context_record(
+    preview: &crate::application::project_context::ProjectContextPreviewEnvelope,
+) -> SessionProjectContextRecord {
+    SessionProjectContextRecord {
+        generated_at_unix_ms: preview.generated_at_unix_ms,
+        active_entries: preview.active_entries,
+        blocked_entries: preview.blocked_entries,
+        approval_required_entries: preview.approval_required_entries,
+        disabled_entries: preview.disabled_entries,
+        active_estimated_tokens: preview.active_estimated_tokens,
+        warnings: preview.warnings.clone(),
+        focus_paths: preview
+            .focus_paths
+            .iter()
+            .map(|entry| SessionProjectContextFocusRecord {
+                path: entry.path.clone(),
+                reason: entry.reason.clone(),
+            })
+            .collect(),
+        entries: preview
+            .entries
+            .iter()
+            .map(|entry| SessionProjectContextEntryRecord {
+                entry_id: entry.entry_id.clone(),
+                order: entry.order,
+                path: entry.path.clone(),
+                source_kind: entry.source_kind.clone(),
+                source_label: entry.source_label.clone(),
+                precedence_label: entry.precedence_label.clone(),
+                depth: entry.depth,
+                root: entry.root,
+                active: entry.active,
+                disabled: entry.disabled,
+                approved: entry.approved,
+                status: entry.status.clone(),
+                content_hash: entry.content_hash.clone(),
+                loaded_at_unix_ms: entry.loaded_at_unix_ms,
+                modified_at_unix_ms: entry.modified_at_unix_ms,
+                estimated_tokens: entry.estimated_tokens,
+                discovery_reasons: entry.discovery_reasons.clone(),
+                warnings: entry.warnings.clone(),
+                preview_text: entry.preview_text.clone(),
+            })
+            .collect(),
+    }
 }
 
 fn build_session_quick_controls(

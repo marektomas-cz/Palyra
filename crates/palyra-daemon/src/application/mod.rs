@@ -4,6 +4,7 @@ pub mod channels;
 pub mod context_references;
 pub mod learning;
 pub mod memory;
+pub mod project_context;
 pub mod provider_events;
 pub mod provider_input;
 pub mod service_authorization;
