@@ -33,6 +33,7 @@ import {
 import { useSessionCatalogDomain } from "../hooks/useSessionCatalogDomain";
 import { formatUnixMs, isJsonObject, readString, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
+import { buildSessionCatalogPresentation } from "./sessionCatalogPresentation";
 
 type SessionsSectionProps = {
   app: Pick<ConsoleAppState, "api" | "setError" | "setNotice">;
@@ -50,16 +51,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
   const [objectivesBusy, setObjectivesBusy] = useState(false);
   const [objectives, setObjectives] = useState<JsonObject[]>([]);
   const selectedLineage = buildSessionLineageHint(selected);
-  const selectedFamilyRootTitle = selected?.family?.root_title ?? selected?.title ?? "Unknown";
-  const selectedFamilySize = selected?.family?.family_size ?? 1;
-  const selectedFamilySequence = selected?.family?.sequence ?? 1;
-  const selectedAgentDisplay =
-    selected?.quick_controls?.agent?.display_value ?? selected?.agent_id ?? "default agent";
-  const selectedModelDisplay =
-    selected?.quick_controls?.model?.display_value ?? selected?.model_profile ?? "default model";
-  const selectedTouchedFiles = selected?.recap?.touched_files ?? [];
-  const selectedActiveContextFiles = selected?.recap?.active_context_files ?? [];
-  const selectedRecentArtifacts = selected?.recap?.recent_artifacts ?? [];
+  const selectedPresentation = buildSessionCatalogPresentation(selected);
   const selectedObjective = useMemo(
     () =>
       findObjectiveForSession(
@@ -463,16 +455,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
             >
               {catalog.entries.map((entry) => {
                 const selectedRow = entry.session_id === catalog.selectedSessionId;
-                const familyRootTitle = entry.family?.root_title ?? entry.title;
-                const familySize = entry.family?.family_size ?? 1;
-                const familySequence = entry.family?.sequence ?? 1;
-                const agentDisplay =
-                  entry.quick_controls?.agent?.display_value ?? entry.agent_id ?? "default agent";
-                const modelDisplay =
-                  entry.quick_controls?.model?.display_value ??
-                  entry.model_profile ??
-                  "default model";
-                const activeContextFiles = entry.recap?.active_context_files ?? [];
+                const entryPresentation = buildSessionCatalogPresentation(entry);
                 return (
                   <tr
                     key={entry.session_id}
@@ -493,10 +476,12 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                     </td>
                     <td>
                       <div className="workspace-stack">
-                        <strong>{familyRootTitle}</strong>
+                        <strong>{entryPresentation.familyRootTitle}</strong>
                         <small className="text-muted">
                           {describeBranchState(entry.branch_state)}
-                          {familySize > 1 ? ` · ${familySequence}/${familySize}` : ""}
+                          {entryPresentation.familySize > 1
+                            ? ` · ${entryPresentation.familySequence}/${entryPresentation.familySize}`
+                            : ""}
                         </small>
                       </div>
                     </td>
@@ -504,13 +489,13 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                     <td>
                       <div className="workspace-stack">
                         <small>
-                          {agentDisplay} · {modelDisplay}
+                          {entryPresentation.agentDisplay} · {entryPresentation.modelDisplay}
                         </small>
                         <small className="text-muted">
                           {entry.pending_approvals} approval
                           {entry.pending_approvals === 1 ? "" : "s"}
-                          {activeContextFiles.length > 0
-                            ? ` · ${activeContextFiles.length} context file${activeContextFiles.length === 1 ? "" : "s"}`
+                          {entryPresentation.activeContextFiles.length > 0
+                            ? ` · ${entryPresentation.activeContextFiles.length} context file${entryPresentation.activeContextFiles.length === 1 ? "" : "s"}`
                             : ""}
                         </small>
                       </div>
@@ -550,11 +535,15 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                       selected.manual_title_locked,
                     )}
                   </WorkspaceStatusChip>
-                  <WorkspaceStatusChip tone="default">{selectedAgentDisplay}</WorkspaceStatusChip>
-                  <WorkspaceStatusChip tone="default">{selectedModelDisplay}</WorkspaceStatusChip>
-                  {selectedFamilySize > 1 ? (
+                  <WorkspaceStatusChip tone="default">
+                    {selectedPresentation.agentDisplay}
+                  </WorkspaceStatusChip>
+                  <WorkspaceStatusChip tone="default">
+                    {selectedPresentation.modelDisplay}
+                  </WorkspaceStatusChip>
+                  {selectedPresentation.familySize > 1 ? (
                     <WorkspaceStatusChip tone="accent">
-                      Family {selectedFamilySequence}/{selectedFamilySize}
+                      Family {selectedPresentation.familySequence}/{selectedPresentation.familySize}
                     </WorkspaceStatusChip>
                   ) : null}
                 </div>
@@ -689,7 +678,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                 </div>
                 <div>
                   <dt>Family root</dt>
-                  <dd>{selectedFamilyRootTitle}</dd>
+                  <dd>{selectedPresentation.familyRootTitle}</dd>
                 </div>
                 <div>
                   <dt>Created</dt>
@@ -722,8 +711,8 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                 <div>
                   <dt>Context files</dt>
                   <dd>
-                    {selectedActiveContextFiles.length > 0
-                      ? `${selectedActiveContextFiles.length} active`
+                    {selectedPresentation.activeContextFiles.length > 0
+                      ? `${selectedPresentation.activeContextFiles.length} active`
                       : "none"}
                   </dd>
                 </div>
@@ -740,24 +729,25 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                 </WorkspaceInlineNotice>
               ) : null}
 
-              {selectedTouchedFiles.length > 0 ||
-              selectedActiveContextFiles.length > 0 ||
-              selectedRecentArtifacts.length > 0 ? (
+              {selectedPresentation.touchedFiles.length > 0 ||
+              selectedPresentation.activeContextFiles.length > 0 ||
+              selectedPresentation.recentArtifacts.length > 0 ? (
                 <WorkspaceInlineNotice title="Resume recap" tone="accent">
-                  {selectedTouchedFiles.length > 0 ? (
+                  {selectedPresentation.touchedFiles.length > 0 ? (
                     <p>
-                      <strong>Touched files:</strong> {selectedTouchedFiles.join(", ")}
+                      <strong>Touched files:</strong> {selectedPresentation.touchedFiles.join(", ")}
                     </p>
                   ) : null}
-                  {selectedActiveContextFiles.length > 0 ? (
+                  {selectedPresentation.activeContextFiles.length > 0 ? (
                     <p>
-                      <strong>Active context:</strong> {selectedActiveContextFiles.join(", ")}
+                      <strong>Active context:</strong>{" "}
+                      {selectedPresentation.activeContextFiles.join(", ")}
                     </p>
                   ) : null}
-                  {selectedRecentArtifacts.length > 0 ? (
+                  {selectedPresentation.recentArtifacts.length > 0 ? (
                     <p>
                       <strong>Recent artifacts:</strong>{" "}
-                      {selectedRecentArtifacts
+                      {selectedPresentation.recentArtifacts
                         .map((artifact) => `${artifact.label} (${artifact.kind})`)
                         .join(", ")}
                     </p>
