@@ -310,21 +310,13 @@ export function MemorySection({ app }: MemorySectionProps) {
 `}</pre>
           </div>
           <ul className="workspace-bullet-list">
-            <li>
-              Use project rules for stable repository guidance that should always be considered.
-            </li>
-            <li>
-              Use Memory for learned facts, preferences, and procedures gathered from work over
-              time.
-            </li>
-            <li>
-              Use prompt-scoped references when only the current turn needs extra files or folders.
-            </li>
+            <li>Use project rules for stable repository guidance that should stay always-on.</li>
+            <li>Use Memory for learned facts, preferences, and procedures gathered over time.</li>
+            <li>Use prompt-scoped references for one-turn files or folders under investigation.</li>
           </ul>
           <p className="chat-muted">
-            The chat inspector can create a starter <code>PALYRA.md</code> in the active workspace
-            and will show warnings when deterministic context files contain suspicious hidden or
-            override-like instructions.
+            The chat inspector can create a starter <code>PALYRA.md</code> and warn when context
+            files contain suspicious hidden or override-like instructions.
           </p>
         </div>
       </WorkspaceSectionCard>
