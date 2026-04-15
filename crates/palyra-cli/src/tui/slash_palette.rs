@@ -351,12 +351,10 @@ fn build_session_suggestions(
             subtitle: if session.session_key.is_empty() {
                 session.session_id.clone()
             } else {
-                let family_hint = if session.family_size > 1 {
-                    format!(" · family {}", session.family_size)
-                } else {
-                    String::new()
-                };
-                format!("{}{}", session.session_key, family_hint)
+                match session.family_size {
+                    0 | 1 => session.session_key.clone(),
+                    size => format!("{} · family {}", session.session_key, size),
+                }
             },
             detail: if !session.preview.is_empty() {
                 session.preview.clone()

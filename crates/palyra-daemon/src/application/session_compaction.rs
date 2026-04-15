@@ -1477,6 +1477,7 @@ mod tests {
         OrchestratorSessionTranscriptRecord, WorkspaceDocumentRecord,
     };
 
+    #[rustfmt::skip]
     fn session_record() -> OrchestratorSessionRecord {
         OrchestratorSessionRecord {
             session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
@@ -1489,27 +1490,16 @@ mod tests {
             updated_at_unix_ms: 2,
             last_run_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned()),
             archived_at_unix_ms: None,
-            auto_title: None,
-            auto_title_source: None,
-            auto_title_generator_version: None,
-            auto_title_updated_at_unix_ms: None,
-            title_generation_state: "ready".to_owned(),
-            manual_title_locked: true,
-            manual_title_updated_at_unix_ms: Some(2),
-            model_profile_override: None,
-            thinking_override: None,
-            trace_override: None,
-            verbose_override: None,
-            title: "Ops triage".to_owned(),
-            title_source: "manual".to_owned(),
+            auto_title: None, auto_title_source: None, auto_title_generator_version: None,
+            auto_title_updated_at_unix_ms: None, title_generation_state: "ready".to_owned(),
+            manual_title_locked: true, manual_title_updated_at_unix_ms: Some(2),
+            model_profile_override: None, thinking_override: None,
+            trace_override: None, verbose_override: None,
+            title: "Ops triage".to_owned(), title_source: "manual".to_owned(),
             title_generator_version: None,
-            preview: None,
-            last_intent: None,
-            last_summary: None,
-            match_snippet: None,
+            preview: None, last_intent: None, last_summary: None, match_snippet: None,
             branch_state: "active_branch".to_owned(),
-            parent_session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned()),
-            branch_origin_run_id: None,
+            parent_session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned()), branch_origin_run_id: None,
             last_run_state: Some("done".to_owned()),
         }
     }
