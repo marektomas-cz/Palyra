@@ -54,7 +54,14 @@ export function ConsoleSectionContent({ app }: ConsoleSectionContentProps) {
       );
     case "sessions":
       return (
-        <SessionsSection app={{ api: app.api, setError: app.setError, setNotice: app.setNotice }} />
+        <SessionsSection
+          app={{
+            api: app.api,
+            locale: app.locale,
+            setError: app.setError,
+            setNotice: app.setNotice,
+          }}
+        />
       );
     case "usage":
       return (

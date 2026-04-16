@@ -41,7 +41,11 @@ const EN_MESSAGES = {
   "shell.basic": "Basic",
   "shell.advanced": "Advanced",
   "shell.english": "English",
+  "shell.czech": "Czech",
   "shell.pseudo": "Pseudo",
+  "shell.expires": "Expires {value} UTC",
+  "shell.dashboardDomains": "Dashboard domains",
+  "shell.revealSensitiveAria": "Reveal sensitive values",
   "shell.profileActive": "Active profile: {label}",
   "shell.profileBody": "Mode {mode}, environment {environment}, risk {risk}.",
   "shell.principal": "Principal",
@@ -130,12 +134,155 @@ const EN_MESSAGES = {
 
 export type ConsoleMessageKey = keyof typeof EN_MESSAGES;
 
+const CS_MESSAGES: Readonly<Record<ConsoleMessageKey, string>> = {
+  "boot.label": "Konzole Palyra",
+  "boot.title": "Webový dashboard",
+  "boot.body": "Ověřuji aktuální relaci a načítám shell dashboardu.",
+  "auth.label": "Konzole Palyra",
+  "auth.title": "Operátorský dashboard",
+  "auth.body":
+    "Předání z desktopu zůstává nejkratší cestou, ale přímé přihlášení v prohlížeči stále používá stejný admin token, cookie relaci a CSRF guardraily.",
+  "auth.adminToken": "Admin token",
+  "auth.advancedIdentity": "Rozšířená identita relace",
+  "auth.operatorPrincipal": "Principál operátora",
+  "auth.deviceLabel": "Označení zařízení",
+  "auth.channelLabel": "Označení kanálu",
+  "auth.optional": "Volitelné",
+  "auth.browserPathTitle": "Cesta přihlášení přes prohlížeč",
+  "auth.browserPathBody":
+    "Ruční přihlášení v prohlížeči stále zachovává existující session cookie a CSRF guardraily. Na jednom stroji zůstává nejkratší lokální cestou otevření z desktopu.",
+  "auth.restoreDefaults": "Obnovit výchozí",
+  "auth.signIn": "Přihlásit se",
+  "auth.signingIn": "Přihlašuji...",
+  "auth.failed": "Přihlášení selhalo",
+  "shell.title": "Operátorská plocha webového dashboardu",
+  "shell.subtitle": "Doména {group} zaměřená na {detail}.",
+  "shell.authenticated": "Ověřeno",
+  "shell.theme": "Motiv: {theme}",
+  "shell.locale": "Jazyk: {locale}",
+  "shell.mode": "Režim: {mode}",
+  "shell.signOut": "Odhlásit",
+  "shell.signingOut": "Odhlašuji...",
+  "shell.sessionContext": "Kontext relace",
+  "shell.sessionContextBody":
+    "Principál, zařízení a ovládání zveřejnění zůstávají kompaktní a druhotné vůči samotné stránce.",
+  "shell.revealSensitive": "Zobrazit citlivé hodnoty: {state}",
+  "shell.actionResult": "Výsledek akce",
+  "shell.actionBlocked": "Akce zablokována",
+  "shell.strictPosture": "Přísný postoj",
+  "shell.on": "Zapnuto",
+  "shell.off": "Vypnuto",
+  "shell.basic": "Základní",
+  "shell.advanced": "Pokročilý",
+  "shell.english": "Angličtina",
+  "shell.czech": "Čeština",
+  "shell.pseudo": "Pseudo",
+  "shell.expires": "Platnost končí {value} UTC",
+  "shell.dashboardDomains": "Oblasti dashboardu",
+  "shell.revealSensitiveAria": "Zobrazit citlivé hodnoty",
+  "shell.profileActive": "Aktivní profil: {label}",
+  "shell.profileBody": "Režim {mode}, prostředí {environment}, riziko {risk}.",
+  "shell.principal": "Principál",
+  "shell.device": "Zařízení",
+  "shell.channel": "Kanál",
+  "shell.transport": "Transport",
+  "shell.profile": "Profil",
+  "shell.environment": "Prostředí",
+  "shell.risk": "Riziko",
+  "shell.none": "žádné",
+  "shell.notApplicable": "n/a",
+  "shell.transportValue": "Cookie relace + CSRF",
+  "nav.title": "Navigace",
+  "nav.subtitle":
+    "Chat, observabilita, řízení, agent a nastavení zůstávají seskupené jako jedna pracovní lišta.",
+  "nav.basicTitle": "Nápověda pro základní režim",
+  "nav.basicBody":
+    "Základní režim drží viditelnou cestu k prvnímu úspěchu a zbytek schovává za explicitní přepnutí zpět na plný operátorský povrch.",
+  "nav.switchAdvanced": "Přepnout na Pokročilý",
+  "nav.switchBasic": "Přepnout na Základní",
+  "nav.group.chat": "Chat",
+  "nav.group.control": "Observabilita",
+  "nav.group.operations": "Řízení",
+  "nav.group.agent": "Agent",
+  "nav.group.settings": "Nastavení",
+  "section.overview.label": "Přehled",
+  "section.overview.detail": "Operátorský postoj, rizika a další kroky",
+  "section.chat.label": "Chat",
+  "section.chat.detail": "Primární operátorský workspace",
+  "section.canvas.label": "Canvas",
+  "section.canvas.detail": "Rich surface navázaná na relaci a historii",
+  "section.sessions.label": "Relace",
+  "section.sessions.detail": "Katalog, lifecycle a stav běhů",
+  "section.usage.label": "Využití",
+  "section.usage.detail": "Kapacita, tokeny, latence a nákladový postoj",
+  "section.logs.label": "Logy",
+  "section.logs.detail": "Sjednocený runtime stream napříč palyrad, browserd a kanály",
+  "section.inventory.label": "Inventář",
+  "section.inventory.detail": "Nody, zařízení, čekající párování a runtime instance",
+  "section.approvals.label": "Schválení",
+  "section.approvals.detail": "Brána pro citlivé akce",
+  "section.cron.label": "Automatizace",
+  "section.cron.detail":
+    "Heartbeaty, standing orders, programy, rutiny, běhy, šablony a schválení",
+  "section.channels.label": "Kanály",
+  "section.channels.detail": "Konektory, router a nastavení Discordu",
+  "section.browser.label": "Prohlížeč",
+  "section.browser.detail": "Profily, relay a stažené soubory",
+  "section.agents.label": "Agenti",
+  "section.agents.detail": "Registr, výchozí nastavení a setup workspace",
+  "section.memory.label": "Paměť",
+  "section.memory.detail": "Retence, hledání a purge",
+  "section.skills.label": "Skills",
+  "section.skills.detail": "Instalace a runtime trust posture",
+  "section.auth.label": "Profily",
+  "section.auth.detail": "Auth profily providerů a jejich health posture",
+  "section.config.label": "Konfigurace",
+  "section.config.detail": "Prohlížení, validace, změny a obnova konfigurace",
+  "section.secrets.label": "Tajné údaje",
+  "section.secrets.detail": "Vault metadata tajných údajů a reveal flow",
+  "section.access.label": "Přístup",
+  "section.access.detail": "Lifecycle párování a postura vzdáleného přístupu",
+  "section.operations.label": "Diagnostika",
+  "section.operations.detail": "Runtime snapshoty, audit a CLI handoffy",
+  "section.support.label": "Podpora",
+  "section.support.detail": "Bundle, obnova a operátorské předání",
+  "guidance.nextAction": "Další krok",
+  "guidance.checklist": "Onboardingový checklist",
+  "guidance.troubleshooting": "Řešení problémů",
+  "guidance.scenario": "Scénář",
+  "guidance.cta": "Otevřít",
+  "overview.telemetryTitle": "Aktivační baseline",
+  "overview.telemetryBody":
+    "Metriky baseline z fáze 1 zůstávají auditně podložené přes systémové události místo samostatné pipeline analytického dodavatele.",
+  "overview.telemetryFunnel": "Průchod trychtýřem",
+  "overview.telemetryApprovals": "Únava ze schvalování",
+  "overview.telemetryFriction": "Největší třecí plocha",
+  "overview.telemetryEmpty": "Zatím nejsou zaznamenány žádné UX baseline události.",
+  "overview.modeGuidanceTitle": "Doporučení k režimu",
+  "overview.modeGuidanceBody":
+    "Základní režim zužuje pozornost na plochy pro první úspěch. Pokročilý režim okamžitě obnoví plnou operátorskou lištu bez změny backendových schopností.",
+  "mode.basic.description":
+    "Chat, přehled, relace, schválení, přístup a podpora zůstávají hlavní.",
+  "mode.advanced.description":
+    "Všechny operátorské sekce zůstávají viditelné přímo v postranním panelu.",
+};
+
+export const CONSOLE_LOCALES: readonly ConsoleLocale[] = ["en", "cs", "qps-ploc"] as const;
+
 export function readStoredConsoleLocale(): ConsoleLocale {
   if (typeof window === "undefined") {
     return "en";
   }
   const stored = window.localStorage.getItem(CONSOLE_LOCALE_STORAGE_KEY);
+  if (stored === "cs") {
+    return "cs";
+  }
   return stored === "qps-ploc" ? "qps-ploc" : "en";
+}
+
+export function nextConsoleLocale(current: ConsoleLocale): ConsoleLocale {
+  const index = CONSOLE_LOCALES.indexOf(current);
+  return CONSOLE_LOCALES[(index + 1) % CONSOLE_LOCALES.length] ?? "en";
 }
 
 export function translateConsoleMessage(
@@ -143,13 +290,24 @@ export function translateConsoleMessage(
   key: ConsoleMessageKey,
   variables?: Record<string, string | number>,
 ): string {
-  const template = EN_MESSAGES[key];
+  const template = (locale === "cs" ? CS_MESSAGES : EN_MESSAGES)[key];
   const resolved = variables === undefined ? template : interpolate(template, variables);
-  return locale === "qps-ploc" ? pseudoLocalize(resolved) : resolved;
+  return locale === "qps-ploc" ? pseudoLocalizeText(resolved) : resolved;
 }
 
 export function describeConsoleMode(locale: ConsoleLocale, mode: ConsoleUiMode): string {
   return translateConsoleMessage(locale, mode === "basic" ? "shell.basic" : "shell.advanced");
+}
+
+export function describeConsoleLocale(locale: ConsoleLocale): string {
+  switch (locale) {
+    case "cs":
+      return translateConsoleMessage(locale, "shell.czech");
+    case "qps-ploc":
+      return translateConsoleMessage(locale, "shell.pseudo");
+    default:
+      return translateConsoleMessage(locale, "shell.english");
+  }
 }
 
 export function formatConsoleDateTime(
@@ -168,7 +326,7 @@ function interpolate(template: string, variables: Record<string, string | number
   return template.replaceAll(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => `${variables[key] ?? ""}`);
 }
 
-function pseudoLocalize(value: string): string {
+export function pseudoLocalizeText(value: string): string {
   const replaced = value.replaceAll(/[A-Za-z]/g, (character) => PSEUDO_MAP[character] ?? character);
   return `[~ ${replaced} ~]`;
 }

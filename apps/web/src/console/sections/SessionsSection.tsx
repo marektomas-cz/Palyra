@@ -31,15 +31,358 @@ import {
   workspaceToneForState,
 } from "../components/workspace/WorkspacePatterns";
 import { useSessionCatalogDomain } from "../hooks/useSessionCatalogDomain";
+import { pseudoLocalizeText } from "../i18n";
 import { formatUnixMs, isJsonObject, readString, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 import { buildSessionCatalogPresentation } from "./sessionCatalogPresentation";
 
 type SessionsSectionProps = {
-  app: Pick<ConsoleAppState, "api" | "setError" | "setNotice">;
+  app: Pick<ConsoleAppState, "api" | "locale" | "setError" | "setNotice">;
 };
 
+const SESSION_MESSAGES = {
+  "header.title": "Sessions",
+  "header.description":
+    "Search session history, inspect latest run posture, and drive lifecycle actions without leaving the operator console.",
+  "status.refreshing": "Refreshing",
+  "status.catalogReady": "Catalog ready",
+  "status.pendingApprovals": "pending approvals",
+  "status.noRunSelected": "No run selected",
+  "action.refresh": "Refresh sessions",
+  "action.refreshing": "Refreshing...",
+  "action.rename": "Rename",
+  "action.reset": "Reset",
+  "action.archive": "Archive",
+  "action.abortRun": "Abort run",
+  "action.createCheckpoint": "Create checkpoint",
+  "action.checkpointing": "Checkpointing...",
+  "action.previewCompaction": "Preview compaction",
+  "action.previewing": "Previewing...",
+  "action.applyCompaction": "Apply compaction",
+  "action.applying": "Applying...",
+  "action.openChat": "Open in chat",
+  "action.openObjective": "Open objective",
+  "action.openInventory": "Open inventory",
+  "metric.activeSessions": "Active sessions",
+  "metric.activeSessionsDetail": "Visible non-archived sessions in the current scoped catalog.",
+  "metric.archivedSessions": "Archived sessions",
+  "metric.archivedSessionsDetail":
+    "Archived records stay queryable without reopening the chat rail.",
+  "metric.pendingApprovals": "Pending approvals",
+  "metric.pendingApprovalsDetail": "Sessions currently waiting on sensitive-action decisions.",
+  "metric.activeRuns": "Active runs",
+  "metric.activeRunsDetail": "Latest known run is still accepted or in progress.",
+  "metric.contextFiles": "Context files",
+  "metric.contextFilesDetail": "Sessions carrying active context files or workspace references.",
+  "filters.title": "Filters",
+  "filters.description":
+    "Catalog filters stay server-backed so chat, web, and future operator surfaces do not invent separate session logic.",
+  "filters.search": "Search",
+  "filters.searchPlaceholder": "title, family, agent, model, file, or recap",
+  "filters.sort": "Sort",
+  "filters.sort.updatedDesc": "Updated (newest)",
+  "filters.sort.updatedAsc": "Updated (oldest)",
+  "filters.sort.createdDesc": "Created (newest)",
+  "filters.sort.createdAsc": "Created (oldest)",
+  "filters.sort.titleAsc": "Title (A-Z)",
+  "filters.titleMode": "Title mode",
+  "filters.titleMode.all": "Any title mode",
+  "filters.titleMode.ready": "Auto title ready",
+  "filters.titleMode.pending": "Auto title pending",
+  "filters.titleMode.failed": "Auto title failed",
+  "filters.titleMode.idle": "Auto title idle",
+  "filters.titleSource": "Title source",
+  "filters.titleSource.all": "Any title source",
+  "filters.titleSource.label": "Manual label",
+  "filters.titleSource.semantic": "Semantic title",
+  "filters.titleSource.auto": "Automatic title",
+  "filters.titleSource.sessionKey": "Session key fallback",
+  "filters.branchState": "Branch state",
+  "filters.branchState.all": "Any lineage",
+  "filters.branchState.root": "Root session",
+  "filters.branchState.active": "Active branch",
+  "filters.branchState.source": "Branch source",
+  "filters.pendingApprovals": "Pending approvals",
+  "filters.pendingApprovals.all": "Any approval state",
+  "filters.pendingApprovals.yes": "With pending approvals",
+  "filters.pendingApprovals.no": "Without pending approvals",
+  "filters.contextFiles": "Context files",
+  "filters.contextFiles.all": "Any context posture",
+  "filters.contextFiles.yes": "With context files",
+  "filters.contextFiles.no": "Without context files",
+  "filters.agent": "Agent",
+  "filters.agentPlaceholder": "agent id",
+  "filters.modelProfile": "Model profile",
+  "filters.modelProfilePlaceholder": "model profile",
+  "filters.showArchived": "Show archived",
+  "filters.showArchivedDescription": "Include archived records in the current list.",
+  "catalog.title": "Catalog",
+  "catalog.description":
+    "Pick a session to inspect its latest activity, preview, and lifecycle state.",
+  "catalog.emptyTitle": "No sessions match the current query",
+  "catalog.emptyDescription":
+    "Adjust filters or create activity in chat to populate the session catalog.",
+  "catalog.columns.title": "Title",
+  "catalog.columns.family": "Family",
+  "catalog.columns.updated": "Updated",
+  "catalog.columns.controls": "Controls",
+  "catalog.columns.recap": "Recap",
+  "catalog.archived": "archived",
+  "catalog.noRecap": "No recap",
+  "detail.title": "Detail",
+  "detail.description":
+    "Lifecycle actions here reuse the same backend mutations as chat instead of inventing a separate control path.",
+  "detail.emptyTitle": "No session selected",
+  "detail.emptyDescription":
+    "Select a row from the session catalog to inspect details and actions.",
+  "detail.selectedSession": "Selected session",
+  "detail.noPreview": "No preview was derivable from existing run history.",
+  "detail.family": "Family {index}/{count}",
+  "detail.sessionLabel": "Session label",
+  "detail.sessionLabelDescription":
+    "Leave empty to return the session to automatic title mode.",
+  "detail.sessionKey": "Session key",
+  "detail.titleSource": "Title source",
+  "detail.familyRoot": "Family root",
+  "detail.created": "Created",
+  "detail.updated": "Updated",
+  "detail.runState": "Run state",
+  "detail.lineage": "Lineage",
+  "detail.totalTokens": "Total tokens",
+  "detail.contextFiles": "Context files",
+  "detail.active": "{count} active",
+  "detail.none": "none",
+  "detail.latestActivity": "Latest activity",
+  "detail.lastIntent": "Last intent:",
+  "detail.lastSummary": "Last summary:",
+  "detail.missing": "Missing",
+  "detail.resumeRecap": "Resume recap",
+  "detail.touchedFiles": "Touched files:",
+  "detail.activeContext": "Active context:",
+  "detail.recentArtifacts": "Recent artifacts:",
+  "detail.objectiveLinkage": "Objective linkage",
+  "detail.linkedObjective": "Linked objective",
+  "detail.loadingObjectiveLinkage": "Loading objective linkage for the selected session.",
+  "detail.noObjective": "No objective currently points at this session.",
+  "detail.unnamedObjective": "Unnamed objective",
+  "detail.currentFocus": "Current focus:",
+  "detail.noCurrentFocus": "No current focus recorded.",
+  "detail.nextAction": "Next action:",
+  "detail.noNextAction": "No next action recorded.",
+  "continuity.preview": "Compaction preview",
+  "continuity.blocked": "Compaction blocked",
+  "continuity.summary": "Summary:",
+  "continuity.tokenDelta": "Token delta:",
+  "continuity.plannedWrites": "Planned writes:",
+  "continuity.reviewCandidates": "Review candidates:",
+  "continuity.reviewHelp":
+    "Use the chat compaction flow to accept or reject the review-required candidates explicitly.",
+  "continuity.loading": "Loading continuity",
+  "continuity.compactions": "{count} compactions",
+  "continuity.checkpoints": "{count} checkpoints",
+  "continuity.pendingReview": "{count} pending review",
+  "continuity.artifacts": "Continuity artifacts",
+  "continuity.recentCompactions": "Recent compactions",
+  "continuity.recentCompactionsDescription":
+    "Inspect the last stored compactions and jump straight into the chat detail sidebar for raw diff and audit context.",
+  "continuity.emptyCompactionsTitle": "No compactions yet",
+  "continuity.emptyCompactionsDescription":
+    "No compaction artifacts are stored for this session yet.",
+  "continuity.review": "review",
+  "continuity.recoveryPoints": "Recovery points",
+  "continuity.recentCheckpoints": "Recent checkpoints",
+  "continuity.recentCheckpointsDescription":
+    "Checkpoints stay paired with compaction history so rollback is visible without opening the raw journal.",
+  "continuity.emptyCheckpointsTitle": "No checkpoints yet",
+  "continuity.emptyCheckpointsDescription":
+    "Create a checkpoint or apply a compaction to start the rollback history.",
+  "continuity.restores": "restores",
+  "continuity.noCheckpointNote": "No note recorded for this checkpoint.",
+} as const;
+
+type SessionMessageKey = keyof typeof SESSION_MESSAGES;
+
+const SESSION_MESSAGES_CS: Readonly<Record<SessionMessageKey, string>> = {
+  "header.title": "Relace",
+  "header.description":
+    "Procházej historii relací, kontroluj poslední stav běhu a spouštěj lifecycle akce bez opuštění operátorské konzole.",
+  "status.refreshing": "Obnovuji",
+  "status.catalogReady": "Katalog připraven",
+  "status.pendingApprovals": "čekajících schválení",
+  "status.noRunSelected": "Není vybraný běh",
+  "action.refresh": "Obnovit relace",
+  "action.refreshing": "Obnovuji...",
+  "action.rename": "Přejmenovat",
+  "action.reset": "Resetovat",
+  "action.archive": "Archivovat",
+  "action.abortRun": "Přerušit běh",
+  "action.createCheckpoint": "Vytvořit checkpoint",
+  "action.checkpointing": "Vytvářím checkpoint...",
+  "action.previewCompaction": "Preview kompakce",
+  "action.previewing": "Připravuji preview...",
+  "action.applyCompaction": "Aplikovat kompakci",
+  "action.applying": "Aplikuji...",
+  "action.openChat": "Otevřít v chatu",
+  "action.openObjective": "Otevřít objective",
+  "action.openInventory": "Otevřít inventář",
+  "metric.activeSessions": "Aktivní relace",
+  "metric.activeSessionsDetail": "Viditelné nearhivované relace v aktuálním scoped katalogu.",
+  "metric.archivedSessions": "Archivované relace",
+  "metric.archivedSessionsDetail":
+    "Archivované záznamy zůstávají dotazovatelné bez znovuotevření chat railu.",
+  "metric.pendingApprovals": "Čekající schválení",
+  "metric.pendingApprovalsDetail": "Relace, které právě čekají na rozhodnutí o citlivé akci.",
+  "metric.activeRuns": "Aktivní běhy",
+  "metric.activeRunsDetail": "Poslední známý běh je stále přijatý nebo probíhá.",
+  "metric.contextFiles": "Kontextové soubory",
+  "metric.contextFilesDetail": "Relace nesoucí aktivní kontextové soubory nebo odkazy na workspace.",
+  "filters.title": "Filtry",
+  "filters.description":
+    "Filtry katalogu zůstávají server-backed, takže chat, web a budoucí operátorské surface nevymýšlejí oddělenou logiku relací.",
+  "filters.search": "Hledat",
+  "filters.searchPlaceholder": "název, rodina, agent, model, soubor nebo recap",
+  "filters.sort": "Řazení",
+  "filters.sort.updatedDesc": "Aktualizováno (nejnovější)",
+  "filters.sort.updatedAsc": "Aktualizováno (nejstarší)",
+  "filters.sort.createdDesc": "Vytvořeno (nejnovější)",
+  "filters.sort.createdAsc": "Vytvořeno (nejstarší)",
+  "filters.sort.titleAsc": "Název (A-Z)",
+  "filters.titleMode": "Režim názvu",
+  "filters.titleMode.all": "Libovolný režim názvu",
+  "filters.titleMode.ready": "Auto název připraven",
+  "filters.titleMode.pending": "Auto název čeká",
+  "filters.titleMode.failed": "Auto název selhal",
+  "filters.titleMode.idle": "Auto název nečinný",
+  "filters.titleSource": "Zdroj názvu",
+  "filters.titleSource.all": "Libovolný zdroj názvu",
+  "filters.titleSource.label": "Ruční štítek",
+  "filters.titleSource.semantic": "Sémantický název",
+  "filters.titleSource.auto": "Automatický název",
+  "filters.titleSource.sessionKey": "Fallback session key",
+  "filters.branchState": "Stav větve",
+  "filters.branchState.all": "Libovolná lineage",
+  "filters.branchState.root": "Kořenová relace",
+  "filters.branchState.active": "Aktivní větev",
+  "filters.branchState.source": "Zdroj větve",
+  "filters.pendingApprovals": "Čekající schválení",
+  "filters.pendingApprovals.all": "Libovolný stav schválení",
+  "filters.pendingApprovals.yes": "S čekajícími schváleními",
+  "filters.pendingApprovals.no": "Bez čekajících schválení",
+  "filters.contextFiles": "Kontextové soubory",
+  "filters.contextFiles.all": "Libovolná kontextová postura",
+  "filters.contextFiles.yes": "S kontextovými soubory",
+  "filters.contextFiles.no": "Bez kontextových souborů",
+  "filters.agent": "Agent",
+  "filters.agentPlaceholder": "id agenta",
+  "filters.modelProfile": "Profil modelu",
+  "filters.modelProfilePlaceholder": "profil modelu",
+  "filters.showArchived": "Zobrazit archivované",
+  "filters.showArchivedDescription": "Zahrnout archivované záznamy do aktuálního seznamu.",
+  "catalog.title": "Katalog",
+  "catalog.description": "Vyber relaci a zkontroluj její poslední aktivitu, preview a lifecycle stav.",
+  "catalog.emptyTitle": "Aktuálnímu dotazu neodpovídají žádné relace",
+  "catalog.emptyDescription": "Uprav filtry nebo vytvoř aktivitu v chatu, aby se katalog relací naplnil.",
+  "catalog.columns.title": "Název",
+  "catalog.columns.family": "Rodina",
+  "catalog.columns.updated": "Aktualizováno",
+  "catalog.columns.controls": "Ovládání",
+  "catalog.columns.recap": "Recap",
+  "catalog.archived": "archivováno",
+  "catalog.noRecap": "Žádný recap",
+  "detail.title": "Detail",
+  "detail.description":
+    "Lifecycle akce tady znovu používají stejné backendové mutace jako chat místo vymýšlení separátní control path.",
+  "detail.emptyTitle": "Není vybraná žádná relace",
+  "detail.emptyDescription": "Vyber řádek z katalogu relací a zkontroluj detaily i akce.",
+  "detail.selectedSession": "Vybraná relace",
+  "detail.noPreview": "Ze stávající historie běhů nešlo odvodit žádné preview.",
+  "detail.family": "Rodina {index}/{count}",
+  "detail.sessionLabel": "Štítek relace",
+  "detail.sessionLabelDescription":
+    "Ponech prázdné, pokud chceš relaci vrátit do automatického režimu názvu.",
+  "detail.sessionKey": "Session key",
+  "detail.titleSource": "Zdroj názvu",
+  "detail.familyRoot": "Kořen rodiny",
+  "detail.created": "Vytvořeno",
+  "detail.updated": "Aktualizováno",
+  "detail.runState": "Stav běhu",
+  "detail.lineage": "Lineage",
+  "detail.totalTokens": "Celkem tokenů",
+  "detail.contextFiles": "Kontextové soubory",
+  "detail.active": "{count} aktivních",
+  "detail.none": "žádné",
+  "detail.latestActivity": "Poslední aktivita",
+  "detail.lastIntent": "Poslední intent:",
+  "detail.lastSummary": "Poslední souhrn:",
+  "detail.missing": "Chybí",
+  "detail.resumeRecap": "Resume recap",
+  "detail.touchedFiles": "Dotčené soubory:",
+  "detail.activeContext": "Aktivní kontext:",
+  "detail.recentArtifacts": "Nedávné artefakty:",
+  "detail.objectiveLinkage": "Vazba na objective",
+  "detail.linkedObjective": "Navázaný objective",
+  "detail.loadingObjectiveLinkage": "Načítám vazbu objective pro vybranou relaci.",
+  "detail.noObjective": "Na tuto relaci momentálně neukazuje žádný objective.",
+  "detail.unnamedObjective": "Objective bez názvu",
+  "detail.currentFocus": "Aktuální fokus:",
+  "detail.noCurrentFocus": "Není zaznamenaný žádný aktuální fokus.",
+  "detail.nextAction": "Další akce:",
+  "detail.noNextAction": "Není zaznamenaná žádná další akce.",
+  "continuity.preview": "Preview kompakce",
+  "continuity.blocked": "Kompakce zablokována",
+  "continuity.summary": "Souhrn:",
+  "continuity.tokenDelta": "Rozdíl tokenů:",
+  "continuity.plannedWrites": "Plánované zápisy:",
+  "continuity.reviewCandidates": "Kandidáti k review:",
+  "continuity.reviewHelp":
+    "Použij compaction flow v chatu a kandidáty vyžadující review explicitně přijmi nebo zamítni.",
+  "continuity.loading": "Načítám kontinuitu",
+  "continuity.compactions": "{count} kompakcí",
+  "continuity.checkpoints": "{count} checkpointů",
+  "continuity.pendingReview": "{count} čeká na review",
+  "continuity.artifacts": "Artefakty kontinuity",
+  "continuity.recentCompactions": "Nedávné kompakce",
+  "continuity.recentCompactionsDescription":
+    "Zkontroluj poslední uložené kompakce a skoč rovnou do chat detail sidebaru pro raw diff a auditní kontext.",
+  "continuity.emptyCompactionsTitle": "Zatím žádné kompakce",
+  "continuity.emptyCompactionsDescription": "Pro tuto relaci zatím nejsou uložené žádné artefakty kompakce.",
+  "continuity.review": "review",
+  "continuity.recoveryPoints": "Body obnovy",
+  "continuity.recentCheckpoints": "Nedávné checkpointy",
+  "continuity.recentCheckpointsDescription":
+    "Checkpointy zůstávají spárované s historií kompakce, takže rollback je viditelný i bez otevření raw journalu.",
+  "continuity.emptyCheckpointsTitle": "Zatím žádné checkpointy",
+  "continuity.emptyCheckpointsDescription":
+    "Vytvoř checkpoint nebo aplikuj kompakci a tím založ rollback historii.",
+  "continuity.restores": "obnovení",
+  "continuity.noCheckpointNote": "Pro tento checkpoint není zaznamenaná žádná poznámka.",
+};
+
+function translateSession(
+  locale: ConsoleAppState["locale"],
+  key: SessionMessageKey,
+  variables?: Record<string, string | number>,
+): string {
+  const template = (locale === "cs" ? SESSION_MESSAGES_CS : SESSION_MESSAGES)[key];
+  const resolved =
+    variables === undefined
+      ? template
+      : template.replaceAll(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => `${variables[name] ?? ""}`);
+  return locale === "qps-ploc" ? pseudoLocalizeText(resolved) : resolved;
+}
+
 export function SessionsSection({ app }: SessionsSectionProps) {
+  const t = (key: SessionMessageKey, variables?: Record<string, string | number>) =>
+    translateSession(app.locale, key, variables);
+  const continuityCountLabel = (kind: "write", count: number): string => {
+    if (kind === "write") {
+      if (app.locale === "cs") {
+        return `${count} zápis${count === 1 ? "" : count >= 2 && count <= 4 ? "y" : "ů"}`;
+      }
+      return `${count} write${count === 1 ? "" : "s"}`;
+    }
+    return String(count);
+  };
   const navigate = useNavigate();
   const catalog = useSessionCatalogDomain(app);
   const selected = catalog.selectedSession;
@@ -136,7 +479,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
 
   async function createCheckpoint(): Promise<void> {
     if (selected === null) {
-      app.setError("Select a session first.");
+      app.setError(t("detail.emptyTitle"));
       return;
     }
     setPhase4Busy("checkpoint");
@@ -150,7 +493,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
         tags: ["web-console", "sessions-section"],
       });
       setSessionCheckpoints((previous) => [...previous, response.checkpoint]);
-      app.setNotice(`Checkpoint created: ${response.checkpoint.name}.`);
+      app.setNotice(`${t("action.createCheckpoint")}: ${response.checkpoint.name}.`);
     } catch (error) {
       app.setError(error instanceof Error ? error.message : "Unexpected failure.");
     } finally {
@@ -160,7 +503,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
 
   async function previewCompaction(): Promise<void> {
     if (selected === null) {
-      app.setError("Select a session first.");
+      app.setError(t("detail.emptyTitle"));
       return;
     }
     setPhase4Busy("preview");
@@ -177,8 +520,8 @@ export function SessionsSection({ app }: SessionsSectionProps) {
       const writeCount = summary?.writes?.length ?? 0;
       app.setNotice(
         response.preview.eligible
-          ? `Compaction preview ready: ${writeCount} planned write${writeCount === 1 ? "" : "s"}${reviewCount > 0 ? ` and ${reviewCount} review candidate${reviewCount === 1 ? "" : "s"}` : ""}.`
-          : "Compaction preview is blocked for this session right now.",
+          ? `${t("continuity.preview")}: ${continuityCountLabel("write", writeCount)}${reviewCount > 0 ? ` · ${reviewCount} ${t("continuity.review")}` : ""}.`
+          : t("continuity.blocked"),
       );
     } catch (error) {
       app.setError(error instanceof Error ? error.message : "Unexpected failure.");
@@ -189,7 +532,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
 
   async function applyCompaction(): Promise<void> {
     if (selected === null) {
-      app.setError("Select a session first.");
+      app.setError(t("detail.emptyTitle"));
       return;
     }
 
@@ -209,7 +552,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
     const reviewCount = summary?.planner?.review_candidate_count ?? 0;
     if (reviewCount > 0) {
       app.setNotice(
-        `Compaction review is required for ${reviewCount} candidate${reviewCount === 1 ? "" : "s"}. Open the session in chat to accept or reject them explicitly.`,
+        `${reviewCount} ${t("continuity.review")} · ${t("continuity.reviewHelp")}`,
       );
       return;
     }
@@ -228,7 +571,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
       const appliedSummary = safeParseCompactionSummaryJson(response.artifact.summary_json);
       const writeCount = appliedSummary?.writes?.length ?? 0;
       app.setNotice(
-        `Compaction applied: ${writeCount} durable write${writeCount === 1 ? "" : "s"} and checkpoint ${response.checkpoint.name}.`,
+        `${t("action.applyCompaction")}: ${continuityCountLabel("write", writeCount)} · ${response.checkpoint.name}.`,
       );
     } catch (error) {
       app.setError(error instanceof Error ? error.message : "Unexpected failure.");
@@ -270,20 +613,20 @@ export function SessionsSection({ app }: SessionsSectionProps) {
     <main className="workspace-page">
       <WorkspacePageHeader
         eyebrow="Control"
-        title="Sessions"
-        description="Search session history, inspect latest run posture, and drive lifecycle actions without leaving the operator console."
+        title={t("header.title")}
+        description={t("header.description")}
         status={
           <>
             <WorkspaceStatusChip tone={catalog.busy ? "warning" : "success"}>
-              {catalog.busy ? "Refreshing" : "Catalog ready"}
+              {catalog.busy ? t("status.refreshing") : t("status.catalogReady")}
             </WorkspaceStatusChip>
             <WorkspaceStatusChip tone={selected?.pending_approvals ? "warning" : "default"}>
-              {selected?.pending_approvals ?? 0} pending approvals
+              {selected?.pending_approvals ?? 0} {t("status.pendingApprovals")}
             </WorkspaceStatusChip>
             <WorkspaceStatusChip
               tone={workspaceToneForState(selected?.last_run_state ?? "unknown")}
             >
-              {selected?.last_run_state ?? "No run selected"}
+              {selected?.last_run_state ?? t("status.noRunSelected")}
             </WorkspaceStatusChip>
           </>
         }
@@ -294,61 +637,61 @@ export function SessionsSection({ app }: SessionsSectionProps) {
             variant="primary"
             onPress={() => void catalog.refreshSessions()}
           >
-            {catalog.busy ? "Refreshing..." : "Refresh sessions"}
+            {catalog.busy ? t("action.refreshing") : t("action.refresh")}
           </ActionButton>
         }
       />
 
       <section className="workspace-metric-grid">
         <WorkspaceMetricCard
-          detail="Visible non-archived sessions in the current scoped catalog."
-          label="Active sessions"
+          detail={t("metric.activeSessionsDetail")}
+          label={t("metric.activeSessions")}
           value={catalog.summary?.active_sessions ?? 0}
         />
         <WorkspaceMetricCard
-          detail="Archived records stay queryable without reopening the chat rail."
-          label="Archived sessions"
+          detail={t("metric.archivedSessionsDetail")}
+          label={t("metric.archivedSessions")}
           value={catalog.summary?.archived_sessions ?? 0}
         />
         <WorkspaceMetricCard
-          detail="Sessions currently waiting on sensitive-action decisions."
-          label="Pending approvals"
+          detail={t("metric.pendingApprovalsDetail")}
+          label={t("metric.pendingApprovals")}
           tone={(catalog.summary?.sessions_with_pending_approvals ?? 0) > 0 ? "warning" : "default"}
           value={catalog.summary?.sessions_with_pending_approvals ?? 0}
         />
         <WorkspaceMetricCard
-          detail="Latest known run is still accepted or in progress."
-          label="Active runs"
+          detail={t("metric.activeRunsDetail")}
+          label={t("metric.activeRuns")}
           tone={(catalog.summary?.sessions_with_active_runs ?? 0) > 0 ? "accent" : "default"}
           value={catalog.summary?.sessions_with_active_runs ?? 0}
         />
         <WorkspaceMetricCard
-          detail="Sessions carrying active context files or workspace references."
-          label="Context files"
+          detail={t("metric.contextFilesDetail")}
+          label={t("metric.contextFiles")}
           tone={(catalog.summary?.sessions_with_context_files ?? 0) > 0 ? "accent" : "default"}
           value={catalog.summary?.sessions_with_context_files ?? 0}
         />
       </section>
 
       <WorkspaceSectionCard
-        description="Catalog filters stay server-backed so chat, web, and future operator surfaces do not invent separate session logic."
-        title="Filters"
+        description={t("filters.description")}
+        title={t("filters.title")}
       >
         <div className="workspace-form-grid">
           <TextInputField
-            label="Search"
-            placeholder="title, family, agent, model, file, or recap"
+            label={t("filters.search")}
+            placeholder={t("filters.searchPlaceholder")}
             value={catalog.query}
             onChange={catalog.setQuery}
           />
           <SelectField
-            label="Sort"
+            label={t("filters.sort")}
             options={[
-              { key: "updated_desc", label: "Updated (newest)" },
-              { key: "updated_asc", label: "Updated (oldest)" },
-              { key: "created_desc", label: "Created (newest)" },
-              { key: "created_asc", label: "Created (oldest)" },
-              { key: "title_asc", label: "Title (A-Z)" },
+              { key: "updated_desc", label: t("filters.sort.updatedDesc") },
+              { key: "updated_asc", label: t("filters.sort.updatedAsc") },
+              { key: "created_desc", label: t("filters.sort.createdDesc") },
+              { key: "created_asc", label: t("filters.sort.createdAsc") },
+              { key: "title_asc", label: t("filters.sort.titleAsc") },
             ]}
             value={catalog.sort}
             onChange={(value) =>
@@ -363,76 +706,76 @@ export function SessionsSection({ app }: SessionsSectionProps) {
             }
           />
           <SelectField
-            label="Title mode"
+            label={t("filters.titleMode")}
             options={[
-              { key: "all", label: "Any title mode" },
-              { key: "ready", label: "Auto title ready" },
-              { key: "pending", label: "Auto title pending" },
-              { key: "failed", label: "Auto title failed" },
-              { key: "idle", label: "Auto title idle" },
+              { key: "all", label: t("filters.titleMode.all") },
+              { key: "ready", label: t("filters.titleMode.ready") },
+              { key: "pending", label: t("filters.titleMode.pending") },
+              { key: "failed", label: t("filters.titleMode.failed") },
+              { key: "idle", label: t("filters.titleMode.idle") },
             ]}
             value={catalog.titleState}
             onChange={catalog.setTitleState}
           />
           <SelectField
-            label="Title source"
+            label={t("filters.titleSource")}
             options={[
-              { key: "all", label: "Any title source" },
-              { key: "label", label: "Manual label" },
-              { key: "semantic_title", label: "Semantic title" },
-              { key: "auto_title", label: "Automatic title" },
-              { key: "session_key", label: "Session key fallback" },
+              { key: "all", label: t("filters.titleSource.all") },
+              { key: "label", label: t("filters.titleSource.label") },
+              { key: "semantic_title", label: t("filters.titleSource.semantic") },
+              { key: "auto_title", label: t("filters.titleSource.auto") },
+              { key: "session_key", label: t("filters.titleSource.sessionKey") },
             ]}
             value={catalog.titleSource}
             onChange={catalog.setTitleSource}
           />
           <SelectField
-            label="Branch state"
+            label={t("filters.branchState")}
             options={[
-              { key: "all", label: "Any lineage" },
-              { key: "root", label: "Root session" },
-              { key: "active_branch", label: "Active branch" },
-              { key: "branch_source", label: "Branch source" },
+              { key: "all", label: t("filters.branchState.all") },
+              { key: "root", label: t("filters.branchState.root") },
+              { key: "active_branch", label: t("filters.branchState.active") },
+              { key: "branch_source", label: t("filters.branchState.source") },
             ]}
             value={catalog.branchState}
             onChange={catalog.setBranchState}
           />
           <SelectField
-            label="Pending approvals"
+            label={t("filters.pendingApprovals")}
             options={[
-              { key: "all", label: "Any approval state" },
-              { key: "yes", label: "With pending approvals" },
-              { key: "no", label: "Without pending approvals" },
+              { key: "all", label: t("filters.pendingApprovals.all") },
+              { key: "yes", label: t("filters.pendingApprovals.yes") },
+              { key: "no", label: t("filters.pendingApprovals.no") },
             ]}
             value={catalog.hasPendingApprovals}
             onChange={(value) => catalog.setHasPendingApprovals(value as "all" | "yes" | "no")}
           />
           <SelectField
-            label="Context files"
+            label={t("filters.contextFiles")}
             options={[
-              { key: "all", label: "Any context posture" },
-              { key: "yes", label: "With context files" },
-              { key: "no", label: "Without context files" },
+              { key: "all", label: t("filters.contextFiles.all") },
+              { key: "yes", label: t("filters.contextFiles.yes") },
+              { key: "no", label: t("filters.contextFiles.no") },
             ]}
             value={catalog.hasContextFiles}
             onChange={(value) => catalog.setHasContextFiles(value as "all" | "yes" | "no")}
           />
           <TextInputField
-            label="Agent"
-            placeholder="agent id"
+            label={t("filters.agent")}
+            placeholder={t("filters.agentPlaceholder")}
             value={catalog.agentId}
             onChange={catalog.setAgentId}
           />
           <TextInputField
-            label="Model profile"
-            placeholder="model profile"
+            label={t("filters.modelProfile")}
+            placeholder={t("filters.modelProfilePlaceholder")}
             value={catalog.modelProfile}
             onChange={catalog.setModelProfile}
           />
           <SwitchField
             checked={catalog.includeArchived}
-            description="Include archived records in the current list."
-            label="Show archived"
+            description={t("filters.showArchivedDescription")}
+            label={t("filters.showArchived")}
             onChange={catalog.setIncludeArchived}
           />
         </div>
@@ -440,18 +783,24 @@ export function SessionsSection({ app }: SessionsSectionProps) {
 
       <section className="workspace-two-column">
         <WorkspaceSectionCard
-          description="Pick a session to inspect its latest activity, preview, and lifecycle state."
-          title="Catalog"
+          description={t("catalog.description")}
+          title={t("catalog.title")}
         >
           {catalog.entries.length === 0 ? (
             <WorkspaceEmptyState
-              description="Adjust filters or create activity in chat to populate the session catalog."
-              title="No sessions match the current query"
+              description={t("catalog.emptyDescription")}
+              title={t("catalog.emptyTitle")}
             />
           ) : (
             <WorkspaceTable
               ariaLabel="Session catalog"
-              columns={["Title", "Family", "Updated", "Controls", "Recap"]}
+              columns={[
+                t("catalog.columns.title"),
+                t("catalog.columns.family"),
+                t("catalog.columns.updated"),
+                t("catalog.columns.controls"),
+                t("catalog.columns.recap"),
+              ]}
             >
               {catalog.entries.map((entry) => {
                 const selectedRow = entry.session_id === catalog.selectedSessionId;
@@ -470,7 +819,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                             entry.title_generation_state,
                             entry.manual_title_locked,
                           )}{" "}
-                          · {entry.archived ? "archived" : entry.title_source}
+                          · {entry.archived ? t("catalog.archived") : entry.title_source}
                         </small>
                       </div>
                     </td>
@@ -492,15 +841,14 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                           {entryPresentation.agentDisplay} · {entryPresentation.modelDisplay}
                         </small>
                         <small className="text-muted">
-                          {entry.pending_approvals} approval
-                          {entry.pending_approvals === 1 ? "" : "s"}
+                          {entry.pending_approvals} {t("status.pendingApprovals")}
                           {entryPresentation.activeContextFiles.length > 0
                             ? ` · ${entryPresentation.activeContextFiles.length} context file${entryPresentation.activeContextFiles.length === 1 ? "" : "s"}`
                             : ""}
                         </small>
                       </div>
                     </td>
-                    <td>{entry.preview ?? entry.last_summary ?? "No recap"}</td>
+                    <td>{entry.preview ?? entry.last_summary ?? t("catalog.noRecap")}</td>
                   </tr>
                 );
               })}
@@ -509,24 +857,24 @@ export function SessionsSection({ app }: SessionsSectionProps) {
         </WorkspaceSectionCard>
 
         <WorkspaceSectionCard
-          description="Lifecycle actions here reuse the same backend mutations as chat instead of inventing a separate control path."
-          title="Detail"
+          description={t("detail.description")}
+          title={t("detail.title")}
         >
           {selected === null ? (
             <WorkspaceEmptyState
               compact
-              description="Select a row from the session catalog to inspect details and actions."
-              title="No session selected"
+              description={t("detail.emptyDescription")}
+              title={t("detail.emptyTitle")}
             />
           ) : (
             <div className="workspace-stack">
               <div className="workspace-panel__intro">
-                <p className="workspace-kicker">Selected session</p>
+                <p className="workspace-kicker">{t("detail.selectedSession")}</p>
                 <h3>{selected.title}</h3>
                 <p className="chat-muted">
                   {selected.preview ??
                     selected.last_summary ??
-                    "No preview was derivable from existing run history."}
+                    t("detail.noPreview")}
                 </p>
                 <div className="workspace-chip-row">
                   <WorkspaceStatusChip tone={selected.manual_title_locked ? "accent" : "default"}>
@@ -543,7 +891,10 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   </WorkspaceStatusChip>
                   {selectedPresentation.familySize > 1 ? (
                     <WorkspaceStatusChip tone="accent">
-                      Family {selectedPresentation.familySequence}/{selectedPresentation.familySize}
+                      {t("detail.family", {
+                        index: selectedPresentation.familySequence,
+                        count: selectedPresentation.familySize,
+                      })}
                     </WorkspaceStatusChip>
                   ) : null}
                 </div>
@@ -551,8 +902,8 @@ export function SessionsSection({ app }: SessionsSectionProps) {
 
               <TextInputField
                 disabled={catalog.busy}
-                description="Leave empty to return the session to automatic title mode."
-                label="Session label"
+                description={t("detail.sessionLabelDescription")}
+                label={t("detail.sessionLabel")}
                 value={catalog.renameDraft}
                 onChange={catalog.setRenameDraft}
               />
@@ -564,7 +915,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   variant="primary"
                   onPress={() => void catalog.renameSelectedSession()}
                 >
-                  Rename
+                  {t("action.rename")}
                 </ActionButton>
                 <ActionButton
                   isDisabled={catalog.busy}
@@ -572,7 +923,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   variant="secondary"
                   onPress={() => void catalog.resetSelectedSession()}
                 >
-                  Reset
+                  {t("action.reset")}
                 </ActionButton>
                 <ActionButton
                   isDisabled={catalog.busy}
@@ -580,7 +931,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   variant="danger"
                   onPress={() => void catalog.archiveSelectedSession()}
                 >
-                  Archive
+                  {t("action.archive")}
                 </ActionButton>
                 <ActionButton
                   isDisabled={catalog.busy || !selected.last_run_id}
@@ -588,7 +939,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   variant="ghost"
                   onPress={() => void catalog.abortSelectedRun()}
                 >
-                  Abort run
+                  {t("action.abortRun")}
                 </ActionButton>
                 <ActionButton
                   isDisabled={catalog.busy || phase4Busy !== null}
@@ -596,7 +947,9 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   variant="secondary"
                   onPress={() => void createCheckpoint()}
                 >
-                  {phase4Busy === "checkpoint" ? "Checkpointing..." : "Create checkpoint"}
+                  {phase4Busy === "checkpoint"
+                    ? t("action.checkpointing")
+                    : t("action.createCheckpoint")}
                 </ActionButton>
                 <ActionButton
                   isDisabled={catalog.busy || phase4Busy !== null}
@@ -604,7 +957,9 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   variant="secondary"
                   onPress={() => void previewCompaction()}
                 >
-                  {phase4Busy === "preview" ? "Previewing..." : "Preview compaction"}
+                  {phase4Busy === "preview"
+                    ? t("action.previewing")
+                    : t("action.previewCompaction")}
                 </ActionButton>
                 <ActionButton
                   isDisabled={catalog.busy || phase4Busy !== null}
@@ -612,7 +967,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   variant="primary"
                   onPress={() => void applyCompaction()}
                 >
-                  {phase4Busy === "apply" ? "Applying..." : "Apply compaction"}
+                  {phase4Busy === "apply" ? t("action.applying") : t("action.applyCompaction")}
                 </ActionButton>
               </div>
 
@@ -638,7 +993,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   void navigate(`${getSectionPath("chat")}?${search.toString()}`);
                 }}
               >
-                Open in chat
+                {t("action.openChat")}
               </ActionButton>
               <ActionButton
                 type="button"
@@ -655,7 +1010,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   void navigate(buildObjectiveOverviewHref(objectiveId));
                 }}
               >
-                Open objective
+                {t("action.openObjective")}
               </ActionButton>
               <ActionButton
                 type="button"
@@ -664,67 +1019,69 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   void navigate(`${getSectionPath("inventory")}?deviceId=${selected.device_id}`)
                 }
               >
-                Open inventory
+                {t("action.openInventory")}
               </ActionButton>
 
               <dl className="workspace-key-value-grid">
                 <div>
-                  <dt>Session key</dt>
+                  <dt>{t("detail.sessionKey")}</dt>
                   <dd>{selected.session_key}</dd>
                 </div>
                 <div>
-                  <dt>Title source</dt>
+                  <dt>{t("detail.titleSource")}</dt>
                   <dd>{selected.title_source}</dd>
                 </div>
                 <div>
-                  <dt>Family root</dt>
+                  <dt>{t("detail.familyRoot")}</dt>
                   <dd>{selectedPresentation.familyRootTitle}</dd>
                 </div>
                 <div>
-                  <dt>Created</dt>
+                  <dt>{t("detail.created")}</dt>
                   <dd>{formatUnixMs(selected.created_at_unix_ms)}</dd>
                 </div>
                 <div>
-                  <dt>Updated</dt>
+                  <dt>{t("detail.updated")}</dt>
                   <dd>{formatUnixMs(selected.updated_at_unix_ms)}</dd>
                 </div>
                 <div>
-                  <dt>Run state</dt>
-                  <dd>{selected.last_run_state ?? "none"}</dd>
+                  <dt>{t("detail.runState")}</dt>
+                  <dd>{selected.last_run_state ?? t("detail.none")}</dd>
                 </div>
                 <div>
-                  <dt>Branch state</dt>
+                  <dt>{t("filters.branchState")}</dt>
                   <dd>{describeBranchState(selected.branch_state)}</dd>
                 </div>
                 <div>
-                  <dt>Lineage</dt>
+                  <dt>{t("detail.lineage")}</dt>
                   <dd>{selectedLineage}</dd>
                 </div>
                 <div>
-                  <dt>Total tokens</dt>
+                  <dt>{t("detail.totalTokens")}</dt>
                   <dd>{selected.total_tokens}</dd>
                 </div>
                 <div>
-                  <dt>Pending approvals</dt>
+                  <dt>{t("metric.pendingApprovals")}</dt>
                   <dd>{selected.pending_approvals}</dd>
                 </div>
                 <div>
-                  <dt>Context files</dt>
+                  <dt>{t("detail.contextFiles")}</dt>
                   <dd>
                     {selectedPresentation.activeContextFiles.length > 0
-                      ? `${selectedPresentation.activeContextFiles.length} active`
-                      : "none"}
+                      ? t("detail.active", {
+                          count: selectedPresentation.activeContextFiles.length,
+                        })
+                      : t("detail.none")}
                   </dd>
                 </div>
               </dl>
 
               {selected.last_intent || selected.last_summary ? (
-                <WorkspaceInlineNotice title="Latest activity" tone="default">
+                <WorkspaceInlineNotice title={t("detail.latestActivity")} tone="default">
                   <p>
-                    <strong>Last intent:</strong> {selected.last_intent ?? "Missing"}
+                    <strong>{t("detail.lastIntent")}</strong> {selected.last_intent ?? t("detail.missing")}
                   </p>
                   <p>
-                    <strong>Last summary:</strong> {selected.last_summary ?? "Missing"}
+                    <strong>{t("detail.lastSummary")}</strong> {selected.last_summary ?? t("detail.missing")}
                   </p>
                 </WorkspaceInlineNotice>
               ) : null}
@@ -732,21 +1089,21 @@ export function SessionsSection({ app }: SessionsSectionProps) {
               {selectedPresentation.touchedFiles.length > 0 ||
               selectedPresentation.activeContextFiles.length > 0 ||
               selectedPresentation.recentArtifacts.length > 0 ? (
-                <WorkspaceInlineNotice title="Resume recap" tone="accent">
+                <WorkspaceInlineNotice title={t("detail.resumeRecap")} tone="accent">
                   {selectedPresentation.touchedFiles.length > 0 ? (
                     <p>
-                      <strong>Touched files:</strong> {selectedPresentation.touchedFiles.join(", ")}
+                      <strong>{t("detail.touchedFiles")}</strong> {selectedPresentation.touchedFiles.join(", ")}
                     </p>
                   ) : null}
                   {selectedPresentation.activeContextFiles.length > 0 ? (
                     <p>
-                      <strong>Active context:</strong>{" "}
+                      <strong>{t("detail.activeContext")}</strong>{" "}
                       {selectedPresentation.activeContextFiles.join(", ")}
                     </p>
                   ) : null}
                   {selectedPresentation.recentArtifacts.length > 0 ? (
                     <p>
-                      <strong>Recent artifacts:</strong>{" "}
+                      <strong>{t("detail.recentArtifacts")}</strong>{" "}
                       {selectedPresentation.recentArtifacts
                         .map((artifact) => `${artifact.label} (${artifact.kind})`)
                         .join(", ")}
@@ -756,33 +1113,33 @@ export function SessionsSection({ app }: SessionsSectionProps) {
               ) : null}
 
               <WorkspaceInlineNotice
-                title={selectedObjective === null ? "Objective linkage" : "Linked objective"}
+                title={selectedObjective === null ? t("detail.objectiveLinkage") : t("detail.linkedObjective")}
                 tone={selectedObjective === null ? "default" : "accent"}
               >
                 {selectedObjective === null ? (
                   objectivesBusy ? (
-                    <p>Loading objective linkage for the selected session.</p>
+                    <p>{t("detail.loadingObjectiveLinkage")}</p>
                   ) : (
-                    <p>No objective currently points at this session.</p>
+                    <p>{t("detail.noObjective")}</p>
                   )
                 ) : (
                   <>
                     <p>
                       <strong>
-                        {readString(selectedObjective, "name") ?? "Unnamed objective"}
+                        {readString(selectedObjective, "name") ?? t("detail.unnamedObjective")}
                       </strong>{" "}
                       · {readString(selectedObjective, "kind") ?? "objective"} ·{" "}
                       {readString(selectedObjective, "state") ?? "unknown"}
                     </p>
                     <p>
-                      <strong>Current focus:</strong>{" "}
+                      <strong>{t("detail.currentFocus")}</strong>{" "}
                       {readString(selectedObjective, "current_focus") ??
-                        "No current focus recorded."}
+                        t("detail.noCurrentFocus")}
                     </p>
                     <p>
-                      <strong>Next action:</strong>{" "}
+                      <strong>{t("detail.nextAction")}</strong>{" "}
                       {readString(selectedObjective, "next_recommended_step") ??
-                        "No next action recorded."}
+                        t("detail.noNextAction")}
                     </p>
                   </>
                 )}
@@ -790,7 +1147,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
 
               {compactionPreview !== null ? (
                 <WorkspaceInlineNotice
-                  title={compactionPreview.eligible ? "Compaction preview" : "Compaction blocked"}
+                  title={compactionPreview.eligible ? t("continuity.preview") : t("continuity.blocked")}
                   tone={
                     !compactionPreview.eligible
                       ? "warning"
@@ -800,18 +1157,15 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   }
                 >
                   <p>
-                    <strong>Summary:</strong> {compactionPreview.summary_preview}
+                    <strong>{t("continuity.summary")}</strong> {compactionPreview.summary_preview}
                   </p>
                   <p>
-                    <strong>Token delta:</strong> {compactionPreview.token_delta} ·{" "}
-                    <strong>Planned writes:</strong> {continuityWriteCount} ·{" "}
-                    <strong>Review candidates:</strong> {continuityReviewCount}
+                    <strong>{t("continuity.tokenDelta")}</strong> {compactionPreview.token_delta} ·{" "}
+                    <strong>{t("continuity.plannedWrites")}</strong> {continuityWriteCount} ·{" "}
+                    <strong>{t("continuity.reviewCandidates")}</strong> {continuityReviewCount}
                   </p>
                   {continuityReviewCount > 0 ? (
-                    <p>
-                      Use the chat compaction flow to accept or reject the review-required
-                      candidates explicitly.
-                    </p>
+                    <p>{t("continuity.reviewHelp")}</p>
                   ) : null}
                 </WorkspaceInlineNotice>
               ) : null}
@@ -819,31 +1173,28 @@ export function SessionsSection({ app }: SessionsSectionProps) {
               <div className="workspace-inline-actions">
                 <WorkspaceStatusChip tone={continuityBusy ? "warning" : "default"}>
                   {continuityBusy
-                    ? "Loading continuity"
-                    : `${sessionCompactions.length} compactions`}
+                    ? t("continuity.loading")
+                    : t("continuity.compactions", { count: sessionCompactions.length })}
                 </WorkspaceStatusChip>
                 <WorkspaceStatusChip tone={sessionCheckpoints.length > 0 ? "accent" : "default"}>
-                  {sessionCheckpoints.length} checkpoints
+                  {t("continuity.checkpoints", { count: sessionCheckpoints.length })}
                 </WorkspaceStatusChip>
                 <WorkspaceStatusChip tone={continuityReviewCount > 0 ? "warning" : "default"}>
-                  {continuityReviewCount} pending review
+                  {t("continuity.pendingReview", { count: continuityReviewCount })}
                 </WorkspaceStatusChip>
               </div>
 
               <div className="workspace-stack">
                 <div className="workspace-panel__intro">
-                  <p className="workspace-kicker">Continuity artifacts</p>
-                  <h3>Recent compactions</h3>
-                  <p className="chat-muted">
-                    Inspect the last stored compactions and jump straight into the chat detail
-                    sidebar for raw diff and audit context.
-                  </p>
+                  <p className="workspace-kicker">{t("continuity.artifacts")}</p>
+                  <h3>{t("continuity.recentCompactions")}</h3>
+                  <p className="chat-muted">{t("continuity.recentCompactionsDescription")}</p>
                 </div>
                 {recentCompactions.length === 0 ? (
                   <WorkspaceEmptyState
                     compact
-                    description="No compaction artifacts are stored for this session yet."
-                    title="No compactions yet"
+                    description={t("continuity.emptyCompactionsDescription")}
+                    title={t("continuity.emptyCompactionsTitle")}
                   />
                 ) : (
                   <div className="chat-ops-list">
@@ -857,8 +1208,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                           <div className="chat-ops-card__copy">
                             <strong>{artifact.mode}</strong>
                             <span>
-                              {lifecycleState.replaceAll("_", " ")} · {writeCount} write
-                              {writeCount === 1 ? "" : "s"} · {reviewCount} review
+                              {lifecycleState.replaceAll("_", " ")} · {continuityCountLabel("write", writeCount)} · {reviewCount} {t("continuity.review")}
                             </span>
                             <p>{artifact.summary_preview}</p>
                           </div>
@@ -877,7 +1227,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                                 })
                               }
                             >
-                              Open in chat
+                              {t("action.openChat")}
                             </ActionButton>
                           </div>
                         </article>
@@ -889,18 +1239,15 @@ export function SessionsSection({ app }: SessionsSectionProps) {
 
               <div className="workspace-stack">
                 <div className="workspace-panel__intro">
-                  <p className="workspace-kicker">Recovery points</p>
-                  <h3>Recent checkpoints</h3>
-                  <p className="chat-muted">
-                    Checkpoints stay paired with compaction history so rollback is visible without
-                    opening the raw journal.
-                  </p>
+                  <p className="workspace-kicker">{t("continuity.recoveryPoints")}</p>
+                  <h3>{t("continuity.recentCheckpoints")}</h3>
+                  <p className="chat-muted">{t("continuity.recentCheckpointsDescription")}</p>
                 </div>
                 {recentCheckpoints.length === 0 ? (
                   <WorkspaceEmptyState
                     compact
-                    description="Create a checkpoint or apply a compaction to start the rollback history."
-                    title="No checkpoints yet"
+                    description={t("continuity.emptyCheckpointsDescription")}
+                    title={t("continuity.emptyCheckpointsTitle")}
                   />
                 ) : (
                   <div className="chat-ops-list">
@@ -909,10 +1256,10 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                         <div className="chat-ops-card__copy">
                           <strong>{checkpoint.name}</strong>
                           <span>
-                            {describeBranchState(checkpoint.branch_state)} · restores{" "}
+                            {describeBranchState(checkpoint.branch_state)} · {t("continuity.restores")}{" "}
                             {checkpoint.restore_count}
                           </span>
-                          <p>{checkpoint.note ?? "No note recorded for this checkpoint."}</p>
+                          <p>{checkpoint.note ?? t("continuity.noCheckpointNote")}</p>
                         </div>
                         <div className="chat-ops-card__actions">
                           <WorkspaceStatusChip tone="accent">
@@ -929,7 +1276,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                               })
                             }
                           >
-                            Open in chat
+                            {t("action.openChat")}
                           </ActionButton>
                         </div>
                       </article>

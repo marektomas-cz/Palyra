@@ -17,6 +17,7 @@ import {
   WorkspaceSectionCard,
   WorkspaceStatusChip,
 } from "../components/workspace/WorkspaceChrome";
+import { pseudoLocalizeText } from "../i18n";
 import { PrettyJsonBlock, formatUnixMs, readObject, readString, type JsonObject } from "../shared";
 import type { ConsoleAppState } from "../useConsoleAppState";
 import { emitUxSystemEvent } from "../uxTelemetry";
@@ -37,11 +38,127 @@ type ApprovalsSectionProps = {
     | "setApprovalScope"
     | "refreshApprovals"
     | "decideApproval"
+    | "locale"
     | "revealSensitiveValues"
   >;
 };
 
+const APPROVAL_MESSAGES = {
+  "header.title": "Approvals",
+  "header.description":
+    "Explainable permissions center for per-tool posture, friction, presets, and the approval inbox.",
+  "header.locked": "locked",
+  "header.pending": "approvals pending",
+  "header.refresh": "Refresh",
+  "header.refreshing": "Refreshing...",
+  "metric.toolsInScope": "Tools in scope",
+  "metric.loadingScope": "Loading scope",
+  "metric.requests14d": "Approval requests (14d)",
+  "metric.requests14dDetail": "Recent friction signal used for recommendations.",
+  "metric.highFriction": "High-friction tools",
+  "metric.highFrictionDetail": "Tools with repeated approvals or pending backlog.",
+  "queue.title": "Approval queue",
+  "queue.description":
+    "Pending work stays easy to scan, with resolved items still available for follow-up context.",
+  "queue.empty": "No approval records loaded.",
+  "queue.unknownSubject": "unknown subject",
+  "queue.pending": "pending",
+  "detail.title": "Approval detail",
+  "detail.description":
+    "Keep the selected request, context, explainability, and decision controls on one surface.",
+  "detail.empty": "Select an approval to inspect request context and decide it.",
+  "detail.selected": "Selected approval",
+  "detail.noSummary": "No summary published.",
+  "detail.subjectType": "Subject type",
+  "detail.subjectId": "Subject ID",
+  "detail.principal": "Principal",
+  "detail.requested": "Requested",
+  "detail.session": "Session",
+  "detail.run": "Run",
+  "detail.notAvailable": "n/a",
+  "detail.why": "Why this approval appeared",
+  "detail.whyDescription":
+    "Inline explainability for the current tool posture and the next safe action.",
+  "detail.openTool": "Open tool detail",
+  "detail.tool": "Approval tool",
+  "detail.approvalId": "Approval ID",
+  "detail.reason": "Reason",
+  "detail.reasonPlaceholder": "Optional operator note",
+  "detail.scope": "Decision scope",
+  "detail.approve": "Approve",
+  "detail.deny": "Deny",
+  "detail.previewPayload": "Approval preview payload",
+  "detail.previewPayloadDescription":
+    "Structured preview context stays visible so operators can distinguish preview-only actions from applied ones.",
+} as const;
+
+type ApprovalMessageKey = keyof typeof APPROVAL_MESSAGES;
+
+const APPROVAL_MESSAGES_CS: Readonly<Record<ApprovalMessageKey, string>> = {
+  "header.title": "Schválení",
+  "header.description":
+    "Centrum vysvětlitelných oprávnění pro posture jednotlivých nástrojů, tření, presety a approval inbox.",
+  "header.locked": "uzamčeno",
+  "header.pending": "čekajících schválení",
+  "header.refresh": "Obnovit",
+  "header.refreshing": "Obnovuji...",
+  "metric.toolsInScope": "Nástroje v rozsahu",
+  "metric.loadingScope": "Načítám scope",
+  "metric.requests14d": "Požadavky na schválení (14 d)",
+  "metric.requests14dDetail": "Nedávný friction signál používaný pro doporučení.",
+  "metric.highFriction": "Nástroje s vysokým třením",
+  "metric.highFrictionDetail": "Nástroje s opakovanými schváleními nebo čekajícím backlogem.",
+  "queue.title": "Fronta schválení",
+  "queue.description":
+    "Čekající práce zůstává snadno čitelná a vyřešené položky jsou stále dostupné pro navazující kontext.",
+  "queue.empty": "Nejsou načtené žádné záznamy schválení.",
+  "queue.unknownSubject": "neznámý subjekt",
+  "queue.pending": "čeká",
+  "detail.title": "Detail schválení",
+  "detail.description":
+    "Drž vybraný požadavek, kontext, vysvětlení a ovládání rozhodnutí na jedné ploše.",
+  "detail.empty": "Vyber schválení a zkontroluj kontext požadavku i rozhodnutí.",
+  "detail.selected": "Vybrané schválení",
+  "detail.noSummary": "Nebyl publikovaný žádný souhrn.",
+  "detail.subjectType": "Typ subjektu",
+  "detail.subjectId": "ID subjektu",
+  "detail.principal": "Principál",
+  "detail.requested": "Vyžádáno",
+  "detail.session": "Relace",
+  "detail.run": "Běh",
+  "detail.notAvailable": "n/a",
+  "detail.why": "Proč se toto schválení objevilo",
+  "detail.whyDescription":
+    "Inline explainability pro aktuální posture nástroje a další bezpečnou akci.",
+  "detail.openTool": "Otevřít detail nástroje",
+  "detail.tool": "Nástroj schválení",
+  "detail.approvalId": "ID schválení",
+  "detail.reason": "Důvod",
+  "detail.reasonPlaceholder": "Volitelná poznámka operátora",
+  "detail.scope": "Scope rozhodnutí",
+  "detail.approve": "Schválit",
+  "detail.deny": "Zamítnout",
+  "detail.previewPayload": "Preview payload schválení",
+  "detail.previewPayloadDescription":
+    "Strukturovaný preview kontext zůstává viditelný, aby operátoři odlišili preview-only akce od aplikovaných.",
+};
+
+function translateApproval(
+  locale: ConsoleAppState["locale"],
+  key: ApprovalMessageKey,
+  variables?: Record<string, string | number>,
+): string {
+  const template = (locale === "cs" ? APPROVAL_MESSAGES_CS : APPROVAL_MESSAGES)[key];
+  const resolved =
+    variables === undefined
+      ? template
+      : template.replaceAll(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => `${variables[name] ?? ""}`);
+  return locale === "qps-ploc" ? pseudoLocalizeText(resolved) : resolved;
+}
+
 export function ApprovalsSection({ app }: ApprovalsSectionProps) {
+  const t = (key: ApprovalMessageKey, variables?: Record<string, string | number>) =>
+    translateApproval(app.locale, key, variables);
   const [searchParams] = useSearchParams();
   const [permissionsBusy, setPermissionsBusy] = useState(false);
   const [detailBusy, setDetailBusy] = useState(false);
@@ -316,15 +433,15 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
     <main className="workspace-page">
       <WorkspacePageHeader
         eyebrow="Control"
-        title="Approvals"
-        description="Explainable permissions center for per-tool posture, friction, presets, and the approval inbox."
+        title={t("header.title")}
+        description={t("header.description")}
         status={
           <>
             <WorkspaceStatusChip tone={permissions?.summary.locked_tools ? "warning" : "success"}>
-              {permissions?.summary.locked_tools ?? 0} locked
+              {permissions?.summary.locked_tools ?? 0} {t("header.locked")}
             </WorkspaceStatusChip>
             <WorkspaceStatusChip tone={pendingApprovals.length > 0 ? "warning" : "success"}>
-              {pendingApprovals.length} approvals pending
+              {pendingApprovals.length} {t("header.pending")}
             </WorkspaceStatusChip>
           </>
         }
@@ -336,27 +453,27 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
             }
             isDisabled={permissionsBusy || app.approvalsBusy}
           >
-            {permissionsBusy || app.approvalsBusy ? "Refreshing..." : "Refresh"}
+            {permissionsBusy || app.approvalsBusy ? t("header.refreshing") : t("header.refresh")}
           </Button>
         }
       />
 
       <section className="workspace-metric-grid workspace-metric-grid--compact">
         <WorkspaceMetricCard
-          label="Tools in scope"
+          label={t("metric.toolsInScope")}
           value={permissions?.summary.total_tools ?? 0}
-          detail={permissions?.scope.active.label ?? "Loading scope"}
+          detail={permissions?.scope.active.label ?? t("metric.loadingScope")}
         />
         <WorkspaceMetricCard
-          label="Approval requests (14d)"
+          label={t("metric.requests14d")}
           value={permissions?.summary.approval_requests_14d ?? 0}
-          detail="Recent friction signal used for recommendations."
+          detail={t("metric.requests14dDetail")}
           tone={(permissions?.summary.approval_requests_14d ?? 0) > 0 ? "warning" : "default"}
         />
         <WorkspaceMetricCard
-          label="High-friction tools"
+          label={t("metric.highFriction")}
           value={permissions?.summary.high_friction_tools ?? 0}
-          detail="Tools with repeated approvals or pending backlog."
+          detail={t("metric.highFrictionDetail")}
           tone={(permissions?.summary.high_friction_tools ?? 0) > 0 ? "warning" : "default"}
         />
       </section>
@@ -763,12 +880,12 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
 
       <section className="workspace-two-column workspace-two-column--queue">
         <WorkspaceSectionCard
-          title="Approval queue"
-          description="Pending work stays easy to scan, with resolved items still available for follow-up context."
+          title={t("queue.title")}
+          description={t("queue.description")}
         >
           <div className="workspace-list workspace-list--queue">
             {app.approvals.length === 0 ? (
-              <p className="chat-muted">No approval records loaded.</p>
+              <p className="chat-muted">{t("queue.empty")}</p>
             ) : (
               app.approvals.map((approval) => {
                 const approvalId = readString(approval, "approval_id") ?? "unknown";
@@ -785,12 +902,12 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                     <div>
                       <strong>{readString(approval, "request_summary") ?? approvalId}</strong>
                       <p className="chat-muted">
-                        {readString(approval, "subject_type") ?? "unknown subject"} ·{" "}
+                        {readString(approval, "subject_type") ?? t("queue.unknownSubject")} ·{" "}
                         {formatUnixMs(readUnixMillis(approval, "requested_at_unix_ms"))}
                       </p>
                     </div>
                     <WorkspaceStatusChip tone={decision === null ? "warning" : "default"}>
-                      {decision ?? "pending"}
+                      {decision ?? t("queue.pending")}
                     </WorkspaceStatusChip>
                   </Button>
                 );
@@ -800,63 +917,61 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
         </WorkspaceSectionCard>
 
         <WorkspaceSectionCard
-          title="Approval detail"
-          description="Keep the selected request, context, explainability, and decision controls on one surface."
+          title={t("detail.title")}
+          description={t("detail.description")}
         >
           {selectedApproval === null ? (
-            <p className="chat-muted">
-              Select an approval to inspect request context and decide it.
-            </p>
+            <p className="chat-muted">{t("detail.empty")}</p>
           ) : (
             <div className="workspace-stack">
               <div className="workspace-callout">
                 <div className="workspace-list-item">
                   <div>
-                    <p className="console-label">Selected approval</p>
+                    <p className="console-label">{t("detail.selected")}</p>
                     <strong>{selectedApprovalId}</strong>
                   </div>
                   <WorkspaceStatusChip
                     tone={readString(selectedApproval, "decision") === null ? "warning" : "default"}
                   >
-                    {readString(selectedApproval, "decision") ?? "pending"}
+                    {readString(selectedApproval, "decision") ?? t("queue.pending")}
                   </WorkspaceStatusChip>
                 </div>
                 <p className="chat-muted">
-                  {readString(selectedApproval, "request_summary") ?? "No summary published."}
+                  {readString(selectedApproval, "request_summary") ?? t("detail.noSummary")}
                 </p>
               </div>
 
               <dl className="workspace-key-value-grid">
                 <div>
-                  <dt>Subject type</dt>
-                  <dd>{readString(selectedApproval, "subject_type") ?? "n/a"}</dd>
+                  <dt>{t("detail.subjectType")}</dt>
+                  <dd>{readString(selectedApproval, "subject_type") ?? t("detail.notAvailable")}</dd>
                 </div>
                 <div>
-                  <dt>Subject ID</dt>
-                  <dd>{readString(selectedApproval, "subject_id") ?? "n/a"}</dd>
+                  <dt>{t("detail.subjectId")}</dt>
+                  <dd>{readString(selectedApproval, "subject_id") ?? t("detail.notAvailable")}</dd>
                 </div>
                 <div>
-                  <dt>Principal</dt>
-                  <dd>{readString(selectedApproval, "principal") ?? "n/a"}</dd>
+                  <dt>{t("detail.principal")}</dt>
+                  <dd>{readString(selectedApproval, "principal") ?? t("detail.notAvailable")}</dd>
                 </div>
                 <div>
-                  <dt>Requested</dt>
+                  <dt>{t("detail.requested")}</dt>
                   <dd>{formatUnixMs(readUnixMillis(selectedApproval, "requested_at_unix_ms"))}</dd>
                 </div>
                 <div>
-                  <dt>Session</dt>
-                  <dd>{readString(selectedApproval, "session_id") ?? "n/a"}</dd>
+                  <dt>{t("detail.session")}</dt>
+                  <dd>{readString(selectedApproval, "session_id") ?? t("detail.notAvailable")}</dd>
                 </div>
                 <div>
-                  <dt>Run</dt>
-                  <dd>{readString(selectedApproval, "run_id") ?? "n/a"}</dd>
+                  <dt>{t("detail.run")}</dt>
+                  <dd>{readString(selectedApproval, "run_id") ?? t("detail.notAvailable")}</dd>
                 </div>
               </dl>
 
               {permissionFromApproval !== null && (
                 <WorkspaceSectionCard
-                  title="Why this approval appeared"
-                  description="Inline explainability for the current tool posture and the next safe action."
+                  title={t("detail.why")}
+                  description={t("detail.whyDescription")}
                   className="workspace-section-card--nested"
                 >
                   <p>
@@ -879,7 +994,7 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                       variant="secondary"
                       onPress={() => setSelectedToolName(permissionFromApproval.tool_name)}
                     >
-                      Open tool detail
+                      {t("detail.openTool")}
                     </Button>
                   </div>
                 </WorkspaceSectionCard>
@@ -887,26 +1002,26 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
 
               {selectedApprovalToolName !== null && (
                 <div className="workspace-callout">
-                  <p className="console-label">Approval tool</p>
+                  <p className="console-label">{t("detail.tool")}</p>
                   <strong>{selectedApprovalToolName}</strong>
                 </div>
               )}
 
               <div className="workspace-form-grid">
                 <TextInputField
-                  label="Approval ID"
+                  label={t("detail.approvalId")}
                   value={selectedApprovalId}
                   readOnly
                   onChange={() => {}}
                 />
                 <TextInputField
-                  label="Reason"
+                  label={t("detail.reason")}
                   value={app.approvalReason}
                   onChange={app.setApprovalReason}
-                  placeholder="Optional operator note"
+                  placeholder={t("detail.reasonPlaceholder")}
                 />
                 <SelectField
-                  label="Decision scope"
+                  label={t("detail.scope")}
                   value={app.approvalScope}
                   onChange={app.setApprovalScope}
                   options={[
@@ -927,7 +1042,7 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                   }}
                   isDisabled={app.approvalsBusy}
                 >
-                  Approve
+                  {t("detail.approve")}
                 </Button>
                 <Button
                   variant="danger-soft"
@@ -939,14 +1054,14 @@ export function ApprovalsSection({ app }: ApprovalsSectionProps) {
                   }}
                   isDisabled={app.approvalsBusy}
                 >
-                  Deny
+                  {t("detail.deny")}
                 </Button>
               </div>
 
               {parsePromptDetails(readObject(selectedApproval, "prompt")) !== null && (
                 <WorkspaceSectionCard
-                  title="Approval preview payload"
-                  description="Structured preview context stays visible so operators can distinguish preview-only actions from applied ones."
+                  title={t("detail.previewPayload")}
+                  description={t("detail.previewPayloadDescription")}
                   className="workspace-section-card--nested"
                 >
                   <PrettyJsonBlock

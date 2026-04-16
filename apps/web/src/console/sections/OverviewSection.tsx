@@ -29,6 +29,7 @@ import {
   WorkspaceInlineNotice,
   workspaceToneForState,
 } from "../components/workspace/WorkspacePatterns";
+import { pseudoLocalizeText } from "../i18n";
 import {
   buildObjectiveChatHref,
   objectiveWorkspaceDocumentPath,
@@ -74,6 +75,7 @@ type OverviewSectionProps = {
     | "overviewUsageInsights"
     | "overviewSupportJobs"
     | "refreshOverview"
+    | "locale"
     | "selectOverviewOnboardingFlow"
     | "setError"
     | "setNotice"
@@ -103,6 +105,139 @@ type ObjectiveEditorForm = {
   enabled: boolean;
 };
 
+const OVERVIEW_MESSAGES = {
+  "header.title": "Overview",
+  "header.description":
+    "Stay focused on product posture, operator blockers, and the long-lived objectives driving automated work. Deep diagnostics now live in Settings / Diagnostics.",
+  "status.attentionItems": "{count} attention items",
+  "status.ready": "Ready",
+  "status.activeObjectives": "{count} active objectives",
+  "status.deploymentWarnings": "{count} deployment warnings",
+  "action.refreshing": "Refreshing...",
+  "action.refreshOverview": "Refresh overview",
+  "guidance.show": "Show guidance",
+  "guidance.hidden.title": "Guidance hidden",
+  "guidance.hidden.description":
+    "Starter prompts, onboarding cards, and runtime repair hints are currently hidden.",
+  "guidance.hidden.body":
+    "Reopen the guidance surface whenever you want the recommended next action, blocker repairs, or first-success prompts.",
+  "guidance.currentTrack": "Current track",
+  "onboarding.nextStep": "Next onboarding step",
+  "onboarding.noRecommendation":
+    "The control plane has not published a recommended onboarding step yet.",
+  "onboarding.flow": "Flow: {flow}. Status: {status}.",
+  "onboarding.trackSummary": "{track} Required: {required}. Optional: {optional}.",
+  "onboarding.quickStart": "Quick Start",
+  "onboarding.advancedSetup": "Advanced setup",
+  "onboarding.hideGuidance": "Hide guidance",
+  "onboarding.checklist": "Onboarding checklist",
+  "troubleshooting.title": "Troubleshooting",
+  "scenario.firstSuccess": "First success",
+  "scenario.openChat": "Open chat",
+  "scenario.reviewNextStep": "Review next step",
+  "scenario.readyDescription": "Open chat and validate the first end-to-end operator task.",
+  "scenario.finishSteps":
+    "Finish the remaining guided steps, then use a starter prompt to verify the workspace.",
+  "scenario.reviewApprovals": "Review approvals",
+  "scenario.inspectDiagnostics": "Inspect diagnostics",
+  "scenario.openSessions": "Open sessions",
+  "scenario.toolRecommendation": "Tool posture recommendation",
+  "scenario.openToolPermissions": "Open tool permissions",
+  "scenario.completed": "Completed",
+  "scenario.remaining": "Remaining",
+  "scenario.telemetryFriction": "Telemetry friction",
+  "scenario.openDiagnostics": "Open diagnostics",
+  "scenario.switchAdvanced": "Switch to advanced",
+  "scenario.refreshBaseline": "Refresh baseline",
+  "scenario.refreshingBaseline": "Refreshing baseline...",
+  "metric.runtimePosture": "Runtime posture",
+  "metric.noImmediateBlockers": "No immediate operator blockers are published.",
+  "metric.attentionRequired": "Attention required",
+  "metric.accessPosture": "Access posture",
+  "metric.remoteStable": "Remote access posture looks stable.",
+  "metric.objectiveLayer": "Objective layer",
+  "metric.noObjectives": "No active objective products are loaded yet.",
+  "metric.objectiveHealth": "Objective health",
+  "metric.objectiveHealthNeedsFollowUp": "Heartbeat or objective health needs follow-up.",
+  "metric.objectiveHealthClear": "No objective health deviations are loaded.",
+  "metric.attention": "Attention",
+  "metric.healthy": "Healthy",
+} as const;
+
+type OverviewMessageKey = keyof typeof OVERVIEW_MESSAGES;
+
+const OVERVIEW_MESSAGES_CS: Readonly<Record<OverviewMessageKey, string>> = {
+  "header.title": "Přehled",
+  "header.description":
+    "Soustřeď se na produktovou posturu, operátorské blokery a dlouhodobé objective, které pohánějí automatizovanou práci. Hluboká diagnostika teď žije v Nastavení / Diagnostika.",
+  "status.attentionItems": "{count} položek vyžaduje pozornost",
+  "status.ready": "Připraveno",
+  "status.activeObjectives": "{count} aktivních objectives",
+  "status.deploymentWarnings": "{count} varování nasazení",
+  "action.refreshing": "Obnovuji...",
+  "action.refreshOverview": "Obnovit přehled",
+  "guidance.show": "Zobrazit guidance",
+  "guidance.hidden.title": "Guidance skryta",
+  "guidance.hidden.description":
+    "Starter prompty, onboarding karty a hinty pro opravu runtime jsou momentálně skryté.",
+  "guidance.hidden.body":
+    "Kdykoli chceš doporučený další krok, opravu blockerů nebo prompty pro první úspěch, znovu otevři guidance surface.",
+  "guidance.currentTrack": "Aktuální track",
+  "onboarding.nextStep": "Další onboarding krok",
+  "onboarding.noRecommendation":
+    "Control plane zatím nepublikovala doporučený onboarding krok.",
+  "onboarding.flow": "Flow: {flow}. Stav: {status}.",
+  "onboarding.trackSummary": "{track} Povinné: {required}. Volitelné: {optional}.",
+  "onboarding.quickStart": "Quick Start",
+  "onboarding.advancedSetup": "Pokročilé nastavení",
+  "onboarding.hideGuidance": "Skrýt guidance",
+  "onboarding.checklist": "Onboarding checklist",
+  "troubleshooting.title": "Řešení problémů",
+  "scenario.firstSuccess": "První úspěch",
+  "scenario.openChat": "Otevřít chat",
+  "scenario.reviewNextStep": "Zkontrolovat další krok",
+  "scenario.readyDescription": "Otevři chat a ověř první end-to-end operátorský úkol.",
+  "scenario.finishSteps":
+    "Dokonči zbývající guided kroky a potom starter promptem ověř workspace.",
+  "scenario.reviewApprovals": "Zkontrolovat schválení",
+  "scenario.inspectDiagnostics": "Zkontrolovat diagnostiku",
+  "scenario.openSessions": "Otevřít relace",
+  "scenario.toolRecommendation": "Doporučení pro posture nástroje",
+  "scenario.openToolPermissions": "Otevřít oprávnění nástrojů",
+  "scenario.completed": "Dokončeno",
+  "scenario.remaining": "Zbývá",
+  "scenario.telemetryFriction": "Tření v telemetrii",
+  "scenario.openDiagnostics": "Otevřít diagnostiku",
+  "scenario.switchAdvanced": "Přepnout na pokročilé",
+  "scenario.refreshBaseline": "Obnovit baseline",
+  "scenario.refreshingBaseline": "Obnovuji baseline...",
+  "metric.runtimePosture": "Postura runtime",
+  "metric.noImmediateBlockers": "Nejsou publikované žádné okamžité operátorské blokery.",
+  "metric.attentionRequired": "Vyžaduje pozornost",
+  "metric.accessPosture": "Postura přístupu",
+  "metric.remoteStable": "Postura vzdáleného přístupu vypadá stabilně.",
+  "metric.objectiveLayer": "Vrstva objectives",
+  "metric.noObjectives": "Zatím nejsou načtené žádné aktivní objective produkty.",
+  "metric.objectiveHealth": "Zdraví objectives",
+  "metric.objectiveHealthNeedsFollowUp": "Zdraví heartbeat nebo objective vyžaduje navazující kontrolu.",
+  "metric.objectiveHealthClear": "Nejsou načtené žádné odchylky ve zdraví objectives.",
+  "metric.attention": "Pozornost",
+  "metric.healthy": "Zdravé",
+};
+
+function translateOverview(
+  locale: ConsoleAppState["locale"],
+  key: OverviewMessageKey,
+  variables?: Record<string, string | number>,
+): string {
+  const template = (locale === "cs" ? OVERVIEW_MESSAGES_CS : OVERVIEW_MESSAGES)[key];
+  const resolved =
+    variables === undefined
+      ? template
+      : template.replaceAll(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => `${variables[name] ?? ""}`);
+  return locale === "qps-ploc" ? pseudoLocalizeText(resolved) : resolved;
+}
+
 const OBJECTIVE_KIND_OPTIONS = [
   { key: "objective", label: "Objective", value: "objective" },
   { key: "heartbeat", label: "Heartbeat", value: "heartbeat" },
@@ -124,6 +259,10 @@ const DEFAULT_OBJECTIVE_FORM: ObjectiveEditorForm = {
 };
 
 export function OverviewSection({ app }: OverviewSectionProps) {
+  const tOverview = (
+    key: OverviewMessageKey,
+    variables?: Record<string, string | number>,
+  ): string => translateOverview(app.locale, key, variables);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [guidanceHidden, setGuidanceHidden] = useState(() => readGuidanceHidden("overview"));
@@ -364,18 +503,20 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     <main className="workspace-page">
       <WorkspacePageHeader
         eyebrow="Control"
-        title="Overview"
-        description="Stay focused on product posture, operator blockers, and the long-lived objectives driving automated work. Deep diagnostics now live in Settings / Diagnostics."
+        title={tOverview("header.title")}
+        description={tOverview("header.description")}
         status={
           <>
             <WorkspaceStatusChip tone={attentionItems.length > 0 ? "warning" : "success"}>
-              {attentionItems.length > 0 ? `${attentionItems.length} attention items` : "Ready"}
+              {attentionItems.length > 0
+                ? tOverview("status.attentionItems", { count: attentionItems.length })
+                : tOverview("status.ready")}
             </WorkspaceStatusChip>
             <WorkspaceStatusChip tone={activeObjectiveCount > 0 ? "accent" : "default"}>
-              {activeObjectiveCount} active objectives
+              {tOverview("status.activeObjectives", { count: activeObjectiveCount })}
             </WorkspaceStatusChip>
             <WorkspaceStatusChip tone={warnings.length > 0 ? "warning" : "default"}>
-              {warnings.length} deployment warnings
+              {tOverview("status.deploymentWarnings", { count: warnings.length })}
             </WorkspaceStatusChip>
           </>
         }
@@ -386,7 +527,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
             variant="primary"
             onPress={() => void refreshSurface()}
           >
-            {busy ? "Refreshing..." : "Refresh overview"}
+            {busy ? tOverview("action.refreshing") : tOverview("action.refreshOverview")}
           </ActionButton>
         }
       />
@@ -394,15 +535,12 @@ export function OverviewSection({ app }: OverviewSectionProps) {
       {guidanceHidden ? (
         <section className="workspace-two-column">
           <NextActionCard
-            ctaLabel="Show guidance"
-            description="Starter prompts, onboarding cards, and runtime repair hints are currently hidden."
-            title="Guidance hidden"
+            ctaLabel={tOverview("guidance.show")}
+            description={tOverview("guidance.hidden.description")}
+            title={tOverview("guidance.hidden.title")}
             onCta={() => updateGuidanceHidden(false)}
           >
-            <p className="chat-muted">
-              Reopen the guidance surface whenever you want the recommended next action, blocker
-              repairs, or first-success prompts.
-            </p>
+            <p className="chat-muted">{tOverview("guidance.hidden.body")}</p>
           </NextActionCard>
           <TroubleshootingCard
             description="The current onboarding track stays visible even while the guidance cards are collapsed."
@@ -411,7 +549,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
               `${countRequiredOnboardingSteps(onboarding)} required steps`,
               `${countOptionalOnboardingSteps(onboarding)} optional steps`,
             ]}
-            title="Current track"
+            title={tOverview("guidance.currentTrack")}
           />
         </section>
       ) : (
@@ -420,7 +558,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
             <NextActionCard
               ctaLabel={recommendedOnboardingStep?.action?.label ?? "Refresh overview"}
               description={describeOnboardingPosture(onboarding)}
-              title="Next onboarding step"
+              title={tOverview("onboarding.nextStep")}
               onCta={() => {
                 if (recommendedOnboardingStep?.action !== undefined) {
                   executeOnboardingAction(recommendedOnboardingStep.action, {
@@ -436,7 +574,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
               <div className="grid gap-2">
                 <p className="chat-muted">
                   {recommendedOnboardingStep?.summary ??
-                    "The control plane has not published a recommended onboarding step yet."}
+                    tOverview("onboarding.noRecommendation")}
                 </p>
                 {recommendedOnboardingStep?.blocked !== undefined ? (
                   <p className="chat-muted">
@@ -445,13 +583,17 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                   </p>
                 ) : null}
                 <p className="chat-muted">
-                  Flow: {formatOnboardingVariant(onboarding?.flow_variant)}. Status:{" "}
-                  {formatOnboardingStatus(onboarding?.status)}.
+                  {tOverview("onboarding.flow", {
+                    flow: formatOnboardingVariant(onboarding?.flow_variant),
+                    status: formatOnboardingStatus(onboarding?.status),
+                  })}
                 </p>
                 <p className="chat-muted">
-                  {describeOnboardingTrack(app.overviewOnboardingFlow, deployment)} Required:{" "}
-                  {countRequiredOnboardingSteps(onboarding)}. Optional:{" "}
-                  {countOptionalOnboardingSteps(onboarding)}.
+                  {tOverview("onboarding.trackSummary", {
+                    track: describeOnboardingTrack(app.overviewOnboardingFlow, deployment),
+                    required: countRequiredOnboardingSteps(onboarding),
+                    optional: countOptionalOnboardingSteps(onboarding),
+                  })}
                 </p>
                 <div className="workspace-inline-actions">
                   <ActionButton
@@ -459,7 +601,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                     variant={app.overviewOnboardingFlow === "quickstart" ? "primary" : "ghost"}
                     onPress={() => void app.selectOverviewOnboardingFlow("quickstart")}
                   >
-                    Quick Start
+                    {tOverview("onboarding.quickStart")}
                   </ActionButton>
                   <ActionButton
                     type="button"
@@ -470,14 +612,14 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                       )
                     }
                   >
-                    Advanced setup
+                    {tOverview("onboarding.advancedSetup")}
                   </ActionButton>
                   <ActionButton
                     type="button"
                     variant="ghost"
                     onPress={() => updateGuidanceHidden(true)}
                   >
-                    Hide guidance
+                    {tOverview("onboarding.hideGuidance")}
                   </ActionButton>
                 </div>
               </div>
@@ -485,7 +627,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
             <OnboardingChecklistCard
               description={describeOnboardingChecklist(onboarding)}
               items={onboardingChecklistItems}
-              title="Onboarding checklist"
+              title={tOverview("onboarding.checklist")}
             />
           </section>
 
@@ -499,17 +641,21 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                     : "No hard onboarding blockers detected; telemetry still shows where operators hit friction."
               }
               items={onboardingTroubleshootingItems}
-              title="Troubleshooting"
+              title={tOverview("troubleshooting.title")}
             />
             <ScenarioCard
-              ctaLabel={onboarding?.ready_for_first_success ? "Open chat" : "Review next step"}
+              ctaLabel={
+                onboarding?.ready_for_first_success
+                  ? tOverview("scenario.openChat")
+                  : tOverview("scenario.reviewNextStep")
+              }
               description={
                 onboarding?.ready_for_first_success
                   ? (onboarding.first_success_hint ??
-                    "Open chat and validate the first end-to-end operator task.")
-                  : "Finish the remaining guided steps, then use a starter prompt to verify the workspace."
+                    tOverview("scenario.readyDescription"))
+                  : tOverview("scenario.finishSteps")
               }
-              title="First success"
+              title={tOverview("scenario.firstSuccess")}
               onCta={() => {
                 if (onboarding?.ready_for_first_success) {
                   app.setSection("chat");
@@ -552,7 +698,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                         void navigate(getSectionPath("approvals"));
                       }}
                     >
-                      Review approvals
+                      {tOverview("scenario.reviewApprovals")}
                     </ActionButton>
                     <ActionButton
                       type="button"
@@ -562,7 +708,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                         void navigate(getSectionPath("operations"));
                       }}
                     >
-                      Inspect diagnostics
+                      {tOverview("scenario.inspectDiagnostics")}
                     </ActionButton>
                     <ActionButton
                       type="button"
@@ -572,7 +718,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                         void navigate(getSectionPath("chat"));
                       }}
                     >
-                      Open sessions
+                      {tOverview("scenario.openSessions")}
                     </ActionButton>
                   </div>
                   <dl className="workspace-key-value-grid">
@@ -590,7 +736,10 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                     </div>
                   </dl>
                   {topToolRecommendation !== null && (
-                    <WorkspaceInlineNotice title="Tool posture recommendation" tone="warning">
+                    <WorkspaceInlineNotice
+                      title={tOverview("scenario.toolRecommendation")}
+                      tone="warning"
+                    >
                       {topToolRecommendation.recommendation.reason}
                     </WorkspaceInlineNotice>
                   )}
@@ -608,7 +757,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                           );
                         }}
                       >
-                        Open tool permissions
+                        {tOverview("scenario.openToolPermissions")}
                       </ActionButton>
                     </div>
                   )}
@@ -617,15 +766,15 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                 <div className="grid gap-3">
                   <dl className="workspace-key-value-grid">
                     <div>
-                      <dt>Completed</dt>
+                      <dt>{tOverview("scenario.completed")}</dt>
                       <dd>{onboarding?.counts.done ?? 0}</dd>
                     </div>
                     <div>
-                      <dt>Remaining</dt>
+                      <dt>{tOverview("scenario.remaining")}</dt>
                       <dd>{remainingOnboardingSteps(onboarding)}</dd>
                     </div>
                     <div>
-                      <dt>Telemetry friction</dt>
+                      <dt>{tOverview("scenario.telemetryFriction")}</dt>
                       <dd>{buildTopFrictionSurface(uxAggregate)}</dd>
                     </div>
                   </dl>
@@ -638,7 +787,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                         void navigate(getSectionPath("operations"));
                       }}
                     >
-                      Open diagnostics
+                      {tOverview("scenario.openDiagnostics")}
                     </ActionButton>
                     <ActionButton
                       type="button"
@@ -649,7 +798,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                         )
                       }
                     >
-                      Switch to advanced
+                      {tOverview("scenario.switchAdvanced")}
                     </ActionButton>
                   </div>
                 </div>
@@ -659,7 +808,9 @@ export function OverviewSection({ app }: OverviewSectionProps) {
                 variant="ghost"
                 onPress={() => void app.refreshUxTelemetry()}
               >
-                {app.uxTelemetryBusy ? "Refreshing baseline..." : "Refresh baseline"}
+                {app.uxTelemetryBusy
+                  ? tOverview("scenario.refreshingBaseline")
+                  : tOverview("scenario.refreshBaseline")}
               </ActionButton>
             </ScenarioCard>
           </section>
@@ -668,14 +819,16 @@ export function OverviewSection({ app }: OverviewSectionProps) {
 
       <section className="workspace-metric-grid">
         <WorkspaceMetricCard
-          detail={attentionItems[0] ?? "No immediate operator blockers are published."}
-          label="Runtime posture"
+          detail={attentionItems[0] ?? tOverview("metric.noImmediateBlockers")}
+          label={tOverview("metric.runtimePosture")}
           tone={attentionItems.length > 0 ? "warning" : "success"}
-          value={attentionItems.length > 0 ? "Attention required" : "Ready"}
+          value={
+            attentionItems.length > 0 ? tOverview("metric.attentionRequired") : tOverview("status.ready")
+          }
         />
         <WorkspaceMetricCard
-          detail={warnings[0] ?? "Remote access posture looks stable."}
-          label="Access posture"
+          detail={warnings[0] ?? tOverview("metric.remoteStable")}
+          label={tOverview("metric.accessPosture")}
           tone={warnings.length > 0 ? "warning" : "default"}
           value={`${readString(deployment ?? {}, "mode") ?? "unknown"} / ${readString(deployment ?? {}, "bind_profile") ?? "n/a"}`}
         />
@@ -683,21 +836,21 @@ export function OverviewSection({ app }: OverviewSectionProps) {
           detail={
             activeObjectiveCount > 0
               ? `${heartbeatCount} heartbeats, ${standingOrderCount} standing orders, ${programCount} programs.`
-              : "No active objective products are loaded yet."
+              : tOverview("metric.noObjectives")
           }
-          label="Objective layer"
+          label={tOverview("metric.objectiveLayer")}
           tone={activeObjectiveCount > 0 ? "accent" : "default"}
           value={activeObjectiveCount}
         />
         <WorkspaceMetricCard
           detail={
             objectiveAttentionCount > 0
-              ? "Heartbeat or objective health needs follow-up."
-              : "No objective health deviations are loaded."
+              ? tOverview("metric.objectiveHealthNeedsFollowUp")
+              : tOverview("metric.objectiveHealthClear")
           }
-          label="Objective health"
+          label={tOverview("metric.objectiveHealth")}
           tone={objectiveAttentionCount > 0 ? "warning" : "success"}
-          value={objectiveAttentionCount > 0 ? "Attention" : "Healthy"}
+          value={objectiveAttentionCount > 0 ? tOverview("metric.attention") : tOverview("metric.healthy")}
         />
         <WorkspaceMetricCard
           detail={

@@ -80,7 +80,12 @@ import {
   markDesktopFirstSuccessCompleted,
   readDesktopFirstSuccessCompleted,
 } from "./firstSuccessState";
-import { formatDesktopDateTime, translateDesktopMessage } from "./i18n";
+import {
+  describeDesktopLocale,
+  formatDesktopDateTime,
+  nextDesktopLocale,
+  translateDesktopMessage,
+} from "./i18n";
 import { readStoredDesktopLocale, type DesktopLocale } from "./preferences";
 
 const SECTION_ORDER: DesktopCompanionSection[] = [
@@ -401,7 +406,7 @@ export function App() {
 
   useEffect(() => {
     window.localStorage.setItem("palyra.desktop.locale", locale);
-    document.documentElement.lang = locale === "qps-ploc" ? "en-XA" : "en";
+    document.documentElement.lang = locale === "qps-ploc" ? "en-XA" : locale;
   }, [locale]);
 
   useEffect(() => {
@@ -1690,11 +1695,11 @@ export function App() {
               </Button>
               <Button
                 variant="ghost"
-                onPress={() => setLocale((current) => (current === "en" ? "qps-ploc" : "en"))}
+                onPress={() => setLocale((current) => nextDesktopLocale(current))}
               >
-                {locale === "en"
-                  ? t("desktop.header.locale.switchToPseudo")
-                  : t("desktop.header.locale.switchToEnglish")}
+                {t("desktop.header.locale.label", {
+                  locale: describeDesktopLocale(locale),
+                })}
               </Button>
             </ButtonGroup>
             <ButtonGroup className="desktop-action-group">

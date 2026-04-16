@@ -3,7 +3,12 @@ import type { ReactNode } from "react";
 
 import { ConsoleSidebarNav } from "./components/layout/ConsoleSidebarNav";
 import { InlineNotice, KeyValueList, StatusChip } from "./components/ui";
-import { describeConsoleMode, formatConsoleDateTime } from "./i18n";
+import {
+  describeConsoleLocale,
+  describeConsoleMode,
+  formatConsoleDateTime,
+  nextConsoleLocale,
+} from "./i18n";
 import { getNavigationEntry, getNavigationGroupId } from "./navigation";
 import type { ConsoleAppState } from "./useConsoleAppState";
 
@@ -45,7 +50,7 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
   const currentLabel = app.t(currentEntry.labelKey);
   const currentDetail = app.t(currentEntry.detailKey).toLowerCase();
   const activeProfile = session.profile ?? null;
-  const localeLabel = app.locale === "qps-ploc" ? app.t("shell.pseudo") : app.t("shell.english");
+  const localeLabel = describeConsoleLocale(app.locale);
   const modeLabel = describeConsoleMode(app.locale, app.uiMode);
 
   return (
@@ -69,7 +74,9 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
                 <Chip variant="secondary">{groupLabel}</Chip>
                 <Chip variant="secondary">{modeLabel}</Chip>
                 <Chip variant="secondary">
-                  Expires {formatSessionExpiry(app.locale, session.expires_at_unix_ms)} UTC
+                  {app.t("shell.expires", {
+                    value: formatSessionExpiry(app.locale, session.expires_at_unix_ms),
+                  })}
                 </Chip>
                 {activeProfile !== null ? (
                   <StatusChip tone={toneForProfile(activeProfile.risk_level)}>
@@ -93,7 +100,7 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
                 <Button
                   size="sm"
                   variant="secondary"
-                  onPress={() => app.setLocale(app.locale === "en" ? "qps-ploc" : "en")}
+                  onPress={() => app.setLocale(nextConsoleLocale(app.locale))}
                 >
                   {app.t("shell.locale", { locale: localeLabel })}
                 </Button>
@@ -119,7 +126,7 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
       </header>
 
       <div className="console-shell-grid">
-        <aside className="console-sidebar-card" aria-label="Dashboard domains">
+        <aside className="console-sidebar-card" aria-label={app.t("shell.dashboardDomains")}>
           <ConsoleSidebarNav
             currentSection={app.section}
             onSelect={app.setSection}
@@ -137,7 +144,7 @@ export function ConsoleShell({ app, children }: ConsoleShellProps) {
                 <p className="text-xs text-muted">{app.t("shell.sessionContextBody")}</p>
               </div>
               <Button
-                aria-label="Reveal sensitive values"
+                aria-label={app.t("shell.revealSensitiveAria")}
                 size="sm"
                 variant={app.revealSensitiveValues ? "secondary" : "ghost"}
                 onPress={() => app.setRevealSensitiveValues((current) => !current)}
