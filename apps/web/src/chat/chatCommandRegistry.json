@@ -2,7 +2,7 @@
   {
     "name": "help",
     "synopsis": "/help",
-    "description": "Show slash command help and operator shortcuts for the current surface.",
+    "description": "Show categorized slash command help, examples, and operator shortcuts for the current surface.",
     "example": "/help",
     "category": "navigation",
     "execution": "local",
@@ -13,8 +13,8 @@
   },
   {
     "name": "status",
-    "synopsis": "/status",
-    "description": "Print a compact runtime status summary directly in the TUI transcript.",
+    "synopsis": "/status [detail]",
+    "description": "Print runtime status directly in the TUI transcript, or expand workspace/context detail with `/status detail`.",
     "example": "/status",
     "category": "diagnostics",
     "execution": "local",
@@ -122,7 +122,7 @@
   {
     "name": "resume",
     "synopsis": "/resume [session-id-or-key]",
-    "description": "Resume a known session id or key, or open session history when omitted.",
+    "description": "Resume a known session id or key, or open session history when omitted. In the TUI, `parent`, `sibling`, `child`, and `family` also navigate the current title family.",
     "example": "/resume 01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "category": "session",
     "execution": "server",
@@ -169,8 +169,8 @@
   },
   {
     "name": "rollback",
-    "synopsis": "/rollback [checkpoint-id-or-run-id] | /rollback diff <checkpoint-id-or-run-id>",
-    "description": "Open the workspace rollback inspector or preview a workspace diff before restoring files or the full workspace.",
+    "synopsis": "/rollback [checkpoint-id-or-run-id] | /rollback diff <checkpoint-id-or-run-id> | /rollback restore <checkpoint-id> --confirm",
+    "description": "Inspect workspace rollback state, preview a workspace diff, or restore the tracked workspace after explicit confirmation.",
     "example": "/rollback diff 01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "category": "workspace",
     "execution": "server",
@@ -178,6 +178,18 @@
     "capability_tags": ["workspace", "rollback", "diff", "restore"],
     "entity_targets": ["checkpoint", "run", "session"],
     "keywords": ["rollback", "workspace", "restore", "diff", "checkpoint"]
+  },
+  {
+    "name": "workspace",
+    "synopsis": "/workspace [run-id] | /workspace show|open <index-or-artifact-id> | /workspace handoff [open]",
+    "description": "Inspect workspace artifacts and changed files from the active or referenced run, then open a file locally or hand off to the richer web inspector.",
+    "example": "/workspace show 1",
+    "category": "workspace",
+    "execution": "local",
+    "surfaces": ["tui"],
+    "capability_tags": ["workspace", "artifact", "handoff", "local_capability"],
+    "entity_targets": ["artifact", "run", "checkpoint"],
+    "keywords": ["workspace", "artifact", "file", "open", "handoff", "changed"]
   },
   {
     "name": "interrupt",
@@ -302,8 +314,8 @@
   },
   {
     "name": "attach",
-    "synopsis": "/attach",
-    "description": "Open the attachment flow for the active session on surfaces that support uploads.",
+    "synopsis": "/attach [path|list|remove <index>|clear]",
+    "description": "Queue attachments for the active session. The TUI supports local file paths and queue management; richer clipboard flows remain desktop/web-first.",
     "example": "/attach",
     "category": "attachment",
     "execution": "local_capability",

@@ -1,9 +1,13 @@
 use std::{
+    collections::BTreeMap,
+    fs,
     io::{self, Stdout},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode, KeyEvent, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -19,18 +23,22 @@ use ratatui::{
     Frame, Terminal,
 };
 
+mod composer;
 mod handoff;
 mod rollback;
 mod slash_palette;
 mod text;
+mod workspace;
 
+use composer::{TuiComposer, TuiComposerView};
 use handoff::{build_console_handoff_path, TuiCrossSurfaceHandoff};
 use slash_palette::{
     build_tui_slash_palette, checkpoint_has_tag, preview_for_selection, read_json_bool,
     read_json_i64, read_json_string, read_json_tags, select_undo_checkpoint,
     BuildTuiSlashPaletteArgs, TuiSlashAuthProfileRecord, TuiSlashBrowserProfileRecord,
     TuiSlashBrowserSessionRecord, TuiSlashCheckpointRecord, TuiSlashEntityCatalog,
-    TuiSlashObjectiveRecord, TuiSlashPaletteState, TuiSlashSessionRecord, TuiUxMetricKey,
+    TuiSlashObjectiveRecord, TuiSlashPaletteState, TuiSlashSessionRecord, TuiSlashSessionRelative,
+    TuiSlashWorkspaceArtifactRecord, TuiSlashWorkspaceCheckpointRecord, TuiUxMetricKey,
     TuiUxMetrics,
 };
 use text::{resolve_tui_locale, TuiLocale};
@@ -126,6 +134,63 @@ struct ShellResult {
     stderr: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ComposerDraftState {
+    composer: TuiComposer,
+    attachments: Vec<TuiPendingAttachment>,
+}
+
+#[derive(Debug, Clone)]
+struct TuiPendingAttachment {
+    local_id: String,
+    artifact_id: String,
+    attachment_id: String,
+    filename: String,
+    declared_content_type: String,
+    content_hash: String,
+    size_bytes: u64,
+    width_px: Option<u64>,
+    height_px: Option<u64>,
+    kind: String,
+    budget_tokens: u64,
+    derived_artifacts: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionRuntimeSnapshot {
+    session_total_tokens: u64,
+    session_runs: usize,
+    average_latency_ms: Option<f64>,
+    estimated_cost_usd: Option<f64>,
+    latest_started_at_unix_ms: Option<i64>,
+    latest_completed_at_unix_ms: Option<i64>,
+    latest_run_total_tokens: u64,
+    attachment_count: usize,
+    background_task_count: usize,
+    active_background_task_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ContextBudgetSummary {
+    draft_tokens: u64,
+    project_context_tokens: u64,
+    attachment_tokens: u64,
+    estimated_total_tokens: u64,
+    limit_tokens: u64,
+    ratio: f64,
+    tone: StatusTone,
+    label: String,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StatusTone {
+    #[default]
+    Default,
+    Warning,
+    Danger,
+}
+
 struct App {
     runtime: OperatorRuntime,
     session: gateway_v1::SessionSummary,
@@ -133,7 +198,10 @@ struct App {
     current_agent: Option<gateway_v1::Agent>,
     current_agent_source: &'static str,
     models: Option<ModelsListPayload>,
-    input: String,
+    composer: TuiComposer,
+    draft_cache: BTreeMap<String, ComposerDraftState>,
+    pending_attachments: Vec<TuiPendingAttachment>,
+    session_runtime: SessionRuntimeSnapshot,
     transcript: Vec<TranscriptEntry>,
     active_stream: Option<ManagedRunStream>,
     pending_approval: Option<common_v1::ToolApprovalRequest>,
@@ -159,6 +227,7 @@ struct App {
     scroll_offset: u16,
     status_line: String,
     settings_selected: usize,
+    show_tips: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +241,9 @@ const BUILT_IN_DELEGATION_PROFILES: &[&str] =
     &["research", "synthesis", "review", "patching", "triage"];
 const BUILT_IN_DELEGATION_TEMPLATES: &[&str] =
     &["compare_variants", "research_then_synthesize", "review_and_patch", "multi_source_triage"];
+const CONTEXT_BUDGET_SOFT_LIMIT: u64 = 12_000;
+const CONTEXT_BUDGET_HARD_LIMIT: u64 = 16_000;
+const MAX_COMPOSER_VISIBLE_LINES: usize = 6;
 
 pub(crate) fn run(options: LaunchOptions) -> Result<()> {
     let runtime = build_runtime()?;
@@ -193,10 +265,20 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut A
         }
         if event::poll(Duration::from_millis(50)).context("failed to poll terminal events")? {
             let event = event::read().context("failed to read terminal event")?;
-            if let CEvent::Key(key) = event {
-                if handle_key(app, key).await? {
-                    return Ok(());
+            match event {
+                CEvent::Key(key) => {
+                    if handle_key(app, key).await? {
+                        return Ok(());
+                    }
                 }
+                CEvent::Paste(text)
+                    if matches!(app.mode, Mode::Chat) && matches!(app.focus, Focus::Input) =>
+                {
+                    app.composer.insert_text(text.as_str());
+                    app.sync_composer_after_edit();
+                    app.status_line = "Pasted text into the composer".to_owned();
+                }
+                _ => {}
             }
         }
     }
@@ -241,7 +323,10 @@ impl App {
             current_agent: None,
             current_agent_source: "unresolved",
             models: None,
-            input: String::new(),
+            composer: TuiComposer::default(),
+            draft_cache: BTreeMap::new(),
+            pending_attachments: Vec::new(),
+            session_runtime: SessionRuntimeSnapshot::default(),
             transcript: Vec::new(),
             active_stream: None,
             pending_approval: None,
@@ -267,6 +352,7 @@ impl App {
             scroll_offset: 0,
             status_line: text::connected(locale),
             settings_selected: 0,
+            show_tips: true,
         };
         app.refresh_agent_identity(None, false).await?;
         match app.runtime.list_models(None) {
@@ -285,6 +371,11 @@ impl App {
             app.status_line = sanitize_terminal_text(
                 text::connected_slash_catalog_unavailable(app.locale, error.to_string().as_str())
                     .as_str(),
+            );
+        }
+        if let Err(error) = app.refresh_session_runtime_snapshot().await {
+            app.status_line = sanitize_terminal_text(
+                format!("Connected; runtime metadata unavailable: {error}").as_str(),
             );
         }
         app.sync_slash_palette();
@@ -308,6 +399,11 @@ impl App {
                 Ok(Ok(Some(event))) => self.handle_stream_event(event)?,
                 Ok(Ok(None)) => {
                     self.active_stream = None;
+                    if let Ok(now) = now_unix_ms_i64() {
+                        self.session_runtime.latest_completed_at_unix_ms = Some(now);
+                    }
+                    let _ = self.refresh_slash_entity_catalogs().await;
+                    let _ = self.refresh_session_runtime_snapshot().await;
                     self.status_line = text::run_completed(self.locale);
                     if let Some(redirect) = self.pending_redirect_prompt.take() {
                         self.push_entry(
@@ -325,6 +421,7 @@ impl App {
                             Some("interrupt_redirect".to_owned()),
                             Some(redirect.interrupted_run_id),
                             None,
+                            Vec::new(),
                         )
                         .await?;
                     }
@@ -332,6 +429,11 @@ impl App {
                 }
                 Ok(Err(error)) => {
                     self.active_stream = None;
+                    if let Ok(now) = now_unix_ms_i64() {
+                        self.session_runtime.latest_completed_at_unix_ms = Some(now);
+                    }
+                    let _ = self.refresh_slash_entity_catalogs().await;
+                    let _ = self.refresh_session_runtime_snapshot().await;
                     self.status_line =
                         sanitize_terminal_text(format!("Run failed: {error}").as_str());
                     self.push_entry(EntryKind::System, "Run error", error.to_string());
@@ -522,14 +624,90 @@ impl App {
         });
     }
 
+    fn current_draft_state(&self) -> ComposerDraftState {
+        ComposerDraftState {
+            composer: self.composer.clone(),
+            attachments: self.pending_attachments.clone(),
+        }
+    }
+
+    fn stash_current_draft(&mut self) {
+        let Ok(session_id) = self.active_session_id() else {
+            return;
+        };
+        if self.composer.trimmed_text().is_empty() && self.pending_attachments.is_empty() {
+            self.draft_cache.remove(session_id.as_str());
+            return;
+        }
+        self.draft_cache.insert(session_id, self.current_draft_state());
+    }
+
+    fn restore_current_draft(&mut self) {
+        let Ok(session_id) = self.active_session_id() else {
+            self.composer.clear();
+            self.pending_attachments.clear();
+            return;
+        };
+        if let Some(draft) = self.draft_cache.get(session_id.as_str()).cloned() {
+            self.composer = draft.composer;
+            self.pending_attachments = draft.attachments;
+        } else {
+            self.composer.clear();
+            self.pending_attachments.clear();
+        }
+    }
+
+    fn clear_current_draft(&mut self) {
+        self.composer.clear();
+        self.pending_attachments.clear();
+        if let Ok(session_id) = self.active_session_id() {
+            self.draft_cache.remove(session_id.as_str());
+        }
+    }
+
+    fn sync_composer_after_edit(&mut self) {
+        self.slash_palette_dismissed = false;
+        self.sync_slash_palette();
+        self.stash_current_draft();
+    }
+
+    fn dismiss_slash_palette(&mut self) {
+        self.slash_palette_dismissed = true;
+        self.pending_slash_palette = None;
+        self.slash_palette_selected = 0;
+    }
+
+    fn prompt_attachments(&self) -> Vec<common_v1::MessageAttachment> {
+        self.pending_attachments
+            .iter()
+            .map(|attachment| common_v1::MessageAttachment {
+                kind: attachment_kind_to_proto(attachment.kind.as_str()) as i32,
+                artifact_id: Some(common_v1::CanonicalId { ulid: attachment.artifact_id.clone() }),
+                size_bytes: attachment.size_bytes,
+                attachment_id: attachment.attachment_id.clone(),
+                filename: attachment.filename.clone(),
+                declared_content_type: attachment.declared_content_type.clone(),
+                source_url: String::new(),
+                content_hash: attachment.content_hash.clone(),
+                origin: "tui_attachment_upload".to_owned(),
+                policy_context: "attachment.upload.allowed".to_owned(),
+                inline_bytes: Vec::new(),
+                upload_requested: false,
+                width_px: attachment.width_px.unwrap_or_default() as u32,
+                height_px: attachment.height_px.unwrap_or_default() as u32,
+            })
+            .collect()
+    }
+
     async fn start_prompt_run(
         &mut self,
         prompt: String,
         origin_kind: Option<String>,
         origin_run_id: Option<String>,
         parameter_delta_json: Option<String>,
+        attachments: Vec<common_v1::MessageAttachment>,
     ) -> Result<()> {
-        let request = build_agent_run_input(AgentRunInputArgs {
+        let mut request = build_agent_run_input(AgentRunInputArgs {
             session_id: self.session.session_id.clone(),
             session_key: None,
             session_label: None,
@@ -542,20 +720,26 @@ impl App {
             origin_run_id,
             parameter_delta_json,
         })?;
+        request.attachments = attachments;
         let stream = self.runtime.start_run_stream(request).await?;
         self.last_run_id = Some(stream.run_id().to_owned());
+        if let Ok(now) = now_unix_ms_i64() {
+            self.session_runtime.latest_started_at_unix_ms = Some(now);
+            self.session_runtime.latest_completed_at_unix_ms = None;
+        }
         self.active_stream = Some(stream);
         self.scroll_offset = 0;
         Ok(())
     }
 
     async fn submit_input(&mut self) -> Result<()> {
-        let value = self.input.trim().to_owned();
-        self.input.clear();
-        self.slash_palette_dismissed = false;
-        self.pending_slash_palette = None;
-        self.slash_palette_selected = 0;
+        let value = self.composer.trimmed_text().to_owned();
         if value.is_empty() {
+            if !self.pending_attachments.is_empty() {
+                self.status_line =
+                    "Add a short prompt before sending attachments from the TUI composer."
+                        .to_owned();
+            }
             return Ok(());
         }
         if let Some(command) = value.strip_prefix('/') {
@@ -568,8 +752,35 @@ impl App {
         if let Some(shell_command) = value.strip_prefix('!') {
             return self.handle_shell_request(shell_command.trim().to_owned()).await;
         }
+        let draft_before_submit = self.current_draft_state();
+        let attachments = self.prompt_attachments();
         self.create_undo_checkpoint("send").await?;
-        self.push_entry(EntryKind::User, "You", value.clone());
+        let mut transcript_body = value.clone();
+        if !self.pending_attachments.is_empty() {
+            let attachment_lines = self
+                .pending_attachments
+                .iter()
+                .map(|attachment| {
+                    format!(
+                        "  - {} · {} · {}",
+                        attachment.filename,
+                        format_size_bytes(attachment.size_bytes),
+                        format_approx_tokens(attachment.budget_tokens)
+                    )
+                })
+                .collect::<Vec<_>>();
+            transcript_body.push_str("\n\nAttachments:\n");
+            transcript_body.push_str(attachment_lines.join("\n").as_str());
+        }
+        let user_title = if self.pending_attachments.is_empty() {
+            "You".to_owned()
+        } else {
+            format!(
+                "You · {} attachment{}",
+                self.pending_attachments.len(),
+                if self.pending_attachments.len() == 1 { "" } else { "s" }
+            )
+        };
         self.status_line = text::running_prompt(self.locale);
         self.emit_ux_event(
             "ux.chat.prompt_submitted",
@@ -581,7 +792,20 @@ impl App {
             }),
         )
         .await;
-        self.start_prompt_run(value, None, None, None).await
+        self.clear_current_draft();
+        self.slash_palette_dismissed = false;
+        self.pending_slash_palette = None;
+        self.slash_palette_selected = 0;
+        if let Err(error) =
+            self.start_prompt_run(value.clone(), None, None, None, attachments).await
+        {
+            self.composer = draft_before_submit.composer;
+            self.pending_attachments = draft_before_submit.attachments;
+            self.stash_current_draft();
+            return Err(error);
+        }
+        self.push_entry(EntryKind::User, user_title, transcript_body);
+        Ok(())
     }
 
     async fn handle_shell_request(&mut self, command: String) -> Result<()> {
@@ -616,6 +840,8 @@ impl App {
         let Some(raw_name) = parts.next() else {
             return Ok(());
         };
+        let raw_arguments =
+            command.trim().strip_prefix(raw_name).map(str::trim).unwrap_or_default();
         let Some(name) = resolve_shared_chat_command_name(raw_name, SharedChatCommandSurface::Tui)
         else {
             self.status_line = format!("Unknown slash command: /{raw_name}");
@@ -632,7 +858,12 @@ impl App {
         match name {
             "help" => self.mode = Mode::Help,
             "status" => {
-                self.push_entry(EntryKind::System, "Status", self.status_summary());
+                let detail = raw_arguments.eq_ignore_ascii_case("detail");
+                self.push_entry(
+                    EntryKind::System,
+                    "Status",
+                    if detail { self.status_detail_summary() } else { self.status_summary() },
+                );
                 self.status_line = text::status_refreshed(self.locale);
             }
             "new" => {
@@ -670,15 +901,17 @@ impl App {
                 self.handle_objective_command(Some("program"), arguments).await?;
             }
             "history" => {
-                let query = normalize_optional_text(parts.collect::<Vec<_>>().join(" "));
+                let query = if raw_arguments.trim().eq_ignore_ascii_case("family") {
+                    self.current_session_catalog
+                        .as_ref()
+                        .map(|session| session.family.root_title.clone())
+                } else {
+                    normalize_optional_text(raw_arguments.to_owned())
+                };
                 self.open_session_history_picker(query).await?;
             }
             "resume" => {
-                if let Some(reference) = parts.next() {
-                    self.switch_session(reference.to_owned()).await?;
-                } else {
-                    self.open_session_history_picker(None).await?;
-                }
+                self.handle_resume_command(raw_arguments).await?;
             }
             "title" => {
                 let label = normalize_optional_text(parts.collect::<Vec<_>>().join(" "));
@@ -721,16 +954,28 @@ impl App {
                 let arguments = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
                 rollback::handle_rollback_command(self, arguments).await?;
             }
+            "workspace" => {
+                let arguments = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+                workspace::handle_workspace_command(self, arguments).await?;
+            }
             "background" => {
                 let arguments = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
                 self.handle_background_command(arguments).await?;
             }
             "usage" => {
+                let budget = self.context_budget_summary();
                 self.push_entry(
                     EntryKind::System,
                     "Usage",
                     format!(
-                        "Detailed usage remains available in the web console and the `palyra usage` CLI surfaces.\nSlash commands={} · palette accepts={} · keyboard accepts={} · undo={} · interrupts={} · errors={}",
+                        "Budget {}\ndraft={} · project_context={} · attachments={}\nactive attachments={} · stored attachments={} · background tasks={}\nSlash commands={} · palette accepts={} · keyboard accepts={} · undo={} · interrupts={} · errors={}",
+                        budget.label,
+                        format_approx_tokens(budget.draft_tokens),
+                        format_approx_tokens(budget.project_context_tokens),
+                        format_approx_tokens(budget.attachment_tokens),
+                        self.pending_attachments.len(),
+                        self.session_runtime.attachment_count,
+                        self.session_runtime.active_background_task_count,
                         self.ux_metrics.slash_commands,
                         self.ux_metrics.palette_accepts,
                         self.ux_metrics.keyboard_accepts,
@@ -746,12 +991,7 @@ impl App {
                 self.handle_compaction_command(arguments).await?;
             }
             "attach" => {
-                self.push_entry(
-                    EntryKind::System,
-                    "Attachments",
-                    "Attachment upload is currently available in the web chat composer. The TUI keeps the same `/attach` terminology but does not upload files yet.",
-                );
-                self.status_line = "Attachment upload is currently web-only".to_owned();
+                self.handle_attach_command(raw_arguments).await?;
             }
             "profile" => {
                 let arguments = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
@@ -855,6 +1095,7 @@ impl App {
             self.status_line = "Cannot switch sessions while a run is active".to_owned();
             return Ok(());
         }
+        self.stash_current_draft();
         let trimmed = reference.trim();
         let mut recap_session = self.resolve_loaded_session_reference(trimmed);
         let request = if looks_like_canonical_ulid(trimmed) {
@@ -890,17 +1131,7 @@ impl App {
                                 session_reference_equals(relative.title.as_str(), trimmed)
                             })
                     })
-                    .map(|session| TuiSlashSessionRecord {
-                        session_id: session.session_id,
-                        title: session.title,
-                        session_key: session.session_key,
-                        archived: session.archived,
-                        preview: session.preview.unwrap_or_default(),
-                        root_title: session.family.root_title,
-                        last_summary: session.last_summary.unwrap_or_default(),
-                        branch_state: session.branch_state,
-                        family_size: session.family.family_size,
-                    });
+                    .map(map_session_catalog_record);
             }
 
             if let Some(session) = recap_session.as_ref() {
@@ -926,22 +1157,15 @@ impl App {
             .session
             .context("ResolveSession returned empty session payload for tui switch")?;
         self.session = session;
+        self.last_run_id = None;
+        self.pending_approval = None;
         self.transcript.clear();
         self.push_entry(EntryKind::System, "Session", "Session switched.");
-        if let Some(recap_session) = recap_session.as_ref() {
-            let recap = if !recap_session.preview.is_empty() {
-                recap_session.preview.as_str()
-            } else if !recap_session.last_summary.is_empty() {
-                recap_session.last_summary.as_str()
-            } else if recap_session.root_title != recap_session.title {
-                recap_session.root_title.as_str()
-            } else {
-                "No stored recap is available for this session yet."
-            };
-            self.push_entry(EntryKind::System, "Recap", recap);
-        }
         self.refresh_agent_identity(None, false).await?;
         self.refresh_slash_entity_catalogs().await?;
+        let _ = self.refresh_session_runtime_snapshot().await;
+        self.restore_current_draft();
+        self.push_session_recap(recap_session.take());
         self.sync_slash_palette();
         self.status_line = text::session_switched(self.locale);
         self.emit_ux_event(
@@ -957,12 +1181,83 @@ impl App {
         Ok(())
     }
 
+    async fn handle_resume_command(&mut self, raw_arguments: &str) -> Result<()> {
+        let trimmed = raw_arguments.trim();
+        if trimmed.is_empty() {
+            return self.open_session_history_picker(None).await;
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "parent" => self.resume_family_parent().await,
+            "sibling" | "siblings" => self.open_family_relation_picker("sibling").await,
+            "child" | "children" => self.open_family_relation_picker("child").await,
+            "family" => {
+                let query = self
+                    .current_session_catalog
+                    .as_ref()
+                    .map(|session| session.family.root_title.clone());
+                self.open_session_history_picker(query).await
+            }
+            _ => self.switch_session(trimmed.to_owned()).await,
+        }
+    }
+
+    async fn resume_family_parent(&mut self) -> Result<()> {
+        let Some(parent_session_id) = self
+            .current_session_catalog
+            .as_ref()
+            .and_then(|session| session.family.parent_session_id.clone())
+        else {
+            self.status_line = "The current session does not have a parent branch.".to_owned();
+            return Ok(());
+        };
+        self.switch_session(parent_session_id).await
+    }
+
+    async fn open_family_relation_picker(&mut self, relation: &str) -> Result<()> {
+        let Some(session) = self.current_session_catalog.as_ref() else {
+            self.status_line = "Session family metadata is not loaded yet.".to_owned();
+            return Ok(());
+        };
+        let mut items = session
+            .family
+            .relatives
+            .iter()
+            .filter(|relative| relative.relation.eq_ignore_ascii_case(relation))
+            .map(|relative| PickerItem {
+                id: relative.session_id.clone(),
+                title: relative.title.clone(),
+                detail: format!(
+                    "{} · {}",
+                    relative.relation,
+                    describe_branch_state_label(relative.branch_state.as_str())
+                ),
+            })
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            self.status_line =
+                format!("No {} session is available from the current family.", relation);
+            return Ok(());
+        }
+        if items.len() == 1 {
+            return self.switch_session(items.remove(0).id).await;
+        }
+        self.pending_picker = Some(PickerState {
+            kind: PickerKind::Session,
+            title: format!("{} branches", relation),
+            items,
+            selected: 0,
+        });
+        self.mode = Mode::Picker(PickerKind::Session);
+        Ok(())
+    }
+
     async fn reset_session(&mut self) -> Result<()> {
         if self.active_stream.is_some() {
             self.status_line =
                 "Cannot reset an active session while a run is in progress".to_owned();
             return Ok(());
         }
+        self.stash_current_draft();
         let response = self
             .runtime
             .resolve_session(SessionResolveInput {
@@ -977,9 +1272,13 @@ impl App {
             .session
             .context("ResolveSession returned empty session payload for tui reset")?;
         self.transcript.clear();
+        self.last_run_id = None;
+        self.pending_approval = None;
         self.push_entry(EntryKind::System, "Session", "Session history reset.");
         self.refresh_agent_identity(None, false).await?;
         self.refresh_slash_entity_catalogs().await?;
+        let _ = self.refresh_session_runtime_snapshot().await;
+        self.restore_current_draft();
         self.sync_slash_palette();
         self.status_line = text::session_reset(self.locale);
         Ok(())
@@ -1169,6 +1468,7 @@ impl App {
             self.status_line = "Cannot create a new session while a run is active".to_owned();
             return Ok(());
         }
+        self.stash_current_draft();
         let response = self
             .runtime
             .resolve_session(SessionResolveInput {
@@ -1184,9 +1484,12 @@ impl App {
             .context("ResolveSession returned empty session payload for tui create")?;
         self.transcript.clear();
         self.last_run_id = None;
+        self.pending_approval = None;
         self.push_entry(EntryKind::System, "Session", "Created a new session.");
         self.refresh_agent_identity(None, false).await?;
         self.refresh_slash_entity_catalogs().await?;
+        let _ = self.refresh_session_runtime_snapshot().await;
+        self.restore_current_draft();
         self.sync_slash_palette();
         self.status_line = "Session created".to_owned();
         Ok(())
@@ -1243,7 +1546,8 @@ impl App {
             .transpose()?;
         self.push_entry(EntryKind::System, "Retry", "Replaying the latest turn as a new run.");
         self.status_line = "Retrying latest turn".to_owned();
-        self.start_prompt_run(prompt, origin_kind, origin_run_id, parameter_delta_json).await
+        self.start_prompt_run(prompt, origin_kind, origin_run_id, parameter_delta_json, Vec::new())
+            .await
     }
 
     async fn branch_from_current_session(&mut self, session_label: Option<String>) -> Result<()> {
@@ -1344,6 +1648,198 @@ impl App {
         Ok(())
     }
 
+    async fn handle_attach_command(&mut self, raw_arguments: &str) -> Result<()> {
+        let trimmed = raw_arguments.trim();
+        if trimmed.is_empty() {
+            if self.pending_attachments.is_empty() {
+                self.push_entry(
+                    EntryKind::System,
+                    "Attachments",
+                    "Usage: /attach <path>\nShortcuts: Ctrl+O seeds `/attach ` in the composer.\nClipboard attach is not available in the TUI yet; use a filesystem path instead.",
+                );
+                self.status_line =
+                    "Type `/attach <path>` or press Ctrl+O to attach a file".to_owned();
+            } else {
+                self.list_pending_attachments();
+                self.status_line = "Pending attachments listed".to_owned();
+            }
+            return Ok(());
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if matches!(lower.as_str(), "list" | "ls" | "show") {
+            self.list_pending_attachments();
+            self.status_line = "Pending attachments listed".to_owned();
+            return Ok(());
+        }
+        if matches!(lower.as_str(), "clipboard" | "paste") {
+            self.push_entry(
+                EntryKind::System,
+                "Attachments",
+                "Clipboard image/file attach is not available in the TUI yet. Use `/attach <path>` for a local file or the desktop/web surface for richer clipboard flows.",
+            );
+            self.status_line = "Clipboard attach remains desktop/web-first".to_owned();
+            return Ok(());
+        }
+        if matches!(lower.as_str(), "clear" | "reset") {
+            self.pending_attachments.clear();
+            self.stash_current_draft();
+            self.status_line = "Pending attachments cleared".to_owned();
+            return Ok(());
+        }
+        if let Some(target) = lower.strip_prefix("remove ").or_else(|| lower.strip_prefix("rm ")) {
+            let target = target.trim();
+            let removed = if let Ok(index) = target.parse::<usize>() {
+                if index == 0 || index > self.pending_attachments.len() {
+                    None
+                } else {
+                    Some(self.pending_attachments.remove(index - 1))
+                }
+            } else {
+                self.pending_attachments
+                    .iter()
+                    .position(|attachment| {
+                        attachment.local_id.eq_ignore_ascii_case(target)
+                            || attachment.artifact_id.eq_ignore_ascii_case(target)
+                            || attachment.filename.eq_ignore_ascii_case(target)
+                    })
+                    .map(|index| self.pending_attachments.remove(index))
+            };
+            if let Some(attachment) = removed {
+                self.stash_current_draft();
+                self.status_line = format!("Removed attachment {}", attachment.filename);
+            } else {
+                self.status_line =
+                    "Attachment not found. Use `/attach list` to inspect the current queue."
+                        .to_owned();
+            }
+            return Ok(());
+        }
+        self.upload_attachment_from_path(trimmed).await
+    }
+
+    fn list_pending_attachments(&mut self) {
+        if self.pending_attachments.is_empty() {
+            self.push_entry(EntryKind::System, "Attachments", "No pending attachments.");
+            return;
+        }
+        let mut lines = vec![format!(
+            "{} attachment{} ready for the next turn:",
+            self.pending_attachments.len(),
+            if self.pending_attachments.len() == 1 { "" } else { "s" }
+        )];
+        lines.extend(self.pending_attachments.iter().enumerate().map(|(index, attachment)| {
+            format!(
+                "{}. {} · {} · {} · {}{}",
+                index + 1,
+                attachment.filename,
+                attachment.kind,
+                format_size_bytes(attachment.size_bytes),
+                format_approx_tokens(attachment.budget_tokens),
+                if attachment.derived_artifacts > 0 {
+                    format!(" · derived {}", attachment.derived_artifacts)
+                } else {
+                    String::new()
+                }
+            )
+        }));
+        lines.push("Use `/attach remove <index>` to drop one item before sending.".to_owned());
+        self.push_entry(EntryKind::System, "Attachments", lines.join("\n"));
+    }
+
+    async fn upload_attachment_from_path(&mut self, raw_path: &str) -> Result<()> {
+        let normalized = raw_path.trim().trim_matches('"').trim_matches('\'');
+        if normalized.is_empty() {
+            self.status_line = "Attachment path cannot be empty".to_owned();
+            return Ok(());
+        }
+        let path = PathBuf::from(normalized);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .context("failed to resolve the current working directory")?
+                .join(path)
+        };
+        let metadata = fs::metadata(path.as_path())
+            .with_context(|| format!("failed to stat attachment {}", path.display()))?;
+        if !metadata.is_file() {
+            anyhow::bail!("attachment path is not a regular file: {}", path.display());
+        }
+        let bytes = fs::read(path.as_path())
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let filename = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| path.display().to_string());
+        let content_type = guess_content_type(path.as_path());
+        let session_id = self.active_session_id()?;
+        let context = self.connect_admin_console().await?;
+        let payload = context
+            .client
+            .post_json_value(
+                format!(
+                    "console/v1/chat/sessions/{}/attachments",
+                    percent_encode_component(session_id.as_str())
+                ),
+                &serde_json::json!({
+                    "filename": filename,
+                    "content_type": content_type,
+                    "bytes_base64": BASE64_STANDARD.encode(bytes.as_slice()),
+                }),
+            )
+            .await?;
+        let declared_content_type = read_json_string(&payload, "/attachment/declared_content_type");
+        let kind = {
+            let reported = read_json_string(&payload, "/attachment/kind");
+            if reported.is_empty() {
+                attachment_kind_label(declared_content_type.as_str()).to_owned()
+            } else {
+                reported
+            }
+        };
+        let attachment = TuiPendingAttachment {
+            local_id: format!(
+                "{}-{}",
+                read_json_string(&payload, "/attachment/artifact_id"),
+                now_unix_ms_i64().unwrap_or_default()
+            ),
+            artifact_id: read_json_string(&payload, "/attachment/artifact_id"),
+            attachment_id: read_json_string(&payload, "/attachment/attachment_id"),
+            filename: read_json_string(&payload, "/attachment/filename"),
+            declared_content_type,
+            content_hash: read_json_string(&payload, "/attachment/content_hash"),
+            size_bytes: read_json_u64(&payload, "/attachment/size_bytes"),
+            width_px: read_json_optional_i64(&payload, "/attachment/width_px")
+                .map(|value| value as u64),
+            height_px: read_json_optional_i64(&payload, "/attachment/height_px")
+                .map(|value| value as u64),
+            kind,
+            budget_tokens: read_json_u64(&payload, "/attachment/budget_tokens"),
+            derived_artifacts: payload
+                .pointer("/derived_artifacts")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or_default(),
+        };
+        self.pending_attachments.push(attachment.clone());
+        self.session_runtime.attachment_count =
+            self.session_runtime.attachment_count.saturating_add(1);
+        self.stash_current_draft();
+        self.status_line = format!(
+            "Attached {} ({}, {}{})",
+            attachment.filename,
+            format_size_bytes(attachment.size_bytes),
+            format_approx_tokens(attachment.budget_tokens),
+            if attachment.derived_artifacts > 0 {
+                format!(", derived {}", attachment.derived_artifacts)
+            } else {
+                String::new()
+            }
+        );
+        Ok(())
+    }
+
     async fn connect_admin_console(&self) -> Result<client::control_plane::AdminConsoleContext> {
         client::control_plane::connect_admin_console(app::ConnectionOverrides {
             grpc_url: Some(self.runtime.connection().grpc_url.clone()),
@@ -1388,7 +1884,7 @@ impl App {
     }
 
     fn sync_slash_palette(&mut self) {
-        if !self.input.trim_start().starts_with('/') {
+        if !self.composer.text().trim_start().starts_with('/') {
             self.pending_slash_palette = None;
             self.slash_palette_dismissed = false;
             self.slash_palette_selected = 0;
@@ -1399,7 +1895,7 @@ impl App {
             return;
         }
         self.pending_slash_palette = build_tui_slash_palette(BuildTuiSlashPaletteArgs {
-            input: self.input.as_str(),
+            input: self.composer.text(),
             catalog: &self.slash_entity_catalog,
             streaming: self.active_stream.is_some(),
             delegation_profiles: BUILT_IN_DELEGATION_PROFILES,
@@ -1421,7 +1917,7 @@ impl App {
         let Some(suggestion) = palette.suggestions.get(self.slash_palette_selected) else {
             return;
         };
-        self.input = suggestion.replacement.clone();
+        self.composer.set_text(suggestion.replacement.clone());
         self.slash_palette_dismissed = false;
         self.pending_slash_palette = None;
         self.slash_palette_selected = 0;
@@ -1429,7 +1925,7 @@ impl App {
         if accepted_with_keyboard {
             self.ux_metrics.record(TuiUxMetricKey::KeyboardAccepts);
         }
-        self.sync_slash_palette();
+        self.sync_composer_after_edit();
     }
 
     async fn refresh_slash_entity_catalogs(&mut self) -> Result<()> {
@@ -1438,6 +1934,7 @@ impl App {
         self.refresh_auth_profile_catalog().await?;
         self.refresh_browser_catalog().await?;
         self.refresh_checkpoint_catalog().await?;
+        self.refresh_workspace_catalog().await?;
         Ok(())
     }
 
@@ -1459,17 +1956,7 @@ impl App {
                 if active_session_id.as_deref() == Some(session.session_id.as_str()) {
                     current_session_catalog = Some(session.clone());
                 }
-                TuiSlashSessionRecord {
-                    session_id: session.session_id,
-                    title: session.title,
-                    session_key: session.session_key,
-                    archived: session.archived,
-                    preview: session.preview.unwrap_or_default(),
-                    root_title: session.family.root_title,
-                    last_summary: session.last_summary.unwrap_or_default(),
-                    branch_state: session.branch_state,
-                    family_size: session.family.family_size,
-                }
+                map_session_catalog_record(session)
             })
             .collect();
         if let Some(session) = current_session_catalog {
@@ -1615,6 +2102,72 @@ impl App {
                         .map(|parsed| read_json_tags(parsed, ""))
                         .unwrap_or_default(),
                 }
+            })
+            .filter(|record| !record.checkpoint_id.is_empty())
+            .collect();
+        Ok(())
+    }
+
+    async fn refresh_workspace_catalog(&mut self) -> Result<()> {
+        self.slash_entity_catalog.workspace_artifacts.clear();
+        self.slash_entity_catalog.workspace_checkpoints.clear();
+        let run_id = self
+            .last_run_id
+            .clone()
+            .or_else(|| {
+                self.current_session_catalog
+                    .as_ref()
+                    .and_then(|session| session.last_run_id.clone())
+            })
+            .or_else(|| self.session.last_run_id.as_ref().map(|value| value.ulid.clone()));
+        let Some(run_id) = run_id else {
+            return Ok(());
+        };
+        let context = self.connect_admin_console().await?;
+        let payload = match context
+            .client
+            .get_json_value(format!(
+                "console/v1/chat/runs/{}/workspace?limit=24",
+                percent_encode_component(run_id.as_str())
+            ))
+            .await
+        {
+            Ok(payload) => payload,
+            Err(_) => return Ok(()),
+        };
+        self.slash_entity_catalog.workspace_artifacts = payload
+            .pointer("/workspace/artifacts")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| TuiSlashWorkspaceArtifactRecord {
+                artifact_id: read_json_string(&value, "/artifact_id"),
+                path: read_json_string(&value, "/path"),
+                display_path: read_json_string(&value, "/display_path"),
+                change_kind: read_json_string(&value, "/change_kind"),
+                latest_checkpoint_id: read_json_string(&value, "/latest_checkpoint_id"),
+                preview_kind: read_json_string(&value, "/preview_kind"),
+                size_bytes: value.pointer("/size_bytes").and_then(serde_json::Value::as_u64),
+                deleted: read_json_bool(&value, "/deleted"),
+            })
+            .filter(|record| !record.artifact_id.is_empty())
+            .collect();
+        self.slash_entity_catalog.workspace_checkpoints = payload
+            .pointer("/workspace/workspace_checkpoints")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| TuiSlashWorkspaceCheckpointRecord {
+                checkpoint_id: read_json_string(&value, "/checkpoint_id"),
+                source_label: read_json_string(&value, "/source_label"),
+                summary_text: read_json_string(&value, "/summary_text"),
+                restore_count: value
+                    .pointer("/restore_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                created_at_unix_ms: read_json_i64(&value, "/created_at_unix_ms"),
             })
             .filter(|record| !record.checkpoint_id.is_empty())
             .collect();
@@ -2844,6 +3397,240 @@ impl App {
         Ok(())
     }
 
+    async fn refresh_session_runtime_snapshot(&mut self) -> Result<()> {
+        let session_id = self.active_session_id()?;
+        let context = self.connect_admin_console().await?;
+        let mut snapshot = SessionRuntimeSnapshot {
+            session_total_tokens: self
+                .current_session_catalog
+                .as_ref()
+                .map(|session| session.total_tokens)
+                .unwrap_or_default(),
+            latest_started_at_unix_ms: self
+                .current_session_catalog
+                .as_ref()
+                .and_then(|session| session.last_run_started_at_unix_ms),
+            ..SessionRuntimeSnapshot::default()
+        };
+        let usage_path = format!(
+            "console/v1/usage/sessions/{}?run_limit=8",
+            percent_encode_component(session_id.as_str())
+        );
+        let usage_result = context.client.get_json_value(usage_path).await;
+        let transcript_path = format!(
+            "console/v1/chat/sessions/{}/transcript",
+            percent_encode_component(session_id.as_str())
+        );
+        let transcript_result = context.client.get_json_value(transcript_path).await;
+
+        if let Ok(usage) = usage_result.as_ref() {
+            snapshot.session_total_tokens = read_json_u64(usage, "/session/total_tokens")
+                .max(read_json_u64(usage, "/totals/total_tokens"))
+                .max(snapshot.session_total_tokens);
+            snapshot.session_runs = read_json_u64(usage, "/session/runs") as usize;
+            snapshot.average_latency_ms = read_json_f64(usage, "/session/average_latency_ms")
+                .or_else(|| read_json_f64(usage, "/totals/average_latency_ms"));
+            snapshot.estimated_cost_usd = read_json_f64(usage, "/session/estimated_cost_usd")
+                .or_else(|| read_json_f64(usage, "/totals/estimated_cost_usd"));
+            snapshot.latest_started_at_unix_ms =
+                read_json_optional_i64(usage, "/session/latest_started_at_unix_ms")
+                    .or(snapshot.latest_started_at_unix_ms);
+            if let Some(latest_run) = usage
+                .pointer("/runs")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|runs| runs.first())
+            {
+                snapshot.latest_run_total_tokens = read_json_u64(latest_run, "/total_tokens");
+                snapshot.latest_started_at_unix_ms =
+                    read_json_optional_i64(latest_run, "/started_at_unix_ms")
+                        .or(snapshot.latest_started_at_unix_ms);
+                snapshot.latest_completed_at_unix_ms =
+                    read_json_optional_i64(latest_run, "/completed_at_unix_ms");
+            }
+        }
+
+        if let Ok(transcript) = transcript_result.as_ref() {
+            snapshot.attachment_count = transcript
+                .pointer("/attachments")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or_default();
+            let tasks = transcript
+                .pointer("/background_tasks")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            snapshot.background_task_count = tasks.len();
+            snapshot.active_background_task_count = tasks
+                .iter()
+                .filter(|task| background_task_is_active(read_json_string(task, "/state").as_str()))
+                .count();
+            if snapshot.latest_completed_at_unix_ms.is_none() {
+                snapshot.latest_completed_at_unix_ms = transcript
+                    .pointer("/runs")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|runs| runs.first())
+                    .and_then(|run| read_json_optional_i64(run, "/completed_at_unix_ms"));
+            }
+        }
+
+        self.session_runtime = snapshot;
+        match (usage_result.err(), transcript_result.err()) {
+            (Some(usage_error), Some(transcript_error)) => Err(anyhow!(
+                "usage metadata unavailable: {usage_error}; transcript metadata unavailable: {transcript_error}"
+            )),
+            (Some(error), None) => Err(anyhow!("usage metadata unavailable: {error}")),
+            (None, Some(error)) => Err(anyhow!("transcript metadata unavailable: {error}")),
+            (None, None) => Ok(()),
+        }
+    }
+
+    fn context_budget_summary(&self) -> ContextBudgetSummary {
+        let baseline_tokens = self
+            .current_session_catalog
+            .as_ref()
+            .map(|session| session.total_tokens)
+            .unwrap_or_default()
+            .max(self.session_runtime.session_total_tokens);
+        let draft_tokens = estimate_text_tokens(self.composer.text());
+        let project_context_tokens = self
+            .current_session_catalog
+            .as_ref()
+            .and_then(|session| session.recap.project_context.as_ref())
+            .map(|project_context| project_context.active_estimated_tokens as u64)
+            .unwrap_or_default();
+        let attachment_tokens =
+            self.pending_attachments.iter().map(|attachment| attachment.budget_tokens).sum::<u64>();
+        let estimated_total_tokens =
+            baseline_tokens + draft_tokens + project_context_tokens + attachment_tokens;
+        let ratio = if CONTEXT_BUDGET_HARD_LIMIT == 0 {
+            0.0
+        } else {
+            (estimated_total_tokens as f64) / (CONTEXT_BUDGET_HARD_LIMIT as f64)
+        };
+        let tone = if estimated_total_tokens >= CONTEXT_BUDGET_HARD_LIMIT {
+            StatusTone::Danger
+        } else if estimated_total_tokens >= CONTEXT_BUDGET_SOFT_LIMIT {
+            StatusTone::Warning
+        } else {
+            StatusTone::Default
+        };
+        let warning = match tone {
+            StatusTone::Danger => Some(
+                "Estimated context is above the safe working budget. Branch or compact before another heavy turn."
+                    .to_owned(),
+            ),
+            StatusTone::Warning => Some(
+                "Estimated context is approaching the budget. Keep the next turn compact."
+                    .to_owned(),
+            ),
+            StatusTone::Default => None,
+        };
+        ContextBudgetSummary {
+            draft_tokens,
+            project_context_tokens,
+            attachment_tokens,
+            estimated_total_tokens,
+            limit_tokens: CONTEXT_BUDGET_HARD_LIMIT,
+            ratio,
+            tone,
+            label: format!(
+                "{} / {} est.",
+                format_approx_tokens(estimated_total_tokens),
+                format_approx_tokens(CONTEXT_BUDGET_HARD_LIMIT)
+            ),
+            warning,
+        }
+    }
+
+    fn push_session_recap(&mut self, fallback: Option<TuiSlashSessionRecord>) {
+        if let Some(session) = self.current_session_catalog.as_ref() {
+            let mut lines = Vec::new();
+            let workspace_checkpoint_count = self.slash_entity_catalog.workspace_checkpoints.len();
+            let summary =
+                session.last_summary.clone().or_else(|| session.preview.clone()).unwrap_or_else(
+                    || "No stored recap is available for this session yet.".to_owned(),
+                );
+            lines.push(summary);
+            lines.push(format!(
+                "Approvals {} · Artifacts {} · Context {} · Rollback {} · Family {}/{}",
+                session.pending_approvals,
+                session.artifact_count,
+                session.recap.active_context_files.len(),
+                workspace_checkpoint_count,
+                session.family.sequence,
+                session.family.family_size
+            ));
+            if !session.recap.recent_artifacts.is_empty() {
+                lines.push(format!(
+                    "Recent artifacts: {}",
+                    session
+                        .recap
+                        .recent_artifacts
+                        .iter()
+                        .take(3)
+                        .map(|artifact| artifact.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                ));
+            }
+            if !session.recap.touched_files.is_empty() {
+                lines.push(format!(
+                    "Touched: {}",
+                    session
+                        .recap
+                        .touched_files
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                ));
+            }
+            if let Some(workspace_checkpoint) =
+                self.slash_entity_catalog.workspace_checkpoints.first()
+            {
+                lines.push(format!(
+                    "Workspace: /workspace · /workspace show <artifact> · /rollback diff {}",
+                    workspace_checkpoint.checkpoint_id
+                ));
+            } else if session.artifact_count > 0 {
+                lines.push("Workspace: /workspace lists changed files and `/workspace handoff` jumps into the web inspector.".to_owned());
+            }
+            if !session.recap.ctas.is_empty() {
+                lines.push(format!("Quick actions: {}", session.recap.ctas.join(" · ")));
+            }
+            if session.family.parent_session_id.is_some() || !session.family.relatives.is_empty() {
+                let mut family_actions = Vec::new();
+                if session.family.parent_session_id.is_some() {
+                    family_actions.push("/resume parent".to_owned());
+                }
+                if session.family.relatives.iter().any(|relative| relative.relation == "sibling") {
+                    family_actions.push("/resume sibling".to_owned());
+                }
+                if session.family.relatives.iter().any(|relative| relative.relation == "child") {
+                    family_actions.push("/resume child".to_owned());
+                }
+                family_actions.push(format!("/history {}", session.family.root_title));
+                lines.push(format!("Family: {}", family_actions.join(" · ")));
+            }
+            self.push_entry(EntryKind::System, "Recap", lines.join("\n"));
+            return;
+        }
+        if let Some(recap_session) = fallback {
+            let recap = if !recap_session.last_summary.is_empty() {
+                recap_session.last_summary
+            } else if !recap_session.preview.is_empty() {
+                recap_session.preview
+            } else if recap_session.root_title != recap_session.title {
+                recap_session.root_title
+            } else {
+                "No stored recap is available for this session yet.".to_owned()
+            };
+            self.push_entry(EntryKind::System, "Recap", recap);
+        }
+    }
+
     fn sync_session_quick_controls_from_catalog(&mut self) {
         let Some(session) = self.current_session_catalog.as_ref() else {
             return;
@@ -2916,6 +3703,7 @@ impl App {
         self.refresh_agent_identity(None, false).await?;
         self.models = Some(self.runtime.list_models(None)?);
         self.refresh_slash_entity_catalogs().await?;
+        let _ = self.refresh_session_runtime_snapshot().await;
         self.sync_slash_palette();
         self.status_line = "Runtime state reloaded".to_owned();
         Ok(())
@@ -2932,45 +3720,132 @@ impl App {
         });
         let profile =
             app::current_root_context().and_then(|context| context.active_profile_context());
-        format!(
-            "profile={} env={} risk={} strict={} session={} branch={} agent={} source={} model={} model_source={} agent_source={} trace={} thinking={} verbose={} shell={} active_run={} handoff={}",
-            profile.as_ref().map(|value| value.label.as_str()).unwrap_or("none"),
-            profile.as_ref().map(|value| value.environment.as_str()).unwrap_or("none"),
-            profile.as_ref().map(|value| value.risk_level.as_str()).unwrap_or("none"),
-            profile
+        let budget = self.context_budget_summary();
+        let workspace_artifacts = self.slash_entity_catalog.workspace_artifacts.len().max(
+            self.current_session_catalog
                 .as_ref()
-                .map(|value| value.strict_mode.to_string())
-                .unwrap_or_else(|| "false".to_owned()),
-            display_session_identity(&self.session),
-            if self.session.branch_state.trim().is_empty() {
-                "none"
-            } else {
-                self.session.branch_state.as_str()
-            },
-            self.current_session_agent_display(),
-            self.current_agent_source,
-            self.current_session_model_display(),
-            if self.current_session_model_override_active() {
-                "session"
-            } else {
-                "inherited"
-            },
-            if self.current_session_agent_override_active() {
-                "session"
-            } else {
-                "inherited"
-            },
-            self.show_tools,
-            self.show_thinking,
-            self.show_verbose,
-            self.local_shell_enabled,
-            self.active_stream
+                .map(|session| session.artifact_count)
+                .unwrap_or_default(),
+        );
+        let workspace_checkpoints = self.slash_entity_catalog.workspace_checkpoints.len();
+        let duration = current_run_duration_ms(self)
+            .map(format_duration_ms)
+            .unwrap_or_else(|| "idle".to_owned());
+        [
+            format!(
+                "Session {}\nBranch {} · Agent {} ({}) [{}] · Model {} [{}]",
+                display_session_identity(&self.session),
+                if self.session.branch_state.trim().is_empty() {
+                    "none"
+                } else {
+                    self.session.branch_state.as_str()
+                },
+                self.current_session_agent_display(),
+                self.current_agent_source,
+                if self.current_session_agent_override_active() {
+                    "session"
+                } else {
+                    "inherited"
+                },
+                self.current_session_model_display(),
+                if self.current_session_model_override_active() {
+                    "session"
+                } else {
+                    "inherited"
+                },
+            ),
+            format!(
+                "Budget {} · Attach {} · Context {} · Approvals {} · Background {} · Workspace {}/{}",
+                budget.label,
+                self.pending_attachments.len(),
+                self.current_session_catalog
+                    .as_ref()
+                    .map(|session| session.recap.active_context_files.len())
+                    .unwrap_or_default(),
+                self.current_session_catalog
+                    .as_ref()
+                    .map(|session| session.pending_approvals)
+                    .unwrap_or_default(),
+                self.session_runtime.active_background_task_count,
+                workspace_artifacts,
+                workspace_checkpoints,
+            ),
+            format!(
+                "Run {} · Tokens {} · Cost {} · Connection {}",
+                duration,
+                format_approx_tokens(self.session_runtime.latest_run_total_tokens),
+                self.session_runtime
+                    .estimated_cost_usd
+                    .map(format_cost_usd)
+                    .unwrap_or_else(|| "n/a".to_owned()),
+                connection_posture_label(self.runtime.connection().grpc_url.as_str()),
+            ),
+            format!(
+                "Profile {} · Env {} · Risk {} · Strict {} · Tools {} · Thinking {} · Verbose {} · Shell {}",
+                profile.as_ref().map(|value| value.label.as_str()).unwrap_or("none"),
+                profile.as_ref().map(|value| value.environment.as_str()).unwrap_or("none"),
+                profile.as_ref().map(|value| value.risk_level.as_str()).unwrap_or("none"),
+                profile.as_ref().map(|value| if value.strict_mode { "on" } else { "off" }).unwrap_or("off"),
+                self.show_tools,
+                self.show_thinking,
+                self.show_verbose,
+                self.local_shell_enabled,
+            ),
+            format!("Handoff {handoff}"),
+        ]
+        .join("\n")
+    }
+
+    fn status_detail_summary(&self) -> String {
+        let budget = self.context_budget_summary();
+        let workspace_artifacts = self.slash_entity_catalog.workspace_artifacts.len().max(
+            self.current_session_catalog
                 .as_ref()
-                .map(|stream| stream.run_id())
-                .or(self.last_run_id.as_deref())
-                .unwrap_or("none"),
-            handoff
-        )
+                .map(|session| session.artifact_count)
+                .unwrap_or_default(),
+        );
+        let workspace_checkpoints = self.slash_entity_catalog.workspace_checkpoints.len();
+        let latest_workspace_artifact = self
+            .slash_entity_catalog
+            .workspace_artifacts
+            .first()
+            .map(|artifact| artifact.display_path.as_str())
+            .unwrap_or("none");
+        let latest_workspace_checkpoint = self
+            .slash_entity_catalog
+            .workspace_checkpoints
+            .first()
+            .map(|checkpoint| checkpoint.checkpoint_id.as_str())
+            .unwrap_or("none");
+        [
+            self.status_summary(),
+            format!(
+                "Context detail total={} / {} · draft={} · project_context={} · attachments={}",
+                format_approx_tokens(budget.estimated_total_tokens),
+                format_approx_tokens(budget.limit_tokens),
+                format_approx_tokens(budget.draft_tokens),
+                format_approx_tokens(budget.project_context_tokens),
+                format_approx_tokens(budget.attachment_tokens),
+            ),
+            format!(
+                "Workspace detail artifacts={} · checkpoints={} · latest artifact={} · latest rollback={}",
+                workspace_artifacts,
+                workspace_checkpoints,
+                latest_workspace_artifact,
+                if latest_workspace_checkpoint == "none" {
+                    "none".to_owned()
+                } else {
+                    shorten_id(latest_workspace_checkpoint)
+                },
+            ),
+            format!(
+                "Session attachments stored={} · background queued={} active={}",
+                self.session_runtime.attachment_count,
+                self.session_runtime.background_task_count,
+                self.session_runtime.active_background_task_count,
+            ),
+        ]
+        .join("\n")
     }
 }
 
@@ -3004,6 +3879,9 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
             {
                 app.apply_selected_slash_suggestion(true);
             } else {
+                if matches!(app.focus, Focus::Input) {
+                    app.stash_current_draft();
+                }
                 app.focus = match app.focus {
                     Focus::Transcript => Focus::Input,
                     Focus::Input => Focus::Transcript,
@@ -3013,40 +3891,89 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc
             if matches!(app.focus, Focus::Input) && app.pending_slash_palette.is_some() =>
         {
-            app.slash_palette_dismissed = true;
-            app.pending_slash_palette = None;
-            app.slash_palette_selected = 0;
+            app.dismiss_slash_palette();
             app.status_line = "Slash palette dismissed".to_owned();
+        }
+        KeyCode::Esc if matches!(app.focus, Focus::Input) && app.composer.has_selection() => {
+            app.composer.clear_selection();
+            app.status_line = "Composer selection cleared".to_owned();
         }
         KeyCode::Char('?') => app.mode = Mode::Help,
         KeyCode::F(2) => app.open_picker(PickerKind::Agent).await?,
         KeyCode::F(3) => app.open_picker(PickerKind::Session).await?,
         KeyCode::F(4) => app.open_picker(PickerKind::Model).await?,
         KeyCode::F(5) => app.mode = Mode::Settings,
+        KeyCode::F(8) => {
+            app.show_tips = !app.show_tips;
+            app.status_line = if app.show_tips {
+                "TUI tips are visible again".to_owned()
+            } else {
+                "TUI tips hidden; press F8 to re-open them".to_owned()
+            };
+        }
         KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => {
             app.reload_runtime_state().await?;
         }
+        KeyCode::Char('o')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(app.focus, Focus::Input) =>
+        {
+            if app.composer.trimmed_text().is_empty() {
+                app.composer.set_text("/attach ");
+                app.sync_composer_after_edit();
+                app.status_line =
+                    "Attachment flow primed. Type a path and press Enter to upload it.".to_owned();
+            } else {
+                app.status_line =
+                    "Use `/attach <path>` directly or clear the current draft before Ctrl+O."
+                        .to_owned();
+            }
+        }
+        KeyCode::Enter
+            if matches!(app.focus, Focus::Input) && key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.composer.insert_newline();
+            app.sync_composer_after_edit();
+        }
+        KeyCode::Char('j')
+            if matches!(app.focus, Focus::Input)
+                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            app.composer.insert_newline();
+            app.sync_composer_after_edit();
+        }
         KeyCode::Enter if matches!(app.focus, Focus::Input) => app.submit_input().await?,
         KeyCode::Backspace if matches!(app.focus, Focus::Input) => {
-            app.input.pop();
-            app.slash_palette_dismissed = false;
-            app.sync_slash_palette();
+            app.composer.backspace();
+            app.sync_composer_after_edit();
+        }
+        KeyCode::Delete if matches!(app.focus, Focus::Input) => {
+            app.composer.delete();
+            app.sync_composer_after_edit();
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if matches!(app.focus, Focus::Input) {
-                app.input.clear();
-                app.slash_palette_dismissed = false;
+                app.composer.clear();
+                app.pending_attachments.clear();
+                app.clear_current_draft();
                 app.sync_slash_palette();
             }
         }
+        KeyCode::Char('a')
+            if matches!(app.focus, Focus::Input)
+                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            app.composer.select_all();
+        }
         KeyCode::Char(ch) if matches!(app.focus, Focus::Input) && key.modifiers.is_empty() => {
-            app.input.push(ch);
-            app.slash_palette_dismissed = false;
-            app.sync_slash_palette();
+            app.composer.insert_text(ch.to_string().as_str());
+            app.sync_composer_after_edit();
         }
         KeyCode::Up => {
             if matches!(app.focus, Focus::Input) && app.pending_slash_palette.is_some() {
                 app.slash_palette_selected = app.slash_palette_selected.saturating_sub(1);
+            } else if matches!(app.focus, Focus::Input) {
+                app.composer.move_vertical(-1, key.modifiers.contains(KeyModifiers::SHIFT));
             } else if matches!(app.focus, Focus::Transcript) {
                 app.scroll_offset = app.scroll_offset.saturating_add(1);
             }
@@ -3056,14 +3983,42 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 if let Some(palette) = app.pending_slash_palette.as_ref() {
                     app.slash_palette_selected = (app.slash_palette_selected + 1)
                         .min(palette.suggestions.len().saturating_sub(1));
+                } else {
+                    app.composer.move_vertical(1, key.modifiers.contains(KeyModifiers::SHIFT));
                 }
             } else if matches!(app.focus, Focus::Transcript) {
                 app.scroll_offset = app.scroll_offset.saturating_sub(1);
             }
         }
+        KeyCode::Left if matches!(app.focus, Focus::Input) => {
+            app.composer.move_left(
+                key.modifiers.contains(KeyModifiers::SHIFT),
+                key.modifiers.contains(KeyModifiers::CONTROL),
+            );
+        }
+        KeyCode::Right if matches!(app.focus, Focus::Input) => {
+            app.composer.move_right(
+                key.modifiers.contains(KeyModifiers::SHIFT),
+                key.modifiers.contains(KeyModifiers::CONTROL),
+            );
+        }
+        KeyCode::Home if matches!(app.focus, Focus::Input) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.composer.move_to_start(key.modifiers.contains(KeyModifiers::SHIFT));
+            } else {
+                app.composer.move_to_line_start(key.modifiers.contains(KeyModifiers::SHIFT));
+            }
+        }
+        KeyCode::End if matches!(app.focus, Focus::Input) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.composer.move_to_end(key.modifiers.contains(KeyModifiers::SHIFT));
+            } else {
+                app.composer.move_to_line_end(key.modifiers.contains(KeyModifiers::SHIFT));
+            }
+        }
         KeyCode::PageUp => app.scroll_offset = app.scroll_offset.saturating_add(8),
         KeyCode::PageDown => app.scroll_offset = app.scroll_offset.saturating_sub(8),
-        KeyCode::Char('q') if app.input.is_empty() => app.status_line = "__exit__".to_owned(),
+        KeyCode::Char('q') if app.composer.is_empty() => app.status_line = "__exit__".to_owned(),
         _ => {}
     }
     Ok(())
@@ -3217,13 +4172,17 @@ async fn handle_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn render(frame: &mut Frame<'_>, app: &App) {
+    let composer_view =
+        app.composer.render(MAX_COMPOSER_VISIBLE_LINES, matches!(app.focus, Focus::Input));
+    let input_height = estimate_input_height(app, &composer_view);
+    let footer_height = if app.show_tips { 3 } else { 2 };
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(input_height),
+            Constraint::Length(footer_height),
         ])
         .split(frame.area());
     let header = areas[0];
@@ -3233,11 +4192,11 @@ fn render(frame: &mut Frame<'_>, app: &App) {
 
     render_header(frame, header, app);
     render_transcript(frame, main, app);
-    render_input(frame, input, app);
+    render_input(frame, input, app, &composer_view);
     render_footer(frame, footer, app);
 
     match app.mode {
-        Mode::Help => render_help_popup(frame, frame.area()),
+        Mode::Help => render_help_popup(frame, frame.area(), app),
         Mode::Approval => render_approval_popup(frame, frame.area(), app),
         Mode::Picker(_) => render_picker_popup(frame, frame.area(), app),
         Mode::Settings => render_settings_popup(frame, frame.area(), app),
@@ -3351,42 +4310,249 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(transcript, area);
 }
 
-fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(if matches!(app.focus, Focus::Input) { "Input [focus]" } else { "Input" });
+fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App, composer_view: &TuiComposerView) {
+    let budget = app.context_budget_summary();
+    let workspace_checkpoint_count = app.slash_entity_catalog.workspace_checkpoints.len();
+    let block =
+        Block::default().borders(Borders::ALL).title(if matches!(app.focus, Focus::Input) {
+            format!(
+                "Composer [focus · {} line{} · ws {}]",
+                composer_view.total_lines,
+                if composer_view.total_lines == 1 { "" } else { "s" },
+                workspace_checkpoint_count
+            )
+        } else {
+            format!(
+                "Composer [{} line{} · ws {}]",
+                composer_view.total_lines,
+                if composer_view.total_lines == 1 { "" } else { "s" },
+                workspace_checkpoint_count
+            )
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(app.input.as_str()).wrap(Wrap { trim: false }), inner);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Budget ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            budget.label.clone(),
+            match budget.tone {
+                StatusTone::Default => Style::default(),
+                StatusTone::Warning => Style::default().fg(Color::Yellow),
+                StatusTone::Danger => Style::default().fg(Color::LightRed),
+            },
+        ),
+        Span::raw("  "),
+        Span::styled("Context ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::raw(
+            app.current_session_catalog
+                .as_ref()
+                .map(|session| session.recap.active_context_files.len().to_string())
+                .unwrap_or_else(|| "0".to_owned()),
+        ),
+        Span::raw("  "),
+        Span::styled("Approvals ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(
+            app.current_session_catalog
+                .as_ref()
+                .map(|session| session.pending_approvals.to_string())
+                .unwrap_or_else(|| "0".to_owned()),
+        ),
+        Span::raw("  "),
+        Span::styled("Attach ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::raw(app.pending_attachments.len().to_string()),
+    ])];
+    if !app.pending_attachments.is_empty() {
+        let preview = app
+            .pending_attachments
+            .iter()
+            .take(2)
+            .enumerate()
+            .map(|(index, attachment)| {
+                format!(
+                    "{}={} · {} · {}",
+                    index + 1,
+                    attachment.filename,
+                    format_size_bytes(attachment.size_bytes),
+                    format_approx_tokens(attachment.budget_tokens)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        lines.push(Line::from(format!(
+            "Pending attachments: {}{}",
+            preview,
+            if app.pending_attachments.len() > 2 {
+                format!("  +{}", app.pending_attachments.len() - 2)
+            } else {
+                String::new()
+            }
+        )));
+    }
+    lines.extend(composer_view.lines.clone());
+    if let Some(warning) = budget.warning.as_ref() {
+        lines.push(Line::from(Span::styled(
+            warning.clone(),
+            match budget.tone {
+                StatusTone::Danger => Style::default().fg(Color::LightRed),
+                StatusTone::Warning => Style::default().fg(Color::Yellow),
+                StatusTone::Default => Style::default(),
+            },
+        )));
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }), inner);
     if matches!(app.focus, Focus::Input) && matches!(app.mode, Mode::Chat) {
-        frame.set_cursor_position((inner.x + app.input.chars().count() as u16, inner.y));
+        let cursor_y = inner
+            .y
+            .saturating_add(1)
+            .saturating_add(u16::from(!app.pending_attachments.is_empty()))
+            .saturating_add(composer_view.cursor_y);
+        frame.set_cursor_position((inner.x + composer_view.cursor_x, cursor_y));
     }
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let strict_hint = if strict_profile_blocks_local_shell() {
-        "  strict profile: local shell blocked"
-    } else {
-        ""
-    };
-    let slash_hint = if app.pending_slash_palette.is_some() {
-        "  slash: Up/Down choose  Tab accept  Esc dismiss"
-    } else {
-        ""
-    };
-    let help = format!(
-        "Enter send  Tab focus  F2/F3/F4 pickers  F5 settings  Ctrl+R reload  ? help  / commands  ! shell({}){}{}",
-        if app.local_shell_enabled { "on" } else { "off" },
-        strict_hint,
-        slash_hint,
-    );
-    frame.render_widget(Paragraph::new(help), area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            std::iter::repeat(Constraint::Length(1)).take(area.height as usize).collect::<Vec<_>>(),
+        )
+        .split(area);
+    let width = area.width as usize;
+    if let Some(row) = rows.first().copied() {
+        frame.render_widget(Paragraph::new(compact_status_bar_line(app, width)), row);
+    }
+    if let Some(row) = rows.get(1).copied() {
+        frame.render_widget(Paragraph::new(compact_shortcut_line(app, width)), row);
+    }
+    if app.show_tips {
+        if let Some(row) = rows.get(2).copied() {
+            frame.render_widget(Paragraph::new(discoverability_tip_line(app, width)), row);
+        }
+    }
 }
 
 fn strict_profile_blocks_local_shell() -> bool {
     app::current_root_context()
         .map(|context| context.strict_profile_mode() && !context.allow_strict_profile_actions)
         .unwrap_or(false)
+}
+
+fn estimate_input_height(app: &App, composer_view: &TuiComposerView) -> u16 {
+    let mut height = 2 + composer_view.lines.len() as u16 + 1;
+    if !app.pending_attachments.is_empty() {
+        height += 1;
+    }
+    if app.context_budget_summary().warning.is_some() {
+        height += 1;
+    }
+    height.clamp(4, 10)
+}
+
+fn compact_status_bar_line(app: &App, width: usize) -> String {
+    let budget = app.context_budget_summary();
+    let context_fill = (budget.ratio * 100.0).round().clamp(0.0, 999.0);
+    let run_duration = current_run_duration_ms(app).map(format_duration_ms);
+    let connection_posture = connection_posture_label(app.runtime.connection().grpc_url.as_str());
+    let checkpoint_count = app.slash_entity_catalog.workspace_checkpoints.len();
+    let workspace_artifact_count = app.slash_entity_catalog.workspace_artifacts.len().max(
+        app.current_session_catalog
+            .as_ref()
+            .map(|session| session.artifact_count)
+            .unwrap_or_default(),
+    );
+    let segments = vec![
+        format!("ctx {:>3.0}%", context_fill),
+        format!("tok {}", format_approx_tokens(app.session_runtime.latest_run_total_tokens)),
+        format!("budget {}", budget.label),
+        app.session_runtime
+            .estimated_cost_usd
+            .map(format_cost_usd)
+            .map(|value| format!("cost {value}"))
+            .unwrap_or_else(|| "cost n/a".to_owned()),
+        run_duration.map(|value| format!("run {value}")).unwrap_or_else(|| "run idle".to_owned()),
+        format!(
+            "approvals {}",
+            app.current_session_catalog
+                .as_ref()
+                .map(|session| session.pending_approvals)
+                .unwrap_or_default()
+        ),
+        format!("bg {}", app.session_runtime.active_background_task_count),
+        format!("ws {workspace_artifact_count}/{checkpoint_count}"),
+        format!("agent {}", app.current_session_agent_display()),
+        format!("model {}", app.current_session_model_display()),
+        format!("conn {}", connection_posture),
+    ];
+    fit_segments_to_width(width, segments)
+}
+
+fn compact_shortcut_line(app: &App, width: usize) -> String {
+    let slash_hint =
+        if app.pending_slash_palette.is_some() { "slash Up/Down + Tab" } else { "/ commands" };
+    let line = format!(
+        "Enter send · Alt+Enter/Ctrl+J newline · Ctrl+O attach · /status detail · /workspace · /rollback diff · F8 tips · {slash_hint}"
+    );
+    truncate_text(line, width.max(8))
+}
+
+fn discoverability_tip_line(app: &App, width: usize) -> String {
+    let raw = if app.pending_approval.is_some() {
+        "Tip: a pending approval is waiting; use y / n or Esc to resolve it."
+    } else if !app.pending_attachments.is_empty() {
+        "Tip: attachments are queued for the next turn; use /attach remove <index> before sending."
+    } else if app
+        .current_session_catalog
+        .as_ref()
+        .map(|session| session.family.family_size > 1)
+        .unwrap_or(false)
+    {
+        "Tip: use /resume parent, /resume sibling, /resume child, or /history <family> to move around the current title family."
+    } else if !app.slash_entity_catalog.workspace_checkpoints.is_empty() {
+        "Tip: /rollback diff <checkpoint-id> previews recoverable workspace changes before restore."
+    } else if !app.slash_entity_catalog.checkpoints.is_empty() {
+        "Tip: /undo restores the latest safe conversation checkpoint, and /checkpoint list shows the rest."
+    } else {
+        "Tip: Alt+Enter/Ctrl+J adds a newline, Ctrl+O primes attachment upload, and F8 hides or re-shows these hints. Voice remains desktop-first."
+    };
+    truncate_text(raw.to_owned(), width.max(8))
+}
+
+fn current_run_duration_ms(app: &App) -> Option<i64> {
+    let started_at = app.session_runtime.latest_started_at_unix_ms?;
+    let finished_at = if app.active_stream.is_some() {
+        now_unix_ms_i64().ok()
+    } else {
+        app.session_runtime.latest_completed_at_unix_ms
+    };
+    Some(finished_at.unwrap_or(started_at) - started_at)
+}
+
+fn connection_posture_label(grpc_url: &str) -> &'static str {
+    let normalized = grpc_url.to_ascii_lowercase();
+    if normalized.contains("127.0.0.1")
+        || normalized.contains("localhost")
+        || normalized.contains("[::1]")
+    {
+        "local"
+    } else {
+        "remote"
+    }
+}
+
+fn fit_segments_to_width(width: usize, segments: Vec<String>) -> String {
+    let mut line = String::new();
+    for segment in segments.into_iter().filter(|segment| !segment.trim().is_empty()) {
+        let candidate = if line.is_empty() { segment } else { format!("{line}  {segment}") };
+        if candidate.chars().count() > width {
+            break;
+        }
+        line = candidate;
+    }
+    if line.is_empty() {
+        String::new()
+    } else {
+        line
+    }
 }
 
 #[derive(Debug, Default)]
@@ -3439,6 +4605,168 @@ fn parse_tui_compaction_arguments(arguments: &[String]) -> Result<TuiCompactionC
 
 fn parse_tui_json_string(value: &str) -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(value).ok()
+}
+
+fn estimate_text_tokens(text: &str) -> u64 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    ((trimmed.len() as u64) + 3) / 4
+}
+
+fn format_approx_tokens(value: u64) -> String {
+    if value >= 1_000 {
+        if value >= 10_000 {
+            format!("{}k tok", value / 1_000)
+        } else {
+            format!("{:.1}k tok", (value as f64) / 1_000.0)
+        }
+    } else {
+        format!("{value} tok")
+    }
+}
+
+fn format_size_bytes(value: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let value_f64 = value as f64;
+    if value_f64 >= GIB {
+        format!("{:.1} GiB", value_f64 / GIB)
+    } else if value_f64 >= MIB {
+        format!("{:.1} MiB", value_f64 / MIB)
+    } else if value_f64 >= KIB {
+        format!("{:.1} KiB", value_f64 / KIB)
+    } else {
+        format!("{value} B")
+    }
+}
+
+fn format_duration_ms(value: i64) -> String {
+    let value = value.max(0);
+    if value >= 60_000 {
+        let minutes = value / 60_000;
+        let seconds = (value % 60_000) / 1_000;
+        format!("{minutes}m {seconds:02}s")
+    } else if value >= 1_000 {
+        format!("{:.1}s", (value as f64) / 1_000.0)
+    } else {
+        format!("{value}ms")
+    }
+}
+
+fn format_cost_usd(value: f64) -> String {
+    if value >= 1.0 {
+        format!("${value:.2}")
+    } else {
+        format!("${value:.4}")
+    }
+}
+
+fn guess_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "txt" | "md" | "rs" | "toml" | "json" | "yaml" | "yml" | "ts" | "tsx" | "js" | "jsx"
+        | "py" | "sh" | "ps1" => "text/plain",
+        "pdf" => "application/pdf",
+        "csv" => "text/csv",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
+
+fn attachment_kind_label(content_type: &str) -> &'static str {
+    if content_type.starts_with("image/") {
+        "image"
+    } else if content_type.starts_with("audio/") {
+        "audio"
+    } else if content_type.starts_with("video/") {
+        "video"
+    } else {
+        "file"
+    }
+}
+
+fn attachment_kind_to_proto(kind: &str) -> common_v1::message_attachment::AttachmentKind {
+    match kind.to_ascii_lowercase().as_str() {
+        "image" => common_v1::message_attachment::AttachmentKind::Image,
+        "audio" => common_v1::message_attachment::AttachmentKind::Audio,
+        "video" => common_v1::message_attachment::AttachmentKind::Video,
+        "file" => common_v1::message_attachment::AttachmentKind::File,
+        _ => common_v1::message_attachment::AttachmentKind::Unspecified,
+    }
+}
+
+fn read_json_optional_i64(value: &serde_json::Value, pointer: &str) -> Option<i64> {
+    value.pointer(pointer).and_then(serde_json::Value::as_i64)
+}
+
+fn read_json_u64(value: &serde_json::Value, pointer: &str) -> u64 {
+    value.pointer(pointer).and_then(serde_json::Value::as_u64).unwrap_or_default()
+}
+
+fn read_json_f64(value: &serde_json::Value, pointer: &str) -> Option<f64> {
+    value.pointer(pointer).and_then(|entry| {
+        entry
+            .as_f64()
+            .or_else(|| entry.as_i64().map(|number| number as f64))
+            .or_else(|| entry.as_u64().map(|number| number as f64))
+    })
+}
+
+fn background_task_is_active(state: &str) -> bool {
+    !matches!(
+        state.trim().to_ascii_lowercase().as_str(),
+        "" | "completed" | "failed" | "cancelled" | "canceled" | "succeeded"
+    )
+}
+
+fn map_session_catalog_record(session: SessionCatalogRecord) -> TuiSlashSessionRecord {
+    TuiSlashSessionRecord {
+        session_id: session.session_id,
+        title: session.title,
+        session_key: session.session_key,
+        archived: session.archived,
+        preview: session.preview.unwrap_or_default(),
+        root_title: session.family.root_title,
+        last_summary: session.last_summary.unwrap_or_default(),
+        branch_state: session.branch_state,
+        family_sequence: session.family.sequence,
+        family_size: session.family.family_size,
+        parent_session_id: session.family.parent_session_id,
+        parent_title: session.family.parent_title,
+        pending_approvals: session.pending_approvals,
+        artifact_count: session.artifact_count,
+        active_context_files: session.recap.active_context_files.len(),
+        relatives: session
+            .family
+            .relatives
+            .into_iter()
+            .map(|relative| TuiSlashSessionRelative {
+                session_id: relative.session_id,
+                title: relative.title,
+                branch_state: relative.branch_state,
+                relation: relative.relation,
+            })
+            .collect(),
+    }
 }
 
 struct TuiObjectiveCreateSpec {
@@ -3495,12 +4823,26 @@ fn parse_tui_objective_kind(value: &str) -> Result<&'static str> {
     }
 }
 
-fn render_help_popup(frame: &mut Frame<'_>, area: Rect) {
+fn render_help_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut lines = vec![Line::from("Slash commands")];
     for line in render_shared_chat_command_synopsis_lines(SharedChatCommandSurface::Tui, 84) {
         lines.push(Line::from(line));
     }
     lines.extend([
+        Line::default(),
+        Line::from("Recommended now"),
+        Line::from(discoverability_tip_line(app, 88)),
+        Line::default(),
+        Line::from("Multiline composer"),
+        Line::from("  Enter send  Alt+Enter or Ctrl+J newline"),
+        Line::from("  Ctrl+A select all  Ctrl+O seed /attach  Tab switch focus"),
+    ]);
+    lines.extend([
+        Line::default(),
+        Line::from("Daily-driver examples"),
+        Line::from("  /attach ./logs/failure.txt   /resume parent   /status detail"),
+        Line::from("  /workspace   /workspace show 1   /workspace handoff open"),
+        Line::from("  /rollback diff <checkpoint>   /rollback restore <checkpoint> --confirm"),
         Line::default(),
         Line::from("Context references"),
         Line::from(
@@ -3510,15 +4852,16 @@ fn render_help_popup(frame: &mut Frame<'_>, area: Rect) {
         Line::default(),
         Line::from("Pickers"),
         Line::from("  F2 agent  F3 session  F4 model"),
-        Line::from("  F5 settings  Ctrl+R reload runtime state"),
+        Line::from("  F5 settings  Ctrl+R reload runtime state  F8 toggle tips"),
         Line::default(),
         Line::from("Controls"),
-        Line::from("  Tab focus or accept slash suggestion  Enter submit/select"),
-        Line::from("  Up/Down navigate slash palette or transcript  Esc close overlay  q quit"),
+        Line::from("  Tab focus or accept slash suggestion  Up/Down navigate palette or composer"),
+        Line::from("  q quit when the composer is empty  Esc close overlay  /status detail expands context"),
         Line::default(),
         Line::from(
-            "Retry, undo, interrupt redirect, compaction, checkpoints, and background tasks reuse the console HTTP contracts.",
+            "Retry, undo, attachments, recap family navigation, workspace explorer, rollback, and background tasks all reuse the console HTTP contracts.",
         ),
+        Line::from("Voice remains desktop-first until the CLI path is fully stable."),
     ]);
     let popup_height = area.height.saturating_sub(2).min(lines.len() as u16 + 2).max(14);
     let popup = centered_rect(88, popup_height, area);
@@ -3954,9 +5297,11 @@ mod tests {
     use super::{
         display_session_identity, parse_toggle, parse_tui_objective_create_spec,
         parse_tui_objective_kind, quick_control_reset_requested, sanitize_terminal_text, App,
-        Focus, Mode, TuiLocale, TuiSlashEntityCatalog, TuiUxMetrics,
+        Focus, Mode, SessionRuntimeSnapshot, TuiComposer, TuiLocale, TuiSlashEntityCatalog,
+        TuiUxMetrics,
     };
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
+    use std::collections::BTreeMap;
 
     fn test_app() -> App {
         App {
@@ -3973,7 +5318,10 @@ mod tests {
             current_agent: None,
             current_agent_source: "test",
             models: None,
-            input: String::new(),
+            composer: TuiComposer::default(),
+            draft_cache: BTreeMap::new(),
+            pending_attachments: Vec::new(),
+            session_runtime: SessionRuntimeSnapshot::default(),
             transcript: Vec::new(),
             active_stream: None,
             pending_approval: None,
@@ -3999,6 +5347,7 @@ mod tests {
             scroll_offset: 0,
             status_line: String::new(),
             settings_selected: 0,
+            show_tips: true,
         }
     }
 

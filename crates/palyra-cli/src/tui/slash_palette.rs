@@ -13,6 +13,16 @@ pub(crate) struct TuiSlashEntityCatalog {
     pub(crate) browser_profiles: Vec<TuiSlashBrowserProfileRecord>,
     pub(crate) browser_sessions: Vec<TuiSlashBrowserSessionRecord>,
     pub(crate) checkpoints: Vec<TuiSlashCheckpointRecord>,
+    pub(crate) workspace_artifacts: Vec<TuiSlashWorkspaceArtifactRecord>,
+    pub(crate) workspace_checkpoints: Vec<TuiSlashWorkspaceCheckpointRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TuiSlashSessionRelative {
+    pub(crate) session_id: String,
+    pub(crate) title: String,
+    pub(crate) branch_state: String,
+    pub(crate) relation: String,
 }
 
 #[derive(Debug, Clone)]
@@ -25,7 +35,14 @@ pub(crate) struct TuiSlashSessionRecord {
     pub(crate) root_title: String,
     pub(crate) last_summary: String,
     pub(crate) branch_state: String,
+    pub(crate) family_sequence: u64,
     pub(crate) family_size: usize,
+    pub(crate) parent_session_id: Option<String>,
+    pub(crate) parent_title: Option<String>,
+    pub(crate) pending_approvals: usize,
+    pub(crate) artifact_count: usize,
+    pub(crate) active_context_files: usize,
+    pub(crate) relatives: Vec<TuiSlashSessionRelative>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +82,27 @@ pub(crate) struct TuiSlashCheckpointRecord {
     pub(crate) note: String,
     pub(crate) created_at_unix_ms: i64,
     pub(crate) tags: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TuiSlashWorkspaceArtifactRecord {
+    pub(crate) artifact_id: String,
+    pub(crate) path: String,
+    pub(crate) display_path: String,
+    pub(crate) change_kind: String,
+    pub(crate) latest_checkpoint_id: String,
+    pub(crate) preview_kind: String,
+    pub(crate) size_bytes: Option<u64>,
+    pub(crate) deleted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TuiSlashWorkspaceCheckpointRecord {
+    pub(crate) checkpoint_id: String,
+    pub(crate) source_label: String,
+    pub(crate) summary_text: String,
+    pub(crate) restore_count: u64,
+    pub(crate) created_at_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -313,7 +351,11 @@ fn build_entity_suggestions(
         "checkpoint" => {
             build_checkpoint_suggestions(command, catalog, normalized_rest, active_token)
         }
+        "rollback" => {
+            build_workspace_rollback_suggestions(command, catalog, normalized_rest, active_token)
+        }
         "undo" => build_undo_suggestions(command, catalog, active_token),
+        "workspace" => build_workspace_suggestions(command, catalog, normalized_rest, active_token),
         "interrupt" => build_interrupt_suggestions(command, active_token, streaming),
         "doctor" => build_doctor_suggestions(command, active_token),
         "compact" => {
@@ -344,40 +386,86 @@ fn build_session_suggestions(
                 || session.session_key.to_ascii_lowercase().contains(query.as_str())
                 || session.root_title.to_ascii_lowercase().contains(query.as_str())
                 || session.last_summary.to_ascii_lowercase().contains(query.as_str())
+                || session
+                    .parent_title
+                    .as_ref()
+                    .map(|title| title.to_ascii_lowercase().contains(query.as_str()))
+                    .unwrap_or(false)
+                || session.relatives.iter().any(|relative| {
+                    relative.title.to_ascii_lowercase().contains(query.as_str())
+                        || relative.relation.to_ascii_lowercase().contains(query.as_str())
+                })
         })
         .take(6)
-        .map(|session| TuiSlashSuggestion {
-            title: session.title.clone(),
-            subtitle: if session.session_key.is_empty() {
-                session.session_id.clone()
-            } else {
-                match session.family_size {
-                    0 | 1 => session.session_key.clone(),
-                    size => format!("{} · family {}", session.session_key, size),
-                }
-            },
-            detail: if !session.preview.is_empty() {
-                session.preview.clone()
-            } else if !session.last_summary.is_empty() {
-                session.last_summary.clone()
+        .map(|session| {
+            let mut detail_parts = Vec::new();
+            if !session.last_summary.is_empty() {
+                detail_parts.push(session.last_summary.clone());
+            } else if !session.preview.is_empty() {
+                detail_parts.push(session.preview.clone());
             } else if !session.root_title.is_empty() && session.root_title != session.title {
-                format!("Family root: {}", session.root_title)
+                detail_parts.push(format!("Family root: {}", session.root_title));
             } else {
-                "Resume this session context.".to_owned()
-            },
-            example: format!("/{} {}", command.name, session.session_id),
-            replacement: if command.name == "history" {
-                format!("/{} {}", command.name, session.title)
-            } else {
-                format!("/{} {}", command.name, session.session_id)
-            },
-            badge: if session.archived {
-                "archived".to_owned()
-            } else if session.branch_state.eq_ignore_ascii_case("active_branch") {
-                "branch".to_owned()
-            } else {
-                "session".to_owned()
-            },
+                detail_parts.push("Resume this session context.".to_owned());
+            }
+            detail_parts.push(format!(
+                "approvals {} · artifacts {} · context {}",
+                session.pending_approvals, session.artifact_count, session.active_context_files
+            ));
+            if let Some(parent_session_id) = session.parent_session_id.as_ref() {
+                detail_parts.push(format!(
+                    "parent {}",
+                    session
+                        .parent_title
+                        .clone()
+                        .unwrap_or_else(|| shorten_entity_id(parent_session_id.as_str()))
+                ));
+            }
+            if !session.relatives.is_empty() {
+                let family_preview = session
+                    .relatives
+                    .iter()
+                    .take(2)
+                    .map(|relative| {
+                        let lineage_state = if relative.branch_state.is_empty() {
+                            shorten_entity_id(relative.session_id.as_str())
+                        } else {
+                            relative.branch_state.clone()
+                        };
+                        format!("{} {} ({lineage_state})", relative.relation, relative.title)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                detail_parts.push(format!("family {family_preview}"));
+            }
+            TuiSlashSuggestion {
+                title: session.title.clone(),
+                subtitle: if session.session_key.is_empty() {
+                    session.session_id.clone()
+                } else {
+                    match session.family_size {
+                        0 | 1 => session.session_key.clone(),
+                        size => format!(
+                            "{} · family {}/{}",
+                            session.session_key, session.family_sequence, size
+                        ),
+                    }
+                },
+                detail: detail_parts.join(" · "),
+                example: format!("/{} {}", command.name, session.session_id),
+                replacement: if command.name == "history" {
+                    format!("/{} {}", command.name, session.title)
+                } else {
+                    format!("/{} {}", command.name, session.session_id)
+                },
+                badge: if session.archived {
+                    "archived".to_owned()
+                } else if session.branch_state.eq_ignore_ascii_case("active_branch") {
+                    "branch".to_owned()
+                } else {
+                    "session".to_owned()
+                },
+            }
         })
         .collect()
 }
@@ -558,6 +646,212 @@ fn build_checkpoint_suggestions(
         .collect()
 }
 
+fn build_workspace_rollback_suggestions(
+    command: &SharedChatCommandDefinition,
+    catalog: &TuiSlashEntityCatalog,
+    normalized_rest: &str,
+    active_token: &str,
+) -> Vec<TuiSlashSuggestion> {
+    if normalized_rest.starts_with("diff") {
+        return build_workspace_checkpoint_suggestions(command, catalog, active_token, "diff");
+    }
+    if normalized_rest.starts_with("restore") {
+        return build_workspace_checkpoint_suggestions(command, catalog, active_token, "restore");
+    }
+    vec![
+        TuiSlashSuggestion {
+            title: "Workspace rollback summary".to_owned(),
+            subtitle: command.synopsis.clone(),
+            detail: "List workspace checkpoints and restore guidance for the latest run."
+                .to_owned(),
+            example: format!("/{}", command.name),
+            replacement: format!("/{}", command.name),
+            badge: command.category.clone(),
+        },
+        TuiSlashSuggestion {
+            title: "Preview rollback diff".to_owned(),
+            subtitle: "diff".to_owned(),
+            detail: "Compare the current run against a workspace checkpoint before restoring."
+                .to_owned(),
+            example: format!("/{} diff ", command.name),
+            replacement: format!("/{} diff ", command.name),
+            badge: "diff".to_owned(),
+        },
+        TuiSlashSuggestion {
+            title: "Restore workspace checkpoint".to_owned(),
+            subtitle: "restore".to_owned(),
+            detail: "Require `--confirm` before mutating the tracked workspace.".to_owned(),
+            example: format!("/{} restore ", command.name),
+            replacement: format!("/{} restore ", command.name),
+            badge: "restore".to_owned(),
+        },
+    ]
+}
+
+fn build_workspace_suggestions(
+    command: &SharedChatCommandDefinition,
+    catalog: &TuiSlashEntityCatalog,
+    normalized_rest: &str,
+    active_token: &str,
+) -> Vec<TuiSlashSuggestion> {
+    if normalized_rest.starts_with("show") {
+        return build_workspace_artifact_suggestions(command, catalog, active_token, "show");
+    }
+    if normalized_rest.starts_with("open") {
+        return build_workspace_artifact_suggestions(command, catalog, active_token, "open");
+    }
+    if normalized_rest.starts_with("handoff") {
+        return vec![
+            TuiSlashSuggestion {
+                title: "Workspace handoff path".to_owned(),
+                subtitle: "handoff".to_owned(),
+                detail: "Print the matching web workspace handoff path for the current run."
+                    .to_owned(),
+                example: format!("/{} handoff", command.name),
+                replacement: format!("/{} handoff", command.name),
+                badge: command.category.clone(),
+            },
+            TuiSlashSuggestion {
+                title: "Open workspace handoff".to_owned(),
+                subtitle: "handoff open".to_owned(),
+                detail: "Open the workspace handoff directly in the default browser.".to_owned(),
+                example: format!("/{} handoff open", command.name),
+                replacement: format!("/{} handoff open", command.name),
+                badge: "browser".to_owned(),
+            },
+        ];
+    }
+    vec![
+        TuiSlashSuggestion {
+            title: "Workspace summary".to_owned(),
+            subtitle: command.synopsis.clone(),
+            detail: "List changed paths, checkpoints, and handoff options for the latest run."
+                .to_owned(),
+            example: format!("/{}", command.name),
+            replacement: format!("/{}", command.name),
+            badge: command.category.clone(),
+        },
+        TuiSlashSuggestion {
+            title: "Changed workspace paths".to_owned(),
+            subtitle: "changed".to_owned(),
+            detail: "Show the latest changed files without opening artifact detail.".to_owned(),
+            example: format!("/{} changed", command.name),
+            replacement: format!("/{} changed", command.name),
+            badge: "workspace".to_owned(),
+        },
+        TuiSlashSuggestion {
+            title: "Inspect workspace artifact".to_owned(),
+            subtitle: "show".to_owned(),
+            detail: "Resolve an artifact id or list index to preview content in the transcript."
+                .to_owned(),
+            example: format!("/{} show ", command.name),
+            replacement: format!("/{} show ", command.name),
+            badge: "artifact".to_owned(),
+        },
+        TuiSlashSuggestion {
+            title: "Open workspace artifact externally".to_owned(),
+            subtitle: "open".to_owned(),
+            detail: "Open a changed file with the platform default application.".to_owned(),
+            example: format!("/{} open ", command.name),
+            replacement: format!("/{} open ", command.name),
+            badge: "external".to_owned(),
+        },
+        TuiSlashSuggestion {
+            title: "Workspace handoff".to_owned(),
+            subtitle: "handoff".to_owned(),
+            detail: "Send the current workspace context to the web console for richer preview."
+                .to_owned(),
+            example: format!("/{} handoff", command.name),
+            replacement: format!("/{} handoff", command.name),
+            badge: "handoff".to_owned(),
+        },
+    ]
+}
+
+fn build_workspace_artifact_suggestions(
+    command: &SharedChatCommandDefinition,
+    catalog: &TuiSlashEntityCatalog,
+    active_token: &str,
+    action: &str,
+) -> Vec<TuiSlashSuggestion> {
+    let query = active_token.trim().to_ascii_lowercase();
+    catalog
+        .workspace_artifacts
+        .iter()
+        .filter(|artifact| {
+            query.is_empty()
+                || artifact.artifact_id.to_ascii_lowercase().contains(query.as_str())
+                || artifact.display_path.to_ascii_lowercase().contains(query.as_str())
+                || artifact.path.to_ascii_lowercase().contains(query.as_str())
+                || artifact.change_kind.to_ascii_lowercase().contains(query.as_str())
+        })
+        .take(6)
+        .map(|artifact| TuiSlashSuggestion {
+            title: artifact.display_path.clone(),
+            subtitle: artifact.artifact_id.clone(),
+            detail: format!(
+                "{} · {} · cp {} · {}{}",
+                artifact.change_kind,
+                artifact.preview_kind,
+                shorten_entity_id(artifact.latest_checkpoint_id.as_str()),
+                artifact
+                    .size_bytes
+                    .map(|value| format!("{value} bytes"))
+                    .unwrap_or_else(|| "size unknown".to_owned()),
+                if artifact.deleted { " · deleted" } else { "" }
+            ),
+            example: format!("/{} {} {}", command.name, action, artifact.artifact_id),
+            replacement: format!("/{} {} {}", command.name, action, artifact.artifact_id),
+            badge: if artifact.deleted { "deleted".to_owned() } else { "artifact".to_owned() },
+        })
+        .collect()
+}
+
+fn build_workspace_checkpoint_suggestions(
+    command: &SharedChatCommandDefinition,
+    catalog: &TuiSlashEntityCatalog,
+    active_token: &str,
+    action: &str,
+) -> Vec<TuiSlashSuggestion> {
+    let query = active_token.trim().to_ascii_lowercase();
+    let mut checkpoints = catalog.workspace_checkpoints.iter().collect::<Vec<_>>();
+    checkpoints.sort_by_key(|checkpoint| std::cmp::Reverse(checkpoint.created_at_unix_ms));
+    checkpoints
+        .into_iter()
+        .filter(|checkpoint| {
+            query.is_empty()
+                || checkpoint.checkpoint_id.to_ascii_lowercase().contains(query.as_str())
+                || checkpoint.source_label.to_ascii_lowercase().contains(query.as_str())
+                || checkpoint.summary_text.to_ascii_lowercase().contains(query.as_str())
+        })
+        .take(6)
+        .map(|checkpoint| TuiSlashSuggestion {
+            title: checkpoint.source_label.clone(),
+            subtitle: checkpoint.checkpoint_id.clone(),
+            detail: format!(
+                "{} · restores {}",
+                if checkpoint.summary_text.is_empty() {
+                    "Workspace checkpoint".to_owned()
+                } else {
+                    checkpoint.summary_text.clone()
+                },
+                checkpoint.restore_count
+            ),
+            example: if action == "restore" {
+                format!("/{} restore {} --confirm", command.name, checkpoint.checkpoint_id)
+            } else {
+                format!("/{} diff {}", command.name, checkpoint.checkpoint_id)
+            },
+            replacement: if action == "restore" {
+                format!("/{} restore {} --confirm", command.name, checkpoint.checkpoint_id)
+            } else {
+                format!("/{} diff {}", command.name, checkpoint.checkpoint_id)
+            },
+            badge: "workspace checkpoint".to_owned(),
+        })
+        .collect()
+}
+
 fn build_undo_suggestions(
     command: &SharedChatCommandDefinition,
     catalog: &TuiSlashEntityCatalog,
@@ -693,12 +987,22 @@ fn build_static_suggestions(
         .collect()
 }
 
+fn shorten_entity_id(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() <= 12 {
+        trimmed.to_owned()
+    } else {
+        format!("{}…{}", &trimmed[..6], &trimmed[trimmed.len().saturating_sub(4)..])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build_tui_slash_palette, checkpoint_has_tag, preview_for_selection, read_json_tags,
         select_undo_checkpoint, BuildTuiSlashPaletteArgs, TuiSlashCheckpointRecord,
-        TuiSlashEntityCatalog, TuiSlashSessionRecord,
+        TuiSlashEntityCatalog, TuiSlashSessionRecord, TuiSlashWorkspaceArtifactRecord,
+        TuiSlashWorkspaceCheckpointRecord,
     };
     use serde_json::json;
 
@@ -732,7 +1036,14 @@ mod tests {
                     root_title: "Ops Triage".to_owned(),
                     last_summary: "Investigate deploy failures".to_owned(),
                     branch_state: "root".to_owned(),
+                    family_sequence: 1,
                     family_size: 1,
+                    parent_session_id: None,
+                    parent_title: None,
+                    pending_approvals: 0,
+                    artifact_count: 0,
+                    active_context_files: 0,
+                    relatives: Vec::new(),
                 }],
                 ..TuiSlashEntityCatalog::default()
             },
@@ -803,5 +1114,54 @@ mod tests {
             read_json_tags(&value, "/tags"),
             vec!["undo_safe".to_owned(), "manual".to_owned()]
         );
+    }
+
+    #[test]
+    fn workspace_palette_offers_artifact_show_suggestions() {
+        let palette = build_tui_slash_palette(BuildTuiSlashPaletteArgs {
+            input: "/workspace show src",
+            catalog: &TuiSlashEntityCatalog {
+                workspace_artifacts: vec![TuiSlashWorkspaceArtifactRecord {
+                    artifact_id: "artifact-1".to_owned(),
+                    path: "src/lib.rs".to_owned(),
+                    display_path: "src/lib.rs".to_owned(),
+                    change_kind: "modified".to_owned(),
+                    latest_checkpoint_id: "checkpoint-1".to_owned(),
+                    preview_kind: "text".to_owned(),
+                    size_bytes: Some(1024),
+                    deleted: false,
+                }],
+                ..TuiSlashEntityCatalog::default()
+            },
+            streaming: false,
+            delegation_profiles: &[],
+            delegation_templates: &[],
+        })
+        .expect("workspace palette should be available");
+        assert_eq!(palette.suggestions.len(), 1);
+        assert_eq!(palette.suggestions[0].replacement, "/workspace show artifact-1");
+    }
+
+    #[test]
+    fn rollback_palette_offers_workspace_restore_confirmation_suggestions() {
+        let palette = build_tui_slash_palette(BuildTuiSlashPaletteArgs {
+            input: "/rollback restore work",
+            catalog: &TuiSlashEntityCatalog {
+                workspace_checkpoints: vec![TuiSlashWorkspaceCheckpointRecord {
+                    checkpoint_id: "workspace-1".to_owned(),
+                    source_label: "filesystem_write".to_owned(),
+                    summary_text: "src/lib.rs changed".to_owned(),
+                    restore_count: 0,
+                    created_at_unix_ms: 42,
+                }],
+                ..TuiSlashEntityCatalog::default()
+            },
+            streaming: false,
+            delegation_profiles: &[],
+            delegation_templates: &[],
+        })
+        .expect("rollback palette should be available");
+        assert_eq!(palette.suggestions.len(), 1);
+        assert_eq!(palette.suggestions[0].replacement, "/rollback restore workspace-1 --confirm");
     }
 }

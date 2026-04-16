@@ -215,6 +215,8 @@ mod tests {
         assert!(find_shared_chat_command("help", SharedChatCommandSurface::Tui).is_some());
         assert!(find_shared_chat_command("status", SharedChatCommandSurface::Web).is_none());
         assert!(find_shared_chat_command("status", SharedChatCommandSurface::Tui).is_some());
+        assert!(find_shared_chat_command("workspace", SharedChatCommandSurface::Web).is_none());
+        assert!(find_shared_chat_command("workspace", SharedChatCommandSurface::Tui).is_some());
         assert!(find_shared_chat_command("quit", SharedChatCommandSurface::Tui).is_some());
     }
 

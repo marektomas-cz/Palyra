@@ -11,6 +11,8 @@ source checkout and bundled into portable installs for offline lookup.
   rollout guidance.
 - `docs/cli-parity-migration-v1.md`: canonical versus compatibility command names and the migration
   guidance for existing automation.
+- `docs/tui-daily-driver.md`: multiline compose, attachment, status, workspace, rollback, and
+  discoverability workflows for terminal-first operators.
 - `docs/release-engineering-v1.md`: portable archive contract, provenance sidecars, and release
   automation expectations.
 - `docs/release-validation-checklist.md`: release handoff checklist for packaging, install, and CI

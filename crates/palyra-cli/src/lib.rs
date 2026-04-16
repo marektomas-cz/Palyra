@@ -2833,6 +2833,7 @@ fn build_agent_run_input(input: AgentRunInputArgs) -> Result<AgentRunInput> {
         origin_kind: normalize_optional_owned_text(input.origin_kind),
         origin_run_id: normalize_optional_owned_text(input.origin_run_id),
         parameter_delta_json: normalize_optional_owned_text(input.parameter_delta_json),
+        attachments: Vec::new(),
     })
 }
 
@@ -2858,6 +2859,7 @@ async fn prepare_agent_run_input(
         origin_kind: input.origin_kind,
         origin_run_id: input.origin_run_id,
         parameter_delta_json: input.parameter_delta_json,
+        attachments: input.attachments,
     })
 }
 
@@ -2992,7 +2994,7 @@ fn build_resolved_run_stream_request(
             }),
             content: Some(common_v1::MessageContent {
                 text: input.prompt.clone(),
-                attachments: Vec::new(),
+                attachments: input.attachments.clone(),
             }),
             security: None,
             max_payload_bytes: 0,
@@ -3041,7 +3043,7 @@ fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStrea
             }),
             content: Some(common_v1::MessageContent {
                 text: input.prompt.clone(),
-                attachments: Vec::new(),
+                attachments: input.attachments.clone(),
             }),
             security: None,
             max_payload_bytes: 0,
@@ -3426,6 +3428,7 @@ struct AgentRunInput {
     origin_kind: Option<String>,
     origin_run_id: Option<String>,
     parameter_delta_json: Option<String>,
+    attachments: Vec<common_v1::MessageAttachment>,
 }
 
 #[derive(Clone)]
@@ -3437,6 +3440,7 @@ struct ResolvedAgentRunInput {
     origin_kind: Option<String>,
     origin_run_id: Option<String>,
     parameter_delta_json: Option<String>,
+    attachments: Vec<common_v1::MessageAttachment>,
 }
 
 #[derive(Clone)]
