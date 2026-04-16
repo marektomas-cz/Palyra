@@ -886,7 +886,6 @@ fn build_handoff_path(base_path: &str, params: &[(&str, Option<&str>)]) -> Strin
         format!("{base_path}?{query}")
     }
 }
-
 #[allow(clippy::result_large_err)]
 fn parse_mobile_decision_scope(
     value: Option<&str>,
@@ -903,7 +902,6 @@ fn parse_mobile_decision_scope(
         ))),
     }
 }
-
 #[allow(clippy::result_large_err)]
 fn serialize_value(value: &impl Serialize) -> Result<Value, Response> {
     serde_json::to_value(value).map_err(|error| {
