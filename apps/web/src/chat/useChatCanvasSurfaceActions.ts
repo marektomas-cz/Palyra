@@ -1,10 +1,7 @@
 import { useCallback, useEffect } from "react";
 import type { NavigateFunction } from "react-router-dom";
 
-import type {
-  SessionCanvasDetailEnvelope,
-  SessionCanvasSummary,
-} from "../consoleApi";
+import type { SessionCanvasDetailEnvelope, SessionCanvasSummary } from "../consoleApi";
 import { buildConsoleHandoffHref } from "../console/contracts";
 import { getSectionPath } from "../console/navigation";
 import type { Section } from "../console/sectionMetadata";

@@ -63,7 +63,7 @@ import { useSessionCanvases } from "./useSessionCanvases";
 import { useStarterPromptGuidance } from "./useStarterPromptGuidance";
 import { useStarterPromptHandoff } from "./useStarterPromptHandoff";
 import type { UxTelemetryEvent } from "../console/contracts";
-import { buildConsoleHandoffHref, parseConsoleHandoff } from "../console/contracts";
+import { parseConsoleHandoff } from "../console/contracts";
 import { getSectionPath } from "../console/navigation";
 import type { Section } from "../console/sectionMetadata";
 import { buildObjectiveOverviewHref } from "../console/objectiveLinks";
