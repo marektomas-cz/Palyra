@@ -9,7 +9,7 @@
     "budget-check": "node ./scripts/check-file-budgets.mjs",
     "clean": "node ../../scripts/js-artifacts.mjs clean-web",
     "dev": "vp dev",
-    "lint": "node ../../scripts/run-vp-lint.mjs apps/web && vp run budget-check",
+    "lint": "node ../../scripts/run-vp-lint.mjs . && vp run budget-check",
     "perf:smoke": "vp test --run src/performance.smoke.test.tsx",
     "test": "vp test",
     "test:run": "vp test --run",
