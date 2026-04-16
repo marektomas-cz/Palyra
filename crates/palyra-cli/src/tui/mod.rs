@@ -26,6 +26,7 @@ use ratatui::{
 mod composer;
 mod handoff;
 mod render;
+mod render_helpers;
 mod rollback;
 mod slash_palette;
 mod status;
@@ -35,6 +36,7 @@ mod workspace;
 use composer::{TuiComposer, TuiComposerView};
 use handoff::{build_console_handoff_path, TuiCrossSurfaceHandoff};
 use render::*;
+use render_helpers::*;
 use slash_palette::{
     build_tui_slash_palette, checkpoint_has_tag, preview_for_selection, read_json_bool,
     read_json_i64, read_json_string, read_json_tags, select_undo_checkpoint,
