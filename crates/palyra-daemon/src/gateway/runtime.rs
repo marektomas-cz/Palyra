@@ -80,6 +80,15 @@ pub struct ListOrchestratorSessionsRequest {
     pub search_query: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListPrincipalOrchestratorSessionsRequest {
+    pub after_session_key: Option<String>,
+    pub principal: String,
+    pub include_archived: bool,
+    pub requested_limit: Option<usize>,
+    pub search_query: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoryRuntimeConfig {
     pub max_item_bytes: usize,
@@ -2851,6 +2860,103 @@ impl GatewayRuntimeState {
         tokio::task::spawn_blocking(move || state.list_orchestrator_sessions_blocking(&request))
             .await
             .map_err(|_| Status::internal("orchestrator session list worker panicked"))?
+    }
+
+    fn list_orchestrator_sessions_for_principal_blocking(
+        &self,
+        request: &ListPrincipalOrchestratorSessionsRequest,
+    ) -> Result<(Vec<OrchestratorSessionRecord>, Option<String>), Status> {
+        let limit = request.requested_limit.unwrap_or(100).clamp(1, MAX_SESSIONS_PAGE_LIMIT);
+        let normalized_search = request
+            .search_query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase());
+        let mut sessions = if let Some(search) = normalized_search.as_deref() {
+            let mut matched = Vec::new();
+            let mut cursor = request.after_session_key.clone();
+            loop {
+                let page = self
+                    .journal_store
+                    .list_orchestrator_sessions_for_principal(
+                        cursor.as_deref(),
+                        request.principal.as_str(),
+                        request.include_archived,
+                        MAX_SESSIONS_PAGE_LIMIT,
+                    )
+                    .map_err(|error| {
+                        map_orchestrator_store_error(
+                            "list orchestrator sessions for principal",
+                            error,
+                        )
+                    })?;
+                if page.is_empty() {
+                    break;
+                }
+                cursor = page.last().map(|session| session.session_key.clone());
+                for mut session in page {
+                    let matched_field = [
+                        Some(session.title.as_str()),
+                        session.preview.as_deref(),
+                        session.last_intent.as_deref(),
+                        session.last_summary.as_deref(),
+                        session.last_run_state.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .find(|value| value.to_ascii_lowercase().contains(search))
+                    .map(ToOwned::to_owned);
+                    if let Some(snippet) = matched_field {
+                        session.match_snippet = Some(snippet);
+                        matched.push(session);
+                        if matched.len() > limit {
+                            break;
+                        }
+                    }
+                }
+                if matched.len() > limit || cursor.is_none() {
+                    break;
+                }
+            }
+            matched
+        } else {
+            self.journal_store
+                .list_orchestrator_sessions_for_principal(
+                    request.after_session_key.as_deref(),
+                    request.principal.as_str(),
+                    request.include_archived,
+                    limit.saturating_add(1),
+                )
+                .map_err(|error| {
+                    map_orchestrator_store_error("list orchestrator sessions for principal", error)
+                })?
+        };
+        let has_more = sessions.len() > limit;
+        if has_more {
+            sessions.truncate(limit);
+        }
+        let next_after_session_key = if has_more {
+            sessions.last().map(|session| session.session_key.clone())
+        } else {
+            None
+        };
+        Ok((sessions, next_after_session_key))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_orchestrator_sessions_for_principal(
+        self: &Arc<Self>,
+        request: ListPrincipalOrchestratorSessionsRequest,
+    ) -> Result<(Vec<OrchestratorSessionRecord>, Option<String>), Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.list_orchestrator_sessions_for_principal_blocking(&request)
+        })
+        .await
+        .map_err(|_| {
+            Status::internal("principal-scoped orchestrator session list worker panicked")
+        })?
     }
 
     #[allow(clippy::result_large_err)]

@@ -1422,6 +1422,247 @@ pub struct ConsoleBrowserHandoffEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileReleaseScope {
+    pub approvals_inbox: bool,
+    pub polling_notifications: bool,
+    pub recent_sessions: bool,
+    pub safe_url_open: bool,
+    pub voice_note: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileNotificationPolicy {
+    pub delivery_mode: String,
+    pub quiet_hours_supported: bool,
+    pub grouping_supported: bool,
+    pub priority_supported: bool,
+    pub default_poll_interval_ms: u64,
+    pub max_alerts_per_poll: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobilePairingPolicy {
+    pub auth_flow: String,
+    pub trust_model: String,
+    pub revoke_supported: bool,
+    pub recovery_supported: bool,
+    pub offline_state_visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileHandoffPolicy {
+    pub contract: String,
+    pub safe_url_open_requires_mediation: bool,
+    pub heavy_surface_handoff_supported: bool,
+    pub browser_automation_exposed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileLocalStoreContract {
+    pub approvals_cache_key: String,
+    pub sessions_cache_key: String,
+    pub inbox_cache_key: String,
+    pub outbox_queue_key: String,
+    pub revoke_marker_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileRolloutStatus {
+    pub mobile_companion_enabled: bool,
+    pub approvals_enabled: bool,
+    pub notifications_enabled: bool,
+    pub recent_sessions_enabled: bool,
+    pub safe_url_open_enabled: bool,
+    pub voice_notes_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileBootstrapEnvelope {
+    pub contract: ContractDescriptor,
+    pub release_scope: MobileReleaseScope,
+    pub notifications: MobileNotificationPolicy,
+    pub pairing: MobilePairingPolicy,
+    pub handoff: MobileHandoffPolicy,
+    pub store: MobileLocalStoreContract,
+    pub rollout: MobileRolloutStatus,
+    pub locales: Vec<String>,
+    pub default_locale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileApprovalInboxSummary {
+    pub pending: usize,
+    pub ready_on_device: usize,
+    pub handoff_recommended: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileApprovalsEnvelope {
+    pub contract: ContractDescriptor,
+    pub approvals: Vec<Value>,
+    pub summary: MobileApprovalInboxSummary,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileApprovalExplainability {
+    pub evaluation_summary: String,
+    pub policy_explanation: String,
+    pub recommended_surface: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_handoff_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileApprovalDetailEnvelope {
+    pub contract: ContractDescriptor,
+    pub approval: Value,
+    pub explainability: MobileApprovalExplainability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileHandoffTarget {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    pub requires_full_console: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileSessionRecap {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_intent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_state: Option<String>,
+    pub pending_approvals: usize,
+    pub handoff_recommended: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileSessionSummary {
+    pub session: Value,
+    pub recap: MobileSessionRecap,
+    pub handoff: MobileHandoffTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileSessionsEnvelope {
+    pub contract: ContractDescriptor,
+    pub sessions: Vec<MobileSessionSummary>,
+    pub page: PageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileSessionDetailEnvelope {
+    pub contract: ContractDescriptor,
+    pub session: Value,
+    pub recap: MobileSessionRecap,
+    pub actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileInboxItemKind {
+    Approval,
+    RunUpdate,
+    Support,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileInboxPriority {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileInboxItem {
+    pub alert_id: String,
+    pub kind: MobileInboxItemKind,
+    pub priority: MobileInboxPriority,
+    pub group_key: String,
+    pub title: String,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub created_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<MobileHandoffTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileInboxSummary {
+    pub pending_approvals: usize,
+    pub active_tasks: usize,
+    pub completed_tasks: usize,
+    pub failed_tasks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileInboxEnvelope {
+    pub contract: ContractDescriptor,
+    pub delivery_mode: String,
+    pub quiet_hours_respected: bool,
+    pub summary: MobileInboxSummary,
+    pub alerts: Vec<MobileInboxItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileSafeUrlOpenRequest {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileSafeUrlOpenEnvelope {
+    pub contract: ContractDescriptor,
+    pub action: String,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalized_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MobileVoiceNoteCreateRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_session_label: Option<String>,
+    pub transcript_text: String,
+    pub transcript_reviewed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_target: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MobileVoiceNoteEnvelope {
+    pub contract: ContractDescriptor,
+    pub session: Value,
+    pub task: Value,
+    pub queued_for_existing_session: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserProfilesQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,

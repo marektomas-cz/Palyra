@@ -117,6 +117,83 @@ describe("ConsoleApiClient", () => {
     expect(new Headers(calls[0]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
   });
 
+  it("uses mobile companion endpoints with GET for read paths and CSRF for mutations", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        release_scope: { approvals_inbox: true, polling_notifications: true, recent_sessions: true, safe_url_open: true, voice_note: true },
+        notifications: { delivery_mode: "polling", quiet_hours_supported: true, grouping_supported: true, priority_supported: true, default_poll_interval_ms: 45000, max_alerts_per_poll: 24 },
+        pairing: { auth_flow: "login", trust_model: "shared", revoke_supported: true, recovery_supported: true, offline_state_visible: true },
+        handoff: { contract: "cross_surface_handoff.v1", safe_url_open_requires_mediation: true, heavy_surface_handoff_supported: true, browser_automation_exposed: false },
+        store: { approvals_cache_key: "a", sessions_cache_key: "s", inbox_cache_key: "i", outbox_queue_key: "o", revoke_marker_key: "r" },
+        rollout: { mobile_companion_enabled: true, approvals_enabled: true, notifications_enabled: true, recent_sessions_enabled: true, safe_url_open_enabled: true, voice_notes_enabled: true },
+        locales: ["en", "cs"],
+        default_locale: "en",
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        approvals: [],
+        summary: { pending: 0, ready_on_device: 0, handoff_recommended: 0 },
+        page: { limit: 20, returned: 0, has_more: false },
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        action: "open_external",
+        target: "https://example.com",
+        normalized_url: "https://example.com/",
+      }),
+      jsonResponse({
+        contract: { contract_version: "control-plane.v1" },
+        session: { session_id: "session-1" },
+        task: { task_id: "task-1" },
+        queued_for_existing_session: false,
+      }),
+    ];
+    const fetcher: typeof fetch = (input, init) => {
+      calls.push({ input, init });
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    };
+
+    const client = new ConsoleApiClient("", fetcher);
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    await client.getMobileBootstrap();
+    await client.listMobileApprovals(new URLSearchParams({ limit: "20" }));
+    await client.prepareMobileSafeUrlOpen({ target: "https://example.com" });
+    await client.createMobileVoiceNote({
+      transcript_text: "Call Marek when CI is green.",
+      transcript_reviewed: true,
+    });
+
+    expect(requestUrl(calls[1]?.input)).toBe("/console/v1/mobile/bootstrap");
+    expect(new Headers(calls[1]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[2]?.input)).toBe("/console/v1/mobile/approvals?limit=20");
+    expect(new Headers(calls[2]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
+
+    expect(requestUrl(calls[3]?.input)).toBe("/console/v1/mobile/safe-url-open");
+    expect(new Headers(calls[3]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+
+    expect(requestUrl(calls[4]?.input)).toBe("/console/v1/mobile/voice-notes");
+    expect(new Headers(calls[4]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+  });
+
   it("fails closed when CSRF token is missing for mutating request", async () => {
     const fetcher: typeof fetch = () => {
       return Promise.resolve(jsonResponse({ jobs: [] }));

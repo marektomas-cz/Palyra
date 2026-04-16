@@ -130,7 +130,20 @@ pub(crate) async fn console_browser_handoff_handler(
     Json(payload): Json<control_plane::ConsoleBrowserHandoffRequest>,
 ) -> Result<Json<control_plane::ConsoleBrowserHandoffEnvelope>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    let redirect_path = normalize_console_browser_redirect_path(payload.redirect_path.as_deref())?;
+    Ok(Json(create_console_browser_handoff(
+        &state,
+        &session.context,
+        payload.redirect_path.as_deref(),
+    )?))
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) fn create_console_browser_handoff(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    redirect_path: Option<&str>,
+) -> Result<control_plane::ConsoleBrowserHandoffEnvelope, Response> {
+    let redirect_path = normalize_console_browser_redirect_path(redirect_path)?;
     let now = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
@@ -140,7 +153,7 @@ pub(crate) async fn console_browser_handoff_handler(
     let handoff_token = mint_console_secret_token();
     let handoff = ConsoleBrowserHandoff {
         token_hash_sha256: sha256_hex(handoff_token.as_bytes()),
-        context: session.context.clone(),
+        context: context.clone(),
         redirect_path,
         expires_at_unix_ms,
     };
@@ -155,7 +168,7 @@ pub(crate) async fn console_browser_handoff_handler(
         "http://{CONSOLE_BROWSER_HANDOFF_HOST}:{}/console/v1/auth/browser-handoff/consume?token={handoff_token}",
         state.deployment.admin_port
     );
-    Ok(Json(control_plane::ConsoleBrowserHandoffEnvelope { handoff_url, expires_at_unix_ms }))
+    Ok(control_plane::ConsoleBrowserHandoffEnvelope { handoff_url, expires_at_unix_ms })
 }
 
 pub(crate) async fn console_browser_bootstrap_handler(

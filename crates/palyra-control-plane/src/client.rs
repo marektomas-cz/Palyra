@@ -90,6 +90,103 @@ impl ControlPlaneClient {
             .await
     }
 
+    pub async fn get_mobile_bootstrap(
+        &self,
+    ) -> Result<MobileBootstrapEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::GET, "console/v1/mobile/bootstrap", None::<&Value>, false).await
+    }
+
+    pub async fn get_mobile_inbox(&self) -> Result<MobileInboxEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::GET, "console/v1/mobile/inbox", None::<&Value>, false).await
+    }
+
+    pub async fn list_mobile_approvals(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<MobileApprovalsEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            build_query_path(
+                "console/v1/mobile/approvals",
+                vec![("limit", limit.map(|value| value.to_string()))],
+            ),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn get_mobile_approval(
+        &self,
+        approval_id: &str,
+    ) -> Result<MobileApprovalDetailEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/mobile/approvals/{}", urlencoding(approval_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn decide_mobile_approval(
+        &self,
+        approval_id: &str,
+        request: &ApprovalDecisionRequest,
+    ) -> Result<ApprovalDecisionEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            format!("console/v1/mobile/approvals/{}/decision", urlencoding(approval_id)),
+            Some(request),
+            true,
+        )
+        .await
+    }
+
+    pub async fn list_mobile_sessions(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<MobileSessionsEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            build_query_path(
+                "console/v1/mobile/sessions",
+                vec![("limit", limit.map(|value| value.to_string()))],
+            ),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn get_mobile_session(
+        &self,
+        session_id: &str,
+    ) -> Result<MobileSessionDetailEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::GET,
+            format!("console/v1/mobile/sessions/{}", urlencoding(session_id)),
+            None::<&Value>,
+            false,
+        )
+        .await
+    }
+
+    pub async fn prepare_mobile_safe_url_open(
+        &self,
+        request: &MobileSafeUrlOpenRequest,
+    ) -> Result<MobileSafeUrlOpenEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::POST, "console/v1/mobile/safe-url-open", Some(request), true)
+            .await
+    }
+
+    pub async fn create_mobile_voice_note(
+        &self,
+        request: &MobileVoiceNoteCreateRequest,
+    ) -> Result<MobileVoiceNoteEnvelope, ControlPlaneClientError> {
+        self.request_json(Method::POST, "console/v1/mobile/voice-notes", Some(request), true).await
+    }
+
     pub async fn list_browser_profiles(
         &self,
         query: &BrowserProfilesQuery,

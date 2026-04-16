@@ -15,6 +15,7 @@ pub(crate) mod hooks;
 pub(crate) mod inventory;
 pub(crate) mod logs;
 pub(crate) mod memory;
+pub(crate) mod mobile;
 pub(crate) mod models;
 pub(crate) mod nodes;
 pub(crate) mod objectives;

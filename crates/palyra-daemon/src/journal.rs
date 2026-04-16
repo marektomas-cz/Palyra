@@ -4229,6 +4229,28 @@ impl JournalStore {
             .collect()
     }
 
+    pub fn list_orchestrator_sessions_for_principal(
+        &self,
+        after_session_key: Option<&str>,
+        principal: &str,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<OrchestratorSessionRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let limit = limit.max(1);
+        let sessions = load_orchestrator_sessions_page_for_principal(
+            &guard,
+            after_session_key,
+            principal,
+            include_archived,
+            limit,
+        )?;
+        sessions
+            .into_iter()
+            .map(|session| hydrate_orchestrator_session(&guard, session, None))
+            .collect()
+    }
+
     pub fn summarize_orchestrator_usage(
         &self,
         query: &OrchestratorUsageQuery,
@@ -10890,6 +10912,61 @@ fn load_orchestrator_sessions_page(
         principal,
         device_id,
         channel,
+        if include_archived { 1_i64 } else { 0_i64 },
+        limit as i64
+    ])?;
+    let mut sessions = Vec::new();
+    while let Some(row) = rows.next()? {
+        sessions.push(map_orchestrator_session_row(row)?);
+    }
+    Ok(sessions)
+}
+
+fn load_orchestrator_sessions_page_for_principal(
+    connection: &Connection,
+    after_session_key: Option<&str>,
+    principal: &str,
+    include_archived: bool,
+    limit: usize,
+) -> Result<Vec<OrchestratorSessionRecord>, JournalError> {
+    let mut statement = connection.prepare(
+        r#"
+            SELECT
+                session_ulid,
+                session_key,
+                session_label,
+                principal,
+                device_id,
+                channel,
+                created_at_unix_ms,
+                updated_at_unix_ms,
+                last_run_ulid,
+                archived_at_unix_ms,
+                auto_title,
+                auto_title_source,
+                auto_title_generator_version,
+                auto_title_updated_at_unix_ms,
+                title_generation_state,
+                manual_title_locked,
+                manual_title_updated_at_unix_ms,
+                model_profile_override,
+                thinking_override,
+                trace_override,
+                verbose_override,
+                branch_state,
+                parent_session_ulid,
+                branch_origin_run_ulid
+            FROM orchestrator_sessions
+            WHERE (?1 IS NULL OR session_key > ?1)
+              AND principal = ?2
+              AND (?3 = 1 OR archived_at_unix_ms IS NULL)
+            ORDER BY session_key ASC
+            LIMIT ?4
+        "#,
+    )?;
+    let mut rows = statement.query(params![
+        after_session_key,
+        principal,
         if include_archived { 1_i64 } else { 0_i64 },
         limit as i64
     ])?;

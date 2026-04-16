@@ -1,11 +1,11 @@
 # iOS Scaffold
 
-This is the iOS node application scaffold for future client work.
+This is the iOS mobile companion scaffold for the current release work.
 
 ## Mobile convergence plan
 
-The desktop companion currently defines the first production first-party node contract. iOS should
-follow the same contract shape rather than inventing a separate one:
+The desktop companion currently defines the first production first-party node contract. iOS follows
+the same contract shape rather than inventing a separate one.
 
 - Capability namespace:
   - reuse the same node capability names so inventory, audits, and future policy stay aligned.
@@ -20,11 +20,25 @@ follow the same contract shape rather than inventing a separate one:
   - stale mobile devices must degrade visibly and pending requests must time out or clean up
     instead of hanging indefinitely.
 
+## Scaffold files
+
+- `apps/ios/Sources/MobileCompanion/CompanionContracts.swift`
+- `apps/ios/Sources/MobileCompanion/CompanionStore.swift`
+- `apps/ios/Sources/MobileCompanion/CompanionShell.swift`
+
+These files describe the first companion-safe iOS shell for:
+
+- approvals inbox
+- polling notifications
+- recent sessions and handoff
+- safe URL open
+- voice notes with transcript review
+
 ## Lint baseline
 
 - `SwiftLint` configuration lives in `apps/ios/.swiftlint.yml`.
 - Recommended local command:
   - `swiftlint lint --config apps/ios/.swiftlint.yml`
 
-No production iOS runtime ships yet; this README documents the compatibility target the desktop
-node host now defines.
+No production iOS runtime ships yet. This scaffold exists to keep the mobile companion aligned with
+shared auth, audit, and revoke/recovery flows from the first iteration.

@@ -1,11 +1,8 @@
 # Android Scaffold
 
-This is the Android node application scaffold for future client work.
+This is the Android mobile companion scaffold for the current release work.
 
 ## Mobile convergence plan
-
-The current Android path remains at the contract-planning stage. When it grows into a production
-client, it should reuse the same high-level node model instead of forking behavior:
 
 - Capability naming:
   - keep the same node capability namespace so desktop and Android stay inventory-compatible.
@@ -20,11 +17,25 @@ client, it should reuse the same high-level node model instead of forking behavi
   - mobile clients must surface offline state explicitly and must not leave pending capability
     requests appearing active after the device disappears.
 
+## Scaffold files
+
+- `apps/android/app/src/main/kotlin/io/palyra/mobile/companion/CompanionContracts.kt`
+- `apps/android/app/src/main/kotlin/io/palyra/mobile/companion/CompanionStore.kt`
+- `apps/android/app/src/main/kotlin/io/palyra/mobile/companion/CompanionShell.kt`
+
+These files define the first mobile-safe shell state, local store contract, and release scope for:
+
+- approvals inbox
+- polling notifications
+- recent sessions and handoff
+- safe URL open
+- voice notes with transcript review
+
 ## Lint baseline
 
 - Detekt baseline config: `apps/android/config/detekt/detekt.yml`
 - Optional local lint command:
   - `bash apps/android/scripts/lint.sh`
 
-No production Android app runtime code is shipped yet; this README only captures the convergence
-contract the desktop node host currently defines.
+No production Android runtime ships yet. This scaffold exists to keep the mobile companion aligned
+with the same auth, audit, and revoke/recovery semantics as web and desktop from the first commit.

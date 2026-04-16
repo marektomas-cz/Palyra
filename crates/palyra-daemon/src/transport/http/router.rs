@@ -225,6 +225,39 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(console::auth::console_browser_session_bootstrap_handler),
         )
         .route(
+            "/console/v1/mobile/bootstrap",
+            get(console::mobile::console_mobile_bootstrap_handler),
+        )
+        .route("/console/v1/mobile/inbox", get(console::mobile::console_mobile_inbox_handler))
+        .route(
+            "/console/v1/mobile/approvals",
+            get(console::mobile::console_mobile_approvals_list_handler),
+        )
+        .route(
+            "/console/v1/mobile/approvals/{approval_id}",
+            get(console::mobile::console_mobile_approval_get_handler),
+        )
+        .route(
+            "/console/v1/mobile/approvals/{approval_id}/decision",
+            post(console::mobile::console_mobile_approval_decision_handler),
+        )
+        .route(
+            "/console/v1/mobile/sessions",
+            get(console::mobile::console_mobile_sessions_list_handler),
+        )
+        .route(
+            "/console/v1/mobile/sessions/{session_id}",
+            get(console::mobile::console_mobile_session_get_handler),
+        )
+        .route(
+            "/console/v1/mobile/safe-url-open",
+            post(console::mobile::console_mobile_safe_url_open_handler),
+        )
+        .route(
+            "/console/v1/mobile/voice-notes",
+            post(console::mobile::console_mobile_voice_note_create_handler),
+        )
+        .route(
             "/console/v1/control-plane/capabilities",
             get(console::auth::console_capability_catalog_handler),
         )

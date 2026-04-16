@@ -89,3 +89,64 @@ fn browser_permission_setting_serializes_as_snake_case() {
         .expect("permission setting should serialize");
     assert_eq!(value, serde_json::json!("allow"));
 }
+
+#[test]
+fn mobile_bootstrap_envelope_round_trips() {
+    let envelope = MobileBootstrapEnvelope {
+        contract: ContractDescriptor {
+            contract_version: CONTROL_PLANE_CONTRACT_VERSION.to_owned(),
+        },
+        release_scope: MobileReleaseScope {
+            approvals_inbox: true,
+            polling_notifications: true,
+            recent_sessions: true,
+            safe_url_open: true,
+            voice_note: true,
+        },
+        notifications: MobileNotificationPolicy {
+            delivery_mode: "polling".to_owned(),
+            quiet_hours_supported: true,
+            grouping_supported: true,
+            priority_supported: true,
+            default_poll_interval_ms: 45_000,
+            max_alerts_per_poll: 24,
+        },
+        pairing: MobilePairingPolicy {
+            auth_flow: "login".to_owned(),
+            trust_model: "shared".to_owned(),
+            revoke_supported: true,
+            recovery_supported: true,
+            offline_state_visible: true,
+        },
+        handoff: MobileHandoffPolicy {
+            contract: "cross_surface_handoff.v1".to_owned(),
+            safe_url_open_requires_mediation: true,
+            heavy_surface_handoff_supported: true,
+            browser_automation_exposed: false,
+        },
+        store: MobileLocalStoreContract {
+            approvals_cache_key: "a".to_owned(),
+            sessions_cache_key: "s".to_owned(),
+            inbox_cache_key: "i".to_owned(),
+            outbox_queue_key: "o".to_owned(),
+            revoke_marker_key: "r".to_owned(),
+        },
+        rollout: MobileRolloutStatus {
+            mobile_companion_enabled: true,
+            approvals_enabled: true,
+            notifications_enabled: true,
+            recent_sessions_enabled: true,
+            safe_url_open_enabled: true,
+            voice_notes_enabled: true,
+        },
+        locales: vec!["en".to_owned(), "cs".to_owned()],
+        default_locale: "en".to_owned(),
+    };
+
+    let decoded: MobileBootstrapEnvelope =
+        serde_json::from_value(serde_json::to_value(envelope).expect("bootstrap should serialize"))
+            .expect("bootstrap should deserialize");
+
+    assert_eq!(decoded.default_locale, "en");
+    assert!(decoded.release_scope.voice_note);
+}

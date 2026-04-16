@@ -993,6 +993,300 @@ fn console_session_catalog_endpoints_require_session_and_csrf() -> Result<()> {
 }
 
 #[test]
+fn console_mobile_endpoints_require_session_and_surface_cross_device_sessions() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let no_session = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/bootstrap"))
+        .send()
+        .context("failed to call mobile bootstrap without session")?;
+    assert_eq!(no_session.status().as_u16(), 403, "mobile bootstrap must require session");
+
+    let (desktop_cookie, desktop_csrf) = login_console_session_with_device(
+        &client,
+        admin_port,
+        CONSOLE_ADMIN_PRINCIPAL,
+        "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "desktop",
+    )?;
+    let created_session = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/chat/sessions"))
+        .header("Cookie", desktop_cookie.clone())
+        .header("x-palyra-csrf-token", desktop_csrf)
+        .json(&serde_json::json!({
+            "session_label": "desktop-origin-session",
+        }))
+        .send()
+        .context("failed to create desktop-origin session")?
+        .error_for_status()
+        .context("desktop-origin session create returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse desktop-origin session json")?;
+    let desktop_session_id = created_session
+        .get("session")
+        .and_then(|value| value.get("session_id"))
+        .and_then(Value::as_str)
+        .context("desktop-origin session id should be present")?;
+
+    let (mobile_cookie, mobile_csrf) = login_console_session_with_device(
+        &client,
+        admin_port,
+        CONSOLE_ADMIN_PRINCIPAL,
+        "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        "mobile",
+    )?;
+
+    let bootstrap = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/bootstrap"))
+        .header("Cookie", mobile_cookie.clone())
+        .send()
+        .context("failed to fetch mobile bootstrap")?
+        .error_for_status()
+        .context("mobile bootstrap returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse mobile bootstrap response")?;
+    assert_eq!(
+        bootstrap
+            .get("release_scope")
+            .and_then(|value| value.get("voice_note"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "mobile bootstrap should advertise voice-note scope"
+    );
+    assert!(
+        bootstrap
+            .get("locales")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("cs"))),
+        "mobile bootstrap should expose Czech locale rollout"
+    );
+
+    let sessions = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/sessions"))
+        .header("Cookie", mobile_cookie.clone())
+        .send()
+        .context("failed to fetch mobile sessions")?
+        .error_for_status()
+        .context("mobile sessions returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse mobile sessions response")?;
+    assert!(
+        sessions.get("sessions").and_then(Value::as_array).is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("session")
+                    .and_then(|value| value.get("session_id"))
+                    .and_then(Value::as_str)
+                    == Some(desktop_session_id)
+            })
+        }),
+        "mobile sessions should include sessions created on another device for the same principal"
+    );
+
+    let detail = client
+        .get(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/mobile/sessions/{desktop_session_id}"
+        ))
+        .header("Cookie", mobile_cookie.clone())
+        .send()
+        .context("failed to fetch mobile session detail")?
+        .error_for_status()
+        .context("mobile session detail returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse mobile session detail response")?;
+    assert_eq!(
+        detail.get("session").and_then(|value| value.get("session_id")).and_then(Value::as_str),
+        Some(desktop_session_id),
+        "mobile session detail should resolve cross-device session context"
+    );
+
+    let safe_url_without_csrf = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/safe-url-open"))
+        .header("Cookie", mobile_cookie.clone())
+        .json(&serde_json::json!({ "target": "/chat?sessionId=abc" }))
+        .send()
+        .context("failed to call mobile safe-url-open without csrf")?;
+    assert_eq!(
+        safe_url_without_csrf.status().as_u16(),
+        403,
+        "mobile safe-url-open must enforce csrf"
+    );
+
+    let safe_url = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/safe-url-open"))
+        .header("Cookie", mobile_cookie.clone())
+        .header("x-palyra-csrf-token", mobile_csrf)
+        .json(&serde_json::json!({ "target": format!("/chat?sessionId={desktop_session_id}") }))
+        .send()
+        .context("failed to call mobile safe-url-open")?
+        .error_for_status()
+        .context("mobile safe-url-open returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse mobile safe-url-open response")?;
+    assert_eq!(
+        safe_url.get("action").and_then(Value::as_str),
+        Some("handoff_console"),
+        "mobile safe-url-open should mediate console-relative targets through browser handoff"
+    );
+    assert!(
+        safe_url
+            .get("handoff_url")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.contains("/console/v1/auth/browser-handoff/consume?token=")),
+        "mobile safe-url-open should mint a browser handoff URL"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn console_mobile_voice_note_and_approval_endpoints_enforce_csrf_and_queue_into_existing_session(
+) -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let (desktop_cookie, desktop_csrf) = login_console_session_with_device(
+        &client,
+        admin_port,
+        CONSOLE_ADMIN_PRINCIPAL,
+        "01ARZ3NDEKTSV4RRFFQ69G5FB2",
+        "desktop",
+    )?;
+    let created_session = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/chat/sessions"))
+        .header("Cookie", desktop_cookie)
+        .header("x-palyra-csrf-token", desktop_csrf)
+        .json(&serde_json::json!({
+            "session_label": "desktop-voice-target",
+        }))
+        .send()
+        .context("failed to create desktop voice target session")?
+        .error_for_status()
+        .context("desktop voice target session create returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse desktop voice target session json")?;
+    let desktop_session_id = created_session
+        .get("session")
+        .and_then(|value| value.get("session_id"))
+        .and_then(Value::as_str)
+        .context("desktop voice target session id should be present")?;
+
+    let (mobile_cookie, mobile_csrf) = login_console_session_with_device(
+        &client,
+        admin_port,
+        CONSOLE_ADMIN_PRINCIPAL,
+        "01ARZ3NDEKTSV4RRFFQ69G5FB3",
+        "mobile",
+    )?;
+
+    let approvals = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/approvals"))
+        .header("Cookie", mobile_cookie.clone())
+        .send()
+        .context("failed to fetch mobile approvals")?
+        .error_for_status()
+        .context("mobile approvals returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse mobile approvals response")?;
+    assert!(approvals.get("summary").is_some(), "mobile approvals should include summary metadata");
+
+    let unknown_approval_id = "01ARZ3NDEKTSV4RRFFQ69G5FBA";
+    let missing_csrf = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/mobile/approvals/{unknown_approval_id}/decision"
+        ))
+        .header("Cookie", mobile_cookie.clone())
+        .json(&serde_json::json!({ "approved": true }))
+        .send()
+        .context("failed to call mobile approval decision without csrf")?;
+    assert_eq!(missing_csrf.status().as_u16(), 403, "mobile approval decision must enforce csrf");
+
+    let unknown_decision = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/mobile/approvals/{unknown_approval_id}/decision"
+        ))
+        .header("Cookie", mobile_cookie.clone())
+        .header("x-palyra-csrf-token", mobile_csrf.clone())
+        .json(&serde_json::json!({ "approved": true }))
+        .send()
+        .context("failed to call mobile approval decision for unknown approval")?;
+    assert_eq!(
+        unknown_decision.status().as_u16(),
+        404,
+        "unknown mobile approval decision should return not-found"
+    );
+
+    let unreviewed_voice_note = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/voice-notes"))
+        .header("Cookie", mobile_cookie.clone())
+        .header("x-palyra-csrf-token", mobile_csrf.clone())
+        .json(&serde_json::json!({
+            "transcript_text": "Ship it after CI is green.",
+            "transcript_reviewed": false
+        }))
+        .send()
+        .context("failed to call mobile voice-note without review")?;
+    assert_eq!(
+        unreviewed_voice_note.status().as_u16(),
+        412,
+        "mobile voice-note should fail closed until transcript review is confirmed"
+    );
+
+    let queued_voice_note = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/voice-notes"))
+        .header("Cookie", mobile_cookie)
+        .header("x-palyra-csrf-token", mobile_csrf)
+        .json(&serde_json::json!({
+            "session_id": desktop_session_id,
+            "transcript_text": "Ship it after CI is green.",
+            "transcript_reviewed": true,
+            "duration_ms": 4200
+        }))
+        .send()
+        .context("failed to queue reviewed mobile voice-note")?
+        .error_for_status()
+        .context("queued mobile voice-note returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse queued mobile voice-note response")?;
+    assert_eq!(
+        queued_voice_note.get("queued_for_existing_session").and_then(Value::as_bool),
+        Some(true),
+        "mobile voice-note should acknowledge existing-session queueing"
+    );
+    assert_eq!(
+        queued_voice_note
+            .get("session")
+            .and_then(|value| value.get("session_id"))
+            .and_then(Value::as_str),
+        Some(desktop_session_id),
+        "mobile voice-note should target the selected cross-device session"
+    );
+    assert_eq!(
+        queued_voice_note
+            .get("task")
+            .and_then(|value| value.get("device_id"))
+            .and_then(Value::as_str),
+        Some("01ARZ3NDEKTSV4RRFFQ69G5FB2"),
+        "mobile voice-note queueing should reuse the target session device scope"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_usage_endpoints_support_empty_ranges_archived_sessions_and_export() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
     let mut daemon = ChildGuard::new(child);
@@ -4064,13 +4358,23 @@ fn login_console_session(
     admin_port: u16,
     principal: &str,
 ) -> Result<(String, String)> {
+    login_console_session_with_device(client, admin_port, principal, DEVICE_ID, "web")
+}
+
+fn login_console_session_with_device(
+    client: &Client,
+    admin_port: u16,
+    principal: &str,
+    device_id: &str,
+    channel: &str,
+) -> Result<(String, String)> {
     let response = client
         .post(format!("http://127.0.0.1:{admin_port}/console/v1/auth/login"))
         .json(&serde_json::json!({
             "admin_token": ADMIN_TOKEN,
             "principal": principal,
-            "device_id": DEVICE_ID,
-            "channel": "web",
+            "device_id": device_id,
+            "channel": channel,
         }))
         .send()
         .context("failed to call console login")?

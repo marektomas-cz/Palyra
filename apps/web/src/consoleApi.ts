@@ -1507,6 +1507,177 @@ export interface ContractDescriptor {
   contract_version: string;
 }
 
+export interface MobileReleaseScope {
+  approvals_inbox: boolean;
+  polling_notifications: boolean;
+  recent_sessions: boolean;
+  safe_url_open: boolean;
+  voice_note: boolean;
+}
+
+export interface MobileNotificationPolicy {
+  delivery_mode: string;
+  quiet_hours_supported: boolean;
+  grouping_supported: boolean;
+  priority_supported: boolean;
+  default_poll_interval_ms: number;
+  max_alerts_per_poll: number;
+}
+
+export interface MobilePairingPolicy {
+  auth_flow: string;
+  trust_model: string;
+  revoke_supported: boolean;
+  recovery_supported: boolean;
+  offline_state_visible: boolean;
+}
+
+export interface MobileHandoffPolicy {
+  contract: string;
+  safe_url_open_requires_mediation: boolean;
+  heavy_surface_handoff_supported: boolean;
+  browser_automation_exposed: boolean;
+}
+
+export interface MobileLocalStoreContract {
+  approvals_cache_key: string;
+  sessions_cache_key: string;
+  inbox_cache_key: string;
+  outbox_queue_key: string;
+  revoke_marker_key: string;
+}
+
+export interface MobileRolloutStatus {
+  mobile_companion_enabled: boolean;
+  approvals_enabled: boolean;
+  notifications_enabled: boolean;
+  recent_sessions_enabled: boolean;
+  safe_url_open_enabled: boolean;
+  voice_notes_enabled: boolean;
+}
+
+export interface MobileBootstrapEnvelope {
+  contract: ContractDescriptor;
+  release_scope: MobileReleaseScope;
+  notifications: MobileNotificationPolicy;
+  pairing: MobilePairingPolicy;
+  handoff: MobileHandoffPolicy;
+  store: MobileLocalStoreContract;
+  rollout: MobileRolloutStatus;
+  locales: string[];
+  default_locale: string;
+}
+
+export interface MobileApprovalInboxSummary {
+  pending: number;
+  ready_on_device: number;
+  handoff_recommended: number;
+}
+
+export interface MobileApprovalsEnvelope {
+  contract: ContractDescriptor;
+  approvals: JsonValue[];
+  summary: MobileApprovalInboxSummary;
+  page: PageInfo;
+}
+
+export interface MobileApprovalExplainability {
+  evaluation_summary: string;
+  policy_explanation: string;
+  recommended_surface: string;
+  web_handoff_path?: string;
+}
+
+export interface MobileApprovalDetailEnvelope {
+  contract: ContractDescriptor;
+  approval: JsonValue;
+  explainability: MobileApprovalExplainability;
+}
+
+export interface MobileHandoffTarget {
+  path: string;
+  intent?: string;
+  requires_full_console: boolean;
+}
+
+export interface MobileSessionRecap {
+  title: string;
+  preview?: string;
+  last_summary?: string;
+  last_intent?: string;
+  last_run_state?: string;
+  pending_approvals: number;
+  handoff_recommended: boolean;
+}
+
+export interface MobileSessionSummary {
+  session: JsonValue;
+  recap: MobileSessionRecap;
+  handoff: MobileHandoffTarget;
+}
+
+export interface MobileSessionsEnvelope {
+  contract: ContractDescriptor;
+  sessions: MobileSessionSummary[];
+  page: PageInfo;
+}
+
+export interface MobileSessionDetailEnvelope {
+  contract: ContractDescriptor;
+  session: JsonValue;
+  recap: MobileSessionRecap;
+  actions: string[];
+}
+
+export type MobileInboxItemKind = "approval" | "run_update" | "support";
+export type MobileInboxPriority = "critical" | "high" | "medium" | "low";
+
+export interface MobileInboxItem {
+  alert_id: string;
+  kind: MobileInboxItemKind;
+  priority: MobileInboxPriority;
+  group_key: string;
+  title: string;
+  body: string;
+  session_id?: string;
+  run_id?: string;
+  approval_id?: string;
+  task_id?: string;
+  created_at_unix_ms: number;
+  handoff?: MobileHandoffTarget;
+}
+
+export interface MobileInboxSummary {
+  pending_approvals: number;
+  active_tasks: number;
+  completed_tasks: number;
+  failed_tasks: number;
+}
+
+export interface MobileInboxEnvelope {
+  contract: ContractDescriptor;
+  delivery_mode: string;
+  quiet_hours_respected: boolean;
+  summary: MobileInboxSummary;
+  alerts: MobileInboxItem[];
+}
+
+export interface MobileSafeUrlOpenEnvelope {
+  contract: ContractDescriptor;
+  action: string;
+  target: string;
+  normalized_url?: string;
+  handoff_url?: string;
+  reason?: string;
+}
+
+export interface MobileVoiceNoteEnvelope {
+  contract: ContractDescriptor;
+  session: JsonValue;
+  task: JsonValue;
+  queued_for_existing_session: boolean;
+}
+
 export type ToolPostureScopeKind = "global" | "workspace" | "agent" | "session";
 export type ToolPostureState = "always_allow" | "ask_each_time" | "disabled";
 export type ToolPostureRecommendationAction = "accepted" | "dismissed" | "deferred";
@@ -4456,6 +4627,81 @@ export class ConsoleApiClient {
 
   async getApproval(approvalId: string): Promise<{ approval: JsonValue }> {
     return this.request(`/console/v1/approvals/${encodeURIComponent(approvalId)}`);
+  }
+
+  async getMobileBootstrap(): Promise<MobileBootstrapEnvelope> {
+    return this.request("/console/v1/mobile/bootstrap");
+  }
+
+  async getMobileInbox(): Promise<MobileInboxEnvelope> {
+    return this.request("/console/v1/mobile/inbox");
+  }
+
+  async listMobileApprovals(params?: URLSearchParams): Promise<MobileApprovalsEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/mobile/approvals", params));
+  }
+
+  async getMobileApproval(approvalId: string): Promise<MobileApprovalDetailEnvelope> {
+    return this.request(`/console/v1/mobile/approvals/${encodeURIComponent(approvalId)}`);
+  }
+
+  async decideMobileApproval(
+    approvalId: string,
+    payload: {
+      approved: boolean;
+      reason?: string;
+      decision_scope?: "once" | "session" | "timeboxed";
+      decision_scope_ttl_ms?: number;
+    },
+  ): Promise<{ approval: JsonValue; dm_pairing?: string }> {
+    return this.request(
+      `/console/v1/mobile/approvals/${encodeURIComponent(approvalId)}/decision`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async listMobileSessions(params?: URLSearchParams): Promise<MobileSessionsEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/mobile/sessions", params));
+  }
+
+  async getMobileSession(sessionId: string): Promise<MobileSessionDetailEnvelope> {
+    return this.request(`/console/v1/mobile/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  async prepareMobileSafeUrlOpen(payload: {
+    target: string;
+  }): Promise<MobileSafeUrlOpenEnvelope> {
+    return this.request(
+      "/console/v1/mobile/safe-url-open",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
+  async createMobileVoiceNote(payload: {
+    session_id?: string;
+    create_session_label?: string;
+    transcript_text: string;
+    transcript_reviewed: boolean;
+    duration_ms?: number;
+    draft_id?: string;
+    notification_target?: JsonValue;
+  }): Promise<MobileVoiceNoteEnvelope> {
+    return this.request(
+      "/console/v1/mobile/voice-notes",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
   }
 
   async getToolPermissions(params?: URLSearchParams): Promise<ToolPermissionsEnvelope> {
