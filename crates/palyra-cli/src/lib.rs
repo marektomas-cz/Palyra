@@ -2712,7 +2712,7 @@ where
             stream
                 .send_tool_approval_response(
                     session_id.ulid.as_str(),
-                    resolved.run_id.as_str(),
+                    resolved.request.run_id.as_str(),
                     common_v1::ToolApprovalResponse {
                         proposal_id: approval.proposal_id.clone(),
                         approved: decision.approved,
@@ -2851,16 +2851,7 @@ async fn prepare_agent_run_input(
         })
         .await?;
     let session = response.session.context("ResolveSession returned empty session payload")?;
-    Ok(ResolvedAgentRunInput {
-        session,
-        run_id: input.run_id,
-        prompt: input.prompt,
-        allow_sensitive_tools: input.allow_sensitive_tools,
-        origin_kind: input.origin_kind,
-        origin_run_id: input.origin_run_id,
-        parameter_delta_json: input.parameter_delta_json,
-        attachments: input.attachments,
-    })
+    Ok(ResolvedAgentRunInput { session, request: input })
 }
 
 fn normalize_optional_owned_text(value: Option<String>) -> Option<String> {
@@ -2976,10 +2967,11 @@ fn build_resolved_run_stream_request(
 ) -> Result<common_v1::RunStreamRequest> {
     let timestamp_unix_ms = now_unix_ms_i64()?;
     let session_id = session_summary_reference(&input.session)?;
+    let request = &input.request;
     Ok(common_v1::RunStreamRequest {
         v: RUN_STREAM_REQUEST_VERSION,
         session_id: Some(session_id.clone()),
-        run_id: Some(common_v1::CanonicalId { ulid: input.run_id.clone() }),
+        run_id: Some(common_v1::CanonicalId { ulid: request.run_id.clone() }),
         input: Some(common_v1::MessageEnvelope {
             v: CANONICAL_JSON_ENVELOPE_VERSION,
             envelope_id: Some(common_v1::CanonicalId { ulid: generate_canonical_ulid() }),
@@ -2993,24 +2985,24 @@ fn build_resolved_run_stream_request(
                 sender_verified: true,
             }),
             content: Some(common_v1::MessageContent {
-                text: input.prompt.clone(),
-                attachments: input.attachments.clone(),
+                text: request.prompt.clone(),
+                attachments: request.attachments.clone(),
             }),
             security: None,
             max_payload_bytes: 0,
         }),
-        allow_sensitive_tools: input.allow_sensitive_tools,
+        allow_sensitive_tools: request.allow_sensitive_tools,
         session_key: input.session.session_key.clone(),
         session_label: input.session.session_label.clone(),
         reset_session: false,
         require_existing: true,
         tool_approval_response: None,
-        origin_kind: input.origin_kind.clone().unwrap_or_default(),
-        origin_run_id: input
+        origin_kind: request.origin_kind.clone().unwrap_or_default(),
+        origin_run_id: request
             .origin_run_id
             .as_ref()
             .map(|ulid| common_v1::CanonicalId { ulid: ulid.clone() }),
-        parameter_delta_json: input
+        parameter_delta_json: request
             .parameter_delta_json
             .as_ref()
             .map(|value| value.as_bytes().to_vec())
@@ -3434,13 +3426,7 @@ struct AgentRunInput {
 #[derive(Clone)]
 struct ResolvedAgentRunInput {
     session: gateway_v1::SessionSummary,
-    run_id: String,
-    prompt: String,
-    allow_sensitive_tools: bool,
-    origin_kind: Option<String>,
-    origin_run_id: Option<String>,
-    parameter_delta_json: Option<String>,
-    attachments: Vec<common_v1::MessageAttachment>,
+    request: AgentRunInput,
 }
 
 #[derive(Clone)]

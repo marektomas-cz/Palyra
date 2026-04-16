@@ -142,7 +142,7 @@ impl OperatorRuntime {
         let mut client = self.connect_gateway().await?;
         let resolved = prepare_agent_run_input(&mut client, request).await?;
         let session_id = session_summary_reference(&resolved.session)?;
-        let run_id = resolved.run_id.clone();
+        let run_id = resolved.request.run_id.clone();
         let mut stream =
             client.open_run_stream(build_resolved_run_stream_request(&resolved)?).await?;
         let (event_tx, event_rx) = mpsc::unbounded_channel();
