@@ -33,10 +33,9 @@ mod status;
 mod text;
 mod workspace;
 
+use self::{render::*, render_helpers::*};
 use composer::{TuiComposer, TuiComposerView};
 use handoff::{build_console_handoff_path, TuiCrossSurfaceHandoff};
-use render::*;
-use render_helpers::*;
 use slash_palette::{
     build_tui_slash_palette, checkpoint_has_tag, preview_for_selection, read_json_bool,
     read_json_i64, read_json_string, read_json_tags, select_undo_checkpoint,
@@ -2741,7 +2740,6 @@ impl App {
             self.status_line = "Compaction history loaded".to_owned();
             return Ok(());
         }
-
         let path = if spec.apply {
             format!(
                 "console/v1/chat/sessions/{}/compactions",
