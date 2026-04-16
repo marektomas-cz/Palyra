@@ -17,6 +17,8 @@ export {
 export { InlineNotice } from "./InlineNotice";
 export { KeyValueList } from "./KeyValueList";
 export { MetricCard } from "./MetricCard";
+export { OpenTargetActions } from "./OpenTargetActions";
+export type { OpenTargetAction, OpenTargetId } from "./OpenTargetActions";
 export { PageHeader } from "./PageHeader";
 export { RedactedValue } from "./RedactedValue";
 export { SectionCard } from "./SectionCard";

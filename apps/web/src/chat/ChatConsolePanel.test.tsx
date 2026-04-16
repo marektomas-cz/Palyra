@@ -270,7 +270,11 @@ describe("Chat web UX primitives", () => {
     expect(decideInlineApproval).toHaveBeenCalledWith("A1", true);
   });
 
-  it("renders escaped transcript text and keeps canvas iframes sandboxed", async () => {
+  it("renders escaped transcript text and exposes canvas affordances without raw transcript iframes", async () => {
+    const openCanvasSurface = vi.fn();
+    const togglePinnedCanvas = vi.fn();
+    const reopenLastCanvas = vi.fn();
+
     render(
       <ChatTranscript
         visibleTranscript={[
@@ -299,8 +303,12 @@ describe("Chat web UX primitives", () => {
         selectedDetailId={null}
         updateApprovalDraft={vi.fn()}
         decideInlineApproval={vi.fn()}
+        canReopenLastCanvas
         openRunDetails={vi.fn()}
+        openCanvasSurface={openCanvasSurface}
         inspectPayload={vi.fn()}
+        reopenLastCanvas={reopenLastCanvas}
+        togglePinnedCanvas={togglePinnedCanvas}
       />,
     );
 
@@ -308,10 +316,19 @@ describe("Chat web UX primitives", () => {
     expect(document.body.textContent ?? "").toContain("alert(1)");
     expect(document.querySelector("img[src='x']")).toBeNull();
 
-    const frame = await screen.findByTitle("Canvas 01ARZ3NDEKTSV4RRFFQ69G5FAX");
-    expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-same-origin");
-    expect(frame).toHaveAttribute(
-      "src",
+    expect(screen.getByRole("button", { name: "Reopen last canvas" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reopen last canvas" }));
+    expect(reopenLastCanvas).toHaveBeenCalledTimes(1);
+
+    const openCanvasButton = await screen.findByRole("button", { name: "Open canvas" });
+    fireEvent.click(openCanvasButton);
+    expect(openCanvasSurface).toHaveBeenCalledWith(
+      "/canvas/v1/frame/01ARZ3NDEKTSV4RRFFQ69G5FB1?token=test-token",
+      "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Pin canvas" }));
+    expect(togglePinnedCanvas).toHaveBeenCalledWith(
       "/canvas/v1/frame/01ARZ3NDEKTSV4RRFFQ69G5FB1?token=test-token",
     );
     expect(document.querySelector("iframe[src='/console/v1/diagnostics?token=evil']")).toBeNull();
@@ -627,6 +644,7 @@ function baseInspectorProps() {
     onWorkspaceRestore: vi.fn(),
     openMemorySection: vi.fn(),
     openSupportSection: vi.fn(),
+    openCanvasSurface: vi.fn(),
     refreshRunDetails: vi.fn(),
     closeRunDrawer: vi.fn(),
     openBrowserSessionWorkbench: vi.fn(),
@@ -668,6 +686,7 @@ function baseTranscriptProps(): ComponentProps<typeof ChatTranscript> {
     updateApprovalDraft: vi.fn(),
     decideInlineApproval: vi.fn(),
     openRunDetails: vi.fn(),
+    openCanvasSurface: vi.fn(),
     inspectPayload: vi.fn(),
   };
 }

@@ -101,7 +101,7 @@ export function ChatConsoleWorkspaceView({
       <PageHeader
         eyebrow="Chat"
         title={selectedSessionTitle}
-        description="Sessions, retries, branches, transcript operations, and payload inspection stay on one operator surface without dumping raw tool JSON into the main conversation."
+        description="Sessions, retries, branches, transcript operations, and payload inspection stay on one operator surface without dumping raw tool JSON into the main conversation. Shortcuts: Alt+S search, Alt+R run inspector, Alt+W workspace tab, Alt+C canvas, Alt+A approvals."
         status={
           <>
             <StatusChip tone={streaming ? "warning" : "success"}>

@@ -1,8 +1,9 @@
-import { ActionButton, EmptyState, StatusChip } from "../console/components/ui";
+import { ActionButton, EmptyState, OpenTargetActions, StatusChip } from "../console/components/ui";
 import { A2uiRenderer, type A2uiDocument } from "../a2ui";
 import type { ChatAttachmentRecord, MediaDerivedArtifactRecord } from "../consoleApi";
 
 import { ApprovalRequestControls, type ApprovalDraft, type TranscriptEntry } from "./chatShared";
+import { extractCanvasIdFromFrameUrl } from "./sessionCanvasState";
 
 type ChatTranscriptProps = {
   visibleTranscript: TranscriptEntry[];
@@ -23,6 +24,11 @@ type ChatTranscriptProps = {
     derivedArtifactId: string,
     action: "recompute" | "quarantine" | "release" | "purge",
   ) => void;
+  openCanvasSurface?: (canvasUrl: string, runId?: string) => void;
+  togglePinnedCanvas?: (canvasUrl: string) => void;
+  reopenLastCanvas?: () => void;
+  canReopenLastCanvas?: boolean;
+  pinnedCanvasId?: string | null;
 };
 
 export function ChatTranscript({
@@ -41,6 +47,11 @@ export function ChatTranscript({
   inspectPayload,
   inspectDerivedArtifact = () => undefined,
   runDerivedArtifactAction = () => undefined,
+  openCanvasSurface = () => undefined,
+  togglePinnedCanvas = () => undefined,
+  reopenLastCanvas = () => undefined,
+  canReopenLastCanvas = false,
+  pinnedCanvasId = null,
 }: ChatTranscriptProps) {
   const derivedBySource = groupDerivedArtifactsBySource(sessionDerivedArtifacts);
   return (
@@ -51,6 +62,29 @@ export function ChatTranscript({
           rendered.
         </p>
       )}
+
+      {canReopenLastCanvas ? (
+        <div className="chat-entry__detail-callout">
+          <div>
+            <strong>Last canvas ready to reopen</strong>
+            <p className="chat-muted">
+              Reopen the richer canvas surface when you want the live visual state and revision
+              history instead of transcript-only context.
+            </p>
+          </div>
+          <OpenTargetActions
+            compact
+            actions={[
+              {
+                target: "canvas",
+                label: "Reopen last canvas",
+                variant: "secondary",
+                onPress: reopenLastCanvas,
+              },
+            ]}
+          />
+        </div>
+      ) : null}
 
       {sessionAttachments.length > 0 ? (
         <div className="chat-attachment-list" aria-label="Session attachments">
@@ -162,6 +196,11 @@ export function ChatTranscript({
           visibleTranscript.map((entry) => {
             const hasPayload = entry.payload !== undefined;
             const payloadSelected = selectedDetailId === entry.id;
+            const canvasId =
+              entry.kind === "canvas" && entry.canvas_url !== undefined
+                ? extractCanvasIdFromFrameUrl(entry.canvas_url)
+                : null;
+            const pinnedCanvas = canvasId !== null && canvasId === pinnedCanvasId;
 
             return (
               <article key={entry.id} className={`chat-entry chat-entry--${entry.kind}`}>
@@ -207,14 +246,46 @@ export function ChatTranscript({
                   )}
 
                 {entry.kind === "canvas" && entry.canvas_url !== undefined && (
-                  <iframe
-                    className="chat-canvas-frame"
-                    title={`Canvas ${entry.run_id ?? ""}`}
-                    src={entry.canvas_url}
-                    sandbox="allow-scripts allow-same-origin"
-                    loading="lazy"
-                    referrerPolicy="no-referrer"
-                  />
+                  <div className="workspace-callout">
+                    <div className="workspace-panel__intro">
+                      <p className="workspace-kicker">Rich output</p>
+                      <h3>Canvas available</h3>
+                      <p className="chat-muted">
+                        This run emitted a richer canvas surface than the inline transcript should
+                        carry. Open it when you want the live state, provenance, and restore
+                        controls.
+                      </p>
+                    </div>
+                    <div className="workspace-inline-actions">
+                      <StatusChip tone={pinnedCanvas ? "accent" : "success"}>
+                        {pinnedCanvas ? "Pinned canvas" : "Canvas ready"}
+                      </StatusChip>
+                      {entry.run_id ? (
+                        <StatusChip tone="default">Run {entry.run_id.slice(0, 8)}</StatusChip>
+                      ) : null}
+                    </div>
+                    <div className="workspace-inline-actions">
+                      <OpenTargetActions
+                        compact
+                        actions={[
+                          {
+                            target: "canvas",
+                            label: "Open canvas",
+                            variant: "secondary",
+                            onPress: () => openCanvasSurface(entry.canvas_url as string, entry.run_id),
+                          },
+                        ]}
+                      />
+                      <ActionButton
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                        onPress={() => togglePinnedCanvas(entry.canvas_url as string)}
+                      >
+                        {pinnedCanvas ? "Unpin canvas" : "Pin canvas"}
+                      </ActionButton>
+                    </div>
+                  </div>
                 )}
 
                 {hasPayload ? (

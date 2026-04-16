@@ -1,6 +1,6 @@
 import { Button } from "@heroui/react";
 
-import { CheckboxField, TextInputField } from "../components/ui";
+import { CheckboxField, OpenTargetActions, TextInputField } from "../components/ui";
 import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
@@ -605,6 +605,46 @@ export function BrowserSection({ app }: BrowserSectionProps) {
             >
               Load downloads
             </Button>
+            {downloads.length === 0 ? (
+              <p className="chat-muted">
+                No retained downloads loaded yet. Fetch a session first to expose reusable open
+                targets for browser evidence.
+              </p>
+            ) : (
+              <div className="workspace-list">
+                {downloads.map((download, index) => {
+                  const record = asJsonObject(download);
+                  const artifactId = readString(record ?? {}, "artifact_id") ?? `download-${index}`;
+                  const sessionId = readString(record ?? {}, "session_id");
+                  return (
+                    <article key={artifactId} className="workspace-list-item">
+                      <div>
+                        <strong>{readString(record ?? {}, "file_name") ?? artifactId}</strong>
+                        <p className="chat-muted">
+                          {sessionId ?? "No session binding"} ·{" "}
+                          {readBool(record ?? {}, "quarantined") ? "quarantined" : "retained"}
+                        </p>
+                      </div>
+                      <OpenTargetActions
+                        compact
+                        actions={[
+                          {
+                            target: "browser-workbench",
+                            label: "Open browser session",
+                            disabled: sessionId === null,
+                            onPress: () => {
+                              if (sessionId !== null) {
+                                app.openBrowserSessionWorkbench(sessionId);
+                              }
+                            },
+                          },
+                        ]}
+                      />
+                    </article>
+                  );
+                })}
+              </div>
+            )}
             <PrettyJsonBlock
               value={{
                 downloads: app.browserDownloads,

@@ -63,7 +63,7 @@ import {
   describeSelectedSessionTitle,
 } from "./chatWorkspaceSessionBindings";
 import { FIRST_SUCCESS_PROMPTS } from "./starterPrompts";
-import { buildChatCanvasHref } from "./sessionCanvasState";
+import { buildChatCanvasHref, extractCanvasIdFromFrameUrl } from "./sessionCanvasState";
 import { useSessionCanvases } from "./useSessionCanvases";
 import { useStarterPromptGuidance } from "./useStarterPromptGuidance";
 import { useStarterPromptHandoff } from "./useStarterPromptHandoff";
@@ -133,6 +133,7 @@ export function ChatConsolePanel({
   const [phase4BusyKey, setPhase4BusyKey] = useState<string | null>(null);
   const [runDrawerTab, setRunDrawerTab] = useState<RunDrawerTab>("status");
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const sessionSearchInputRef = useRef<HTMLInputElement | null>(null);
   const handleSessionActivated = useCallback(
     (sessionId: string) => emitSessionResumed(emitUxEvent, sessionId),
     [emitUxEvent],
@@ -516,6 +517,139 @@ export function ChatConsolePanel({
     },
     [openSelectedCanvasSurface, sessionCanvases.selectCanvas],
   );
+  const focusSessionSearch = useCallback(() => {
+    sessionSearchInputRef.current?.focus();
+    sessionSearchInputRef.current?.select();
+  }, []);
+  const openCurrentRunInspector = useCallback(
+    (tab: RunDrawerTab = "status") => {
+      const targetRunId = activeRunId ?? knownRunIds[0] ?? null;
+      if (targetRunId === null) {
+        setError("No run is available for inspection.");
+        return;
+      }
+      openRunDetailsPanel(targetRunId, tab);
+    },
+    [activeRunId, knownRunIds, openRunDetailsPanel, setError],
+  );
+  const openCanvasSurfaceFromUrl = useCallback(
+    (canvasUrl: string, runId?: string) => {
+      const canvasId = extractCanvasIdFromFrameUrl(canvasUrl);
+      if (canvasId === null) {
+        setError("This output does not expose a reusable canvas target.");
+        return;
+      }
+      sessionCanvases.selectCanvas(canvasId);
+      const sessionId = sessions.activeSessionId.trim();
+      const normalizedRunId = runId?.trim() ?? "";
+      void navigate(
+        buildChatCanvasHref({
+          sessionId: sessionId.length > 0 ? sessionId : undefined,
+          canvasId,
+          runId: normalizedRunId.length > 0 ? normalizedRunId : undefined,
+        }),
+      );
+    },
+    [navigate, sessionCanvases.selectCanvas, sessions.activeSessionId, setError],
+  );
+  const toggleCanvasPinFromUrl = useCallback(
+    (canvasUrl: string) => {
+      const canvasId = extractCanvasIdFromFrameUrl(canvasUrl);
+      if (canvasId === null) {
+        setError("This output does not expose a reusable canvas target.");
+        return;
+      }
+      sessionCanvases.togglePinnedCanvasById(canvasId);
+      setNotice(
+        sessionCanvases.pinnedCanvasId === canvasId
+          ? "Canvas unpinned."
+          : "Canvas pinned for consistent reopen across session resumes.",
+      );
+    },
+    [sessionCanvases.pinnedCanvasId, sessionCanvases.togglePinnedCanvasById, setError, setNotice],
+  );
+  const reopenLastCanvas = useCallback(() => {
+    const targetCanvasId =
+      sessionCanvases.pinnedCanvasId ??
+      sessionCanvases.selectedCanvasId ??
+      sessionCanvases.canvases[0]?.canvas_id ??
+      null;
+    if (targetCanvasId === null) {
+      setError("No canvas is available to reopen for this session.");
+      return;
+    }
+    openSelectedCanvasSurface(targetCanvasId);
+  }, [
+    openSelectedCanvasSurface,
+    sessionCanvases.canvases,
+    sessionCanvases.pinnedCanvasId,
+    sessionCanvases.selectedCanvasId,
+    setError,
+  ]);
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        !event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        isEditableShortcutTarget(event.target)
+      ) {
+        return;
+      }
+
+      switch (event.key.toLowerCase()) {
+        case "s":
+          event.preventDefault();
+          focusSessionSearch();
+          return;
+        case "r":
+          event.preventDefault();
+          openCurrentRunInspector();
+          return;
+        case "w":
+          event.preventDefault();
+          openCurrentRunInspector("workspace");
+          return;
+        case "a":
+          event.preventDefault();
+          setConsoleSection("approvals");
+          void navigate(getSectionPath("approvals"));
+          return;
+        case "c":
+          event.preventDefault();
+          if (surface === "canvas") {
+            openConversationSurface();
+            return;
+          }
+          if (sessionCanvases.pinnedCanvasId === null && sessionCanvases.canvases.length === 0) {
+            setNotice("No canvas is available for the current session yet.");
+            return;
+          }
+          reopenLastCanvas();
+          return;
+        default:
+          return;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [
+    focusSessionSearch,
+    navigate,
+    openConversationSurface,
+    openCurrentRunInspector,
+    reopenLastCanvas,
+    sessionCanvases.canvases,
+    sessionCanvases.pinnedCanvasId,
+    setConsoleSection,
+    setNotice,
+    surface,
+  ]);
   const openMemorySection = useCallback(() => setConsoleSection("memory"), [setConsoleSection]);
   const openSupportSection = useCallback(() => setConsoleSection("support"), [setConsoleSection]);
   const handleWorkspaceRestore = useCallback(
@@ -530,14 +664,25 @@ export function ChatConsolePanel({
         refreshSessionTranscript,
         appendLocalEntry,
         openRunDetails: openRunDetailsPanel,
-        setNotice,
+        setNotice: (next) => {
+          if (
+            next === null ||
+            (sessionCanvases.pinnedCanvasId === null && sessionCanvases.canvases.length === 0)
+          ) {
+            setNotice(next);
+            return;
+          }
+          setNotice(`${next} Reopen the canvas surface if you need to reconcile visual state.`);
+        },
       });
+      await sessionCanvases.refreshSessionCanvases(response.session.session_id);
     },
     [
       appendLocalEntry,
       clearTranscriptState,
       openRunDetailsPanel,
       refreshSessionTranscript,
+      sessionCanvases,
       sessions,
       setAttachments,
       setDetailPanel,
@@ -875,7 +1020,7 @@ export function ChatConsolePanel({
           selectedSessionLineage={selectedSessionLineage}
           selectedSessionTitle={describeSelectedSessionTitle(sessions.selectedSession)}
           sessionsBusy={sessions.sessionsBusy}
-          sessionsSidebarProps={sessionsSidebarProps}
+          sessionsSidebarProps={{ ...sessionsSidebarProps, searchInputRef: sessionSearchInputRef }}
           onOpenConversation={() => openConversationSurface()}
           onOpenSourceRun={openCanvasSourceRun}
           onRefresh={() =>
@@ -1027,6 +1172,7 @@ export function ChatConsolePanel({
             onWorkspaceRestore: handleWorkspaceRestore,
             openMemorySection,
             openSupportSection,
+            openCanvasSurface: openCanvasSurfaceFromUrl,
             refreshRunDetails,
             closeRunDrawer,
             openBrowserSessionWorkbench,
@@ -1078,7 +1224,7 @@ export function ChatConsolePanel({
           selectedSessionLineage={selectedSessionLineage}
           selectedSessionTitle={describeSelectedSessionTitle(sessions.selectedSession)}
           sessionsBusy={sessions.sessionsBusy}
-          sessionsSidebarProps={sessionsSidebarProps}
+          sessionsSidebarProps={{ ...sessionsSidebarProps, searchInputRef: sessionSearchInputRef }}
           showStarterPrompts={
             !starterPromptGuidance.firstSuccessCompleted &&
             !starterPromptGuidance.starterPromptsHidden &&
@@ -1111,6 +1257,12 @@ export function ChatConsolePanel({
               );
             },
             openRunDetails: openRunDetailsPanel,
+            openCanvasSurface: openCanvasSurfaceFromUrl,
+            togglePinnedCanvas: toggleCanvasPinFromUrl,
+            reopenLastCanvas,
+            canReopenLastCanvas:
+              sessionCanvases.pinnedCanvasId !== null || sessionCanvases.canvases.length > 0,
+            pinnedCanvasId: sessionCanvases.pinnedCanvasId,
             refreshSessionTranscript,
             setDetailPanel,
             setError,
@@ -1120,5 +1272,17 @@ export function ChatConsolePanel({
         />
       )}
     </main>
+  );
+}
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
   );
 }

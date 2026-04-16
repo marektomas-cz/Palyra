@@ -1,4 +1,5 @@
 import { Button, Chip } from "@heroui/react";
+import type { Ref } from "react";
 
 import {
   ActionButton,
@@ -23,6 +24,7 @@ type ChatSessionsSidebarProps = {
   createSession: () => void;
   searchQuery: string;
   setSearchQuery: (value: string) => void;
+  searchInputRef?: Ref<HTMLInputElement>;
   includeArchived: boolean;
   setIncludeArchived: (value: boolean) => void;
   sessionLabelDraft: string;
@@ -43,6 +45,7 @@ export function ChatSessionsSidebar({
   createSession,
   searchQuery,
   setSearchQuery,
+  searchInputRef,
   includeArchived,
   setIncludeArchived,
   sessionLabelDraft,
@@ -73,6 +76,8 @@ export function ChatSessionsSidebar({
           onChange={setNewSessionLabel}
         />
         <TextInputField
+          description="Shortcut: Alt+S focuses this search."
+          inputRef={searchInputRef}
           label="History search"
           placeholder="title, family, agent, model, file, or recap"
           value={searchQuery}

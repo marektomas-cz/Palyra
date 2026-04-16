@@ -34,6 +34,7 @@ type UseSessionCanvasesResult = {
   readonly refreshSessionCanvases: (sessionIdOverride?: string) => Promise<void>;
   readonly selectCanvas: (canvasId: string) => void;
   readonly togglePinnedCanvas: () => void;
+  readonly togglePinnedCanvasById: (canvasId: string) => void;
   readonly restoreCanvasState: (stateVersion: number) => Promise<void>;
 };
 
@@ -168,15 +169,28 @@ export function useSessionCanvases({
     [activeSessionId],
   );
 
+  const togglePinnedCanvasById = useCallback(
+    (canvasId: string) => {
+      const sessionId = activeSessionId.trim();
+      const normalizedCanvasId = canvasId.trim();
+      if (sessionId.length === 0 || normalizedCanvasId.length === 0) {
+        return;
+      }
+      const next = togglePinnedSessionCanvasPreference(sessionId, normalizedCanvasId);
+      setPinnedCanvasId(next.pinnedCanvasId ?? null);
+      setSelectedCanvasId(normalizedCanvasId);
+    },
+    [activeSessionId],
+  );
+
   const togglePinnedCanvas = useCallback(() => {
     const sessionId = activeSessionId.trim();
     const canvasId = selectedCanvasIdRef.current?.trim() ?? "";
     if (sessionId.length === 0 || canvasId.length === 0) {
       return;
     }
-    const next = togglePinnedSessionCanvasPreference(sessionId, canvasId);
-    setPinnedCanvasId(next.pinnedCanvasId ?? null);
-  }, [activeSessionId]);
+    togglePinnedCanvasById(canvasId);
+  }, [activeSessionId, togglePinnedCanvasById]);
 
   const restoreCanvasState = useCallback(
     async (stateVersion: number) => {
@@ -225,6 +239,7 @@ export function useSessionCanvases({
     refreshSessionCanvases,
     selectCanvas,
     togglePinnedCanvas,
+    togglePinnedCanvasById,
     restoreCanvasState,
   };
 }

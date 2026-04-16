@@ -40,6 +40,7 @@ type ChatRunDrawerProps = {
   onInspectCompaction: (artifactId: string) => void;
   onInspectSessionCheckpoint: (checkpointId: string) => void;
   onWorkspaceRestore: (response: WorkspaceRestoreResponseEnvelope) => Promise<void>;
+  openCanvasSurface: (canvasUrl: string, runId?: string) => void;
   openMemorySection: () => void;
   openSupportSection: () => void;
   refreshRun: () => void;
@@ -64,6 +65,7 @@ export function ChatRunDrawer({
   onInspectCompaction,
   onInspectSessionCheckpoint,
   onWorkspaceRestore,
+  openCanvasSurface,
   openMemorySection,
   openSupportSection,
   refreshRun,
@@ -311,6 +313,7 @@ export function ChatRunDrawer({
                   setRunDrawerId(nextRunId);
                 }}
                 onWorkspaceRestore={onWorkspaceRestore}
+                openCanvasSurface={openCanvasSurface}
                 revealSensitiveValues={revealSensitiveValues}
                 runId={runDrawerId}
                 runIds={runIds}

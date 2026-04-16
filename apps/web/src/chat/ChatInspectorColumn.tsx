@@ -122,6 +122,7 @@ type ChatInspectorColumnProps = {
   openSupportSection: () => void;
   refreshRunDetails: () => void;
   closeRunDrawer: () => void;
+  openCanvasSurface: (canvasUrl: string, runId?: string) => void;
   openBrowserSessionWorkbench: (sessionId: string) => void;
 };
 
@@ -185,6 +186,7 @@ export function ChatInspectorColumn({
   openSupportSection,
   refreshRunDetails,
   closeRunDrawer,
+  openCanvasSurface,
   openBrowserSessionWorkbench,
 }: ChatInspectorColumnProps) {
   const phase4Busy = phase4BusyKey !== null;
@@ -978,6 +980,7 @@ export function ChatInspectorColumn({
             onInspectCompaction={inspectCompaction}
             onInspectSessionCheckpoint={inspectCheckpoint}
             onWorkspaceRestore={onWorkspaceRestore}
+            openCanvasSurface={openCanvasSurface}
             runIds={runIds}
             runDrawerId={runDrawerId}
             setRunDrawerId={setRunDrawerId}

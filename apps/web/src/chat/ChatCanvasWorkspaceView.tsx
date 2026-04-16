@@ -1,5 +1,6 @@
 import { Button, Chip } from "@heroui/react";
 import type { ComponentProps } from "react";
+import { NextActionCard, ScenarioCard } from "../console/components/guidance/GuidanceCards";
 import {
   ActionButton,
   EmptyState,
@@ -75,7 +76,7 @@ export function ChatCanvasWorkspaceView({
       <PageHeader
         eyebrow="Canvas"
         title={selectedCanvasSummary ? `Canvas ${shortId(selectedCanvasSummary.canvas_id)}` : selectedSessionTitle}
-        description="Session-linked rich surfaces stay reopenable, inspectable, and reversible without dropping back to raw transcript iframes."
+        description="Session-linked rich surfaces stay reopenable, inspectable, and reversible without dropping back to raw transcript iframes. Shortcuts: Alt+S search, Alt+R run inspector, Alt+W workspace tab, Alt+C conversation, Alt+A approvals."
         status={
           <>
             <StatusChip tone={toneForCanvasRuntime(selectedCanvasRuntimeStatus)}>
@@ -174,15 +175,32 @@ export function ChatCanvasWorkspaceView({
         >
           <div className="chat-panel__body">
             {selectedCanvasSummary === null || selectedCanvas === null ? (
-              <EmptyState
-                compact
-                title={canvasesBusy ? "Loading canvases" : "No canvas selected"}
-                description={
-                  canvases.length === 0
-                    ? "Open a session that emitted a canvas to inspect its rich surface and rollback history here."
-                    : "Pick a canvas from the session list to hydrate its runtime frame and state history."
-                }
-              />
+              canvases.length === 0 ? (
+                <div className="workspace-stack">
+                  <NextActionCard
+                    ctaLabel="Open conversation"
+                    description="Stay in the active session and ask for a richer output. When a run emits a canvas-hosted surface, it becomes reopenable here with history and restore controls."
+                    title="No canvas in this session yet"
+                    onCta={onOpenConversation}
+                  />
+                  <ScenarioCard
+                    description="Canvas is where Palyra keeps outputs that benefit from a richer visual surface than raw transcript text."
+                    title="What usually opens here"
+                  >
+                    <ul className="console-compact-list">
+                      <li>Agent-rendered visual summaries or structured result surfaces.</li>
+                      <li>Session-linked states that need reopen, provenance, and rollback.</li>
+                      <li>Outputs that should stay inspectable without bloating the transcript.</li>
+                    </ul>
+                  </ScenarioCard>
+                </div>
+              ) : (
+                <EmptyState
+                  compact
+                  title={canvasesBusy ? "Loading canvases" : "No canvas selected"}
+                  description="Pick a canvas from the session list to hydrate its runtime frame and state history."
+                />
+              )
             ) : (
               <>
                 <div className="workspace-callout">

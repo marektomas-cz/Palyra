@@ -7,6 +7,7 @@ import {
   EmptyState,
   InlineNotice,
   KeyValueList,
+  OpenTargetActions,
   SectionCard,
   SelectField,
   TextInputField,
@@ -39,6 +40,7 @@ type RunWorkspaceTabProps = {
   onInspectCompaction: (artifactId: string) => void;
   onInspectSessionCheckpoint: (checkpointId: string) => void;
   onWorkspaceRestore: (response: WorkspaceRestoreResponseEnvelope) => Promise<void>;
+  openCanvasSurface: (canvasUrl: string, runId?: string) => void;
   openMemorySection: () => void;
   openSupportSection: () => void;
 };
@@ -58,6 +60,7 @@ export function ChatRunWorkspaceTab({
   onInspectCompaction,
   onInspectSessionCheckpoint,
   onWorkspaceRestore,
+  openCanvasSurface,
   openMemorySection,
   openSupportSection,
 }: RunWorkspaceTabProps) {
@@ -601,24 +604,29 @@ export function ChatRunWorkspaceTab({
                     ? "Queueing..."
                     : "Attach to Support bundle"}
                 </ActionButton>
-                <ActionButton
-                  size="sm"
-                  type="button"
-                  variant="ghost"
-                  onPress={() => {
-                    const canvasUrl = extractCanvasUrl(artifactDetail);
-                    if (canvasUrl === null) {
-                      setError(
-                        "This artifact does not publish a reusable Canvas frame URL yet. Use Memory or Support until a Canvas target is available.",
-                      );
-                      return;
-                    }
-                    window.open(canvasUrl, "_blank", "noopener,noreferrer");
-                    setNotice("Canvas frame opened in a new tab.");
-                  }}
-                >
-                  Open in Canvas
-                </ActionButton>
+                <OpenTargetActions
+                  compact
+                  actions={[
+                    {
+                      target: "canvas",
+                      label: "Open canvas",
+                      variant: "ghost",
+                      disabled: extractCanvasUrl(artifactDetail) === null,
+                      description: "UI navigation into the session canvas surface.",
+                      onPress: () => {
+                        const canvasUrl = extractCanvasUrl(artifactDetail);
+                        if (canvasUrl === null) {
+                          setError(
+                            "This artifact does not publish a reusable canvas target yet. Use Memory or Support until a Canvas target is available.",
+                          );
+                          return;
+                        }
+                        openCanvasSurface(canvasUrl, artifactDetail.checkpoint.run_id);
+                        setNotice("Canvas surface opened for this workspace artifact.");
+                      },
+                    },
+                  ]}
+                />
               </ActionCluster>
               <ArtifactPreview
                 detail={artifactDetail}

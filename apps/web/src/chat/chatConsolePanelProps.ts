@@ -69,6 +69,7 @@ interface BuildInspectorPropsArgs {
   readonly onWorkspaceRestore: InspectorProps["onWorkspaceRestore"];
   readonly openMemorySection: InspectorProps["openMemorySection"];
   readonly openSupportSection: InspectorProps["openSupportSection"];
+  readonly openCanvasSurface: InspectorProps["openCanvasSurface"];
   readonly transcriptRecords: ChatTranscriptRecord[];
   readonly inspectCompaction: (artifactId: string) => void;
   readonly inspectCheckpoint: (checkpointId: string) => void;
@@ -134,6 +135,7 @@ export function buildInspectorProps({
   onWorkspaceRestore,
   openMemorySection,
   openSupportSection,
+  openCanvasSurface,
   transcriptRecords,
   inspectCompaction,
   inspectCheckpoint,
@@ -230,6 +232,7 @@ export function buildInspectorProps({
     onWorkspaceRestore,
     openMemorySection,
     openSupportSection,
+    openCanvasSurface,
     refreshRunDetails,
     closeRunDrawer,
     openBrowserSessionWorkbench,
@@ -250,6 +253,11 @@ interface BuildTranscriptPropsArgs {
   readonly decideInlineApproval: TranscriptProps["decideInlineApproval"];
   readonly openToolPermissions?: TranscriptProps["openToolPermissions"];
   readonly openRunDetails: TranscriptProps["openRunDetails"];
+  readonly openCanvasSurface?: TranscriptProps["openCanvasSurface"];
+  readonly togglePinnedCanvas?: TranscriptProps["togglePinnedCanvas"];
+  readonly reopenLastCanvas?: TranscriptProps["reopenLastCanvas"];
+  readonly canReopenLastCanvas?: TranscriptProps["canReopenLastCanvas"];
+  readonly pinnedCanvasId?: TranscriptProps["pinnedCanvasId"];
   readonly refreshSessionTranscript: () => Promise<void>;
   readonly setDetailPanel: (next: DetailPanelState | null) => void;
   readonly setError: (next: string | null) => void;
@@ -271,6 +279,11 @@ export function buildTranscriptProps({
   decideInlineApproval,
   openToolPermissions,
   openRunDetails,
+  openCanvasSurface,
+  togglePinnedCanvas,
+  reopenLastCanvas,
+  canReopenLastCanvas,
+  pinnedCanvasId,
   refreshSessionTranscript,
   setDetailPanel,
   setError,
@@ -290,6 +303,11 @@ export function buildTranscriptProps({
     decideInlineApproval,
     openToolPermissions,
     openRunDetails,
+    openCanvasSurface,
+    togglePinnedCanvas,
+    reopenLastCanvas,
+    canReopenLastCanvas,
+    pinnedCanvasId,
     inspectPayload: (entry) => {
       inspectLiveEntryDetail(entry, setDetailPanel);
     },

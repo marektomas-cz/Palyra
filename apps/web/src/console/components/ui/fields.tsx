@@ -35,6 +35,7 @@ type TextInputFieldProps = {
   type?: "text" | "password" | "search" | "url" | "number" | "email";
   autoComplete?: string;
   name?: string;
+  inputRef?: Ref<HTMLInputElement>;
 };
 
 type TextAreaFieldProps = Omit<TextInputFieldProps, "type"> & {
@@ -103,12 +104,14 @@ export function TextInputField({
   type = "text",
   autoComplete,
   name,
+  inputRef,
 }: TextInputFieldProps) {
   return (
     <TextField className="workspace-field" isDisabled={disabled} isRequired={required} name={name}>
       <Label>{label}</Label>
       <Input
         autoComplete={autoComplete}
+        ref={inputRef}
         placeholder={placeholder}
         readOnly={readOnly}
         type={type}

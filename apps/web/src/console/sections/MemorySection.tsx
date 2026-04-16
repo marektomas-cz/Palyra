@@ -1,9 +1,11 @@
 import { Button } from "@heroui/react";
 import { type ReactNode, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import {
   ActionButton,
   CheckboxField,
+  OpenTargetActions,
   SelectField,
   TextAreaField,
   TextInputField,
@@ -21,8 +23,17 @@ import {
   WorkspaceTable,
   workspaceToneForState,
 } from "../components/workspace/WorkspacePatterns";
-import { formatUnixMs, readNumber, readObject, readString, type JsonObject } from "../shared";
+import {
+  formatUnixMs,
+  readNumber,
+  readObject,
+  readString,
+  type JsonObject,
+} from "../shared";
+import type { JsonValue } from "../../consoleApi";
 import type { ConsoleAppState } from "../useConsoleAppState";
+import { collectCanvasFrameUrls } from "../../chat/chatShared";
+import { buildChatCanvasHref, extractCanvasIdFromFrameUrl } from "../../chat/sessionCanvasState";
 
 type MemorySectionProps = {
   app: Pick<
@@ -102,6 +113,7 @@ type GroupedResultsSectionProps = {
 };
 
 export function MemorySection({ app }: MemorySectionProps) {
+  const navigate = useNavigate();
   const [confirmingPurge, setConfirmingPurge] = useState(false);
   const [selectedDerivedArtifactId, setSelectedDerivedArtifactId] = useState<string | null>(null);
   const usage = readObject(app.memoryStatus ?? {}, "usage");
@@ -152,6 +164,8 @@ export function MemorySection({ app }: MemorySectionProps) {
   );
   const selectedDerivedWarnings = readObjectArray(selectedDerivedArtifact, "warnings");
   const selectedDerivedAnchors = readObjectArray(selectedDerivedArtifact, "anchors");
+  const selectedDerivedArtifactCanvasUrl =
+    selectedDerivedArtifact === null ? null : extractCanvasUrlFromMemoryArtifact(selectedDerivedArtifact);
   const learningCandidates = app.memoryLearningCandidates;
   const learningPreferences = app.memoryLearningPreferences;
   const learningHistory = app.memoryLearningHistory;
@@ -734,6 +748,31 @@ export function MemorySection({ app }: MemorySectionProps) {
                       >
                         Open
                       </ActionButton>
+                      {extractCanvasUrlFromMemoryArtifact(artifact) ? (
+                        <OpenTargetActions
+                          compact
+                          actions={[
+                            {
+                              target: "canvas",
+                              label: "Open canvas",
+                              variant: "ghost",
+                              onPress: () => {
+                                const canvasUrl = extractCanvasUrlFromMemoryArtifact(artifact);
+                                const canvasId =
+                                  canvasUrl === null ? null : extractCanvasIdFromFrameUrl(canvasUrl);
+                                if (canvasId !== null) {
+                                  navigate(
+                                    buildChatCanvasHref({
+                                      sessionId: readString(artifact, "session_id") ?? undefined,
+                                      canvasId,
+                                    }),
+                                  );
+                                }
+                              },
+                            },
+                          ]}
+                        />
+                      ) : null}
                       <span className="chat-muted">
                         {formatUnixMs(readNumber(artifact, "updated_at_unix_ms"))}
                       </span>
@@ -784,6 +823,28 @@ export function MemorySection({ app }: MemorySectionProps) {
                     </dd>
                   </div>
                 </dl>
+                {selectedDerivedArtifactCanvasUrl ? (
+                  <OpenTargetActions
+                    actions={[
+                      {
+                        target: "canvas",
+                        label: "Open canvas",
+                        onPress: () => {
+                          const canvasId = extractCanvasIdFromFrameUrl(selectedDerivedArtifactCanvasUrl);
+                          if (canvasId !== null) {
+                            navigate(
+                              buildChatCanvasHref({
+                                sessionId:
+                                  readString(selectedDerivedArtifact, "session_id") ?? undefined,
+                                canvasId,
+                              }),
+                            );
+                          }
+                        },
+                      },
+                    ]}
+                  />
+                ) : null}
                 {selectedDerivedWarnings.length > 0 ? (
                   <WorkspaceInlineNotice title="Parser warnings" tone="warning">
                     <ul className="chat-list">
@@ -1547,6 +1608,25 @@ function shortHash(value: string | null): string {
     return "n/a";
   }
   return value.slice(0, 12);
+}
+
+function extractCanvasUrlFromMemoryArtifact(artifact: JsonObject): string | null {
+  const candidates = [
+    readString(artifact, "content_text"),
+    readString(artifact, "summary_text"),
+    readString(artifact, "failure_reason"),
+  ]
+    .filter((value): value is string => value !== null && value.trim().length > 0)
+    .flatMap((value) => collectCanvasFrameUrls(parseCanvasCandidate(value)));
+  return candidates[0] ?? null;
+}
+
+function parseCanvasCandidate(value: string): JsonValue {
+  try {
+    return JSON.parse(value) as JsonValue;
+  } catch {
+    return value;
+  }
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
