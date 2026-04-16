@@ -28,7 +28,7 @@ function resolveTsgolintPath() {
       const realBinDir = join(dirname(realpathSync(join(scriptDir, ".."))), ".bin");
       executablePath =
         [join(realBinDir, "tsgolint.exe"), join(realBinDir, "tsgolint.cmd")].find((path) =>
-          existsSync(path)
+          existsSync(path),
         ) ?? "";
     } catch {
       // Fall through to the explicit error below.
@@ -39,7 +39,7 @@ function resolveTsgolintPath() {
     throw new Error(
       `Unable to resolve oxlint-tsgolint executable, tried:\n${pathCandidates
         .map((path) => `- ${path}`)
-        .join("\n")}`
+        .join("\n")}`,
     );
   }
 
