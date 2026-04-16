@@ -887,6 +887,7 @@ fn build_handoff_path(base_path: &str, params: &[(&str, Option<&str>)]) -> Strin
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_mobile_decision_scope(
     value: Option<&str>,
 ) -> Result<journal::ApprovalDecisionScope, Response> {
@@ -903,6 +904,7 @@ fn parse_mobile_decision_scope(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn serialize_value(value: &impl Serialize) -> Result<Value, Response> {
     serde_json::to_value(value).map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
