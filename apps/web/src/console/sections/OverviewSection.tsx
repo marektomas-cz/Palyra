@@ -335,6 +335,14 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     alertCount: usageInsights?.alerts.length ?? 0,
     objectiveAttentionCount,
   });
+  const hasAttentionItems = attentionItems.length > 0;
+  const runtimePostureValue = hasAttentionItems
+    ? tOverview("metric.attentionRequired")
+    : tOverview("status.ready");
+  const hasObjectiveAttention = objectiveAttentionCount > 0;
+  const objectiveHealthValue = hasObjectiveAttention
+    ? tOverview("metric.attention")
+    : tOverview("metric.healthy");
   const busy = app.overviewBusy || objectivesBusy || objectiveMutationBusy;
   const objectiveRows = useMemo(
     () =>
@@ -818,12 +826,8 @@ export function OverviewSection({ app }: OverviewSectionProps) {
         <WorkspaceMetricCard
           detail={attentionItems[0] ?? tOverview("metric.noImmediateBlockers")}
           label={tOverview("metric.runtimePosture")}
-          tone={attentionItems.length > 0 ? "warning" : "success"}
-          value={
-            attentionItems.length > 0
-              ? tOverview("metric.attentionRequired")
-              : tOverview("status.ready")
-          }
+          tone={hasAttentionItems ? "warning" : "success"}
+          value={runtimePostureValue}
         />
         <WorkspaceMetricCard
           detail={warnings[0] ?? tOverview("metric.remoteStable")}
@@ -848,12 +852,8 @@ export function OverviewSection({ app }: OverviewSectionProps) {
               : tOverview("metric.objectiveHealthClear")
           }
           label={tOverview("metric.objectiveHealth")}
-          tone={objectiveAttentionCount > 0 ? "warning" : "success"}
-          value={
-            objectiveAttentionCount > 0
-              ? tOverview("metric.attention")
-              : tOverview("metric.healthy")
-          }
+          tone={hasObjectiveAttention ? "warning" : "success"}
+          value={objectiveHealthValue}
         />
         <WorkspaceMetricCard
           detail={
