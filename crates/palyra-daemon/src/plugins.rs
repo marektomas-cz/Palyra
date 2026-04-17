@@ -1,6 +1,9 @@
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
+use palyra_common::versioned_json::{
+    migrate_updated_at_metadata_v0_to_v1, parse_versioned_json, VersionedJsonFormat,
+};
 use serde::{Deserialize, Serialize};
 
 use palyra_skills::SkillManifest;
@@ -9,6 +12,8 @@ use crate::*;
 
 const PLUGIN_BINDINGS_LAYOUT_VERSION: u32 = 1;
 const PLUGIN_BINDINGS_INDEX_FILE_NAME: &str = "bindings.json";
+const PLUGIN_BINDINGS_INDEX_FORMAT: VersionedJsonFormat =
+    VersionedJsonFormat::new("plugin bindings index", PLUGIN_BINDINGS_LAYOUT_VERSION);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,11 +117,12 @@ pub(crate) fn load_plugin_bindings_index(plugins_root: &FsPath) -> Result<Plugin
     }
     let payload = fs::read(path.as_path())
         .with_context(|| format!("failed to read plugin bindings index {}", path.display()))?;
-    let mut index = serde_json::from_slice::<PluginBindingsIndex>(payload.as_slice())
-        .with_context(|| format!("failed to parse plugin bindings index {}", path.display()))?;
-    if index.schema_version != PLUGIN_BINDINGS_LAYOUT_VERSION {
-        bail!("unsupported plugin bindings schema version {}", index.schema_version);
-    }
+    let mut index = parse_versioned_json::<PluginBindingsIndex>(
+        payload.as_slice(),
+        PLUGIN_BINDINGS_INDEX_FORMAT,
+        &[(0, migrate_updated_at_metadata_v0_to_v1)],
+    )
+    .with_context(|| format!("failed to parse plugin bindings index {}", path.display()))?;
     normalize_plugin_bindings_index(&mut index);
     Ok(index)
 }
@@ -235,6 +241,30 @@ fn normalize_registry_identifier(raw: &str, field_name: &'static str) -> Result<
         bail!("{field_name} must use only a-z, 0-9, '.', '_' or '-'");
     }
     Ok(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{
+        load_plugin_bindings_index, plugin_bindings_index_path, PLUGIN_BINDINGS_LAYOUT_VERSION,
+    };
+
+    #[test]
+    fn load_plugin_bindings_index_migrates_legacy_metadata() {
+        let tempdir = tempdir().expect("temporary directory should be created");
+        let index_path = plugin_bindings_index_path(tempdir.path());
+        fs::write(index_path, br#"{"entries":[]}"#)
+            .expect("legacy plugin bindings index should be written");
+        let index = load_plugin_bindings_index(tempdir.path())
+            .expect("legacy plugin bindings index should load");
+        assert_eq!(index.schema_version, PLUGIN_BINDINGS_LAYOUT_VERSION);
+        assert_eq!(index.updated_at_unix_ms, 0);
+        assert!(index.entries.is_empty());
+    }
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {

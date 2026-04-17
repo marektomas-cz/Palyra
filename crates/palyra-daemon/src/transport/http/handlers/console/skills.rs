@@ -7,6 +7,7 @@ use palyra_common::feature_rollouts::{
     FeatureRolloutSetting, DYNAMIC_TOOL_BUILDER_ROLLOUT_CONFIG_PATH,
     DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
 };
+use palyra_common::versioned_json::{migrate_updated_at_metadata_v0_to_v1, parse_versioned_json};
 
 pub(crate) async fn console_skills_list_handler(
     State(state): State<AppState>,
@@ -777,19 +778,17 @@ pub(crate) fn load_skill_builder_candidate_index(
             path.display()
         )))
     })?;
-    let mut index = serde_json::from_slice::<SkillBuilderCandidateIndex>(bytes.as_slice())
-        .map_err(|error| {
-            runtime_status_response(tonic::Status::internal(format!(
-                "failed to parse skill builder candidate index {}: {error}",
-                path.display()
-            )))
-        })?;
-    if index.schema_version != SKILL_BUILDER_CANDIDATE_LAYOUT_VERSION {
-        return Err(runtime_status_response(tonic::Status::failed_precondition(format!(
-            "unsupported skill builder candidate index schema version {}",
-            index.schema_version
-        ))));
-    }
+    let mut index = parse_versioned_json::<SkillBuilderCandidateIndex>(
+        bytes.as_slice(),
+        SKILL_BUILDER_CANDIDATE_INDEX_FORMAT,
+        &[(0, migrate_updated_at_metadata_v0_to_v1)],
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to parse skill builder candidate index {}: {error}",
+            path.display()
+        )))
+    })?;
     index.entries.sort_by(|left, right| left.generated_at_unix_ms.cmp(&right.generated_at_unix_ms));
     Ok(index)
 }
@@ -828,6 +827,31 @@ fn save_skill_builder_candidate_index(
             path.display()
         )))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{load_skill_builder_candidate_index, skill_builder_candidates_index_path};
+    use crate::SKILL_BUILDER_CANDIDATE_LAYOUT_VERSION;
+
+    #[test]
+    fn load_skill_builder_candidate_index_migrates_legacy_metadata() {
+        let tempdir = tempdir().expect("temporary directory should be created");
+        let index_path = skill_builder_candidates_index_path(tempdir.path());
+        let parent = index_path.parent().expect("candidate index path should have a parent");
+        fs::create_dir_all(parent).expect("candidate index parent should be created");
+        fs::write(index_path, br#"{"entries":[]}"#)
+            .expect("legacy skill builder candidate index should be written");
+        let index = load_skill_builder_candidate_index(tempdir.path())
+            .expect("legacy skill builder candidate index should load");
+        assert_eq!(index.schema_version, SKILL_BUILDER_CANDIDATE_LAYOUT_VERSION);
+        assert_eq!(index.updated_at_unix_ms, 0);
+        assert!(index.entries.is_empty());
+    }
 }
 
 fn skill_builder_candidates_root(skills_root: &FsPath) -> PathBuf {

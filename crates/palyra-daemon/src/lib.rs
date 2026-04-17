@@ -127,7 +127,12 @@ use palyra_common::{
     },
     validate_canonical_id,
 };
-use palyra_common::{default_identity_store_root, default_state_root};
+use palyra_common::{
+    default_identity_store_root, default_state_root,
+    versioned_json::{
+        migrate_updated_at_metadata_v0_to_v1, parse_versioned_json, VersionedJsonFormat,
+    },
+};
 use palyra_connectors::providers::discord::{
     discord_min_invite_permissions, discord_required_permission_labels,
     resolve_discord_intents_from_flags, DiscordPrivilegedIntentStatus,
@@ -276,6 +281,8 @@ const CONSOLE_MAX_RELAY_ACTION_PAYLOAD_BYTES: u64 = 32 * 1_024;
 const SKILLS_LAYOUT_VERSION: u32 = 1;
 const SKILLS_INDEX_FILE_NAME: &str = "installed-index.json";
 const SKILL_ARTIFACT_FILE_NAME: &str = "artifact.palyra-skill";
+const INSTALLED_SKILLS_INDEX_FORMAT: VersionedJsonFormat =
+    VersionedJsonFormat::new("installed skills index", SKILLS_LAYOUT_VERSION);
 
 #[derive(Debug, Deserialize)]
 struct JournalRecentQuery {
@@ -1593,6 +1600,10 @@ struct InstalledSkillsIndex {
 }
 
 const SKILL_BUILDER_CANDIDATE_LAYOUT_VERSION: u32 = 1;
+const SKILL_BUILDER_CANDIDATE_INDEX_FORMAT: VersionedJsonFormat = VersionedJsonFormat::new(
+    "skill builder candidate index",
+    SKILL_BUILDER_CANDIDATE_LAYOUT_VERSION,
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2564,19 +2575,17 @@ fn load_installed_skills_index(skills_root: &FsPath) -> Result<InstalledSkillsIn
             index_path.display()
         )))
     })?;
-    let mut index: InstalledSkillsIndex =
-        serde_json::from_slice(payload.as_slice()).map_err(|error| {
-            runtime_status_response(tonic::Status::invalid_argument(format!(
-                "failed to parse installed skills index {}: {error}",
-                index_path.display()
-            )))
-        })?;
-    if index.schema_version != SKILLS_LAYOUT_VERSION {
-        return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
-            "unsupported installed skills index schema version {}",
-            index.schema_version
-        ))));
-    }
+    let mut index: InstalledSkillsIndex = parse_versioned_json(
+        payload.as_slice(),
+        INSTALLED_SKILLS_INDEX_FORMAT,
+        &[(0, migrate_updated_at_metadata_v0_to_v1)],
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::invalid_argument(format!(
+            "failed to parse installed skills index {}: {error}",
+            index_path.display()
+        )))
+    })?;
     normalize_installed_skills_index(&mut index);
     Ok(index)
 }
@@ -3442,23 +3451,24 @@ mod tests {
         clamp_console_relay_token_ttl_ms, connector_db_path_from_journal_path,
         constant_time_eq_bytes, consume_admin_rate_limit_with_now,
         consume_canvas_rate_limit_with_now, enforce_remote_bind_guard,
-        finalize_discord_onboarding_plan, find_hashed_secret_map_key, loopback_grpc_url,
-        mint_console_relay_token, mint_console_secret_token, normalize_discord_token,
-        parse_offline_env_flag, prune_console_relay_tokens, redact_console_diagnostics_value,
-        resolve_discord_intents_from_flags, resolve_model_provider_secret,
-        resolve_runtime_state_root_with_override, runtime_status_response,
-        sanitize_http_error_message, sha256_hex, summarize_discord_inbound_monitor,
-        validate_admin_auth_config, validate_canvas_http_canvas_id,
-        validate_canvas_http_token_query, validate_process_runner_backend_policy,
-        ConsoleRelayToken, DiscordBotIdentitySummary, DiscordOnboardingRequest,
-        DiscordOnboardingScope, DiscordPrivilegedIntentStatus, RemoteBindEndpoints,
-        RemoteBindGuardConfig, ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW,
-        ADMIN_RATE_LIMIT_MAX_IP_BUCKETS, ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
-        CANVAS_HTTP_MAX_TOKEN_BYTES, CANVAS_RATE_LIMIT_MAX_IP_BUCKETS,
-        CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS,
-        CONSOLE_RELAY_TOKEN_MAX_TTL_MS, CONSOLE_RELAY_TOKEN_MIN_TTL_MS,
-        DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS, DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT,
-        DISCORD_APP_FLAG_GATEWAY_PRESENCE,
+        finalize_discord_onboarding_plan, find_hashed_secret_map_key, load_installed_skills_index,
+        loopback_grpc_url, mint_console_relay_token, mint_console_secret_token,
+        normalize_discord_token, parse_offline_env_flag, prune_console_relay_tokens,
+        redact_console_diagnostics_value, resolve_discord_intents_from_flags,
+        resolve_model_provider_secret, resolve_runtime_state_root_with_override,
+        runtime_status_response, sanitize_http_error_message, sha256_hex,
+        summarize_discord_inbound_monitor, validate_admin_auth_config,
+        validate_canvas_http_canvas_id, validate_canvas_http_token_query,
+        validate_process_runner_backend_policy, ConsoleRelayToken, DiscordBotIdentitySummary,
+        DiscordOnboardingRequest, DiscordOnboardingScope, DiscordPrivilegedIntentStatus,
+        RemoteBindEndpoints, RemoteBindGuardConfig,
+        ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
+        ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CANVAS_HTTP_MAX_TOKEN_BYTES,
+        CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        CONSOLE_RELAY_TOKEN_DEFAULT_TTL_MS, CONSOLE_RELAY_TOKEN_MAX_TTL_MS,
+        CONSOLE_RELAY_TOKEN_MIN_TTL_MS, DISCORD_APP_FLAG_GATEWAY_GUILD_MEMBERS,
+        DISCORD_APP_FLAG_GATEWAY_MESSAGE_CONTENT, DISCORD_APP_FLAG_GATEWAY_PRESENCE,
+        SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
     };
     use crate::gateway::GatewayAuthConfig;
     use crate::model_provider::{
@@ -3482,6 +3492,18 @@ mod tests {
         let auth_registry = AuthProfileRegistry::open(identity_store_root.as_path())
             .expect("auth profile registry should initialize");
         (tempdir, auth_registry, vault)
+    }
+
+    #[test]
+    fn load_installed_skills_index_migrates_legacy_metadata() {
+        let tempdir = tempfile::tempdir().expect("temporary directory should be created");
+        fs::write(tempdir.path().join(SKILLS_INDEX_FILE_NAME), br#"{"entries":[]}"#)
+            .expect("legacy installed skills index should be written");
+        let index = load_installed_skills_index(tempdir.path())
+            .expect("legacy installed skills index should load");
+        assert_eq!(index.schema_version, SKILLS_LAYOUT_VERSION);
+        assert_eq!(index.updated_at_unix_ms, 0);
+        assert!(index.entries.is_empty());
     }
 
     fn openai_model_provider_config() -> ModelProviderConfig {

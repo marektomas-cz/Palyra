@@ -11,6 +11,7 @@ pub mod netguard;
 pub mod process_runner_input;
 pub mod project_context;
 pub mod redaction;
+pub mod versioned_json;
 mod webhook;
 #[cfg(windows)]
 pub mod windows_security;

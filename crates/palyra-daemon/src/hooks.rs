@@ -1,6 +1,9 @@
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
+use palyra_common::versioned_json::{
+    migrate_updated_at_metadata_v0_to_v1, parse_versioned_json, VersionedJsonFormat,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
@@ -20,6 +23,8 @@ const HOOK_BINDINGS_LAYOUT_VERSION: u32 = 1;
 const HOOK_BINDINGS_INDEX_FILE_NAME: &str = "bindings.json";
 const HOOK_JOURNAL_POLL_INTERVAL_MS: u64 = 1_000;
 const HOOK_JOURNAL_SNAPSHOT_LIMIT: usize = 128;
+const HOOK_BINDINGS_INDEX_FORMAT: VersionedJsonFormat =
+    VersionedJsonFormat::new("hook bindings index", HOOK_BINDINGS_LAYOUT_VERSION);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,11 +127,12 @@ pub(crate) fn load_hook_bindings_index(hooks_root: &FsPath) -> Result<HookBindin
     }
     let payload = fs::read(path.as_path())
         .with_context(|| format!("failed to read hook bindings index {}", path.display()))?;
-    let mut index = serde_json::from_slice::<HookBindingsIndex>(payload.as_slice())
-        .with_context(|| format!("failed to parse hook bindings index {}", path.display()))?;
-    if index.schema_version != HOOK_BINDINGS_LAYOUT_VERSION {
-        bail!("unsupported hook bindings schema version {}", index.schema_version);
-    }
+    let mut index = parse_versioned_json::<HookBindingsIndex>(
+        payload.as_slice(),
+        HOOK_BINDINGS_INDEX_FORMAT,
+        &[(0, migrate_updated_at_metadata_v0_to_v1)],
+    )
+    .with_context(|| format!("failed to parse hook bindings index {}", path.display()))?;
     normalize_hook_bindings_index(&mut index);
     Ok(index)
 }
@@ -553,6 +559,28 @@ fn normalize_hook_identifier(raw: &str, field_name: &'static str) -> Result<Stri
         bail!("{field_name} must use only a-z, 0-9, '.', '_' or '-'");
     }
     Ok(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{hook_bindings_index_path, load_hook_bindings_index, HOOK_BINDINGS_LAYOUT_VERSION};
+
+    #[test]
+    fn load_hook_bindings_index_migrates_legacy_metadata() {
+        let tempdir = tempdir().expect("temporary directory should be created");
+        let index_path = hook_bindings_index_path(tempdir.path());
+        fs::write(index_path, br#"{"entries":[]}"#)
+            .expect("legacy hook bindings index should be written");
+        let index = load_hook_bindings_index(tempdir.path())
+            .expect("legacy hook bindings index should load");
+        assert_eq!(index.schema_version, HOOK_BINDINGS_LAYOUT_VERSION);
+        assert_eq!(index.updated_at_unix_ms, 0);
+        assert!(index.entries.is_empty());
+    }
 }
 
 fn normalize_hook_operator_metadata(mut operator: HookOperatorMetadata) -> HookOperatorMetadata {

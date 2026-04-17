@@ -10,7 +10,12 @@ use std::{
 };
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
-use palyra_common::{default_identity_store_root, default_state_root};
+use palyra_common::{
+    default_identity_store_root, default_state_root,
+    versioned_json::{
+        migrate_updated_at_metadata_v0_to_v1, parse_versioned_json, VersionedJsonFormat,
+    },
+};
 use palyra_policy::{
     evaluate_with_context, PolicyDecision, PolicyEvaluationConfig, PolicyRequest,
     PolicyRequestContext,
@@ -49,6 +54,8 @@ const MAX_RETRY_BACKOFF_MS: u64 = 60_000;
 const SKILLS_LAYOUT_VERSION: u32 = 1;
 const SKILLS_INDEX_FILE_NAME: &str = "installed-index.json";
 const SKILLS_ARTIFACT_FILE_NAME: &str = "artifact.palyra-skill";
+const PERIODIC_REAUDIT_SKILLS_INDEX_FORMAT: VersionedJsonFormat =
+    VersionedJsonFormat::new("installed skills index", SKILLS_LAYOUT_VERSION);
 const SKILLS_TRUST_STORE_PATH_ENV: &str = "PALYRA_SKILLS_TRUST_STORE";
 const SKILL_REAUDIT_INTERVAL_ENV: &str = "PALYRA_SKILL_REAUDIT_INTERVAL_MS";
 const DEFAULT_SKILL_REAUDIT_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -634,25 +641,8 @@ async fn run_periodic_skill_reaudit(
     if !index_path.exists() {
         return Ok(());
     }
-    let payload = fs::read(index_path.as_path()).map_err(|error| {
-        Status::internal(format!(
-            "failed to read installed skills index {}: {error}",
-            index_path.display()
-        ))
-    })?;
-    let index: InstalledSkillsIndex =
-        serde_json::from_slice(payload.as_slice()).map_err(|error| {
-            Status::internal(format!(
-                "failed to parse installed skills index {}: {error}",
-                index_path.display()
-            ))
-        })?;
-    if index.schema_version != SKILLS_LAYOUT_VERSION {
-        return Err(Status::failed_precondition(format!(
-            "unsupported installed skills index schema version {} (expected {})",
-            index.schema_version, SKILLS_LAYOUT_VERSION
-        )));
-    }
+    let index = load_periodic_reaudit_skills_index(index_path.as_path())?;
+    debug_assert_eq!(index.schema_version, SKILLS_LAYOUT_VERSION);
 
     let targets = periodic_reaudit_targets(&index);
     if targets.is_empty() {
@@ -725,6 +715,27 @@ async fn run_periodic_skill_reaudit(
         ))
     })?;
     Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn load_periodic_reaudit_skills_index(index_path: &Path) -> Result<InstalledSkillsIndex, Status> {
+    let payload = fs::read(index_path).map_err(|error| {
+        Status::internal(format!(
+            "failed to read installed skills index {}: {error}",
+            index_path.display()
+        ))
+    })?;
+    parse_versioned_json::<InstalledSkillsIndex>(
+        payload.as_slice(),
+        PERIODIC_REAUDIT_SKILLS_INDEX_FORMAT,
+        &[(0, migrate_updated_at_metadata_v0_to_v1)],
+    )
+    .map_err(|error| {
+        Status::failed_precondition(format!(
+            "failed to parse installed skills index {}: {error}",
+            index_path.display()
+        ))
+    })
 }
 
 fn compute_next_vacuum_due_at_unix_ms(
@@ -1612,11 +1623,15 @@ fn now_unix_ms_or_fallback(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::{
-        compute_next_run_after, decide_concurrency_policy, normalize_schedule,
-        now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
-        ConcurrencyDecision, CronMatcher, CronTimezoneMode, InstalledSkillRecord,
-        InstalledSkillsIndex,
+        compute_next_run_after, decide_concurrency_policy, load_periodic_reaudit_skills_index,
+        normalize_schedule, now_unix_ms_or_fallback, parse_skill_reaudit_interval,
+        periodic_reaudit_targets, ConcurrencyDecision, CronMatcher, CronTimezoneMode,
+        InstalledSkillRecord, InstalledSkillsIndex, SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
     };
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
     use crate::journal::{
@@ -1927,6 +1942,18 @@ mod tests {
             ],
             "periodic re-audit should target current versions first"
         );
+    }
+
+    #[test]
+    fn load_periodic_reaudit_skills_index_migrates_legacy_schema_metadata() {
+        let tempdir = tempdir().expect("temporary directory should be created");
+        let index_path = tempdir.path().join(SKILLS_INDEX_FILE_NAME);
+        fs::write(&index_path, br#"{"entries":[]}"#)
+            .expect("legacy installed skills index should be written");
+        let index = load_periodic_reaudit_skills_index(index_path.as_path())
+            .expect("legacy installed skills index should load");
+        assert_eq!(index.schema_version, SKILLS_LAYOUT_VERSION);
+        assert!(index.entries.is_empty());
     }
 
     #[test]
