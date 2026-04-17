@@ -673,7 +673,7 @@ file = "auth-access-help.txt"
 path = "auth access backfill"
 category = "nested_surface"
 status = "done"
-summary = "Phase-10 access schema repair and dry-run tooling."
+summary = "Access schema repair and dry-run tooling."
 required_flags = ["dry-run", "json"]
 
 [entries.snapshot]

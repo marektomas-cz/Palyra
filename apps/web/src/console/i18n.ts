@@ -252,7 +252,7 @@ const CS_MESSAGES: Readonly<Record<ConsoleMessageKey, string>> = {
   "guidance.cta": "Otevřít",
   "overview.telemetryTitle": "Aktivační baseline",
   "overview.telemetryBody":
-    "Metriky baseline z fáze 1 zůstávají auditně podložené přes systémové události místo samostatné pipeline analytického dodavatele.",
+    "Metriky baseline zůstávají auditně podložené přes systémové události místo samostatné pipeline analytického dodavatele.",
   "overview.telemetryFunnel": "Průchod trychtýřem",
   "overview.telemetryApprovals": "Únava ze schvalování",
   "overview.telemetryFriction": "Největší třecí plocha",

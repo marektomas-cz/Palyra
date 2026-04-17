@@ -624,7 +624,7 @@ export function AccessControlWorkspace({ api, setError, setNotice }: AccessContr
 
       <WorkspaceSectionCard
         title="Migration and rollout"
-        description="Track phase-10 upgrade readiness, run idempotent backfills, and keep staged rollout packages on an explicit kill-switch contract."
+        description="Track access schema upgrade readiness, run idempotent backfills, and keep staged rollout packages on an explicit kill-switch contract."
       >
         <WorkspaceInlineNotice
           title="Migration status"

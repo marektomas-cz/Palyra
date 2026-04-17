@@ -1826,7 +1826,7 @@ fn repair_access_registry_data(data: &mut AccessRegistryFile) -> AccessBackfillR
         notes.push(format!("trimmed {telemetry_trimmed} telemetry events to retention budget"));
     }
     if notes.is_empty() {
-        notes.push("registry already matched the phase-10 access schema contract".to_owned());
+        notes.push("registry already matched the current access schema contract".to_owned());
     }
 
     AccessBackfillReport {
