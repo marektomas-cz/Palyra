@@ -151,7 +151,7 @@ mod tests {
     use super::{build_console_handoff_path, parse_console_handoff, TuiCrossSurfaceHandoff};
 
     #[test]
-    fn build_console_handoff_path_preserves_phase1_context_order() {
+    fn build_console_handoff_path_preserves_context_order() {
         let payload = TuiCrossSurfaceHandoff {
             section: "browser".to_owned(),
             session_id: Some("session-1".to_owned()),

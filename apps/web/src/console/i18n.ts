@@ -119,7 +119,7 @@ const EN_MESSAGES = {
   "guidance.cta": "Open",
   "overview.telemetryTitle": "Activation baseline",
   "overview.telemetryBody":
-    "Phase 1 baseline metrics stay audit-backed through system events instead of a separate analytics vendor pipeline.",
+    "Baseline metrics stay audit-backed through system events instead of a separate analytics vendor pipeline.",
   "overview.telemetryFunnel": "Funnel progress",
   "overview.telemetryApprovals": "Approval fatigue",
   "overview.telemetryFriction": "Top friction surface",

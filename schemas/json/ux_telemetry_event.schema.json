@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://palyra.local/schemas/phase1_ux_telemetry_event.schema.json",
-  "title": "Phase 1 UX Telemetry Event",
+  "$id": "https://palyra.local/schemas/ux_telemetry_event.schema.json",
+  "title": "UX Telemetry Event",
   "type": "object",
   "additionalProperties": false,
   "required": [

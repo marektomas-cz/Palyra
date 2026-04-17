@@ -8,7 +8,7 @@ import {
   toSystemEventPayload,
 } from "./contracts";
 
-describe("phase 1 contracts", () => {
+describe("console contracts", () => {
   it("builds and parses handoff URLs with the canonical identifier set", () => {
     const href = buildConsoleHandoffHref({
       section: "canvas",

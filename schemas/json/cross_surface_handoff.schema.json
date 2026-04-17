@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://palyra.local/schemas/phase1_cross_surface_handoff.schema.json",
-  "title": "Phase 1 Cross-Surface Handoff",
+  "$id": "https://palyra.local/schemas/cross_surface_handoff.schema.json",
+  "title": "Cross-Surface Handoff",
   "type": "object",
   "additionalProperties": false,
   "properties": {
