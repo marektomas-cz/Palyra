@@ -208,22 +208,13 @@ export function ChatInspectorColumn({
         </div>
         <div className="workspace-tag-row">
           <Chip color={pendingApprovalCount > 0 ? "warning" : "success"} variant="soft">
-            {pendingApprovalCount} approval
-            {pendingApprovalCount === 1 ? "" : "s"}
+            {formatCountLabel(pendingApprovalCount, "approval")}
           </Chip>
+          <Chip variant="secondary">{formatCountLabel(a2uiSurfaces.length, "A2UI surface")}</Chip>
+          <Chip variant="secondary">{formatCountLabel(runIds.length, "known run")}</Chip>
+          <Chip variant="secondary">{formatCountLabel(compactions.length, "compaction")}</Chip>
           <Chip variant="secondary">
-            {a2uiSurfaces.length} A2UI surface
-            {a2uiSurfaces.length === 1 ? "" : "s"}
-          </Chip>
-          <Chip variant="secondary">
-            {runIds.length} known run{runIds.length === 1 ? "" : "s"}
-          </Chip>
-          <Chip variant="secondary">
-            {compactions.length} compaction{compactions.length === 1 ? "" : "s"}
-          </Chip>
-          <Chip variant="secondary">
-            {backgroundTasks.length} background task
-            {backgroundTasks.length === 1 ? "" : "s"}
+            {formatCountLabel(backgroundTasks.length, "background task")}
           </Chip>
         </div>
         <KeyValueList
@@ -1016,6 +1007,10 @@ export function ChatInspectorColumn({
       )}
     </div>
   );
+}
+
+function formatCountLabel(count: number, singularLabel: string): string {
+  return `${count} ${singularLabel}${count === 1 ? "" : "s"}`;
 }
 
 function extractBrowserSessionIds(runTape: ChatRunTapeSnapshot | null): string[] {
