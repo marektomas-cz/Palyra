@@ -3,8 +3,10 @@ use crate::journal::{
     LearningCandidateListFilter, LearningCandidateRecord, LearningCandidateReviewRequest,
 };
 use crate::*;
-
-const DYNAMIC_TOOL_BUILDER_ROLLOUT_FLAG: &str = "PALYRA_EXPERIMENTAL_DYNAMIC_TOOL_BUILDER";
+use palyra_common::feature_rollouts::{
+    FeatureRolloutSetting, DYNAMIC_TOOL_BUILDER_ROLLOUT_CONFIG_PATH,
+    DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+};
 
 pub(crate) async fn console_skills_list_handler(
     State(state): State<AppState>,
@@ -49,6 +51,7 @@ pub(crate) async fn console_skill_builder_candidates_list_handler(
     let _session = authorize_console_session(&state, &headers, false)?;
     let skills_root = resolve_skills_root()?;
     let mut index = load_skill_builder_candidate_index(skills_root.as_path())?;
+    let rollout = dynamic_tool_builder_rollout(&state);
     if let Some(source_kind) =
         query.source_kind.as_deref().map(str::trim).filter(|value| !value.is_empty())
     {
@@ -56,8 +59,9 @@ pub(crate) async fn console_skill_builder_candidates_list_handler(
     }
 
     Ok(Json(json!({
-        "rollout_flag": DYNAMIC_TOOL_BUILDER_ROLLOUT_FLAG,
-        "rollout_enabled": dynamic_tool_builder_rollout_enabled(),
+        "rollout_flag": DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+        "rollout_source": rollout.source,
+        "rollout_enabled": rollout.enabled,
         "count": index.entries.len(),
         "entries": index.entries,
         "skills_root": skills_root,
@@ -70,9 +74,10 @@ pub(crate) async fn console_skill_builder_candidate_create_handler(
     Json(payload): Json<ConsoleSkillBuilderCreateRequest>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    if !dynamic_tool_builder_rollout_enabled() {
+    let rollout = dynamic_tool_builder_rollout(&state);
+    if !rollout.enabled {
         return Err(runtime_status_response(tonic::Status::failed_precondition(format!(
-            "dynamic tool builder is disabled; set {DYNAMIC_TOOL_BUILDER_ROLLOUT_FLAG}=true to opt in"
+            "dynamic tool builder is disabled; enable {DYNAMIC_TOOL_BUILDER_ROLLOUT_CONFIG_PATH} or set {DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV}=true to opt in"
         ))));
     }
 
@@ -196,8 +201,8 @@ pub(crate) async fn console_skill_builder_candidate_create_handler(
         source_ref: scaffold.source_ref.clone(),
         summary: scaffold.summary.clone(),
         status: "quarantined".to_owned(),
-        rollout_flag: DYNAMIC_TOOL_BUILDER_ROLLOUT_FLAG.to_owned(),
-        rollout_enabled: true,
+        rollout_flag: DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV.to_owned(),
+        rollout_enabled: rollout.enabled,
         scaffold_root: scaffold.scaffold_root.clone(),
         manifest_path: scaffold.manifest_path.clone(),
         capability_declaration_path: scaffold.capability_declaration_path.clone(),
@@ -210,8 +215,9 @@ pub(crate) async fn console_skill_builder_candidate_create_handler(
     save_skill_builder_candidate_index(skills_root.as_path(), &index)?;
 
     Ok(Json(json!({
-        "rollout_flag": DYNAMIC_TOOL_BUILDER_ROLLOUT_FLAG,
-        "rollout_enabled": true,
+        "rollout_flag": DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+        "rollout_source": rollout.source,
+        "rollout_enabled": rollout.enabled,
         "candidate": index.entries.iter().find(|entry| entry.candidate_id == scaffold.builder_candidate_id).cloned(),
         "skill": {
             "skill_id": scaffold.skill_id,
@@ -612,8 +618,8 @@ pub(crate) async fn console_procedure_skill_promote_handler(
         source_ref: scaffold.source_ref.clone(),
         summary: scaffold.summary.clone(),
         status: "quarantined".to_owned(),
-        rollout_flag: DYNAMIC_TOOL_BUILDER_ROLLOUT_FLAG.to_owned(),
-        rollout_enabled: dynamic_tool_builder_rollout_enabled(),
+        rollout_flag: DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV.to_owned(),
+        rollout_enabled: dynamic_tool_builder_rollout(&state).enabled,
         scaffold_root: scaffold.scaffold_root.clone(),
         manifest_path: scaffold.manifest_path.clone(),
         capability_declaration_path: scaffold.capability_declaration_path.clone(),
@@ -737,15 +743,8 @@ fn default_generated_skill_id(candidate_id: &str) -> String {
     format!("palyra.generated.procedure.{}", candidate_id.to_ascii_lowercase())
 }
 
-fn dynamic_tool_builder_rollout_enabled() -> bool {
-    std::env::var(DYNAMIC_TOOL_BUILDER_ROLLOUT_FLAG)
-        .ok()
-        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(false)
+fn dynamic_tool_builder_rollout(state: &AppState) -> FeatureRolloutSetting {
+    state.runtime.config.feature_rollouts.dynamic_tool_builder
 }
 
 #[allow(clippy::result_large_err)]
@@ -1094,7 +1093,7 @@ fn build_builder_skill_manifest(
             experimental: true,
             source_kind: builder_source_kind(source).to_owned(),
             source_ref: builder_source_ref(source),
-            rollout_flag: DYNAMIC_TOOL_BUILDER_ROLLOUT_FLAG.to_owned(),
+            rollout_flag: DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV.to_owned(),
             review_status: "quarantined".to_owned(),
             checklist: palyra_skills::SkillBuilderChecklist {
                 capability_declaration_path: "builder-capabilities.json".to_owned(),

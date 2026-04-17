@@ -10,7 +10,12 @@ use palyra_common::{
         parse_document_with_migration, serialize_document_pretty, ConfigMigrationInfo,
     },
     daemon_config_schema::RootFileConfig,
-    default_config_search_paths, parse_config_path,
+    default_config_search_paths,
+    feature_rollouts::{
+        parse_boolish_feature_rollout, FeatureRolloutSetting, DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+        EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV, EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+    },
+    parse_config_path,
 };
 use palyra_vault::VaultRef;
 
@@ -32,6 +37,7 @@ pub fn load_config() -> Result<LoadedConfig> {
     let mut deployment = DeploymentConfig::default();
     let mut daemon = DaemonConfig::default();
     let mut gateway = GatewayConfig::default();
+    let mut feature_rollouts = FeatureRolloutsConfig::default();
     let mut cron = CronConfig::default();
     let mut orchestrator = OrchestratorConfig::default();
     let mut memory = MemoryConfig::default();
@@ -139,6 +145,19 @@ pub fn load_config() -> Result<LoadedConfig> {
         if let Some(file_cron) = parsed.cron {
             if let Some(timezone) = file_cron.timezone {
                 cron.timezone = parse_cron_timezone_mode(timezone.as_str(), "cron.timezone")?;
+            }
+        }
+        if let Some(file_feature_rollouts) = parsed.feature_rollouts {
+            if let Some(enabled) = file_feature_rollouts.dynamic_tool_builder {
+                feature_rollouts.dynamic_tool_builder = FeatureRolloutSetting::from_config(enabled);
+            }
+            if let Some(enabled) = file_feature_rollouts.execution_backend_remote_node {
+                feature_rollouts.execution_backend_remote_node =
+                    FeatureRolloutSetting::from_config(enabled);
+            }
+            if let Some(enabled) = file_feature_rollouts.execution_backend_ssh_tunnel {
+                feature_rollouts.execution_backend_ssh_tunnel =
+                    FeatureRolloutSetting::from_config(enabled);
             }
         }
         if let Some(file_orchestrator) = parsed.orchestrator {
@@ -1556,6 +1575,22 @@ pub fn load_config() -> Result<LoadedConfig> {
         source.push_str(" +env(PALYRA_VAULT_DIR)");
     }
 
+    feature_rollouts.dynamic_tool_builder = apply_feature_rollout_env_override(
+        feature_rollouts.dynamic_tool_builder,
+        DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+        &mut source,
+    )?;
+    feature_rollouts.execution_backend_remote_node = apply_feature_rollout_env_override(
+        feature_rollouts.execution_backend_remote_node,
+        EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
+        &mut source,
+    )?;
+    feature_rollouts.execution_backend_ssh_tunnel = apply_feature_rollout_env_override(
+        feature_rollouts.execution_backend_ssh_tunnel,
+        EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+        &mut source,
+    )?;
+
     if gateway.tls.enabled && (gateway.tls.cert_path.is_none() || gateway.tls.key_path.is_none()) {
         anyhow::bail!(
             "gateway.tls.enabled=true requires both gateway.tls.cert_path and gateway.tls.key_path"
@@ -1580,6 +1615,7 @@ pub fn load_config() -> Result<LoadedConfig> {
         deployment,
         daemon,
         gateway,
+        feature_rollouts,
         cron,
         orchestrator,
         memory,
@@ -1602,6 +1638,19 @@ fn parse_root_file_config(content: &str) -> Result<(RootFileConfig, ConfigMigrat
     let parsed: RootFileConfig =
         toml::from_str(&normalized).context("invalid daemon config schema")?;
     Ok((parsed, migration))
+}
+
+fn apply_feature_rollout_env_override(
+    current: FeatureRolloutSetting,
+    env_name: &'static str,
+    source: &mut String,
+) -> Result<FeatureRolloutSetting> {
+    let Ok(raw) = env::var(env_name) else {
+        return Ok(current);
+    };
+    let enabled = parse_boolish_feature_rollout(raw.as_str(), env_name)?;
+    source.push_str(&format!(" +env({env_name})"));
+    Ok(FeatureRolloutSetting::from_env(enabled))
 }
 
 fn find_config_path() -> Result<Option<PathBuf>> {
@@ -2709,34 +2758,85 @@ fn parse_retries(value: u32, name: &str) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        ffi::OsString,
+        path::PathBuf,
+        sync::{Mutex, OnceLock},
+    };
 
     use super::{
-        parse_broadcast_strategy, parse_browser_service_endpoint,
-        parse_canvas_host_public_base_url, parse_content_type_allowlist, parse_cron_timezone_mode,
-        parse_default_memory_ttl_ms, parse_direct_message_policy, parse_dns_suffix_allowlist,
-        parse_host_allowlist, parse_http_header_allowlist, parse_journal_db_path,
-        parse_memory_retention_vacuum_schedule, parse_model_provider_auth_provider_kind,
-        parse_model_provider_registry_entry, parse_model_provider_registry_model,
-        parse_openai_base_url, parse_openai_embeddings_dims, parse_optional_auth_profile_id,
-        parse_optional_browser_state_dir, parse_optional_openai_embeddings_model,
-        parse_optional_vault_ref_field, parse_positive_u32, parse_positive_usize,
-        parse_process_executable_allowlist, parse_process_runner_egress_enforcement_mode,
-        parse_process_runner_tier, parse_root_file_config, parse_storage_prefix_allowlist,
-        parse_tool_allowlist, parse_vault_dir, parse_vault_ref_allowlist, AdminConfig,
-        BrowserServiceConfig, CanvasHostConfig, ChannelRouterConfig, CronConfig, DeploymentConfig,
-        DeploymentMode, GatewayBindProfile, GatewayConfig, GatewayTlsConfig, HttpFetchConfig,
-        IdentityConfig, MemoryConfig, ModelProviderConfig, OrchestratorConfig, StorageConfig,
-        ToolCallConfig,
+        apply_feature_rollout_env_override, parse_broadcast_strategy,
+        parse_browser_service_endpoint, parse_canvas_host_public_base_url,
+        parse_content_type_allowlist, parse_cron_timezone_mode, parse_default_memory_ttl_ms,
+        parse_direct_message_policy, parse_dns_suffix_allowlist, parse_host_allowlist,
+        parse_http_header_allowlist, parse_journal_db_path, parse_memory_retention_vacuum_schedule,
+        parse_model_provider_auth_provider_kind, parse_model_provider_registry_entry,
+        parse_model_provider_registry_model, parse_openai_base_url, parse_openai_embeddings_dims,
+        parse_optional_auth_profile_id, parse_optional_browser_state_dir,
+        parse_optional_openai_embeddings_model, parse_optional_vault_ref_field, parse_positive_u32,
+        parse_positive_usize, parse_process_executable_allowlist,
+        parse_process_runner_egress_enforcement_mode, parse_process_runner_tier,
+        parse_root_file_config, parse_storage_prefix_allowlist, parse_tool_allowlist,
+        parse_vault_dir, parse_vault_ref_allowlist, AdminConfig, BrowserServiceConfig,
+        CanvasHostConfig, ChannelRouterConfig, CronConfig, DeploymentConfig, DeploymentMode,
+        GatewayBindProfile, GatewayConfig, GatewayTlsConfig, HttpFetchConfig, IdentityConfig,
+        MemoryConfig, ModelProviderConfig, OrchestratorConfig, StorageConfig, ToolCallConfig,
     };
     use crate::channel_router::{BroadcastStrategy, DirectMessagePolicy};
     use crate::model_provider::{
         ModelProviderAuthProviderKind, ModelProviderKind, ProviderMetadataSource, ProviderModelRole,
     };
     use crate::sandbox_runner::{EgressEnforcementMode, SandboxProcessRunnerTier};
-    use palyra_common::daemon_config_schema::{
-        FileModelProviderRegistryEntry, FileModelProviderRegistryModel, RootFileConfig,
+    use palyra_common::{
+        daemon_config_schema::{
+            FileModelProviderRegistryEntry, FileModelProviderRegistryModel, RootFileConfig,
+        },
+        feature_rollouts::{
+            FeatureRolloutSetting, FeatureRolloutSource, DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+        },
     };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     #[test]
     fn identity_config_defaults_to_secure_mode() {
@@ -2844,6 +2944,72 @@ mod tests {
             crate::cron::CronTimezoneMode::Utc,
             "cron scheduler should default to UTC for deterministic cross-host behavior"
         );
+    }
+
+    #[test]
+    fn feature_rollouts_config_parses_expected_values() {
+        let (parsed, _) = parse_root_file_config(
+            r#"
+            [feature_rollouts]
+            dynamic_tool_builder = true
+            execution_backend_remote_node = false
+            execution_backend_ssh_tunnel = true
+            "#,
+        )
+        .expect("feature_rollouts should parse");
+        let feature_rollouts =
+            parsed.feature_rollouts.expect("feature_rollouts section should be present");
+        assert_eq!(feature_rollouts.dynamic_tool_builder, Some(true));
+        assert_eq!(feature_rollouts.execution_backend_remote_node, Some(false));
+        assert_eq!(feature_rollouts.execution_backend_ssh_tunnel, Some(true));
+    }
+
+    #[test]
+    fn feature_rollout_env_override_defaults_to_disabled_without_overrides() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let _clear = ScopedEnvVar::unset(DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV);
+        let mut source = "defaults".to_owned();
+        let setting = apply_feature_rollout_env_override(
+            FeatureRolloutSetting::default(),
+            DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+            &mut source,
+        )
+        .expect("missing env should preserve default");
+        assert!(!setting.enabled, "missing env should not accidentally enable the rollout");
+        assert_eq!(setting.source, FeatureRolloutSource::Default);
+        assert_eq!(source, "defaults");
+    }
+
+    #[test]
+    fn feature_rollout_env_override_takes_precedence_over_config_value() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let _env = ScopedEnvVar::set(DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV, "off");
+        let mut source = "config:/tmp/palyra.toml".to_owned();
+        let setting = apply_feature_rollout_env_override(
+            FeatureRolloutSetting::from_config(true),
+            DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+            &mut source,
+        )
+        .expect("env override should parse");
+        assert!(!setting.enabled, "env override should win over config");
+        assert_eq!(setting.source, FeatureRolloutSource::Env);
+        assert!(source.contains(DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV));
+    }
+
+    #[test]
+    fn feature_rollout_env_override_rejects_invalid_values() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let _env = ScopedEnvVar::set(DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV, "maybe");
+        let mut source = "defaults".to_owned();
+        let error = apply_feature_rollout_env_override(
+            FeatureRolloutSetting::default(),
+            DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+            &mut source,
+        )
+        .expect_err("invalid env value should fail");
+        let rendered = error.to_string();
+        assert!(rendered.contains(DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV));
+        assert!(rendered.contains("boolean-like value"));
     }
 
     #[test]

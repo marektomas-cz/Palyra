@@ -105,6 +105,7 @@ pub struct RootFileConfig {
     pub daemon: Option<FileDaemonConfig>,
     pub gateway: Option<FileGatewayConfig>,
     pub gateway_access: Option<FileGatewayAccessConfig>,
+    pub feature_rollouts: Option<FileFeatureRolloutsConfig>,
     pub cron: Option<FileCronConfig>,
     pub orchestrator: Option<FileOrchestratorConfig>,
     pub memory: Option<FileMemoryConfig>,
@@ -164,6 +165,14 @@ pub struct FileGatewayAccessConfig {
     pub remote_base_url: Option<String>,
     pub pinned_server_cert_fingerprint_sha256: Option<String>,
     pub pinned_gateway_ca_fingerprint_sha256: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileFeatureRolloutsConfig {
+    pub dynamic_tool_builder: Option<bool>,
+    pub execution_backend_remote_node: Option<bool>,
+    pub execution_backend_ssh_tunnel: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -569,5 +578,24 @@ mod tests {
         );
         assert_eq!(gateway_access.pinned_server_cert_fingerprint_sha256.as_deref(), Some("01ab"));
         assert!(gateway_access.pinned_gateway_ca_fingerprint_sha256.is_none());
+    }
+
+    #[test]
+    fn feature_rollouts_section_parses_expected_fields() {
+        let parsed: RootFileConfig = toml::from_str(
+            r#"
+            [feature_rollouts]
+            dynamic_tool_builder = true
+            execution_backend_remote_node = false
+            execution_backend_ssh_tunnel = true
+            "#,
+        )
+        .expect("feature_rollouts section should parse");
+
+        let feature_rollouts =
+            parsed.feature_rollouts.as_ref().expect("feature_rollouts section should be available");
+        assert_eq!(feature_rollouts.dynamic_tool_builder, Some(true));
+        assert_eq!(feature_rollouts.execution_backend_remote_node, Some(false));
+        assert_eq!(feature_rollouts.execution_backend_ssh_tunnel, Some(true));
     }
 }

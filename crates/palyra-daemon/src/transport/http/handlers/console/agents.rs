@@ -264,6 +264,7 @@ fn backend_inventory(
         &state.runtime.config.tool_call.process_runner,
         nodes.as_slice(),
         now_unix_ms,
+        &state.runtime.config.feature_rollouts,
     ))
 }
 

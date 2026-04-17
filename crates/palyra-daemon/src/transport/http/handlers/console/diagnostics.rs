@@ -1,4 +1,9 @@
 use crate::*;
+use palyra_common::feature_rollouts::{
+    DYNAMIC_TOOL_BUILDER_ROLLOUT_CONFIG_PATH, DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+    EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_CONFIG_PATH, EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
+    EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_CONFIG_PATH, EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -106,6 +111,7 @@ pub(crate) async fn console_diagnostics_handler(
             "rollout": access_snapshot.rollout,
             "telemetry": access_snapshot.telemetry,
         },
+        "feature_rollouts": collect_console_feature_rollouts_diagnostics(&state),
         "deployment": deployment_payload,
         "execution_backends": execution_backends_payload,
         "canvas_experiments": canvas_experiments_payload,
@@ -163,9 +169,34 @@ fn collect_console_execution_backend_diagnostics(state: &AppState) -> Result<Val
         &state.runtime.config.tool_call.process_runner,
         nodes.as_slice(),
         now_unix_ms,
+        &state.runtime.config.feature_rollouts,
     ))
     .map_err(|error| {
         tonic::Status::internal(format!("failed to serialize execution backends: {error}"))
+    })
+}
+
+fn collect_console_feature_rollouts_diagnostics(state: &AppState) -> Value {
+    let feature_rollouts = &state.runtime.config.feature_rollouts;
+    json!({
+        "dynamic_tool_builder": {
+            "enabled": feature_rollouts.dynamic_tool_builder.enabled,
+            "source": feature_rollouts.dynamic_tool_builder.source,
+            "config_path": DYNAMIC_TOOL_BUILDER_ROLLOUT_CONFIG_PATH,
+            "env_var": DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+        },
+        "execution_backend_remote_node": {
+            "enabled": feature_rollouts.execution_backend_remote_node.enabled,
+            "source": feature_rollouts.execution_backend_remote_node.source,
+            "config_path": EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_CONFIG_PATH,
+            "env_var": EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
+        },
+        "execution_backend_ssh_tunnel": {
+            "enabled": feature_rollouts.execution_backend_ssh_tunnel.enabled,
+            "source": feature_rollouts.execution_backend_ssh_tunnel.source,
+            "config_path": EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_CONFIG_PATH,
+            "env_var": EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+        },
     })
 }
 
@@ -370,11 +401,9 @@ pub(crate) async fn collect_console_skills_diagnostics(state: &AppState) -> Valu
             "errors": runtime_errors,
         },
         "builder": {
-            "rollout_flag": "PALYRA_EXPERIMENTAL_DYNAMIC_TOOL_BUILDER",
-            "rollout_enabled": std::env::var("PALYRA_EXPERIMENTAL_DYNAMIC_TOOL_BUILDER")
-                .ok()
-                .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(false),
+            "rollout_flag": DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+            "rollout_source": state.runtime.config.feature_rollouts.dynamic_tool_builder.source,
+            "rollout_enabled": state.runtime.config.feature_rollouts.dynamic_tool_builder.enabled,
             "candidate_total": builder_index.as_ref().map(|index| index.entries.len()).unwrap_or(0),
             "procedure_candidates": builder_index
                 .as_ref()

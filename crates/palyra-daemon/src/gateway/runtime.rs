@@ -60,6 +60,7 @@ pub struct GatewayRuntimeConfigSnapshot {
     pub vault_get_approval_required_refs: Vec<String>,
     pub max_tape_entries_per_response: usize,
     pub max_tape_bytes_per_response: usize,
+    pub feature_rollouts: crate::config::FeatureRolloutsConfig,
     pub channel_router: ChannelRouterConfig,
     pub media: MediaRuntimeConfig,
     pub tool_call: ToolCallConfig,

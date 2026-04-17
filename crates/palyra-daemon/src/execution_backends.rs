@@ -1,18 +1,18 @@
 use std::collections::BTreeSet;
-use std::env;
 
+use palyra_common::feature_rollouts::{
+    FeatureRolloutSetting, FeatureRolloutSource, EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
+    EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+};
 use palyra_sandbox::{current_backend_capabilities, current_backend_kind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::FeatureRolloutsConfig,
     node_runtime::RegisteredNodeRecord,
     sandbox_runner::{process_runner_executor_name, SandboxProcessRunnerPolicy},
 };
 
-pub(crate) const ENV_REMOTE_NODE_BACKEND_ENABLED: &str =
-    "PALYRA_EXPERIMENTAL_EXECUTION_BACKEND_REMOTE_NODE";
-pub(crate) const ENV_SSH_TUNNEL_BACKEND_ENABLED: &str =
-    "PALYRA_EXPERIMENTAL_EXECUTION_BACKEND_SSH_TUNNEL";
 const NODE_HEALTHY_AFTER_MS: i64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -95,6 +95,7 @@ pub(crate) struct ExecutionBackendInventoryRecord {
     pub(crate) operator_summary: String,
     pub(crate) executor_label: Option<String>,
     pub(crate) rollout_flag: Option<String>,
+    pub(crate) rollout_source: Option<FeatureRolloutSource>,
     pub(crate) rollout_enabled: bool,
     pub(crate) capabilities: Vec<String>,
     pub(crate) tradeoffs: Vec<String>,
@@ -141,6 +142,7 @@ pub(crate) fn build_execution_backend_inventory(
     policy: &SandboxProcessRunnerPolicy,
     nodes: &[RegisteredNodeRecord],
     now_unix_ms: i64,
+    feature_rollouts: &FeatureRolloutsConfig,
 ) -> Vec<ExecutionBackendInventoryRecord> {
     let healthy_nodes = nodes
         .iter()
@@ -152,8 +154,8 @@ pub(crate) fn build_execution_backend_inventory(
         policy,
         nodes.len(),
         healthy_nodes.as_slice(),
-        parse_backend_flag(ENV_REMOTE_NODE_BACKEND_ENABLED),
-        parse_backend_flag(ENV_SSH_TUNNEL_BACKEND_ENABLED),
+        feature_rollouts.execution_backend_remote_node,
+        feature_rollouts.execution_backend_ssh_tunnel,
     )
 }
 
@@ -161,13 +163,13 @@ fn build_execution_backend_inventory_with_rollout(
     policy: &SandboxProcessRunnerPolicy,
     total_nodes: usize,
     healthy_nodes: &[&RegisteredNodeRecord],
-    remote_node_enabled: bool,
-    ssh_tunnel_enabled: bool,
+    remote_node_rollout: FeatureRolloutSetting,
+    ssh_tunnel_rollout: FeatureRolloutSetting,
 ) -> Vec<ExecutionBackendInventoryRecord> {
     vec![
         local_sandbox_inventory_record(policy),
-        desktop_node_inventory_record(total_nodes, healthy_nodes, remote_node_enabled),
-        ssh_tunnel_inventory_record(ssh_tunnel_enabled),
+        desktop_node_inventory_record(total_nodes, healthy_nodes, remote_node_rollout),
+        ssh_tunnel_inventory_record(ssh_tunnel_rollout),
     ]
 }
 
@@ -325,6 +327,7 @@ fn local_sandbox_inventory_record(
         operator_summary,
         executor_label: Some(process_runner_executor_name(policy)),
         rollout_flag: None,
+        rollout_source: None,
         rollout_enabled: true,
         capabilities,
         tradeoffs: vec![
@@ -339,16 +342,16 @@ fn local_sandbox_inventory_record(
 fn desktop_node_inventory_record(
     total_nodes: usize,
     healthy_nodes: &[&RegisteredNodeRecord],
-    rollout_enabled: bool,
+    rollout: FeatureRolloutSetting,
 ) -> ExecutionBackendInventoryRecord {
     let capabilities = aggregate_node_capabilities(healthy_nodes);
-    let (state, selectable, operator_summary) = if !rollout_enabled {
+    let (state, selectable, operator_summary) = if !rollout.enabled {
         (
             ExecutionBackendState::Disabled,
             false,
             format!(
                 "Preview backend is disabled. Set {}=1 and keep at least one paired desktop node healthy before selecting it.",
-                ENV_REMOTE_NODE_BACKEND_ENABLED
+                EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV
             ),
         )
     } else if !healthy_nodes.is_empty() {
@@ -385,8 +388,9 @@ fn desktop_node_inventory_record(
         description: ExecutionBackendPreference::DesktopNode.description().to_owned(),
         operator_summary,
         executor_label: None,
-        rollout_flag: Some(ENV_REMOTE_NODE_BACKEND_ENABLED.to_owned()),
-        rollout_enabled,
+        rollout_flag: Some(EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV.to_owned()),
+        rollout_source: Some(rollout.source),
+        rollout_enabled: rollout.enabled,
         capabilities,
         tradeoffs: vec![
             "Supports first-party desktop capabilities and local mediation flows".to_owned(),
@@ -397,30 +401,31 @@ fn desktop_node_inventory_record(
     }
 }
 
-fn ssh_tunnel_inventory_record(rollout_enabled: bool) -> ExecutionBackendInventoryRecord {
+fn ssh_tunnel_inventory_record(rollout: FeatureRolloutSetting) -> ExecutionBackendInventoryRecord {
     ExecutionBackendInventoryRecord {
         backend_id: ExecutionBackendPreference::SshTunnel.as_str().to_owned(),
         label: ExecutionBackendPreference::SshTunnel.label().to_owned(),
-        state: if rollout_enabled {
+        state: if rollout.enabled {
             ExecutionBackendState::Available
         } else {
             ExecutionBackendState::Disabled
         },
-        selectable: rollout_enabled,
+        selectable: rollout.enabled,
         selected_by_default: false,
         description: ExecutionBackendPreference::SshTunnel.description().to_owned(),
-        operator_summary: if rollout_enabled {
+        operator_summary: if rollout.enabled {
             "Preview backend is enabled. Operators must still establish an explicit SSH forward before relying on remote control-plane flows."
                 .to_owned()
         } else {
             format!(
                 "Preview backend is disabled. Set {}=1 before advertising SSH tunnel workflows.",
-                ENV_SSH_TUNNEL_BACKEND_ENABLED
+                EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV
             )
         },
         executor_label: None,
-        rollout_flag: Some(ENV_SSH_TUNNEL_BACKEND_ENABLED.to_owned()),
-        rollout_enabled,
+        rollout_flag: Some(EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV.to_owned()),
+        rollout_source: Some(rollout.source),
+        rollout_enabled: rollout.enabled,
         capabilities: vec![
             "verified_remote_dashboard_access".to_owned(),
             "operator_handoff".to_owned(),
@@ -450,18 +455,11 @@ fn aggregate_node_capabilities(nodes: &[&RegisteredNodeRecord]) -> Vec<String> {
     capabilities.into_iter().take(6).collect()
 }
 
-fn parse_backend_flag(name: &str) -> bool {
-    env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use palyra_common::feature_rollouts::FeatureRolloutSource;
 
     use crate::sandbox_runner::{
         EgressEnforcementMode, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
@@ -470,6 +468,7 @@ mod tests {
     use super::{
         build_execution_backend_inventory_with_rollout, resolve_execution_backend,
         validate_execution_backend_selection, ExecutionBackendPreference, ExecutionBackendState,
+        FeatureRolloutSetting,
     };
 
     fn test_policy() -> SandboxProcessRunnerPolicy {
@@ -490,8 +489,13 @@ mod tests {
 
     #[test]
     fn automatic_resolution_prefers_local_sandbox() {
-        let inventory =
-            build_execution_backend_inventory_with_rollout(&test_policy(), 0, &[], false, false);
+        let inventory = build_execution_backend_inventory_with_rollout(
+            &test_policy(),
+            0,
+            &[],
+            FeatureRolloutSetting::default(),
+            FeatureRolloutSetting::default(),
+        );
         let resolution =
             resolve_execution_backend(ExecutionBackendPreference::Automatic, &inventory);
         assert_eq!(resolution.resolved, ExecutionBackendPreference::LocalSandbox);
@@ -500,8 +504,13 @@ mod tests {
 
     #[test]
     fn preview_backend_selection_rejects_disabled_rollout() {
-        let inventory =
-            build_execution_backend_inventory_with_rollout(&test_policy(), 0, &[], false, false);
+        let inventory = build_execution_backend_inventory_with_rollout(
+            &test_policy(),
+            0,
+            &[],
+            FeatureRolloutSetting::default(),
+            FeatureRolloutSetting::default(),
+        );
         let error = validate_execution_backend_selection(
             ExecutionBackendPreference::DesktopNode,
             &inventory,
@@ -512,8 +521,13 @@ mod tests {
 
     #[test]
     fn preview_backend_resolution_falls_back_to_local_sandbox() {
-        let inventory =
-            build_execution_backend_inventory_with_rollout(&test_policy(), 0, &[], false, true);
+        let inventory = build_execution_backend_inventory_with_rollout(
+            &test_policy(),
+            0,
+            &[],
+            FeatureRolloutSetting::default(),
+            FeatureRolloutSetting::from_config(true),
+        );
         let resolution =
             resolve_execution_backend(ExecutionBackendPreference::DesktopNode, &inventory);
         assert_eq!(resolution.resolved, ExecutionBackendPreference::LocalSandbox);
@@ -522,14 +536,20 @@ mod tests {
 
     #[test]
     fn preview_backend_inventory_is_degraded_without_healthy_nodes() {
-        let inventory =
-            build_execution_backend_inventory_with_rollout(&test_policy(), 1, &[], true, false);
+        let inventory = build_execution_backend_inventory_with_rollout(
+            &test_policy(),
+            1,
+            &[],
+            FeatureRolloutSetting::from_config(true),
+            FeatureRolloutSetting::default(),
+        );
         let desktop_node = inventory
             .iter()
             .find(|entry| entry.backend_id == ExecutionBackendPreference::DesktopNode.as_str())
             .expect("desktop node backend should exist");
         assert_eq!(desktop_node.state, ExecutionBackendState::Degraded);
         assert!(desktop_node.rollout_enabled);
+        assert_eq!(desktop_node.rollout_source, Some(FeatureRolloutSource::Config));
         assert!(!desktop_node.selectable);
     }
 }

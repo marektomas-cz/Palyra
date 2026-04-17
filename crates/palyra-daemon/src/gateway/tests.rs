@@ -192,6 +192,7 @@ fn build_test_runtime_state_with_http_fetch_private_targets(
             vault_get_approval_required_refs: vec!["global/openai_api_key".to_owned()],
             max_tape_entries_per_response: 1_000,
             max_tape_bytes_per_response: 2 * 1024 * 1024,
+            feature_rollouts: crate::config::FeatureRolloutsConfig::default(),
             channel_router: crate::channel_router::ChannelRouterConfig::default(),
             media: MediaRuntimeConfig::default(),
             tool_call: crate::tool_protocol::ToolCallConfig {

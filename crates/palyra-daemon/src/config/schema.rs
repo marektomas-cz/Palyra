@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use palyra_common::default_identity_store_root;
+use palyra_common::{default_identity_store_root, feature_rollouts::FeatureRolloutSetting};
 
 use crate::channel_router::ChannelRouterConfig;
 use crate::cron::CronTimezoneMode;
@@ -91,6 +91,7 @@ pub struct LoadedConfig {
     pub deployment: DeploymentConfig,
     pub daemon: DaemonConfig,
     pub gateway: GatewayConfig,
+    pub feature_rollouts: FeatureRolloutsConfig,
     pub cron: CronConfig,
     pub orchestrator: OrchestratorConfig,
     pub memory: MemoryConfig,
@@ -193,6 +194,13 @@ pub struct GatewayTlsConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronConfig {
     pub timezone: CronTimezoneMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureRolloutsConfig {
+    pub dynamic_tool_builder: FeatureRolloutSetting,
+    pub execution_backend_remote_node: FeatureRolloutSetting,
+    pub execution_backend_ssh_tunnel: FeatureRolloutSetting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +418,16 @@ impl Default for CronConfig {
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self { runloop_v1_enabled: DEFAULT_ORCHESTRATOR_RUNLOOP_V1_ENABLED }
+    }
+}
+
+impl Default for FeatureRolloutsConfig {
+    fn default() -> Self {
+        Self {
+            dynamic_tool_builder: FeatureRolloutSetting::default(),
+            execution_backend_remote_node: FeatureRolloutSetting::default(),
+            execution_backend_ssh_tunnel: FeatureRolloutSetting::default(),
+        }
     }
 }
 

@@ -91,6 +91,7 @@ impl GatewayServiceImpl {
             &self.state.config.tool_call.process_runner,
             nodes.as_slice(),
             now_unix_ms,
+            &self.state.config.feature_rollouts,
         ))
     }
 }

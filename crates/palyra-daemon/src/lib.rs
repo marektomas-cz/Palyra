@@ -2029,6 +2029,7 @@ pub async fn run() -> Result<()> {
                 .clone(),
             max_tape_entries_per_response: loaded.gateway.max_tape_entries_per_response,
             max_tape_bytes_per_response: loaded.gateway.max_tape_bytes_per_response,
+            feature_rollouts: loaded.feature_rollouts.clone(),
             channel_router: loaded.channel_router.clone(),
             media: loaded.media.clone(),
             tool_call: tool_protocol::ToolCallConfig {
