@@ -62,7 +62,7 @@ export function createChatConsoleSessionHandlers(args: {
   setComposerText: (value: string) => void;
   setExportBusy: (next: "json" | "markdown" | null) => void;
   setCommandBusy: (next: string | null) => void;
-  setPhase4BusyKey: (next: string | null) => void;
+  setSessionMaintenanceBusyKey: (next: string | null) => void;
   setError: (next: string | null) => void;
   setNotice: (next: string | null) => void;
   appendLocalEntry: AppendLocalEntry;
@@ -99,7 +99,7 @@ export function createChatConsoleSessionHandlers(args: {
     setComposerText,
     setExportBusy,
     setCommandBusy,
-    setPhase4BusyKey,
+    setSessionMaintenanceBusyKey,
     setError,
     setNotice,
     appendLocalEntry,
@@ -275,7 +275,7 @@ export function createChatConsoleSessionHandlers(args: {
         },
         refreshSessionTranscript,
         setDetailPanel,
-        setPhase4BusyKey,
+        setSessionMaintenanceBusyKey,
         setError,
         setNotice,
         upsertSession,

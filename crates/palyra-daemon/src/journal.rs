@@ -2994,7 +2994,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 17,
-        name: "orchestrator_phase4_artifacts_and_background_tasks",
+        name: "orchestrator_compaction_artifacts_and_background_tasks",
         sql: r#"
             CREATE TABLE IF NOT EXISTS orchestrator_compaction_artifacts (
                 artifact_ulid TEXT PRIMARY KEY,
@@ -3088,7 +3088,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 18,
-        name: "usage_governance_phase7",
+        name: "usage_governance_and_pricing_catalog",
         sql: r#"
             CREATE TABLE IF NOT EXISTS usage_pricing_catalog (
                 pricing_ulid TEXT PRIMARY KEY,
@@ -3186,7 +3186,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 19,
-        name: "delegation_child_runs_phase8",
+        name: "delegation_child_runs",
         sql: r#"
             ALTER TABLE orchestrator_runs
                 ADD COLUMN parent_run_ulid TEXT;
@@ -3203,7 +3203,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 20,
-        name: "learning_loop_phase6",
+        name: "learning_loop",
         sql: r#"
             CREATE TABLE IF NOT EXISTS learning_candidates (
                 candidate_ulid TEXT PRIMARY KEY,
@@ -3284,7 +3284,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 21,
-        name: "orchestrator_session_title_lifecycle_phase4",
+        name: "orchestrator_session_title_lifecycle",
         sql: r#"
             ALTER TABLE orchestrator_sessions
                 ADD COLUMN auto_title_updated_at_unix_ms INTEGER;
@@ -3300,7 +3300,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 22,
-        name: "orchestrator_session_quick_controls_phase4",
+        name: "orchestrator_session_quick_controls",
         sql: r#"
             ALTER TABLE orchestrator_sessions
                 ADD COLUMN model_profile_override TEXT;
@@ -3316,7 +3316,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 23,
-        name: "session_project_context_state_phase5",
+        name: "session_project_context_state",
         sql: r#"
             CREATE TABLE IF NOT EXISTS session_project_context_state (
                 session_ulid TEXT PRIMARY KEY,
@@ -3331,7 +3331,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 24,
-        name: "workspace_checkpoints_phase6",
+        name: "workspace_checkpoints",
         sql: r#"
             CREATE TABLE IF NOT EXISTS workspace_checkpoints (
                 checkpoint_ulid TEXT PRIMARY KEY,
@@ -10343,7 +10343,7 @@ fn load_orchestrator_tape_page(
 
 const ORCHESTRATOR_SESSION_TITLE_LEN: usize = 72;
 const ORCHESTRATOR_SESSION_PREVIEW_LEN: usize = 180;
-const ORCHESTRATOR_AUTO_TITLE_GENERATOR_VERSION: &str = "phase4.session_title.v1";
+const ORCHESTRATOR_AUTO_TITLE_GENERATOR_VERSION: &str = "semantic_exchange.session_title.v1";
 const ORCHESTRATOR_TITLE_GENERATION_STATE_IDLE: &str = "idle";
 const ORCHESTRATOR_TITLE_GENERATION_STATE_PENDING: &str = "pending";
 const ORCHESTRATOR_TITLE_GENERATION_STATE_READY: &str = "ready";
@@ -14491,7 +14491,10 @@ mod tests {
             .expect("session should be present in scoped listing");
         assert_eq!(session.title, "Investigate daemon health posture");
         assert_eq!(session.title_source, "semantic_exchange");
-        assert_eq!(session.title_generator_version.as_deref(), Some("phase4.session_title.v1"));
+        assert_eq!(
+            session.title_generator_version.as_deref(),
+            Some("semantic_exchange.session_title.v1")
+        );
         assert_eq!(
             session.preview.as_deref(),
             Some("Daemon health posture looks stable after the latest restart.")

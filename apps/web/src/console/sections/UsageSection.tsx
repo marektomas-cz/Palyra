@@ -199,7 +199,7 @@ export function UsageSection({ app }: UsageSectionProps) {
         <section className="workspace-two-column">
           <WorkspaceSectionCard
             title="Routing and budgets"
-            description="Phase 7 turns usage into governance: routing posture, budget evaluations, and overrides now share one backend contract."
+            description="Usage governance now shares one backend contract for routing posture, budget evaluations, and overrides."
           >
             <dl className="workspace-key-value-grid">
               <div>
@@ -432,7 +432,7 @@ export function UsageSection({ app }: UsageSectionProps) {
               {usage.insights?.pricing.estimate_only ? (
                 <WorkspaceInlineNotice title="Estimate only" tone="default">
                   <p>
-                    Pricing uses the shared Phase 7 catalog and is intentionally marked as an
+                    Pricing uses the shared catalog and is intentionally marked as an
                     estimate-only surface.
                   </p>
                 </WorkspaceInlineNotice>

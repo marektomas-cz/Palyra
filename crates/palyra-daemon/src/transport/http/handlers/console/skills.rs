@@ -580,7 +580,7 @@ pub(crate) async fn console_procedure_skill_promote_handler(
             tool_id: None,
             tool_name: "Run promoted procedure".to_owned(),
             tool_description: candidate.summary.clone(),
-            review_notes: Some("Promoted from Phase 6 reusable procedure candidate.".to_owned()),
+            review_notes: Some("Promoted from reusable procedure candidate.".to_owned()),
             capabilities: None,
         },
     )?;

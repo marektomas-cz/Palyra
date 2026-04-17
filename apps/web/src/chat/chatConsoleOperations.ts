@@ -191,11 +191,12 @@ export async function inspectCompactionDetails(args: {
   artifactId: string;
   upsertSession: (session: SessionCatalogRecord, options?: { select?: boolean }) => void;
   setDetailPanel: (next: DetailPanelState | null) => void;
-  setPhase4BusyKey: (next: string | null) => void;
+  setSessionMaintenanceBusyKey: (next: string | null) => void;
   setError: (next: string | null) => void;
 }): Promise<void> {
-  const { api, artifactId, upsertSession, setDetailPanel, setPhase4BusyKey, setError } = args;
-  setPhase4BusyKey(`inspect-compaction:${artifactId}`);
+  const { api, artifactId, upsertSession, setDetailPanel, setSessionMaintenanceBusyKey, setError } =
+    args;
+  setSessionMaintenanceBusyKey(`inspect-compaction:${artifactId}`);
   setError(null);
   try {
     await inspectCompactionAction({
@@ -207,7 +208,7 @@ export async function inspectCompactionDetails(args: {
   } catch (error) {
     setError(toErrorMessage(error));
   } finally {
-    setPhase4BusyKey(null);
+    setSessionMaintenanceBusyKey(null);
   }
 }
 
@@ -216,11 +217,18 @@ export async function inspectCheckpointDetails(args: {
   checkpointId: string;
   upsertSession: (session: SessionCatalogRecord, options?: { select?: boolean }) => void;
   setDetailPanel: (next: DetailPanelState | null) => void;
-  setPhase4BusyKey: (next: string | null) => void;
+  setSessionMaintenanceBusyKey: (next: string | null) => void;
   setError: (next: string | null) => void;
 }): Promise<void> {
-  const { api, checkpointId, upsertSession, setDetailPanel, setPhase4BusyKey, setError } = args;
-  setPhase4BusyKey(`inspect-checkpoint:${checkpointId}`);
+  const {
+    api,
+    checkpointId,
+    upsertSession,
+    setDetailPanel,
+    setSessionMaintenanceBusyKey,
+    setError,
+  } = args;
+  setSessionMaintenanceBusyKey(`inspect-checkpoint:${checkpointId}`);
   setError(null);
   try {
     await inspectCheckpointAction({
@@ -232,7 +240,7 @@ export async function inspectCheckpointDetails(args: {
   } catch (error) {
     setError(toErrorMessage(error));
   } finally {
-    setPhase4BusyKey(null);
+    setSessionMaintenanceBusyKey(null);
   }
 }
 
@@ -248,7 +256,7 @@ export async function restoreChatCheckpoint(args: {
   refreshSessions: (preserveSelection?: boolean) => Promise<void>;
   refreshSessionTranscript: () => Promise<void>;
   setDetailPanel: (next: DetailPanelState | null) => void;
-  setPhase4BusyKey: (next: string | null) => void;
+  setSessionMaintenanceBusyKey: (next: string | null) => void;
   setError: (next: string | null) => void;
   setNotice: (next: string | null) => void;
   upsertSession: (session: SessionCatalogRecord, options?: { select?: boolean }) => void;
@@ -266,13 +274,13 @@ export async function restoreChatCheckpoint(args: {
     refreshSessions,
     refreshSessionTranscript,
     setDetailPanel,
-    setPhase4BusyKey,
+    setSessionMaintenanceBusyKey,
     setError,
     setNotice,
     upsertSession,
     source,
   } = args;
-  setPhase4BusyKey(`restore-checkpoint:${checkpointId}`);
+  setSessionMaintenanceBusyKey(`restore-checkpoint:${checkpointId}`);
   setError(null);
   setNotice(null);
   try {
@@ -311,6 +319,6 @@ export async function restoreChatCheckpoint(args: {
   } catch (error) {
     setError(toErrorMessage(error));
   } finally {
-    setPhase4BusyKey(null);
+    setSessionMaintenanceBusyKey(null);
   }
 }

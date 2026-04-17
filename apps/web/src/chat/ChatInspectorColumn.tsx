@@ -105,7 +105,7 @@ type ChatInspectorColumnProps = {
   revealSensitiveValues: boolean;
   inspectorVisible: boolean;
   openRunDetails: (runId: string, tab?: RunDrawerTab) => void;
-  phase4BusyKey: string | null;
+  sessionMaintenanceBusyKey: string | null;
   runDrawerId: string;
   setRunDrawerId: (runId: string) => void;
   runDrawerBusy: boolean;
@@ -169,7 +169,7 @@ export function ChatInspectorColumn({
   revealSensitiveValues,
   inspectorVisible,
   openRunDetails,
-  phase4BusyKey,
+  sessionMaintenanceBusyKey,
   runDrawerId,
   setRunDrawerId,
   runDrawerBusy,
@@ -189,7 +189,7 @@ export function ChatInspectorColumn({
   openCanvasSurface,
   openBrowserSessionWorkbench,
 }: ChatInspectorColumnProps) {
-  const phase4Busy = phase4BusyKey !== null;
+  const sessionMaintenanceBusy = sessionMaintenanceBusyKey !== null;
   const browserSessionIds = extractBrowserSessionIds(runTape);
   const sessionProjectContext = selectedSession?.recap.project_context ?? null;
 
@@ -334,7 +334,7 @@ export function ChatInspectorColumn({
                 </div>
                 <ActionCluster>
                   <ActionButton
-                    isDisabled={projectContextBusy || phase4Busy}
+                    isDisabled={projectContextBusy || sessionMaintenanceBusy}
                     size="sm"
                     type="button"
                     variant="secondary"
@@ -343,7 +343,7 @@ export function ChatInspectorColumn({
                     {projectContextBusy ? "Refreshing..." : "Refresh project context"}
                   </ActionButton>
                   <ActionButton
-                    isDisabled={projectContextBusy || phase4Busy}
+                    isDisabled={projectContextBusy || sessionMaintenanceBusy}
                     size="sm"
                     type="button"
                     variant="secondary"
@@ -394,7 +394,7 @@ export function ChatInspectorColumn({
                       <Chip variant="soft">{entry.estimated_tokens.toLocaleString()} tok</Chip>
                       {entry.disabled ? (
                         <ActionButton
-                          isDisabled={projectContextBusy || phase4Busy}
+                          isDisabled={projectContextBusy || sessionMaintenanceBusy}
                           size="sm"
                           type="button"
                           variant="secondary"
@@ -404,7 +404,7 @@ export function ChatInspectorColumn({
                         </ActionButton>
                       ) : (
                         <ActionButton
-                          isDisabled={projectContextBusy || phase4Busy}
+                          isDisabled={projectContextBusy || sessionMaintenanceBusy}
                           size="sm"
                           type="button"
                           variant="secondary"
@@ -415,7 +415,7 @@ export function ChatInspectorColumn({
                       )}
                       {entry.status === "approval_required" ? (
                         <ActionButton
-                          isDisabled={projectContextBusy || phase4Busy}
+                          isDisabled={projectContextBusy || sessionMaintenanceBusy}
                           size="sm"
                           type="button"
                           variant="primary"
@@ -697,7 +697,7 @@ export function ChatInspectorColumn({
                   <div className="chat-ops-card__actions">
                     {artifactRunId !== undefined ? (
                       <ActionButton
-                        isDisabled={phase4Busy}
+                        isDisabled={sessionMaintenanceBusy}
                         size="sm"
                         type="button"
                         variant="ghost"
@@ -707,13 +707,13 @@ export function ChatInspectorColumn({
                       </ActionButton>
                     ) : null}
                     <ActionButton
-                      isDisabled={phase4Busy}
+                      isDisabled={sessionMaintenanceBusy}
                       size="sm"
                       type="button"
                       variant="secondary"
                       onPress={() => inspectCompaction(artifact.artifact_id)}
                     >
-                      {phase4BusyKey === `inspect-compaction:${artifact.artifact_id}`
+                      {sessionMaintenanceBusyKey === `inspect-compaction:${artifact.artifact_id}`
                         ? "Loading..."
                         : "Inspect"}
                     </ActionButton>
@@ -747,7 +747,7 @@ export function ChatInspectorColumn({
                   <div className="chat-ops-card__actions">
                     {checkpointRunId !== undefined ? (
                       <ActionButton
-                        isDisabled={phase4Busy}
+                        isDisabled={sessionMaintenanceBusy}
                         size="sm"
                         type="button"
                         variant="ghost"
@@ -757,24 +757,24 @@ export function ChatInspectorColumn({
                       </ActionButton>
                     ) : null}
                     <ActionButton
-                      isDisabled={phase4Busy}
+                      isDisabled={sessionMaintenanceBusy}
                       size="sm"
                       type="button"
                       variant="secondary"
                       onPress={() => inspectCheckpoint(checkpoint.checkpoint_id)}
                     >
-                      {phase4BusyKey === `inspect-checkpoint:${checkpoint.checkpoint_id}`
+                      {sessionMaintenanceBusyKey === `inspect-checkpoint:${checkpoint.checkpoint_id}`
                         ? "Loading..."
                         : "Inspect"}
                     </ActionButton>
                     <ActionButton
-                      isDisabled={phase4Busy}
+                      isDisabled={sessionMaintenanceBusy}
                       size="sm"
                       type="button"
                       variant="primary"
                       onPress={() => restoreCheckpoint(checkpoint.checkpoint_id)}
                     >
-                      {phase4BusyKey === `restore-checkpoint:${checkpoint.checkpoint_id}`
+                      {sessionMaintenanceBusyKey === `restore-checkpoint:${checkpoint.checkpoint_id}`
                         ? "Restoring..."
                         : "Restore"}
                     </ActionButton>
@@ -834,7 +834,7 @@ export function ChatInspectorColumn({
                   <div className="chat-ops-card__actions">
                     {targetRunId !== undefined ? (
                       <ActionButton
-                        isDisabled={phase4Busy}
+                        isDisabled={sessionMaintenanceBusy}
                         size="sm"
                         type="button"
                         variant="ghost"
@@ -844,38 +844,38 @@ export function ChatInspectorColumn({
                       </ActionButton>
                     ) : null}
                     <ActionButton
-                      isDisabled={phase4Busy}
+                      isDisabled={sessionMaintenanceBusy}
                       size="sm"
                       type="button"
                       variant="secondary"
                       onPress={() => inspectBackgroundTask(task.task_id)}
                     >
-                      {phase4BusyKey === `inspect-background-task:${task.task_id}`
+                      {sessionMaintenanceBusyKey === `inspect-background-task:${task.task_id}`
                         ? "Loading..."
                         : "Inspect"}
                     </ActionButton>
                     {(task.state === "queued" || task.state === "failed") && (
                       <ActionButton
-                        isDisabled={phase4Busy}
+                        isDisabled={sessionMaintenanceBusy}
                         size="sm"
                         type="button"
                         variant="secondary"
                         onPress={() => runBackgroundTaskAction(task.task_id, "pause")}
                       >
-                        {phase4BusyKey === `background-pause:${task.task_id}`
+                        {sessionMaintenanceBusyKey === `background-pause:${task.task_id}`
                           ? "Pausing..."
                           : "Pause"}
                       </ActionButton>
                     )}
                     {task.state === "paused" && (
                       <ActionButton
-                        isDisabled={phase4Busy}
+                        isDisabled={sessionMaintenanceBusy}
                         size="sm"
                         type="button"
                         variant="secondary"
                         onPress={() => runBackgroundTaskAction(task.task_id, "resume")}
                       >
-                        {phase4BusyKey === `background-resume:${task.task_id}`
+                        {sessionMaintenanceBusyKey === `background-resume:${task.task_id}`
                           ? "Resuming..."
                           : "Resume"}
                       </ActionButton>
@@ -884,13 +884,13 @@ export function ChatInspectorColumn({
                       task.state === "cancelled" ||
                       task.state === "expired") && (
                       <ActionButton
-                        isDisabled={phase4Busy}
+                        isDisabled={sessionMaintenanceBusy}
                         size="sm"
                         type="button"
                         variant="secondary"
                         onPress={() => runBackgroundTaskAction(task.task_id, "retry")}
                       >
-                        {phase4BusyKey === `background-retry:${task.task_id}`
+                        {sessionMaintenanceBusyKey === `background-retry:${task.task_id}`
                           ? "Retrying..."
                           : "Retry"}
                       </ActionButton>
@@ -899,13 +899,13 @@ export function ChatInspectorColumn({
                     task.state !== "cancelled" &&
                     task.state !== "expired" ? (
                       <ActionButton
-                        isDisabled={phase4Busy}
+                        isDisabled={sessionMaintenanceBusy}
                         size="sm"
                         type="button"
                         variant="danger"
                         onPress={() => runBackgroundTaskAction(task.task_id, "cancel")}
                       >
-                        {phase4BusyKey === `background-cancel:${task.task_id}`
+                        {sessionMaintenanceBusyKey === `background-cancel:${task.task_id}`
                           ? "Canceling..."
                           : "Cancel"}
                       </ActionButton>

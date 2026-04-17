@@ -1178,7 +1178,7 @@ pub(crate) async fn request_usage_budget_override(
             request_summary,
             policy_snapshot: ApprovalPolicySnapshot {
                 policy_id: "usage_budget_policy.v1".to_owned(),
-                policy_hash: "phase7".to_owned(),
+                policy_hash: "usage-governance-v1".to_owned(),
                 evaluation_summary: "budget hard limit exceeded; explicit override required"
                     .to_owned(),
             },

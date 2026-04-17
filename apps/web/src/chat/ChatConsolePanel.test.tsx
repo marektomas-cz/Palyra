@@ -629,7 +629,7 @@ function baseInspectorProps() {
     revealSensitiveValues: false,
     inspectorVisible: false,
     openRunDetails: vi.fn(),
-    phase4BusyKey: null,
+    sessionMaintenanceBusyKey: null,
     runDrawerId: "",
     setRunDrawerId: vi.fn(),
     runDrawerBusy: false,

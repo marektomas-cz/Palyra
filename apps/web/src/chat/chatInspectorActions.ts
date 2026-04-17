@@ -18,10 +18,10 @@ import { toErrorMessage, type ComposerAttachment, type TranscriptEntry } from ".
 import { handleAttachmentFilesAction } from "./chatSessionActions";
 
 function setBusyKey(
-  setPhase4BusyKey: ((next: string | null) => void) | undefined,
+  setSessionMaintenanceBusyKey: ((next: string | null) => void) | undefined,
   next: string | null,
 ): void {
-  setPhase4BusyKey?.(next);
+  setSessionMaintenanceBusyKey?.(next);
 }
 
 export function inspectLiveEntryDetail(
@@ -90,7 +90,7 @@ export async function runDerivedArtifactLifecycleAction({
   refreshSessionTranscript,
   setError,
   setNotice,
-  setPhase4BusyKey,
+  setSessionMaintenanceBusyKey,
 }: {
   api: ConsoleApiClient;
   derivedArtifactId: string;
@@ -98,9 +98,9 @@ export async function runDerivedArtifactLifecycleAction({
   refreshSessionTranscript: () => Promise<void>;
   setError: (next: string | null) => void;
   setNotice: (next: string | null) => void;
-  setPhase4BusyKey?: (next: string | null) => void;
+  setSessionMaintenanceBusyKey?: (next: string | null) => void;
 }): Promise<void> {
-  setBusyKey(setPhase4BusyKey, `derived:${action}:${derivedArtifactId}`);
+  setBusyKey(setSessionMaintenanceBusyKey, `derived:${action}:${derivedArtifactId}`);
   setError(null);
   setNotice(null);
   try {
@@ -125,7 +125,7 @@ export async function runDerivedArtifactLifecycleAction({
   } catch (error) {
     setError(toErrorMessage(error));
   } finally {
-    setBusyKey(setPhase4BusyKey, null);
+    setBusyKey(setSessionMaintenanceBusyKey, null);
   }
 }
 
@@ -134,15 +134,15 @@ export async function inspectBackgroundTaskDetail({
   taskId,
   setDetailPanel,
   setError,
-  setPhase4BusyKey,
+  setSessionMaintenanceBusyKey,
 }: {
   api: ConsoleApiClient;
   taskId: string;
   setDetailPanel: (next: DetailPanelState | null) => void;
   setError: (next: string | null) => void;
-  setPhase4BusyKey?: (next: string | null) => void;
+  setSessionMaintenanceBusyKey?: (next: string | null) => void;
 }): Promise<void> {
-  setBusyKey(setPhase4BusyKey, `inspect-background-task:${taskId}`);
+  setBusyKey(setSessionMaintenanceBusyKey, `inspect-background-task:${taskId}`);
   setError(null);
   try {
     await inspectBackgroundTaskAction({
@@ -153,7 +153,7 @@ export async function inspectBackgroundTaskDetail({
   } catch (error) {
     setError(toErrorMessage(error));
   } finally {
-    setBusyKey(setPhase4BusyKey, null);
+    setBusyKey(setSessionMaintenanceBusyKey, null);
   }
 }
 
@@ -164,7 +164,7 @@ export async function runBackgroundTaskLifecycleAction({
   refreshSessionTranscript,
   setError,
   setNotice,
-  setPhase4BusyKey,
+  setSessionMaintenanceBusyKey,
 }: {
   api: ConsoleApiClient;
   taskId: string;
@@ -172,9 +172,9 @@ export async function runBackgroundTaskLifecycleAction({
   refreshSessionTranscript: () => Promise<void>;
   setError: (next: string | null) => void;
   setNotice: (next: string | null) => void;
-  setPhase4BusyKey?: (next: string | null) => void;
+  setSessionMaintenanceBusyKey?: (next: string | null) => void;
 }): Promise<void> {
-  setBusyKey(setPhase4BusyKey, `background-${action}:${taskId}`);
+  setBusyKey(setSessionMaintenanceBusyKey, `background-${action}:${taskId}`);
   setError(null);
   setNotice(null);
   try {
@@ -188,7 +188,7 @@ export async function runBackgroundTaskLifecycleAction({
   } catch (error) {
     setError(toErrorMessage(error));
   } finally {
-    setBusyKey(setPhase4BusyKey, null);
+    setBusyKey(setSessionMaintenanceBusyKey, null);
   }
 }
 

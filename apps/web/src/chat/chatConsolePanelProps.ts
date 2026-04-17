@@ -54,7 +54,7 @@ interface BuildInspectorPropsArgs {
   readonly revealSensitiveValues: InspectorProps["revealSensitiveValues"];
   readonly inspectorVisible: InspectorProps["inspectorVisible"];
   readonly openRunDetails: InspectorProps["openRunDetails"];
-  readonly phase4BusyKey: InspectorProps["phase4BusyKey"];
+  readonly sessionMaintenanceBusyKey: InspectorProps["sessionMaintenanceBusyKey"];
   readonly runDrawerId: InspectorProps["runDrawerId"];
   readonly setRunDrawerId: InspectorProps["setRunDrawerId"];
   readonly runDrawerBusy: InspectorProps["runDrawerBusy"];
@@ -81,7 +81,7 @@ interface BuildInspectorPropsArgs {
   readonly setDetailPanel: (next: DetailPanelState | null) => void;
   readonly setError: (next: string | null) => void;
   readonly setNotice: (next: string | null) => void;
-  readonly setPhase4BusyKey: (next: string | null) => void;
+  readonly setSessionMaintenanceBusyKey: (next: string | null) => void;
 }
 
 export function buildInspectorProps({
@@ -120,7 +120,7 @@ export function buildInspectorProps({
   revealSensitiveValues,
   inspectorVisible,
   openRunDetails,
-  phase4BusyKey,
+  sessionMaintenanceBusyKey,
   runDrawerId,
   setRunDrawerId,
   runDrawerBusy,
@@ -144,7 +144,7 @@ export function buildInspectorProps({
   setDetailPanel,
   setError,
   setNotice,
-  setPhase4BusyKey,
+  setSessionMaintenanceBusyKey,
 }: BuildInspectorPropsArgs): InspectorProps {
   return {
     pendingApprovalCount,
@@ -199,7 +199,7 @@ export function buildInspectorProps({
         taskId,
         setDetailPanel,
         setError,
-        setPhase4BusyKey,
+        setSessionMaintenanceBusyKey,
       });
     },
     runBackgroundTaskAction: (taskId, action) => {
@@ -210,14 +210,14 @@ export function buildInspectorProps({
         refreshSessionTranscript,
         setError,
         setNotice,
-        setPhase4BusyKey,
+        setSessionMaintenanceBusyKey,
       });
     },
     detailPanel,
     revealSensitiveValues,
     inspectorVisible,
     openRunDetails,
-    phase4BusyKey,
+    sessionMaintenanceBusyKey,
     runDrawerId,
     setRunDrawerId,
     runDrawerBusy,
@@ -262,7 +262,7 @@ interface BuildTranscriptPropsArgs {
   readonly setDetailPanel: (next: DetailPanelState | null) => void;
   readonly setError: (next: string | null) => void;
   readonly setNotice: (next: string | null) => void;
-  readonly setPhase4BusyKey: (next: string | null) => void;
+  readonly setSessionMaintenanceBusyKey: (next: string | null) => void;
 }
 
 export function buildTranscriptProps({
@@ -288,7 +288,7 @@ export function buildTranscriptProps({
   setDetailPanel,
   setError,
   setNotice,
-  setPhase4BusyKey,
+  setSessionMaintenanceBusyKey,
 }: BuildTranscriptPropsArgs): TranscriptProps {
   return {
     visibleTranscript,
@@ -328,7 +328,7 @@ export function buildTranscriptProps({
         refreshSessionTranscript,
         setError,
         setNotice,
-        setPhase4BusyKey,
+        setSessionMaintenanceBusyKey,
       });
     },
   };

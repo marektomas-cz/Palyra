@@ -125,7 +125,7 @@ export function ChatConsolePanel({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState<"json" | "markdown" | null>(null);
-  const [phase4BusyKey, setPhase4BusyKey] = useState<string | null>(null);
+  const [sessionMaintenanceBusyKey, setSessionMaintenanceBusyKey] = useState<string | null>(null);
   const [runDrawerTab, setRunDrawerTab] = useState<RunDrawerTab>("status");
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const sessionSearchInputRef = useRef<HTMLInputElement | null>(null);
@@ -329,7 +329,7 @@ export function ChatConsolePanel({
       artifactId,
       upsertSession: sessions.upsertSession,
       setDetailPanel,
-      setPhase4BusyKey,
+      setSessionMaintenanceBusyKey,
       setError,
     });
   const inspectCheckpoint = (checkpointId: string) =>
@@ -338,7 +338,7 @@ export function ChatConsolePanel({
       checkpointId,
       upsertSession: sessions.upsertSession,
       setDetailPanel,
-      setPhase4BusyKey,
+      setSessionMaintenanceBusyKey,
       setError,
     });
   usePhase4DeepLinks({
@@ -529,7 +529,7 @@ export function ChatConsolePanel({
       setTranscriptSearchResults([]);
       setDetailPanel(null);
       setAttachments([]);
-      setPhase4BusyKey(null);
+      setSessionMaintenanceBusyKey(null);
       resetRecallPreview();
       resetContextReferencePreview();
       return;
@@ -541,7 +541,7 @@ export function ChatConsolePanel({
       setAttachments([]);
       setSessionAttachments([]);
       setSessionDerivedArtifacts([]);
-      setPhase4BusyKey(null);
+      setSessionMaintenanceBusyKey(null);
       resetRecallPreview();
       resetContextReferencePreview();
     }
@@ -587,7 +587,7 @@ export function ChatConsolePanel({
     setComposerText: updateComposerDraft,
     setExportBusy,
     setCommandBusy,
-    setPhase4BusyKey,
+    setSessionMaintenanceBusyKey,
     setError,
     setNotice,
     appendLocalEntry,
@@ -753,7 +753,7 @@ export function ChatConsolePanel({
     upsertSession: sessions.upsertSession,
     setError,
     setNotice,
-    setPhase4BusyKey,
+    setSessionMaintenanceBusyKey,
   };
   const sessionsSidebarProps = buildSessionsSidebarProps({
     sessions:
@@ -928,7 +928,7 @@ export function ChatConsolePanel({
             revealSensitiveValues,
             inspectorVisible,
             openRunDetails: openRunDetailsPanel,
-            phase4BusyKey,
+            sessionMaintenanceBusyKey,
             runDrawerId,
             setRunDrawerId,
             runDrawerBusy,
@@ -952,7 +952,7 @@ export function ChatConsolePanel({
             restoreCheckpoint,
             refreshSessionTranscript,
             setDetailPanel,
-            setPhase4BusyKey,
+            setSessionMaintenanceBusyKey,
           })}
           onAbortRun={() => void interruptCurrentRun("")}
           onOpenObjective={
@@ -1037,7 +1037,7 @@ export function ChatConsolePanel({
             setDetailPanel,
             setError,
             setNotice,
-            setPhase4BusyKey,
+            setSessionMaintenanceBusyKey,
           })}
         />
       )}

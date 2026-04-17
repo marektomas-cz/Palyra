@@ -1740,9 +1740,9 @@ describe("M35 web console app", () => {
   it("creates a session checkpoint from the sessions section with a CSRF-protected request", async () => {
     const session = {
       session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-      session_key: "phase4-session",
-      session_label: "Phase 4 Session",
-      title: "Phase 4 Session",
+      session_key: "continuity-session",
+      session_label: "Continuity Session",
+      title: "Continuity Session",
       title_source: "label",
       preview: "checkpoint-ready session",
       preview_state: "present",
@@ -1815,7 +1815,7 @@ describe("M35 web console app", () => {
               checkpoint_id: "checkpoint-1",
               session_id: session.session_id,
               run_id: session.last_run_id,
-              name: "Phase 4 Session checkpoint",
+              name: "Continuity Session checkpoint",
               tags_json: '["web-console","sessions-section"]',
               note: "Created from the Sessions console on 4/2/2026, 3:00:00 PM.",
               branch_state: "active_branch",
@@ -1841,7 +1841,7 @@ describe("M35 web console app", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Create checkpoint" }));
 
     await waitFor(() => {
-      expect(document.body).toHaveTextContent("Create checkpoint: Phase 4 Session checkpoint.");
+      expect(document.body).toHaveTextContent("Create checkpoint: Continuity Session checkpoint.");
     });
 
     const [, request] = findRequestCall(
@@ -1851,15 +1851,15 @@ describe("M35 web console app", () => {
     );
     const headers = new Headers(request?.headers);
     expect(headers.get("x-palyra-csrf-token")).toBe("csrf-1");
-    expect(requestBody(request?.body)).toContain('"name":"Phase 4 Session checkpoint"');
+    expect(requestBody(request?.body)).toContain('"name":"Continuity Session checkpoint"');
   });
 
   it("shows recent compactions and checkpoints in the sessions detail continuity surface", async () => {
     const session = {
       session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-      session_key: "phase4-session",
-      session_label: "Phase 4 Session",
-      title: "Phase 4 Session",
+      session_key: "continuity-session",
+      session_label: "Continuity Session",
+      title: "Continuity Session",
       title_source: "label",
       preview: "continuity-ready session",
       preview_state: "present",
@@ -1961,7 +1961,7 @@ describe("M35 web console app", () => {
                 checkpoint_id: "checkpoint-1",
                 session_id: session.session_id,
                 run_id: session.last_run_id,
-                name: "Phase 4 checkpoint",
+                name: "Continuity checkpoint",
                 tags_json: "[]",
                 note: "Created after compaction.",
                 branch_state: "active_branch",
@@ -1992,7 +1992,7 @@ describe("M35 web console app", () => {
     expect(await screen.findByRole("heading", { name: "Recent compactions" })).toBeInTheDocument();
     expect(document.body).toHaveTextContent("applied with pending review · 1 write · 1 review");
     expect(document.body).toHaveTextContent("Continuity planner preserved the release gate state.");
-    expect(document.body).toHaveTextContent("Phase 4 checkpoint");
+    expect(document.body).toHaveTextContent("Continuity checkpoint");
     expect(document.body).toHaveTextContent("Created after compaction.");
   });
 

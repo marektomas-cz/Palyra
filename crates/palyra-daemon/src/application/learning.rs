@@ -28,7 +28,7 @@ use crate::{
 };
 
 pub(crate) const REFLECTION_TASK_KIND: &str = "post_run_reflection";
-const REFLECTION_TRIGGER_POLICY: &str = "phase6_learning_v1";
+const REFLECTION_TRIGGER_POLICY: &str = "post_run_learning_v1";
 
 #[derive(Debug, Clone)]
 struct ProcedureRunSignature {

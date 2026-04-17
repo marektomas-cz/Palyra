@@ -18,7 +18,7 @@ type ProjectContextActionArgs = {
   upsertSession: (session: SessionCatalogRecord, options?: { select?: boolean }) => void;
   setError: (next: string | null) => void;
   setNotice: (next: string | null) => void;
-  setPhase4BusyKey: (next: string | null) => void;
+  setSessionMaintenanceBusyKey: (next: string | null) => void;
 };
 
 async function runProjectContextMutation(
@@ -34,7 +34,7 @@ async function runProjectContextMutation(
   }
   args.setError(null);
   args.setNotice(null);
-  args.setPhase4BusyKey(`project-context:${args.actionKey}`);
+  args.setSessionMaintenanceBusyKey(`project-context:${args.actionKey}`);
   try {
     const response = await args.operation();
     args.upsertSession(response.session, { select: true });
@@ -51,7 +51,7 @@ async function runProjectContextMutation(
   } catch (error) {
     args.setError(toErrorMessage(error));
   } finally {
-    args.setPhase4BusyKey(null);
+    args.setSessionMaintenanceBusyKey(null);
   }
 }
 

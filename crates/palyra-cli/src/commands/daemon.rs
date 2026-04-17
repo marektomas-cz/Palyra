@@ -1445,7 +1445,7 @@ fn build_gateway_usage_cost_value(db_path: Option<String>, days: u32) -> Result<
         },
         "daily": daily,
         "notes": [
-            "Cost estimates reuse the shared Phase 7 pricing catalog stored in usage_pricing_catalog.",
+            "Cost estimates reuse the shared pricing catalog stored in usage_pricing_catalog.",
             "Runs without a recorded routing decision stay excluded from estimated_cost_usd to avoid pretending certainty."
         ],
     }))

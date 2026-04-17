@@ -302,7 +302,7 @@ fn upsert_test_orchestrator_session(
         .expect("orchestrator session should be upserted for provider input test");
 }
 
-fn seed_phase4_compaction_fixture(
+fn seed_session_compaction_fixture(
     state: &std::sync::Arc<GatewayRuntimeState>,
     session_id: &str,
     run_id: &str,
@@ -312,7 +312,7 @@ fn seed_phase4_compaction_fixture(
         .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
             session_id: session_id.to_owned(),
             session_key: format!("session:{session_id}"),
-            session_label: Some("Phase 4 continuity".to_owned()),
+            session_label: Some("Session continuity".to_owned()),
             principal: "user:ops".to_owned(),
             device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
             channel: Some("cli".to_owned()),
@@ -360,7 +360,7 @@ fn seed_phase4_compaction_fixture(
                     json!({ "reply_text": text }).to_string()
                 },
             })
-            .expect("phase 4 tape event should persist");
+            .expect("session tape event should persist");
     }
 }
 
@@ -2752,7 +2752,7 @@ async fn session_compaction_apply_persists_durable_writes_and_quality_gates() {
     let state = build_test_runtime_state(false);
     let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
     let run_id = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
-    seed_phase4_compaction_fixture(&state, session_id, run_id);
+    seed_session_compaction_fixture(&state, session_id, run_id);
     let session = state
         .journal_store
         .resolve_orchestrator_session(&OrchestratorSessionResolveRequest {
@@ -2854,7 +2854,7 @@ async fn session_compaction_apply_rolls_back_workspace_writes_on_partial_failure
     let state = build_test_runtime_state(false);
     let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB1";
     let run_id = "01ARZ3NDEKTSV4RRFFQ69G5FB2";
-    seed_phase4_compaction_fixture(&state, session_id, run_id);
+    seed_session_compaction_fixture(&state, session_id, run_id);
     let session = state
         .journal_store
         .resolve_orchestrator_session(&OrchestratorSessionResolveRequest {

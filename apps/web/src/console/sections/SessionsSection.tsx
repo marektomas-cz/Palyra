@@ -389,7 +389,9 @@ export function SessionsSection({ app }: SessionsSectionProps) {
   const navigate = useNavigate();
   const catalog = useSessionCatalogDomain(app);
   const selected = catalog.selectedSession;
-  const [phase4Busy, setPhase4Busy] = useState<"checkpoint" | "preview" | "apply" | null>(null);
+  const [sessionMaintenanceBusy, setSessionMaintenanceBusy] = useState<
+    "checkpoint" | "preview" | "apply" | null
+  >(null);
   const [continuityBusy, setContinuityBusy] = useState(false);
   const [sessionCompactions, setSessionCompactions] = useState<ChatCompactionArtifactRecord[]>([]);
   const [sessionCheckpoints, setSessionCheckpoints] = useState<ChatCheckpointRecord[]>([]);
@@ -485,7 +487,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
       app.setError(t("detail.emptyTitle"));
       return;
     }
-    setPhase4Busy("checkpoint");
+    setSessionMaintenanceBusy("checkpoint");
     app.setError(null);
     app.setNotice(null);
     try {
@@ -500,7 +502,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
     } catch (error) {
       app.setError(error instanceof Error ? error.message : "Unexpected failure.");
     } finally {
-      setPhase4Busy(null);
+      setSessionMaintenanceBusy(null);
     }
   }
 
@@ -509,7 +511,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
       app.setError(t("detail.emptyTitle"));
       return;
     }
-    setPhase4Busy("preview");
+    setSessionMaintenanceBusy("preview");
     app.setError(null);
     app.setNotice(null);
     try {
@@ -529,7 +531,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
     } catch (error) {
       app.setError(error instanceof Error ? error.message : "Unexpected failure.");
     } finally {
-      setPhase4Busy(null);
+      setSessionMaintenanceBusy(null);
     }
   }
 
@@ -558,7 +560,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
       return;
     }
 
-    setPhase4Busy("apply");
+    setSessionMaintenanceBusy("apply");
     app.setError(null);
     app.setNotice(null);
     try {
@@ -577,7 +579,7 @@ export function SessionsSection({ app }: SessionsSectionProps) {
     } catch (error) {
       app.setError(error instanceof Error ? error.message : "Unexpected failure.");
     } finally {
-      setPhase4Busy(null);
+      setSessionMaintenanceBusy(null);
     }
   }
 
@@ -932,32 +934,34 @@ export function SessionsSection({ app }: SessionsSectionProps) {
                   {t("action.abortRun")}
                 </ActionButton>
                 <ActionButton
-                  isDisabled={catalog.busy || phase4Busy !== null}
+                  isDisabled={catalog.busy || sessionMaintenanceBusy !== null}
                   type="button"
                   variant="secondary"
                   onPress={() => void createCheckpoint()}
                 >
-                  {phase4Busy === "checkpoint"
+                  {sessionMaintenanceBusy === "checkpoint"
                     ? t("action.checkpointing")
                     : t("action.createCheckpoint")}
                 </ActionButton>
                 <ActionButton
-                  isDisabled={catalog.busy || phase4Busy !== null}
+                  isDisabled={catalog.busy || sessionMaintenanceBusy !== null}
                   type="button"
                   variant="secondary"
                   onPress={() => void previewCompaction()}
                 >
-                  {phase4Busy === "preview"
+                  {sessionMaintenanceBusy === "preview"
                     ? t("action.previewing")
                     : t("action.previewCompaction")}
                 </ActionButton>
                 <ActionButton
-                  isDisabled={catalog.busy || phase4Busy !== null}
+                  isDisabled={catalog.busy || sessionMaintenanceBusy !== null}
                   type="button"
                   variant="primary"
                   onPress={() => void applyCompaction()}
                 >
-                  {phase4Busy === "apply" ? t("action.applying") : t("action.applyCompaction")}
+                  {sessionMaintenanceBusy === "apply"
+                    ? t("action.applying")
+                    : t("action.applyCompaction")}
                 </ActionButton>
               </div>
 

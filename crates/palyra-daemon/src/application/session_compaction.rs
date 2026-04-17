@@ -1481,8 +1481,8 @@ mod tests {
     fn session_record() -> OrchestratorSessionRecord {
         OrchestratorSessionRecord {
             session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
-            session_key: "ops:phase4".to_owned(),
-            session_label: Some("Ops Phase 4".to_owned()),
+            session_key: "ops:session-continuity".to_owned(),
+            session_label: Some("Ops Session Continuity".to_owned()),
             principal: "user:ops".to_owned(),
             device_id: "device-1".to_owned(),
             channel: Some("console".to_owned()),

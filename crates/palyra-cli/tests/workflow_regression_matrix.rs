@@ -273,7 +273,7 @@ fn local_remote_and_lifecycle_workflows_are_regression_tested() -> Result<()> {
 }
 
 #[test]
-fn session_compaction_cli_preview_surfaces_the_phase4_contract() -> Result<()> {
+fn session_compaction_cli_preview_surfaces_the_compaction_contract() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let (daemon_child, admin_port, grpc_port) = spawn_palyrad_with_dynamic_ports(None, None)?;
     let _daemon = ChildGuard::new(daemon_child);
@@ -315,7 +315,7 @@ fn session_compaction_cli_preview_surfaces_the_phase4_contract() -> Result<()> {
             "--trigger-reason",
             "workflow_regression",
             "--trigger-policy",
-            "phase4_contract",
+            "session_compaction_contract",
         ],
         &cli_env,
     )?;
@@ -324,10 +324,13 @@ fn session_compaction_cli_preview_surfaces_the_phase4_contract() -> Result<()> {
         .get("preview")
         .context("compact-preview should return a preview payload")?;
     assert_eq!(preview.get("trigger_reason").and_then(Value::as_str), Some("workflow_regression"));
-    assert_eq!(preview.get("trigger_policy").and_then(Value::as_str), Some("phase4_contract"));
+    assert_eq!(
+        preview.get("trigger_policy").and_then(Value::as_str),
+        Some("session_compaction_contract")
+    );
     assert!(
         preview.get("summary").is_some(),
-        "phase 4 preview output should include the structured summary contract"
+        "compaction preview output should include the structured summary contract"
     );
     assert_eq!(preview.get("eligible").and_then(Value::as_bool), Some(false));
 

@@ -246,7 +246,7 @@ export function OperationsSection({ app }: OperationsSectionProps) {
         <div className="workspace-stack">
           <WorkspaceSectionCard
             title="Routing and budget telemetry"
-            description="Phase 7 keeps routing recommendations, enforced overrides, and alerting visible from the diagnostics surface."
+            description="Routing recommendations, enforced overrides, and alerting stay visible from the diagnostics surface."
           >
             {usageInsights === null ? (
               <WorkspaceEmptyState
@@ -277,7 +277,7 @@ export function OperationsSection({ app }: OperationsSectionProps) {
 
           <WorkspaceSectionCard
             title="Learning workload"
-            description="Reflection stays visible as a separate background workload so operators can distinguish Phase 6 learning activity from user-facing runs."
+            description="Reflection stays visible as a separate background workload so operators can distinguish learning activity from user-facing runs."
           >
             {learning === null ? (
               <WorkspaceEmptyState
@@ -388,7 +388,7 @@ export function OperationsSection({ app }: OperationsSectionProps) {
 
           <WorkspaceSectionCard
             title="Self-healing"
-            description="Phase 2 incident telemetry, watchdog output, and recent remediation attempts are summarized here before you fall back to the raw diagnostics snapshot."
+            description="Incident telemetry, watchdog output, and recent remediation attempts are summarized here before you fall back to the raw diagnostics snapshot."
           >
             {selfHealing === null ? (
               <WorkspaceEmptyState

@@ -173,7 +173,7 @@ file = "memory-help.txt"
 path = "memory learning"
 category = "nested_surface"
 status = "done"
-summary = "Phase 6 learning candidate review and promotion workflows."
+summary = "Learning candidate review and promotion workflows."
 
 [entries.snapshot]
 path = "memory learning"

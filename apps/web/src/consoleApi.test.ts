@@ -1111,7 +1111,7 @@ describe("ConsoleApiClient", () => {
     expect(new Headers(calls[6]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
   });
 
-  it("supports phase 9 node pairing lifecycle endpoints with additive CSRF behavior", async () => {
+  it("supports node pairing lifecycle endpoints with additive CSRF behavior", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const responses = [
       jsonResponse({
@@ -1706,7 +1706,7 @@ describe("ConsoleApiClient", () => {
         expires_at_unix_ms: 200,
       }),
       jsonResponse({
-        session: { session_id: "session-1", title: "Phase 4 Session" },
+        session: { session_id: "session-1", title: "Continuity Session" },
         preview: {
           eligible: true,
           strategy: "head_tail_v1",
@@ -1727,7 +1727,7 @@ describe("ConsoleApiClient", () => {
         contract: { contract_version: "control-plane.v1" },
       }),
       jsonResponse({
-        session: { session_id: "session-1", title: "Phase 4 Session" },
+        session: { session_id: "session-1", title: "Continuity Session" },
         artifact: {
           artifact_id: "artifact-1",
           session_id: "session-1",
@@ -1780,7 +1780,7 @@ describe("ConsoleApiClient", () => {
         contract: { contract_version: "control-plane.v1" },
       }),
       jsonResponse({
-        session: { session_id: "session-1", title: "Phase 4 Session" },
+        session: { session_id: "session-1", title: "Continuity Session" },
         artifact: {
           artifact_id: "artifact-1",
           session_id: "session-1",
@@ -1818,7 +1818,7 @@ describe("ConsoleApiClient", () => {
         contract: { contract_version: "control-plane.v1" },
       }),
       jsonResponse({
-        session: { session_id: "session-1", title: "Phase 4 Session" },
+        session: { session_id: "session-1", title: "Continuity Session" },
         checkpoint: {
           checkpoint_id: "checkpoint-1",
           session_id: "session-1",
@@ -1834,7 +1834,7 @@ describe("ConsoleApiClient", () => {
         contract: { contract_version: "control-plane.v1" },
       }),
       jsonResponse({
-        session: { session_id: "session-1", title: "Phase 4 Session" },
+        session: { session_id: "session-1", title: "Continuity Session" },
         checkpoint: {
           checkpoint_id: "checkpoint-1",
           session_id: "session-1",
@@ -1950,7 +1950,7 @@ describe("ConsoleApiClient", () => {
         contract: { contract_version: "control-plane.v1" },
       }),
       jsonResponse({
-        session: { session_id: "session-1", title: "Phase 4 Session" },
+        session: { session_id: "session-1", title: "Continuity Session" },
         checkpoint: {
           checkpoint_id: "workspace-checkpoint-1",
           session_id: "session-1",
@@ -1969,7 +1969,7 @@ describe("ConsoleApiClient", () => {
       }),
       jsonResponse({
         session: { session_id: "session-2", title: "Rollback session" },
-        source_session: { session_id: "session-1", title: "Phase 4 Session" },
+        source_session: { session_id: "session-1", title: "Continuity Session" },
         checkpoint: {
           checkpoint_id: "workspace-checkpoint-1",
           session_id: "session-1",
@@ -2192,7 +2192,7 @@ describe("ConsoleApiClient", () => {
       }),
       jsonResponse({ tasks: [task], contract: { contract_version: "control-plane.v1" } }),
       jsonResponse({
-        session: { session_id: "session-1", title: "Phase 4 Session" },
+        session: { session_id: "session-1", title: "Continuity Session" },
         task,
         contract: { contract_version: "control-plane.v1" },
       }),

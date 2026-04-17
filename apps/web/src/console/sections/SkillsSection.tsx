@@ -319,7 +319,7 @@ export function SkillsSection({ app }: SkillsSectionProps) {
 
           <WorkspaceSectionCard
             title="Procedure promotion"
-            description="Phase 6 promotion now feeds the same experimental builder loop so procedure-derived outputs and prompt-derived outputs share one quarantine and review model."
+            description="Procedure promotion feeds the same experimental builder loop so procedure-derived outputs and prompt-derived outputs share one quarantine and review model."
           >
             {app.skillProcedureCandidates.length === 0 ? (
               <WorkspaceEmptyState
