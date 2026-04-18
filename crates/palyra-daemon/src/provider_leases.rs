@@ -437,10 +437,7 @@ impl ProviderLeaseManagerInner {
         let state_kind = if reason.is_none() {
             LeasePreviewState::Ready
         } else if priority == LeasePriority::Background
-            && matches!(
-                reason.as_deref(),
-                Some("foreground_waiters_present" | "foreground_capacity_reserved")
-            )
+            && matches!(reason, Some("foreground_waiters_present" | "foreground_capacity_reserved"))
         {
             LeasePreviewState::Deferred
         } else {

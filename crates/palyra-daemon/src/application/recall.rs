@@ -18,6 +18,15 @@ use crate::{
         OrchestratorCompactionArtifactRecord, OrchestratorSessionResolveRequest,
         OrchestratorSessionTranscriptRecord, WorkspaceSearchHit, WorkspaceSearchRequest,
     },
+    retrieval::{
+        checkpoint_source_quality as retrieval_checkpoint_source_quality,
+        compaction_source_quality as retrieval_compaction_source_quality,
+        lexical_overlap_score as retrieval_lexical_overlap_score,
+        proxy_vector_score as retrieval_proxy_vector_score,
+        recency_score as retrieval_recency_score, score_with_profile,
+        transcript_source_quality as retrieval_transcript_source_quality, RetrievalRuntimeConfig,
+        RetrievalSourceProfileKind,
+    },
     transport::grpc::auth::RequestContext,
 };
 
@@ -31,7 +40,11 @@ const DEFAULT_MAX_TOP_CANDIDATES: usize = 8;
 const MAX_TOP_CANDIDATES: usize = 12;
 const DEFAULT_RECALL_PROMPT_BUDGET_TOKENS: usize = 1_800;
 const MAX_RECALL_QUERY_VARIANTS: usize = 4;
+#[cfg(test)]
+#[allow(dead_code)]
 const MIN_TRANSCRIPT_RECENCY_SCORE: f64 = 0.15;
+#[cfg(test)]
+#[allow(dead_code)]
 const MIN_SOURCE_QUALITY_SCORE: f64 = 0.20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -285,6 +298,14 @@ struct CandidateRecord {
     candidate: RecallCandidate,
 }
 
+struct RecallCandidateSources<'a> {
+    memory_hits: &'a [MemorySearchHit],
+    workspace_hits: &'a [WorkspaceSearchHit],
+    transcript_hits: &'a [TranscriptRecallHit],
+    checkpoint_hits: &'a [CheckpointRecallHit],
+    compaction_hits: &'a [CompactionRecallHit],
+}
+
 impl RecallRequest {
     pub(crate) fn normalized(self) -> Self {
         Self {
@@ -371,6 +392,7 @@ pub(crate) async fn materialize_explicit_recall_context(
     request: RecallRequest,
     selection: &ExplicitRecallSelection,
 ) -> Result<MaterializedRecallContext, Status> {
+    let retrieval_config = runtime_state.retrieval_config_snapshot();
     let request = request.normalized();
     let query = selection.query.trim();
     if query.is_empty() {
@@ -382,12 +404,15 @@ pub(crate) async fn materialize_explicit_recall_context(
     let query_variants = build_query_variants(query);
     let candidate_records = build_candidate_records(
         query_variants.as_slice(),
-        selection_context.memory_hits.as_slice(),
-        selection_context.workspace_hits.as_slice(),
-        selection_context.transcript_hits.as_slice(),
-        selection_context.checkpoint_hits.as_slice(),
-        selection_context.compaction_hits.as_slice(),
+        &RecallCandidateSources {
+            memory_hits: selection_context.memory_hits.as_slice(),
+            workspace_hits: selection_context.workspace_hits.as_slice(),
+            transcript_hits: selection_context.transcript_hits.as_slice(),
+            checkpoint_hits: selection_context.checkpoint_hits.as_slice(),
+            compaction_hits: selection_context.compaction_hits.as_slice(),
+        },
         current_unix_ms(),
+        &retrieval_config,
     );
     let top_candidates = finalize_top_candidates(
         candidate_records,
@@ -576,6 +601,7 @@ async fn execute_recall(
     context: &RequestContext,
     request: &RecallRequest,
 ) -> Result<RecallExecution, Status> {
+    let retrieval_config = runtime_state.retrieval_config_snapshot();
     let query = request.query.trim();
     let query_variants = build_query_variants(query);
     let scoped_session_id =
@@ -653,28 +679,34 @@ async fn execute_recall(
         query_variants.as_slice(),
         request.min_score,
         DEFAULT_TRANSCRIPT_TOP_K,
+        &retrieval_config,
     );
     let checkpoint_hits = build_checkpoint_hits(
         checkpoint_records.as_slice(),
         query_variants.as_slice(),
         request.min_score,
         DEFAULT_CHECKPOINT_TOP_K,
+        &retrieval_config,
     );
     let compaction_hits = build_compaction_hits(
         compaction_records.as_slice(),
         query_variants.as_slice(),
         request.min_score,
         DEFAULT_COMPACTION_TOP_K,
+        &retrieval_config,
     );
 
     let candidate_records = build_candidate_records(
         query_variants.as_slice(),
-        memory_hits.as_slice(),
-        workspace_hits.as_slice(),
-        transcript_hits.as_slice(),
-        checkpoint_hits.as_slice(),
-        compaction_hits.as_slice(),
+        &RecallCandidateSources {
+            memory_hits: memory_hits.as_slice(),
+            workspace_hits: workspace_hits.as_slice(),
+            transcript_hits: transcript_hits.as_slice(),
+            checkpoint_hits: checkpoint_hits.as_slice(),
+            compaction_hits: compaction_hits.as_slice(),
+        },
         current_unix_ms(),
+        &retrieval_config,
     );
     let top_candidates = finalize_top_candidates(
         candidate_records,
@@ -731,6 +763,7 @@ async fn build_selection_context(
     request: &RecallRequest,
     selection: &ExplicitRecallSelection,
 ) -> Result<MaterializedRecallContext, Status> {
+    let retrieval_config = runtime_state.retrieval_config_snapshot();
     let session_id = validate_recall_session_scope(
         runtime_state,
         context,
@@ -802,6 +835,7 @@ async fn build_selection_context(
             query_variants.as_slice(),
             selection.min_score.unwrap_or(request.min_score),
             selection.transcript_refs.len().max(DEFAULT_TRANSCRIPT_TOP_K),
+            &retrieval_config,
         );
         select_transcript_hits(built_hits, selection.transcript_refs.as_slice())
     } else {
@@ -819,6 +853,7 @@ async fn build_selection_context(
             query_variants.as_slice(),
             selection.min_score.unwrap_or(request.min_score),
             selection.checkpoint_ids.len().max(DEFAULT_CHECKPOINT_TOP_K),
+            &retrieval_config,
         );
         select_checkpoint_hits(built_hits, selection.checkpoint_ids.as_slice())
     } else {
@@ -836,6 +871,7 @@ async fn build_selection_context(
             query_variants.as_slice(),
             selection.min_score.unwrap_or(request.min_score),
             selection.compaction_artifact_ids.len().max(DEFAULT_COMPACTION_TOP_K),
+            &retrieval_config,
         );
         select_compaction_hits(built_hits, selection.compaction_artifact_ids.as_slice())
     } else {
@@ -1090,21 +1126,36 @@ fn build_transcript_hits(
     query_variants: &[String],
     min_score: f64,
     top_k: usize,
+    retrieval_config: &RetrievalRuntimeConfig,
 ) -> Vec<TranscriptRecallHit> {
     let now = current_unix_ms();
+    let profile = retrieval_config.scoring.profile_for(RetrievalSourceProfileKind::Transcript);
     let mut hits = transcript_records
         .iter()
         .filter_map(|record| {
             let snippet = extract_transcript_search_text(record)?;
-            let lexical_score = lexical_overlap_score(snippet.as_str(), query_variants);
+            let lexical_score = retrieval_lexical_overlap_score(
+                snippet.as_str(),
+                query_variants,
+                retrieval_config.scoring.phrase_match_bonus_bps,
+            );
             if lexical_score < min_score {
                 return None;
             }
-            let vector_score = proxy_vector_score(snippet.as_str(), query_variants);
-            let recency_score = recency_score(record.created_at_unix_ms, now);
-            let source_quality_score = transcript_source_quality(record);
-            let score =
-                final_score(lexical_score, vector_score, recency_score, source_quality_score);
+            let vector_score = retrieval_proxy_vector_score(snippet.as_str(), query_variants);
+            let recency_score =
+                retrieval_recency_score(record.created_at_unix_ms, now, profile.min_recency_bps);
+            let source_quality_score =
+                retrieval_transcript_source_quality(record.event_type.as_str(), profile);
+            let score = score_with_profile(
+                lexical_score,
+                vector_score,
+                recency_score,
+                source_quality_score,
+                false,
+                profile,
+            )
+            .final_score;
             Some(TranscriptRecallHit {
                 run_id: record.run_id.clone(),
                 seq: record.seq,
@@ -1126,8 +1177,10 @@ fn build_checkpoint_hits(
     query_variants: &[String],
     min_score: f64,
     top_k: usize,
+    retrieval_config: &RetrievalRuntimeConfig,
 ) -> Vec<CheckpointRecallHit> {
     let now = current_unix_ms();
+    let profile = retrieval_config.scoring.profile_for(RetrievalSourceProfileKind::Checkpoint);
     let mut hits = checkpoints
         .iter()
         .filter_map(|checkpoint| {
@@ -1140,15 +1193,30 @@ fn build_checkpoint_hits(
                 workspace_paths.join(" ").as_str(),
             ]
             .join(" ");
-            let lexical_score = lexical_overlap_score(searchable.as_str(), query_variants);
+            let lexical_score = retrieval_lexical_overlap_score(
+                searchable.as_str(),
+                query_variants,
+                retrieval_config.scoring.phrase_match_bonus_bps,
+            );
             if lexical_score < min_score {
                 return None;
             }
-            let vector_score = proxy_vector_score(searchable.as_str(), query_variants);
-            let recency_score = recency_score(checkpoint.created_at_unix_ms, now);
-            let source_quality_score = checkpoint_source_quality(checkpoint);
-            let score =
-                final_score(lexical_score, vector_score, recency_score, source_quality_score);
+            let vector_score = retrieval_proxy_vector_score(searchable.as_str(), query_variants);
+            let recency_score = retrieval_recency_score(
+                checkpoint.created_at_unix_ms,
+                now,
+                profile.min_recency_bps,
+            );
+            let source_quality_score = retrieval_checkpoint_source_quality(checkpoint, profile);
+            let score = score_with_profile(
+                lexical_score,
+                vector_score,
+                recency_score,
+                source_quality_score,
+                false,
+                profile,
+            )
+            .final_score;
             Some(CheckpointRecallHit {
                 checkpoint_id: checkpoint.checkpoint_id.clone(),
                 name: checkpoint.name.clone(),
@@ -1170,8 +1238,11 @@ fn build_compaction_hits(
     query_variants: &[String],
     min_score: f64,
     top_k: usize,
+    retrieval_config: &RetrievalRuntimeConfig,
 ) -> Vec<CompactionRecallHit> {
     let now = current_unix_ms();
+    let profile =
+        retrieval_config.scoring.profile_for(RetrievalSourceProfileKind::CompactionArtifact);
     let mut hits = artifacts
         .iter()
         .filter_map(|artifact| {
@@ -1181,15 +1252,27 @@ fn build_compaction_hits(
                 artifact.summary_preview.as_str(),
             ]
             .join(" ");
-            let lexical_score = lexical_overlap_score(searchable.as_str(), query_variants);
+            let lexical_score = retrieval_lexical_overlap_score(
+                searchable.as_str(),
+                query_variants,
+                retrieval_config.scoring.phrase_match_bonus_bps,
+            );
             if lexical_score < min_score {
                 return None;
             }
-            let vector_score = proxy_vector_score(searchable.as_str(), query_variants);
-            let recency_score = recency_score(artifact.created_at_unix_ms, now);
-            let source_quality_score = compaction_source_quality(artifact);
-            let score =
-                final_score(lexical_score, vector_score, recency_score, source_quality_score);
+            let vector_score = retrieval_proxy_vector_score(searchable.as_str(), query_variants);
+            let recency_score =
+                retrieval_recency_score(artifact.created_at_unix_ms, now, profile.min_recency_bps);
+            let source_quality_score = retrieval_compaction_source_quality(artifact, profile);
+            let score = score_with_profile(
+                lexical_score,
+                vector_score,
+                recency_score,
+                source_quality_score,
+                false,
+                profile,
+            )
+            .final_score;
             Some(CompactionRecallHit {
                 artifact_id: artifact.artifact_id.clone(),
                 mode: artifact.mode.clone(),
@@ -1209,27 +1292,18 @@ fn build_compaction_hits(
 
 fn build_candidate_records(
     query_variants: &[String],
-    memory_hits: &[MemorySearchHit],
-    workspace_hits: &[WorkspaceSearchHit],
-    transcript_hits: &[TranscriptRecallHit],
-    checkpoint_hits: &[CheckpointRecallHit],
-    compaction_hits: &[CompactionRecallHit],
+    sources: &RecallCandidateSources<'_>,
     now_unix_ms: i64,
+    retrieval_config: &RetrievalRuntimeConfig,
 ) -> Vec<CandidateRecord> {
     let mut records = Vec::new();
-    for hit in memory_hits {
-        let source_quality_score = memory_source_quality(hit);
+    for hit in sources.memory_hits {
         let score = RecallScoreBreakdown {
             lexical_score: hit.breakdown.lexical_score,
             vector_score: hit.breakdown.vector_score,
             recency_score: hit.breakdown.recency_score,
-            source_quality_score,
-            final_score: final_score(
-                hit.breakdown.lexical_score,
-                hit.breakdown.vector_score,
-                hit.breakdown.recency_score,
-                source_quality_score,
-            ),
+            source_quality_score: hit.breakdown.source_quality_score,
+            final_score: hit.breakdown.final_score,
         };
         let candidate = RecallCandidate {
             candidate_id: format!("memory:{}", hit.item.memory_id),
@@ -1248,23 +1322,13 @@ fn build_candidate_records(
         };
         records.push(CandidateRecord { candidate });
     }
-    for hit in workspace_hits {
-        let searchable = workspace_search_text(hit);
-        let lexical_score = lexical_overlap_score(searchable.as_str(), query_variants);
-        let vector_score = proxy_vector_score(searchable.as_str(), query_variants);
-        let recency_score = recency_score(hit.document.updated_at_unix_ms, now_unix_ms);
-        let source_quality_score = workspace_source_quality(hit);
+    for hit in sources.workspace_hits {
         let score = RecallScoreBreakdown {
-            lexical_score,
-            vector_score,
-            recency_score,
-            source_quality_score,
-            final_score: final_score(
-                lexical_score,
-                vector_score,
-                recency_score,
-                source_quality_score,
-            ),
+            lexical_score: hit.breakdown.lexical_score,
+            vector_score: hit.breakdown.vector_score,
+            recency_score: hit.breakdown.recency_score,
+            source_quality_score: hit.breakdown.source_quality_score,
+            final_score: hit.breakdown.final_score,
         };
         let candidate = RecallCandidate {
             candidate_id: format!("workspace:{}", hit.document.document_id),
@@ -1275,28 +1339,38 @@ fn build_candidate_records(
             created_at_unix_ms: hit.document.updated_at_unix_ms,
             rationale: format!(
                 "matched workspace snippet with lexical {:.2} and document quality {:.2}",
-                lexical_score, source_quality_score
+                hit.breakdown.lexical_score, hit.breakdown.source_quality_score
             ),
             score,
         };
         records.push(CandidateRecord { candidate });
     }
-    for hit in transcript_hits {
-        let lexical_score = lexical_overlap_score(hit.snippet.as_str(), query_variants);
-        let vector_score = proxy_vector_score(hit.snippet.as_str(), query_variants);
-        let recency_score = recency_score(hit.created_at_unix_ms, now_unix_ms);
-        let source_quality_score = 0.74;
-        let score = RecallScoreBreakdown {
+    for hit in sources.transcript_hits {
+        let profile = retrieval_config.scoring.profile_for(RetrievalSourceProfileKind::Transcript);
+        let lexical_score = retrieval_lexical_overlap_score(
+            hit.snippet.as_str(),
+            query_variants,
+            retrieval_config.scoring.phrase_match_bonus_bps,
+        );
+        let vector_score = retrieval_proxy_vector_score(hit.snippet.as_str(), query_variants);
+        let recency_score =
+            retrieval_recency_score(hit.created_at_unix_ms, now_unix_ms, profile.min_recency_bps);
+        let source_quality_score =
+            retrieval_transcript_source_quality(hit.event_type.as_str(), profile);
+        let score_breakdown = score_with_profile(
             lexical_score,
             vector_score,
             recency_score,
             source_quality_score,
-            final_score: final_score(
-                lexical_score,
-                vector_score,
-                recency_score,
-                source_quality_score,
-            ),
+            false,
+            profile,
+        );
+        let score = RecallScoreBreakdown {
+            lexical_score: score_breakdown.lexical_score,
+            vector_score: score_breakdown.vector_score,
+            recency_score: score_breakdown.recency_score,
+            source_quality_score: score_breakdown.source_quality_score,
+            final_score: score_breakdown.final_score,
         };
         let candidate = RecallCandidate {
             candidate_id: format!("transcript:{}:{}", hit.run_id, hit.seq),
@@ -1313,23 +1387,33 @@ fn build_candidate_records(
         };
         records.push(CandidateRecord { candidate });
     }
-    for hit in checkpoint_hits {
+    for hit in sources.checkpoint_hits {
         let searchable = checkpoint_search_text(hit);
-        let lexical_score = lexical_overlap_score(searchable.as_str(), query_variants);
-        let vector_score = proxy_vector_score(searchable.as_str(), query_variants);
-        let recency_score = recency_score(hit.created_at_unix_ms, now_unix_ms);
-        let source_quality_score = 0.88;
-        let score = RecallScoreBreakdown {
+        let profile = retrieval_config.scoring.profile_for(RetrievalSourceProfileKind::Checkpoint);
+        let lexical_score = retrieval_lexical_overlap_score(
+            searchable.as_str(),
+            query_variants,
+            retrieval_config.scoring.phrase_match_bonus_bps,
+        );
+        let vector_score = retrieval_proxy_vector_score(searchable.as_str(), query_variants);
+        let recency_score =
+            retrieval_recency_score(hit.created_at_unix_ms, now_unix_ms, profile.min_recency_bps);
+        let source_quality_score =
+            0.88_f64.clamp(f64::from(profile.min_source_quality_bps) / 10_000.0, 1.0);
+        let score_breakdown = score_with_profile(
             lexical_score,
             vector_score,
             recency_score,
             source_quality_score,
-            final_score: final_score(
-                lexical_score,
-                vector_score,
-                recency_score,
-                source_quality_score,
-            ),
+            false,
+            profile,
+        );
+        let score = RecallScoreBreakdown {
+            lexical_score: score_breakdown.lexical_score,
+            vector_score: score_breakdown.vector_score,
+            recency_score: score_breakdown.recency_score,
+            source_quality_score: score_breakdown.source_quality_score,
+            final_score: score_breakdown.final_score,
         };
         let candidate = RecallCandidate {
             candidate_id: format!("checkpoint:{}", hit.checkpoint_id),
@@ -1346,23 +1430,34 @@ fn build_candidate_records(
         };
         records.push(CandidateRecord { candidate });
     }
-    for hit in compaction_hits {
+    for hit in sources.compaction_hits {
         let searchable = compaction_search_text(hit);
-        let lexical_score = lexical_overlap_score(searchable.as_str(), query_variants);
-        let vector_score = proxy_vector_score(searchable.as_str(), query_variants);
-        let recency_score = recency_score(hit.created_at_unix_ms, now_unix_ms);
-        let source_quality_score = 0.84;
-        let score = RecallScoreBreakdown {
+        let profile =
+            retrieval_config.scoring.profile_for(RetrievalSourceProfileKind::CompactionArtifact);
+        let lexical_score = retrieval_lexical_overlap_score(
+            searchable.as_str(),
+            query_variants,
+            retrieval_config.scoring.phrase_match_bonus_bps,
+        );
+        let vector_score = retrieval_proxy_vector_score(searchable.as_str(), query_variants);
+        let recency_score =
+            retrieval_recency_score(hit.created_at_unix_ms, now_unix_ms, profile.min_recency_bps);
+        let source_quality_score =
+            0.84_f64.clamp(f64::from(profile.min_source_quality_bps) / 10_000.0, 1.0);
+        let score_breakdown = score_with_profile(
             lexical_score,
             vector_score,
             recency_score,
             source_quality_score,
-            final_score: final_score(
-                lexical_score,
-                vector_score,
-                recency_score,
-                source_quality_score,
-            ),
+            false,
+            profile,
+        );
+        let score = RecallScoreBreakdown {
+            lexical_score: score_breakdown.lexical_score,
+            vector_score: score_breakdown.vector_score,
+            recency_score: score_breakdown.recency_score,
+            source_quality_score: score_breakdown.source_quality_score,
+            final_score: score_breakdown.final_score,
         };
         let candidate = RecallCandidate {
             candidate_id: format!("compaction:{}", hit.artifact_id),
@@ -1561,10 +1656,6 @@ fn compare_scores(left: f64, right: f64) -> std::cmp::Ordering {
     left.partial_cmp(&right).unwrap_or(std::cmp::Ordering::Equal)
 }
 
-fn workspace_search_text(hit: &WorkspaceSearchHit) -> String {
-    format!("{} {} {}", hit.document.path, hit.document.title, hit.snippet)
-}
-
 fn checkpoint_search_text(hit: &CheckpointRecallHit) -> String {
     format!(
         "{} {} {}",
@@ -1603,6 +1694,8 @@ fn compaction_reason(
     )
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn transcript_source_quality(record: &OrchestratorSessionTranscriptRecord) -> f64 {
     let base: f64 = match record.event_type.as_str() {
         "message.received" | "queued.input" => 0.72,
@@ -1612,6 +1705,8 @@ fn transcript_source_quality(record: &OrchestratorSessionTranscriptRecord) -> f6
     base.clamp(MIN_SOURCE_QUALITY_SCORE, 1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn memory_source_quality(hit: &MemorySearchHit) -> f64 {
     let confidence = hit.item.confidence.unwrap_or(0.75).clamp(0.0, 1.0);
     let source_bias = match hit.item.source {
@@ -1624,6 +1719,8 @@ fn memory_source_quality(hit: &MemorySearchHit) -> f64 {
     ((confidence * 0.6) + (source_bias * 0.4)).clamp(MIN_SOURCE_QUALITY_SCORE, 1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn workspace_source_quality(hit: &WorkspaceSearchHit) -> f64 {
     let mut quality: f64 = 0.78;
     if hit.document.pinned {
@@ -1641,6 +1738,8 @@ fn workspace_source_quality(hit: &WorkspaceSearchHit) -> f64 {
     quality.clamp(MIN_SOURCE_QUALITY_SCORE, 1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn checkpoint_source_quality(checkpoint: &OrchestratorCheckpointRecord) -> f64 {
     let mut quality: f64 = 0.86;
     if checkpoint.restore_count > 0 {
@@ -1652,6 +1751,8 @@ fn checkpoint_source_quality(checkpoint: &OrchestratorCheckpointRecord) -> f64 {
     quality.clamp(MIN_SOURCE_QUALITY_SCORE, 1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn compaction_source_quality(artifact: &OrchestratorCompactionArtifactRecord) -> f64 {
     let summary = serde_json::from_str::<Value>(artifact.summary_json.as_str()).unwrap_or_default();
     let review_penalty = summary
@@ -1667,10 +1768,14 @@ fn compaction_source_quality(artifact: &OrchestratorCompactionArtifactRecord) ->
     (0.88 - review_penalty - poisoned_penalty).clamp(MIN_SOURCE_QUALITY_SCORE, 1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn lexical_overlap_score(text: &str, query_variants: &[String]) -> f64 {
     query_variants.iter().map(|query| lexical_overlap_for_query(text, query)).fold(0.0, f64::max)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn lexical_overlap_for_query(text: &str, query: &str) -> f64 {
     let haystack = normalized_tokens(text);
     let needles = normalized_tokens(query);
@@ -1687,6 +1792,8 @@ fn lexical_overlap_for_query(text: &str, query: &str) -> f64 {
     ((match_count as f64 / needle_set.len().max(1) as f64) + phrase_bonus).min(1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn proxy_vector_score(text: &str, query_variants: &[String]) -> f64 {
     query_variants
         .iter()
@@ -1703,6 +1810,8 @@ fn proxy_vector_score(text: &str, query_variants: &[String]) -> f64 {
         .clamp(0.0, 1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn recency_score(created_at_unix_ms: i64, now_unix_ms: i64) -> f64 {
     if created_at_unix_ms <= 0 || now_unix_ms <= created_at_unix_ms {
         return 1.0;
@@ -1711,6 +1820,8 @@ fn recency_score(created_at_unix_ms: i64, now_unix_ms: i64) -> f64 {
     (1.0 / (1.0 + age_days / 7.0)).clamp(MIN_TRANSCRIPT_RECENCY_SCORE, 1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn final_score(
     lexical_score: f64,
     vector_score: f64,
@@ -1724,6 +1835,8 @@ fn final_score(
         .clamp(0.0, 1.0)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn normalized_tokens(input: &str) -> Vec<String> {
     input
         .chars()
@@ -1740,6 +1853,8 @@ fn normalized_tokens(input: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn char_ngrams(input: &str) -> BTreeSet<String> {
     let normalized = input
         .chars()

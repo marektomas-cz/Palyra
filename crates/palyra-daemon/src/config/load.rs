@@ -9,7 +9,9 @@ use palyra_common::{
     config_system::{
         parse_document_with_migration, serialize_document_pretty, ConfigMigrationInfo,
     },
-    daemon_config_schema::RootFileConfig,
+    daemon_config_schema::{
+        FileMemoryRetrievalConfig, FileRetrievalSourceScoringProfile, RootFileConfig,
+    },
     default_config_search_paths,
     feature_rollouts::{
         parse_boolish_feature_rollout, FeatureRolloutSetting, CONTEXT_ENGINE_ROLLOUT_ENV,
@@ -32,6 +34,9 @@ use crate::model_provider::{
     ModelProviderCredentialSource, ModelProviderKind, ProviderCapabilitiesSnapshot,
     ProviderCostTier, ProviderLatencyTier, ProviderMetadataSource, ProviderModelEntryConfig,
     ProviderModelRole, ProviderRegistryEntryConfig,
+};
+use crate::retrieval::{
+    RetrievalBackendKind, RetrievalRuntimeConfig, RetrievalSourceScoringProfile,
 };
 use crate::sandbox_runner::{EgressEnforcementMode, SandboxProcessRunnerTier};
 
@@ -211,6 +216,9 @@ pub fn load_config() -> Result<LoadedConfig> {
                         "memory.retention.vacuum_schedule",
                     )?;
                 }
+            }
+            if let Some(file_retrieval) = file_memory.retrieval {
+                apply_memory_retrieval_config(&mut memory.retrieval, file_retrieval)?;
             }
         }
         if let Some(file_media) = parsed.media {
@@ -1673,6 +1681,7 @@ pub fn load_config() -> Result<LoadedConfig> {
             model_provider.allow_private_base_url,
         )?;
     }
+    memory.retrieval.validate()?;
     validate_secret_source_conflicts(&model_provider, &tool_call.browser_service, &admin)?;
 
     Ok(LoadedConfig {
@@ -2924,6 +2933,116 @@ fn parse_memory_retention_vacuum_schedule(raw: &str, name: &str) -> Result<Strin
     Ok(joined)
 }
 
+fn parse_retrieval_backend_kind(raw: &str, name: &str) -> Result<RetrievalBackendKind> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "journal_sqlite_fts" | "journal-sqlite-fts" | "journal" | "sqlite_fts" | "sqlite-fts" => {
+            Ok(RetrievalBackendKind::JournalSqliteFts)
+        }
+        _ => anyhow::bail!("{name} must be one of: journal_sqlite_fts"),
+    }
+}
+
+fn parse_basis_points(value: u16, name: &str) -> Result<u16> {
+    if value > 10_000 {
+        anyhow::bail!("{name} must be between 0 and 10000");
+    }
+    Ok(value)
+}
+
+fn apply_retrieval_profile_override(
+    profile: &mut RetrievalSourceScoringProfile,
+    file_profile: FileRetrievalSourceScoringProfile,
+    prefix: &str,
+) -> Result<()> {
+    if let Some(value) = file_profile.lexical_bps {
+        profile.lexical_bps = parse_basis_points(value, format!("{prefix}.lexical_bps").as_str())?;
+    }
+    if let Some(value) = file_profile.vector_bps {
+        profile.vector_bps = parse_basis_points(value, format!("{prefix}.vector_bps").as_str())?;
+    }
+    if let Some(value) = file_profile.recency_bps {
+        profile.recency_bps = parse_basis_points(value, format!("{prefix}.recency_bps").as_str())?;
+    }
+    if let Some(value) = file_profile.source_quality_bps {
+        profile.source_quality_bps =
+            parse_basis_points(value, format!("{prefix}.source_quality_bps").as_str())?;
+    }
+    if let Some(value) = file_profile.min_recency_bps {
+        profile.min_recency_bps =
+            parse_basis_points(value, format!("{prefix}.min_recency_bps").as_str())?;
+    }
+    if let Some(value) = file_profile.min_source_quality_bps {
+        profile.min_source_quality_bps =
+            parse_basis_points(value, format!("{prefix}.min_source_quality_bps").as_str())?;
+    }
+    if let Some(value) = file_profile.pinned_bonus_bps {
+        profile.pinned_bonus_bps =
+            parse_basis_points(value, format!("{prefix}.pinned_bonus_bps").as_str())?;
+    }
+    Ok(())
+}
+
+fn apply_memory_retrieval_config(
+    config: &mut RetrievalRuntimeConfig,
+    file_retrieval: FileMemoryRetrievalConfig,
+) -> Result<()> {
+    if let Some(file_backend) = file_retrieval.backend {
+        if let Some(kind) = file_backend.kind {
+            config.backend.kind =
+                parse_retrieval_backend_kind(kind.as_str(), "memory.retrieval.backend.kind")?;
+        }
+    }
+    if let Some(file_scoring) = file_retrieval.scoring {
+        if let Some(value) = file_scoring.phrase_match_bonus_bps {
+            config.scoring.phrase_match_bonus_bps =
+                parse_basis_points(value, "memory.retrieval.scoring.phrase_match_bonus_bps")?;
+        }
+        if let Some(default_profile) = file_scoring.default_profile {
+            apply_retrieval_profile_override(
+                &mut config.scoring.default_profile,
+                default_profile,
+                "memory.retrieval.scoring.default_profile",
+            )?;
+        }
+        if let Some(memory) = file_scoring.memory {
+            apply_retrieval_profile_override(
+                &mut config.scoring.memory,
+                memory,
+                "memory.retrieval.scoring.memory",
+            )?;
+        }
+        if let Some(workspace) = file_scoring.workspace {
+            apply_retrieval_profile_override(
+                &mut config.scoring.workspace,
+                workspace,
+                "memory.retrieval.scoring.workspace",
+            )?;
+        }
+        if let Some(transcript) = file_scoring.transcript {
+            apply_retrieval_profile_override(
+                &mut config.scoring.transcript,
+                transcript,
+                "memory.retrieval.scoring.transcript",
+            )?;
+        }
+        if let Some(checkpoint) = file_scoring.checkpoint {
+            apply_retrieval_profile_override(
+                &mut config.scoring.checkpoint,
+                checkpoint,
+                "memory.retrieval.scoring.checkpoint",
+            )?;
+        }
+        if let Some(compaction) = file_scoring.compaction {
+            apply_retrieval_profile_override(
+                &mut config.scoring.compaction,
+                compaction,
+                "memory.retrieval.scoring.compaction",
+            )?;
+        }
+    }
+    config.validate()
+}
+
 fn parse_retries(value: u32, name: &str) -> Result<u32> {
     const MAX_RETRIES: u32 = 10;
     if value > MAX_RETRIES {
@@ -3253,6 +3372,82 @@ mod tests {
         assert_eq!(retention.max_bytes, Some(10485760));
         assert_eq!(retention.ttl_days, Some(30));
         assert_eq!(retention.vacuum_schedule.as_deref(), Some("0 3 * * 0"));
+    }
+
+    #[test]
+    fn memory_retrieval_config_applies_backend_and_scoring_overrides() {
+        let (parsed, _) = parse_root_file_config(
+            r#"
+            [memory.retrieval.backend]
+            kind = "journal_sqlite_fts"
+
+            [memory.retrieval.scoring]
+            phrase_match_bonus_bps = 2500
+
+            [memory.retrieval.scoring.memory]
+            lexical_bps = 5200
+            vector_bps = 3200
+            recency_bps = 1000
+            source_quality_bps = 600
+            min_recency_bps = 1200
+            min_source_quality_bps = 1500
+            pinned_bonus_bps = 0
+
+            [memory.retrieval.scoring.workspace]
+            lexical_bps = 4800
+            vector_bps = 2800
+            recency_bps = 1200
+            source_quality_bps = 1200
+            min_recency_bps = 1500
+            min_source_quality_bps = 1800
+            pinned_bonus_bps = 800
+            "#,
+        )
+        .expect("memory retrieval config should parse");
+        let file_memory = parsed.memory.expect("memory section should exist");
+        let file_retrieval = file_memory.retrieval.expect("memory.retrieval section should exist");
+
+        let mut runtime = MemoryConfig::default();
+        super::apply_memory_retrieval_config(&mut runtime.retrieval, file_retrieval)
+            .expect("memory retrieval overrides should apply");
+
+        assert_eq!(
+            runtime.retrieval.scoring.phrase_match_bonus_bps, 2_500,
+            "phrase match bonus should follow file override"
+        );
+        assert_eq!(
+            runtime.retrieval.scoring.memory.lexical_bps, 5_200,
+            "memory lexical weight should be configurable"
+        );
+        assert_eq!(
+            runtime.retrieval.scoring.workspace.pinned_bonus_bps, 800,
+            "workspace pinned bonus should follow file override"
+        );
+        runtime.retrieval.validate().expect("applied retrieval config should remain valid");
+    }
+
+    #[test]
+    fn memory_retrieval_config_rejects_invalid_weight_sum() {
+        let (parsed, _) = parse_root_file_config(
+            r#"
+            [memory.retrieval.scoring.memory]
+            lexical_bps = 7000
+            vector_bps = 2500
+            recency_bps = 500
+            source_quality_bps = 500
+            "#,
+        )
+        .expect("invalid retrieval weight sum should still parse as TOML");
+        let file_memory = parsed.memory.expect("memory section should exist");
+        let file_retrieval = file_memory.retrieval.expect("memory.retrieval section should exist");
+
+        let mut runtime = MemoryConfig::default();
+        let error = super::apply_memory_retrieval_config(&mut runtime.retrieval, file_retrieval)
+            .expect_err("invalid retrieval weights must be rejected during override application");
+        assert!(
+            error.to_string().contains("memory.retrieval.scoring.memory weights must sum to 10000"),
+            "validation error should explain the invalid retrieval weight sum: {error}"
+        );
     }
 
     #[test]

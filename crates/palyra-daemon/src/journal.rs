@@ -24,6 +24,7 @@ use crate::{
         WorkspaceDocumentState, WorkspacePathError,
     },
     orchestrator::RunLifecycleState,
+    retrieval::{MemoryEmbeddingsPosture, MemoryEmbeddingsRuntimeProfile},
 };
 
 const REDACTED_MARKER: &str = "<redacted>";
@@ -463,6 +464,7 @@ pub struct MemoryScoreBreakdown {
     pub lexical_score: f64,
     pub vector_score: f64,
     pub recency_score: f64,
+    pub source_quality_score: f64,
     pub final_score: f64,
 }
 
@@ -472,6 +474,36 @@ pub struct MemorySearchHit {
     pub snippet: String,
     pub score: f64,
     pub breakdown: MemoryScoreBreakdown,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WorkspaceScoreBreakdown {
+    pub lexical_score: f64,
+    pub vector_score: f64,
+    pub recency_score: f64,
+    pub source_quality_score: f64,
+    pub final_score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemorySearchCandidateRecord {
+    pub item: MemoryItemRecord,
+    pub snippet: String,
+    pub lexical_raw: f64,
+    pub vector_raw: f64,
+    pub recency_raw: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceSearchCandidateRecord {
+    pub document: WorkspaceDocumentRecord,
+    pub version: i64,
+    pub chunk_index: usize,
+    pub chunk_count: usize,
+    pub snippet: String,
+    pub lexical_raw: f64,
+    pub vector_raw: f64,
+    pub recency_raw: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,6 +643,7 @@ pub struct WorkspaceSearchHit {
     pub snippet: String,
     pub score: f64,
     pub reason: String,
+    pub breakdown: WorkspaceScoreBreakdown,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -677,12 +710,24 @@ pub enum MemoryEmbeddingsMode {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MemoryEmbeddingsStatus {
     pub mode: MemoryEmbeddingsMode,
+    pub posture: MemoryEmbeddingsPosture,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_model_id: Option<String>,
     pub target_model_id: String,
     pub target_dims: u64,
     pub target_version: i64,
     pub total_count: u64,
     pub indexed_count: u64,
     pub pending_count: u64,
+    pub production_default_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    pub backfill_strategy: String,
+    pub batch_limit: usize,
+    pub request_timeout_ms: u64,
+    pub retry_max: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3464,6 +3509,7 @@ pub struct JournalStore {
     config: JournalConfig,
     connection: Mutex<Connection>,
     memory_embedding_provider: Arc<dyn MemoryEmbeddingProvider>,
+    memory_embedding_runtime: MemoryEmbeddingsRuntimeProfile,
 }
 
 impl fmt::Debug for JournalStore {
@@ -3480,15 +3526,32 @@ impl fmt::Debug for JournalStore {
 impl JournalStore {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn open(config: JournalConfig) -> Result<Self, JournalError> {
-        Self::open_with_memory_embedding_provider(
+        Self::open_with_memory_embedding_runtime(
             config,
             Arc::new(HashMemoryEmbeddingProvider::default()),
+            MemoryEmbeddingsRuntimeProfile::legacy_from_provider(
+                DEFAULT_MEMORY_EMBEDDING_MODEL,
+                DEFAULT_MEMORY_VECTOR_DIMS,
+            ),
         )
     }
 
+    #[allow(dead_code)]
     pub fn open_with_memory_embedding_provider(
         config: JournalConfig,
         memory_embedding_provider: Arc<dyn MemoryEmbeddingProvider>,
+    ) -> Result<Self, JournalError> {
+        let runtime = MemoryEmbeddingsRuntimeProfile::legacy_from_provider(
+            memory_embedding_provider.model_name(),
+            memory_embedding_provider.dimensions(),
+        );
+        Self::open_with_memory_embedding_runtime(config, memory_embedding_provider, runtime)
+    }
+
+    pub fn open_with_memory_embedding_runtime(
+        config: JournalConfig,
+        memory_embedding_provider: Arc<dyn MemoryEmbeddingProvider>,
+        memory_embedding_runtime: MemoryEmbeddingsRuntimeProfile,
     ) -> Result<Self, JournalError> {
         if config.max_payload_bytes == 0 {
             return Err(JournalError::InvalidPayloadLimit);
@@ -3528,7 +3591,12 @@ impl JournalStore {
 
         apply_migrations(&mut connection)?;
         seed_usage_pricing_catalog(&mut connection)?;
-        Ok(Self { config, connection: Mutex::new(connection), memory_embedding_provider })
+        Ok(Self {
+            config,
+            connection: Mutex::new(connection),
+            memory_embedding_provider,
+            memory_embedding_runtime,
+        })
     }
 
     pub fn append(
@@ -8715,8 +8783,8 @@ impl JournalStore {
     pub fn memory_embeddings_status(&self) -> Result<MemoryEmbeddingsStatus, JournalError> {
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         let usage = query_memory_usage_snapshot(&guard)?;
-        let target_model_id = self.memory_embedding_provider.model_name().to_owned();
-        let target_dims = self.memory_embedding_provider.dimensions();
+        let target_model_id = self.memory_embedding_runtime.active_model_id.clone();
+        let target_dims = self.memory_embedding_runtime.active_dims;
         let pending_count = query_pending_memory_embeddings_count(
             &guard,
             target_model_id.as_str(),
@@ -8724,17 +8792,22 @@ impl JournalStore {
             CURRENT_MEMORY_EMBEDDING_VERSION,
         )?;
         Ok(MemoryEmbeddingsStatus {
-            mode: if target_model_id == DEFAULT_MEMORY_EMBEDDING_MODEL {
-                MemoryEmbeddingsMode::HashFallback
-            } else {
-                MemoryEmbeddingsMode::ModelProvider
-            },
+            mode: self.memory_embedding_runtime.mode(),
+            posture: self.memory_embedding_runtime.posture,
+            desired_model_id: self.memory_embedding_runtime.desired_model_id.clone(),
             target_model_id,
             target_dims: target_dims as u64,
             target_version: CURRENT_MEMORY_EMBEDDING_VERSION,
             total_count: usage.entries,
             indexed_count: usage.entries.saturating_sub(pending_count),
             pending_count,
+            production_default_active: self.memory_embedding_runtime.production_default_active,
+            degraded_reason_code: self.memory_embedding_runtime.degraded_reason_code.clone(),
+            warning: self.memory_embedding_runtime.warning.clone(),
+            backfill_strategy: self.memory_embedding_runtime.backfill_strategy.clone(),
+            batch_limit: self.memory_embedding_runtime.batch_limit,
+            request_timeout_ms: self.memory_embedding_runtime.request_timeout_ms,
+            retry_max: self.memory_embedding_runtime.retry_max,
         })
     }
 
@@ -8941,10 +9014,10 @@ impl JournalStore {
         })
     }
 
-    pub fn search_memory(
+    pub fn search_memory_candidates(
         &self,
         request: &MemorySearchRequest,
-    ) -> Result<Vec<MemorySearchHit>, JournalError> {
+    ) -> Result<Vec<MemorySearchCandidateRecord>, JournalError> {
         let query_text = normalize_memory_text(request.query.as_str());
         let embedding_model_id = self.memory_embedding_provider.model_name().to_owned();
         let embedding_dims = self.memory_embedding_provider.dimensions();
@@ -9043,17 +9116,25 @@ impl JournalStore {
                 0.0
             };
             let recency_raw = recency_score(now, item.created_at_unix_ms);
-            candidates.push(RankedMemoryCandidate {
+            let snippet = memory_snippet(item.content_text.as_str(), query_text.as_str());
+            candidates.push(MemorySearchCandidateRecord {
                 item,
+                snippet,
                 lexical_raw,
                 vector_raw,
                 recency_raw,
-                lexical_score: 0.0,
-                vector_score: 0.0,
-                final_score: 0.0,
             });
         }
 
+        Ok(candidates)
+    }
+
+    #[allow(dead_code)]
+    pub fn search_memory(
+        &self,
+        request: &MemorySearchRequest,
+    ) -> Result<Vec<MemorySearchHit>, JournalError> {
+        let mut candidates = self.search_memory_candidates(request)?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -9063,40 +9144,39 @@ impl JournalStore {
         let vector_max =
             candidates.iter().map(|candidate| candidate.vector_raw).fold(0.0, f64::max);
 
-        for candidate in &mut candidates {
-            candidate.lexical_score =
-                if lexical_max > 0.0 { candidate.lexical_raw / lexical_max } else { 0.0 };
-            candidate.vector_score =
-                if vector_max > 0.0 { candidate.vector_raw / vector_max } else { 0.0 };
-            candidate.final_score = (0.55 * candidate.lexical_score)
-                + (0.35 * candidate.vector_score)
-                + (0.10 * candidate.recency_raw);
-        }
+        let mut hits = candidates
+            .drain(..)
+            .map(|candidate| {
+                let lexical_score =
+                    if lexical_max > 0.0 { candidate.lexical_raw / lexical_max } else { 0.0 };
+                let vector_score =
+                    if vector_max > 0.0 { candidate.vector_raw / vector_max } else { 0.0 };
+                let final_score =
+                    (0.55 * lexical_score) + (0.35 * vector_score) + (0.10 * candidate.recency_raw);
+                MemorySearchHit {
+                    item: candidate.item,
+                    snippet: candidate.snippet,
+                    score: final_score,
+                    breakdown: MemoryScoreBreakdown {
+                        lexical_score,
+                        vector_score,
+                        recency_score: candidate.recency_raw,
+                        source_quality_score: 0.0,
+                        final_score,
+                    },
+                }
+            })
+            .filter(|hit| hit.score >= request.min_score)
+            .collect::<Vec<_>>();
 
-        candidates.retain(|candidate| candidate.final_score >= request.min_score);
-        candidates.sort_by(|left, right| {
+        hits.sort_by(|left, right| {
             right
-                .final_score
-                .total_cmp(&left.final_score)
+                .score
+                .total_cmp(&left.score)
                 .then_with(|| right.item.created_at_unix_ms.cmp(&left.item.created_at_unix_ms))
                 .then_with(|| left.item.memory_id.cmp(&right.item.memory_id))
         });
-        candidates.truncate(top_k);
-
-        let hits = candidates
-            .into_iter()
-            .map(|candidate| MemorySearchHit {
-                snippet: memory_snippet(candidate.item.content_text.as_str(), query_text.as_str()),
-                score: candidate.final_score,
-                breakdown: MemoryScoreBreakdown {
-                    lexical_score: candidate.lexical_score,
-                    vector_score: candidate.vector_score,
-                    recency_score: candidate.recency_raw,
-                    final_score: candidate.final_score,
-                },
-                item: candidate.item,
-            })
-            .collect();
+        hits.truncate(request.top_k.clamp(1, MAX_MEMORY_ITEMS_LIST_LIMIT));
         Ok(hits)
     }
 
@@ -9757,10 +9837,10 @@ impl JournalStore {
         })
     }
 
-    pub fn search_workspace_documents(
+    pub fn search_workspace_candidates(
         &self,
         request: &WorkspaceSearchRequest,
-    ) -> Result<Vec<WorkspaceSearchHit>, JournalError> {
+    ) -> Result<Vec<WorkspaceSearchCandidateRecord>, JournalError> {
         if !request.min_score.is_finite() || !(0.0..=1.0).contains(&request.min_score) {
             return Err(JournalError::InvalidWorkspaceContent {
                 reason: "min_score must be in range 0.0..=1.0".to_owned(),
@@ -9885,20 +9965,26 @@ impl JournalStore {
                 0.0
             };
             let recency_raw = recency_score(now, document.updated_at_unix_ms);
-            candidates.push(RankedWorkspaceCandidate {
+            candidates.push(WorkspaceSearchCandidateRecord {
                 document,
                 version,
                 chunk_index,
                 chunk_count,
-                chunk_text,
+                snippet: memory_snippet(chunk_text.as_str(), query_text.as_str()),
                 lexical_raw,
                 vector_raw,
                 recency_raw,
-                final_score: 0.0,
-                lexical_score: 0.0,
-                vector_score: 0.0,
             });
         }
+        Ok(candidates)
+    }
+
+    #[allow(dead_code)]
+    pub fn search_workspace_documents(
+        &self,
+        request: &WorkspaceSearchRequest,
+    ) -> Result<Vec<WorkspaceSearchHit>, JournalError> {
+        let mut candidates = self.search_workspace_candidates(request)?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -9906,46 +9992,55 @@ impl JournalStore {
             candidates.iter().map(|candidate| candidate.lexical_raw).fold(0.0, f64::max);
         let vector_max =
             candidates.iter().map(|candidate| candidate.vector_raw).fold(0.0, f64::max);
-        for candidate in &mut candidates {
-            candidate.lexical_score =
-                if lexical_max > 0.0 { candidate.lexical_raw / lexical_max } else { 0.0 };
-            candidate.vector_score =
-                if vector_max > 0.0 { candidate.vector_raw / vector_max } else { 0.0 };
-            candidate.final_score = (0.55 * candidate.lexical_score)
-                + (0.35 * candidate.vector_score)
-                + (0.10 * candidate.recency_raw)
-                + if candidate.document.pinned { 0.05 } else { 0.0 };
-        }
-        candidates.retain(|candidate| candidate.final_score >= request.min_score);
-        candidates.sort_by(|left, right| {
+        let mut hits = candidates
+            .drain(..)
+            .map(|candidate| {
+                let lexical_score =
+                    if lexical_max > 0.0 { candidate.lexical_raw / lexical_max } else { 0.0 };
+                let vector_score =
+                    if vector_max > 0.0 { candidate.vector_raw / vector_max } else { 0.0 };
+                let final_score = (0.55 * lexical_score)
+                    + (0.35 * vector_score)
+                    + (0.10 * candidate.recency_raw)
+                    + if candidate.document.pinned { 0.05 } else { 0.0 };
+                let pinned = candidate.document.pinned;
+                WorkspaceSearchHit {
+                    document: candidate.document,
+                    version: candidate.version,
+                    chunk_index: candidate.chunk_index,
+                    chunk_count: candidate.chunk_count,
+                    snippet: candidate.snippet,
+                    score: final_score,
+                    reason: if pinned {
+                        "pinned_workspace_document".to_owned()
+                    } else {
+                        format!(
+                            "hybrid(lexical={:.2},vector={:.2},recency={:.2})",
+                            lexical_score, vector_score, candidate.recency_raw
+                        )
+                    },
+                    breakdown: WorkspaceScoreBreakdown {
+                        lexical_score,
+                        vector_score,
+                        recency_score: candidate.recency_raw,
+                        source_quality_score: 0.0,
+                        final_score,
+                    },
+                }
+            })
+            .filter(|hit| hit.score >= request.min_score)
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
             right
-                .final_score
-                .total_cmp(&left.final_score)
+                .score
+                .total_cmp(&left.score)
                 .then_with(|| {
                     right.document.updated_at_unix_ms.cmp(&left.document.updated_at_unix_ms)
                 })
                 .then_with(|| left.document.document_id.cmp(&right.document.document_id))
         });
-        candidates.truncate(top_k);
-        Ok(candidates
-            .into_iter()
-            .map(|candidate| WorkspaceSearchHit {
-                reason: if candidate.document.pinned {
-                    "pinned_workspace_document".to_owned()
-                } else {
-                    format!(
-                        "hybrid(lexical={:.2},vector={:.2},recency={:.2})",
-                        candidate.lexical_score, candidate.vector_score, candidate.recency_raw
-                    )
-                },
-                snippet: memory_snippet(candidate.chunk_text.as_str(), query_text.as_str()),
-                score: candidate.final_score,
-                version: candidate.version,
-                chunk_index: candidate.chunk_index,
-                chunk_count: candidate.chunk_count,
-                document: candidate.document,
-            })
-            .collect())
+        hits.truncate(request.top_k.clamp(1, MAX_WORKSPACE_DOCUMENT_LIST_LIMIT));
+        Ok(hits)
     }
 }
 
@@ -9962,21 +10057,6 @@ struct WorkspaceChunkReindexArgs<'a> {
     prompt_binding: &'a str,
     created_at_unix_ms: i64,
     embedding_dims: usize,
-}
-
-#[derive(Debug, Clone)]
-struct RankedWorkspaceCandidate {
-    document: WorkspaceDocumentRecord,
-    version: i64,
-    chunk_index: usize,
-    chunk_count: usize,
-    chunk_text: String,
-    lexical_raw: f64,
-    vector_raw: f64,
-    recency_raw: f64,
-    final_score: f64,
-    lexical_score: f64,
-    vector_score: f64,
 }
 
 #[cfg(unix)]
@@ -12685,17 +12765,6 @@ fn integer_to_u64(
     })
 }
 
-#[derive(Debug, Clone)]
-struct RankedMemoryCandidate {
-    item: MemoryItemRecord,
-    lexical_raw: f64,
-    vector_raw: f64,
-    recency_raw: f64,
-    lexical_score: f64,
-    vector_score: f64,
-    final_score: f64,
-}
-
 fn map_memory_item_row(row: &rusqlite::Row<'_>) -> Result<MemoryItemRecord, rusqlite::Error> {
     let source_raw: String = row.get(4)?;
     let source = MemorySource::from_str(source_raw.as_str()).ok_or_else(|| {
@@ -15380,6 +15449,84 @@ mod tests {
     }
 
     #[test]
+    fn memory_retrieval_service_preserves_legacy_scoring_defaults() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FD1",
+                "user:ops",
+                Some("cli"),
+                Some(session_id),
+                MemorySource::Manual,
+                "release deploy checklist with rollback verification steps",
+            ))
+            .expect("manual memory item should be created");
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FD2",
+                "user:ops",
+                Some("cli"),
+                Some(session_id),
+                MemorySource::Summary,
+                "weekly summary mentioning deploy guardrails and rollout follow-up",
+            ))
+            .expect("summary memory item should be created");
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FD3",
+                "user:ops",
+                Some("cli"),
+                Some(session_id),
+                MemorySource::TapeToolResult,
+                "browser artifact inventory and trace bundle",
+            ))
+            .expect("tool-result memory item should be created");
+
+        let request = MemorySearchRequest {
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            session_id: Some(session_id.to_owned()),
+            query: "deploy checklist rollback".to_owned(),
+            top_k: 5,
+            min_score: 0.0,
+            tags: Vec::new(),
+            sources: Vec::new(),
+        };
+
+        let legacy_hits =
+            store.search_memory(&request).expect("legacy memory search should succeed");
+        let candidates = store
+            .search_memory_candidates(&request)
+            .expect("candidate memory search should succeed");
+        let service_hits = crate::retrieval::score_memory_candidates(
+            candidates,
+            request.min_score,
+            &crate::retrieval::RetrievalRuntimeConfig::default(),
+        );
+
+        assert_eq!(legacy_hits.len(), service_hits.len(), "memory hit counts should match");
+        for (legacy, service) in legacy_hits.iter().zip(service_hits.iter()) {
+            assert_eq!(
+                legacy.item.memory_id, service.item.memory_id,
+                "memory retrieval service should preserve legacy result ordering"
+            );
+            assert!(
+                (legacy.score - service.score).abs() < 0.001,
+                "memory retrieval service should stay within a tight score delta; legacy={} service={}",
+                legacy.score,
+                service.score
+            );
+            assert!(
+                service.breakdown.source_quality_score > 0.0,
+                "service path should expose explainable source quality signals"
+            );
+        }
+    }
+
+    #[test]
     fn memory_store_supports_custom_embedding_provider_plug() {
         let db_path = temp_db_path();
         let provider = Arc::new(FixedMemoryEmbeddingProvider {
@@ -16651,6 +16798,85 @@ mod tests {
             risky_hits.iter().any(|hit| hit.document.path == "projects/risky-note.md"),
             "quarantined search should surface risky workspace content when explicitly requested"
         );
+    }
+
+    #[test]
+    fn workspace_retrieval_service_preserves_legacy_scoring_defaults() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        let primary = store
+            .upsert_workspace_document(&sample_workspace_write_request(
+                "projects/deploy-checklist.md",
+                "Release deployment checklist with rollback rehearsal and staged verification.",
+            ))
+            .expect("primary workspace document should be created");
+        store
+            .upsert_workspace_document(&sample_workspace_write_request(
+                "projects/release-summary.md",
+                "Summary of rollout notes, deployment follow-up, and operator checklist.",
+            ))
+            .expect("secondary workspace document should be created");
+        store
+            .upsert_workspace_document(&sample_workspace_write_request(
+                "projects/unrelated.md",
+                "Artifact inventory and browser capture notes.",
+            ))
+            .expect("unrelated workspace document should be created");
+        let pinned = store
+            .set_workspace_document_pinned(
+                "user:ops",
+                Some("cli"),
+                Some("agent:writer"),
+                primary.path.as_str(),
+                true,
+            )
+            .expect("workspace pin should succeed")
+            .expect("pinned workspace document should exist");
+        assert!(pinned.pinned, "workspace fixture should remain pinned");
+
+        let request = WorkspaceSearchRequest {
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            agent_id: Some("agent:writer".to_owned()),
+            query: "deployment checklist rollback".to_owned(),
+            prefix: Some("projects".to_owned()),
+            top_k: 8,
+            min_score: 0.0,
+            include_historical: false,
+            include_quarantined: false,
+        };
+
+        let legacy_hits = store
+            .search_workspace_documents(&request)
+            .expect("legacy workspace search should succeed");
+        let candidates = store
+            .search_workspace_candidates(&request)
+            .expect("candidate workspace search should succeed");
+        let service_hits = crate::retrieval::score_workspace_candidates(
+            candidates,
+            request.min_score,
+            &crate::retrieval::RetrievalRuntimeConfig::default(),
+        );
+
+        assert_eq!(legacy_hits.len(), service_hits.len(), "workspace hit counts should match");
+        for (legacy, service) in legacy_hits.iter().zip(service_hits.iter()) {
+            assert_eq!(
+                legacy.document.document_id, service.document.document_id,
+                "workspace retrieval service should preserve legacy result ordering"
+            );
+            assert!(
+                (legacy.score - service.score).abs() < 0.001,
+                "workspace retrieval service should stay within a tight score delta; legacy={} service={}",
+                legacy.score,
+                service.score
+            );
+            assert!(
+                service.breakdown.source_quality_score > 0.0,
+                "service path should expose workspace source quality signals"
+            );
+        }
     }
 
     #[test]

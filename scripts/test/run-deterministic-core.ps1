@@ -11,6 +11,7 @@ Set-Location $rootDir
 & (Join-Path $PSScriptRoot "ensure-desktop-ui.ps1")
 
 & (Join-Path $PSScriptRoot "check-deterministic-fixtures.ps1")
+& (Join-Path $PSScriptRoot "run-retrieval-benchmark.ps1")
 
 cargo build -p palyra-cli --locked
 

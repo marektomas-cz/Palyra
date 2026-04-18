@@ -207,6 +207,7 @@ pub struct FileMemoryConfig {
     pub default_ttl_ms: Option<i64>,
     pub auto_inject: Option<FileMemoryAutoInjectConfig>,
     pub retention: Option<FileMemoryRetentionConfig>,
+    pub retrieval: Option<FileMemoryRetrievalConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -223,6 +224,43 @@ pub struct FileMemoryRetentionConfig {
     pub max_bytes: Option<u64>,
     pub ttl_days: Option<u32>,
     pub vacuum_schedule: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileMemoryRetrievalConfig {
+    pub backend: Option<FileRetrievalBackendConfig>,
+    pub scoring: Option<FileRetrievalScoringConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileRetrievalBackendConfig {
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileRetrievalScoringConfig {
+    pub phrase_match_bonus_bps: Option<u16>,
+    pub default_profile: Option<FileRetrievalSourceScoringProfile>,
+    pub memory: Option<FileRetrievalSourceScoringProfile>,
+    pub workspace: Option<FileRetrievalSourceScoringProfile>,
+    pub transcript: Option<FileRetrievalSourceScoringProfile>,
+    pub checkpoint: Option<FileRetrievalSourceScoringProfile>,
+    pub compaction: Option<FileRetrievalSourceScoringProfile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileRetrievalSourceScoringProfile {
+    pub lexical_bps: Option<u16>,
+    pub vector_bps: Option<u16>,
+    pub recency_bps: Option<u16>,
+    pub source_quality_bps: Option<u16>,
+    pub min_recency_bps: Option<u16>,
+    pub min_source_quality_bps: Option<u16>,
+    pub pinned_bonus_bps: Option<u16>,
 }
 
 #[derive(Debug, Default, Deserialize)]

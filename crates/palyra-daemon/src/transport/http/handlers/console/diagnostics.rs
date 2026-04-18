@@ -59,6 +59,11 @@ pub(crate) async fn console_diagnostics_handler(
     })?;
     let memory_status =
         state.runtime.memory_maintenance_status().await.map_err(runtime_status_response)?;
+    let memory_embeddings =
+        state.runtime.memory_embeddings_status().await.map_err(runtime_status_response)?;
+    let retrieval_backend =
+        state.runtime.retrieval_backend_snapshot().map_err(runtime_status_response)?;
+    let retrieval_config = state.runtime.retrieval_config_snapshot();
     let memory_runtime_config = state.runtime.memory_config_snapshot();
     let learning_runtime_config = state.runtime.learning_config_snapshot();
     let access_snapshot = {
@@ -119,6 +124,11 @@ pub(crate) async fn console_diagnostics_handler(
         "observability": observability_payload,
         "memory": {
             "usage": memory_status.usage,
+            "embeddings": memory_embeddings,
+            "retrieval": {
+                "backend": retrieval_backend,
+                "scoring": retrieval_config.scoring,
+            },
             "retention": {
                 "max_entries": memory_runtime_config.retention_max_entries,
                 "max_bytes": memory_runtime_config.retention_max_bytes,

@@ -8496,6 +8496,18 @@ mod diagnostics_bundle_tests {
                         "runtime_metrics": {
                             "request_count": 12345
                         }
+                    },
+                    "memory": {
+                        "retrieval": {
+                            "backend": {
+                                "kind": "journal_sqlite_fts",
+                                "state": "degraded",
+                                "reason": "PALYRA_OFFLINE is enabled; retrieval embeddings are using the explicit hash fallback",
+                                "capabilities": {
+                                    "vector_search": true
+                                }
+                            }
+                        }
                     }
                 })),
                 config_ref_health: None,
@@ -8546,6 +8558,30 @@ mod diagnostics_bundle_tests {
                 && !extracted.contains("abc123")
                 && !extracted.contains("qwerty"),
             "extracted error message must not leak raw secret values: {extracted}"
+        );
+    }
+
+    #[test]
+    fn support_bundle_encoding_preserves_retrieval_backend_diagnostics() {
+        let mut bundle = oversized_bundle();
+        let encoded = encode_support_bundle_with_cap(&mut bundle, 512 * 1024)
+            .expect("support bundle should encode");
+        let parsed = serde_json::from_slice::<Value>(encoded.as_slice())
+            .expect("encoded support bundle should deserialize");
+
+        assert_eq!(
+            parsed
+                .pointer("/diagnostics/admin_status/memory/retrieval/backend/state")
+                .and_then(Value::as_str),
+            Some("degraded"),
+            "support bundle should preserve retrieval backend state for offline diagnostics"
+        );
+        assert!(
+            parsed
+                .pointer("/diagnostics/admin_status/memory/retrieval/backend/reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason.contains("PALYRA_OFFLINE")),
+            "support bundle should preserve retrieval backend reason for operator triage"
         );
     }
 

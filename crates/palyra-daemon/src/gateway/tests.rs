@@ -906,6 +906,7 @@ fn memory_auto_inject_tape_payload_redacts_secret_like_values() {
             lexical_score: 0.5,
             vector_score: 0.2,
             recency_score: 0.17,
+            source_quality_score: 0.0,
             final_score: 0.87,
         },
     };
@@ -940,6 +941,7 @@ fn render_memory_augmented_prompt_formats_context_block_deterministically() {
                 lexical_score: 0.6,
                 vector_score: 0.2,
                 recency_score: 0.1876,
+                source_quality_score: 0.0,
                 final_score: 0.9876,
             },
         },
@@ -951,6 +953,7 @@ fn render_memory_augmented_prompt_formats_context_block_deterministically() {
                 lexical_score: 0.3,
                 vector_score: 0.1,
                 recency_score: 0.1123,
+                source_quality_score: 0.0,
                 final_score: 0.5123,
             },
         },
@@ -1485,6 +1488,7 @@ fn memory_search_hit_message_redacts_legacy_secret_like_snippet() {
             lexical_score: 0.2,
             vector_score: 0.1,
             recency_score: 0.12,
+            source_quality_score: 0.0,
             final_score: 0.42,
         },
     };
@@ -1522,6 +1526,7 @@ fn memory_search_tool_output_payload_redacts_secret_like_values() {
             lexical_score: 0.3,
             vector_score: 0.2,
             recency_score: 0.16,
+            source_quality_score: 0.0,
             final_score: 0.66,
         },
     };

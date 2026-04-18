@@ -37,6 +37,10 @@ use crate::provider_leases::{
     ProviderLeaseManager, ProviderLeaseManagerSnapshot, ProviderLeasePreviewRequest,
     ProviderLeasePreviewSnapshot,
 };
+use crate::retrieval::{
+    score_memory_candidates, score_workspace_candidates, RetrievalBackend,
+    RetrievalBackendSnapshot, RetrievalRuntimeConfig,
+};
 use crate::self_healing::{
     IncidentDomain, RemediationAttemptStatus, RuntimeIncidentHistoryEntry,
     RuntimeIncidentObservation, RuntimeIncidentRecord, RuntimeIncidentSummary,
@@ -344,7 +348,7 @@ pub struct GatewayJournalConfigSnapshot {
 }
 
 #[rustfmt::skip]
-pub struct GatewayRuntimeDependencies { pub model_provider: Arc<dyn ModelProvider>, pub vault: Arc<Vault>, pub agent_registry: AgentRegistry, pub tool_posture_registry: ToolPostureRegistry }
+pub struct GatewayRuntimeDependencies { pub model_provider: Arc<dyn ModelProvider>, pub vault: Arc<Vault>, pub agent_registry: AgentRegistry, pub tool_posture_registry: ToolPostureRegistry, pub retrieval_backend: Arc<dyn RetrievalBackend> }
 
 pub struct GatewayRuntimeState {
     pub(crate) started_at: Instant,
@@ -357,11 +361,13 @@ pub struct GatewayRuntimeState {
     model_provider: Arc<dyn ModelProvider>,
     pub(crate) vault: Arc<Vault>,
     pub(crate) memory_config: RwLock<MemoryRuntimeConfig>,
+    pub(crate) retrieval_config: RwLock<RetrievalRuntimeConfig>,
     pub(crate) learning_config: RwLock<LearningRuntimeConfig>,
     pub(crate) memory_search_cache: Mutex<HashMap<String, CachedMemorySearchEntry>>,
     pub(crate) http_fetch_cache: Mutex<HashMap<String, CachedHttpFetchEntry>>,
     tool_approval_cache: Mutex<HashMap<String, CachedToolApprovalDecision>>,
     pub(crate) provider_leases: ProviderLeaseManager,
+    pub(crate) retrieval_backend: Arc<dyn RetrievalBackend>,
     pub(crate) tool_posture_registry: ToolPostureRegistry,
     pub(crate) vault_rate_limit: Mutex<HashMap<String, VaultRateLimitEntry>>,
     canvas_records: Mutex<HashMap<String, CanvasRecord>>,
@@ -974,7 +980,7 @@ impl GatewayRuntimeState {
         let tool_posture_registry = ToolPostureRegistry::open(tool_posture_root.as_path())
             .expect("test tool posture registry should initialize");
         #[rustfmt::skip]
-        let dependencies = GatewayRuntimeDependencies { model_provider: default_provider, vault: default_vault, agent_registry, tool_posture_registry };
+        let dependencies = GatewayRuntimeDependencies { model_provider: default_provider, vault: default_vault, agent_registry, tool_posture_registry, retrieval_backend: Arc::new(crate::retrieval::JournalRetrievalBackend) };
         Self::new_with_provider(
             config,
             journal_config,
@@ -992,7 +998,7 @@ impl GatewayRuntimeState {
         dependencies: GatewayRuntimeDependencies,
     ) -> Result<Arc<Self>, JournalError> {
         #[rustfmt::skip]
-        let GatewayRuntimeDependencies { model_provider, vault, agent_registry, tool_posture_registry } = dependencies;
+        let GatewayRuntimeDependencies { model_provider, vault, agent_registry, tool_posture_registry, retrieval_backend } = dependencies;
         let build = build_metadata();
         let existing_events = journal_store.total_events()? as u64;
         let canvas_snapshots =
@@ -1127,11 +1133,13 @@ impl GatewayRuntimeState {
             model_provider,
             vault,
             memory_config: RwLock::new(MemoryRuntimeConfig::default()),
+            retrieval_config: RwLock::new(RetrievalRuntimeConfig::default()),
             learning_config: RwLock::new(LearningRuntimeConfig::default()),
             memory_search_cache: Mutex::new(HashMap::new()),
             http_fetch_cache: Mutex::new(HashMap::new()),
             tool_approval_cache: Mutex::new(HashMap::new()),
             provider_leases: ProviderLeaseManager::default(),
+            retrieval_backend,
             tool_posture_registry,
             vault_rate_limit: Mutex::new(HashMap::new()),
             canvas_records: Mutex::new(recovered_canvas_records),
@@ -2557,6 +2565,15 @@ impl GatewayRuntimeState {
     #[must_use]
     pub fn provider_lease_snapshot(&self) -> ProviderLeaseManagerSnapshot {
         self.provider_leases.snapshot()
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn retrieval_backend_snapshot(&self) -> Result<RetrievalBackendSnapshot, Status> {
+        let embeddings_status = self
+            .journal_store
+            .memory_embeddings_status()
+            .map_err(|error| map_memory_store_error("load retrieval backend snapshot", error))?;
+        Ok(self.retrieval_backend.snapshot(&self.retrieval_config_snapshot(), &embeddings_status))
     }
 
     #[must_use]
@@ -5309,12 +5326,37 @@ impl GatewayRuntimeState {
         self.clear_memory_search_cache();
     }
 
+    pub fn configure_retrieval(&self, config: RetrievalRuntimeConfig) {
+        match self.retrieval_config.write() {
+            Ok(mut guard) => {
+                *guard = config;
+            }
+            Err(poisoned) => {
+                warn!("retrieval config lock poisoned while applying runtime config");
+                let mut guard = poisoned.into_inner();
+                *guard = config;
+            }
+        }
+        self.clear_memory_search_cache();
+    }
+
     #[must_use]
     pub fn memory_config_snapshot(&self) -> MemoryRuntimeConfig {
         match self.memory_config.read() {
             Ok(config) => config.clone(),
             Err(poisoned) => {
                 warn!("memory config lock poisoned while reading runtime config");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn retrieval_config_snapshot(&self) -> RetrievalRuntimeConfig {
+        match self.retrieval_config.read() {
+            Ok(config) => config.clone(),
+            Err(poisoned) => {
+                warn!("retrieval config lock poisoned while reading runtime config");
                 poisoned.into_inner().clone()
             }
         }
@@ -5819,10 +5861,15 @@ impl GatewayRuntimeState {
         let started_at = Instant::now();
         let state = Arc::clone(self);
         let results = tokio::task::spawn_blocking(move || {
-            state
-                .journal_store
-                .search_memory(&request)
-                .map_err(|error| map_memory_store_error("search memory items", error))
+            let candidates = state
+                .retrieval_backend
+                .search_memory_candidates(&state.journal_store, &request)
+                .map_err(|error| map_memory_store_error("search memory items", error))?;
+            Ok::<_, Status>(score_memory_candidates(
+                candidates,
+                request.min_score,
+                &state.retrieval_config_snapshot(),
+            ))
         })
         .await
         .map_err(|_| Status::internal("memory search worker panicked"))??;
@@ -6042,10 +6089,15 @@ impl GatewayRuntimeState {
     ) -> Result<Vec<WorkspaceSearchHit>, Status> {
         let state = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
-            state
-                .journal_store
-                .search_workspace_documents(&request)
-                .map_err(|error| map_memory_store_error("search workspace documents", error))
+            let candidates = state
+                .retrieval_backend
+                .search_workspace_candidates(&state.journal_store, &request)
+                .map_err(|error| map_memory_store_error("search workspace documents", error))?;
+            Ok::<_, Status>(score_workspace_candidates(
+                candidates,
+                request.min_score,
+                &state.retrieval_config_snapshot(),
+            ))
         })
         .await
         .map_err(|_| Status::internal("workspace search worker panicked"))?

@@ -29,6 +29,7 @@ mod orchestrator;
 mod plugins;
 mod provider_leases;
 mod quic_runtime;
+mod retrieval;
 mod routines;
 mod sandbox_runner;
 mod self_healing;
@@ -81,15 +82,13 @@ use gateway::{
 };
 use journal::{
     ApprovalDecision, ApprovalDecisionScope, ApprovalSubjectType, CronJobUpdatePatch,
-    HashMemoryEmbeddingProvider, JournalAppendRequest, JournalConfig, JournalStore,
-    MemoryEmbeddingProvider, MemoryPurgeRequest, OrchestratorCancelRequest,
-    OrchestratorRunStatusSnapshot, SkillExecutionStatus, SkillStatusRecord,
-    SkillStatusUpsertRequest,
+    JournalAppendRequest, JournalConfig, JournalStore, MemoryPurgeRequest,
+    OrchestratorCancelRequest, OrchestratorRunStatusSnapshot, SkillExecutionStatus,
+    SkillStatusRecord, SkillStatusUpsertRequest,
 };
 use model_provider::{
-    build_embeddings_provider, build_model_provider, EmbeddingsProvider, EmbeddingsRequest,
-    ModelProviderAuthProviderKind, ModelProviderConfig, ModelProviderCredentialSource,
-    ModelProviderKind, ProviderRegistryEntryConfig,
+    build_model_provider, ModelProviderAuthProviderKind, ModelProviderConfig,
+    ModelProviderCredentialSource, ModelProviderKind, ProviderRegistryEntryConfig,
 };
 use observability::{
     CorrelationSnapshot as ObservabilityCorrelationSnapshot, FailureClass, ObservabilityState,
@@ -167,6 +166,7 @@ use palyra_vault::{
     VaultConfig as VaultConfigOptions, VaultRef, VaultScope,
 };
 use reqwest::{Client as ReqwestClient, Url};
+use retrieval::{build_memory_embedding_runtime_selection, JournalRetrievalBackend};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1756,78 +1756,6 @@ struct SecretAccessAuditRecord {
     resolved_at_unix_ms: i64,
 }
 
-struct ModelProviderMemoryEmbeddingAdapter {
-    provider: Arc<dyn EmbeddingsProvider>,
-    model_name: String,
-    dimensions: usize,
-}
-
-impl ModelProviderMemoryEmbeddingAdapter {
-    fn new(provider: Arc<dyn EmbeddingsProvider>, model_name: String, dimensions: usize) -> Self {
-        Self { provider, model_name, dimensions: dimensions.max(1) }
-    }
-
-    fn zero_vector(&self) -> Vec<f32> {
-        vec![0.0_f32; self.dimensions]
-    }
-}
-
-impl MemoryEmbeddingProvider for ModelProviderMemoryEmbeddingAdapter {
-    fn model_name(&self) -> &str {
-        self.model_name.as_str()
-    }
-
-    fn dimensions(&self) -> usize {
-        self.dimensions
-    }
-
-    fn embed_text(&self, text: &str) -> Vec<f32> {
-        let request = EmbeddingsRequest { inputs: vec![text.to_owned()] };
-        let result = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(|| handle.block_on(self.provider.embed(request)))
-            }
-            Err(_) => {
-                warn!(
-                    "tokio runtime unavailable for model-provider embeddings adapter; using zero vector fallback"
-                );
-                return self.zero_vector();
-            }
-        };
-
-        match result {
-            Ok(response) => {
-                let Some(vector) = response.vectors.into_iter().next() else {
-                    warn!(
-                        "model-provider embeddings response did not include vector payload; using zero vector fallback"
-                    );
-                    return self.zero_vector();
-                };
-                normalize_memory_embedding_vector(vector, self.dimensions)
-            }
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    "model-provider embeddings request failed; using zero vector fallback"
-                );
-                self.zero_vector()
-            }
-        }
-    }
-}
-
-fn normalize_memory_embedding_vector(mut vector: Vec<f32>, expected_dims: usize) -> Vec<f32> {
-    if expected_dims == 0 {
-        return Vec::new();
-    }
-    if vector.len() < expected_dims {
-        vector.resize(expected_dims, 0.0);
-    } else if vector.len() > expected_dims {
-        vector.truncate(expected_dims);
-    }
-    vector
-}
-
 fn parse_offline_env_flag(raw: &str) -> Result<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -1918,48 +1846,6 @@ fn build_learning_runtime_config() -> Result<LearningRuntimeConfig> {
     Ok(config)
 }
 
-fn build_memory_embedding_provider(
-    config: &ModelProviderConfig,
-    offline_mode: bool,
-) -> Result<Arc<dyn MemoryEmbeddingProvider>> {
-    if config.kind != ModelProviderKind::OpenAiCompatible {
-        return Ok(Arc::new(HashMemoryEmbeddingProvider::default()));
-    }
-
-    match (&config.openai_embeddings_model, config.openai_embeddings_dims) {
-        (Some(model_name), Some(dimensions)) => {
-            if offline_mode {
-                warn!(
-                    model = %model_name,
-                    dimensions,
-                    "PALYRA_OFFLINE is enabled; using hash embeddings fallback for memory vectors"
-                );
-                return Ok(Arc::new(HashMemoryEmbeddingProvider::with_dimensions(
-                    dimensions as usize,
-                )));
-            }
-            let embeddings_provider = build_embeddings_provider(config)
-                .context("failed to initialize model-provider embeddings runtime")?;
-            Ok(Arc::new(ModelProviderMemoryEmbeddingAdapter::new(
-                embeddings_provider,
-                model_name.clone(),
-                dimensions as usize,
-            )))
-        }
-        (Some(_), None) => Err(anyhow::anyhow!(
-            "openai embeddings model is configured but model_provider.openai_embeddings_dims is missing"
-        )),
-        (None, Some(dimensions)) => {
-            warn!(
-                dimensions,
-                "openai embeddings dimensions are configured without model; hash embeddings fallback remains active"
-            );
-            Ok(Arc::new(HashMemoryEmbeddingProvider::default()))
-        }
-        (None, None) => Ok(Arc::new(HashMemoryEmbeddingProvider::default())),
-    }
-}
-
 pub async fn run() -> Result<()> {
     init_tracing();
     let bootstrap = load_runtime_bootstrap()?;
@@ -1970,16 +1856,18 @@ pub async fn run() -> Result<()> {
     let identity_runtime = load_identity_runtime(loaded.gateway.identity_store_dir.clone())
         .context("failed to initialize gateway identity runtime")?;
     let offline_mode = offline_mode_enabled()?;
-    let memory_embedding_provider =
-        build_memory_embedding_provider(&loaded.model_provider, offline_mode)?;
-    let journal_store = JournalStore::open_with_memory_embedding_provider(
+    let memory_embedding_selection =
+        build_memory_embedding_runtime_selection(&loaded.model_provider, offline_mode)
+            .context("failed to resolve retrieval embeddings runtime")?;
+    let journal_store = JournalStore::open_with_memory_embedding_runtime(
         JournalConfig {
             db_path: loaded.storage.journal_db_path.clone(),
             hash_chain_enabled: loaded.storage.journal_hash_chain_enabled,
             max_payload_bytes: loaded.storage.max_journal_payload_bytes,
             max_events: loaded.storage.max_journal_events,
         },
-        memory_embedding_provider,
+        Arc::clone(&memory_embedding_selection.provider),
+        memory_embedding_selection.profile.clone(),
     )
     .context("failed to initialize event journal storage")?;
     let vault = Arc::new(
@@ -2177,7 +2065,13 @@ pub async fn run() -> Result<()> {
         },
         journal_store,
         identity_runtime.revoked_certificate_count,
-        gateway::GatewayRuntimeDependencies { model_provider, vault: Arc::clone(&vault), agent_registry, tool_posture_registry },
+        gateway::GatewayRuntimeDependencies {
+            model_provider,
+            vault: Arc::clone(&vault),
+            agent_registry,
+            tool_posture_registry,
+            retrieval_backend: Arc::new(JournalRetrievalBackend),
+        },
     )
     .context("failed to initialize gateway runtime state")?;
     runtime.configure_memory(MemoryRuntimeConfig {
@@ -2191,6 +2085,7 @@ pub async fn run() -> Result<()> {
         retention_ttl_days: loaded.memory.retention.ttl_days,
         retention_vacuum_schedule: loaded.memory.retention.vacuum_schedule.clone(),
     });
+    runtime.configure_retrieval(loaded.memory.retrieval.clone());
     runtime.configure_learning(build_learning_runtime_config()?);
 
     if journal_migrate_only {
@@ -3723,7 +3618,7 @@ mod tests {
 
     use super::{
         build_discord_inbound_monitor_warnings, build_discord_onboarding_plan,
-        build_discord_onboarding_security_defaults, build_memory_embedding_provider,
+        build_discord_onboarding_security_defaults, build_memory_embedding_runtime_selection,
         clamp_console_relay_token_ttl_ms, connector_db_path_from_journal_path,
         constant_time_eq_bytes, consume_admin_rate_limit_with_now,
         consume_canvas_rate_limit_with_now, enforce_remote_bind_guard,
@@ -4193,31 +4088,39 @@ mod tests {
     }
 
     #[test]
-    fn build_memory_embedding_provider_requires_dims_when_model_is_configured() {
+    fn build_memory_embedding_runtime_selection_marks_unknown_dims_as_degraded_fallback() {
         let mut config = openai_model_provider_config();
-        config.openai_embeddings_model = Some("text-embedding-3-small".to_owned());
+        config.openai_embeddings_model = Some("custom-embedding-model".to_owned());
         config.openai_embeddings_dims = None;
 
-        let error = match build_memory_embedding_provider(&config, false) {
-            Ok(_) => panic!("configured model without dims should fail"),
-            Err(error) => error,
-        };
+        let selection = build_memory_embedding_runtime_selection(&config, false)
+            .expect("embedding runtime selection should succeed");
         assert!(
-            error.to_string().contains("openai_embeddings_dims"),
-            "error should explain missing dimensions requirement"
+            !selection.profile.production_default_active,
+            "unknown embedding dimensions should keep retrieval in degraded mode"
+        );
+        assert_eq!(
+            selection.profile.degraded_reason_code.as_deref(),
+            Some("embeddings_dimensions_unknown"),
+            "degraded selection should explain that embedding dimensions are missing"
         );
     }
 
     #[test]
-    fn build_memory_embedding_provider_uses_hash_fallback_in_explicit_offline_mode() {
+    fn build_memory_embedding_runtime_selection_uses_hash_fallback_in_explicit_offline_mode() {
         let mut config = openai_model_provider_config();
         config.openai_embeddings_model = Some("text-embedding-3-small".to_owned());
         config.openai_embeddings_dims = Some(8);
 
-        let provider = build_memory_embedding_provider(&config, true)
+        let selection = build_memory_embedding_runtime_selection(&config, true)
             .expect("offline mode should allow hash fallback");
-        assert_eq!(provider.model_name(), "hash-embedding-v1");
-        assert_eq!(provider.dimensions(), 8);
+        assert_eq!(selection.provider.model_name(), "hash-embedding-v1");
+        assert_eq!(selection.provider.dimensions(), 8);
+        assert_eq!(
+            selection.profile.degraded_reason_code.as_deref(),
+            Some("offline_mode_enabled"),
+            "offline mode should be surfaced explicitly in degraded retrieval posture"
+        );
     }
 
     #[test]

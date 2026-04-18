@@ -18,6 +18,9 @@ pub(crate) async fn console_memory_status_handler(
     let embeddings_status =
         state.runtime.memory_embeddings_status().await.map_err(runtime_status_response)?;
     let memory_config = state.runtime.memory_config_snapshot();
+    let retrieval_config = state.runtime.retrieval_config_snapshot();
+    let retrieval_backend =
+        state.runtime.retrieval_backend_snapshot().map_err(runtime_status_response)?;
     let learning_config = state.runtime.learning_config_snapshot();
     let counters = state.runtime.counters.snapshot();
     let workspace_preview = state
@@ -38,6 +41,10 @@ pub(crate) async fn console_memory_status_handler(
     Ok(Json(json!({
         "usage": maintenance_status.usage,
         "embeddings": embeddings_status,
+        "retrieval": {
+            "backend": retrieval_backend,
+            "scoring": retrieval_config.scoring,
+        },
         "retention": {
             "max_entries": memory_config.retention_max_entries,
             "max_bytes": memory_config.retention_max_bytes,

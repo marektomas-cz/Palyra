@@ -47,6 +47,9 @@ desktop-ui-ready:
 deterministic-core:
     bash scripts/test/run-deterministic-core.sh
 
+retrieval-benchmark:
+    bash scripts/test/run-retrieval-benchmark.sh
+
 cli-test:
     cargo test -p palyra-cli --locked
 

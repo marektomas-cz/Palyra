@@ -2302,6 +2302,10 @@ fn console_memory_status_and_index_surface_return_operator_payloads() -> Result<
         status_response.get("embeddings").is_some(),
         "memory status response should include embeddings payload"
     );
+    assert!(
+        status_response.get("retrieval").is_some(),
+        "memory status response should include retrieval backend payload"
+    );
 
     let missing_csrf = client
         .post(format!("http://127.0.0.1:{admin_port}/console/v1/memory/index"))
@@ -2337,6 +2341,84 @@ fn console_memory_status_and_index_surface_return_operator_payloads() -> Result<
     assert!(
         index_response.get("embeddings").is_some(),
         "memory index response should include embeddings payload"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn console_memory_diagnostics_surface_explicit_degraded_retrieval_posture() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_dynamic_ports_with_env(&[
+        ("PALYRA_ADMIN_BOUND_PRINCIPAL", CONSOLE_ADMIN_PRINCIPAL),
+        ("PALYRA_MODEL_PROVIDER_KIND", "openai_compatible"),
+        ("PALYRA_MODEL_PROVIDER_OPENAI_API_KEY", "sk-test"),
+        ("PALYRA_MODEL_PROVIDER_OPENAI_EMBEDDINGS_MODEL", "text-embedding-3-small"),
+        ("PALYRA_MODEL_PROVIDER_OPENAI_EMBEDDINGS_DIMS", "1536"),
+        ("PALYRA_OFFLINE", "true"),
+    ])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+    let (cookie, _) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+
+    let memory_status = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/memory/status"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to call degraded memory status endpoint")?
+        .error_for_status()
+        .context("degraded memory status endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse degraded memory status response json")?;
+    assert_eq!(
+        memory_status.pointer("/embeddings/posture").and_then(Value::as_str),
+        Some("degraded_offline"),
+        "memory status should expose the explicit degraded embeddings posture"
+    );
+    assert_eq!(
+        memory_status.pointer("/embeddings/production_default_active").and_then(Value::as_bool),
+        Some(false),
+        "offline fallback must not be reported as production-default embeddings"
+    );
+    assert!(
+        memory_status
+            .pointer("/embeddings/warning")
+            .and_then(Value::as_str)
+            .is_some_and(|warning| warning.contains("PALYRA_OFFLINE")),
+        "memory status should surface the operator warning for offline embeddings fallback"
+    );
+
+    let diagnostics = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/diagnostics"))
+        .header("Cookie", cookie)
+        .send()
+        .context("failed to call degraded diagnostics endpoint")?
+        .error_for_status()
+        .context("degraded diagnostics endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse degraded diagnostics response json")?;
+    assert_eq!(
+        diagnostics.pointer("/memory/retrieval/backend/state").and_then(Value::as_str),
+        Some("degraded"),
+        "diagnostics should expose degraded retrieval backend state"
+    );
+    assert_eq!(
+        diagnostics
+            .pointer("/memory/retrieval/backend/capabilities/vector_search")
+            .and_then(Value::as_bool),
+        Some(true),
+        "diagnostics should still advertise vector search capability even in degraded mode"
+    );
+    assert!(
+        diagnostics
+            .pointer("/memory/retrieval/backend/reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason.contains("PALYRA_OFFLINE")),
+        "diagnostics should preserve the degraded retrieval reason for support surfaces"
     );
 
     Ok(())

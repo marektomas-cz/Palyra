@@ -95,10 +95,13 @@ desktop-ui-ready:
 	bash scripts/test/ensure-desktop-ui.sh
 
 deterministic-core:
-	bash scripts/test/run-deterministic-core.sh
+        bash scripts/test/run-deterministic-core.sh
+
+retrieval-benchmark:
+        bash scripts/test/run-retrieval-benchmark.sh
 
 cli-test:
-	cargo test -p palyra-cli --locked
+        cargo test -p palyra-cli --locked
 
 cli-regression:
 	bash scripts/test/run-workflow-regression.sh

@@ -9,6 +9,7 @@ use crate::channel_router::ChannelRouterConfig;
 use crate::cron::CronTimezoneMode;
 use crate::media::MediaRuntimeConfig;
 use crate::model_provider::ModelProviderConfig;
+use crate::retrieval::RetrievalRuntimeConfig;
 use crate::sandbox_runner::{EgressEnforcementMode, SandboxProcessRunnerTier};
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1";
@@ -218,6 +219,7 @@ pub struct MemoryConfig {
     pub default_ttl_ms: Option<i64>,
     pub auto_inject: MemoryAutoInjectConfig,
     pub retention: MemoryRetentionConfig,
+    pub retrieval: RetrievalRuntimeConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +438,7 @@ impl Default for MemoryConfig {
             default_ttl_ms: Some(DEFAULT_MEMORY_DEFAULT_TTL_MS),
             auto_inject: MemoryAutoInjectConfig::default(),
             retention: MemoryRetentionConfig::default(),
+            retrieval: RetrievalRuntimeConfig::default(),
         }
     }
 }
