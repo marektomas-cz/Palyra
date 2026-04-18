@@ -1468,12 +1468,9 @@ fn handle_openai_mock_request(
     stream: &mut TcpStream,
     state: &Arc<Mutex<OpenAiMockState>>,
 ) -> Result<()> {
-    stream
-        .set_nonblocking(false)
-        .context("failed to switch OpenAI mock connection to blocking mode")?;
-    let request = match read_http_request(stream)? {
-        Some(request) => request,
-        None => return Ok(()),
+    stream.set_nonblocking(false).context("failed to switch OpenAI mock connection to blocking")?;
+    let Some(request) = read_http_request(stream)? else {
+        return Ok(());
     };
     if request.request_line.starts_with("GET /v1/models ") {
         let authorization =
