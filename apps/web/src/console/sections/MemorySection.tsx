@@ -1193,6 +1193,9 @@ export function MemorySection({ app }: MemorySectionProps) {
                       readString(app.memoryRecallPreview ?? EMPTY_OBJECT, "query") ??
                       "No planner query returned."}
                   </p>
+                  {recallExpandedQueries.length > 0 ? (
+                    <p>Expanded queries: {recallExpandedQueries.join(" | ")}</p>
+                  ) : null}
                   <p>
                     {readString(recallStructuredOutput, "why_relevant_now") ??
                       "No structured relevance summary was returned."}
@@ -1224,14 +1227,6 @@ export function MemorySection({ app }: MemorySectionProps) {
                     </WorkspaceStatusChip>
                   ) : null}
                 </div>
-                {recallExpandedQueries.length > 0 ? (
-                  <div className="workspace-stack workspace-stack--compact">
-                    <p className="workspace-kicker">Expanded queries</p>
-                    <pre className="chat-detail-panel__payload">
-                      {recallExpandedQueries.join("\n")}
-                    </pre>
-                  </div>
-                ) : null}
                 {recallPlanSources.length > 0 ? (
                   <GroupedResultsSection
                     emptyDescription="No planner source decisions were returned."
@@ -1509,13 +1504,6 @@ export function MemorySection({ app }: MemorySectionProps) {
                     )}
                   />
                 ) : null}
-                <div className="workspace-panel__intro">
-                  <p className="workspace-kicker">Explain payload</p>
-                  <h3>Parameter delta</h3>
-                </div>
-                <pre className="chat-detail-panel__payload">
-                  {JSON.stringify(app.memoryRecallPreview?.["parameter_delta"] ?? {}, null, 2)}
-                </pre>
                 <div className="workspace-panel__intro">
                   <p className="workspace-kicker">Prompt preview</p>
                   <h3>Previewed prompt augmentation</h3>
