@@ -409,11 +409,7 @@ async fn grpc_route_message_with_fake_adapter_emits_reply_and_journal_events() -
     assert_eq!(outbound.auto_reaction, "eyes");
     assert!(!outbound.broadcast);
     assert_eq!(adapter.sent_messages(), vec![outbound]);
-    assert_eq!(
-        request_count.load(Ordering::Relaxed),
-        1,
-        "routed message should trigger exactly one model-provider call"
-    );
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
 
     let status_snapshot = admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;
     assert_eq!(
@@ -4371,11 +4367,7 @@ async fn grpc_run_stream_uses_openai_compatible_provider_when_configured() -> Re
         }
     }
     assert_eq!(model_tokens, vec!["provider", "says", "hello"]);
-    assert_eq!(
-        request_count.load(Ordering::Relaxed),
-        1,
-        "openai-compatible provider should perform one upstream call"
-    );
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
 
     let status_snapshot = admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;
     assert_eq!(
