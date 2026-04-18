@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::anyhow;
@@ -257,26 +259,31 @@ pub(crate) async fn console_plugins_install_or_bind_handler(
         binding.tool_id.as_deref(),
     )
     .map_err(|error| runtime_status_response(tonic::Status::invalid_argument(error.message)))?;
-    let current_installed_record = if installed_record.is_none() {
-        lookup_installed_skill_record(binding.skill_id.as_str(), binding.skill_version.as_deref())?
-    } else {
-        None
-    };
+    let current_installed_record = installed_record
+        .is_none()
+        .then(|| {
+            lookup_installed_skill_record(
+                binding.skill_id.as_str(),
+                binding.skill_version.as_deref(),
+            )
+        })
+        .transpose()?
+        .flatten();
     let manifest_payload_sha256 = installed_record
         .as_ref()
         .or(current_installed_record.as_ref())
         .map(|record| record.payload_sha256.as_str());
     let resolved_skill_version = binding.skill_version.clone();
-    persist_binding_config_instance(PersistBindingConfigArgs {
-        plugins_root: plugins_root.as_path(),
-        binding: &mut binding,
-        manifest: &resolved.manifest,
-        skill_version: resolved_skill_version.as_deref(),
-        config_payload: config_payload.as_ref(),
+    persist_binding_config_instance(
+        plugins_root.as_path(),
+        &mut binding,
+        &resolved.manifest,
+        resolved_skill_version.as_deref(),
+        config_payload.as_ref(),
         clear_config,
         manifest_payload_sha256,
-        now_unix_ms: now,
-    })?;
+        now,
+    )?;
     let binding = upsert_plugin_binding(&mut index, binding);
     let (binding, check, installed_skill) =
         evaluate_plugin_binding(&state, plugins_root.as_path(), &binding).await?;
@@ -621,7 +628,6 @@ async fn evaluate_plugin_binding(
     ))
 }
 
-#[allow(clippy::result_large_err)]
 fn build_wasm_policy(state: &AppState) -> Result<WasmPluginRunnerPolicy, Response> {
     let loaded = state.loaded_config.lock().map_err(|_| {
         runtime_status_response(tonic::Status::internal("loaded_config lock poisoned"))
@@ -641,7 +647,6 @@ fn build_wasm_policy(state: &AppState) -> Result<WasmPluginRunnerPolicy, Respons
     })
 }
 
-#[allow(clippy::result_large_err)]
 fn lookup_installed_skill_record(
     skill_id: &str,
     skill_version: Option<&str>,
@@ -659,7 +664,6 @@ fn lookup_installed_skill_record(
         .find(|record| record.skill_id == skill_id && record.version == resolved_version))
 }
 
-#[allow(clippy::result_large_err)]
 fn normalize_plugin_config_payload(
     payload: Option<Value>,
 ) -> Result<Option<BTreeMap<String, Value>>, Response> {
@@ -688,37 +692,24 @@ fn apply_manifest_binding_defaults(
         binding.entrypoint = resolved.manifest.operator.plugin.default_entrypoint.clone();
     }
     if binding.operator.display_name.is_none() {
-        binding.operator.display_name = resolved.manifest.operator.display_name.clone();
+        binding.operator.display_name.clone_from(&resolved.manifest.operator.display_name);
     }
     if binding.operator.tags.is_empty() {
-        binding.operator.tags = resolved.manifest.operator.tags.clone();
+        binding.operator.tags.clone_from(&resolved.manifest.operator.tags);
     }
 }
 
-#[allow(clippy::result_large_err)]
-struct PersistBindingConfigArgs<'a> {
-    plugins_root: &'a FsPath,
-    binding: &'a mut PluginBindingRecord,
-    manifest: &'a palyra_skills::SkillManifest,
-    skill_version: Option<&'a str>,
-    config_payload: Option<&'a BTreeMap<String, Value>>,
+#[allow(clippy::too_many_arguments)]
+fn persist_binding_config_instance(
+    plugins_root: &FsPath,
+    binding: &mut PluginBindingRecord,
+    manifest: &palyra_skills::SkillManifest,
+    skill_version: Option<&str>,
+    config_payload: Option<&BTreeMap<String, Value>>,
     clear_config: bool,
-    manifest_payload_sha256: Option<&'a str>,
+    manifest_payload_sha256: Option<&str>,
     now_unix_ms: i64,
-}
-
-#[allow(clippy::result_large_err)]
-fn persist_binding_config_instance(args: PersistBindingConfigArgs<'_>) -> Result<(), Response> {
-    let PersistBindingConfigArgs {
-        plugins_root,
-        binding,
-        manifest,
-        skill_version,
-        config_payload,
-        clear_config,
-        manifest_payload_sha256,
-        now_unix_ms,
-    } = args;
+) -> Result<(), Response> {
     if clear_config {
         remove_plugin_config_instance(plugins_root, binding.plugin_id.as_str())
             .map_err(internal_console_error)?;
@@ -787,7 +778,6 @@ fn persist_binding_config_instance(args: PersistBindingConfigArgs<'_>) -> Result
     Ok(())
 }
 
-#[allow(clippy::result_large_err)]
 fn install_skill_artifact_for_plugin_binding(
     artifact_path: PathBuf,
     allow_tofu: bool,
@@ -890,7 +880,6 @@ fn install_skill_artifact_for_plugin_binding(
     Ok(record)
 }
 
-#[allow(clippy::result_large_err)]
 fn load_trust_store_for_plugins(path: &FsPath) -> Result<SkillTrustStore, Response> {
     if !path.exists() {
         return Ok(SkillTrustStore::default());
@@ -903,7 +892,6 @@ fn load_trust_store_for_plugins(path: &FsPath) -> Result<SkillTrustStore, Respon
     })
 }
 
-#[allow(clippy::result_large_err)]
 fn save_trust_store_for_plugins(path: &FsPath, store: &SkillTrustStore) -> Result<(), Response> {
     store.save(path).map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
