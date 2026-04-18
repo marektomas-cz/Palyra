@@ -267,16 +267,16 @@ pub(crate) async fn console_plugins_install_or_bind_handler(
         .or(current_installed_record.as_ref())
         .map(|record| record.payload_sha256.as_str());
     let resolved_skill_version = binding.skill_version.clone();
-    persist_binding_config_instance(
-        plugins_root.as_path(),
-        &mut binding,
-        &resolved.manifest,
-        resolved_skill_version.as_deref(),
-        config_payload.as_ref(),
+    persist_binding_config_instance(PersistBindingConfigArgs {
+        plugins_root: plugins_root.as_path(),
+        binding: &mut binding,
+        manifest: &resolved.manifest,
+        skill_version: resolved_skill_version.as_deref(),
+        config_payload: config_payload.as_ref(),
         clear_config,
         manifest_payload_sha256,
-        now,
-    )?;
+        now_unix_ms: now,
+    })?;
     let binding = upsert_plugin_binding(&mut index, binding);
     let (binding, check, installed_skill) =
         evaluate_plugin_binding(&state, plugins_root.as_path(), &binding).await?;
@@ -621,6 +621,7 @@ async fn evaluate_plugin_binding(
     ))
 }
 
+#[allow(clippy::result_large_err)]
 fn build_wasm_policy(state: &AppState) -> Result<WasmPluginRunnerPolicy, Response> {
     let loaded = state.loaded_config.lock().map_err(|_| {
         runtime_status_response(tonic::Status::internal("loaded_config lock poisoned"))
@@ -640,6 +641,7 @@ fn build_wasm_policy(state: &AppState) -> Result<WasmPluginRunnerPolicy, Respons
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn lookup_installed_skill_record(
     skill_id: &str,
     skill_version: Option<&str>,
@@ -657,6 +659,7 @@ fn lookup_installed_skill_record(
         .find(|record| record.skill_id == skill_id && record.version == resolved_version))
 }
 
+#[allow(clippy::result_large_err)]
 fn normalize_plugin_config_payload(
     payload: Option<Value>,
 ) -> Result<Option<BTreeMap<String, Value>>, Response> {
@@ -693,16 +696,29 @@ fn apply_manifest_binding_defaults(
 }
 
 #[allow(clippy::result_large_err)]
-fn persist_binding_config_instance(
-    plugins_root: &FsPath,
-    binding: &mut PluginBindingRecord,
-    manifest: &palyra_skills::SkillManifest,
-    skill_version: Option<&str>,
-    config_payload: Option<&BTreeMap<String, Value>>,
+struct PersistBindingConfigArgs<'a> {
+    plugins_root: &'a FsPath,
+    binding: &'a mut PluginBindingRecord,
+    manifest: &'a palyra_skills::SkillManifest,
+    skill_version: Option<&'a str>,
+    config_payload: Option<&'a BTreeMap<String, Value>>,
     clear_config: bool,
-    manifest_payload_sha256: Option<&str>,
+    manifest_payload_sha256: Option<&'a str>,
     now_unix_ms: i64,
-) -> Result<(), Response> {
+}
+
+#[allow(clippy::result_large_err)]
+fn persist_binding_config_instance(args: PersistBindingConfigArgs<'_>) -> Result<(), Response> {
+    let PersistBindingConfigArgs {
+        plugins_root,
+        binding,
+        manifest,
+        skill_version,
+        config_payload,
+        clear_config,
+        manifest_payload_sha256,
+        now_unix_ms,
+    } = args;
     if clear_config {
         remove_plugin_config_instance(plugins_root, binding.plugin_id.as_str())
             .map_err(internal_console_error)?;
