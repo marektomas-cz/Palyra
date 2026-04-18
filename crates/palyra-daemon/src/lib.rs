@@ -815,6 +815,10 @@ struct ConsoleRecallPreviewRequest {
     include_workspace_historical: Option<bool>,
     #[serde(default)]
     include_workspace_quarantined: Option<bool>,
+    #[serde(default)]
+    max_candidates: Option<usize>,
+    #[serde(default)]
+    prompt_budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

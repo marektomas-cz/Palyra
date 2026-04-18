@@ -141,7 +141,20 @@ export function MemorySection({ app }: MemorySectionProps) {
     readNumber(selectedDocumentRecord, "latest_version") ??
     readNumber(app.memoryWorkspaceVersions[0] ?? EMPTY_OBJECT, "version") ??
     0;
+  const recallMemoryHits = readObjectArray(app.memoryRecallPreview, "memory_hits");
   const recallWorkspaceHits = readObjectArray(app.memoryRecallPreview, "workspace_hits");
+  const recallTranscriptHits = readObjectArray(app.memoryRecallPreview, "transcript_hits");
+  const recallCheckpointHits = readObjectArray(app.memoryRecallPreview, "checkpoint_hits");
+  const recallCompactionHits = readObjectArray(app.memoryRecallPreview, "compaction_hits");
+  const recallTopCandidates = readObjectArray(app.memoryRecallPreview, "top_candidates");
+  const recallPlan = readObject(app.memoryRecallPreview ?? EMPTY_OBJECT, "plan") ?? EMPTY_OBJECT;
+  const recallPlanSources = readObjectArray(recallPlan, "sources");
+  const recallPlanBudget = readObject(recallPlan, "budget") ?? EMPTY_OBJECT;
+  const recallExpandedQueries = readStringArray(recallPlan, "expanded_queries");
+  const recallStructuredOutput =
+    readObject(app.memoryRecallPreview ?? EMPTY_OBJECT, "structured_output") ?? EMPTY_OBJECT;
+  const recallFacts = readObjectArray(recallStructuredOutput, "facts");
+  const recallEvidence = readObjectArray(recallStructuredOutput, "evidence");
   const unifiedGroups =
     readObject(app.memorySearchAllResults ?? EMPTY_OBJECT, "groups") ?? EMPTY_OBJECT;
   const unifiedSessionHits = readObjectArray(unifiedGroups, "sessions");
@@ -1141,11 +1154,23 @@ export function MemorySection({ app }: MemorySectionProps) {
                 <ActionButton isDisabled={app.memoryBusy} type="submit" variant="primary">
                   {app.memoryBusy ? "Searching..." : "Search"}
                 </ActionButton>
-                <WorkspaceStatusChip tone={app.memoryHits.length > 0 ? "success" : "default"}>
-                  {app.memoryHits.length} memory refs
+                <WorkspaceStatusChip tone={recallMemoryHits.length > 0 ? "success" : "default"}>
+                  {recallMemoryHits.length} memory refs
                 </WorkspaceStatusChip>
                 <WorkspaceStatusChip tone={recallWorkspaceHits.length > 0 ? "accent" : "default"}>
                   {recallWorkspaceHits.length} workspace refs
+                </WorkspaceStatusChip>
+                <WorkspaceStatusChip tone={recallTranscriptHits.length > 0 ? "warning" : "default"}>
+                  {recallTranscriptHits.length} transcript refs
+                </WorkspaceStatusChip>
+                <WorkspaceStatusChip tone={recallCheckpointHits.length > 0 ? "success" : "default"}>
+                  {recallCheckpointHits.length} checkpoints
+                </WorkspaceStatusChip>
+                <WorkspaceStatusChip tone={recallCompactionHits.length > 0 ? "accent" : "default"}>
+                  {recallCompactionHits.length} compaction refs
+                </WorkspaceStatusChip>
+                <WorkspaceStatusChip tone={recallTopCandidates.length > 0 ? "warning" : "default"}>
+                  {recallTopCandidates.length} top candidates
                 </WorkspaceStatusChip>
               </div>
             </form>
@@ -1158,6 +1183,164 @@ export function MemorySection({ app }: MemorySectionProps) {
               />
             ) : (
               <>
+                <div className="workspace-panel__intro">
+                  <p className="workspace-kicker">Recall planner</p>
+                  <h3>Scoped evidence plan</h3>
+                </div>
+                <WorkspaceInlineNotice title="Planner summary" tone="default">
+                  <p>
+                    {readString(recallPlan, "original_query") ??
+                      readString(app.memoryRecallPreview ?? EMPTY_OBJECT, "query") ??
+                      "No planner query returned."}
+                  </p>
+                  <p>
+                    {readString(recallStructuredOutput, "why_relevant_now") ??
+                      "No structured relevance summary was returned."}
+                  </p>
+                  <p>
+                    Next step:{" "}
+                    {readString(recallStructuredOutput, "suggested_next_step") ??
+                      "No suggested next step was returned."}
+                  </p>
+                </WorkspaceInlineNotice>
+                <div className="workspace-inline-actions">
+                  <WorkspaceStatusChip
+                    tone={readBoolean(recallPlan, "session_scoped") ? "success" : "default"}
+                  >
+                    {readBoolean(recallPlan, "session_scoped")
+                      ? "Session-bounded planner"
+                      : "Cross-session planner"}
+                  </WorkspaceStatusChip>
+                  <WorkspaceStatusChip tone="default">
+                    Budget {readNumber(recallPlanBudget, "prompt_budget_tokens") ?? 0} tokens
+                  </WorkspaceStatusChip>
+                  <WorkspaceStatusChip tone="default">
+                    Candidate limit {readNumber(recallPlanBudget, "candidate_limit") ?? 0}
+                  </WorkspaceStatusChip>
+                  {readNumber(recallStructuredOutput, "confidence") !== null ? (
+                    <WorkspaceStatusChip tone="accent">
+                      Confidence {(readNumber(recallStructuredOutput, "confidence") ?? 0).toFixed(2)}
+                    </WorkspaceStatusChip>
+                  ) : null}
+                </div>
+                {recallExpandedQueries.length > 0 ? (
+                  <div className="workspace-stack workspace-stack--compact">
+                    <p className="workspace-kicker">Expanded queries</p>
+                    <pre className="chat-detail-panel__payload">
+                      {recallExpandedQueries.join("\n")}
+                    </pre>
+                  </div>
+                ) : null}
+                {recallPlanSources.length > 0 ? (
+                  <GroupedResultsSection
+                    emptyDescription="No planner source decisions were returned."
+                    items={recallPlanSources}
+                    title="Planner sources"
+                    renderItem={(item, index) => (
+                      <article
+                        key={`${readString(item, "source_kind") ?? "source"}-${index}`}
+                        className="chat-ops-card"
+                      >
+                        <div className="chat-ops-card__copy">
+                          <strong>
+                            {formatRecallSourceKind(readString(item, "source_kind"))}
+                          </strong>
+                          <span>{readString(item, "reason") ?? "No planner reason returned."}</span>
+                          <p>{readString(item, "query") ?? "No query rewrite returned."}</p>
+                        </div>
+                        <div className="chat-ops-card__actions">
+                          <WorkspaceStatusChip
+                            tone={
+                              readString(item, "decision") === "selected" ? "success" : "default"
+                            }
+                          >
+                            {readString(item, "decision") ?? "unknown"}
+                          </WorkspaceStatusChip>
+                          <WorkspaceStatusChip tone="default">
+                            top_k {readNumber(item, "requested_top_k") ?? 0}
+                          </WorkspaceStatusChip>
+                        </div>
+                      </article>
+                    )}
+                  />
+                ) : null}
+                {recallTopCandidates.length > 0 ? (
+                  <GroupedResultsSection
+                    emptyDescription="No reranked candidates were returned."
+                    items={recallTopCandidates}
+                    title="Top candidates"
+                    renderItem={(item, index) => (
+                      <article
+                        key={readString(item, "candidate_id") ?? `candidate-${index + 1}`}
+                        className="chat-ops-card"
+                      >
+                        <div className="chat-ops-card__copy">
+                          <strong>{readString(item, "title") ?? `Candidate ${index + 1}`}</strong>
+                          <span>
+                            {formatRecallSourceKind(readString(item, "source_kind"))} ·{" "}
+                            {readString(item, "source_ref") ?? "No source ref"}
+                          </span>
+                          <p>{readString(item, "snippet") ?? "No snippet returned."}</p>
+                          <p className="chat-muted">
+                            {readString(item, "rationale") ?? "No rationale returned."}
+                          </p>
+                        </div>
+                        <div className="chat-ops-card__actions">
+                          <WorkspaceStatusChip tone="warning">{formatScore(item)}</WorkspaceStatusChip>
+                          <WorkspaceStatusChip tone="default">
+                            {formatUnixMs(readNumber(item, "created_at_unix_ms"))}
+                          </WorkspaceStatusChip>
+                        </div>
+                      </article>
+                    )}
+                  />
+                ) : null}
+                {recallFacts.length > 0 ? (
+                  <GroupedResultsSection
+                    emptyDescription="No structured facts were returned."
+                    items={recallFacts}
+                    title="Facts"
+                    renderItem={(item, index) => (
+                      <article key={`fact-${index + 1}`} className="chat-ops-card">
+                        <div className="chat-ops-card__copy">
+                          <strong>{readString(item, "statement") ?? `Fact ${index + 1}`}</strong>
+                          <p>
+                            Evidence:{" "}
+                            {readStringArray(item, "evidence_ids").join(", ") || "No linked evidence"}
+                          </p>
+                        </div>
+                      </article>
+                    )}
+                  />
+                ) : null}
+                {recallEvidence.length > 0 ? (
+                  <GroupedResultsSection
+                    emptyDescription="No structured evidence was returned."
+                    items={recallEvidence}
+                    title="Evidence"
+                    renderItem={(item, index) => (
+                      <article
+                        key={readString(item, "evidence_id") ?? `evidence-${index + 1}`}
+                        className="chat-ops-card"
+                      >
+                        <div className="chat-ops-card__copy">
+                          <strong>{readString(item, "title") ?? `Evidence ${index + 1}`}</strong>
+                          <span>
+                            {formatRecallSourceKind(readString(item, "source_kind"))} ·{" "}
+                            {readString(item, "source_ref") ?? "No source ref"}
+                          </span>
+                          <p>{readString(item, "snippet") ?? "No snippet returned."}</p>
+                          <p className="chat-muted">
+                            {readString(item, "rationale") ?? "No rationale returned."}
+                          </p>
+                        </div>
+                        <div className="chat-ops-card__actions">
+                          <WorkspaceStatusChip tone="accent">{formatScore(item)}</WorkspaceStatusChip>
+                        </div>
+                      </article>
+                    )}
+                  />
+                ) : null}
                 <div className="chat-ops-list">
                   {recallWorkspaceHits.map((hit, index) => {
                     const document = readObject(hit, "document") ?? EMPTY_OBJECT;
@@ -1197,7 +1380,7 @@ export function MemorySection({ app }: MemorySectionProps) {
                       </article>
                     );
                   })}
-                  {app.memoryHits.map((hit, index) => (
+                  {recallMemoryHits.map((hit, index) => (
                     <article key={readMemoryId(hit, index)} className="chat-ops-card">
                       <div className="chat-ops-card__copy">
                         <strong>{readMemoryId(hit, index)}</strong>
@@ -1227,6 +1410,100 @@ export function MemorySection({ app }: MemorySectionProps) {
                     </article>
                   ))}
                 </div>
+                {recallTranscriptHits.length > 0 ? (
+                  <GroupedResultsSection
+                    emptyDescription="No transcript evidence was returned."
+                    items={recallTranscriptHits}
+                    title="Transcript"
+                    renderItem={(item, index) => (
+                      <article
+                        key={`${readString(item, "run_id") ?? "run"}:${readNumber(item, "seq") ?? index}`}
+                        className="chat-ops-card"
+                      >
+                        <div className="chat-ops-card__copy">
+                          <strong>
+                            {readString(item, "event_type") ?? "transcript"} · seq{" "}
+                            {readNumber(item, "seq") ?? index}
+                          </strong>
+                          <span>{readString(item, "run_id") ?? "No run id"}</span>
+                          <p>{readString(item, "snippet") ?? "No snippet returned."}</p>
+                          <p className="chat-muted">
+                            {readString(item, "reason") ?? "No rationale returned."}
+                          </p>
+                        </div>
+                        <div className="chat-ops-card__actions">
+                          <WorkspaceStatusChip tone="warning">{formatScore(item)}</WorkspaceStatusChip>
+                          <WorkspaceStatusChip tone="default">
+                            {formatUnixMs(readNumber(item, "created_at_unix_ms"))}
+                          </WorkspaceStatusChip>
+                        </div>
+                      </article>
+                    )}
+                  />
+                ) : null}
+                {recallCheckpointHits.length > 0 ? (
+                  <GroupedResultsSection
+                    emptyDescription="No checkpoint evidence was returned."
+                    items={recallCheckpointHits}
+                    title="Checkpoints"
+                    renderItem={(item, index) => (
+                      <article
+                        key={readString(item, "checkpoint_id") ?? `checkpoint-${index + 1}`}
+                        className="chat-ops-card"
+                      >
+                        <div className="chat-ops-card__copy">
+                          <strong>{readString(item, "name") ?? `Checkpoint ${index + 1}`}</strong>
+                          <span>{readString(item, "checkpoint_id") ?? "No checkpoint id"}</span>
+                          <p>{readString(item, "note") ?? "No checkpoint note returned."}</p>
+                          <p className="chat-muted">
+                            Paths: {readStringArray(item, "workspace_paths").join(", ") || "n/a"}
+                          </p>
+                        </div>
+                        <div className="chat-ops-card__actions">
+                          <WorkspaceStatusChip tone="success">{formatScore(item)}</WorkspaceStatusChip>
+                          <WorkspaceStatusChip tone="default">
+                            {formatUnixMs(readNumber(item, "created_at_unix_ms"))}
+                          </WorkspaceStatusChip>
+                        </div>
+                      </article>
+                    )}
+                  />
+                ) : null}
+                {recallCompactionHits.length > 0 ? (
+                  <GroupedResultsSection
+                    emptyDescription="No compaction artifacts were returned."
+                    items={recallCompactionHits}
+                    title="Compaction artifacts"
+                    renderItem={(item, index) => (
+                      <article
+                        key={readString(item, "artifact_id") ?? `artifact-${index + 1}`}
+                        className="chat-ops-card"
+                      >
+                        <div className="chat-ops-card__copy">
+                          <strong>{readString(item, "artifact_id") ?? `Artifact ${index + 1}`}</strong>
+                          <span>{readString(item, "reason") ?? "No rationale returned."}</span>
+                          <p>
+                            {readString(item, "summary_preview") ??
+                              "No compaction summary preview was returned."}
+                          </p>
+                        </div>
+                        <div className="chat-ops-card__actions">
+                          <WorkspaceStatusChip tone="accent">{formatScore(item)}</WorkspaceStatusChip>
+                          <WorkspaceStatusChip tone="default">
+                            {formatUnixMs(readNumber(item, "created_at_unix_ms"))}
+                          </WorkspaceStatusChip>
+                        </div>
+                      </article>
+                    )}
+                  />
+                ) : null}
+                <div className="workspace-panel__intro">
+                  <p className="workspace-kicker">Explain payload</p>
+                  <h3>Parameter delta</h3>
+                </div>
+                <pre className="chat-detail-panel__payload">
+                  {JSON.stringify(app.memoryRecallPreview?.["parameter_delta"] ?? {}, null, 2)}
+                </pre>
                 <div className="workspace-panel__intro">
                   <p className="workspace-kicker">Prompt preview</p>
                   <h3>Previewed prompt augmentation</h3>
@@ -1601,6 +1878,13 @@ function formatScore(hit: JsonObject): string {
 
 function formatLearningConfidence(value: number): string {
   return value.toFixed(2);
+}
+
+function formatRecallSourceKind(value: string | null): string {
+  if (value === null || value.trim().length === 0) {
+    return "unknown";
+  }
+  return value.replaceAll("_", " ");
 }
 
 function shortHash(value: string | null): string {

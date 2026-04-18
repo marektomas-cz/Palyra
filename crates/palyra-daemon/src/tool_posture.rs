@@ -692,6 +692,14 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
         recommend_always_allow: false,
     },
     ToolCatalogEntry {
+        tool_name: "palyra.memory.recall",
+        title: "Memory recall",
+        description: "Plans bounded recall across memory, workspace, and session evidence.",
+        category: "memory",
+        risk_level: ApprovalRiskLevel::Low,
+        recommend_always_allow: false,
+    },
+    ToolCatalogEntry {
         tool_name: "palyra.http.fetch",
         title: "HTTP fetch",
         description: "Makes outbound HTTP requests through the gateway fetch broker.",
@@ -915,6 +923,10 @@ const PRESET_CONSERVATIVE_CODING: &[ToolPosturePresetAssignment] = &[
         state: ToolPostureState::AlwaysAllow,
     },
     ToolPosturePresetAssignment {
+        tool_name: "palyra.memory.recall",
+        state: ToolPostureState::AlwaysAllow,
+    },
+    ToolPosturePresetAssignment {
         tool_name: "palyra.process.run",
         state: ToolPostureState::AskEachTime,
     },
@@ -943,6 +955,10 @@ const PRESET_CONSERVATIVE_CODING: &[ToolPosturePresetAssignment] = &[
 const PRESET_BROWSER_ASSIST: &[ToolPosturePresetAssignment] = &[
     ToolPosturePresetAssignment {
         tool_name: "palyra.memory.search",
+        state: ToolPostureState::AlwaysAllow,
+    },
+    ToolPosturePresetAssignment {
+        tool_name: "palyra.memory.recall",
         state: ToolPostureState::AlwaysAllow,
     },
     ToolPosturePresetAssignment {
@@ -977,6 +993,10 @@ const PRESET_READ_MOSTLY_RESEARCH: &[ToolPosturePresetAssignment] = &[
         state: ToolPostureState::AlwaysAllow,
     },
     ToolPosturePresetAssignment {
+        tool_name: "palyra.memory.recall",
+        state: ToolPostureState::AlwaysAllow,
+    },
+    ToolPosturePresetAssignment {
         tool_name: "palyra.http.fetch",
         state: ToolPostureState::AskEachTime,
     },
@@ -1005,6 +1025,10 @@ const PRESET_READ_MOSTLY_RESEARCH: &[ToolPosturePresetAssignment] = &[
 const PRESET_AUTOMATION_REVIEW: &[ToolPosturePresetAssignment] = &[
     ToolPosturePresetAssignment {
         tool_name: "palyra.memory.search",
+        state: ToolPostureState::AlwaysAllow,
+    },
+    ToolPosturePresetAssignment {
+        tool_name: "palyra.memory.recall",
         state: ToolPostureState::AlwaysAllow,
     },
     ToolPosturePresetAssignment {

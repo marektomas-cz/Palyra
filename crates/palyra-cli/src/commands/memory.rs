@@ -508,7 +508,18 @@ async fn run_memory_admin_async(command: MemoryCommand) -> Result<()> {
                 "memory.recall",
                 &payload,
                 output::preferred_json(json),
-                &["/memory_hits", "/workspace_hits", "/prompt_preview"],
+                &[
+                    "/plan",
+                    "/top_candidates",
+                    "/structured_output",
+                    "/memory_hits",
+                    "/workspace_hits",
+                    "/transcript_hits",
+                    "/checkpoint_hits",
+                    "/compaction_hits",
+                    "/parameter_delta",
+                    "/prompt_preview",
+                ],
             )
         }
         MemoryCommand::SearchAll {

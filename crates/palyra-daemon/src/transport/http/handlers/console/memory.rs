@@ -4,7 +4,7 @@ use crate::journal::MemoryRetentionPolicy;
 use crate::*;
 use crate::{
     application::learning::apply_preference_candidate,
-    application::provider_input::render_memory_augmented_prompt,
+    application::recall::{preview_recall, recall_preview_console_payload, RecallRequest},
     domain::workspace::{curated_workspace_roots, curated_workspace_templates},
 };
 
@@ -747,76 +747,61 @@ pub(crate) async fn console_recall_preview_handler(
             ))
         })?;
     }
-    let recall_channel = payload.channel.clone().or(session.context.channel.clone());
-    let recall_agent_id = payload.agent_id.clone().and_then(trim_to_option);
-    let workspace_prefix = payload.workspace_prefix.clone().and_then(trim_to_option);
-    let memory_hits = if payload.memory_top_k.unwrap_or(4) == 0 {
-        Vec::new()
-    } else {
-        state
-            .runtime
-            .search_memory(journal::MemorySearchRequest {
-                principal: session.context.principal.clone(),
-                channel: recall_channel.clone(),
-                session_id: session_scope.clone(),
-                query: query_text.to_owned(),
-                top_k: payload.memory_top_k.unwrap_or(4).clamp(1, 16),
-                min_score,
-                tags: Vec::new(),
-                sources: Vec::new(),
-            })
-            .await
-            .map_err(runtime_status_response)?
-    };
-    let workspace_hits = if payload.workspace_top_k.unwrap_or(4) == 0 {
-        Vec::new()
-    } else {
-        state
-            .runtime
-            .search_workspace_documents(journal::WorkspaceSearchRequest {
-                principal: session.context.principal.clone(),
-                channel: recall_channel.clone(),
-                agent_id: recall_agent_id.clone(),
-                query: query_text.to_owned(),
-                prefix: workspace_prefix.clone(),
-                top_k: payload.workspace_top_k.unwrap_or(4).clamp(1, 16),
-                min_score,
-                include_historical: payload.include_workspace_historical.unwrap_or(false),
-                include_quarantined: payload.include_workspace_quarantined.unwrap_or(false),
-            })
-            .await
-            .map_err(runtime_status_response)?
-    };
-    let parameter_delta = json!({
-        "explicit_recall": {
-            "query": query_text,
-            "channel": recall_channel,
-            "session_id": session_scope,
-            "agent_id": recall_agent_id,
-            "min_score": min_score,
-            "workspace_prefix": workspace_prefix,
-            "include_workspace_historical": payload.include_workspace_historical.unwrap_or(false),
-            "include_workspace_quarantined": payload.include_workspace_quarantined.unwrap_or(false),
-            "memory_item_ids": memory_hits
-                .iter()
-                .map(|hit| hit.item.memory_id.clone())
-                .collect::<Vec<_>>(),
-            "workspace_document_ids": workspace_hits
-                .iter()
-                .map(|hit| hit.document.document_id.clone())
-                .collect::<Vec<_>>(),
-        }
-    });
+    let max_candidates = payload.max_candidates.unwrap_or(8);
+    if !(1..=12).contains(&max_candidates) {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "max_candidates must be in range 1..=12",
+        )));
+    }
+    let prompt_budget_tokens = payload.prompt_budget_tokens.unwrap_or(1_800);
+    if !(512..=4_096).contains(&prompt_budget_tokens) {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "prompt_budget_tokens must be in range 512..=4096",
+        )));
+    }
+    let preview = preview_recall(
+        &state.runtime,
+        &session.context,
+        RecallRequest {
+            query: query_text.to_owned(),
+            channel: payload.channel.clone().or(session.context.channel.clone()),
+            session_id: session_scope,
+            agent_id: payload.agent_id.and_then(trim_to_option),
+            memory_top_k: payload.memory_top_k.unwrap_or(4).clamp(0, 16),
+            workspace_top_k: payload.workspace_top_k.unwrap_or(4).clamp(0, 16),
+            min_score,
+            workspace_prefix: payload.workspace_prefix.and_then(trim_to_option),
+            include_workspace_historical: payload.include_workspace_historical.unwrap_or(false),
+            include_workspace_quarantined: payload.include_workspace_quarantined.unwrap_or(false),
+            max_candidates,
+            prompt_budget_tokens,
+        },
+    )
+    .await
+    .map_err(runtime_status_response)?;
+    if let Err(error) = state
+        .runtime
+        .record_console_event(
+            &session.context,
+            "memory.recall.preview",
+            recall_preview_console_payload(&preview),
+        )
+        .await
+    {
+        warn!(error = %error, "failed to record recall preview console event");
+    }
     Ok(Json(json!({
-        "query": query_text,
-        "memory_hits": memory_hits,
-        "workspace_hits": workspace_hits,
-        "parameter_delta": parameter_delta,
-        "prompt_preview": render_recall_preview_prompt(
-            query_text,
-            memory_hits.as_slice(),
-            workspace_hits.as_slice(),
-        ),
+        "query": preview.query,
+        "memory_hits": preview.memory_hits,
+        "workspace_hits": preview.workspace_hits,
+        "transcript_hits": preview.transcript_hits,
+        "checkpoint_hits": preview.checkpoint_hits,
+        "compaction_hits": preview.compaction_hits,
+        "top_candidates": preview.top_candidates,
+        "structured_output": preview.structured_output,
+        "plan": preview.plan,
+        "parameter_delta": preview.parameter_delta,
+        "prompt_preview": preview.prompt_preview,
         "contract": contract_descriptor(),
     })))
 }
@@ -945,54 +930,6 @@ async fn run_memory_maintenance_now(
         )
         .await
         .map_err(runtime_status_response)
-}
-
-fn render_recall_preview_prompt(
-    query: &str,
-    memory_hits: &[journal::MemorySearchHit],
-    workspace_hits: &[journal::WorkspaceSearchHit],
-) -> String {
-    let mut sections = Vec::new();
-    if !memory_hits.is_empty() {
-        sections.push(render_memory_augmented_prompt(memory_hits, query));
-    }
-    if !workspace_hits.is_empty() {
-        let mut block = String::from("<workspace_recall>\n");
-        for (index, hit) in workspace_hits.iter().enumerate() {
-            let snippet = preview_text(hit.snippet.as_str(), 220);
-            block.push_str(
-                format!(
-                    "{}. document_id={} path={} version={} reason={} risk_state={} snippet={}\n",
-                    index + 1,
-                    hit.document.document_id,
-                    hit.document.path,
-                    hit.version,
-                    hit.reason,
-                    hit.document.risk_state,
-                    snippet
-                )
-                .as_str(),
-            );
-        }
-        block.push_str("</workspace_recall>\n");
-        block.push_str(query);
-        sections.push(block);
-    }
-    if sections.is_empty() {
-        return query.to_owned();
-    }
-    sections.join("\n\n")
-}
-
-fn preview_text(raw: &str, max_chars: usize) -> String {
-    let normalized = raw.replace(['\r', '\n'], " ");
-    let trimmed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
-    if trimmed.chars().count() <= max_chars {
-        return trimmed;
-    }
-    let mut truncated = trimmed.chars().take(max_chars).collect::<String>();
-    truncated.push_str("...");
-    truncated
 }
 
 async fn load_console_learning_candidate(

@@ -66,7 +66,10 @@ use crate::application::{
             execute_http_fetch_tool, http_fetch_cache_key, resolve_fetch_target_addresses,
             validate_resolved_fetch_addresses, HttpFetchCachePolicy,
         },
-        memory::{execute_memory_search_tool, memory_search_tool_output_payload},
+        memory::{
+            execute_memory_recall_tool, execute_memory_search_tool,
+            memory_search_tool_output_payload,
+        },
         workspace_patch::{
             execute_workspace_patch_tool, extend_patch_string_defaults,
             parse_patch_string_array_field,
@@ -2787,6 +2790,57 @@ async fn memory_search_tool_channel_scope_requires_authenticated_channel_context
     assert!(
         outcome.error.contains("scope=channel requires authenticated channel context"),
         "error should explain fail-closed channel scope behavior"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_recall_tool_channel_override_requires_authenticated_channel_context() {
+    let state = build_test_runtime_state(false);
+    let input_json = br#"{"query":"incident summary","channel":"cli"}"#;
+    let outcome = execute_memory_recall_tool(
+        &state,
+        super::ToolRuntimeExecutionContext {
+            principal: "user:ops",
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            channel: None,
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        },
+        "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        input_json,
+    )
+    .await;
+    assert!(
+        !outcome.success,
+        "recall tool should fail closed without authenticated channel context"
+    );
+    assert!(
+        outcome.error.contains("channel override requires authenticated channel context"),
+        "error should explain fail-closed recall channel override behavior"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_recall_tool_rejects_out_of_range_prompt_budget() {
+    let state = build_test_runtime_state(false);
+    let input_json = br#"{"query":"incident summary","prompt_budget_tokens":128}"#;
+    let outcome = execute_memory_recall_tool(
+        &state,
+        super::ToolRuntimeExecutionContext {
+            principal: "user:ops",
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            channel: Some("cli"),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        },
+        "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        input_json,
+    )
+    .await;
+    assert!(!outcome.success, "recall tool should reject prompt budgets below the safe floor");
+    assert!(
+        outcome.error.contains("prompt_budget_tokens must be in range 512..=4096"),
+        "error should explain bounded recall prompt budget requirements"
     );
 }
 

@@ -9,6 +9,7 @@ pub mod project_context;
 pub mod project_context_summary;
 pub mod provider_events;
 pub mod provider_input;
+pub mod recall;
 pub mod service_authorization;
 pub mod session_compaction;
 pub mod tool_runtime;

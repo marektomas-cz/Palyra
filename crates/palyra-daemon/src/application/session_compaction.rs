@@ -1434,7 +1434,9 @@ fn compaction_event_label(event_type: &str) -> &'static str {
     }
 }
 
-fn extract_transcript_search_text(record: &OrchestratorSessionTranscriptRecord) -> Option<String> {
+pub(crate) fn extract_transcript_search_text(
+    record: &OrchestratorSessionTranscriptRecord,
+) -> Option<String> {
     match record.event_type.as_str() {
         "message.received" | "queued.input" => extract_transcript_text(record, "text"),
         "message.replied" => extract_transcript_text(record, "reply_text"),
@@ -1458,7 +1460,7 @@ fn extract_transcript_text(
         .map(ToOwned::to_owned)
 }
 
-fn truncate_console_text(raw: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_console_text(raw: &str, max_chars: usize) -> String {
     let normalized = raw.replace(['\r', '\n'], " ");
     let trimmed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
     if trimmed.chars().count() <= max_chars {

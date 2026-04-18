@@ -159,6 +159,7 @@ pub(crate) const TOOL_APPROVAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(
 pub(crate) const SKILL_EXECUTION_DENY_REASON_PREFIX: &str =
     "skill execution blocked by security gate";
 pub(crate) const MEMORY_SEARCH_TOOL_NAME: &str = "palyra.memory.search";
+pub(crate) const MEMORY_RECALL_TOOL_NAME: &str = "palyra.memory.recall";
 pub(crate) const WORKSPACE_PATCH_TOOL_NAME: &str = "palyra.fs.apply_patch";
 pub(crate) const PROCESS_RUNNER_TOOL_NAME: &str = "palyra.process.run";
 pub(crate) const HTTP_FETCH_TOOL_NAME: &str = "palyra.http.fetch";
@@ -484,6 +485,14 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
             context.principal,
             context.channel,
             context.session_id,
+            proposal_id,
+            input_json,
+        )
+        .await
+    } else if tool_name == MEMORY_RECALL_TOOL_NAME {
+        crate::application::tool_runtime::memory::execute_memory_recall_tool(
+            runtime_state,
+            context,
             proposal_id,
             input_json,
         )

@@ -1376,10 +1376,77 @@ export interface WorkspaceBootstrapOutcome {
   skipped_paths: string[];
 }
 
+export interface RecallPlanSource {
+  source_kind: string;
+  decision: string;
+  reason: string;
+  requested_top_k: number;
+  query: string;
+}
+
+export interface RecallPlan {
+  original_query: string;
+  expanded_queries: string[];
+  session_scoped: boolean;
+  budget: {
+    prompt_budget_tokens: number;
+    candidate_limit: number;
+  };
+  sources: RecallPlanSource[];
+}
+
+export interface RecallScoreBreakdown {
+  lexical_score: number;
+  vector_score: number;
+  recency_score: number;
+  source_quality_score: number;
+  final_score: number;
+}
+
+export interface RecallCandidate {
+  candidate_id: string;
+  source_kind: string;
+  source_ref: string;
+  title: string;
+  snippet: string;
+  created_at_unix_ms: number;
+  rationale: string;
+  score: RecallScoreBreakdown;
+}
+
+export interface StructuredRecallFact {
+  statement: string;
+  evidence_ids: string[];
+}
+
+export interface StructuredRecallEvidence {
+  evidence_id: string;
+  source_kind: string;
+  source_ref: string;
+  title: string;
+  snippet: string;
+  rationale: string;
+  score: RecallScoreBreakdown;
+}
+
+export interface StructuredRecallOutput {
+  facts: StructuredRecallFact[];
+  evidence: StructuredRecallEvidence[];
+  why_relevant_now: string;
+  suggested_next_step: string;
+  confidence?: number;
+}
+
 export interface RecallPreviewEnvelope {
   query: string;
   memory_hits: JsonValue[];
   workspace_hits: WorkspaceSearchHit[];
+  transcript_hits?: JsonValue[];
+  checkpoint_hits?: JsonValue[];
+  compaction_hits?: JsonValue[];
+  top_candidates?: RecallCandidate[];
+  structured_output?: StructuredRecallOutput;
+  plan?: RecallPlan;
   parameter_delta: JsonValue;
   prompt_preview: string;
   contract: ContractDescriptor;
@@ -5702,6 +5769,8 @@ export class ConsoleApiClient {
     workspace_prefix?: string;
     include_workspace_historical?: boolean;
     include_workspace_quarantined?: boolean;
+    max_candidates?: number;
+    prompt_budget_tokens?: number;
   }): Promise<RecallPreviewEnvelope> {
     return this.request(
       "/console/v1/memory/recall/preview",
