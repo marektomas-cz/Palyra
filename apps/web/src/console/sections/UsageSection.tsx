@@ -243,7 +243,9 @@ export function UsageSection({ app }: UsageSectionProps) {
               </div>
               <div>
                 <dt>Runtime credential</dt>
-                <dd>{providerRegistry?.credentialId ?? providerRegistry?.credentialSource ?? "n/a"}</dd>
+                <dd>
+                  {providerRegistry?.credentialId ?? providerRegistry?.credentialSource ?? "n/a"}
+                </dd>
               </div>
               <div>
                 <dt>Shared lease waiters</dt>
@@ -266,8 +268,9 @@ export function UsageSection({ app }: UsageSectionProps) {
                 }
               >
                 <p>
-                  {providerRegistry.providers.length} providers, {providerRegistry.credentials.length}{" "}
-                  credentials, {providerRegistry.models.length} models, failover{" "}
+                  {providerRegistry.providers.length} providers,{" "}
+                  {providerRegistry.credentials.length} credentials,{" "}
+                  {providerRegistry.models.length} models, failover{" "}
                   {providerRegistry.failoverEnabled ? "enabled" : "disabled"}, response cache{" "}
                   {providerRegistry.responseCacheEnabled ? "enabled" : "disabled"}, credential
                   attention {credentialAttentionCount}, shared lease waiters {sharedLeaseWaiters},

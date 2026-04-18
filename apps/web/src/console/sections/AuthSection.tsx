@@ -286,7 +286,9 @@ export function AuthSection({ app }: AuthSectionProps) {
                   </div>
                   <div>
                     <dt>Runtime credential</dt>
-                    <dd>{providerRegistry.credentialId ?? providerRegistry.credentialSource ?? "n/a"}</dd>
+                    <dd>
+                      {providerRegistry.credentialId ?? providerRegistry.credentialSource ?? "n/a"}
+                    </dd>
                   </div>
                   <div>
                     <dt>Failover</dt>
@@ -323,13 +325,16 @@ export function AuthSection({ app }: AuthSectionProps) {
                         <td>
                           <div className="workspace-stack">
                             <div className="workspace-table__status">
-                              <WorkspaceStatusChip tone={workspaceToneForState(provider.healthState)}>
+                              <WorkspaceStatusChip
+                                tone={workspaceToneForState(provider.healthState)}
+                              >
                                 {probe?.state ?? provider.healthState}
                               </WorkspaceStatusChip>
                             </div>
                             {provider.lastError !== undefined ? (
                               <small className="text-muted">
-                                {provider.lastError.class} · {provider.lastError.recommendedAction ?? "inspect"}
+                                {provider.lastError.class} ·{" "}
+                                {provider.lastError.recommendedAction ?? "inspect"}
                               </small>
                             ) : null}
                           </div>
@@ -347,7 +352,9 @@ export function AuthSection({ app }: AuthSectionProps) {
                               ) || "No models"}
                             </span>
                             <span className="chat-muted">
-                              {provider.avgLatencyMs > 0 ? `${provider.avgLatencyMs} ms avg` : "No runtime latency yet"}
+                              {provider.avgLatencyMs > 0
+                                ? `${provider.avgLatencyMs} ms avg`
+                                : "No runtime latency yet"}
                             </span>
                           </div>
                         </td>
@@ -355,7 +362,9 @@ export function AuthSection({ app }: AuthSectionProps) {
                           <div className="workspace-table__meta">
                             <strong>{provider.credentialId ?? "unbound"}</strong>
                             <span className="chat-muted">
-                              {provider.authProfileId ?? provider.credentialSource ?? "registry only"}
+                              {provider.authProfileId ??
+                                provider.credentialSource ??
+                                "registry only"}
                             </span>
                           </div>
                         </td>
@@ -386,7 +395,14 @@ export function AuthSection({ app }: AuthSectionProps) {
                 {providerRegistry.credentials.length > 0 ? (
                   <WorkspaceTable
                     ariaLabel="Credential registry health"
-                    columns={["Credential", "Provider", "Availability", "Capabilities", "Activity", "Last failure"]}
+                    columns={[
+                      "Credential",
+                      "Provider",
+                      "Availability",
+                      "Capabilities",
+                      "Activity",
+                      "Last failure",
+                    ]}
                   >
                     {providerRegistry.credentials.map((credential) => (
                       <tr key={credential.credentialId}>
@@ -394,7 +410,9 @@ export function AuthSection({ app }: AuthSectionProps) {
                           <div className="workspace-table__meta">
                             <strong>{credential.credentialId}</strong>
                             <span className="chat-muted">
-                              {credential.authProfileId ?? credential.credentialSource ?? "runtime-only binding"}
+                              {credential.authProfileId ??
+                                credential.credentialSource ??
+                                "runtime-only binding"}
                             </span>
                           </div>
                         </td>
@@ -424,7 +442,10 @@ export function AuthSection({ app }: AuthSectionProps) {
                           <div className="workspace-table__meta">
                             <strong>{formatUnixMs(credential.lastUsedAtUnixMs)}</strong>
                             <span className="chat-muted">
-                              {describeCredentialActivity(credential.lastSuccessAtUnixMs, credential.lastErrorAtUnixMs)}
+                              {describeCredentialActivity(
+                                credential.lastSuccessAtUnixMs,
+                                credential.lastErrorAtUnixMs,
+                              )}
                             </span>
                           </div>
                         </td>
@@ -436,7 +457,9 @@ export function AuthSection({ app }: AuthSectionProps) {
                               <strong>{credential.lastError.class}</strong>
                               <span className="chat-muted">
                                 {credential.lastError.recommendedAction ?? "inspect"}
-                                {credential.lastError.message ? ` · ${credential.lastError.message}` : ""}
+                                {credential.lastError.message
+                                  ? ` · ${credential.lastError.message}`
+                                  : ""}
                               </span>
                             </div>
                           )}
@@ -497,7 +520,9 @@ function summarizeAuthHealth(profiles: AuthHealthProfile[]) {
   );
 }
 
-function toneForCredentialAvailability(state: string): Parameters<typeof WorkspaceStatusChip>[0]["tone"] {
+function toneForCredentialAvailability(
+  state: string,
+): Parameters<typeof WorkspaceStatusChip>[0]["tone"] {
   switch (state) {
     case "available":
       return "success";

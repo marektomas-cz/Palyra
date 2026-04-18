@@ -1374,7 +1374,9 @@ function buildAttentionItems({
     );
   }
   if (leaseDeferredTotal > 0) {
-    items.push(`${leaseDeferredTotal} background or auxiliary runs were deferred by lease pressure.`);
+    items.push(
+      `${leaseDeferredTotal} background or auxiliary runs were deferred by lease pressure.`,
+    );
   }
   if (objectiveAttentionCount > 0) {
     items.push(`${objectiveAttentionCount} objectives need health follow-up.`);
