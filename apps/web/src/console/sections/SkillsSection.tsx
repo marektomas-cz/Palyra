@@ -94,7 +94,6 @@ export function SkillsSection({ app }: SkillsSectionProps) {
   const quarantinedCount = app.skillsEntries.filter(
     (entry) => readString(entry, "status") === "quarantined",
   ).length;
-  const builderCandidateCount = app.skillBuilderCandidates.length;
 
   const selectedPlugin = app.selectedPluginDetail;
   const selectedPluginBinding = selectedPlugin === null ? null : pluginBinding(selectedPlugin);
@@ -187,9 +186,9 @@ export function SkillsSection({ app }: SkillsSectionProps) {
         />
         <WorkspaceMetricCard
           label="Builder queue"
-          value={builderCandidateCount}
+          value={app.skillBuilderCandidates.length}
           detail="Prompt and procedure builder outputs remain separate from installed skills until review."
-          tone={builderCandidateCount > 0 ? "warning" : "default"}
+          tone={app.skillBuilderCandidates.length > 0 ? "warning" : "default"}
         />
       </section>
 
@@ -434,7 +433,6 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                     {readString(selectedPluginBinding, "entrypoint") ?? "run"}
                   </span>
                 </div>
-
                 {selectedPluginReasons.length > 0 && (
                   <WorkspaceInlineNotice title="Why it is blocked" tone="danger">
                     <ul>
@@ -444,7 +442,6 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                     </ul>
                   </WorkspaceInlineNotice>
                 )}
-
                 {selectedPluginRemediation.length > 0 && (
                   <WorkspaceInlineNotice title="Remediation" tone="warning">
                     <ul>
@@ -454,7 +451,6 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                     </ul>
                   </WorkspaceInlineNotice>
                 )}
-
                 <div className="workspace-inline">
                   <ActionButton
                     type="button"
@@ -476,7 +472,6 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                     {pluginEnabled ? "Disable plugin" : "Enable plugin"}
                   </ActionButton>
                 </div>
-
                 <WorkspaceSectionCard
                   title="Config remediation"
                   description="Paste the full config object when editing. Redacted fields are intentionally not round-trippable."
@@ -553,7 +548,6 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                     </AppForm>
                   </div>
                 </WorkspaceSectionCard>
-
                 {selectedPluginCapabilityEntries.length > 0 && (
                   <WorkspaceSectionCard
                     title="Capability diff"
@@ -584,7 +578,6 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                     </WorkspaceTable>
                   </WorkspaceSectionCard>
                 )}
-
                 {selectedPluginFilesystemIssues.length > 0 && (
                   <WorkspaceSectionCard
                     title="Filesystem safety"
