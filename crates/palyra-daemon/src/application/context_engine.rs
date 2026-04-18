@@ -367,7 +367,7 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
             "",
         )
         .await
-        .and_then(|block| Ok(clean_segment_content(block)))
+        .map(clean_segment_content)
         {
             Ok(Some(memory_block)) => push_segment(
                 &mut segments,
@@ -984,7 +984,7 @@ fn estimate_tokens(text: &str) -> u64 {
     if trimmed.is_empty() {
         return 0;
     }
-    ((trimmed.chars().count() + 3) / 4) as u64
+    trimmed.chars().count().div_ceil(4) as u64
 }
 
 #[cfg(test)]

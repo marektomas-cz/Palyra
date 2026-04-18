@@ -381,7 +381,6 @@ pub(crate) async fn materialize_explicit_recall_context(
         build_selection_context(runtime_state, context, &request, selection).await?;
     let query_variants = build_query_variants(query);
     let candidate_records = build_candidate_records(
-        query,
         query_variants.as_slice(),
         selection_context.memory_hits.as_slice(),
         selection_context.workspace_hits.as_slice(),
@@ -669,7 +668,6 @@ async fn execute_recall(
     );
 
     let candidate_records = build_candidate_records(
-        query,
         query_variants.as_slice(),
         memory_hits.as_slice(),
         workspace_hits.as_slice(),
@@ -930,8 +928,6 @@ fn build_recall_plan(
         source_kind: RecallSourceKind::WorkspaceDocument,
         decision: if request.workspace_top_k == 0 {
             RecallSourceDecision::Skipped
-        } else if mentions_workspace || query.contains('/') || query.contains('.') {
-            RecallSourceDecision::Selected
         } else {
             RecallSourceDecision::Selected
         },
@@ -1212,7 +1208,6 @@ fn build_compaction_hits(
 }
 
 fn build_candidate_records(
-    query: &str,
     query_variants: &[String],
     memory_hits: &[MemorySearchHit],
     workspace_hits: &[WorkspaceSearchHit],
@@ -1385,7 +1380,6 @@ fn build_candidate_records(
         records.push(CandidateRecord { candidate });
     }
 
-    let _ = query;
     records
 }
 
@@ -1519,10 +1513,10 @@ fn build_structured_output(
     let suggested_next_step = if evidence.is_empty() {
         "Refine the query or narrow the scope before attaching recall to the next prompt."
             .to_owned()
-    } else if dominant_sources.iter().any(|source| *source == "workspace_document") {
+    } else if dominant_sources.contains(&"workspace_document") {
         "Open the strongest workspace document or attach the selected recall set to the next prompt."
             .to_owned()
-    } else if dominant_sources.iter().any(|source| *source == "checkpoint") {
+    } else if dominant_sources.contains(&"checkpoint") {
         "Inspect the checkpoint evidence before deciding whether session state should be restored."
             .to_owned()
     } else {
