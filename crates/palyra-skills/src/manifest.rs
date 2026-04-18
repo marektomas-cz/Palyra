@@ -52,10 +52,8 @@ pub fn parse_ed25519_signing_key(secret: &[u8]) -> Result<[u8; 32], SkillPackagi
 }
 
 fn validate_manifest(manifest: &SkillManifest) -> Result<(), SkillPackagingError> {
-    if !matches!(
-        manifest.manifest_version,
-        LEGACY_SKILL_MANIFEST_VERSION | SKILL_MANIFEST_VERSION
-    ) {
+    if !matches!(manifest.manifest_version, LEGACY_SKILL_MANIFEST_VERSION | SKILL_MANIFEST_VERSION)
+    {
         return Err(SkillPackagingError::ManifestValidation(format!(
             "manifest_version must equal {} or {}",
             LEGACY_SKILL_MANIFEST_VERSION, SKILL_MANIFEST_VERSION
@@ -264,9 +262,7 @@ fn validate_secret_scope(scope: &str) -> Result<(), SkillPackagingError> {
     Err(SkillPackagingError::ManifestValidation(format!("invalid secret scope '{}'", scope)))
 }
 
-fn validate_builder_metadata(
-    builder: &SkillBuilderMetadata,
-) -> Result<(), SkillPackagingError> {
+fn validate_builder_metadata(builder: &SkillBuilderMetadata) -> Result<(), SkillPackagingError> {
     if !builder.experimental {
         return Err(SkillPackagingError::ManifestValidation(
             "builder.experimental must stay true for generated builder outputs".to_owned(),
@@ -373,8 +369,9 @@ pub(crate) fn collect_manifest_warnings(manifest: &SkillManifest) -> Vec<SkillMa
         warnings.push(SkillManifestWarning {
             code: "missing_operator_metadata".to_owned(),
             severity: SkillManifestWarningSeverity::Warning,
-            message: "operator-facing metadata is missing; inventory and doctor output will be degraded"
-                .to_owned(),
+            message:
+                "operator-facing metadata is missing; inventory and doctor output will be degraded"
+                    .to_owned(),
         });
     } else {
         if manifest.operator.display_name.is_none() {
@@ -384,16 +381,12 @@ pub(crate) fn collect_manifest_warnings(manifest: &SkillManifest) -> Vec<SkillMa
                 message: "operator.display_name is missing".to_owned(),
             });
         }
-        if manifest
-            .operator
-            .config
-            .as_ref()
-            .is_some_and(|config| config.properties.is_empty())
-        {
+        if manifest.operator.config.as_ref().is_some_and(|config| config.properties.is_empty()) {
             warnings.push(SkillManifestWarning {
                 code: "empty_operator_config_contract".to_owned(),
                 severity: SkillManifestWarningSeverity::Warning,
-                message: "operator.config is present but does not declare any properties".to_owned(),
+                message: "operator.config is present but does not declare any properties"
+                    .to_owned(),
             });
         }
         for (name, property) in manifest
@@ -459,12 +452,15 @@ fn validate_optional_operator_text(
     Ok(())
 }
 
-fn validate_operator_label(value: &str, field_name: &'static str) -> Result<(), SkillPackagingError> {
+fn validate_operator_label(
+    value: &str,
+    field_name: &'static str,
+) -> Result<(), SkillPackagingError> {
     let normalized = value.trim();
     if normalized.is_empty()
-        || !normalized
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+        || !normalized.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        })
     {
         return Err(SkillPackagingError::ManifestValidation(format!(
             "{field_name} entries must use [a-z0-9._-]"
@@ -547,7 +543,10 @@ fn validate_config_property(
     name: &str,
     property: &SkillConfigProperty,
 ) -> Result<(), SkillPackagingError> {
-    validate_optional_operator_text(property.title.as_deref(), "operator.config.properties[].title")?;
+    validate_optional_operator_text(
+        property.title.as_deref(),
+        "operator.config.properties[].title",
+    )?;
     validate_optional_operator_text(
         property.description.as_deref(),
         "operator.config.properties[].description",
@@ -599,9 +598,9 @@ fn validate_config_property(
 fn validate_config_key(name: &str, field_name: &'static str) -> Result<(), SkillPackagingError> {
     let normalized = name.trim();
     if normalized.is_empty()
-        || !normalized
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+        || !normalized.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        })
     {
         return Err(SkillPackagingError::ManifestValidation(format!(
             "{field_name} keys must use [a-z0-9._-]"
@@ -620,9 +619,9 @@ fn validate_config_value_type(
         SkillConfigValueType::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
         SkillConfigValueType::Number => value.is_number(),
         SkillConfigValueType::Boolean => value.is_boolean(),
-        SkillConfigValueType::StringList => value.as_array().is_some_and(|values| {
-            values.iter().all(|candidate| candidate.as_str().is_some())
-        }),
+        SkillConfigValueType::StringList => value
+            .as_array()
+            .is_some_and(|values| values.iter().all(|candidate| candidate.as_str().is_some())),
     };
     if valid {
         return Ok(());

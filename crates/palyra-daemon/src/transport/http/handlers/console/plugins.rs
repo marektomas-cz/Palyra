@@ -12,8 +12,8 @@ use crate::{
         redact_plugin_config_values, remove_plugin_config_instance, resolve_plugins_root,
         save_plugin_bindings_index, save_plugin_config_instance, set_plugin_binding_enabled,
         upsert_plugin_binding, validate_plugin_config_instance, PluginBindingRecord,
-        PluginBindingUpsert, PluginCapabilityProfile, PluginConfigInstance, PluginConfigInstanceRef,
-        PluginConfigValidationState, PluginOperatorMetadata,
+        PluginBindingUpsert, PluginCapabilityProfile, PluginConfigInstance,
+        PluginConfigInstanceRef, PluginConfigValidationState, PluginOperatorMetadata,
     },
     wasm_plugin_runner::{
         resolve_installed_skill_module, ResolvedInstalledSkillModule, WasmPluginRunnerPolicy,
@@ -97,7 +97,8 @@ pub(crate) async fn console_plugins_list_handler(
         }));
     }
     if dirty {
-        save_plugin_bindings_index(plugins_root.as_path(), &index).map_err(internal_console_error)?;
+        save_plugin_bindings_index(plugins_root.as_path(), &index)
+            .map_err(internal_console_error)?;
     }
     Ok(Json(json!({
         "contract": contract_descriptor(),
@@ -128,7 +129,8 @@ pub(crate) async fn console_plugin_get_handler(
         evaluate_plugin_binding(&state, plugins_root.as_path(), &binding).await?;
     if index.entries[position] != binding {
         index.entries[position] = binding.clone();
-        save_plugin_bindings_index(plugins_root.as_path(), &index).map_err(internal_console_error)?;
+        save_plugin_bindings_index(plugins_root.as_path(), &index)
+            .map_err(internal_console_error)?;
     }
     Ok(Json(json!({
         "contract": contract_descriptor(),
@@ -206,10 +208,8 @@ pub(crate) async fn console_plugins_install_or_bind_handler(
     let plugins_root = resolve_plugins_root().map_err(internal_console_error)?;
     let mut index =
         load_plugin_bindings_index(plugins_root.as_path()).map_err(internal_console_error)?;
-    let existing = index
-        .entries
-        .iter()
-        .find(|entry| entry.plugin_id == plugin_id.trim().to_ascii_lowercase());
+    let existing =
+        index.entries.iter().find(|entry| entry.plugin_id == plugin_id.trim().to_ascii_lowercase());
     let upsert = PluginBindingUpsert {
         plugin_id,
         enabled: enabled.unwrap_or(true),
@@ -310,7 +310,8 @@ pub(crate) async fn console_plugin_check_handler(
         evaluate_plugin_binding(&state, plugins_root.as_path(), &binding).await?;
     if index.entries[position] != binding {
         index.entries[position] = binding.clone();
-        save_plugin_bindings_index(plugins_root.as_path(), &index).map_err(internal_console_error)?;
+        save_plugin_bindings_index(plugins_root.as_path(), &index)
+            .map_err(internal_console_error)?;
     }
     Ok(Json(json!({
         "contract": contract_descriptor(),
@@ -434,10 +435,8 @@ async fn evaluate_plugin_binding(
         remediation.extend(filesystem.issues.iter().map(|issue| issue.remediation.clone()));
     }
 
-    let installed_skill = lookup_installed_skill_record(
-        binding.skill_id.as_str(),
-        binding.skill_version.as_deref(),
-    )?;
+    let installed_skill =
+        lookup_installed_skill_record(binding.skill_id.as_str(), binding.skill_version.as_deref())?;
     if matches!(
         installed_skill.as_ref().map(|record| record.trust_decision.as_str()),
         Some("untrusted_override")
@@ -449,16 +448,16 @@ async fn evaluate_plugin_binding(
                 .to_owned(),
         );
     }
-    let installed_skill_payload = installed_skill
-        .as_ref()
-        .and_then(|record| serde_json::to_value(record).ok());
+    let installed_skill_payload =
+        installed_skill.as_ref().and_then(|record| serde_json::to_value(record).ok());
     let manifest_payload_sha256 =
         installed_skill.as_ref().map(|record| record.payload_sha256.as_str());
-    let config_instance =
-        load_plugin_config_instance(plugins_root, binding.plugin_id.as_str()).map_err(internal_console_error)?;
+    let config_instance = load_plugin_config_instance(plugins_root, binding.plugin_id.as_str())
+        .map_err(internal_console_error)?;
 
     let mut skill_status_payload = Value::Null;
-    let mut capability_payload = serde_json::to_value(&binding.capability_diff).unwrap_or(Value::Null);
+    let mut capability_payload =
+        serde_json::to_value(&binding.capability_diff).unwrap_or(Value::Null);
     let mut config_payload = Value::Null;
     let mut resolved_payload = Value::Null;
 
@@ -519,8 +518,11 @@ async fn evaluate_plugin_binding(
         }
 
         let wasm_policy = build_wasm_policy(state)?;
-        binding.capability_diff =
-            build_plugin_capability_diff(&resolved.manifest, &binding.capability_profile, &wasm_policy);
+        binding.capability_diff = build_plugin_capability_diff(
+            &resolved.manifest,
+            &binding.capability_profile,
+            &wasm_policy,
+        );
         if !binding.capability_diff.valid {
             ready = false;
             reasons.push("plugin capability profile has binding/policy drift".to_owned());
@@ -531,9 +533,13 @@ async fn evaluate_plugin_binding(
         }
         capability_payload = serde_json::to_value(&binding.capability_diff).unwrap_or(Value::Null);
 
-        let (config_validation, effective_config) =
-            validate_plugin_config_instance(&resolved.manifest, config_instance.as_ref(), manifest_payload_sha256);
-        binding.config = if resolved.manifest.operator.config.is_some() || config_instance.is_some() {
+        let (config_validation, effective_config) = validate_plugin_config_instance(
+            &resolved.manifest,
+            config_instance.as_ref(),
+            manifest_payload_sha256,
+        );
+        binding.config = if resolved.manifest.operator.config.is_some() || config_instance.is_some()
+        {
             Some(PluginConfigInstanceRef {
                 schema_version: 1,
                 path: format!("{}/config.json", binding.plugin_id),
@@ -657,10 +663,7 @@ fn normalize_plugin_config_payload(
     match payload {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Object(object)) => Ok(Some(
-            object
-                .into_iter()
-                .filter(|(_, value)| !value.is_null())
-                .collect::<BTreeMap<_, _>>(),
+            object.into_iter().filter(|(_, value)| !value.is_null()).collect::<BTreeMap<_, _>>(),
         )),
         Some(_) => Err(runtime_status_response(tonic::Status::invalid_argument(
             "plugin config payload must be a JSON object",
@@ -668,7 +671,10 @@ fn normalize_plugin_config_payload(
     }
 }
 
-fn apply_manifest_binding_defaults(binding: &mut PluginBindingRecord, resolved: &ResolvedInstalledSkillModule) {
+fn apply_manifest_binding_defaults(
+    binding: &mut PluginBindingRecord,
+    resolved: &ResolvedInstalledSkillModule,
+) {
     if binding.tool_id.is_none() {
         binding.tool_id = resolved.manifest.operator.plugin.default_tool_id.clone();
     }
@@ -711,8 +717,9 @@ fn persist_binding_config_instance(
                 "plugin config payload was provided but the installed skill manifest does not declare operator.config",
             )));
         }
-        if let Some(existing) = load_plugin_config_instance(plugins_root, binding.plugin_id.as_str())
-            .map_err(internal_console_error)?
+        if let Some(existing) =
+            load_plugin_config_instance(plugins_root, binding.plugin_id.as_str())
+                .map_err(internal_console_error)?
         {
             let (validation, _) =
                 validate_plugin_config_instance(manifest, Some(&existing), manifest_payload_sha256);
@@ -729,9 +736,10 @@ fn persist_binding_config_instance(
         return Ok(());
     }
 
-    prepare_plugin_root(plugins_root, binding.plugin_id.as_str()).map_err(internal_console_error)?;
-    let existing =
-        load_plugin_config_instance(plugins_root, binding.plugin_id.as_str()).map_err(internal_console_error)?;
+    prepare_plugin_root(plugins_root, binding.plugin_id.as_str())
+        .map_err(internal_console_error)?;
+    let existing = load_plugin_config_instance(plugins_root, binding.plugin_id.as_str())
+        .map_err(internal_console_error)?;
     let values = config_payload
         .cloned()
         .or_else(|| existing.as_ref().map(|instance| instance.values.clone()))
@@ -741,7 +749,11 @@ fn persist_binding_config_instance(
         plugin_id: binding.plugin_id.clone(),
         skill_id: binding.skill_id.clone(),
         skill_version: skill_version.map(ToOwned::to_owned),
-        contract_schema_version: manifest.operator.config.as_ref().map(|contract| contract.schema_version),
+        contract_schema_version: manifest
+            .operator
+            .config
+            .as_ref()
+            .map(|contract| contract.schema_version),
         manifest_payload_sha256: manifest_payload_sha256.map(ToOwned::to_owned),
         values,
         updated_at_unix_ms: now_unix_ms,

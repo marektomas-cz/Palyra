@@ -2,9 +2,9 @@ use super::{
     audit_skill_artifact_security, build_signed_skill_artifact, builder_manifest_requires_review,
     capability_grants_from_manifest, inspect_skill_artifact, parse_ed25519_signing_key,
     parse_manifest_toml, policy_requests_from_manifest, verify_skill_artifact, ArtifactFile,
-    SkillArtifactBuildRequest, SkillAuditCheckStatus, SkillPackagingError, SkillSecurityAuditPolicy,
-    SkillTrustStore, TrustDecision, MAX_ARTIFACT_BYTES, MAX_ENTRIES, SBOM_PATH, SIGNATURE_PATH,
-    SKILL_MANIFEST_PATH, SKILL_MANIFEST_VERSION,
+    SkillArtifactBuildRequest, SkillAuditCheckStatus, SkillPackagingError,
+    SkillSecurityAuditPolicy, SkillTrustStore, TrustDecision, MAX_ARTIFACT_BYTES, MAX_ENTRIES,
+    SBOM_PATH, SIGNATURE_PATH, SKILL_MANIFEST_PATH, SKILL_MANIFEST_VERSION,
 };
 use base64::Engine as _;
 
@@ -301,8 +301,8 @@ fn manifest_accepts_builder_metadata_with_required_checklist() {
 #[test]
 fn manifest_rejects_operator_metadata_on_legacy_manifest_version() {
     let manifest = sample_manifest().replace("manifest_version = 2", "manifest_version = 1");
-    let error =
-        parse_manifest_toml(manifest.as_str()).expect_err("legacy manifest with operator block must fail");
+    let error = parse_manifest_toml(manifest.as_str())
+        .expect_err("legacy manifest with operator block must fail");
     assert!(
         matches!(error, SkillPackagingError::ManifestValidation(ref message) if message.contains("operator metadata requires manifest_version")),
         "unexpected validation error: {error:?}"
@@ -311,9 +311,10 @@ fn manifest_rejects_operator_metadata_on_legacy_manifest_version() {
 
 #[test]
 fn manifest_rejects_operator_plugin_default_tool_that_is_not_declared() {
-    let manifest = sample_manifest().replace("default_tool_id = \"acme.echo\"", "default_tool_id = \"acme.missing\"");
-    let error =
-        parse_manifest_toml(manifest.as_str()).expect_err("unknown operator plugin default_tool_id must fail");
+    let manifest = sample_manifest()
+        .replace("default_tool_id = \"acme.echo\"", "default_tool_id = \"acme.missing\"");
+    let error = parse_manifest_toml(manifest.as_str())
+        .expect_err("unknown operator plugin default_tool_id must fail");
     assert!(
         matches!(error, SkillPackagingError::ManifestValidation(ref message) if message.contains("default_tool_id")),
         "unexpected validation error: {error:?}"
@@ -413,8 +414,8 @@ fn inspect_reports_warning_for_legacy_manifest_without_operator_metadata() {
         ..sample_request()
     })
     .expect("legacy artifact should build");
-    let inspection =
-        inspect_skill_artifact(artifact.artifact_bytes.as_slice()).expect("artifact should inspect");
+    let inspection = inspect_skill_artifact(artifact.artifact_bytes.as_slice())
+        .expect("artifact should inspect");
     assert!(
         inspection
             .manifest_warnings
@@ -555,10 +556,7 @@ fn audit_reports_passing_result_for_baseline_skill() {
         !report.should_quarantine,
         "passing baseline skill should not be marked for quarantine"
     );
-    assert!(
-        report.manifest_warnings.is_empty(),
-        "baseline v2 manifest should not emit warnings"
-    );
+    assert!(report.manifest_warnings.is_empty(), "baseline v2 manifest should not emit warnings");
 }
 
 #[test]

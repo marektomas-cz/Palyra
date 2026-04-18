@@ -595,15 +595,13 @@ pub(crate) fn save_plugin_config_instance(
         .with_context(|| format!("failed to write plugin config instance {}", path.display()))
 }
 
-pub(crate) fn remove_plugin_config_instance(
-    plugins_root: &FsPath,
-    plugin_id: &str,
-) -> Result<()> {
+pub(crate) fn remove_plugin_config_instance(plugins_root: &FsPath, plugin_id: &str) -> Result<()> {
     let plugin_id = normalize_registry_identifier(plugin_id, "plugin_id")?;
     let path = plugin_config_instance_path(plugins_root, plugin_id.as_str());
     if path.exists() {
-        fs::remove_file(path.as_path())
-            .with_context(|| format!("failed to remove plugin config instance {}", path.display()))?;
+        fs::remove_file(path.as_path()).with_context(|| {
+            format!("failed to remove plugin config instance {}", path.display())
+        })?;
     }
     let plugin_root = plugin_root_path(plugins_root, plugin_id.as_str());
     if plugin_root.exists() {
@@ -625,8 +623,9 @@ pub(crate) fn inspect_plugin_filesystem_safety(
                     code: "invalid_plugin_id".to_owned(),
                     severity: "error".to_owned(),
                     message: error.to_string(),
-                    remediation: "rename the plugin binding so plugin_id uses only safe registry characters"
-                        .to_owned(),
+                    remediation:
+                        "rename the plugin binding so plugin_id uses only safe registry characters"
+                            .to_owned(),
                 }],
             };
         }
@@ -700,7 +699,9 @@ pub(crate) fn validate_plugin_config_instance(
         if manifest_payload_sha256.is_some()
             && instance.manifest_payload_sha256.as_deref() != manifest_payload_sha256
         {
-            issues.push("config manifest digest does not match the currently installed skill".to_owned());
+            issues.push(
+                "config manifest digest does not match the currently installed skill".to_owned(),
+            );
             return (
                 PluginConfigValidationSnapshot {
                     state: PluginConfigValidationState::RequiresMigration,
@@ -723,12 +724,14 @@ pub(crate) fn validate_plugin_config_instance(
             .cloned()
             .or_else(|| property.default.clone());
         match value {
-            Some(value) => match validate_config_value_against_property(name.as_str(), property, &value) {
-                Ok(()) => {
-                    effective.insert(name.clone(), value);
+            Some(value) => {
+                match validate_config_value_against_property(name.as_str(), property, &value) {
+                    Ok(()) => {
+                        effective.insert(name.clone(), value);
+                    }
+                    Err(error) => issues.push(error),
                 }
-                Err(error) => issues.push(error),
-            },
+            }
             None if contract.required.iter().any(|required| required == name) => {
                 issues.push(format!("required config property '{}' is missing", name));
             }
@@ -743,21 +746,14 @@ pub(crate) fn validate_plugin_config_instance(
     } else {
         PluginConfigValidationState::Invalid
     };
-    (
-        PluginConfigValidationSnapshot { state, issues, redacted_fields },
-        effective,
-    )
+    (PluginConfigValidationSnapshot { state, issues, redacted_fields }, effective)
 }
 
 pub(crate) fn redact_plugin_config_values(
     values: &BTreeMap<String, Value>,
     validation: &PluginConfigValidationSnapshot,
 ) -> BTreeMap<String, Value> {
-    let redacted = validation
-        .redacted_fields
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
+    let redacted = validation.redacted_fields.iter().map(String::as_str).collect::<BTreeSet<_>>();
     values
         .iter()
         .map(|(name, value)| {
@@ -819,7 +815,8 @@ pub(crate) fn build_plugin_capability_diff(
         valid: !entries.iter().any(|entry| {
             matches!(
                 entry.category,
-                PluginCapabilityDiffCategory::ExcessGrant | PluginCapabilityDiffCategory::PolicyRestricted
+                PluginCapabilityDiffCategory::ExcessGrant
+                    | PluginCapabilityDiffCategory::PolicyRestricted
             )
         }),
         declared,
@@ -850,9 +847,7 @@ pub(crate) fn build_plugin_discovery_snapshot(
         Some(PluginConfigValidationState::RequiresMigration)
     ) {
         reasons.extend(
-            config_validation
-                .into_iter()
-                .flat_map(|snapshot| snapshot.issues.iter().cloned()),
+            config_validation.into_iter().flat_map(|snapshot| snapshot.issues.iter().cloned()),
         );
         PluginDiscoveryState::RequiresMigration
     } else if let Some(error) = resolve_error {
@@ -870,9 +865,7 @@ pub(crate) fn build_plugin_discovery_snapshot(
         Some(PluginConfigValidationState::Missing | PluginConfigValidationState::Invalid)
     ) {
         reasons.extend(
-            config_validation
-                .into_iter()
-                .flat_map(|snapshot| snapshot.issues.iter().cloned()),
+            config_validation.into_iter().flat_map(|snapshot| snapshot.issues.iter().cloned()),
         );
         PluginDiscoveryState::Invalid
     } else if resolved_ok {
@@ -902,7 +895,11 @@ fn inspect_path_safety(
         issues.push(PluginFilesystemIssue {
             code: format!("{label}_symlink"),
             severity: "error".to_owned(),
-            message: format!("{} must not be a symlink: {}", label.replace('_', " "), path.display()),
+            message: format!(
+                "{} must not be a symlink: {}",
+                label.replace('_', " "),
+                path.display()
+            ),
             remediation:
                 "replace the symlink with a real directory or file under the managed plugins root"
                     .to_owned(),
@@ -997,7 +994,9 @@ fn config_value_type_label(value_type: SkillConfigValueType) -> &'static str {
     }
 }
 
-fn plugin_capability_profile_from_wasm_policy(policy: &WasmPluginRunnerPolicy) -> PluginCapabilityProfile {
+fn plugin_capability_profile_from_wasm_policy(
+    policy: &WasmPluginRunnerPolicy,
+) -> PluginCapabilityProfile {
     PluginCapabilityProfile {
         http_hosts: policy.allowed_http_hosts.clone(),
         secrets: policy.allowed_secrets.clone(),
@@ -1011,7 +1010,10 @@ fn intersect_profiles(
     right: &PluginCapabilityProfile,
 ) -> PluginCapabilityProfile {
     PluginCapabilityProfile {
-        http_hosts: intersect_capability_list(left.http_hosts.as_slice(), right.http_hosts.as_slice()),
+        http_hosts: intersect_capability_list(
+            left.http_hosts.as_slice(),
+            right.http_hosts.as_slice(),
+        ),
         secrets: intersect_capability_list(left.secrets.as_slice(), right.secrets.as_slice()),
         storage_prefixes: intersect_capability_list(
             left.storage_prefixes.as_slice(),
@@ -1096,7 +1098,10 @@ fn append_capability_list_diffs(
     }
 }
 
-fn append_wildcard_risks(entries: &mut Vec<PluginCapabilityDiffEntry>, profile: &PluginCapabilityProfile) {
+fn append_wildcard_risks(
+    entries: &mut Vec<PluginCapabilityDiffEntry>,
+    profile: &PluginCapabilityProfile,
+) {
     append_wildcard_entries(entries, "http_hosts", profile.http_hosts.as_slice());
     append_wildcard_entries(entries, "secrets", profile.secrets.as_slice());
     append_wildcard_entries(entries, "storage_prefixes", profile.storage_prefixes.as_slice());
@@ -1169,7 +1174,7 @@ mod tests {
         build_plugin_capability_diff, inspect_plugin_filesystem_safety, load_plugin_bindings_index,
         plugin_bindings_index_path, redact_plugin_config_values, save_plugin_bindings_index,
         validate_plugin_config_instance, PluginBindingRecord, PluginBindingsIndex,
-        PluginCapabilityDiffCategory, PluginCapabilityDiffCache, PluginCapabilityDiffEntry,
+        PluginCapabilityDiffCache, PluginCapabilityDiffCategory, PluginCapabilityDiffEntry,
         PluginCapabilityProfile, PluginConfigInstance, PluginConfigInstanceRef,
         PluginConfigValidationSnapshot, PluginConfigValidationState, PluginDiscoverySnapshot,
         PluginDiscoveryState, PluginFilesystemSafetySnapshot, PLUGIN_BINDINGS_LAYOUT_VERSION,
@@ -1225,8 +1230,8 @@ mod tests {
         )
         .expect("legacy v1 plugin bindings index should be written");
 
-        let index =
-            load_plugin_bindings_index(tempdir.path()).expect("legacy v1 plugin bindings should load");
+        let index = load_plugin_bindings_index(tempdir.path())
+            .expect("legacy v1 plugin bindings should load");
         assert_eq!(index.schema_version, PLUGIN_BINDINGS_LAYOUT_VERSION);
         assert_eq!(index.entries.len(), 1);
         let entry = &index.entries[0];
@@ -1317,8 +1322,8 @@ mod tests {
 
         save_plugin_bindings_index(tempdir.path(), &expected)
             .expect("v2 plugin bindings index should save");
-        let loaded =
-            load_plugin_bindings_index(tempdir.path()).expect("v2 plugin bindings index should load");
+        let loaded = load_plugin_bindings_index(tempdir.path())
+            .expect("v2 plugin bindings index should load");
         assert_eq!(loaded.schema_version, expected.schema_version);
         assert!(
             loaded.updated_at_unix_ms >= expected.updated_at_unix_ms,
@@ -1333,8 +1338,8 @@ mod tests {
         let index_path = plugin_bindings_index_path(tempdir.path());
         fs::write(index_path, br#"{"schema_version":2,"updated_at_unix_ms":0,"entries":{}}"#)
             .expect("corrupted plugin bindings index should be written");
-        let error =
-            load_plugin_bindings_index(tempdir.path()).expect_err("invalid entries payload must fail");
+        let error = load_plugin_bindings_index(tempdir.path())
+            .expect_err("invalid entries payload must fail");
         let rendered = format!("{error:#}");
         assert!(
             rendered.contains("expected a sequence"),
@@ -1378,17 +1383,11 @@ redacted = true
             effective.get("api_base_url"),
             Some(&Value::String("https://api.example.com".to_owned()))
         );
-        assert_eq!(
-            effective.get("api_token"),
-            Some(&Value::String("secret-token".to_owned()))
-        );
+        assert_eq!(effective.get("api_token"), Some(&Value::String("secret-token".to_owned())));
         assert_eq!(validation.redacted_fields, vec!["api_token".to_owned()]);
 
         let redacted = redact_plugin_config_values(&effective, &validation);
-        assert_eq!(
-            redacted.get("api_token"),
-            Some(&Value::String("[redacted]".to_owned()))
-        );
+        assert_eq!(redacted.get("api_token"), Some(&Value::String("[redacted]".to_owned())));
     }
 
     #[test]
@@ -1405,20 +1404,17 @@ title = "API token"
 redacted = true
 "#,
         );
-        let (validation, effective) = validate_plugin_config_instance(&manifest, None, Some("digest-1"));
+        let (validation, effective) =
+            validate_plugin_config_instance(&manifest, None, Some("digest-1"));
         assert_eq!(validation.state, PluginConfigValidationState::Missing);
-        assert!(
-            validation
-                .issues
-                .iter()
-                .any(|issue| issue.contains("required config property 'api_base_url' is missing"))
-        );
-        assert!(
-            validation
-                .issues
-                .iter()
-                .any(|issue| issue.contains("required config property 'api_token' is missing"))
-        );
+        assert!(validation
+            .issues
+            .iter()
+            .any(|issue| issue.contains("required config property 'api_base_url' is missing")));
+        assert!(validation
+            .issues
+            .iter()
+            .any(|issue| issue.contains("required config property 'api_token' is missing")));
         assert!(effective.is_empty());
     }
 
@@ -1454,12 +1450,10 @@ redacted = true
             validate_plugin_config_instance(&manifest, Some(&instance), Some("digest-1"));
         assert_eq!(validation.state, PluginConfigValidationState::RequiresMigration);
         assert!(effective.is_empty());
-        assert!(
-            validation
-                .issues
-                .iter()
-                .any(|issue| issue.contains("config contract schema mismatch"))
-        );
+        assert!(validation
+            .issues
+            .iter()
+            .any(|issue| issue.contains("config contract schema mismatch")));
     }
 
     #[test]
@@ -1567,12 +1561,10 @@ redacted = true
         let tempdir = tempdir().expect("temporary directory should be created");
         let snapshot = inspect_plugin_filesystem_safety(tempdir.path(), "../escape");
         assert!(!snapshot.safe);
-        assert!(
-            snapshot
-                .issues
-                .iter()
-                .any(|issue| issue.code == "invalid_plugin_id" && issue.severity == "error")
-        );
+        assert!(snapshot
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_plugin_id" && issue.severity == "error"));
     }
 
     #[cfg(unix)]
@@ -1583,24 +1575,20 @@ redacted = true
         let tempdir = tempdir().expect("temporary directory should be created");
         let plugin_root = tempdir.path().join("acme.echo_plugin");
         fs::create_dir_all(&plugin_root).expect("plugin root should be created");
-        let mut permissions = fs::metadata(&plugin_root)
-            .expect("plugin root metadata should load")
-            .permissions();
+        let mut permissions =
+            fs::metadata(&plugin_root).expect("plugin root metadata should load").permissions();
         permissions.set_mode(0o777);
         fs::set_permissions(&plugin_root, permissions)
             .expect("plugin root permissions should be updated");
 
         let snapshot = inspect_plugin_filesystem_safety(tempdir.path(), "acme.echo_plugin");
         assert!(!snapshot.safe);
-        assert!(
-            snapshot
-                .issues
-                .iter()
-                .any(|issue| issue.code == "plugin_root_writable")
-        );
+        assert!(snapshot.issues.iter().any(|issue| issue.code == "plugin_root_writable"));
     }
 
-    fn plugin_manifest_with_operator_config(config_properties_toml: &str) -> palyra_skills::SkillManifest {
+    fn plugin_manifest_with_operator_config(
+        config_properties_toml: &str,
+    ) -> palyra_skills::SkillManifest {
         let manifest_toml = format!(
             r#"
 manifest_version = 2
