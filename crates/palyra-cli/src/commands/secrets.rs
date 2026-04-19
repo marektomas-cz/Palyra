@@ -3,12 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{args::SecretsConfigureCommand, *};
 use palyra_control_plane as control_plane;
 
-#[path = "secrets_text.rs"]
-mod secrets_text;
-#[cfg(test)]
-#[path = "secrets_text_tests.rs"]
-mod secrets_text_tests;
-
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SecretAuditPayload {
     pub(crate) path: String,
@@ -804,9 +798,9 @@ fn run_configured_secret_inventory(json: bool) -> Result<()> {
         output::print_json_pretty(&envelope, "failed to encode configured secret inventory")?;
         return Ok(());
     }
-    for line in secrets_text::render_configured_secret_inventory_lines() {
-        output::print_text_line(line)?;
-    }
+    output::print_text_line(
+        "Sensitive configuration details are redacted in text output; use --json for structured output",
+    )?;
     Ok(())
 }
 
@@ -822,9 +816,9 @@ fn run_configured_secret_explain(secret_id: &str, json: bool) -> Result<()> {
         output::print_json_pretty(&envelope, "failed to encode configured secret detail")?;
         return Ok(());
     }
-    for line in secrets_text::render_configured_secret_explain_lines() {
-        output::print_text_line(line)?;
-    }
+    output::print_text_line(
+        "Sensitive configuration details are redacted in text output; use --json for structured output",
+    )?;
     Ok(())
 }
 
