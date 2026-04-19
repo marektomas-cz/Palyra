@@ -198,18 +198,10 @@ export function MemorySection({ app }: MemorySectionProps) {
   const selectedLearningCandidatePayload = parseJsonObject(
     readString(selectedLearningCandidate ?? EMPTY_OBJECT, "content_json"),
   );
-  const selectedLearningPatch = readObject(
-    selectedLearningCandidatePayload ?? EMPTY_OBJECT,
-    "patch",
-  );
-  const selectedLearningReasoning = readObject(
-    selectedLearningCandidatePayload ?? EMPTY_OBJECT,
-    "reasoning",
-  );
-  const selectedLearningSourceTool = readObject(
-    selectedLearningCandidatePayload ?? EMPTY_OBJECT,
-    "source_tool",
-  );
+  const selectedLearningCandidateData = selectedLearningCandidatePayload ?? EMPTY_OBJECT;
+  const selectedLearningPatch = readObject(selectedLearningCandidateData, "patch");
+  const selectedLearningReasoning = readObject(selectedLearningCandidateData, "reasoning");
+  const selectedLearningSourceTool = readObject(selectedLearningCandidateData, "source_tool");
   const selectedLearningPatchFiles = readJsonObjectArray(
     selectedLearningPatch ?? EMPTY_OBJECT,
     "files",
