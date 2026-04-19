@@ -115,23 +115,16 @@ fn build_current_state_inventory_snapshot(
             json!({
                 "backend_id": entry.get("backend_id").cloned().unwrap_or(Value::Null),
                 "label": entry.get("label").cloned().unwrap_or(Value::Null),
-                "state": entry.get("state").cloned().unwrap_or(Value::Null),
-                "selectable": entry.get("selectable").cloned().unwrap_or(Value::Null),
-                "selected_by_default": entry.get("selected_by_default").cloned().unwrap_or(Value::Null),
                 "description": entry.get("description").cloned().unwrap_or(Value::Null),
-                "operator_summary": entry.get("operator_summary").cloned().unwrap_or(Value::Null),
                 "executor_label": entry.get("executor_label").cloned().unwrap_or(Value::Null),
                 "rollout_flag": entry.get("rollout_flag").cloned().unwrap_or(Value::Null),
                 "rollout_enabled": entry.get("rollout_enabled").cloned().unwrap_or(Value::Null),
-                "capabilities": entry.get("capabilities").cloned().unwrap_or(Value::Null),
                 "tradeoffs": entry.get("tradeoffs").cloned().unwrap_or(Value::Null),
                 "requires_attestation": entry.get("requires_attestation").cloned().unwrap_or(Value::Null),
                 "requires_egress_proxy": entry.get("requires_egress_proxy").cloned().unwrap_or(Value::Null),
                 "workspace_scope_mode": entry.get("workspace_scope_mode").cloned().unwrap_or(Value::Null),
                 "artifact_transport": entry.get("artifact_transport").cloned().unwrap_or(Value::Null),
                 "cleanup_strategy": entry.get("cleanup_strategy").cloned().unwrap_or(Value::Null),
-                "active_node_count": entry.get("active_node_count").cloned().unwrap_or(Value::Null),
-                "total_node_count": entry.get("total_node_count").cloned().unwrap_or(Value::Null),
             })
         })
         .collect::<Vec<_>>();

@@ -59,6 +59,10 @@ crate = "palyra-daemon"
 expression = "LicenseRef-Palyra-Community-Source-1.1"
 license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
 [[licenses.clarify]]
+crate = "palyra-egress-proxy"
+expression = "LicenseRef-Palyra-Community-Source-1.1"
+license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
+[[licenses.clarify]]
 crate = "palyra-identity"
 expression = "LicenseRef-Palyra-Community-Source-1.1"
 license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
@@ -75,6 +79,10 @@ crate = "palyra-policy"
 expression = "LicenseRef-Palyra-Community-Source-1.1"
 license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
 [[licenses.clarify]]
+crate = "palyra-safety"
+expression = "LicenseRef-Palyra-Community-Source-1.1"
+license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
+[[licenses.clarify]]
 crate = "palyra-sandbox"
 expression = "LicenseRef-Palyra-Community-Source-1.1"
 license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
@@ -88,6 +96,10 @@ expression = "LicenseRef-Palyra-Community-Source-1.1"
 license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
 [[licenses.clarify]]
 crate = "palyra-vault"
+expression = "LicenseRef-Palyra-Community-Source-1.1"
+license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
+[[licenses.clarify]]
+crate = "palyra-workerd"
 expression = "LicenseRef-Palyra-Community-Source-1.1"
 license-files = [{ path = "../../LICENSE", hash = 0xc6635295 }]
 

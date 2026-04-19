@@ -725,12 +725,7 @@ fn detect_sensitive_assignment(line: &str, lowered: &str) -> Option<&'static str
     if value.len() < 8 || key.ends_with("_ref") {
         return None;
     }
-    for candidate in SENSITIVE_ASSIGNMENT_KEYS {
-        if key.contains(candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    SENSITIVE_ASSIGNMENT_KEYS.iter().find(|candidate| key.contains(**candidate)).copied()
 }
 
 fn detect_prefixed_secret_token(line: &str) -> Option<&'static str> {
@@ -766,8 +761,7 @@ fn contains_prefixed_token(
     min_tail_len: usize,
     is_allowed_char: impl Fn(char) -> bool,
 ) -> bool {
-    let mut char_indices = text.char_indices().peekable();
-    while let Some((start, _)) = char_indices.next() {
+    for (start, _) in text.char_indices() {
         if !text[start..].starts_with(prefix) {
             continue;
         }

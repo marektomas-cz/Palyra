@@ -44,8 +44,10 @@ fn configured_secret_inventory_text_lines_hide_sensitive_identifiers() {
         secrets: vec![sample_configured_secret_record()],
         page: PageInfo { limit: 1, returned: 1, next_cursor: None, has_more: false },
     };
-    let rendered =
-        super::secrets_text::render_configured_secret_inventory_lines(&envelope).join("\n");
+    let rendered = super::secrets_text::render_configured_secret_inventory_lines(
+        &super::secrets_text::summarize_configured_secret_inventory(&envelope),
+    )
+    .join("\n");
     assert!(rendered.contains("status=healthy"));
     assert!(rendered.contains("source=vault"));
     assert!(!rendered.contains("super-secret-fingerprint"));
@@ -55,7 +57,9 @@ fn configured_secret_inventory_text_lines_hide_sensitive_identifiers() {
 #[test]
 fn configured_secret_explain_text_lines_hide_sensitive_detail() {
     let rendered = super::secrets_text::render_configured_secret_explain_lines(
-        &sample_configured_secret_record(),
+        &super::secrets_text::summarize_configured_secret_explain(
+            &sample_configured_secret_record(),
+        ),
     )
     .join("\n");
     assert!(rendered.contains("status=healthy"));

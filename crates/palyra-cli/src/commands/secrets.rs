@@ -804,7 +804,9 @@ fn run_configured_secret_inventory(json: bool) -> Result<()> {
         output::print_json_pretty(&envelope, "failed to encode configured secret inventory")?;
         return Ok(());
     }
-    for line in secrets_text::render_configured_secret_inventory_lines(&envelope) {
+    // Project the control-plane record into operator-safe metadata before writing text output.
+    let summary = secrets_text::summarize_configured_secret_inventory(&envelope);
+    for line in secrets_text::render_configured_secret_inventory_lines(&summary) {
         output::print_text_line(line.as_str())?;
     }
     Ok(())
@@ -822,7 +824,10 @@ fn run_configured_secret_explain(secret_id: &str, json: bool) -> Result<()> {
         output::print_json_pretty(&envelope, "failed to encode configured secret detail")?;
         return Ok(());
     }
-    for line in secrets_text::render_configured_secret_explain_lines(&envelope.secret) {
+    // The text surface intentionally excludes secret identifiers and values; JSON remains the
+    // structured diagnostics path when operators need the full record shape.
+    let summary = secrets_text::summarize_configured_secret_explain(&envelope.secret);
+    for line in secrets_text::render_configured_secret_explain_lines(&summary) {
         output::print_text_line(line.as_str())?;
     }
     Ok(())
