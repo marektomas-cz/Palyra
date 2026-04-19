@@ -69,3 +69,51 @@ fn configured_secret_explain_text_lines_hide_sensitive_detail() {
     assert!(!rendered.contains("Bearer super-secret-token"));
     assert!(!rendered.contains("model_provider.openai_api_key_secret_ref"));
 }
+
+#[test]
+fn configured_secret_text_lines_collapse_unrecognized_labels() {
+    let mut record = sample_configured_secret_record();
+    record.status = "Bearer super-secret-token".to_owned();
+    record.reload_action = "vault://global/openai_api_key".to_owned();
+    record.resolution_scope = "model_provider.openai_api_key_secret_ref".to_owned();
+    record.source.kind = "secret-env-var".to_owned();
+    record.source.refresh_policy = "refresh Bearer super-secret-token".to_owned();
+    record.source.snapshot_policy = "runtime_snapshot?token=super-secret".to_owned();
+    record.last_error_kind = Some("Bearer super-secret-token".to_owned());
+
+    let inventory_rendered = super::secrets_text::render_configured_secret_inventory_lines(
+        &super::secrets_text::summarize_configured_secret_inventory(
+            &control_plane::ConfiguredSecretListEnvelope {
+                contract: ContractDescriptor {
+                    contract_version: CONTROL_PLANE_CONTRACT_VERSION.to_owned(),
+                },
+                generated_at_unix_ms: 1_700_000_000_000,
+                snapshot_generation: 7,
+                secrets: vec![record.clone()],
+                page: PageInfo { limit: 1, returned: 1, next_cursor: None, has_more: false },
+            },
+        ),
+    )
+    .join("\n");
+    let explain_rendered = super::secrets_text::render_configured_secret_explain_lines(
+        &super::secrets_text::summarize_configured_secret_explain(&record),
+    )
+    .join("\n");
+
+    assert!(inventory_rendered.contains("status=other"));
+    assert!(inventory_rendered.contains("reload_action=other"));
+    assert!(inventory_rendered.contains("source=other"));
+    assert!(inventory_rendered.contains("scope=other"));
+    assert!(inventory_rendered.contains("error_kind=other"));
+    assert!(explain_rendered.contains("status=other"));
+    assert!(explain_rendered.contains("reload_action=other"));
+    assert!(explain_rendered.contains("scope=other"));
+    assert!(explain_rendered.contains("kind=other"));
+    assert!(explain_rendered.contains("refresh_policy=other"));
+    assert!(explain_rendered.contains("snapshot_policy=other"));
+    assert!(explain_rendered.contains("error_kind=other"));
+    assert!(!inventory_rendered.contains("super-secret"));
+    assert!(!inventory_rendered.contains("vault://global/openai_api_key"));
+    assert!(!explain_rendered.contains("super-secret"));
+    assert!(!explain_rendered.contains("vault://global/openai_api_key"));
+}
