@@ -66,6 +66,68 @@ impl RoutineTriggerKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RoutineRunMode {
+    SameSession,
+    FreshSession,
+}
+
+impl RoutineRunMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SameSession => "same_session",
+            Self::FreshSession => "fresh_session",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "same_session" => Some(Self::SameSession),
+            "fresh_session" => Some(Self::FreshSession),
+            _ => None,
+        }
+    }
+}
+
+impl Default for RoutineRunMode {
+    fn default() -> Self {
+        Self::SameSession
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineExecutionPosture {
+    Standard,
+    SensitiveTools,
+}
+
+impl RoutineExecutionPosture {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::SensitiveTools => "sensitive_tools",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "standard" => Some(Self::Standard),
+            "sensitive_tools" => Some(Self::SensitiveTools),
+            _ => None,
+        }
+    }
+}
+
+impl Default for RoutineExecutionPosture {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RoutineDeliveryMode {
     SameChannel,
     SpecificChannel,
@@ -97,6 +159,40 @@ impl RoutineDeliveryMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RoutineSilentPolicy {
+    Noisy,
+    FailureOnly,
+    AuditOnly,
+}
+
+impl RoutineSilentPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Noisy => "noisy",
+            Self::FailureOnly => "failure_only",
+            Self::AuditOnly => "audit_only",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "noisy" => Some(Self::Noisy),
+            "failure_only" => Some(Self::FailureOnly),
+            "audit_only" => Some(Self::AuditOnly),
+            _ => None,
+        }
+    }
+}
+
+impl Default for RoutineSilentPolicy {
+    fn default() -> Self {
+        Self::Noisy
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RoutineRunOutcomeKind {
     SuccessWithOutput,
     SuccessNoOp,
@@ -116,6 +212,58 @@ impl RoutineRunOutcomeKind {
             Self::Throttled => "throttled",
             Self::Failed => "failed",
             Self::Denied => "denied",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineDispatchMode {
+    Normal,
+    TestRun,
+    Replay,
+}
+
+impl RoutineDispatchMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::TestRun => "test_run",
+            Self::Replay => "replay",
+        }
+    }
+}
+
+impl Default for RoutineDispatchMode {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineExecutionConfig {
+    #[serde(default)]
+    pub run_mode: RoutineRunMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure_profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_profile_id: Option<String>,
+    #[serde(default)]
+    pub execution_posture: RoutineExecutionPosture,
+}
+
+impl Default for RoutineExecutionConfig {
+    fn default() -> Self {
+        Self {
+            run_mode: RoutineRunMode::SameSession,
+            procedure_profile_id: None,
+            skill_profile_id: None,
+            provider_profile_id: None,
+            execution_posture: RoutineExecutionPosture::Standard,
         }
     }
 }
@@ -154,11 +302,23 @@ pub struct RoutineDeliveryConfig {
     pub mode: RoutineDeliveryMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_mode: Option<RoutineDeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_channel: Option<String>,
+    #[serde(default)]
+    pub silent_policy: RoutineSilentPolicy,
 }
 
 impl Default for RoutineDeliveryConfig {
     fn default() -> Self {
-        Self { mode: RoutineDeliveryMode::SameChannel, channel: None }
+        Self {
+            mode: RoutineDeliveryMode::SameChannel,
+            channel: None,
+            failure_mode: None,
+            failure_channel: None,
+            silent_policy: RoutineSilentPolicy::Noisy,
+        }
     }
 }
 
@@ -189,6 +349,8 @@ pub struct RoutineMetadataRecord {
     pub routine_id: String,
     pub trigger_kind: RoutineTriggerKind,
     pub trigger_payload_json: String,
+    #[serde(default)]
+    pub execution: RoutineExecutionConfig,
     pub delivery: RoutineDeliveryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet_hours: Option<RoutineQuietHours>,
@@ -207,6 +369,7 @@ pub struct RoutineMetadataUpsert {
     pub routine_id: String,
     pub trigger_kind: RoutineTriggerKind,
     pub trigger_payload_json: String,
+    pub execution: RoutineExecutionConfig,
     pub delivery: RoutineDeliveryConfig,
     pub quiet_hours: Option<RoutineQuietHours>,
     pub cooldown_ms: u64,
@@ -225,13 +388,27 @@ pub struct RoutineRunMetadataRecord {
     pub trigger_payload_json: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_dedupe_key: Option<String>,
+    #[serde(default)]
+    pub execution: RoutineExecutionConfig,
     pub delivery: RoutineDeliveryConfig,
+    #[serde(default)]
+    pub dispatch_mode: RoutineDispatchMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome_override: Option<RoutineRunOutcomeKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_delivered: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_note: Option<String>,
     pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
 }
@@ -244,10 +421,17 @@ pub struct RoutineRunMetadataUpsert {
     pub trigger_reason: Option<String>,
     pub trigger_payload_json: String,
     pub trigger_dedupe_key: Option<String>,
+    pub execution: RoutineExecutionConfig,
     pub delivery: RoutineDeliveryConfig,
+    pub dispatch_mode: RoutineDispatchMode,
+    pub source_run_id: Option<String>,
     pub outcome_override: Option<RoutineRunOutcomeKind>,
     pub outcome_message: Option<String>,
     pub output_delivered: Option<bool>,
+    pub skip_reason: Option<String>,
+    pub delivery_reason: Option<String>,
+    pub approval_note: Option<String>,
+    pub safety_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -426,6 +610,7 @@ impl RoutineRegistry {
         {
             existing.trigger_kind = normalized.trigger_kind;
             existing.trigger_payload_json = normalized.trigger_payload_json;
+            existing.execution = normalized.execution;
             existing.delivery = normalized.delivery;
             existing.quiet_hours = normalized.quiet_hours;
             existing.cooldown_ms = normalized.cooldown_ms;
@@ -497,6 +682,7 @@ impl RoutineRegistry {
                 routine_id: job.job_id.clone(),
                 trigger_kind: RoutineTriggerKind::Schedule,
                 trigger_payload_json: build_schedule_trigger_payload(job)?,
+                execution: RoutineExecutionConfig::default(),
                 delivery: RoutineDeliveryConfig::default(),
                 quiet_hours: None,
                 cooldown_ms: 0,
@@ -587,10 +773,17 @@ impl RoutineRegistry {
             existing.trigger_reason = normalized.trigger_reason;
             existing.trigger_payload_json = normalized.trigger_payload_json;
             existing.trigger_dedupe_key = normalized.trigger_dedupe_key;
+            existing.execution = normalized.execution;
             existing.delivery = normalized.delivery;
+            existing.dispatch_mode = normalized.dispatch_mode;
+            existing.source_run_id = normalized.source_run_id;
             existing.outcome_override = normalized.outcome_override;
             existing.outcome_message = normalized.outcome_message;
             existing.output_delivered = normalized.output_delivered;
+            existing.skip_reason = normalized.skip_reason;
+            existing.delivery_reason = normalized.delivery_reason;
+            existing.approval_note = normalized.approval_note;
+            existing.safety_note = normalized.safety_note;
             existing.updated_at_unix_ms = now;
             let updated = existing.clone();
             let document = RoutineRunMetadataDocument {
@@ -654,18 +847,49 @@ pub fn join_run_metadata(
     let outcome_kind = metadata
         .and_then(|entry| entry.outcome_override)
         .unwrap_or_else(|| default_outcome_from_cron_status(run.status));
+    let execution = metadata.map(|entry| entry.execution.clone()).unwrap_or_default();
+    let delivery = metadata.map(|entry| entry.delivery.clone()).unwrap_or_default();
+    let output_delivered = metadata
+        .and_then(|entry| entry.output_delivered)
+        .unwrap_or_else(|| delivery_announced_for_outcome(&delivery, outcome_kind));
+    let delivery_reason = metadata
+        .and_then(|entry| entry.delivery_reason.clone())
+        .unwrap_or_else(|| delivery_reason_for_outcome(&delivery, outcome_kind));
+    let effective_delivery = effective_delivery_target(
+        &delivery,
+        matches!(outcome_kind, RoutineRunOutcomeKind::Failed | RoutineRunOutcomeKind::Denied),
+    );
     json!({
         "routine_id": routine_id,
         "run_id": run.run_id,
         "status": run.status.as_str(),
         "outcome_kind": outcome_kind.as_str(),
         "outcome_message": metadata.and_then(|entry| entry.outcome_message.clone()).or_else(|| run.error_message_redacted.clone()),
+        "error_kind": run.error_kind,
         "trigger_kind": metadata.map(|entry| entry.trigger_kind.as_str()).unwrap_or(RoutineTriggerKind::Schedule.as_str()),
         "trigger_reason": metadata.and_then(|entry| entry.trigger_reason.clone()),
         "trigger_payload": metadata.and_then(|entry| serde_json::from_str::<Value>(&entry.trigger_payload_json).ok()).unwrap_or_else(|| json!({})),
-        "delivery_mode": metadata.map(|entry| entry.delivery.mode.as_str()).unwrap_or(RoutineDeliveryMode::SameChannel.as_str()),
-        "delivery_channel": metadata.and_then(|entry| entry.delivery.channel.clone()),
-        "output_delivered": metadata.and_then(|entry| entry.output_delivered).unwrap_or(matches!(outcome_kind, RoutineRunOutcomeKind::SuccessWithOutput)),
+        "run_mode": execution.run_mode.as_str(),
+        "execution_posture": execution.execution_posture.as_str(),
+        "procedure_profile_id": execution.procedure_profile_id,
+        "skill_profile_id": execution.skill_profile_id,
+        "provider_profile_id": execution.provider_profile_id,
+        "provider_routing": provider_routing_preview(&execution),
+        "delivery_mode": delivery.mode.as_str(),
+        "delivery_channel": delivery.channel,
+        "delivery_failure_mode": delivery.failure_mode.map(RoutineDeliveryMode::as_str),
+        "delivery_failure_channel": delivery.failure_channel,
+        "silent_policy": delivery.silent_policy.as_str(),
+        "delivery_preview": routine_delivery_preview(&delivery),
+        "effective_delivery_mode": effective_delivery.mode.as_str(),
+        "effective_delivery_channel": effective_delivery.channel,
+        "delivery_reason": delivery_reason,
+        "dispatch_mode": metadata.map(|entry| entry.dispatch_mode.as_str()).unwrap_or(RoutineDispatchMode::Normal.as_str()),
+        "source_run_id": metadata.and_then(|entry| entry.source_run_id.clone()),
+        "skip_reason": metadata.and_then(|entry| entry.skip_reason.clone()).or_else(|| run.error_kind.clone()),
+        "approval_note": metadata.and_then(|entry| entry.approval_note.clone()),
+        "safety_note": metadata.and_then(|entry| entry.safety_note.clone()),
+        "output_delivered": output_delivered,
         "attempt": run.attempt,
         "session_id": run.session_id,
         "orchestrator_run_id": run.orchestrator_run_id,
@@ -863,6 +1087,7 @@ fn normalize_routine_metadata_upsert(
             request.trigger_payload_json,
             "trigger_payload_json",
         )?,
+        execution: normalize_execution(request.execution)?,
         delivery: normalize_delivery(request.delivery)?,
         quiet_hours: normalize_quiet_hours(request.quiet_hours)?,
         cooldown_ms: request.cooldown_ms,
@@ -890,12 +1115,43 @@ fn normalize_routine_run_metadata_upsert(
             .trigger_dedupe_key
             .map(|value| normalize_freeform_identifier(value.as_str(), "trigger_dedupe_key"))
             .transpose()?,
+        execution: normalize_execution(request.execution)?,
         delivery: normalize_delivery(request.delivery)?,
+        dispatch_mode: request.dispatch_mode,
+        source_run_id: request
+            .source_run_id
+            .map(|value| normalize_identifier(value.as_str(), "source_run_id"))
+            .transpose()?,
         outcome_override: request.outcome_override,
         outcome_message: request.outcome_message.and_then(trim_to_option),
         output_delivered: request.output_delivered,
+        skip_reason: request.skip_reason.and_then(trim_to_option),
+        delivery_reason: request.delivery_reason.and_then(trim_to_option),
+        approval_note: request.approval_note.and_then(trim_to_option),
+        safety_note: request.safety_note.and_then(trim_to_option),
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
+    })
+}
+
+fn normalize_execution(
+    execution: RoutineExecutionConfig,
+) -> Result<RoutineExecutionConfig, RoutineRegistryError> {
+    Ok(RoutineExecutionConfig {
+        run_mode: execution.run_mode,
+        procedure_profile_id: execution
+            .procedure_profile_id
+            .map(|value| normalize_identifier(value.as_str(), "execution.procedure_profile_id"))
+            .transpose()?,
+        skill_profile_id: execution
+            .skill_profile_id
+            .map(|value| normalize_identifier(value.as_str(), "execution.skill_profile_id"))
+            .transpose()?,
+        provider_profile_id: execution
+            .provider_profile_id
+            .map(|value| normalize_identifier(value.as_str(), "execution.provider_profile_id"))
+            .transpose()?,
+        execution_posture: execution.execution_posture,
     })
 }
 
@@ -903,13 +1159,28 @@ fn normalize_delivery(
     delivery: RoutineDeliveryConfig,
 ) -> Result<RoutineDeliveryConfig, RoutineRegistryError> {
     let channel = delivery.channel.and_then(trim_to_option);
+    let failure_channel = delivery.failure_channel.and_then(trim_to_option);
     if matches!(delivery.mode, RoutineDeliveryMode::SpecificChannel) && channel.is_none() {
         return Err(RoutineRegistryError::InvalidField {
             field: "delivery.channel",
             message: "delivery.channel is required for delivery.mode=specific_channel".to_owned(),
         });
     }
-    Ok(RoutineDeliveryConfig { mode: delivery.mode, channel })
+    if matches!(delivery.failure_mode, Some(RoutineDeliveryMode::SpecificChannel))
+        && failure_channel.as_ref().or(channel.as_ref()).is_none()
+    {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "delivery.failure_channel",
+            message: "delivery.failure_channel or delivery.channel is required for failure_mode=specific_channel".to_owned(),
+        });
+    }
+    Ok(RoutineDeliveryConfig {
+        mode: delivery.mode,
+        channel,
+        failure_mode: delivery.failure_mode,
+        failure_channel,
+        silent_policy: delivery.silent_policy,
+    })
 }
 
 fn normalize_quiet_hours(
@@ -929,6 +1200,148 @@ fn normalize_quiet_hours(
         end_minute_of_day: quiet_hours.end_minute_of_day,
         timezone: quiet_hours.timezone.and_then(trim_to_option),
     }))
+}
+
+pub fn validate_routine_prompt_self_contained(
+    prompt: &str,
+    execution: &RoutineExecutionConfig,
+) -> Result<(), RoutineRegistryError> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "prompt",
+            message: "prompt cannot be empty".to_owned(),
+        });
+    }
+    if execution.run_mode != RoutineRunMode::FreshSession {
+        return Ok(());
+    }
+
+    const FRAGILE_PROMPT_MARKERS: &[&str] = &[
+        "as above",
+        "same as before",
+        "previous context",
+        "prior context",
+        "resume where you left off",
+        "pick up where you left off",
+        "continue from earlier",
+        "the earlier thread",
+        "the conversation above",
+    ];
+    let normalized = trimmed.to_ascii_lowercase();
+    if let Some(marker) =
+        FRAGILE_PROMPT_MARKERS.iter().copied().find(|marker| normalized.contains(marker))
+    {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "prompt",
+            message: format!(
+                "fresh-session routines must stay self-contained; remove fragile context reference '{marker}'"
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct EffectiveDeliveryTarget {
+    mode: RoutineDeliveryMode,
+    channel: Option<String>,
+}
+
+fn effective_delivery_target(
+    delivery: &RoutineDeliveryConfig,
+    failure_path: bool,
+) -> EffectiveDeliveryTarget {
+    if failure_path {
+        EffectiveDeliveryTarget {
+            mode: delivery.failure_mode.unwrap_or(delivery.mode),
+            channel: delivery.failure_channel.clone().or_else(|| delivery.channel.clone()),
+        }
+    } else {
+        EffectiveDeliveryTarget { mode: delivery.mode, channel: delivery.channel.clone() }
+    }
+}
+
+fn delivery_announced_for_outcome(
+    delivery: &RoutineDeliveryConfig,
+    outcome_kind: RoutineRunOutcomeKind,
+) -> bool {
+    if delivery.silent_policy == RoutineSilentPolicy::AuditOnly {
+        return false;
+    }
+    let failure_path =
+        matches!(outcome_kind, RoutineRunOutcomeKind::Failed | RoutineRunOutcomeKind::Denied);
+    if !failure_path && delivery.silent_policy == RoutineSilentPolicy::FailureOnly {
+        return false;
+    }
+    let effective = effective_delivery_target(delivery, failure_path);
+    !matches!(effective.mode, RoutineDeliveryMode::LocalOnly | RoutineDeliveryMode::LogsOnly)
+}
+
+fn delivery_reason_for_outcome(
+    delivery: &RoutineDeliveryConfig,
+    outcome_kind: RoutineRunOutcomeKind,
+) -> String {
+    if delivery.silent_policy == RoutineSilentPolicy::AuditOnly {
+        return "delivery suppressed by silent_policy=audit_only; audit trail remains available"
+            .to_owned();
+    }
+    let failure_path =
+        matches!(outcome_kind, RoutineRunOutcomeKind::Failed | RoutineRunOutcomeKind::Denied);
+    if !failure_path && delivery.silent_policy == RoutineSilentPolicy::FailureOnly {
+        return "successful runs stay silent; failures still use the configured failure target"
+            .to_owned();
+    }
+    let effective = effective_delivery_target(delivery, failure_path);
+    match effective.mode {
+        RoutineDeliveryMode::LocalOnly => {
+            "delivery stays local to the automation session and is not announced externally"
+                .to_owned()
+        }
+        RoutineDeliveryMode::LogsOnly => {
+            "delivery is restricted to logs and diagnostics surfaces".to_owned()
+        }
+        RoutineDeliveryMode::SameChannel => {
+            "delivery is eligible for the routine origin channel".to_owned()
+        }
+        RoutineDeliveryMode::SpecificChannel => format!(
+            "delivery is eligible for explicit channel {}",
+            effective.channel.unwrap_or_else(|| "unknown".to_owned())
+        ),
+    }
+}
+
+fn provider_routing_preview(execution: &RoutineExecutionConfig) -> Value {
+    if let Some(profile_id) = execution.provider_profile_id.as_ref() {
+        json!({
+            "mode": "pinned",
+            "profile_id": profile_id,
+        })
+    } else {
+        json!({
+            "mode": "auto",
+        })
+    }
+}
+
+pub fn routine_delivery_preview(delivery: &RoutineDeliveryConfig) -> Value {
+    let success_target = effective_delivery_target(delivery, false);
+    let failure_target = effective_delivery_target(delivery, true);
+    json!({
+        "silent_policy": delivery.silent_policy.as_str(),
+        "success": {
+            "mode": success_target.mode.as_str(),
+            "channel": success_target.channel,
+            "announced": delivery_announced_for_outcome(delivery, RoutineRunOutcomeKind::SuccessWithOutput),
+            "reason": delivery_reason_for_outcome(delivery, RoutineRunOutcomeKind::SuccessWithOutput),
+        },
+        "failure": {
+            "mode": failure_target.mode.as_str(),
+            "channel": failure_target.channel,
+            "announced": delivery_announced_for_outcome(delivery, RoutineRunOutcomeKind::Failed),
+            "reason": delivery_reason_for_outcome(delivery, RoutineRunOutcomeKind::Failed),
+        },
+    })
 }
 
 fn normalize_payload_json(
@@ -1362,10 +1775,12 @@ fn humanize_duration(duration_ms: u64) -> String {
 mod tests {
     use super::{
         build_routine_export_bundle, default_outcome_from_cron_status,
-        natural_language_schedule_preview, resolve_routines_root,
-        shadow_manual_schedule_payload_json, validate_routine_export_bundle, RoutineApprovalMode,
-        RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode, RoutineRegistry,
-        RoutineRunMetadataUpsert, RoutineTriggerKind, ROUTINE_EXPORT_SCHEMA_ID,
+        natural_language_schedule_preview, resolve_routines_root, routine_delivery_preview,
+        shadow_manual_schedule_payload_json, validate_routine_export_bundle,
+        validate_routine_prompt_self_contained, RoutineApprovalMode, RoutineApprovalPolicy,
+        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineExecutionConfig, RoutineRegistry,
+        RoutineRunMetadataUpsert, RoutineRunMode, RoutineSilentPolicy, RoutineTriggerKind,
+        ROUTINE_EXPORT_SCHEMA_ID,
     };
     use crate::{
         cron::CronTimezoneMode,
@@ -1400,9 +1815,13 @@ mod tests {
                 routine_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
                 trigger_kind: RoutineTriggerKind::Manual,
                 trigger_payload_json: json!({ "kind": "manual" }).to_string(),
+                execution: RoutineExecutionConfig::default(),
                 delivery: RoutineDeliveryConfig {
                     mode: RoutineDeliveryMode::SpecificChannel,
                     channel: Some("system:routines".to_owned()),
+                    failure_mode: None,
+                    failure_channel: None,
+                    silent_policy: RoutineSilentPolicy::Noisy,
                 },
                 quiet_hours: None,
                 cooldown_ms: 60_000,
@@ -1422,10 +1841,17 @@ mod tests {
                 trigger_reason: Some("manual fire".to_owned()),
                 trigger_payload_json: json!({ "source": "operator" }).to_string(),
                 trigger_dedupe_key: Some("manual:1".to_owned()),
+                execution: RoutineExecutionConfig::default(),
                 delivery: created.delivery.clone(),
+                dispatch_mode: super::RoutineDispatchMode::Normal,
+                source_run_id: None,
                 outcome_override: None,
                 outcome_message: None,
                 output_delivered: Some(true),
+                skip_reason: None,
+                delivery_reason: None,
+                approval_note: None,
+                safety_note: None,
             })
             .expect("run metadata upsert should succeed");
         assert_eq!(run.trigger_kind, RoutineTriggerKind::Manual);
@@ -1526,6 +1952,7 @@ mod tests {
                 routine_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
                 trigger_kind: RoutineTriggerKind::Schedule,
                 trigger_payload_json: json!({ "schedule_type": "every" }).to_string(),
+                execution: RoutineExecutionConfig::default(),
                 delivery: RoutineDeliveryConfig::default(),
                 quiet_hours: None,
                 cooldown_ms: 0,
@@ -1538,5 +1965,37 @@ mod tests {
         .expect("export bundle should build");
         assert_eq!(bundle.schema_id, ROUTINE_EXPORT_SCHEMA_ID);
         validate_routine_export_bundle(&bundle).expect("bundle should validate");
+    }
+
+    #[test]
+    fn fresh_session_prompt_validation_rejects_brittle_references() {
+        let error = validate_routine_prompt_self_contained(
+            "Resume where you left off and keep the same output style.",
+            &RoutineExecutionConfig {
+                run_mode: RoutineRunMode::FreshSession,
+                ..RoutineExecutionConfig::default()
+            },
+        )
+        .expect_err("fresh-session prompt should reject implicit context");
+        assert!(
+            error.to_string().contains("self-contained"),
+            "error should explain the self-contained requirement"
+        );
+    }
+
+    #[test]
+    fn delivery_preview_reflects_failure_only_policy() {
+        let preview = routine_delivery_preview(&RoutineDeliveryConfig {
+            mode: RoutineDeliveryMode::SameChannel,
+            channel: None,
+            failure_mode: Some(RoutineDeliveryMode::SpecificChannel),
+            failure_channel: Some("ops:alerts".to_owned()),
+            silent_policy: RoutineSilentPolicy::FailureOnly,
+        });
+        assert_eq!(preview["silent_policy"], json!("failure_only"));
+        assert_eq!(preview["success"]["announced"], json!(false));
+        assert_eq!(preview["failure"]["mode"], json!("specific_channel"));
+        assert_eq!(preview["failure"]["channel"], json!("ops:alerts"));
+        assert_eq!(preview["failure"]["announced"], json!(true));
     }
 }

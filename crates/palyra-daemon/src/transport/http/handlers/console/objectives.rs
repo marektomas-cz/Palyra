@@ -25,8 +25,8 @@ use crate::{
     routines::{
         default_outcome_from_cron_status, join_run_metadata, natural_language_schedule_preview,
         shadow_manual_schedule_payload_json, RoutineApprovalMode, RoutineApprovalPolicy,
-        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineQuietHours, RoutineRunMetadataUpsert,
-        RoutineTriggerKind,
+        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineDispatchMode, RoutineExecutionConfig,
+        RoutineQuietHours, RoutineRunMetadataUpsert, RoutineSilentPolicy, RoutineTriggerKind,
     },
     *,
 };
@@ -851,6 +851,7 @@ fn persist_objective_routine_metadata(
         routine_id,
         trigger_kind: automation.trigger_kind,
         trigger_payload_json: automation.schedule_payload_json.clone(),
+        execution: RoutineExecutionConfig::default(),
         delivery: automation.delivery.clone(),
         quiet_hours: automation.quiet_hours.clone(),
         cooldown_ms: automation.cooldown_ms,
@@ -915,10 +916,17 @@ async fn trigger_objective_now(
                 trigger_reason: Some("objective fire".to_owned()),
                 trigger_payload_json: json!({ "source": "objective" }).to_string(),
                 trigger_dedupe_key: None,
+                execution: RoutineExecutionConfig::default(),
                 delivery: objective.automation.delivery.clone(),
+                dispatch_mode: RoutineDispatchMode::Normal,
+                source_run_id: None,
                 outcome_override: Some(default_outcome_from_cron_status(outcome.status)),
                 outcome_message: Some(outcome.message.clone()),
                 output_delivered: Some(true),
+                skip_reason: None,
+                delivery_reason: None,
+                approval_note: None,
+                safety_note: None,
             })
             .map_err(routine_registry_error_response)?;
     }
@@ -1576,7 +1584,13 @@ fn parse_delivery(
             "delivery_channel is required for delivery_mode=specific_channel",
         )));
     }
-    Ok(RoutineDeliveryConfig { mode, channel: delivery_channel })
+    Ok(RoutineDeliveryConfig {
+        mode,
+        channel: delivery_channel,
+        failure_mode: None,
+        failure_channel: None,
+        silent_policy: RoutineSilentPolicy::Noisy,
+    })
 }
 
 #[allow(clippy::result_large_err)]

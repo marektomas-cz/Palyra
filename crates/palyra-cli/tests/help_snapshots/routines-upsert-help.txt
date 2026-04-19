@@ -43,6 +43,22 @@ Options:
           [default: same-channel] [possible values: same-channel, specific-channel, local-only, logs-only]
       --delivery-channel <DELIVERY_CHANNEL>
 
+      --delivery-failure-mode <DELIVERY_FAILURE_MODE>
+          [possible values: same-channel, specific-channel, local-only, logs-only]
+      --delivery-failure-channel <DELIVERY_FAILURE_CHANNEL>
+
+      --silent-policy <SILENT_POLICY>
+          [default: noisy] [possible values: noisy, failure-only, audit-only]
+      --run-mode <RUN_MODE>
+          [default: same-session] [possible values: same-session, fresh-session]
+      --procedure-profile-id <PROCEDURE_PROFILE_ID>
+
+      --skill-profile-id <SKILL_PROFILE_ID>
+
+      --provider-profile-id <PROVIDER_PROFILE_ID>
+
+      --execution-posture <EXECUTION_POSTURE>
+          [default: standard] [possible values: standard, sensitive-tools]
       --quiet-hours-start <QUIET_HOURS_START>
 
       --quiet-hours-end <QUIET_HOURS_END>

@@ -17,11 +17,14 @@ use crate::{
     },
     routines::{
         build_routine_export_bundle, default_outcome_from_cron_status, join_run_metadata,
-        natural_language_schedule_preview, routine_templates, shadow_manual_schedule_payload_json,
-        validate_routine_export_bundle, RoutineApprovalMode, RoutineApprovalPolicy,
-        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineExportBundle, RoutineMetadataRecord,
-        RoutineMetadataUpsert, RoutineQuietHours, RoutineRegistryError, RoutineRunMetadataUpsert,
-        RoutineRunOutcomeKind, RoutineTriggerKind, ROUTINE_TEMPLATE_PACK_VERSION,
+        natural_language_schedule_preview, routine_delivery_preview, routine_templates,
+        shadow_manual_schedule_payload_json, validate_routine_export_bundle,
+        validate_routine_prompt_self_contained, RoutineApprovalMode, RoutineApprovalPolicy,
+        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineDispatchMode, RoutineExecutionConfig,
+        RoutineExecutionPosture, RoutineExportBundle, RoutineMetadataRecord, RoutineMetadataUpsert,
+        RoutineQuietHours, RoutineRegistryError, RoutineRunMetadataUpsert, RoutineRunMode,
+        RoutineRunOutcomeKind, RoutineSilentPolicy, RoutineTriggerKind,
+        ROUTINE_TEMPLATE_PACK_VERSION,
     },
     *,
 };
@@ -93,6 +96,22 @@ pub(crate) struct ConsoleRoutineUpsertRequest {
     #[serde(default)]
     delivery_channel: Option<String>,
     #[serde(default)]
+    delivery_failure_mode: Option<String>,
+    #[serde(default)]
+    delivery_failure_channel: Option<String>,
+    #[serde(default)]
+    silent_policy: Option<String>,
+    #[serde(default)]
+    run_mode: Option<String>,
+    #[serde(default)]
+    procedure_profile_id: Option<String>,
+    #[serde(default)]
+    skill_profile_id: Option<String>,
+    #[serde(default)]
+    provider_profile_id: Option<String>,
+    #[serde(default)]
+    execution_posture: Option<String>,
+    #[serde(default)]
     quiet_hours_start: Option<String>,
     #[serde(default)]
     quiet_hours_end: Option<String>,
@@ -131,6 +150,17 @@ pub(crate) struct ConsoleRoutineDispatchRequest {
     trigger_payload: Option<Value>,
     #[serde(default)]
     trigger_dedupe_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConsoleRoutineTestRunRequest {
+    #[serde(default)]
+    source_run_id: Option<String>,
+    #[serde(default)]
+    trigger_reason: Option<String>,
+    #[serde(default)]
+    trigger_payload: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -337,6 +367,7 @@ pub(crate) async fn console_routine_import_handler(
             routine_id: routine_id.clone(),
             trigger_kind: bundle.routine.trigger_kind,
             trigger_payload_json: bundle.routine.trigger_payload_json.clone(),
+            execution: bundle.routine.execution.clone(),
             delivery: bundle.routine.delivery.clone(),
             quiet_hours: bundle.routine.quiet_hours.clone(),
             cooldown_ms: bundle.routine.cooldown_ms,
@@ -397,7 +428,22 @@ pub(crate) async fn console_routine_upsert_handler(
     }
 
     let schedule = resolve_routine_schedule(&payload, trigger_kind, state.cron_timezone_mode)?;
-    let delivery = parse_delivery(payload.delivery_mode.as_deref(), payload.delivery_channel)?;
+    let execution = parse_execution_config(
+        payload.run_mode.as_deref(),
+        payload.procedure_profile_id.clone(),
+        payload.skill_profile_id.clone(),
+        payload.provider_profile_id.clone(),
+        payload.execution_posture.as_deref(),
+    )?;
+    validate_routine_prompt_self_contained(payload.prompt.as_str(), &execution)
+        .map_err(routine_registry_error_response)?;
+    let delivery = parse_delivery(
+        payload.delivery_mode.as_deref(),
+        payload.delivery_channel,
+        payload.delivery_failure_mode.as_deref(),
+        payload.delivery_failure_channel,
+        payload.silent_policy.as_deref(),
+    )?;
     let quiet_hours = parse_quiet_hours(
         payload.quiet_hours_start.as_deref(),
         payload.quiet_hours_end.as_deref(),
@@ -455,6 +501,7 @@ pub(crate) async fn console_routine_upsert_handler(
             routine_id: routine_id.clone(),
             trigger_kind,
             trigger_payload_json,
+            execution,
             delivery,
             quiet_hours,
             cooldown_ms: payload.cooldown_ms.unwrap_or(0),
@@ -576,10 +623,36 @@ pub(crate) async fn console_routine_run_now_handler(
         &state,
         routine_id.as_str(),
         session.context.principal.as_str(),
-        RoutineTriggerKind::Manual,
-        Some("manual run-now".to_owned()),
-        json!({ "source": "manual_run_now" }),
-        None,
+        RoutineDispatchRequest {
+            trigger_kind: RoutineTriggerKind::Manual,
+            trigger_reason: Some("manual run-now".to_owned()),
+            trigger_payload: json!({ "source": "manual_run_now" }),
+            trigger_dedupe_key: None,
+            dispatch_mode: RoutineDispatchMode::Normal,
+            source_run_id: None,
+            execution_override: None,
+            delivery_override: None,
+            approval_note: None,
+            safety_note: None,
+            bypass_operator_gates: false,
+        },
+    )
+    .await?;
+    Ok(Json(outcome))
+}
+
+pub(crate) async fn console_routine_test_run_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(routine_id): Path<String>,
+    Json(payload): Json<ConsoleRoutineTestRunRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let outcome = dispatch_routine_test_run(
+        &state,
+        routine_id.as_str(),
+        session.context.principal.as_str(),
+        payload,
     )
     .await?;
     Ok(Json(outcome))
@@ -639,10 +712,19 @@ pub(crate) async fn console_routine_dispatch_handler(
         &state,
         routine_id.as_str(),
         session.context.principal.as_str(),
-        trigger_kind,
-        payload.trigger_reason,
-        payload.trigger_payload.unwrap_or_else(|| json!({})),
-        payload.trigger_dedupe_key,
+        RoutineDispatchRequest {
+            trigger_kind,
+            trigger_reason: payload.trigger_reason,
+            trigger_payload: payload.trigger_payload.unwrap_or_else(|| json!({})),
+            trigger_dedupe_key: payload.trigger_dedupe_key,
+            dispatch_mode: RoutineDispatchMode::Normal,
+            source_run_id: None,
+            execution_override: None,
+            delivery_override: None,
+            approval_note: None,
+            safety_note: None,
+            bypass_operator_gates: false,
+        },
     )
     .await?;
     Ok(Json(outcome))
@@ -936,7 +1018,7 @@ async fn enrich_routine_view_with_latest_run(
 ) -> Result<Value, Response> {
     let (runs, _) = state
         .runtime
-        .list_cron_runs(Some(job_id.to_owned()), None, Some(1))
+        .list_cron_runs(Some(job_id.to_owned()), None, Some(10))
         .await
         .map_err(runtime_status_response)?;
     let Some(run) = runs.last() else {
@@ -956,6 +1038,30 @@ async fn enrich_routine_view_with_latest_run(
         object.insert(
             "last_outcome_message".to_owned(),
             latest_run.get("outcome_message").cloned().unwrap_or(Value::Null),
+        );
+        let failure_count =
+            runs.iter().filter(|entry| matches!(entry.status, CronRunStatus::Failed)).count();
+        let skip_count =
+            runs.iter().filter(|entry| matches!(entry.status, CronRunStatus::Skipped)).count();
+        let denied_count =
+            runs.iter().filter(|entry| matches!(entry.status, CronRunStatus::Denied)).count();
+        object.insert(
+            "troubleshooting".to_owned(),
+            json!({
+                "window_size": runs.len(),
+                "failed_runs": failure_count,
+                "skipped_runs": skip_count,
+                "denied_runs": denied_count,
+                "recommended_action": if failure_count > 0 {
+                    "Inspect the latest run details, provider routing, and delivery preview before re-running."
+                } else if denied_count > 0 {
+                    "Resolve the approval or safety gate and use safe test-run before re-enabling production delivery."
+                } else if skip_count > 0 {
+                    "Review cooldown, quiet hours, or trigger dedupe rules that may be suppressing execution."
+                } else {
+                    "Routine is healthy; use safe test-run when you need a no-delivery diagnostic run."
+                },
+            }),
         );
     }
     Ok(view)
@@ -1104,177 +1210,332 @@ async fn ensure_routine_approval_requested(
     })
 }
 
-async fn dispatch_single_routine(
-    state: &AppState,
-    routine_id: &str,
-    principal: &str,
+#[derive(Debug, Clone)]
+struct RoutineDispatchRequest {
     trigger_kind: RoutineTriggerKind,
     trigger_reason: Option<String>,
     trigger_payload: Value,
     trigger_dedupe_key: Option<String>,
+    dispatch_mode: RoutineDispatchMode,
+    source_run_id: Option<String>,
+    execution_override: Option<RoutineExecutionConfig>,
+    delivery_override: Option<RoutineDeliveryConfig>,
+    approval_note: Option<String>,
+    safety_note: Option<String>,
+    bypass_operator_gates: bool,
+}
+
+pub(crate) async fn dispatch_routine_test_run(
+    state: &AppState,
+    routine_id: &str,
+    principal: &str,
+    payload: ConsoleRoutineTestRunRequest,
 ) -> Result<Value, Response> {
     let routine = load_routine_parts_for_owner(state, routine_id, principal).await?;
-    if !routine.job.enabled {
-        return register_terminal_routine_run(
-            state,
-            TerminalRoutineRunRequest {
-                routine_id: routine.job.job_id.as_str(),
-                trigger_kind,
-                trigger_reason,
-                trigger_payload: &trigger_payload,
-                trigger_dedupe_key,
-                delivery: routine.metadata.delivery.clone(),
-                status: CronRunStatus::Skipped,
-                outcome_override: RoutineRunOutcomeKind::Skipped,
-                message: "routine is disabled",
-            },
-        )
-        .await;
-    }
-    if routine.metadata.approval_policy.mode == RoutineApprovalMode::BeforeFirstRun
-        && !routine_approval_granted(
-            state,
-            routine_approval_subject_id(
-                routine.metadata.routine_id.as_str(),
+    let replay_source =
+        match payload.source_run_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            Some(run_id) => {
+                let entry = state
+                    .routines
+                    .find_run_metadata(run_id)
+                    .map_err(routine_registry_error_response)?
+                    .ok_or_else(|| {
+                        runtime_status_response(tonic::Status::not_found("source run not found"))
+                    })?;
+                if entry.routine_id != routine.metadata.routine_id {
+                    return Err(runtime_status_response(tonic::Status::invalid_argument(
+                        "source_run_id must belong to the selected routine",
+                    )));
+                }
+                Some(entry)
+            }
+            None => None,
+        };
+    let trigger_payload = if let Some(value) = payload.trigger_payload {
+        value
+    } else if let Some(source) = replay_source.as_ref() {
+        serde_json::from_str(source.trigger_payload_json.as_str()).map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to parse archived trigger payload: {error}"
+            )))
+        })?
+    } else {
+        serde_json::from_str(routine.metadata.trigger_payload_json.as_str()).map_err(|error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to parse routine trigger payload: {error}"
+            )))
+        })?
+    };
+    let dispatch_mode = if replay_source.is_some() {
+        RoutineDispatchMode::Replay
+    } else {
+        RoutineDispatchMode::TestRun
+    };
+    let safety_note = Some(match dispatch_mode {
+        RoutineDispatchMode::Replay => {
+            "safe replay forced fresh_session and audit-only delivery".to_owned()
+        }
+        _ => "safe test-run forced fresh_session and audit-only delivery".to_owned(),
+    });
+    dispatch_single_routine(
+        state,
+        routine_id,
+        principal,
+        RoutineDispatchRequest {
+            trigger_kind: replay_source
+                .as_ref()
+                .map(|entry| entry.trigger_kind)
+                .unwrap_or(routine.metadata.trigger_kind),
+            trigger_reason: payload
+                .trigger_reason
+                .or_else(|| replay_source.as_ref().and_then(|entry| entry.trigger_reason.clone()))
+                .or_else(|| Some("safe test-run".to_owned())),
+            trigger_payload,
+            trigger_dedupe_key: None,
+            dispatch_mode,
+            source_run_id: replay_source.as_ref().map(|entry| entry.run_id.clone()),
+            execution_override: Some(RoutineExecutionConfig {
+                run_mode: RoutineRunMode::FreshSession,
+                ..routine.metadata.execution.clone()
+            }),
+            delivery_override: Some(build_safe_test_delivery()),
+            approval_note: None,
+            safety_note,
+            bypass_operator_gates: true,
+        },
+    )
+    .await
+}
+
+async fn dispatch_single_routine(
+    state: &AppState,
+    routine_id: &str,
+    principal: &str,
+    request: RoutineDispatchRequest,
+) -> Result<Value, Response> {
+    let routine = load_routine_parts_for_owner(state, routine_id, principal).await?;
+    let execution =
+        request.execution_override.clone().unwrap_or_else(|| routine.metadata.execution.clone());
+    let delivery =
+        request.delivery_override.clone().unwrap_or_else(|| routine.metadata.delivery.clone());
+
+    if !request.bypass_operator_gates {
+        if !routine.job.enabled {
+            return register_terminal_routine_run(
+                state,
+                TerminalRoutineRunRequest {
+                    routine_id: routine.job.job_id.as_str(),
+                    trigger_kind: request.trigger_kind,
+                    trigger_reason: request.trigger_reason,
+                    trigger_payload: &request.trigger_payload,
+                    trigger_dedupe_key: request.trigger_dedupe_key,
+                    execution,
+                    delivery,
+                    dispatch_mode: request.dispatch_mode,
+                    source_run_id: request.source_run_id,
+                    status: CronRunStatus::Skipped,
+                    outcome_override: RoutineRunOutcomeKind::Skipped,
+                    message: "routine is disabled",
+                    skip_reason: Some("routine_disabled".to_owned()),
+                    delivery_reason: None,
+                    approval_note: request.approval_note,
+                    safety_note: request.safety_note,
+                },
+            )
+            .await;
+        }
+        if routine.metadata.approval_policy.mode == RoutineApprovalMode::BeforeFirstRun
+            && !routine_approval_granted(
+                state,
+                routine_approval_subject_id(
+                    routine.metadata.routine_id.as_str(),
+                    RoutineApprovalMode::BeforeFirstRun,
+                ),
+            )
+            .await?
+        {
+            let approval = ensure_routine_approval_requested(
+                state,
+                principal,
+                Some(routine.job.channel.as_str()),
+                &routine.job,
+                &routine.metadata,
                 RoutineApprovalMode::BeforeFirstRun,
-            ),
-        )
-        .await?
-    {
-        let approval = ensure_routine_approval_requested(
-            state,
-            principal,
-            Some(routine.job.channel.as_str()),
-            &routine.job,
-            &routine.metadata,
-            RoutineApprovalMode::BeforeFirstRun,
-        )
-        .await?;
-        let mut response = register_terminal_routine_run(
-            state,
-            TerminalRoutineRunRequest {
-                routine_id: routine.job.job_id.as_str(),
-                trigger_kind,
-                trigger_reason,
-                trigger_payload: &trigger_payload,
-                trigger_dedupe_key,
-                delivery: routine.metadata.delivery.clone(),
-                status: CronRunStatus::Denied,
-                outcome_override: RoutineRunOutcomeKind::Denied,
-                message: "routine approval is required before the first run",
-            },
-        )
-        .await?;
-        if let Some(object) = response.as_object_mut() {
-            object.insert("approval".to_owned(), approval);
+            )
+            .await?;
+            let mut response = register_terminal_routine_run(
+                state,
+                TerminalRoutineRunRequest {
+                    routine_id: routine.job.job_id.as_str(),
+                    trigger_kind: request.trigger_kind,
+                    trigger_reason: request.trigger_reason,
+                    trigger_payload: &request.trigger_payload,
+                    trigger_dedupe_key: request.trigger_dedupe_key,
+                    execution,
+                    delivery,
+                    dispatch_mode: request.dispatch_mode,
+                    source_run_id: request.source_run_id,
+                    status: CronRunStatus::Denied,
+                    outcome_override: RoutineRunOutcomeKind::Denied,
+                    message: "routine approval is required before the first run",
+                    skip_reason: Some("approval_required".to_owned()),
+                    delivery_reason: None,
+                    approval_note: Some("before_first_run approval is still pending".to_owned()),
+                    safety_note: request.safety_note,
+                },
+            )
+            .await?;
+            if let Some(object) = response.as_object_mut() {
+                object.insert("approval".to_owned(), approval);
+            }
+            return Ok(response);
         }
-        return Ok(response);
-    }
-    if routine.metadata.trigger_kind != trigger_kind && trigger_kind != RoutineTriggerKind::Manual {
-        return Err(runtime_status_response(tonic::Status::invalid_argument(
-            "trigger_kind does not match routine definition",
-        )));
-    }
-    if let Some(dedupe_key) = trigger_dedupe_key.as_deref() {
-        let seen = state
-            .routines
-            .seen_dedupe_key(routine.metadata.routine_id.as_str(), dedupe_key)
-            .map_err(routine_registry_error_response)?;
-        if seen {
+        if routine.metadata.trigger_kind != request.trigger_kind
+            && request.trigger_kind != RoutineTriggerKind::Manual
+        {
+            return Err(runtime_status_response(tonic::Status::invalid_argument(
+                "trigger_kind does not match routine definition",
+            )));
+        }
+        if let Some(dedupe_key) = request.trigger_dedupe_key.as_deref() {
+            let seen = state
+                .routines
+                .seen_dedupe_key(routine.metadata.routine_id.as_str(), dedupe_key)
+                .map_err(routine_registry_error_response)?;
+            if seen {
+                return register_terminal_routine_run(
+                    state,
+                    TerminalRoutineRunRequest {
+                        routine_id: routine.job.job_id.as_str(),
+                        trigger_kind: request.trigger_kind,
+                        trigger_reason: request.trigger_reason,
+                        trigger_payload: &request.trigger_payload,
+                        trigger_dedupe_key: Some(dedupe_key.to_owned()),
+                        execution,
+                        delivery,
+                        dispatch_mode: request.dispatch_mode,
+                        source_run_id: request.source_run_id,
+                        status: CronRunStatus::Skipped,
+                        outcome_override: RoutineRunOutcomeKind::Throttled,
+                        message: "duplicate trigger dedupe key already processed",
+                        skip_reason: Some("duplicate_trigger_dedupe_key".to_owned()),
+                        delivery_reason: None,
+                        approval_note: request.approval_note,
+                        safety_note: request.safety_note,
+                    },
+                )
+                .await;
+            }
+        }
+
+        let now_unix_ms = unix_ms_now().map_err(internal_console_error)?;
+        if routine.metadata.cooldown_ms > 0 {
+            let latest = state
+                .routines
+                .list_run_metadata(Some(routine.metadata.routine_id.as_str()), 1)
+                .map_err(routine_registry_error_response)?
+                .into_iter()
+                .last();
+            if latest.as_ref().is_some_and(|entry| {
+                entry.created_at_unix_ms + routine.metadata.cooldown_ms as i64 > now_unix_ms
+            }) {
+                return register_terminal_routine_run(
+                    state,
+                    TerminalRoutineRunRequest {
+                        routine_id: routine.job.job_id.as_str(),
+                        trigger_kind: request.trigger_kind,
+                        trigger_reason: request.trigger_reason,
+                        trigger_payload: &request.trigger_payload,
+                        trigger_dedupe_key: request.trigger_dedupe_key,
+                        execution,
+                        delivery,
+                        dispatch_mode: request.dispatch_mode,
+                        source_run_id: request.source_run_id,
+                        status: CronRunStatus::Skipped,
+                        outcome_override: RoutineRunOutcomeKind::Throttled,
+                        message: "routine cooldown window is still active",
+                        skip_reason: Some("cooldown_active".to_owned()),
+                        delivery_reason: None,
+                        approval_note: request.approval_note,
+                        safety_note: request.safety_note,
+                    },
+                )
+                .await;
+            }
+        }
+        if is_in_quiet_hours(routine.metadata.quiet_hours.as_ref(), now_unix_ms)? {
             return register_terminal_routine_run(
                 state,
                 TerminalRoutineRunRequest {
                     routine_id: routine.job.job_id.as_str(),
-                    trigger_kind,
-                    trigger_reason,
-                    trigger_payload: &trigger_payload,
-                    trigger_dedupe_key: Some(dedupe_key.to_owned()),
-                    delivery: routine.metadata.delivery.clone(),
+                    trigger_kind: request.trigger_kind,
+                    trigger_reason: request.trigger_reason,
+                    trigger_payload: &request.trigger_payload,
+                    trigger_dedupe_key: request.trigger_dedupe_key,
+                    execution,
+                    delivery,
+                    dispatch_mode: request.dispatch_mode,
+                    source_run_id: request.source_run_id,
                     status: CronRunStatus::Skipped,
-                    outcome_override: RoutineRunOutcomeKind::Throttled,
-                    message: "duplicate trigger dedupe key already processed",
+                    outcome_override: RoutineRunOutcomeKind::Skipped,
+                    message: "routine quiet hours suppress execution",
+                    skip_reason: Some("quiet_hours".to_owned()),
+                    delivery_reason: None,
+                    approval_note: request.approval_note,
+                    safety_note: request.safety_note,
                 },
             )
             .await;
         }
     }
 
-    let now_unix_ms = unix_ms_now().map_err(internal_console_error)?;
-    if routine.metadata.cooldown_ms > 0 {
-        let latest = state
-            .routines
-            .list_run_metadata(Some(routine.metadata.routine_id.as_str()), 1)
-            .map_err(routine_registry_error_response)?
-            .into_iter()
-            .last();
-        if latest.as_ref().is_some_and(|entry| {
-            entry.created_at_unix_ms + routine.metadata.cooldown_ms as i64 > now_unix_ms
-        }) {
-            return register_terminal_routine_run(
-                state,
-                TerminalRoutineRunRequest {
-                    routine_id: routine.job.job_id.as_str(),
-                    trigger_kind,
-                    trigger_reason,
-                    trigger_payload: &trigger_payload,
-                    trigger_dedupe_key,
-                    delivery: routine.metadata.delivery.clone(),
-                    status: CronRunStatus::Skipped,
-                    outcome_override: RoutineRunOutcomeKind::Throttled,
-                    message: "routine cooldown window is still active",
-                },
-            )
-            .await;
-        }
-    }
-    if is_in_quiet_hours(routine.metadata.quiet_hours.as_ref(), now_unix_ms)? {
-        return register_terminal_routine_run(
-            state,
-            TerminalRoutineRunRequest {
-                routine_id: routine.job.job_id.as_str(),
-                trigger_kind,
-                trigger_reason,
-                trigger_payload: &trigger_payload,
-                trigger_dedupe_key,
-                delivery: routine.metadata.delivery.clone(),
-                status: CronRunStatus::Skipped,
-                outcome_override: RoutineRunOutcomeKind::Skipped,
-                message: "routine quiet hours suppress execution",
-            },
-        )
-        .await;
-    }
-
-    let outcome = cron::trigger_job_now(
+    let outcome = cron::trigger_job_now_with_options(
         Arc::clone(&state.runtime),
         state.auth.clone(),
         state.grpc_url.clone(),
         routine.job.clone(),
         Arc::clone(&state.scheduler_wake),
+        build_cron_trigger_options(
+            &execution,
+            request.dispatch_mode,
+            request.source_run_id.as_deref(),
+            request.safety_note.as_deref(),
+        ),
     )
     .await
     .map_err(runtime_status_response)?;
     if let Some(run_id) = outcome.run_id.as_ref() {
+        let outcome_kind = default_outcome_from_cron_status(outcome.status);
         let _ = state
             .routines
             .upsert_run_metadata(RoutineRunMetadataUpsert {
                 run_id: run_id.clone(),
                 routine_id: routine.metadata.routine_id.clone(),
-                trigger_kind,
-                trigger_reason,
-                trigger_payload_json: serde_json::to_string(&trigger_payload).map_err(|error| {
-                    runtime_status_response(tonic::Status::internal(format!(
-                        "failed to serialize trigger payload: {error}"
-                    )))
-                })?,
-                trigger_dedupe_key,
-                delivery: routine.metadata.delivery.clone(),
-                outcome_override: Some(default_outcome_from_cron_status(outcome.status)),
+                trigger_kind: request.trigger_kind,
+                trigger_reason: request.trigger_reason,
+                trigger_payload_json: serde_json::to_string(&request.trigger_payload).map_err(
+                    |error| {
+                        runtime_status_response(tonic::Status::internal(format!(
+                            "failed to serialize trigger payload: {error}"
+                        )))
+                    },
+                )?,
+                trigger_dedupe_key: request.trigger_dedupe_key,
+                execution,
+                delivery: delivery.clone(),
+                dispatch_mode: request.dispatch_mode,
+                source_run_id: request.source_run_id,
+                outcome_override: Some(outcome_kind),
                 outcome_message: Some(outcome.message.clone()),
-                output_delivered: Some(!matches!(
-                    routine.metadata.delivery.mode,
-                    RoutineDeliveryMode::LogsOnly | RoutineDeliveryMode::LocalOnly
-                )),
+                output_delivered: Some(output_delivered_for_outcome(&delivery, outcome_kind)),
+                skip_reason: if matches!(outcome.status, CronRunStatus::Skipped) {
+                    Some("scheduler_skipped".to_owned())
+                } else {
+                    None
+                },
+                delivery_reason: Some(delivery_reason_for_outcome(&delivery, outcome_kind)),
+                approval_note: request.approval_note,
+                safety_note: request.safety_note,
             })
             .map_err(routine_registry_error_response)?;
     }
@@ -1283,6 +1544,8 @@ async fn dispatch_single_routine(
         "run_id": outcome.run_id,
         "status": outcome.status.as_str(),
         "message": outcome.message,
+        "dispatch_mode": request.dispatch_mode.as_str(),
+        "delivery_preview": routine_delivery_preview(&delivery),
     }))
 }
 
@@ -1316,10 +1579,19 @@ async fn dispatch_matching_routines(
             state,
             metadata.routine_id.as_str(),
             principal,
-            trigger_kind,
-            trigger_reason.clone(),
-            trigger_payload.clone(),
-            trigger_dedupe_key.clone(),
+            RoutineDispatchRequest {
+                trigger_kind,
+                trigger_reason: trigger_reason.clone(),
+                trigger_payload: trigger_payload.clone(),
+                trigger_dedupe_key: trigger_dedupe_key.clone(),
+                dispatch_mode: RoutineDispatchMode::Normal,
+                source_run_id: None,
+                execution_override: None,
+                delivery_override: None,
+                approval_note: None,
+                safety_note: None,
+                bypass_operator_gates: false,
+            },
         )
         .await?;
         outcomes.push(outcome);
@@ -1372,10 +1644,17 @@ struct TerminalRoutineRunRequest<'a> {
     trigger_reason: Option<String>,
     trigger_payload: &'a Value,
     trigger_dedupe_key: Option<String>,
+    execution: RoutineExecutionConfig,
     delivery: RoutineDeliveryConfig,
+    dispatch_mode: RoutineDispatchMode,
+    source_run_id: Option<String>,
     status: CronRunStatus,
     outcome_override: RoutineRunOutcomeKind,
     message: &'a str,
+    skip_reason: Option<String>,
+    delivery_reason: Option<String>,
+    approval_note: Option<String>,
+    safety_note: Option<String>,
 }
 
 async fn register_terminal_routine_run(
@@ -1383,6 +1662,7 @@ async fn register_terminal_routine_run(
     request: TerminalRoutineRunRequest<'_>,
 ) -> Result<Value, Response> {
     let run_id = Ulid::new().to_string();
+    let delivery_preview = routine_delivery_preview(&request.delivery);
     state
         .runtime
         .start_cron_run(CronRunStartRequest {
@@ -1428,10 +1708,17 @@ async fn register_terminal_routine_run(
                 },
             )?,
             trigger_dedupe_key: request.trigger_dedupe_key,
+            execution: request.execution,
             delivery: request.delivery,
+            dispatch_mode: request.dispatch_mode,
+            source_run_id: request.source_run_id,
             outcome_override: Some(request.outcome_override),
             outcome_message: Some(request.message.to_owned()),
             output_delivered: Some(false),
+            skip_reason: request.skip_reason,
+            delivery_reason: request.delivery_reason,
+            approval_note: request.approval_note,
+            safety_note: request.safety_note,
         })
         .map_err(routine_registry_error_response)?;
     Ok(json!({
@@ -1439,6 +1726,8 @@ async fn register_terminal_routine_run(
         "run_id": run_id,
         "status": request.status.as_str(),
         "message": request.message,
+        "dispatch_mode": request.dispatch_mode.as_str(),
+        "delivery_preview": delivery_preview,
     }))
 }
 
@@ -1467,8 +1756,17 @@ fn routine_view_from_parts(job: &CronJobRecord, metadata: &RoutineMetadataRecord
         "jitter_ms": job.jitter_ms,
         "trigger_kind": metadata.trigger_kind.as_str(),
         "trigger_payload": serde_json::from_str::<Value>(metadata.trigger_payload_json.as_str()).unwrap_or_else(|_| json!({ "raw": metadata.trigger_payload_json })),
+        "run_mode": metadata.execution.run_mode.as_str(),
+        "execution_posture": metadata.execution.execution_posture.as_str(),
+        "procedure_profile_id": metadata.execution.procedure_profile_id,
+        "skill_profile_id": metadata.execution.skill_profile_id,
+        "provider_profile_id": metadata.execution.provider_profile_id,
         "delivery_mode": metadata.delivery.mode.as_str(),
         "delivery_channel": metadata.delivery.channel,
+        "delivery_failure_mode": metadata.delivery.failure_mode.map(RoutineDeliveryMode::as_str),
+        "delivery_failure_channel": metadata.delivery.failure_channel,
+        "silent_policy": metadata.delivery.silent_policy.as_str(),
+        "delivery_preview": routine_delivery_preview(&metadata.delivery),
         "quiet_hours": metadata.quiet_hours.as_ref().map(|quiet_hours| json!({
             "start_minute_of_day": quiet_hours.start_minute_of_day,
             "end_minute_of_day": quiet_hours.end_minute_of_day,
@@ -1597,6 +1895,88 @@ fn build_schedule_trigger_payload(job: &CronJobRecord) -> String {
     .to_string()
 }
 
+fn build_safe_test_delivery() -> RoutineDeliveryConfig {
+    RoutineDeliveryConfig {
+        mode: RoutineDeliveryMode::LogsOnly,
+        channel: None,
+        failure_mode: Some(RoutineDeliveryMode::LogsOnly),
+        failure_channel: None,
+        silent_policy: RoutineSilentPolicy::AuditOnly,
+    }
+}
+
+fn build_cron_trigger_options(
+    execution: &RoutineExecutionConfig,
+    dispatch_mode: RoutineDispatchMode,
+    source_run_id: Option<&str>,
+    safety_note: Option<&str>,
+) -> cron::TriggerJobOptions {
+    cron::TriggerJobOptions {
+        force_run_mode: Some(execution.run_mode),
+        allow_sensitive_tools: Some(
+            execution.execution_posture == RoutineExecutionPosture::SensitiveTools,
+        ),
+        model_profile_override: execution.provider_profile_id.clone(),
+        parameter_delta_json: Some(
+            json!({
+                "routine": {
+                    "run_mode": execution.run_mode.as_str(),
+                    "execution_posture": execution.execution_posture.as_str(),
+                    "procedure_profile_id": execution.procedure_profile_id,
+                    "skill_profile_id": execution.skill_profile_id,
+                    "provider_profile_id": execution.provider_profile_id,
+                },
+                "dispatch_mode": dispatch_mode.as_str(),
+                "source_run_id": source_run_id,
+                "safety_note": safety_note,
+            })
+            .to_string(),
+        ),
+        origin_kind: Some(match dispatch_mode {
+            RoutineDispatchMode::Normal => "manual".to_owned(),
+            RoutineDispatchMode::TestRun => "routine_test_run".to_owned(),
+            RoutineDispatchMode::Replay => "routine_replay".to_owned(),
+        }),
+    }
+}
+
+fn output_delivered_for_outcome(
+    delivery: &RoutineDeliveryConfig,
+    outcome_kind: RoutineRunOutcomeKind,
+) -> bool {
+    if delivery.silent_policy == RoutineSilentPolicy::AuditOnly {
+        return false;
+    }
+    let failure_path =
+        matches!(outcome_kind, RoutineRunOutcomeKind::Failed | RoutineRunOutcomeKind::Denied);
+    if !failure_path && delivery.silent_policy == RoutineSilentPolicy::FailureOnly {
+        return false;
+    }
+    let effective_mode =
+        if failure_path { delivery.failure_mode.unwrap_or(delivery.mode) } else { delivery.mode };
+    !matches!(effective_mode, RoutineDeliveryMode::LocalOnly | RoutineDeliveryMode::LogsOnly)
+}
+
+fn delivery_reason_for_outcome(
+    delivery: &RoutineDeliveryConfig,
+    outcome_kind: RoutineRunOutcomeKind,
+) -> String {
+    let preview = routine_delivery_preview(delivery);
+    let key =
+        if matches!(outcome_kind, RoutineRunOutcomeKind::Failed | RoutineRunOutcomeKind::Denied) {
+            "failure"
+        } else {
+            "success"
+        };
+    preview
+        .get(key)
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("reason"))
+        .and_then(Value::as_str)
+        .unwrap_or("delivery preview unavailable")
+        .to_owned()
+}
+
 fn parse_routine_trigger_kind(value: &str) -> Result<RoutineTriggerKind, tonic::Status> {
     RoutineTriggerKind::from_str(value).ok_or_else(|| {
         tonic::Status::invalid_argument(
@@ -1646,9 +2026,46 @@ fn parse_misfire_policy(value: Option<&str>) -> Result<CronMisfirePolicy, Respon
 }
 
 #[allow(clippy::result_large_err)]
+fn parse_execution_config(
+    run_mode: Option<&str>,
+    procedure_profile_id: Option<String>,
+    skill_profile_id: Option<String>,
+    provider_profile_id: Option<String>,
+    execution_posture: Option<&str>,
+) -> Result<RoutineExecutionConfig, Response> {
+    let run_mode = match run_mode.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => RoutineRunMode::from_str(value).ok_or_else(|| {
+            runtime_status_response(tonic::Status::invalid_argument(
+                "run_mode must be one of same_session|fresh_session",
+            ))
+        })?,
+        None => RoutineRunMode::SameSession,
+    };
+    let execution_posture = match execution_posture.map(str::trim).filter(|value| !value.is_empty())
+    {
+        Some(value) => RoutineExecutionPosture::from_str(value).ok_or_else(|| {
+            runtime_status_response(tonic::Status::invalid_argument(
+                "execution_posture must be one of standard|sensitive_tools",
+            ))
+        })?,
+        None => RoutineExecutionPosture::Standard,
+    };
+    Ok(RoutineExecutionConfig {
+        run_mode,
+        procedure_profile_id: normalize_optional_text(procedure_profile_id.as_deref()),
+        skill_profile_id: normalize_optional_text(skill_profile_id.as_deref()),
+        provider_profile_id: normalize_optional_text(provider_profile_id.as_deref()),
+        execution_posture,
+    })
+}
+
+#[allow(clippy::result_large_err)]
 fn parse_delivery(
     mode: Option<&str>,
     channel: Option<String>,
+    failure_mode: Option<&str>,
+    failure_channel: Option<String>,
+    silent_policy: Option<&str>,
 ) -> Result<RoutineDeliveryConfig, Response> {
     let normalized_mode =
         mode.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("same_channel");
@@ -1657,7 +2074,31 @@ fn parse_delivery(
             "delivery_mode must be one of same_channel|specific_channel|local_only|logs_only",
         ))
     })?;
+    let failure_mode = match failure_mode.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => Some(RoutineDeliveryMode::from_str(value).ok_or_else(|| {
+            runtime_status_response(tonic::Status::invalid_argument(
+                "delivery_failure_mode must be one of same_channel|specific_channel|local_only|logs_only",
+            ))
+        })?),
+        None => None,
+    };
+    let silent_policy = match silent_policy.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => RoutineSilentPolicy::from_str(value).ok_or_else(|| {
+            runtime_status_response(tonic::Status::invalid_argument(
+                "silent_policy must be one of noisy|failure_only|audit_only",
+            ))
+        })?,
+        None => RoutineSilentPolicy::Noisy,
+    };
     let channel = channel.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    });
+    let failure_channel = failure_channel.and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             None
@@ -1670,7 +2111,14 @@ fn parse_delivery(
             "delivery_channel is required for delivery_mode=specific_channel",
         )));
     }
-    Ok(RoutineDeliveryConfig { mode, channel })
+    if matches!(failure_mode, Some(RoutineDeliveryMode::SpecificChannel))
+        && failure_channel.as_ref().or(channel.as_ref()).is_none()
+    {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "delivery_failure_channel or delivery_channel is required for delivery_failure_mode=specific_channel",
+        )));
+    }
+    Ok(RoutineDeliveryConfig { mode, channel, failure_mode, failure_channel, silent_policy })
 }
 
 #[allow(clippy::result_large_err)]
@@ -1852,11 +2300,12 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_optional_matchers, is_in_quiet_hours, parse_delivery, parse_quiet_hours,
-        routine_matches_trigger,
+        compare_optional_matchers, is_in_quiet_hours, parse_delivery, parse_execution_config,
+        parse_quiet_hours, routine_matches_trigger,
     };
     use crate::routines::{
-        RoutineApprovalPolicy, RoutineDeliveryMode, RoutineMetadataRecord, RoutineTriggerKind,
+        RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig, RoutineMetadataRecord,
+        RoutineSilentPolicy, RoutineTriggerKind,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
@@ -1872,6 +2321,7 @@ mod tests {
                 "event": "push",
             })
             .to_string(),
+            execution: RoutineExecutionConfig::default(),
             delivery: super::RoutineDeliveryConfig::default(),
             quiet_hours: None,
             cooldown_ms: 0,
@@ -1892,12 +2342,35 @@ mod tests {
 
     #[test]
     fn specific_channel_delivery_requires_explicit_channel() {
-        let response =
-            parse_delivery(Some("specific_channel"), None).expect_err("channel should be required");
+        let response = parse_delivery(Some("specific_channel"), None, None, None, None)
+            .expect_err("channel should be required");
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        let delivery = parse_delivery(Some("specific_channel"), Some("ops:routines".to_owned()))
-            .expect("delivery should parse");
+        let delivery = parse_delivery(
+            Some("specific_channel"),
+            Some("ops:routines".to_owned()),
+            Some("logs_only"),
+            None,
+            Some("failure_only"),
+        )
+        .expect("delivery should parse");
         assert_eq!(delivery.mode, RoutineDeliveryMode::SpecificChannel);
+        assert_eq!(delivery.failure_mode, Some(RoutineDeliveryMode::LogsOnly));
+        assert_eq!(delivery.silent_policy, RoutineSilentPolicy::FailureOnly);
+    }
+
+    #[test]
+    fn parse_execution_config_accepts_fresh_sensitive_profiled_runs() {
+        let execution = parse_execution_config(
+            Some("fresh_session"),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FC0".to_owned()),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FC1".to_owned()),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FC2".to_owned()),
+            Some("sensitive_tools"),
+        )
+        .expect("execution config should parse");
+        assert_eq!(execution.run_mode.as_str(), "fresh_session");
+        assert_eq!(execution.execution_posture.as_str(), "sensitive_tools");
+        assert_eq!(execution.provider_profile_id.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FC2"));
     }
 
     #[test]

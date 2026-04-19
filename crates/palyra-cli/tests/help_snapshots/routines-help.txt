@@ -11,6 +11,7 @@ Commands:
   enable
   disable
   run-now
+  test-run              [aliases: replay]
   logs                  [aliases: runs]
   dispatch
   delete                [aliases: rm]

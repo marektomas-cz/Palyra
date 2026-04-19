@@ -141,6 +141,8 @@ const MAX_ECHO_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_SLEEP_TOOL_INPUT_BYTES: usize = 8 * 1024;
 const MAX_MEMORY_SEARCH_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_MEMORY_RECALL_TOOL_INPUT_BYTES: usize = 64 * 1024;
+const MAX_ROUTINES_QUERY_TOOL_INPUT_BYTES: usize = 64 * 1024;
+const MAX_ROUTINES_CONTROL_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_HTTP_FETCH_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES: usize = 256 * 1024;
@@ -289,6 +291,12 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         }
         "palyra.memory.recall" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
+        }
+        "palyra.routines.query" => {
+            Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
+        }
+        "palyra.routines.control" => {
+            Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.http.fetch" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
@@ -585,6 +593,14 @@ async fn run_allowlisted_tool(
             executor: "gateway_runtime".to_owned(),
             sandbox_enforcement: "none".to_owned(),
         },
+        "palyra.routines.query" | "palyra.routines.control" => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: format!("{tool_name} requires gateway routines runtime context"),
+            timed_out: false,
+            executor: "routines_runtime".to_owned(),
+            sandbox_enforcement: "none".to_owned(),
+        },
         "palyra.http.fetch" => ToolExecutionRawResult {
             success: false,
             output_json: b"{}".to_vec(),
@@ -651,6 +667,8 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.sleep"
             | "palyra.memory.search"
             | "palyra.memory.recall"
+            | "palyra.routines.query"
+            | "palyra.routines.control"
             | "palyra.http.fetch"
             | "palyra.process.run"
             | "palyra.fs.apply_patch"
@@ -692,6 +710,8 @@ fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
         "browser_broker".to_owned()
     } else if matches!(tool_name, "palyra.memory.search" | "palyra.memory.recall") {
         "gateway_runtime".to_owned()
+    } else if matches!(tool_name, "palyra.routines.query" | "palyra.routines.control") {
+        "routines_runtime".to_owned()
     } else if tool_name == "palyra.plugin.run" {
         "sandbox_tier_a".to_owned()
     } else {
@@ -705,6 +725,8 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.sleep" => MAX_SLEEP_TOOL_INPUT_BYTES,
         "palyra.memory.search" => MAX_MEMORY_SEARCH_TOOL_INPUT_BYTES,
         "palyra.memory.recall" => MAX_MEMORY_RECALL_TOOL_INPUT_BYTES,
+        "palyra.routines.query" => MAX_ROUTINES_QUERY_TOOL_INPUT_BYTES,
+        "palyra.routines.control" => MAX_ROUTINES_CONTROL_TOOL_INPUT_BYTES,
         "palyra.http.fetch" => MAX_HTTP_FETCH_TOOL_INPUT_BYTES,
         "palyra.process.run" => MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES,
         "palyra.fs.apply_patch" => MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES,
@@ -1231,6 +1253,8 @@ mod tests {
         assert!(!tool_requires_approval("palyra.sleep"));
         assert!(!tool_requires_approval("palyra.memory.search"));
         assert!(!tool_requires_approval("palyra.memory.recall"));
+        assert!(!tool_requires_approval("palyra.routines.query"));
+        assert!(tool_requires_approval("palyra.routines.control"));
         assert!(tool_requires_approval("palyra.http.fetch"));
         assert!(tool_requires_approval("palyra.process.run"));
         assert!(tool_requires_approval("palyra.fs.apply_patch"));
@@ -1334,6 +1358,58 @@ mod tests {
         );
         assert_eq!(outcome.attestation.executor, "gateway_runtime");
         assert!(!outcome.attestation.timed_out, "delegation error must not be timeout");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_tool_call_routines_query_requires_gateway_runtime_context() {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.routines.query".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let outcome = execute_tool_call(
+            &config,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+            "palyra.routines.query",
+            br#"{"operation":"list"}"#,
+        )
+        .await;
+
+        assert!(!outcome.success, "generic tool executor should not run gateway routines query");
+        assert!(
+            outcome.error.contains("requires gateway routines runtime context"),
+            "delegated executor error should be explicit: {}",
+            outcome.error
+        );
+        assert_eq!(outcome.attestation.executor, "routines_runtime");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_tool_call_routines_control_requires_gateway_runtime_context() {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.routines.control".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let outcome = execute_tool_call(
+            &config,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+            "palyra.routines.control",
+            br#"{"operation":"pause","routine_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}"#,
+        )
+        .await;
+
+        assert!(!outcome.success, "generic tool executor should not run gateway routines control");
+        assert!(
+            outcome.error.contains("requires gateway routines runtime context"),
+            "delegated executor error should be explicit: {}",
+            outcome.error
+        );
+        assert_eq!(outcome.attestation.executor, "routines_runtime");
     }
 
     #[tokio::test(flavor = "multi_thread")]

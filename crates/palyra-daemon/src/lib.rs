@@ -78,7 +78,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use cron::{spawn_scheduler_loop, MEMORY_MAINTENANCE_INTERVAL};
 use gateway::{
     GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
-    LearningRuntimeConfig, MemoryRuntimeConfig,
+    LearningRuntimeConfig, MemoryRuntimeConfig, RoutinesRuntimeConfig,
 };
 use journal::{
     ApprovalDecision, ApprovalDecisionScope, ApprovalSubjectType, CronJobUpdatePatch,
@@ -2335,6 +2335,13 @@ pub async fn run() -> Result<()> {
         Arc::clone(&scheduler_wake),
         loaded.memory.retention.clone(),
     );
+    runtime.configure_routines_runtime(RoutinesRuntimeConfig {
+        registry: Arc::clone(&routine_registry),
+        auth: auth.clone(),
+        grpc_url: grpc_url.clone(),
+        scheduler_wake: Arc::clone(&scheduler_wake),
+        timezone_mode: loaded.cron.timezone,
+    });
 
     let state = build_app_state(
         &loaded,

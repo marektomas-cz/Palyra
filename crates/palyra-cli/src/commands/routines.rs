@@ -9,7 +9,8 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::{
     CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, RoutineApprovalModeArg,
-    RoutineDeliveryModeArg, RoutinePreviewTimezoneArg, RoutineTriggerKindArg, RoutinesCommand,
+    RoutineDeliveryModeArg, RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
+    RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg, RoutinesCommand,
 };
 use crate::*;
 
@@ -92,6 +93,14 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
             jitter_ms,
             delivery_mode,
             delivery_channel,
+            delivery_failure_mode,
+            delivery_failure_channel,
+            silent_policy,
+            run_mode,
+            procedure_profile_id,
+            skill_profile_id,
+            provider_profile_id,
+            execution_posture,
             quiet_hours_start,
             quiet_hours_end,
             quiet_hours_timezone,
@@ -126,6 +135,14 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 jitter_ms,
                 delivery_mode,
                 delivery_channel,
+                delivery_failure_mode,
+                delivery_failure_channel,
+                silent_policy,
+                run_mode,
+                procedure_profile_id,
+                skill_profile_id,
+                provider_profile_id,
+                execution_posture,
                 quiet_hours_start,
                 quiet_hours_end,
                 quiet_hours_timezone,
@@ -194,6 +211,34 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
             let payload = run_routine_now_value(&context.client, id.as_str()).await?;
             emit_routine_run_action(
                 "routines.run_now",
+                id.as_str(),
+                &payload,
+                output::preferred_json(json),
+            )
+        }
+        RoutinesCommand::TestRun {
+            id,
+            source_run_id,
+            trigger_reason,
+            trigger_payload,
+            trigger_payload_stdin,
+            json,
+        } => {
+            let trigger_payload = read_optional_json_object(
+                "routine test-run payload",
+                trigger_payload,
+                trigger_payload_stdin,
+            )?;
+            let payload = test_run_routine_value(
+                &context.client,
+                id.as_str(),
+                source_run_id,
+                trigger_reason,
+                trigger_payload,
+            )
+            .await?;
+            emit_routine_run_action(
+                "routines.test_run",
                 id.as_str(),
                 &payload,
                 output::preferred_json(json),
@@ -350,6 +395,28 @@ pub(crate) async fn run_routine_now_value(
         .post_json_value(
             format!("console/v1/routines/{}/run-now", percent_encode_component(routine_id)),
             &json!({}),
+        )
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn test_run_routine_value(
+    client: &control_plane::ControlPlaneClient,
+    routine_id: &str,
+    source_run_id: Option<String>,
+    trigger_reason: Option<String>,
+    trigger_payload: Option<Value>,
+) -> Result<Value> {
+    let mut payload = Map::new();
+    insert_optional_string(&mut payload, "source_run_id", source_run_id);
+    insert_optional_string(&mut payload, "trigger_reason", trigger_reason);
+    if let Some(trigger_payload) = trigger_payload {
+        payload.insert("trigger_payload".to_owned(), trigger_payload);
+    }
+    client
+        .post_json_value(
+            format!("console/v1/routines/{}/test-run", percent_encode_component(routine_id)),
+            &payload,
         )
         .await
         .map_err(Into::into)
@@ -558,7 +625,7 @@ fn emit_routines_list(payload: &Value, json: bool) -> Result<()> {
 
 fn emit_routine_list_line(prefix: &str, routine: &Value) -> Result<()> {
     println!(
-        "{prefix} id={} name={} enabled={} trigger_kind={} summary=\"{}\" next_run_at_unix_ms={} last_outcome={} delivery={} template_id={}",
+        "{prefix} id={} name={} enabled={} trigger_kind={} summary=\"{}\" next_run_at_unix_ms={} last_outcome={} run_mode={} delivery={} silent_policy={} template_id={}",
         json_optional_string_at(routine, "/routine_id").unwrap_or_else(|| "unknown".to_owned()),
         json_optional_string_at(routine, "/name").unwrap_or_else(|| "unknown".to_owned()),
         json_bool_at(routine, "/enabled").unwrap_or(false),
@@ -566,8 +633,10 @@ fn emit_routine_list_line(prefix: &str, routine: &Value) -> Result<()> {
         routine_summary(routine),
         json_i64_at(routine, "/next_run_at_unix_ms").unwrap_or_default(),
         json_optional_string_at(routine, "/last_outcome_kind").unwrap_or_else(|| "none".to_owned()),
+        json_optional_string_at(routine, "/run_mode").unwrap_or_else(|| "same_session".to_owned()),
         json_optional_string_at(routine, "/delivery_mode")
             .unwrap_or_else(|| "same_channel".to_owned()),
+        json_optional_string_at(routine, "/silent_policy").unwrap_or_else(|| "noisy".to_owned()),
         json_optional_string_at(routine, "/template_id").unwrap_or_else(|| "none".to_owned()),
     );
     if let Some(message) =
@@ -588,31 +657,62 @@ fn emit_routine_envelope(event: &str, payload: &Value, json: bool) -> Result<()>
     }
     let routine = payload.pointer("/routine").unwrap_or(payload);
     println!(
-        "{event} id={} name={} enabled={} trigger_kind={} summary=\"{}\" delivery={} approval={} last_outcome={}",
+        "{event} id={} name={} enabled={} trigger_kind={} summary=\"{}\" run_mode={} delivery={} approval={} last_outcome={}",
         json_optional_string_at(routine, "/routine_id").unwrap_or_else(|| "unknown".to_owned()),
         json_optional_string_at(routine, "/name").unwrap_or_else(|| "unknown".to_owned()),
         json_bool_at(routine, "/enabled").unwrap_or(false),
         json_optional_string_at(routine, "/trigger_kind").unwrap_or_else(|| "unknown".to_owned()),
         routine_summary(routine),
+        json_optional_string_at(routine, "/run_mode").unwrap_or_else(|| "same_session".to_owned()),
         json_optional_string_at(routine, "/delivery_mode")
             .unwrap_or_else(|| "same_channel".to_owned()),
         json_optional_string_at(routine, "/approval_mode").unwrap_or_else(|| "none".to_owned()),
         json_optional_string_at(routine, "/last_outcome_kind").unwrap_or_else(|| "none".to_owned()),
     );
     println!(
-        "{event}.details channel={} session_key={} session_label={} cooldown_ms={} quiet_hours={} delivery_channel={} trigger_payload={}",
+        "{event}.details channel={} session_key={} session_label={} cooldown_ms={} quiet_hours={} execution_posture={} procedure_profile_id={} skill_profile_id={} provider_profile_id={} delivery_channel={} failure_delivery={} failure_channel={} silent_policy={} trigger_payload={}",
         json_optional_string_at(routine, "/channel").unwrap_or_default(),
         json_optional_string_at(routine, "/session_key").unwrap_or_default(),
         json_optional_string_at(routine, "/session_label").unwrap_or_default(),
         json_i64_at(routine, "/cooldown_ms").unwrap_or_default(),
         quiet_hours_summary(routine),
+        json_optional_string_at(routine, "/execution_posture")
+            .unwrap_or_else(|| "standard".to_owned()),
+        json_optional_string_at(routine, "/procedure_profile_id").unwrap_or_default(),
+        json_optional_string_at(routine, "/skill_profile_id").unwrap_or_default(),
+        json_optional_string_at(routine, "/provider_profile_id").unwrap_or_default(),
         json_optional_string_at(routine, "/delivery_channel").unwrap_or_default(),
+        json_optional_string_at(routine, "/delivery_failure_mode").unwrap_or_default(),
+        json_optional_string_at(routine, "/delivery_failure_channel").unwrap_or_default(),
+        json_optional_string_at(routine, "/silent_policy").unwrap_or_else(|| "noisy".to_owned()),
         compact_json(json_value_at(routine, "/trigger_payload").unwrap_or(&Value::Null)),
     );
+    if let Some(success_reason) =
+        json_optional_string_at(routine, "/delivery_preview/success/reason")
+    {
+        println!(
+            "{event}.delivery success_announced={} failure_announced={} success_reason={} failure_reason={}",
+            json_bool_at(routine, "/delivery_preview/success/announced").unwrap_or(false),
+            json_bool_at(routine, "/delivery_preview/failure/announced").unwrap_or(false),
+            success_reason,
+            json_optional_string_at(routine, "/delivery_preview/failure/reason").unwrap_or_default(),
+        );
+    }
     if let Some(message) =
         json_optional_string_at(routine, "/last_outcome_message").filter(|value| !value.is_empty())
     {
         println!("{event}.last_outcome_message {message}");
+    }
+    if let Some(recommended_action) =
+        json_optional_string_at(routine, "/troubleshooting/recommended_action")
+    {
+        println!(
+            "{event}.troubleshooting failed_runs={} skipped_runs={} denied_runs={} recommended_action={}",
+            json_i64_at(routine, "/troubleshooting/failed_runs").unwrap_or_default(),
+            json_i64_at(routine, "/troubleshooting/skipped_runs").unwrap_or_default(),
+            json_i64_at(routine, "/troubleshooting/denied_runs").unwrap_or_default(),
+            recommended_action,
+        );
     }
     if let Some(approval) = payload.pointer("/approval") {
         println!(
@@ -650,12 +750,27 @@ fn emit_routine_run_action(
         return output::print_json_pretty(payload, "failed to encode routine run output as JSON");
     }
     println!(
-        "{event} id={} run_id={} status={} message={}",
+        "{event} id={} run_id={} status={} dispatch_mode={} message={}",
         routine_id,
         json_optional_string_at(payload, "/run_id").unwrap_or_default(),
         json_optional_string_at(payload, "/status").unwrap_or_else(|| "unknown".to_owned()),
+        json_optional_string_at(payload, "/dispatch_mode").unwrap_or_else(|| "normal".to_owned()),
         json_optional_string_at(payload, "/message").unwrap_or_default(),
     );
+    if let Some(success_reason) =
+        json_optional_string_at(payload, "/delivery_preview/success/reason")
+    {
+        println!(
+            "{event}.delivery success_mode={} success_announced={} failure_mode={} failure_announced={} success_reason={} failure_reason={}",
+            json_optional_string_at(payload, "/delivery_preview/success/mode").unwrap_or_default(),
+            json_bool_at(payload, "/delivery_preview/success/announced").unwrap_or(false),
+            json_optional_string_at(payload, "/delivery_preview/failure/mode").unwrap_or_default(),
+            json_bool_at(payload, "/delivery_preview/failure/announced").unwrap_or(false),
+            success_reason,
+            json_optional_string_at(payload, "/delivery_preview/failure/reason")
+                .unwrap_or_default(),
+        );
+    }
     if let Some(approval) = payload.pointer("/approval") {
         println!(
             "{event}.approval pending=true approval_id={} status={}",
@@ -680,11 +795,13 @@ fn emit_routine_runs(routine_id: &str, payload: &Value, json: bool) -> Result<()
     );
     for run in runs {
         println!(
-            "routines.run run_id={} status={} outcome={} trigger_kind={} output_delivered={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
+            "routines.run run_id={} status={} outcome={} trigger_kind={} dispatch_mode={} run_mode={} output_delivered={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
             json_optional_string_at(run, "/run_id").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(run, "/status").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(run, "/outcome_kind").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(run, "/trigger_kind").unwrap_or_else(|| "unknown".to_owned()),
+            json_optional_string_at(run, "/dispatch_mode").unwrap_or_else(|| "normal".to_owned()),
+            json_optional_string_at(run, "/run_mode").unwrap_or_else(|| "same_session".to_owned()),
             json_bool_at(run, "/output_delivered").unwrap_or(false),
             json_i64_at(run, "/started_at_unix_ms").unwrap_or_default(),
             json_i64_at(run, "/finished_at_unix_ms").unwrap_or_default(),
@@ -700,6 +817,17 @@ fn emit_routine_runs(routine_id: &str, payload: &Value, json: bool) -> Result<()
                 message
             );
         }
+        println!(
+            "routines.run.details run_id={} execution_posture={} provider_profile_id={} delivery_reason={} skip_reason={} approval_note={} safety_note={}",
+            json_optional_string_at(run, "/run_id").unwrap_or_else(|| "unknown".to_owned()),
+            json_optional_string_at(run, "/execution_posture")
+                .unwrap_or_else(|| "standard".to_owned()),
+            json_optional_string_at(run, "/provider_profile_id").unwrap_or_default(),
+            json_optional_string_at(run, "/delivery_reason").unwrap_or_default(),
+            json_optional_string_at(run, "/skip_reason").unwrap_or_default(),
+            json_optional_string_at(run, "/approval_note").unwrap_or_default(),
+            json_optional_string_at(run, "/safety_note").unwrap_or_default(),
+        );
     }
     std::io::stdout().flush().context("stdout flush failed")
 }
@@ -792,6 +920,14 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         jitter_ms,
         delivery_mode,
         delivery_channel,
+        delivery_failure_mode,
+        delivery_failure_channel,
+        silent_policy,
+        run_mode,
+        procedure_profile_id,
+        skill_profile_id,
+        provider_profile_id,
+        execution_posture,
         quiet_hours_start,
         quiet_hours_end,
         quiet_hours_timezone,
@@ -843,6 +979,21 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
     payload.insert("jitter_ms".to_owned(), Value::from(jitter_ms));
     payload.insert("delivery_mode".to_owned(), Value::String(delivery_mode.as_str().to_owned()));
     insert_optional_string(&mut payload, "delivery_channel", delivery_channel);
+    insert_optional_string(
+        &mut payload,
+        "delivery_failure_mode",
+        delivery_failure_mode.map(|value| value.as_str().to_owned()),
+    );
+    insert_optional_string(&mut payload, "delivery_failure_channel", delivery_failure_channel);
+    payload.insert("silent_policy".to_owned(), Value::String(silent_policy.as_str().to_owned()));
+    payload.insert("run_mode".to_owned(), Value::String(run_mode.as_str().to_owned()));
+    insert_optional_string(&mut payload, "procedure_profile_id", procedure_profile_id);
+    insert_optional_string(&mut payload, "skill_profile_id", skill_profile_id);
+    insert_optional_string(&mut payload, "provider_profile_id", provider_profile_id);
+    payload.insert(
+        "execution_posture".to_owned(),
+        Value::String(execution_posture.as_str().to_owned()),
+    );
     insert_optional_string(&mut payload, "quiet_hours_start", quiet_hours_start);
     insert_optional_string(&mut payload, "quiet_hours_end", quiet_hours_end);
     insert_optional_string(
@@ -1228,6 +1379,14 @@ struct RoutineUpsertArgs {
     jitter_ms: u64,
     delivery_mode: RoutineDeliveryModeArg,
     delivery_channel: Option<String>,
+    delivery_failure_mode: Option<RoutineDeliveryModeArg>,
+    delivery_failure_channel: Option<String>,
+    silent_policy: RoutineSilentPolicyArg,
+    run_mode: RoutineRunModeArg,
+    procedure_profile_id: Option<String>,
+    skill_profile_id: Option<String>,
+    provider_profile_id: Option<String>,
+    execution_posture: RoutineExecutionPostureArg,
     quiet_hours_start: Option<String>,
     quiet_hours_end: Option<String>,
     quiet_hours_timezone: Option<RoutinePreviewTimezoneArg>,

@@ -5177,6 +5177,31 @@ export class ConsoleApiClient {
     );
   }
 
+  async testRunRoutine(
+    routineId: string,
+    payload: {
+      source_run_id?: string;
+      trigger_reason?: string;
+      trigger_payload?: JsonValue;
+    },
+  ): Promise<{
+    routine_id: string;
+    run_id?: string;
+    status: string;
+    message: string;
+    dispatch_mode?: string;
+    delivery_preview?: JsonValue;
+  }> {
+    return this.request(
+      `/console/v1/routines/${encodeURIComponent(routineId)}/test-run`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      { csrf: true },
+    );
+  }
+
   async listRoutineRuns(
     routineId: string,
     params?: URLSearchParams,

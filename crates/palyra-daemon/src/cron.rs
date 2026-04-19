@@ -39,9 +39,11 @@ use crate::{
     journal::{
         CronConcurrencyPolicy, CronJobRecord, CronMisfirePolicy, CronRunFinalizeRequest,
         CronRunStartRequest, CronRunStatus, CronScheduleType, MemoryRetentionPolicy,
-        OrchestratorCancelRequest, OrchestratorRunStatusSnapshot, SkillExecutionStatus,
+        OrchestratorCancelRequest, OrchestratorRunStatusSnapshot,
+        OrchestratorSessionQuickControlsUpdateRequest, SkillExecutionStatus,
         SkillStatusUpsertRequest,
     },
+    routines::{RoutineExecutionPosture, RoutineRunMode},
 };
 
 const SCHEDULER_IDLE_SLEEP: Duration = Duration::from_secs(15);
@@ -101,6 +103,15 @@ pub struct DispatchOutcome {
     pub run_id: Option<String>,
     pub status: CronRunStatus,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TriggerJobOptions {
+    pub force_run_mode: Option<RoutineRunMode>,
+    pub allow_sensitive_tools: Option<bool>,
+    pub model_profile_override: Option<String>,
+    pub parameter_delta_json: Option<String>,
+    pub origin_kind: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -948,7 +959,26 @@ pub async fn trigger_job_now(
     job: CronJobRecord,
     wake_signal: Arc<Notify>,
 ) -> Result<DispatchOutcome, Status> {
-    dispatch_job(state, auth, grpc_url, job, wake_signal, true).await
+    trigger_job_now_with_options(
+        state,
+        auth,
+        grpc_url,
+        job,
+        wake_signal,
+        TriggerJobOptions::default(),
+    )
+    .await
+}
+
+pub async fn trigger_job_now_with_options(
+    state: Arc<GatewayRuntimeState>,
+    auth: GatewayAuthConfig,
+    grpc_url: String,
+    job: CronJobRecord,
+    wake_signal: Arc<Notify>,
+    options: TriggerJobOptions,
+) -> Result<DispatchOutcome, Status> {
+    dispatch_job(state, auth, grpc_url, job, wake_signal, true, options).await
 }
 
 async fn process_due_jobs(
@@ -973,6 +1003,7 @@ async fn process_due_jobs(
             job,
             Arc::clone(&wake_signal),
             false,
+            TriggerJobOptions::default(),
         )
         .await?;
         if next_run_at_unix_ms.is_some_and(|value| value <= now_unix_ms) {
@@ -1010,6 +1041,7 @@ async fn process_queued_jobs(
                 job.clone(),
                 Arc::clone(&wake_signal),
                 false,
+                TriggerJobOptions::default(),
             )
             .await
             {
@@ -1075,6 +1107,7 @@ async fn dispatch_job(
     job: CronJobRecord,
     wake_signal: Arc<Notify>,
     manual_trigger: bool,
+    options: TriggerJobOptions,
 ) -> Result<DispatchOutcome, Status> {
     let policy = evaluate_with_context(
         &PolicyRequest {
@@ -1152,6 +1185,16 @@ async fn dispatch_job(
     }
 
     let run_id = Ulid::new().to_string();
+    let options = TriggerJobOptions {
+        origin_kind: Some(options.origin_kind.unwrap_or_else(|| {
+            if manual_trigger {
+                "manual".to_owned()
+            } else {
+                "cron".to_owned()
+            }
+        })),
+        ..options
+    };
     state
         .start_cron_run(CronRunStartRequest {
             run_id: run_id.clone(),
@@ -1174,6 +1217,7 @@ async fn dispatch_job(
             job,
             run_id,
             Arc::clone(&wake_signal),
+            options,
         )
         .await
         {
@@ -1236,6 +1280,7 @@ async fn run_job_with_retries(
     job: CronJobRecord,
     first_run_id: String,
     wake_signal: Arc<Notify>,
+    options: TriggerJobOptions,
 ) -> Result<(), Status> {
     let max_attempts = job.retry_policy.max_attempts.clamp(1, MAX_RETRY_ATTEMPTS);
     let base_backoff_ms = job.retry_policy.backoff_ms.min(MAX_RETRY_BACKOFF_MS);
@@ -1265,6 +1310,7 @@ async fn run_job_with_retries(
             &job,
             run_id.clone(),
             attempt,
+            &options,
         )
         .await;
 
@@ -1315,6 +1361,82 @@ async fn run_job_with_retries(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct EffectiveCronExecutionRequest {
+    session_key: String,
+    session_label: String,
+    allow_sensitive_tools: bool,
+    model_profile_override: Option<String>,
+    parameter_delta_json: Option<String>,
+    origin_kind: String,
+}
+
+fn build_effective_cron_execution_request(
+    state: &GatewayRuntimeState,
+    job: &CronJobRecord,
+    run_id: &str,
+    options: &TriggerJobOptions,
+) -> Result<EffectiveCronExecutionRequest, Status> {
+    let routine = state
+        .routines_runtime_config()
+        .ok()
+        .and_then(|config| config.registry.get_routine(job.job_id.as_str()).ok().flatten());
+    let execution = routine.as_ref().map(|record| &record.execution);
+    let run_mode = options
+        .force_run_mode
+        .or_else(|| execution.map(|config| config.run_mode))
+        .unwrap_or(RoutineRunMode::SameSession);
+    let allow_sensitive_tools = options.allow_sensitive_tools.unwrap_or_else(|| {
+        execution.is_some_and(|config| {
+            config.execution_posture == RoutineExecutionPosture::SensitiveTools
+        })
+    });
+    let model_profile_override = options
+        .model_profile_override
+        .clone()
+        .or_else(|| execution.and_then(|config| config.provider_profile_id.clone()));
+    let parameter_delta_json = options.parameter_delta_json.clone().or_else(|| {
+        routine.as_ref().map(|record| {
+            json!({
+                "routine": {
+                    "routine_id": record.routine_id,
+                    "run_mode": record.execution.run_mode.as_str(),
+                    "execution_posture": record.execution.execution_posture.as_str(),
+                    "procedure_profile_id": record.execution.procedure_profile_id,
+                    "skill_profile_id": record.execution.skill_profile_id,
+                    "provider_profile_id": record.execution.provider_profile_id,
+                    "silent_policy": record.delivery.silent_policy.as_str(),
+                    "delivery_mode": record.delivery.mode.as_str(),
+                    "failure_delivery_mode": record.delivery.failure_mode.unwrap_or(record.delivery.mode).as_str(),
+                }
+            })
+            .to_string()
+        })
+    });
+    let session_key = if run_mode == RoutineRunMode::FreshSession {
+        format!("cron:{}:{run_id}", job.job_id)
+    } else {
+        job.session_key.clone().unwrap_or_else(|| format!("cron:{}", job.job_id))
+    };
+    let session_label = if run_mode == RoutineRunMode::FreshSession {
+        format!(
+            "{} ({})",
+            job.session_label.clone().unwrap_or_else(|| job.name.clone()),
+            options.origin_kind.as_deref().unwrap_or("cron")
+        )
+    } else {
+        job.session_label.clone().unwrap_or_else(|| job.name.clone())
+    };
+    Ok(EffectiveCronExecutionRequest {
+        session_key,
+        session_label,
+        allow_sensitive_tools,
+        model_profile_override,
+        parameter_delta_json,
+        origin_kind: options.origin_kind.clone().unwrap_or_else(|| "cron".to_owned()),
+    })
+}
+
 async fn execute_single_job_attempt(
     state: Arc<GatewayRuntimeState>,
     auth: GatewayAuthConfig,
@@ -1322,17 +1444,19 @@ async fn execute_single_job_attempt(
     job: &CronJobRecord,
     run_id: String,
     attempt: u32,
+    options: &TriggerJobOptions,
 ) -> Result<CronRunStatus, Status> {
     let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(grpc_url)
         .await
         .map_err(|error| Status::unavailable(format!("failed to connect gateway: {error}")))?;
+    let effective =
+        build_effective_cron_execution_request(state.as_ref(), job, run_id.as_str(), options)?;
 
-    let session_key = job.session_key.clone().unwrap_or_else(|| format!("cron:{}", job.job_id));
     let mut resolve_request = Request::new(gateway_v1::ResolveSessionRequest {
         v: 1,
         session_id: None,
-        session_key,
-        session_label: job.session_label.clone().unwrap_or_else(|| job.name.clone()),
+        session_key: effective.session_key,
+        session_label: effective.session_label,
         require_existing: false,
         reset_session: false,
     });
@@ -1354,6 +1478,22 @@ async fn execute_single_job_attempt(
         .session_id
         .map(|value| value.ulid)
         .ok_or_else(|| Status::internal("ResolveSession returned session without session_id"))?;
+    if effective.model_profile_override.is_some() {
+        state
+            .update_orchestrator_session_quick_controls(
+                OrchestratorSessionQuickControlsUpdateRequest {
+                    session_id: session_id.clone(),
+                    principal: job.owner_principal.clone(),
+                    device_id: SCHEDULER_DEVICE_ID.to_owned(),
+                    channel: Some(job.channel.clone()),
+                    model_profile_override: Some(effective.model_profile_override.clone()),
+                    thinking_override: None,
+                    trace_override: None,
+                    verbose_override: None,
+                },
+            )
+            .await?;
+    }
     let orchestrator_run_id = Ulid::new().to_string();
 
     state
@@ -1425,15 +1565,15 @@ async fn execute_single_job_attempt(
             security: None,
             max_payload_bytes: 0,
         }),
-        allow_sensitive_tools: false,
+        allow_sensitive_tools: effective.allow_sensitive_tools,
         session_key: String::new(),
         session_label: String::new(),
         reset_session: false,
         require_existing: false,
         tool_approval_response: None,
-        origin_kind: "manual".to_owned(),
+        origin_kind: effective.origin_kind,
         origin_run_id: None,
-        parameter_delta_json: Vec::new(),
+        parameter_delta_json: effective.parameter_delta_json.unwrap_or_default().into_bytes(),
         queued_input_id: None,
     }]));
     inject_scheduler_metadata(

@@ -102,8 +102,9 @@ pub use profile::{ProfileCommand, ProfileExportModeArg, ProfileModeArg, ProfileR
 pub use protocol::ProtocolCommand;
 pub use reset::{ResetCommand, ResetScopeArg};
 pub use routines::{
-    RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutinePreviewTimezoneArg,
-    RoutineTriggerKindArg, RoutinesCommand,
+    RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutineExecutionPostureArg,
+    RoutinePreviewTimezoneArg, RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg,
+    RoutinesCommand,
 };
 pub use sandbox::{SandboxCommand, SandboxRuntimeArg};
 pub use secrets::{SecretsCommand, SecretsConfigureCommand};

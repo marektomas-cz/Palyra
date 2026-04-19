@@ -14,19 +14,23 @@ use std::{
 use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
 use palyra_common::workspace_patch::WorkspacePatchRedactionPolicy;
 use serde_json::{json, Value};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::{
+    net::TcpListener as TokioTcpListener,
+    sync::{oneshot, Mutex, MutexGuard, Notify},
+};
+use tokio_stream::wrappers::TcpListenerStream;
 
 use crate::agents::AgentCreateRequest;
 use crate::journal::{
     ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
     ApprovalPromptOption, ApprovalPromptRecord, ApprovalResolveRequest, ApprovalRiskLevel,
-    ApprovalSubjectType, JournalAppendRequest, JournalConfig, JournalStore,
+    ApprovalSubjectType, CronRunStatus, JournalAppendRequest, JournalConfig, JournalStore,
     MemoryItemCreateRequest, MemoryItemRecord, MemoryScoreBreakdown, MemorySearchHit,
     MemorySearchRequest, MemorySource, OrchestratorRunStartRequest,
     OrchestratorSessionResolveRequest, OrchestratorSessionUpsertRequest,
     OrchestratorTapeAppendRequest,
 };
-use tonic::Code;
+use tonic::{transport::Server as TonicServer, Code};
 use ulid::Ulid;
 
 use super::vault::vault_get_requires_approval;
@@ -71,6 +75,7 @@ use crate::application::{
             execute_memory_recall_tool, execute_memory_search_tool,
             memory_search_tool_output_payload,
         },
+        routines::execute_routines_tool,
         workspace_patch::{
             execute_workspace_patch_tool, extend_patch_string_defaults,
             parse_patch_string_array_field,
@@ -83,6 +88,7 @@ use crate::model_provider::ProviderImageInput;
 use crate::transport::grpc::auth::{
     authorize_headers, authorize_metadata, request_context_from_headers, AuthError,
 };
+use crate::transport::grpc::services::gateway::GatewayServiceImpl;
 use palyra_workerd::{
     WorkerArtifactTransport, WorkerAttestation, WorkerCleanupReport, WorkerLeaseRequest,
     WorkerWorkspaceScope,
@@ -304,6 +310,100 @@ fn build_test_runtime_state_with_runtime_overrides(
 
 fn build_test_runtime_state(hash_chain_enabled: bool) -> std::sync::Arc<GatewayRuntimeState> {
     build_test_runtime_state_with_http_fetch_private_targets(hash_chain_enabled, false)
+}
+
+fn unique_temp_test_root(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        TEMP_JOURNAL_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn routines_tool_test_auth() -> GatewayAuthConfig {
+    GatewayAuthConfig {
+        require_auth: false,
+        admin_token: None,
+        connector_token: None,
+        bound_principal: None,
+    }
+}
+
+fn configure_test_routines_runtime(
+    state: &std::sync::Arc<GatewayRuntimeState>,
+    grpc_url: String,
+) -> std::sync::Arc<crate::routines::RoutineRegistry> {
+    let registry_root = unique_temp_test_root("palyra-routines-runtime");
+    let registry = std::sync::Arc::new(
+        crate::routines::RoutineRegistry::open(registry_root.as_path())
+            .expect("routine registry should initialize"),
+    );
+    state.configure_routines_runtime(super::RoutinesRuntimeConfig {
+        registry: std::sync::Arc::clone(&registry),
+        auth: routines_tool_test_auth(),
+        grpc_url,
+        scheduler_wake: std::sync::Arc::new(Notify::new()),
+        timezone_mode: crate::cron::CronTimezoneMode::Utc,
+    });
+    registry
+}
+
+fn routines_tool_test_context() -> super::ToolRuntimeExecutionContext<'static> {
+    super::ToolRuntimeExecutionContext {
+        principal: "user:ops",
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+        channel: Some("cli"),
+        session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+        run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAC",
+    }
+}
+
+fn parse_tool_output_json(outcome: &super::ToolExecutionOutcome) -> Value {
+    serde_json::from_slice(&outcome.output_json).expect("tool output should parse as JSON")
+}
+
+async fn spawn_test_gateway_grpc_server(
+    state: std::sync::Arc<GatewayRuntimeState>,
+) -> (String, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    let listener =
+        TokioTcpListener::bind("127.0.0.1:0").await.expect("test gRPC listener should bind");
+    let address = listener.local_addr().expect("test gRPC listener address should resolve");
+    let node_runtime_root = unique_temp_test_root("palyra-node-runtime");
+    let node_runtime = std::sync::Arc::new(
+        crate::node_runtime::NodeRuntimeState::load(node_runtime_root.as_path())
+            .expect("node runtime should initialize"),
+    );
+    let service = GatewayServiceImpl::new(state, routines_tool_test_auth(), node_runtime);
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        TonicServer::builder()
+            .add_service(super::gateway_v1::gateway_service_server::GatewayServiceServer::new(
+                service,
+            ))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .expect("test gRPC server should shut down cleanly");
+    });
+    (format!("http://{address}"), shutdown_tx, handle)
+}
+
+async fn wait_for_cron_run_terminal_status(
+    state: &std::sync::Arc<GatewayRuntimeState>,
+    run_id: &str,
+) -> CronRunStatus {
+    for _ in 0..100 {
+        if let Some(run) =
+            state.cron_run(run_id.to_owned()).await.expect("cron run lookup should succeed")
+        {
+            if !matches!(run.status, CronRunStatus::Accepted | CronRunStatus::Running) {
+                return run.status;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("cron run {run_id} did not reach a terminal state");
 }
 
 fn default_backend_selection() -> ToolProposalBackendSelection {
@@ -3448,6 +3548,427 @@ fn workspace_patch_metrics_from_output_extracts_files_and_rollback() {
     let serialized = serde_json::to_vec(&output).expect("metrics payload should serialize");
     assert_eq!(workspace_patch_metrics_from_output(&serialized), (2, true));
     assert_eq!(workspace_patch_metrics_from_output(b"{\"files_touched\":\"invalid\"}"), (0, false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn routines_tool_flow_supports_upsert_listing_pause_resume_and_schedule_preview() {
+    let state = build_test_runtime_state(false);
+    let _registry = configure_test_routines_runtime(&state, "http://127.0.0.1:9".to_owned());
+    let context = routines_tool_test_context();
+
+    let upsert_input = serde_json::to_vec(&json!({
+        "operation": "upsert",
+        "name": "Ops heartbeat",
+        "prompt": "Summarize unresolved incidents and report blockers.",
+        "trigger_kind": "schedule",
+        "natural_language_schedule": "every 2h",
+        "run_mode": "fresh_session",
+        "execution_posture": "sensitive_tools",
+        "procedure_profile_id": "procedure.ops.heartbeat",
+        "skill_profile_id": "skill.ops.triage",
+        "provider_profile_id": "provider.fast",
+        "delivery_mode": "specific_channel",
+        "delivery_channel": "ops:routines",
+        "delivery_failure_mode": "specific_channel",
+        "delivery_failure_channel": "ops:alerts",
+        "silent_policy": "failure_only",
+        "cooldown_ms": 60_000,
+        "session_key": "ops:heartbeat",
+        "session_label": "Ops heartbeat",
+    }))
+    .expect("routine upsert payload should serialize");
+    let upsert_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_CONTROL_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBC",
+        upsert_input.as_slice(),
+    )
+    .await;
+    assert!(upsert_outcome.success, "routine upsert should succeed");
+    let upsert_json = parse_tool_output_json(&upsert_outcome);
+    let routine = upsert_json.get("routine").expect("upsert response should include routine");
+    let routine_id = routine
+        .get("routine_id")
+        .and_then(Value::as_str)
+        .expect("routine id should be returned")
+        .to_owned();
+    assert_eq!(routine.get("schedule_type").and_then(Value::as_str), Some("every"));
+    assert_eq!(
+        routine
+            .get("schedule_payload")
+            .and_then(Value::as_object)
+            .and_then(|payload| payload.get("interval_ms"))
+            .and_then(Value::as_u64),
+        Some(7_200_000),
+        "natural-language schedules should persist as deterministic every payloads"
+    );
+    assert_eq!(routine.get("run_mode").and_then(Value::as_str), Some("fresh_session"));
+    assert_eq!(routine.get("execution_posture").and_then(Value::as_str), Some("sensitive_tools"));
+    assert_eq!(
+        routine.get("procedure_profile_id").and_then(Value::as_str),
+        Some("procedure.ops.heartbeat")
+    );
+    assert_eq!(routine.get("skill_profile_id").and_then(Value::as_str), Some("skill.ops.triage"));
+    assert_eq!(routine.get("provider_profile_id").and_then(Value::as_str), Some("provider.fast"));
+    assert_eq!(routine.get("delivery_failure_channel").and_then(Value::as_str), Some("ops:alerts"));
+    assert_eq!(routine.get("silent_policy").and_then(Value::as_str), Some("failure_only"));
+
+    let schedule_preview_input = serde_json::to_vec(&json!({
+        "operation": "schedule_preview",
+        "phrase": "every 6h",
+    }))
+    .expect("schedule preview payload should serialize");
+    let schedule_preview_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_QUERY_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBD",
+        schedule_preview_input.as_slice(),
+    )
+    .await;
+    assert!(schedule_preview_outcome.success, "schedule preview should succeed");
+    let schedule_preview_json = parse_tool_output_json(&schedule_preview_outcome);
+    assert_eq!(
+        schedule_preview_json
+            .get("preview")
+            .and_then(Value::as_object)
+            .and_then(|preview| preview.get("schedule_payload"))
+            .and_then(Value::as_object)
+            .and_then(|payload| payload.get("interval_ms"))
+            .and_then(Value::as_u64),
+        Some(21_600_000),
+        "schedule preview should normalize natural-language intervals deterministically"
+    );
+
+    let list_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_QUERY_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBE",
+        br#"{"operation":"list"}"#,
+    )
+    .await;
+    assert!(list_outcome.success, "routine listing should succeed");
+    let list_json = parse_tool_output_json(&list_outcome);
+    let listed = list_json
+        .get("routines")
+        .and_then(Value::as_array)
+        .expect("list response should include routines");
+    assert_eq!(listed.len(), 1, "list should include the created routine");
+    assert_eq!(listed[0].get("routine_id").and_then(Value::as_str), Some(routine_id.as_str()));
+
+    let get_input = serde_json::to_vec(&json!({
+        "operation": "get",
+        "routine_id": routine_id,
+    }))
+    .expect("get payload should serialize");
+    let get_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_QUERY_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBF",
+        get_input.as_slice(),
+    )
+    .await;
+    assert!(get_outcome.success, "routine detail lookup should succeed");
+    let get_json = parse_tool_output_json(&get_outcome);
+    let fetched = get_json.get("routine").expect("get response should include routine");
+    assert_eq!(fetched.get("enabled").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        fetched
+            .get("delivery_preview")
+            .and_then(Value::as_object)
+            .and_then(|preview| preview.get("failure"))
+            .and_then(Value::as_object)
+            .and_then(|failure| failure.get("channel"))
+            .and_then(Value::as_str),
+        Some("ops:alerts"),
+        "detail view should expose failure delivery preview"
+    );
+
+    let pause_input = serde_json::to_vec(&json!({
+        "operation": "pause",
+        "routine_id": routine_id,
+    }))
+    .expect("pause payload should serialize");
+    let pause_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_CONTROL_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBG",
+        pause_input.as_slice(),
+    )
+    .await;
+    assert!(pause_outcome.success, "pause should succeed");
+    let pause_json = parse_tool_output_json(&pause_outcome);
+    assert_eq!(pause_json.get("operation").and_then(Value::as_str), Some("pause"));
+    assert_eq!(
+        pause_json
+            .get("routine")
+            .and_then(Value::as_object)
+            .and_then(|routine| routine.get("enabled"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    let resume_input = serde_json::to_vec(&json!({
+        "operation": "resume",
+        "routine_id": routine_id,
+    }))
+    .expect("resume payload should serialize");
+    let resume_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_CONTROL_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBH",
+        resume_input.as_slice(),
+    )
+    .await;
+    assert!(resume_outcome.success, "resume should succeed");
+    let resume_json = parse_tool_output_json(&resume_outcome);
+    assert_eq!(resume_json.get("operation").and_then(Value::as_str), Some("resume"));
+    assert_eq!(
+        resume_json
+            .get("routine")
+            .and_then(Value::as_object)
+            .and_then(|routine| routine.get("enabled"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let list_runs_input = serde_json::to_vec(&json!({
+        "operation": "list_runs",
+        "routine_id": routine_id,
+    }))
+    .expect("run listing payload should serialize");
+    let list_runs_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_QUERY_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBJ",
+        list_runs_input.as_slice(),
+    )
+    .await;
+    assert!(list_runs_outcome.success, "empty run history should still be queryable");
+    let list_runs_json = parse_tool_output_json(&list_runs_outcome);
+    assert_eq!(
+        list_runs_json.get("runs").and_then(Value::as_array).map(Vec::len),
+        Some(0),
+        "new routines should not report phantom runs"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn routines_tool_test_run_and_replay_force_fresh_sessions_and_audit_only_delivery() {
+    let state = build_test_runtime_state(false);
+    let (grpc_url, shutdown_tx, server_task) =
+        spawn_test_gateway_grpc_server(std::sync::Arc::clone(&state)).await;
+    let _registry = configure_test_routines_runtime(&state, grpc_url);
+    let context = routines_tool_test_context();
+
+    let upsert_input = serde_json::to_vec(&json!({
+        "operation": "upsert",
+        "name": "Replayable manual routine",
+        "prompt": "Review pending incidents and report blockers.",
+        "trigger_kind": "manual",
+        "run_mode": "same_session",
+        "provider_profile_id": "provider.ops",
+        "delivery_mode": "specific_channel",
+        "delivery_channel": "ops:prod",
+        "delivery_failure_mode": "specific_channel",
+        "delivery_failure_channel": "ops:alerts",
+        "silent_policy": "noisy",
+    }))
+    .expect("manual routine payload should serialize");
+    let upsert_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_CONTROL_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBK",
+        upsert_input.as_slice(),
+    )
+    .await;
+    assert!(upsert_outcome.success, "manual routine upsert should succeed");
+    let upsert_json = parse_tool_output_json(&upsert_outcome);
+    let routine_id = upsert_json
+        .get("routine")
+        .and_then(Value::as_object)
+        .and_then(|routine| routine.get("routine_id"))
+        .and_then(Value::as_str)
+        .expect("manual routine id should be returned")
+        .to_owned();
+
+    let test_run_input = serde_json::to_vec(&json!({
+        "operation": "test_run",
+        "routine_id": routine_id,
+        "trigger_reason": "operator drill",
+        "trigger_payload": {
+            "origin": "operator",
+            "ticket": "INC-42",
+        }
+    }))
+    .expect("test-run payload should serialize");
+    let test_run_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_CONTROL_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBL",
+        test_run_input.as_slice(),
+    )
+    .await;
+    assert!(test_run_outcome.success, "safe test-run should dispatch successfully");
+    let test_run_json = parse_tool_output_json(&test_run_outcome);
+    let first_run_id = test_run_json
+        .get("run_id")
+        .and_then(Value::as_str)
+        .expect("test-run response should include run id")
+        .to_owned();
+    assert_eq!(test_run_json.get("dispatch_mode").and_then(Value::as_str), Some("test_run"));
+    assert_eq!(
+        test_run_json
+            .get("delivery_preview")
+            .and_then(Value::as_object)
+            .and_then(|preview| preview.get("silent_policy"))
+            .and_then(Value::as_str),
+        Some("audit_only")
+    );
+    assert_eq!(
+        test_run_json
+            .get("delivery_preview")
+            .and_then(Value::as_object)
+            .and_then(|preview| preview.get("success"))
+            .and_then(Value::as_object)
+            .and_then(|success| success.get("mode"))
+            .and_then(Value::as_str),
+        Some("logs_only"),
+        "safe test-run must never reuse production delivery targets"
+    );
+    assert_eq!(
+        test_run_json
+            .get("delivery_preview")
+            .and_then(Value::as_object)
+            .and_then(|preview| preview.get("failure"))
+            .and_then(Value::as_object)
+            .and_then(|failure| failure.get("mode"))
+            .and_then(Value::as_str),
+        Some("logs_only")
+    );
+    let _ = wait_for_cron_run_terminal_status(&state, first_run_id.as_str()).await;
+    let first_run = state
+        .cron_run(first_run_id.clone())
+        .await
+        .expect("first cron run lookup should succeed")
+        .expect("first cron run should exist");
+    let first_session_id = first_run
+        .session_id
+        .clone()
+        .expect("safe test-run should still materialize a fresh session");
+
+    let replay_input = serde_json::to_vec(&json!({
+        "operation": "test_run",
+        "routine_id": routine_id,
+        "source_run_id": first_run_id,
+    }))
+    .expect("replay payload should serialize");
+    let replay_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_CONTROL_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBM",
+        replay_input.as_slice(),
+    )
+    .await;
+    assert!(replay_outcome.success, "safe replay should dispatch successfully");
+    let replay_json = parse_tool_output_json(&replay_outcome);
+    let replay_run_id = replay_json
+        .get("run_id")
+        .and_then(Value::as_str)
+        .expect("replay response should include run id")
+        .to_owned();
+    assert_eq!(replay_json.get("dispatch_mode").and_then(Value::as_str), Some("replay"));
+    let _ = wait_for_cron_run_terminal_status(&state, replay_run_id.as_str()).await;
+    let replay_run = state
+        .cron_run(replay_run_id.clone())
+        .await
+        .expect("replay cron run lookup should succeed")
+        .expect("replay cron run should exist");
+    let replay_session_id =
+        replay_run.session_id.clone().expect("safe replay should materialize a fresh session");
+    assert_ne!(
+        first_session_id, replay_session_id,
+        "test-run and replay must force fresh-session execution instead of reusing the production session"
+    );
+
+    let list_runs_input = serde_json::to_vec(&json!({
+        "operation": "list_runs",
+        "routine_id": routine_id,
+        "limit": 10,
+    }))
+    .expect("run listing payload should serialize");
+    let list_runs_outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_QUERY_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBN",
+        list_runs_input.as_slice(),
+    )
+    .await;
+    assert!(list_runs_outcome.success, "run history listing should succeed");
+    let list_runs_json = parse_tool_output_json(&list_runs_outcome);
+    let runs = list_runs_json
+        .get("runs")
+        .and_then(Value::as_array)
+        .expect("run history should include recorded runs");
+    let first_run_entry = runs
+        .iter()
+        .find(|entry| entry.get("run_id").and_then(Value::as_str) == Some(first_run_id.as_str()))
+        .expect("test-run entry should be present in run history");
+    assert_eq!(first_run_entry.get("dispatch_mode").and_then(Value::as_str), Some("test_run"));
+    assert_eq!(first_run_entry.get("run_mode").and_then(Value::as_str), Some("fresh_session"));
+    assert_eq!(
+        first_run_entry.get("provider_profile_id").and_then(Value::as_str),
+        Some("provider.ops")
+    );
+    assert_eq!(first_run_entry.get("delivery_mode").and_then(Value::as_str), Some("logs_only"));
+    assert_eq!(first_run_entry.get("silent_policy").and_then(Value::as_str), Some("audit_only"));
+    assert_eq!(
+        first_run_entry.get("output_delivered").and_then(Value::as_bool),
+        Some(false),
+        "safe test-run metadata must record audit-only delivery"
+    );
+    assert!(
+        first_run_entry
+            .get("safety_note")
+            .and_then(Value::as_str)
+            .is_some_and(|note| note.contains("audit-only")),
+        "run history should explain why delivery was overridden"
+    );
+
+    let replay_entry = runs
+        .iter()
+        .find(|entry| entry.get("run_id").and_then(Value::as_str) == Some(replay_run_id.as_str()))
+        .expect("replay entry should be present in run history");
+    assert_eq!(replay_entry.get("dispatch_mode").and_then(Value::as_str), Some("replay"));
+    assert_eq!(
+        replay_entry.get("source_run_id").and_then(Value::as_str),
+        Some(first_run_id.as_str())
+    );
+    assert_eq!(replay_entry.get("run_mode").and_then(Value::as_str), Some("fresh_session"));
+    assert_eq!(replay_entry.get("delivery_mode").and_then(Value::as_str), Some("logs_only"));
+    assert_eq!(replay_entry.get("silent_policy").and_then(Value::as_str), Some("audit_only"));
+    assert_eq!(
+        replay_entry
+            .get("trigger_payload")
+            .and_then(Value::as_object)
+            .and_then(|payload| payload.get("ticket"))
+            .and_then(Value::as_str),
+        Some("INC-42"),
+        "safe replay should reuse the archived trigger payload"
+    );
+
+    let _ = shutdown_tx.send(());
+    server_task.await.expect("test gRPC server task should exit cleanly");
 }
 
 #[test]

@@ -18,7 +18,8 @@ use super::{
     PairingCommand, PairingMethodArg, PairingStateArg, PatchCommand, PluginsCommand, PolicyCommand,
     ProfileCommand, ProfileExportModeArg, ProfileModeArg, ProfileRiskLevelArg, ProtocolCommand,
     RemoteVerificationModeArg, ResetCommand, ResetScopeArg, RoutineApprovalModeArg,
-    RoutineDeliveryModeArg, RoutinePreviewTimezoneArg, RoutineTriggerKindArg, RoutinesCommand,
+    RoutineDeliveryModeArg, RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
+    RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg, RoutinesCommand,
     SandboxCommand, SandboxRuntimeArg, SecretsCommand, SecretsConfigureCommand, SecurityCommand,
     SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
     SupportBundleCommand, SystemCommand, SystemEventCommand, SystemEventSeverityArg, TuiCommand,
@@ -1549,6 +1550,20 @@ fn parse_routines_upsert() {
         "specific-channel",
         "--delivery-channel",
         "ops:summary",
+        "--delivery-failure-mode",
+        "logs-only",
+        "--silent-policy",
+        "failure-only",
+        "--run-mode",
+        "fresh-session",
+        "--procedure-profile-id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FC0",
+        "--skill-profile-id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FC1",
+        "--provider-profile-id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FC2",
+        "--execution-posture",
+        "sensitive-tools",
         "--quiet-hours-start",
         "22:00",
         "--quiet-hours-end",
@@ -1588,12 +1603,51 @@ fn parse_routines_upsert() {
                 jitter_ms: 250,
                 delivery_mode: RoutineDeliveryModeArg::SpecificChannel,
                 delivery_channel: Some("ops:summary".to_owned()),
+                delivery_failure_mode: Some(RoutineDeliveryModeArg::LogsOnly),
+                delivery_failure_channel: None,
+                silent_policy: RoutineSilentPolicyArg::FailureOnly,
+                run_mode: RoutineRunModeArg::FreshSession,
+                procedure_profile_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FC0".to_owned()),
+                skill_profile_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FC1".to_owned()),
+                provider_profile_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FC2".to_owned()),
+                execution_posture: RoutineExecutionPostureArg::SensitiveTools,
                 quiet_hours_start: Some("22:00".to_owned()),
                 quiet_hours_end: Some("06:00".to_owned()),
                 quiet_hours_timezone: Some(RoutinePreviewTimezoneArg::Utc),
                 cooldown_ms: 120000,
                 approval_mode: RoutineApprovalModeArg::BeforeFirstRun,
                 template_id: Some("daily-report".to_owned()),
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_routines_test_run() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "routines",
+        "test-run",
+        "--id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "--source-run-id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FC0",
+        "--trigger-reason",
+        "replay after failure",
+        "--trigger-payload",
+        "{\"event\":\"push\"}",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Routines {
+            command: RoutinesCommand::TestRun {
+                id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
+                source_run_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FC0".to_owned()),
+                trigger_reason: Some("replay after failure".to_owned()),
+                trigger_payload: Some("{\"event\":\"push\"}".to_owned()),
+                trigger_payload_stdin: false,
                 json: true,
             }
         }

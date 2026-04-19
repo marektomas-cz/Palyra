@@ -59,6 +59,7 @@ use palyra_workerd::{
     WorkerFleetSnapshot, WorkerLease, WorkerLeaseRequest, WorkerLifecycleEvent,
 };
 use std::path::PathBuf;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeConfigSnapshot {
@@ -354,6 +355,15 @@ pub struct GatewayJournalConfigSnapshot {
 #[rustfmt::skip]
 pub struct GatewayRuntimeDependencies { pub model_provider: Arc<dyn ModelProvider>, pub vault: Arc<Vault>, pub agent_registry: AgentRegistry, pub tool_posture_registry: ToolPostureRegistry, pub retrieval_backend: Arc<dyn RetrievalBackend> }
 
+#[derive(Clone)]
+pub(crate) struct RoutinesRuntimeConfig {
+    pub registry: Arc<crate::routines::RoutineRegistry>,
+    pub auth: GatewayAuthConfig,
+    pub grpc_url: String,
+    pub scheduler_wake: Arc<Notify>,
+    pub timezone_mode: crate::cron::CronTimezoneMode,
+}
+
 pub struct GatewayRuntimeState {
     pub(crate) started_at: Instant,
     pub(crate) build: BuildSnapshot,
@@ -374,6 +384,7 @@ pub struct GatewayRuntimeState {
     pub(crate) provider_leases: ProviderLeaseManager,
     pub(crate) retrieval_backend: Arc<dyn RetrievalBackend>,
     pub(crate) tool_posture_registry: ToolPostureRegistry,
+    pub(crate) routines_runtime: RwLock<Option<RoutinesRuntimeConfig>>,
     pub(crate) vault_rate_limit: Mutex<HashMap<String, VaultRateLimitEntry>>,
     canvas_records: Mutex<HashMap<String, CanvasRecord>>,
     canvas_signing_secret: [u8; 32],
@@ -1147,6 +1158,7 @@ impl GatewayRuntimeState {
             provider_leases: ProviderLeaseManager::default(),
             retrieval_backend,
             tool_posture_registry,
+            routines_runtime: RwLock::new(None),
             vault_rate_limit: Mutex::new(HashMap::new()),
             canvas_records: Mutex::new(recovered_canvas_records),
             canvas_signing_secret: generate_canvas_signing_secret(),
@@ -5344,6 +5356,32 @@ impl GatewayRuntimeState {
             }
         }
         self.clear_memory_search_cache();
+    }
+
+    pub fn configure_routines_runtime(&self, config: RoutinesRuntimeConfig) {
+        match self.routines_runtime.write() {
+            Ok(mut guard) => {
+                *guard = Some(config);
+            }
+            Err(poisoned) => {
+                warn!("routines runtime lock poisoned while applying runtime config");
+                let mut guard = poisoned.into_inner();
+                *guard = Some(config);
+            }
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn routines_runtime_config(&self) -> Result<RoutinesRuntimeConfig, Status> {
+        match self.routines_runtime.read() {
+            Ok(config) => config
+                .clone()
+                .ok_or_else(|| Status::failed_precondition("routines runtime is not configured")),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .clone()
+                .ok_or_else(|| Status::failed_precondition("routines runtime is not configured")),
+        }
     }
 
     #[must_use]

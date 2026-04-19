@@ -86,6 +86,22 @@ pub enum RoutinesCommand {
         delivery_mode: RoutineDeliveryModeArg,
         #[arg(long)]
         delivery_channel: Option<String>,
+        #[arg(long, value_enum)]
+        delivery_failure_mode: Option<RoutineDeliveryModeArg>,
+        #[arg(long)]
+        delivery_failure_channel: Option<String>,
+        #[arg(long, value_enum, default_value_t = RoutineSilentPolicyArg::Noisy)]
+        silent_policy: RoutineSilentPolicyArg,
+        #[arg(long, value_enum, default_value_t = RoutineRunModeArg::SameSession)]
+        run_mode: RoutineRunModeArg,
+        #[arg(long)]
+        procedure_profile_id: Option<String>,
+        #[arg(long)]
+        skill_profile_id: Option<String>,
+        #[arg(long)]
+        provider_profile_id: Option<String>,
+        #[arg(long, value_enum, default_value_t = RoutineExecutionPostureArg::Standard)]
+        execution_posture: RoutineExecutionPostureArg,
         #[arg(long)]
         quiet_hours_start: Option<String>,
         #[arg(long)]
@@ -146,6 +162,21 @@ pub enum RoutinesCommand {
     RunNow {
         #[arg(long)]
         id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(visible_alias = "replay")]
+    TestRun {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        source_run_id: Option<String>,
+        #[arg(long)]
+        trigger_reason: Option<String>,
+        #[arg(long)]
+        trigger_payload: Option<String>,
+        #[arg(long, default_value_t = false, conflicts_with = "trigger_payload")]
+        trigger_payload_stdin: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -257,6 +288,56 @@ impl RoutineDeliveryModeArg {
             Self::SpecificChannel => "specific_channel",
             Self::LocalOnly => "local_only",
             Self::LogsOnly => "logs_only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RoutineSilentPolicyArg {
+    Noisy,
+    FailureOnly,
+    AuditOnly,
+}
+
+impl RoutineSilentPolicyArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Noisy => "noisy",
+            Self::FailureOnly => "failure_only",
+            Self::AuditOnly => "audit_only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RoutineRunModeArg {
+    SameSession,
+    FreshSession,
+}
+
+impl RoutineRunModeArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SameSession => "same_session",
+            Self::FreshSession => "fresh_session",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RoutineExecutionPostureArg {
+    Standard,
+    SensitiveTools,
+}
+
+impl RoutineExecutionPostureArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::SensitiveTools => "sensitive_tools",
         }
     }
 }

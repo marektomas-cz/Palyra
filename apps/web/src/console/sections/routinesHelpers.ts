@@ -30,6 +30,14 @@ export type RoutineEditorForm = {
   jitterMs: string;
   deliveryMode: "same_channel" | "specific_channel" | "local_only" | "logs_only";
   deliveryChannel: string;
+  deliveryFailureMode: "" | "same_channel" | "specific_channel" | "local_only" | "logs_only";
+  deliveryFailureChannel: string;
+  silentPolicy: "noisy" | "failure_only" | "audit_only";
+  runMode: "same_session" | "fresh_session";
+  executionPosture: "standard" | "sensitive_tools";
+  procedureProfileId: string;
+  skillProfileId: string;
+  providerProfileId: string;
   quietHoursStart: string;
   quietHoursEnd: string;
   quietHoursTimezone: "local" | "utc";
@@ -77,6 +85,30 @@ export const DELIVERY_OPTIONS = [
   { key: "logs_only", label: "Logs only" },
 ] as const;
 
+export const DELIVERY_FAILURE_OPTIONS = [
+  { key: "", label: "Inherit success target" },
+  { key: "same_channel", label: "Same channel" },
+  { key: "specific_channel", label: "Specific channel" },
+  { key: "local_only", label: "Local only" },
+  { key: "logs_only", label: "Logs only" },
+] as const;
+
+export const SILENT_POLICY_OPTIONS = [
+  { key: "noisy", label: "Always announce" },
+  { key: "failure_only", label: "Only on failure" },
+  { key: "audit_only", label: "Audit only" },
+] as const;
+
+export const RUN_MODE_OPTIONS = [
+  { key: "same_session", label: "Same session" },
+  { key: "fresh_session", label: "Fresh session" },
+] as const;
+
+export const EXECUTION_POSTURE_OPTIONS = [
+  { key: "standard", label: "Standard tools" },
+  { key: "sensitive_tools", label: "Sensitive tools" },
+] as const;
+
 export const APPROVAL_OPTIONS = [
   { key: "none", label: "No extra approval" },
   { key: "before_enable", label: "Before enable" },
@@ -110,6 +142,14 @@ export function defaultRoutineForm(channel: string | null | undefined): RoutineE
     jitterMs: "0",
     deliveryMode: "same_channel",
     deliveryChannel: "",
+    deliveryFailureMode: "",
+    deliveryFailureChannel: "",
+    silentPolicy: "noisy",
+    runMode: "same_session",
+    executionPosture: "standard",
+    procedureProfileId: "",
+    skillProfileId: "",
+    providerProfileId: "",
     quietHoursStart: "",
     quietHoursEnd: "",
     quietHoursTimezone: "local",
@@ -169,6 +209,23 @@ export function routineFormFromRecord(
       (readString(routine, "delivery_mode") as RoutineEditorForm["deliveryMode"] | null) ??
       form.deliveryMode,
     deliveryChannel: readString(routine, "delivery_channel") ?? "",
+    deliveryFailureMode:
+      (readString(routine, "delivery_failure_mode") as
+        | RoutineEditorForm["deliveryFailureMode"]
+        | null) ?? form.deliveryFailureMode,
+    deliveryFailureChannel: readString(routine, "delivery_failure_channel") ?? "",
+    silentPolicy:
+      (readString(routine, "silent_policy") as RoutineEditorForm["silentPolicy"] | null) ??
+      form.silentPolicy,
+    runMode:
+      (readString(routine, "run_mode") as RoutineEditorForm["runMode"] | null) ?? form.runMode,
+    executionPosture:
+      (readString(routine, "execution_posture") as
+        | RoutineEditorForm["executionPosture"]
+        | null) ?? form.executionPosture,
+    procedureProfileId: readString(routine, "procedure_profile_id") ?? "",
+    skillProfileId: readString(routine, "skill_profile_id") ?? "",
+    providerProfileId: readString(routine, "provider_profile_id") ?? "",
     quietHoursStart: minuteOfDayToClock(readNumber(quietHours, "start_minute_of_day")),
     quietHoursEnd: minuteOfDayToClock(readNumber(quietHours, "end_minute_of_day")),
     quietHoursTimezone:
@@ -229,6 +286,17 @@ export function buildRoutineUpsertPayload(
     delivery_mode: form.deliveryMode,
     delivery_channel:
       form.deliveryMode === "specific_channel" ? emptyToUndefined(form.deliveryChannel) : undefined,
+    delivery_failure_mode: emptyToUndefined(form.deliveryFailureMode),
+    delivery_failure_channel:
+      form.deliveryFailureMode === "specific_channel"
+        ? emptyToUndefined(form.deliveryFailureChannel)
+        : undefined,
+    silent_policy: form.silentPolicy,
+    run_mode: form.runMode,
+    procedure_profile_id: emptyToUndefined(form.procedureProfileId),
+    skill_profile_id: emptyToUndefined(form.skillProfileId),
+    provider_profile_id: emptyToUndefined(form.providerProfileId),
+    execution_posture: form.executionPosture,
     quiet_hours_start: emptyToUndefined(form.quietHoursStart),
     quiet_hours_end: emptyToUndefined(form.quietHoursEnd),
     quiet_hours_timezone:

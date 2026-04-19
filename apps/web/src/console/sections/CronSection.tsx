@@ -39,14 +39,18 @@ import {
   CONCURRENCY_OPTIONS,
   defaultRoutineForm,
   DELIVERY_OPTIONS,
+  DELIVERY_FAILURE_OPTIONS,
   EMPTY_JSON_TEXT,
+  EXECUTION_POSTURE_OPTIONS,
   formatJson,
   MISFIRE_OPTIONS,
   millisecondsSummary,
   parseJsonObject,
+  RUN_MODE_OPTIONS,
   resolveRoutineId,
   routineFormFromRecord,
   routineSummary,
+  SILENT_POLICY_OPTIONS,
   SCHEDULE_OPTIONS,
   stripSystemEventPrefix,
   TIMEZONE_OPTIONS,
@@ -311,6 +315,30 @@ export function CronSection({ app }: CronSectionProps) {
         response.run_id === undefined
           ? response.message
           : `Routine dispatched as run ${response.run_id}.`,
+      );
+    });
+  }
+
+  async function safeTestRunSelectedRoutine(options?: { replayLastRun?: boolean }): Promise<void> {
+    if (selectedRoutineId === null) {
+      app.setError("Select a routine before running a safe test.");
+      return;
+    }
+    await runBusyAction(async () => {
+      const lastRunId = readString(selectedLastRun, "run_id");
+      const payload = options?.replayLastRun
+        ? undefined
+        : parseJsonObject(dispatchPayloadText, "Test-run payload");
+      const response = await app.api.testRunRoutine(selectedRoutineId, {
+        source_run_id: options?.replayLastRun ? lastRunId ?? undefined : undefined,
+        trigger_reason: dispatchReason.trim() || undefined,
+        trigger_payload: payload,
+      });
+      await refreshAutomationSurface({ refreshRuns: true });
+      app.setNotice(
+        response.run_id === undefined
+          ? response.message
+          : `${options?.replayLastRun ? "Replay" : "Safe test-run"} dispatched as ${response.run_id}.`,
       );
     });
   }
@@ -657,6 +685,80 @@ export function CronSection({ app }: CronSectionProps) {
                     setRoutineForm((current) => ({ ...current, deliveryChannel }))
                   }
                 />
+                <SelectField
+                  label="Failure delivery"
+                  value={routineForm.deliveryFailureMode}
+                  onChange={(deliveryFailureMode) =>
+                    setRoutineForm((current) => ({
+                      ...current,
+                      deliveryFailureMode:
+                        deliveryFailureMode as RoutineEditorForm["deliveryFailureMode"],
+                    }))
+                  }
+                  options={DELIVERY_FAILURE_OPTIONS}
+                />
+                <TextInputField
+                  label="Failure channel"
+                  value={routineForm.deliveryFailureChannel}
+                  onChange={(deliveryFailureChannel) =>
+                    setRoutineForm((current) => ({ ...current, deliveryFailureChannel }))
+                  }
+                />
+                <SelectField
+                  label="Silent policy"
+                  value={routineForm.silentPolicy}
+                  onChange={(silentPolicy) =>
+                    setRoutineForm((current) => ({
+                      ...current,
+                      silentPolicy: silentPolicy as RoutineEditorForm["silentPolicy"],
+                    }))
+                  }
+                  options={SILENT_POLICY_OPTIONS}
+                />
+                <SelectField
+                  label="Run mode"
+                  value={routineForm.runMode}
+                  onChange={(runMode) =>
+                    setRoutineForm((current) => ({
+                      ...current,
+                      runMode: runMode as RoutineEditorForm["runMode"],
+                    }))
+                  }
+                  options={RUN_MODE_OPTIONS}
+                />
+                <SelectField
+                  label="Execution posture"
+                  value={routineForm.executionPosture}
+                  onChange={(executionPosture) =>
+                    setRoutineForm((current) => ({
+                      ...current,
+                      executionPosture:
+                        executionPosture as RoutineEditorForm["executionPosture"],
+                    }))
+                  }
+                  options={EXECUTION_POSTURE_OPTIONS}
+                />
+                <TextInputField
+                  label="Procedure profile"
+                  value={routineForm.procedureProfileId}
+                  onChange={(procedureProfileId) =>
+                    setRoutineForm((current) => ({ ...current, procedureProfileId }))
+                  }
+                />
+                <TextInputField
+                  label="Skill profile"
+                  value={routineForm.skillProfileId}
+                  onChange={(skillProfileId) =>
+                    setRoutineForm((current) => ({ ...current, skillProfileId }))
+                  }
+                />
+                <TextInputField
+                  label="Provider profile"
+                  value={routineForm.providerProfileId}
+                  onChange={(providerProfileId) =>
+                    setRoutineForm((current) => ({ ...current, providerProfileId }))
+                  }
+                />
                 <TextInputField
                   label="Template id"
                   value={routineForm.templateId}
@@ -921,8 +1023,30 @@ export function CronSection({ app }: CronSectionProps) {
                   { label: "Trigger", value: selectedTriggerKind },
                   { label: "Summary", value: routineSummary(selectedRoutine) },
                   {
+                    label: "Run mode",
+                    value: readString(selectedRoutine, "run_mode") ?? "same_session",
+                  },
+                  {
+                    label: "Execution posture",
+                    value: readString(selectedRoutine, "execution_posture") ?? "standard",
+                  },
+                  {
+                    label: "Profiles",
+                    value: [
+                      readString(selectedRoutine, "procedure_profile_id"),
+                      readString(selectedRoutine, "skill_profile_id"),
+                      readString(selectedRoutine, "provider_profile_id"),
+                    ]
+                      .filter((value) => value !== null && value.length > 0)
+                      .join(" · ") || "none",
+                  },
+                  {
                     label: "Delivery",
-                    value: `${readString(selectedRoutine, "delivery_mode") ?? "same_channel"}${readString(selectedRoutine, "delivery_channel") ? ` -> ${readString(selectedRoutine, "delivery_channel")}` : ""}`,
+                    value: deliverySummary(selectedRoutine),
+                  },
+                  {
+                    label: "Silent policy",
+                    value: readString(selectedRoutine, "silent_policy") ?? "noisy",
                   },
                   {
                     label: "Approval",
@@ -938,6 +1062,13 @@ export function CronSection({ app }: CronSectionProps) {
                   },
                 ]}
               />
+              <InlineNotice title="Delivery preview" tone="default">
+                <p>{deliveryPreviewSummary(selectedRoutine, "success")}</p>
+                <p>{deliveryPreviewSummary(selectedRoutine, "failure")}</p>
+              </InlineNotice>
+              <InlineNotice title="Troubleshooting" tone="default">
+                <p>{troubleshootingSummary(selectedRoutine)}</p>
+              </InlineNotice>
               {selectedObjective !== null ? (
                 <InlineNotice
                   title="Linked objective"
@@ -1038,15 +1169,25 @@ export function CronSection({ app }: CronSectionProps) {
                     <WorkspaceStatusChip tone={workspaceToneForState(readString(run, "status"))}>
                       {readString(run, "status") ?? "unknown"}
                     </WorkspaceStatusChip>
+                    <WorkspaceStatusChip tone="default">
+                      {readString(run, "dispatch_mode") ?? "normal"}
+                    </WorkspaceStatusChip>
                   </div>
                 ),
+              },
+              {
+                key: "execution",
+                label: "Execution",
+                render: (run) =>
+                  `${readString(run, "run_mode") ?? "same_session"} · ${readString(run, "execution_posture") ?? "standard"}`,
               },
               {
                 key: "summary",
                 label: "Summary",
                 render: (run) =>
                   readString(run, "outcome_message") ??
-                  readString(run, "trigger_reason") ??
+                  readString(run, "delivery_reason") ??
+                  readString(run, "skip_reason") ??
                   "No explanation recorded.",
               },
             ]}
@@ -1117,7 +1258,7 @@ export function CronSection({ app }: CronSectionProps) {
 
         <WorkspaceSectionCard
           title="Import, export, and trigger test"
-          description="Portable bundles and adapter test firing stay inside the same automation surface."
+          description="Portable bundles, adapter firing, and safe test-run diagnostics stay inside the same automation surface."
         >
           <ActionCluster>
             <ActionButton
@@ -1135,6 +1276,22 @@ export function CronSection({ app }: CronSectionProps) {
               isDisabled={busy || selectedRoutineId === null}
             >
               {selectedTriggerKind === "schedule" ? "Run selected now" : "Fire selected trigger"}
+            </ActionButton>
+            <ActionButton
+              variant="secondary"
+              size="sm"
+              onPress={() => void safeTestRunSelectedRoutine()}
+              isDisabled={busy || selectedRoutineId === null}
+            >
+              Safe test-run
+            </ActionButton>
+            <ActionButton
+              variant="secondary"
+              size="sm"
+              onPress={() => void safeTestRunSelectedRoutine({ replayLastRun: true })}
+              isDisabled={busy || selectedRoutineId === null || readString(selectedLastRun, "run_id") === null}
+            >
+              Replay last input
             </ActionButton>
           </ActionCluster>
           <TextAreaField
@@ -1179,7 +1336,8 @@ export function CronSection({ app }: CronSectionProps) {
           {selectedTriggerKind === "schedule" ? (
             <InlineNotice title="Schedule routines" tone="default">
               Scheduled automations use run-now. Hook, webhook, and system-event routines can fire
-              their adapter path directly from this panel.
+              their adapter path directly from this panel. Safe test-run and replay always force
+              audit-only delivery.
             </InlineNotice>
           ) : null}
         </WorkspaceSectionCard>
@@ -1207,6 +1365,40 @@ function templateProductLabel(templateId: string | null): string {
     return "Heartbeat template";
   }
   return "Routine";
+}
+
+function deliverySummary(routine: JsonObject): string {
+  const deliveryMode = readString(routine, "delivery_mode") ?? "same_channel";
+  const deliveryChannel = readString(routine, "delivery_channel");
+  const failureMode = readString(routine, "delivery_failure_mode");
+  const failureChannel = readString(routine, "delivery_failure_channel");
+  return [
+    deliveryChannel !== null ? `${deliveryMode} -> ${deliveryChannel}` : deliveryMode,
+    failureMode !== null
+      ? `failure ${failureChannel !== null ? `${failureMode} -> ${failureChannel}` : failureMode}`
+      : null,
+  ]
+    .filter((value) => value !== null)
+    .join(" · ");
+}
+
+function deliveryPreviewSummary(
+  routine: JsonObject,
+  key: "success" | "failure",
+): string {
+  const preview = readObject(readObject(routine, "delivery_preview") ?? {}, key) ?? {};
+  const mode = readString(preview, "mode") ?? "unknown";
+  const channel = readString(preview, "channel");
+  const announced = readBool(preview, "announced") ? "announced" : "silent";
+  const reason = readString(preview, "reason") ?? "No delivery reason recorded.";
+  return `${key === "success" ? "Success" : "Failure"}: ${mode}${channel !== null ? ` -> ${channel}` : ""} · ${announced} · ${reason}`;
+}
+
+function troubleshootingSummary(routine: JsonObject): string {
+  const troubleshooting = readObject(routine, "troubleshooting") ?? {};
+  const recommendation =
+    readString(troubleshooting, "recommended_action") ?? "No troubleshooting recommendation yet.";
+  return `${readNumber(troubleshooting, "failed_runs") ?? 0} failed · ${readNumber(troubleshooting, "skipped_runs") ?? 0} skipped · ${readNumber(troubleshooting, "denied_runs") ?? 0} denied. ${recommendation}`;
 }
 
 function productToneForObjective(linkedObjective: JsonObject | null): "default" | "accent" {

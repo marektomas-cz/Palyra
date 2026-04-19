@@ -821,6 +821,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(console::routines::console_routine_run_now_handler),
         )
         .route(
+            "/console/v1/routines/{routine_id}/test-run",
+            post(console::routines::console_routine_test_run_handler),
+        )
+        .route(
             "/console/v1/routines/{routine_id}/runs",
             get(console::routines::console_routine_runs_handler),
         )
