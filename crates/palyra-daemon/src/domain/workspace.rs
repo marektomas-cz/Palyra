@@ -175,16 +175,6 @@ impl WorkspaceRiskState {
             Self::Quarantined => "quarantined",
         }
     }
-
-    #[must_use]
-    pub fn merge(self, other: Self) -> Self {
-        use WorkspaceRiskState::{Clean, Quarantined, Warning};
-        match (self, other) {
-            (Quarantined, _) | (_, Quarantined) => Quarantined,
-            (Warning, _) | (_, Warning) => Warning,
-            _ => Clean,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

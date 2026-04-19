@@ -1090,6 +1090,7 @@ mod tests {
         segment
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn segment_with_safety(
         kind: ContextSegmentKind,
         label: &str,

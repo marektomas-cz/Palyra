@@ -199,6 +199,7 @@ pub(crate) fn build_execution_backend_inventory_with_worker_state(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_execution_backend_inventory_with_rollout(
     policy: &SandboxProcessRunnerPolicy,
     total_nodes: usize,
