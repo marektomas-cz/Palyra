@@ -831,7 +831,6 @@ fn lexical_overlap_for_query(text: &str, query: &str, phrase_match_bonus_bps: u1
     };
     (match_count as f64 / needle_set.len().max(1) as f64) + phrase_bonus
 }
-
 fn normalized_tokens(input: &str) -> Vec<String> {
     input
         .chars()
@@ -1788,7 +1787,8 @@ mod tests {
             .expect("retrieval eval report should serialize to deterministic json");
         assert_eq!(
             format!("{serialized}\n"),
-            include_str!("../../../fixtures/retrieval/eval_report_default.json"),
+            include_str!("../../../fixtures/retrieval/eval_report_default.json")
+                .replace("\r\n", "\n"),
             "default retrieval benchmark report should stay stable for regression review"
         );
     }
