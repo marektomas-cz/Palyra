@@ -5,7 +5,11 @@ use std::{
 };
 
 use palyra_common::netguard;
-use reqwest::{redirect::Policy, Url};
+use palyra_egress_proxy::{
+    CredentialBindingPlan, EgressPolicyVerdict, EgressProxyPolicyService, EgressProxyRequest,
+};
+use palyra_vault::SecretResolver;
+use reqwest::{header::HeaderValue, redirect::Policy, Url};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
@@ -151,6 +155,35 @@ pub(crate) async fn execute_http_fetch_tool(
         }
         None => Vec::new(),
     };
+    let credential_bindings = match parse_credential_bindings(&payload) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            return http_fetch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                error,
+            );
+        }
+    };
+    if let Some(duplicate_header) = credential_bindings.iter().find_map(|binding| {
+        let normalized = binding.header_name.trim().to_ascii_lowercase();
+        request_headers
+            .iter()
+            .any(|(header_name, _)| header_name == &normalized)
+            .then_some(normalized)
+    }) {
+        return http_fetch_tool_execution_outcome(
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!(
+                "palyra.http.fetch credential binding duplicates explicit header '{duplicate_header}'"
+            ),
+        );
+    }
 
     let allow_redirects = payload
         .get("allow_redirects")
@@ -268,19 +301,44 @@ pub(crate) async fn execute_http_fetch_tool(
         );
     }
 
-    let initial_resolved_addrs =
-        match resolve_fetch_target_addresses(&url, allow_private_targets).await {
-            Ok(value) => value,
-            Err(error) => {
-                return http_fetch_tool_execution_outcome(
-                    proposal_id,
-                    input_json,
-                    false,
-                    b"{}".to_vec(),
-                    format!("palyra.http.fetch target blocked: {error}"),
-                );
-            }
-        };
+    let initial_egress_verdict = match evaluate_http_fetch_egress(
+        runtime_state,
+        method.as_str(),
+        &url,
+        allow_private_targets,
+        max_response_bytes,
+        credential_bindings.as_slice(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return http_fetch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                error,
+            );
+        }
+    };
+    let resolved_credential_headers = match resolve_credential_bindings(
+        runtime_state,
+        credential_bindings.as_slice(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return http_fetch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                error,
+            );
+        }
+    };
+    let initial_resolved_addrs = initial_egress_verdict.resolved_addresses.clone();
+    let mut current_egress_verdict = initial_egress_verdict;
+    let mut next_egress_verdict =
+        Some((current_egress_verdict.clone(), initial_resolved_addrs.clone()));
 
     let cache_policy = HttpFetchCachePolicy {
         allow_private_targets,
@@ -315,24 +373,34 @@ pub(crate) async fn execute_http_fetch_tool(
     let started_at = Instant::now();
     let mut current_url = url;
     let mut redirects_followed = 0_usize;
-    let mut next_resolved_addrs = Some(initial_resolved_addrs);
     loop {
-        let resolved_addrs = if let Some(resolved) = next_resolved_addrs.take() {
+        let (egress_verdict, resolved_addrs) = if let Some(resolved) = next_egress_verdict.take() {
             resolved
         } else {
-            match resolve_fetch_target_addresses(&current_url, allow_private_targets).await {
-                Ok(value) => value,
+            match evaluate_http_fetch_egress(
+                runtime_state,
+                method.as_str(),
+                &current_url,
+                allow_private_targets,
+                max_response_bytes,
+                credential_bindings.as_slice(),
+            ) {
+                Ok(value) => {
+                    let resolved = value.resolved_addresses.clone();
+                    (value, resolved)
+                }
                 Err(error) => {
                     return http_fetch_tool_execution_outcome(
                         proposal_id,
                         input_json,
                         false,
                         b"{}".to_vec(),
-                        format!("palyra.http.fetch target blocked: {error}"),
+                        error,
                     );
                 }
             }
         };
+        current_egress_verdict = egress_verdict;
 
         let host = current_url.host_str().unwrap_or_default().to_owned();
         let mut client_builder = reqwest::Client::builder()
@@ -374,6 +442,9 @@ pub(crate) async fn execute_http_fetch_tool(
         let mut request = client.request(method_value, current_url.clone());
         for (name, value) in request_headers.as_slice() {
             request = request.header(name, value);
+        }
+        for (name, value) in resolved_credential_headers.as_slice() {
+            request = request.header(name, value.clone());
         }
         if method == "POST" && !body.is_empty() {
             request = request.body(body.clone());
@@ -444,6 +515,7 @@ pub(crate) async fn execute_http_fetch_tool(
                 }
             };
             redirects_followed = redirects_followed.saturating_add(1);
+            next_egress_verdict = None;
             continue;
         }
 
@@ -510,6 +582,13 @@ pub(crate) async fn execute_http_fetch_tool(
             "body_text": String::from_utf8_lossy(body_bytes.as_slice()).to_string(),
             "latency_ms": started_at.elapsed().as_millis() as u64,
             "request_headers": redacted_http_headers(request_headers.as_slice()),
+            "egress": {
+                "request_fingerprint_sha256": current_egress_verdict.request_fingerprint_sha256,
+                "reason_code": current_egress_verdict.reason_code,
+                "host": current_egress_verdict.host,
+                "resolved_socket_addrs": current_egress_verdict.resolved_socket_addrs,
+                "injected_credential_headers": current_egress_verdict.injected_credential_headers,
+            },
         });
         let serialized = serde_json::to_vec(&output_json).unwrap_or_else(|_| b"{}".to_vec());
         if cache_enabled && success {
@@ -591,41 +670,113 @@ pub(crate) fn http_fetch_cache_key(
     key
 }
 
+#[allow(dead_code)]
 pub(crate) async fn resolve_fetch_target_addresses(
     url: &Url,
     allow_private_targets: bool,
 ) -> Result<Vec<SocketAddr>, String> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!("blocked URL scheme '{}'", url.scheme()));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("URL credentials are not allowed".to_owned());
-    }
     let host = url.host_str().ok_or_else(|| "URL host is required".to_owned())?;
-    let port =
-        url.port_or_known_default().ok_or_else(|| "URL port could not be resolved".to_owned())?;
-
-    let addrs = if let Some(ip) = netguard::parse_host_ip_literal(host)? {
-        vec![SocketAddr::new(ip, port)]
-    } else {
-        let resolved = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(|error| format!("DNS resolution failed for host '{host}': {error}"))?;
-        resolved.collect::<Vec<_>>()
-    };
-    if addrs.is_empty() {
-        return Err(format!("DNS resolution returned no addresses for host '{host}'"));
+    let port = url.port_or_known_default().ok_or_else(|| "URL port is required".to_owned())?;
+    if let Some(ip) = netguard::parse_host_ip_literal(host)? {
+        let resolved = vec![SocketAddr::new(ip, port)];
+        validate_resolved_fetch_addresses(&resolved, allow_private_targets)?;
+        return Ok(resolved);
     }
-    validate_resolved_fetch_addresses(addrs.as_slice(), allow_private_targets)?;
-    Ok(addrs)
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| format!("DNS resolution failed for '{host}:{port}': {error}"))?
+        .collect::<Vec<_>>();
+    validate_resolved_fetch_addresses(&resolved, allow_private_targets)?;
+    Ok(resolved)
 }
 
+#[allow(dead_code)]
 pub(crate) fn validate_resolved_fetch_addresses(
     addrs: &[SocketAddr],
     allow_private_targets: bool,
 ) -> Result<(), String> {
     let ips = addrs.iter().map(|address| address.ip()).collect::<Vec<_>>();
     netguard::validate_resolved_ip_addrs(ips.as_slice(), allow_private_targets)
+}
+
+fn parse_credential_bindings(
+    payload: &serde_json::Map<String, Value>,
+) -> Result<Vec<CredentialBindingPlan>, String> {
+    match payload.get("credential_bindings") {
+        Some(Value::Array(_)) => serde_json::from_value::<Vec<CredentialBindingPlan>>(
+            payload.get("credential_bindings").cloned().unwrap_or(Value::Null),
+        )
+        .map_err(|error| format!("palyra.http.fetch credential_bindings are invalid: {error}")),
+        Some(_) => {
+            Err("palyra.http.fetch credential_bindings must be an array of binding objects".to_owned())
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+fn evaluate_http_fetch_egress(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    method: &str,
+    url: &Url,
+    allow_private_targets: bool,
+    max_response_bytes: usize,
+    credential_bindings: &[CredentialBindingPlan],
+) -> Result<EgressPolicyVerdict, String> {
+    EgressProxyPolicyService
+        .evaluate_request(&EgressProxyRequest {
+            method,
+            url: url.as_str(),
+            allow_private_targets,
+            allowed_hosts: runtime_state.config.tool_call.process_runner.allowed_egress_hosts.as_slice(),
+            allowed_dns_suffixes: runtime_state
+                .config
+                .tool_call
+                .process_runner
+                .allowed_dns_suffixes
+                .as_slice(),
+            max_response_bytes,
+            credential_bindings,
+        })
+        .map_err(|error| format!("palyra.http.fetch target blocked: {error}"))
+}
+
+fn resolve_credential_bindings(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    credential_bindings: &[CredentialBindingPlan],
+) -> Result<Vec<(String, HeaderValue)>, String> {
+    if credential_bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+    let resolver = SecretResolver::with_working_dir(
+        Some(runtime_state.vault.as_ref()),
+        runtime_state.config.tool_call.process_runner.workspace_root.as_path(),
+    );
+    let mut resolved = Vec::with_capacity(credential_bindings.len());
+    for binding in credential_bindings {
+        let resolution = resolver.resolve(&binding.secret_ref).map_err(|error| {
+            format!(
+                "palyra.http.fetch credential binding '{}' could not resolve secret: {}",
+                binding.header_name, error
+            )
+        })?;
+        let Some(secret_value) = resolution.value else {
+            if binding.required || binding.secret_ref.required {
+                return Err(format!(
+                    "palyra.http.fetch credential binding '{}' requires a present secret snapshot",
+                    binding.header_name
+                ));
+            }
+            continue;
+        };
+        let value = HeaderValue::from_bytes(secret_value.as_ref()).map_err(|error| {
+            format!(
+                "palyra.http.fetch credential binding '{}' produced an invalid header value: {error}",
+                binding.header_name
+            )
+        })?;
+        resolved.push((binding.header_name.trim().to_ascii_lowercase(), value));
+    }
+    Ok(resolved)
 }
 
 fn redacted_http_headers(headers: &[(String, String)]) -> Vec<serde_json::Value> {

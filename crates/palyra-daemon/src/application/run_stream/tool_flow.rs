@@ -17,8 +17,9 @@ use crate::{
         resolve_cached_tool_approval_for_proposal,
     },
     application::tool_security::{
-        evaluate_tool_proposal_security, record_tool_proposal_decision_audit_trail,
-        resolve_tool_proposal_decision_for_context, ToolProposalSecurityEvaluation,
+        approval_execution_context_for_backend_selection, evaluate_tool_proposal_security,
+        record_tool_proposal_decision_audit_trail, resolve_tool_proposal_decision_for_context,
+        ToolProposalBackendSelection, ToolProposalSecurityEvaluation,
     },
     gateway::{
         await_tool_approval_response, best_effort_mark_approval_error,
@@ -129,6 +130,7 @@ async fn prepare_run_stream_tool_proposal_execution(
         approval_subject_id,
         proposal_approval_required,
         effective_posture,
+        backend_selection,
     } = evaluate_tool_proposal_security(
         runtime_state,
         request_context,
@@ -164,6 +166,7 @@ async fn prepare_run_stream_tool_proposal_execution(
         skill_context.as_ref(),
         approval_subject_id.as_str(),
         proposal_approval_required,
+        &backend_selection,
         tape_seq,
     )
     .await?;
@@ -178,6 +181,7 @@ async fn prepare_run_stream_tool_proposal_execution(
         remaining_tool_budget,
         skill_gate_decision,
         &effective_posture,
+        &backend_selection,
         approval_outcome.as_ref(),
     );
     send_tool_decision_with_tape(
@@ -227,6 +231,7 @@ async fn resolve_run_stream_tool_approval_outcome(
     skill_context: Option<&crate::gateway::ToolSkillContext>,
     approval_subject_id: &str,
     proposal_approval_required: bool,
+    backend_selection: &ToolProposalBackendSelection,
     tape_seq: &mut i64,
 ) -> Result<Option<ToolApprovalOutcome>, Status> {
     let cached_approval_outcome = resolve_cached_tool_approval_for_proposal(
@@ -264,6 +269,7 @@ async fn resolve_run_stream_tool_approval_outcome(
         skill_context,
         input_json,
         &runtime_state.config.tool_call,
+        approval_execution_context_for_backend_selection(backend_selection).as_ref(),
     );
     runtime_state
         .create_approval_record(ApprovalCreateRequest {

@@ -15,8 +15,9 @@ use palyra_common::{
     default_config_search_paths,
     feature_rollouts::{
         parse_boolish_feature_rollout, FeatureRolloutSetting, CONTEXT_ENGINE_ROLLOUT_ENV,
-        DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV, EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
-        EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+        DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV, EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_ENV,
+        EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV, EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+        EXECUTION_GATE_PIPELINE_V2_ROLLOUT_ENV, SAFETY_BOUNDARY_ROLLOUT_ENV,
     },
     parse_config_path,
     secret_refs::{SecretRef, SecretSource},
@@ -165,8 +166,19 @@ pub fn load_config() -> Result<LoadedConfig> {
                 feature_rollouts.execution_backend_remote_node =
                     FeatureRolloutSetting::from_config(enabled);
             }
+            if let Some(enabled) = file_feature_rollouts.execution_backend_networked_worker {
+                feature_rollouts.execution_backend_networked_worker =
+                    FeatureRolloutSetting::from_config(enabled);
+            }
             if let Some(enabled) = file_feature_rollouts.execution_backend_ssh_tunnel {
                 feature_rollouts.execution_backend_ssh_tunnel =
+                    FeatureRolloutSetting::from_config(enabled);
+            }
+            if let Some(enabled) = file_feature_rollouts.safety_boundary {
+                feature_rollouts.safety_boundary = FeatureRolloutSetting::from_config(enabled);
+            }
+            if let Some(enabled) = file_feature_rollouts.execution_gate_pipeline_v2 {
+                feature_rollouts.execution_gate_pipeline_v2 =
                     FeatureRolloutSetting::from_config(enabled);
             }
         }
@@ -1659,9 +1671,24 @@ pub fn load_config() -> Result<LoadedConfig> {
         EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
         &mut source,
     )?;
+    feature_rollouts.execution_backend_networked_worker = apply_feature_rollout_env_override(
+        feature_rollouts.execution_backend_networked_worker,
+        EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_ENV,
+        &mut source,
+    )?;
     feature_rollouts.execution_backend_ssh_tunnel = apply_feature_rollout_env_override(
         feature_rollouts.execution_backend_ssh_tunnel,
         EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+        &mut source,
+    )?;
+    feature_rollouts.safety_boundary = apply_feature_rollout_env_override(
+        feature_rollouts.safety_boundary,
+        SAFETY_BOUNDARY_ROLLOUT_ENV,
+        &mut source,
+    )?;
+    feature_rollouts.execution_gate_pipeline_v2 = apply_feature_rollout_env_override(
+        feature_rollouts.execution_gate_pipeline_v2,
+        EXECUTION_GATE_PIPELINE_V2_ROLLOUT_ENV,
         &mut source,
     )?;
 
@@ -3249,7 +3276,10 @@ mod tests {
             dynamic_tool_builder = true
             context_engine = true
             execution_backend_remote_node = false
+            execution_backend_networked_worker = true
             execution_backend_ssh_tunnel = true
+            safety_boundary = true
+            execution_gate_pipeline_v2 = false
             "#,
         )
         .expect("feature_rollouts should parse");
@@ -3258,7 +3288,10 @@ mod tests {
         assert_eq!(feature_rollouts.dynamic_tool_builder, Some(true));
         assert_eq!(feature_rollouts.context_engine, Some(true));
         assert_eq!(feature_rollouts.execution_backend_remote_node, Some(false));
+        assert_eq!(feature_rollouts.execution_backend_networked_worker, Some(true));
         assert_eq!(feature_rollouts.execution_backend_ssh_tunnel, Some(true));
+        assert_eq!(feature_rollouts.safety_boundary, Some(true));
+        assert_eq!(feature_rollouts.execution_gate_pipeline_v2, Some(false));
     }
 
     #[test]

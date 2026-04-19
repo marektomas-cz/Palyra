@@ -20,6 +20,7 @@ clap.workspace = true
 headless_chrome.workspace = true
 libc.workspace = true
 palyra-common = { version = "0.1.0", path = "../palyra-common" }
+palyra-egress-proxy = { version = "0.1.0", path = "../palyra-egress-proxy" }
 prost.workspace = true
 reqwest.workspace = true
 ring.workspace = true

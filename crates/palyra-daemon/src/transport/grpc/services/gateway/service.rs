@@ -26,7 +26,8 @@ use crate::{
         RoutedMessage as ChannelRoutedMessage,
     },
     execution_backends::{
-        build_execution_backend_inventory, parse_optional_execution_backend_preference,
+        build_execution_backend_inventory_with_worker_state,
+        parse_optional_execution_backend_preference,
         resolve_execution_backend, validate_execution_backend_selection,
     },
     gateway::{
@@ -87,11 +88,13 @@ impl GatewayServiceImpl {
     ) -> Result<Vec<crate::execution_backends::ExecutionBackendInventoryRecord>, Status> {
         let now_unix_ms = crate::gateway::current_unix_ms_status()?;
         let nodes = self.node_runtime.nodes()?;
-        Ok(build_execution_backend_inventory(
+        Ok(build_execution_backend_inventory_with_worker_state(
             &self.state.config.tool_call.process_runner,
             nodes.as_slice(),
             now_unix_ms,
             &self.state.config.feature_rollouts,
+            self.state.worker_fleet_snapshot(),
+            &self.state.worker_fleet_policy(),
         ))
     }
 }

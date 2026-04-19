@@ -300,6 +300,11 @@ pub struct ExecutionBackendInventoryRecord {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub tradeoffs: Vec<String>,
+    pub requires_attestation: bool,
+    pub requires_egress_proxy: bool,
+    pub workspace_scope_mode: String,
+    pub artifact_transport: String,
+    pub cleanup_strategy: String,
     pub active_node_count: usize,
     pub total_node_count: usize,
 }
@@ -343,6 +348,8 @@ pub struct AgentEnvelope {
     pub execution_backends: Vec<ExecutionBackendInventoryRecord>,
     pub resolved_execution_backend: String,
     pub execution_backend_fallback_used: bool,
+    pub execution_backend_reason_code: String,
+    pub execution_backend_approval_required: bool,
     pub execution_backend_reason: String,
 }
 
@@ -377,6 +384,8 @@ pub struct AgentCreateEnvelope {
     pub execution_backends: Vec<ExecutionBackendInventoryRecord>,
     pub resolved_execution_backend: String,
     pub execution_backend_fallback_used: bool,
+    pub execution_backend_reason_code: String,
+    pub execution_backend_approval_required: bool,
     pub execution_backend_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_agent_id: Option<String>,

@@ -6,7 +6,8 @@ use crate::{
     agents::{AgentCreateRequest, AgentRecord},
     application::service_authorization::authorize_agent_management_action,
     execution_backends::{
-        build_execution_backend_inventory, parse_optional_execution_backend_preference,
+        build_execution_backend_inventory_with_worker_state,
+        parse_optional_execution_backend_preference,
         resolve_execution_backend, validate_execution_backend_selection,
     },
     gateway::{normalize_agent_identifier, record_agent_journal_event},
@@ -98,6 +99,8 @@ pub(crate) async fn console_agent_get_handler(
             .collect(),
         resolved_execution_backend: resolution.resolved.as_str().to_owned(),
         execution_backend_fallback_used: resolution.fallback_used,
+        execution_backend_reason_code: resolution.reason_code,
+        execution_backend_approval_required: resolution.approval_required,
         execution_backend_reason: resolution.reason,
     }))
 }
@@ -180,6 +183,8 @@ pub(crate) async fn console_agent_create_handler(
             .collect(),
         resolved_execution_backend: resolution.resolved.as_str().to_owned(),
         execution_backend_fallback_used: resolution.fallback_used,
+        execution_backend_reason_code: resolution.reason_code,
+        execution_backend_approval_required: resolution.approval_required,
         execution_backend_reason: resolution.reason,
         default_agent_id: outcome.default_agent_id,
     }))
@@ -250,6 +255,11 @@ fn control_plane_execution_backend_inventory(
         rollout_enabled: backend.rollout_enabled,
         capabilities: backend.capabilities.clone(),
         tradeoffs: backend.tradeoffs.clone(),
+        requires_attestation: backend.requires_attestation,
+        requires_egress_proxy: backend.requires_egress_proxy,
+        workspace_scope_mode: backend.workspace_scope_mode.clone(),
+        artifact_transport: backend.artifact_transport.clone(),
+        cleanup_strategy: backend.cleanup_strategy.clone(),
         active_node_count: backend.active_node_count,
         total_node_count: backend.total_node_count,
     }
@@ -260,11 +270,13 @@ fn backend_inventory(
 ) -> Result<Vec<crate::execution_backends::ExecutionBackendInventoryRecord>, tonic::Status> {
     let now_unix_ms = crate::gateway::current_unix_ms_status()?;
     let nodes = state.node_runtime.nodes()?;
-    Ok(build_execution_backend_inventory(
+    Ok(build_execution_backend_inventory_with_worker_state(
         &state.runtime.config.tool_call.process_runner,
         nodes.as_slice(),
         now_unix_ms,
         &state.runtime.config.feature_rollouts,
+        state.runtime.worker_fleet_snapshot(),
+        &state.runtime.worker_fleet_policy(),
     ))
 }
 

@@ -2866,6 +2866,7 @@ dependencies = [
  "headless_chrome",
  "libc",
  "palyra-common",
+ "palyra-egress-proxy",
  "prost",
  "protoc-bin-vendored",
  "reqwest",
@@ -2993,6 +2994,7 @@ dependencies = [
  "palyra-common",
  "palyra-connectors",
  "palyra-control-plane",
+ "palyra-egress-proxy",
  "palyra-identity",
  "palyra-plugins-runtime",
  "palyra-plugins-sdk",
@@ -3001,6 +3003,7 @@ dependencies = [
  "palyra-skills",
  "palyra-transport-quic",
  "palyra-vault",
+ "palyra-workerd",
  "prost",
  "protoc-bin-vendored",
  "quick-xml",
@@ -3024,6 +3027,18 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "zip",
+]
+
+[[package]]
+name = "palyra-egress-proxy"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "palyra-common",
+ "reqwest",
+ "serde",
+ "sha2 0.11.0",
+ "thiserror",
 ]
 
 [[package]]
@@ -3139,6 +3154,16 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror",
+ "ulid",
+]
+
+[[package]]
+name = "palyra-workerd"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
  "thiserror",
  "ulid",
 ]

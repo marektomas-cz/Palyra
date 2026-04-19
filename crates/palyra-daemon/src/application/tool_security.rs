@@ -11,7 +11,13 @@ use ulid::Ulid;
 
 use crate::{
     agents::AgentBindingQuery,
-    application::approvals::{apply_tool_approval_outcome, build_tool_approval_subject_id},
+    application::approvals::{
+        apply_tool_approval_outcome, build_tool_approval_subject_id, ApprovalExecutionContext,
+    },
+    execution_backends::{
+        build_execution_backend_inventory_with_worker_state, resolve_execution_backend,
+        ExecutionBackendPreference, ExecutionBackendResolution,
+    },
     gateway::{
         current_unix_ms, GatewayRuntimeState, ToolApprovalOutcome, ToolSkillContext,
         SKILL_EXECUTION_DENY_REASON_PREFIX,
@@ -21,7 +27,7 @@ use crate::{
         derive_scope_chain, evaluate_effective_tool_posture, ToolPostureScopeKind,
         ToolPostureScopeRef, ToolPostureState,
     },
-    tool_protocol::{decide_tool_call, ToolDecision, ToolRequestContext},
+    tool_protocol::{decide_tool_call, tool_metadata, ToolCapability, ToolDecision, ToolRequestContext},
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
 };
 
@@ -32,6 +38,14 @@ pub(crate) struct ToolProposalSecurityEvaluation {
     pub(crate) approval_subject_id: String,
     pub(crate) proposal_approval_required: bool,
     pub(crate) effective_posture: crate::tool_posture::EffectiveToolPosture,
+    pub(crate) backend_selection: ToolProposalBackendSelection,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ToolProposalBackendSelection {
+    pub(crate) agent_id: Option<String>,
+    pub(crate) requested_preference: ExecutionBackendPreference,
+    pub(crate) resolution: ExecutionBackendResolution,
 }
 
 #[allow(clippy::result_large_err)]
@@ -158,6 +172,138 @@ async fn evaluate_skill_execution_gate(
     }
 }
 
+async fn derive_tool_proposal_backend_selection(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    agent_id: Option<&str>,
+) -> ToolProposalBackendSelection {
+    let requested_preference = if let Some(agent_id) = agent_id {
+        runtime_state
+            .get_agent(agent_id.to_owned())
+            .await
+            .map(|(agent, _)| agent.execution_backend_preference)
+            .unwrap_or_default()
+    } else {
+        ExecutionBackendPreference::Automatic
+    };
+    let inventory = build_execution_backend_inventory_with_worker_state(
+        &runtime_state.config.tool_call.process_runner,
+        &[],
+        current_unix_ms(),
+        &runtime_state.config.feature_rollouts,
+        runtime_state.worker_fleet_snapshot(),
+        &runtime_state.worker_fleet_policy(),
+    );
+    let resolution = resolve_execution_backend(requested_preference, &inventory);
+    ToolProposalBackendSelection {
+        agent_id: agent_id.map(ToOwned::to_owned),
+        requested_preference,
+        resolution,
+    }
+}
+
+pub(crate) fn approval_execution_context_for_backend_selection(
+    backend_selection: &ToolProposalBackendSelection,
+) -> Option<ApprovalExecutionContext> {
+    let resolution = &backend_selection.resolution;
+    let default_local_resolution = backend_selection.requested_preference
+        == ExecutionBackendPreference::Automatic
+        && resolution.resolved == ExecutionBackendPreference::LocalSandbox
+        && !resolution.fallback_used
+        && !resolution.approval_required;
+    if default_local_resolution {
+        return None;
+    }
+    Some(ApprovalExecutionContext {
+        requested_backend: backend_selection.requested_preference.as_str().to_owned(),
+        resolved_backend: resolution.resolved.as_str().to_owned(),
+        reason_code: resolution.reason_code.clone(),
+        approval_required: resolution.approval_required,
+        reason: resolution.reason.clone(),
+        agent_id: backend_selection.agent_id.clone(),
+    })
+}
+
+fn backend_capability_label(capability: ToolCapability) -> &'static str {
+    match capability {
+        ToolCapability::ProcessExec => "process_exec",
+        ToolCapability::Network => "network",
+        ToolCapability::SecretsRead => "secrets_read",
+        ToolCapability::FilesystemWrite => "filesystem_write",
+    }
+}
+
+fn evaluate_backend_capability_gate(
+    tool_name: &str,
+    backend_selection: &ToolProposalBackendSelection,
+) -> Option<ToolDecision> {
+    if backend_selection.resolution.resolved != ExecutionBackendPreference::NetworkedWorker {
+        return None;
+    }
+    let restricted_capabilities = tool_metadata(tool_name)
+        .map(|metadata| {
+            metadata
+                .capabilities
+                .iter()
+                .copied()
+                .filter(|capability| {
+                    matches!(
+                        capability,
+                        ToolCapability::ProcessExec
+                            | ToolCapability::SecretsRead
+                            | ToolCapability::FilesystemWrite
+                    )
+                })
+                .map(backend_capability_label)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if restricted_capabilities.is_empty() {
+        return None;
+    }
+    Some(ToolDecision {
+        allowed: false,
+        reason: format!(
+            "backend policy blocked tool={tool_name}; reason_code=backend.policy.capability_denied; resolved_backend={}; blocked_capabilities={}; remediation=switch agent backend_preference to local_sandbox or automatic; backend_reason={}",
+            backend_selection.resolution.resolved.as_str(),
+            restricted_capabilities.join(","),
+            backend_selection.resolution.reason
+        ),
+        approval_required: false,
+        policy_enforced: true,
+    })
+}
+
+fn annotate_tool_decision_with_backend_context(
+    mut decision: ToolDecision,
+    backend_selection: &ToolProposalBackendSelection,
+) -> ToolDecision {
+    let resolution = &backend_selection.resolution;
+    let default_local_resolution = backend_selection.requested_preference
+        == ExecutionBackendPreference::Automatic
+        && resolution.resolved == ExecutionBackendPreference::LocalSandbox
+        && !resolution.fallback_used
+        && !resolution.approval_required;
+    if default_local_resolution {
+        return decision;
+    }
+    let agent_fragment = backend_selection
+        .agent_id
+        .as_deref()
+        .map(|agent_id| format!("; backend_agent_id={agent_id}"))
+        .unwrap_or_default();
+    decision.reason = format!(
+        "{}; backend_requested={}; backend_resolved={}; backend_reason_code={}; backend_approval_required={}; backend_reason={}{}",
+        decision.reason,
+        backend_selection.requested_preference.as_str(),
+        resolution.resolved.as_str(),
+        resolution.reason_code,
+        resolution.approval_required,
+        resolution.reason,
+        agent_fragment
+    );
+    decision
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn evaluate_tool_proposal_security(
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -212,7 +358,7 @@ pub(crate) async fn evaluate_tool_proposal_security(
         }
     }
     let overrides = runtime_state.list_tool_posture_overrides().unwrap_or_default();
-    let agent_scope = runtime_state
+    let agent_binding = runtime_state
         .list_agent_bindings(AgentBindingQuery {
             agent_id: None,
             principal: Some(request_context.principal.clone()),
@@ -222,10 +368,10 @@ pub(crate) async fn evaluate_tool_proposal_security(
         })
         .await
         .ok()
-        .and_then(|bindings| bindings.into_iter().next())
-        .map(|binding| ToolPostureScopeRef {
+        .and_then(|bindings| bindings.into_iter().next());
+    let agent_scope = agent_binding.as_ref().map(|binding| ToolPostureScopeRef {
             kind: ToolPostureScopeKind::Agent,
-            scope_id: binding.agent_id,
+            scope_id: binding.agent_id.clone(),
             label: "Agent default".to_owned(),
         });
     let workspace_scope =
@@ -236,6 +382,11 @@ pub(crate) async fn evaluate_tool_proposal_security(
                 label: format!("Workspace {workspace_id}"),
             }
         });
+    let backend_selection = derive_tool_proposal_backend_selection(
+        runtime_state,
+        agent_binding.as_ref().map(|binding| binding.agent_id.as_str()),
+    )
+    .await;
     let effective_posture = evaluate_effective_tool_posture(
         &runtime_state.config,
         overrides.as_slice(),
@@ -263,12 +414,16 @@ pub(crate) async fn evaluate_tool_proposal_security(
             policy_enforced: true,
         });
     }
+    if skill_gate_decision.is_none() {
+        skill_gate_decision = evaluate_backend_capability_gate(tool_name, &backend_selection);
+    }
     let proposal_approval_required = skill_gate_decision
         .as_ref()
         .map(|decision| {
             decision.allowed && effective_posture.effective_state == ToolPostureState::AskEachTime
         })
-        .unwrap_or(effective_posture.effective_state == ToolPostureState::AskEachTime);
+        .unwrap_or(effective_posture.effective_state == ToolPostureState::AskEachTime)
+        || backend_selection.resolution.approval_required;
     let approval_subject_id = build_tool_approval_subject_id(tool_name, skill_context.as_ref());
     ToolProposalSecurityEvaluation {
         skill_context,
@@ -276,6 +431,7 @@ pub(crate) async fn evaluate_tool_proposal_security(
         approval_subject_id,
         proposal_approval_required,
         effective_posture,
+        backend_selection,
     }
 }
 
@@ -285,11 +441,12 @@ fn resolve_tool_proposal_decision(
     tool_name: &str,
     skill_gate_decision: Option<ToolDecision>,
     effective_posture: &crate::tool_posture::EffectiveToolPosture,
+    backend_selection: &ToolProposalBackendSelection,
     approval_outcome: Option<&ToolApprovalOutcome>,
     runtime_state: &Arc<GatewayRuntimeState>,
 ) -> ToolDecision {
     if let Some(skill_gate_decision) = skill_gate_decision {
-        return skill_gate_decision;
+        return annotate_tool_decision_with_backend_context(skill_gate_decision, backend_selection);
     }
     let mut decision = decide_tool_call(
         &runtime_state.config.tool_call,
@@ -308,7 +465,10 @@ fn resolve_tool_proposal_decision(
             effective_posture.source_scope_label
         );
     }
-    apply_tool_approval_outcome(decision, tool_name, approval_outcome)
+    annotate_tool_decision_with_backend_context(
+        apply_tool_approval_outcome(decision, tool_name, approval_outcome),
+        backend_selection,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,6 +483,7 @@ pub(crate) fn resolve_tool_proposal_decision_for_context(
     remaining_tool_budget: &mut u32,
     skill_gate_decision: Option<ToolDecision>,
     effective_posture: &crate::tool_posture::EffectiveToolPosture,
+    backend_selection: &ToolProposalBackendSelection,
     approval_outcome: Option<&ToolApprovalOutcome>,
 ) -> ToolDecision {
     let policy_request_context = build_tool_policy_request_context(
@@ -338,6 +499,7 @@ pub(crate) fn resolve_tool_proposal_decision_for_context(
         tool_name,
         skill_gate_decision,
         effective_posture,
+        backend_selection,
         approval_outcome,
         runtime_state,
     );
@@ -525,4 +687,84 @@ async fn record_skill_execution_denied_journal_event(
         })
         .await
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        execution_backends::{ExecutionBackendPreference, ExecutionBackendResolution},
+        tool_protocol::ToolDecision,
+    };
+
+    use super::{
+        annotate_tool_decision_with_backend_context, evaluate_backend_capability_gate,
+        ToolProposalBackendSelection,
+    };
+
+    fn networked_worker_selection() -> ToolProposalBackendSelection {
+        ToolProposalBackendSelection {
+            agent_id: Some("agent-network".to_owned()),
+            requested_preference: ExecutionBackendPreference::NetworkedWorker,
+            resolution: ExecutionBackendResolution {
+                requested: ExecutionBackendPreference::NetworkedWorker,
+                resolved: ExecutionBackendPreference::NetworkedWorker,
+                fallback_used: false,
+                reason_code: "backend.available.networked_worker".to_owned(),
+                approval_required: true,
+                reason: "attested worker is available".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn networked_worker_backend_denies_filesystem_write_tools() {
+        let selection = networked_worker_selection();
+        let decision = evaluate_backend_capability_gate("palyra.fs.apply_patch", &selection)
+            .expect("filesystem write should be blocked on networked workers");
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("backend.policy.capability_denied"));
+        assert!(decision.reason.contains("filesystem_write"));
+    }
+
+    #[test]
+    fn networked_worker_annotation_surfaces_backend_reason_codes() {
+        let selection = networked_worker_selection();
+        let decision = annotate_tool_decision_with_backend_context(
+            ToolDecision {
+                allowed: true,
+                reason: "tool is allowlisted by Cedar runtime policy".to_owned(),
+                approval_required: true,
+                policy_enforced: true,
+            },
+            &selection,
+        );
+        assert!(decision.reason.contains("backend_requested=networked_worker"));
+        assert!(decision.reason.contains("backend_reason_code=backend.available.networked_worker"));
+    }
+
+    #[test]
+    fn default_local_backend_annotation_keeps_reason_compact() {
+        let selection = ToolProposalBackendSelection {
+            agent_id: None,
+            requested_preference: ExecutionBackendPreference::Automatic,
+            resolution: ExecutionBackendResolution {
+                requested: ExecutionBackendPreference::Automatic,
+                resolved: ExecutionBackendPreference::LocalSandbox,
+                fallback_used: false,
+                reason_code: "backend.default.local_sandbox".to_owned(),
+                approval_required: false,
+                reason: "automatic stays local".to_owned(),
+            },
+        };
+        let decision = annotate_tool_decision_with_backend_context(
+            ToolDecision {
+                allowed: true,
+                reason: "tool is allowlisted by Cedar runtime policy".to_owned(),
+                approval_required: false,
+                policy_enforced: true,
+            },
+            &selection,
+        );
+        assert_eq!(decision.reason, "tool is allowlisted by Cedar runtime policy");
+    }
 }

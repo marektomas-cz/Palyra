@@ -29,6 +29,16 @@ pub(crate) struct PendingToolApproval {
     pub(crate) prompt: ApprovalPromptRecord,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApprovalExecutionContext {
+    pub(crate) requested_backend: String,
+    pub(crate) resolved_backend: String,
+    pub(crate) reason_code: String,
+    pub(crate) approval_required: bool,
+    pub(crate) reason: String,
+    pub(crate) agent_id: Option<String>,
+}
+
 pub(crate) fn apply_tool_approval_outcome(
     mut decision: ToolDecision,
     tool_name: &str,
@@ -102,17 +112,37 @@ pub(crate) fn build_pending_tool_approval(
     skill_context: Option<&ToolSkillContext>,
     input_json: &[u8],
     config: &ToolCallConfig,
+    execution_context: Option<&ApprovalExecutionContext>,
 ) -> PendingToolApproval {
     let subject_id = build_tool_approval_subject_id(tool_name, skill_context);
-    let request_summary = build_tool_request_summary(tool_name, skill_context, input_json);
+    let request_summary =
+        build_tool_request_summary(tool_name, skill_context, input_json, execution_context);
     let policy_snapshot = build_tool_policy_snapshot(config, tool_name);
-    let details = serde_json::from_slice::<Value>(input_json)
+    let mut details = serde_json::from_slice::<Value>(input_json)
         .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(input_json).to_string() }));
+    if let Some(execution_context) = execution_context {
+        details["execution_backend"] = json!({
+            "requested": execution_context.requested_backend,
+            "resolved": execution_context.resolved_backend,
+            "reason_code": execution_context.reason_code,
+            "approval_required": execution_context.approval_required,
+            "reason": execution_context.reason,
+            "agent_id": execution_context.agent_id,
+        });
+    }
     let prompt = ApprovalPromptRecord {
         title: format!("Approve {}", tool_name),
         risk_level: approval_risk_for_tool(tool_name, input_json, config),
         subject_id: subject_id.clone(),
-        summary: format!("Tool `{tool_name}` requested explicit approval"),
+        summary: execution_context.map_or_else(
+            || format!("Tool `{tool_name}` requested explicit approval"),
+            |execution_context| {
+                format!(
+                    "Tool `{tool_name}` requested explicit approval on backend `{}`",
+                    execution_context.resolved_backend
+                )
+            },
+        ),
         options: default_approval_prompt_options(),
         timeout_seconds: APPROVAL_PROMPT_TIMEOUT_SECONDS,
         details_json: json!({
@@ -123,8 +153,17 @@ pub(crate) fn build_pending_tool_approval(
             "input_json": details,
         })
         .to_string(),
-        policy_explanation: "Sensitive tool actions are deny-by-default until explicitly approved"
-            .to_owned(),
+        policy_explanation: execution_context.map_or_else(
+            || "Sensitive tool actions are deny-by-default until explicitly approved".to_owned(),
+            |execution_context| {
+                format!(
+                    "Sensitive tool actions are deny-by-default until explicitly approved; backend_requested={}; backend_resolved={}; backend_reason_code={}",
+                    execution_context.requested_backend,
+                    execution_context.resolved_backend,
+                    execution_context.reason_code
+                )
+            },
+        ),
     };
     PendingToolApproval {
         approval_id: Ulid::new().to_string(),
@@ -186,10 +225,11 @@ fn build_tool_request_summary(
     tool_name: &str,
     skill_context: Option<&ToolSkillContext>,
     input_json: &[u8],
+    execution_context: Option<&ApprovalExecutionContext>,
 ) -> String {
     let normalized_input = serde_json::from_slice::<Value>(input_json)
         .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(input_json).to_string() }));
-    truncate_with_ellipsis(
+    let summary = truncate_with_ellipsis(
         json!({
             "tool_name": tool_name,
             "skill_id": skill_context.map(ToolSkillContext::skill_id),
@@ -198,7 +238,18 @@ fn build_tool_request_summary(
         })
         .to_string(),
         APPROVAL_REQUEST_SUMMARY_MAX_BYTES,
-    )
+    );
+    execution_context.map_or(summary.clone(), |execution_context| {
+        truncate_with_ellipsis(
+            format!(
+                "{summary}; backend_requested={}; backend_resolved={}; backend_reason_code={}",
+                execution_context.requested_backend,
+                execution_context.resolved_backend,
+                execution_context.reason_code
+            ),
+            APPROVAL_REQUEST_SUMMARY_MAX_BYTES,
+        )
+    })
 }
 
 fn build_tool_policy_snapshot(config: &ToolCallConfig, tool_name: &str) -> ApprovalPolicySnapshot {
@@ -474,5 +525,75 @@ mod tests {
         let json: Value = serde_json::from_slice(payload.as_slice())
             .expect("approval requested payload should remain valid JSON");
         assert_eq!(json.get("subject_type").and_then(Value::as_str), Some("browser_action"));
+    }
+
+    #[test]
+    fn build_pending_tool_approval_embeds_backend_execution_context() {
+        let execution_context = ApprovalExecutionContext {
+            requested_backend: "networked_worker".to_owned(),
+            resolved_backend: "networked_worker".to_owned(),
+            reason_code: "backend.available.networked_worker".to_owned(),
+            approval_required: true,
+            reason: "attested worker fleet is available".to_owned(),
+            agent_id: Some("agent.networked".to_owned()),
+        };
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.process.run".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 250,
+            process_runner: crate::sandbox_runner::SandboxProcessRunnerPolicy {
+                enabled: true,
+                tier: crate::sandbox_runner::SandboxProcessRunnerTier::B,
+                workspace_root: std::env::current_dir().expect("current_dir should resolve"),
+                allowed_executables: vec!["cargo".to_owned()],
+                allow_interpreters: false,
+                egress_enforcement_mode: crate::sandbox_runner::EgressEnforcementMode::Preflight,
+                allowed_egress_hosts: Vec::new(),
+                allowed_dns_suffixes: Vec::new(),
+                cpu_time_limit_ms: 1_000,
+                memory_limit_bytes: 1_048_576,
+                max_output_bytes: 1_048_576,
+            },
+            wasm_runtime: crate::wasm_plugin_runner::WasmPluginRunnerPolicy {
+                enabled: false,
+                allow_inline_modules: false,
+                max_module_size_bytes: 256 * 1024,
+                fuel_budget: 1_000_000,
+                max_memory_bytes: 64 * 1024 * 1024,
+                max_table_elements: 1_024,
+                max_instances: 8,
+                allowed_http_hosts: Vec::new(),
+                allowed_secrets: Vec::new(),
+                allowed_storage_prefixes: Vec::new(),
+                allowed_channels: Vec::new(),
+            },
+        };
+        let pending = build_pending_tool_approval(
+            "palyra.process.run",
+            None,
+            br#"{"command":"cargo","args":["test"]}"#,
+            &config,
+            Some(&execution_context),
+        );
+        assert!(
+            pending
+                .request_summary
+                .contains("backend_resolved=networked_worker"),
+            "request summary should preserve backend explain metadata"
+        );
+        assert!(
+            pending.prompt.summary.contains("networked_worker"),
+            "approval prompt summary should call out the resolved backend"
+        );
+        let details_json: Value = serde_json::from_str(pending.prompt.details_json.as_str())
+            .expect("approval prompt details should remain valid JSON");
+        assert_eq!(
+            details_json
+                .get("input_json")
+                .and_then(|value| value.get("execution_backend"))
+                .and_then(|value| value.get("reason_code"))
+                .and_then(Value::as_str),
+            Some("backend.available.networked_worker")
+        );
     }
 }

@@ -184,7 +184,10 @@ pub struct FileFeatureRolloutsConfig {
     pub dynamic_tool_builder: Option<bool>,
     pub context_engine: Option<bool>,
     pub execution_backend_remote_node: Option<bool>,
+    pub execution_backend_networked_worker: Option<bool>,
     pub execution_backend_ssh_tunnel: Option<bool>,
+    pub safety_boundary: Option<bool>,
+    pub execution_gate_pipeline_v2: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -730,7 +733,10 @@ mod tests {
             dynamic_tool_builder = true
             context_engine = true
             execution_backend_remote_node = false
+            execution_backend_networked_worker = true
             execution_backend_ssh_tunnel = true
+            safety_boundary = true
+            execution_gate_pipeline_v2 = false
             "#,
         )
         .expect("feature_rollouts section should parse");
@@ -740,6 +746,9 @@ mod tests {
         assert_eq!(feature_rollouts.dynamic_tool_builder, Some(true));
         assert_eq!(feature_rollouts.context_engine, Some(true));
         assert_eq!(feature_rollouts.execution_backend_remote_node, Some(false));
+        assert_eq!(feature_rollouts.execution_backend_networked_worker, Some(true));
         assert_eq!(feature_rollouts.execution_backend_ssh_tunnel, Some(true));
+        assert_eq!(feature_rollouts.safety_boundary, Some(true));
+        assert_eq!(feature_rollouts.execution_gate_pipeline_v2, Some(false));
     }
 }

@@ -2,8 +2,12 @@ use crate::*;
 use palyra_common::feature_rollouts::{
     CONTEXT_ENGINE_ROLLOUT_CONFIG_PATH, CONTEXT_ENGINE_ROLLOUT_ENV,
     DYNAMIC_TOOL_BUILDER_ROLLOUT_CONFIG_PATH, DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV,
+    EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_CONFIG_PATH,
+    EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_ENV,
     EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_CONFIG_PATH, EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
     EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_CONFIG_PATH, EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+    EXECUTION_GATE_PIPELINE_V2_ROLLOUT_CONFIG_PATH, EXECUTION_GATE_PIPELINE_V2_ROLLOUT_ENV,
+    SAFETY_BOUNDARY_ROLLOUT_CONFIG_PATH, SAFETY_BOUNDARY_ROLLOUT_ENV,
 };
 
 #[cfg(windows)]
@@ -176,11 +180,13 @@ pub(crate) async fn console_diagnostics_handler(
 fn collect_console_execution_backend_diagnostics(state: &AppState) -> Result<Value, tonic::Status> {
     let now_unix_ms = crate::gateway::current_unix_ms_status()?;
     let nodes = state.node_runtime.nodes()?;
-    serde_json::to_value(crate::execution_backends::build_execution_backend_inventory(
+    serde_json::to_value(crate::execution_backends::build_execution_backend_inventory_with_worker_state(
         &state.runtime.config.tool_call.process_runner,
         nodes.as_slice(),
         now_unix_ms,
         &state.runtime.config.feature_rollouts,
+        state.runtime.worker_fleet_snapshot(),
+        &state.runtime.worker_fleet_policy(),
     ))
     .map_err(|error| {
         tonic::Status::internal(format!("failed to serialize execution backends: {error}"))
@@ -208,11 +214,29 @@ fn collect_console_feature_rollouts_diagnostics(state: &AppState) -> Value {
             "config_path": EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_CONFIG_PATH,
             "env_var": EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
         },
+        "execution_backend_networked_worker": {
+            "enabled": feature_rollouts.execution_backend_networked_worker.enabled,
+            "source": feature_rollouts.execution_backend_networked_worker.source,
+            "config_path": EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_CONFIG_PATH,
+            "env_var": EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_ENV,
+        },
         "execution_backend_ssh_tunnel": {
             "enabled": feature_rollouts.execution_backend_ssh_tunnel.enabled,
             "source": feature_rollouts.execution_backend_ssh_tunnel.source,
             "config_path": EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_CONFIG_PATH,
             "env_var": EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+        },
+        "safety_boundary": {
+            "enabled": feature_rollouts.safety_boundary.enabled,
+            "source": feature_rollouts.safety_boundary.source,
+            "config_path": SAFETY_BOUNDARY_ROLLOUT_CONFIG_PATH,
+            "env_var": SAFETY_BOUNDARY_ROLLOUT_ENV,
+        },
+        "execution_gate_pipeline_v2": {
+            "enabled": feature_rollouts.execution_gate_pipeline_v2.enabled,
+            "source": feature_rollouts.execution_gate_pipeline_v2.source,
+            "config_path": EXECUTION_GATE_PIPELINE_V2_ROLLOUT_CONFIG_PATH,
+            "env_var": EXECUTION_GATE_PIPELINE_V2_ROLLOUT_ENV,
         },
     })
 }

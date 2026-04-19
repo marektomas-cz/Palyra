@@ -46,7 +46,13 @@ fn current_state_inventory_snapshot_covers_capabilities_cli_and_compat_surface()
         .collect::<Vec<_>>();
     assert_eq!(
         execution_backend_preferences,
-        vec!["automatic", "local_sandbox", "desktop_node", "ssh_tunnel"],
+        vec![
+            "automatic",
+            "local_sandbox",
+            "desktop_node",
+            "networked_worker",
+            "ssh_tunnel",
+        ],
         "inventory should continue to advertise the current execution backend preference set"
     );
 
@@ -60,7 +66,7 @@ fn current_state_inventory_snapshot_covers_capabilities_cli_and_compat_surface()
         .collect::<Vec<_>>();
     assert_eq!(
         backend_ids,
-        vec!["desktop_node", "local_sandbox", "ssh_tunnel"],
+        vec!["desktop_node", "local_sandbox", "networked_worker", "ssh_tunnel"],
         "inventory should expose the current runtime execution backend inventory"
     );
 
@@ -119,10 +125,17 @@ fn build_current_state_inventory_snapshot(
                 "selectable": entry.get("selectable").cloned().unwrap_or(Value::Null),
                 "selected_by_default": entry.get("selected_by_default").cloned().unwrap_or(Value::Null),
                 "description": entry.get("description").cloned().unwrap_or(Value::Null),
+                "operator_summary": entry.get("operator_summary").cloned().unwrap_or(Value::Null),
+                "executor_label": entry.get("executor_label").cloned().unwrap_or(Value::Null),
                 "rollout_flag": entry.get("rollout_flag").cloned().unwrap_or(Value::Null),
                 "rollout_enabled": entry.get("rollout_enabled").cloned().unwrap_or(Value::Null),
                 "capabilities": entry.get("capabilities").cloned().unwrap_or(Value::Null),
                 "tradeoffs": entry.get("tradeoffs").cloned().unwrap_or(Value::Null),
+                "requires_attestation": entry.get("requires_attestation").cloned().unwrap_or(Value::Null),
+                "requires_egress_proxy": entry.get("requires_egress_proxy").cloned().unwrap_or(Value::Null),
+                "workspace_scope_mode": entry.get("workspace_scope_mode").cloned().unwrap_or(Value::Null),
+                "artifact_transport": entry.get("artifact_transport").cloned().unwrap_or(Value::Null),
+                "cleanup_strategy": entry.get("cleanup_strategy").cloned().unwrap_or(Value::Null),
                 "active_node_count": entry.get("active_node_count").cloned().unwrap_or(Value::Null),
                 "total_node_count": entry.get("total_node_count").cloned().unwrap_or(Value::Null),
             })
@@ -148,7 +161,7 @@ fn build_current_state_inventory_snapshot(
         "capabilities": capabilities,
         "migration_notes": capability_catalog.get("migration_notes").cloned().unwrap_or(Value::Null),
         "feature_rollouts": diagnostics.get("feature_rollouts").cloned().unwrap_or(Value::Null),
-        "execution_backend_preferences": ["automatic", "local_sandbox", "desktop_node", "ssh_tunnel"],
+        "execution_backend_preferences": ["automatic", "local_sandbox", "desktop_node", "networked_worker", "ssh_tunnel"],
         "execution_backends": execution_backends,
         "compat_routes": compat_routes,
         "cli_families": cli_families,

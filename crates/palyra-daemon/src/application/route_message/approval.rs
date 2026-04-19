@@ -10,6 +10,9 @@ use crate::{
             record_approval_requested_journal_event,
         },
         run_stream::tape::append_tool_approval_request_tape_event,
+        tool_security::{
+            approval_execution_context_for_backend_selection, ToolProposalBackendSelection,
+        },
     },
     gateway::{best_effort_mark_approval_error, GatewayRuntimeState, ToolSkillContext},
     journal::ApprovalCreateRequest,
@@ -28,6 +31,7 @@ pub(crate) async fn resolve_route_tool_approval_outcome(
     input_json: &[u8],
     skill_context: Option<&ToolSkillContext>,
     proposal_approval_required: bool,
+    backend_selection: &ToolProposalBackendSelection,
     tape_seq: &mut i64,
 ) -> Result<Option<String>, Status> {
     if !proposal_approval_required {
@@ -39,6 +43,7 @@ pub(crate) async fn resolve_route_tool_approval_outcome(
         skill_context,
         input_json,
         &runtime_state.config.tool_call,
+        approval_execution_context_for_backend_selection(backend_selection).as_ref(),
     );
     runtime_state
         .create_approval_record(ApprovalCreateRequest {

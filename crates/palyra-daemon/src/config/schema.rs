@@ -204,7 +204,10 @@ pub struct FeatureRolloutsConfig {
     pub dynamic_tool_builder: FeatureRolloutSetting,
     pub context_engine: FeatureRolloutSetting,
     pub execution_backend_remote_node: FeatureRolloutSetting,
+    pub execution_backend_networked_worker: FeatureRolloutSetting,
     pub execution_backend_ssh_tunnel: FeatureRolloutSetting,
+    pub safety_boundary: FeatureRolloutSetting,
+    pub execution_gate_pipeline_v2: FeatureRolloutSetting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

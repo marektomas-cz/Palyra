@@ -76,6 +76,14 @@ use crate::application::{
         },
     },
 };
+use crate::application::tool_security::ToolProposalBackendSelection;
+use crate::execution_backends::{
+    ExecutionBackendPreference, ExecutionBackendResolution,
+};
+use palyra_workerd::{
+    WorkerArtifactTransport, WorkerAttestation, WorkerCleanupReport, WorkerLeaseRequest,
+    WorkerWorkspaceScope,
+};
 use crate::media::MediaRuntimeConfig;
 use crate::model_provider::ProviderImageInput;
 use crate::transport::grpc::auth::{
@@ -298,6 +306,52 @@ fn build_test_runtime_state_with_runtime_overrides(
 
 fn build_test_runtime_state(hash_chain_enabled: bool) -> std::sync::Arc<GatewayRuntimeState> {
     build_test_runtime_state_with_http_fetch_private_targets(hash_chain_enabled, false)
+}
+
+fn default_backend_selection() -> ToolProposalBackendSelection {
+    ToolProposalBackendSelection {
+        agent_id: None,
+        requested_preference: ExecutionBackendPreference::Automatic,
+        resolution: ExecutionBackendResolution {
+            requested: ExecutionBackendPreference::Automatic,
+            resolved: ExecutionBackendPreference::LocalSandbox,
+            fallback_used: false,
+            reason_code: "backend.default.local_sandbox".to_owned(),
+            approval_required: false,
+            reason: "automatic backend preference defaults to local_sandbox".to_owned(),
+        },
+    }
+}
+
+fn test_worker_attestation(worker_id: &str) -> WorkerAttestation {
+    let now_unix_ms = super::current_unix_ms();
+    WorkerAttestation {
+        worker_id: worker_id.to_owned(),
+        image_digest_sha256: "img".repeat(16),
+        build_digest_sha256: "bld".repeat(16),
+        artifact_digest_sha256: "art".repeat(16),
+        egress_proxy_attested: true,
+        issued_at_unix_ms: now_unix_ms.saturating_sub(1_000),
+        expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+    }
+}
+
+fn test_worker_lease_request(run_id: &str) -> WorkerLeaseRequest {
+    WorkerLeaseRequest {
+        run_id: run_id.to_owned(),
+        ttl_ms: 30_000,
+        workspace_scope: WorkerWorkspaceScope {
+            workspace_root: "C:/workspace".to_owned(),
+            allowed_paths: vec!["src".to_owned(), "Cargo.toml".to_owned()],
+            read_only: false,
+        },
+        artifact_transport: WorkerArtifactTransport {
+            input_manifest_sha256: "input".repeat(16),
+            output_manifest_sha256: "output".repeat(16),
+            log_stream_id: "logs/run-1".to_owned(),
+            scratch_directory_id: "scratch-run-1".to_owned(),
+        },
+    }
 }
 
 fn upsert_test_orchestrator_session(
@@ -2059,6 +2113,66 @@ fn recent_journal_snapshot_returns_events_for_admin_surface() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn networked_worker_lifecycle_events_are_journaled() {
+    let state = build_test_runtime_state(false);
+    let register = state
+        .register_networked_worker(test_worker_attestation("worker-01"))
+        .await
+        .expect("worker registration should succeed");
+    assert_eq!(register.reason_code, "worker.registered");
+    assert_eq!(state.worker_fleet_snapshot().attested_workers, 1);
+
+    let (lease, assigned) = state
+        .assign_networked_worker_lease("worker-01", test_worker_lease_request("run-worker-01"))
+        .await
+        .expect("worker lease assignment should succeed");
+    assert_eq!(lease.run_id, "run-worker-01");
+    assert_eq!(assigned.reason_code, "worker.assigned");
+
+    let completed = state
+        .complete_networked_worker_lease(
+            "worker-01",
+            WorkerCleanupReport {
+                removed_workspace_scope: true,
+                removed_artifacts: true,
+                removed_logs: true,
+                failure_reason: None,
+            },
+        )
+        .await
+        .expect("worker cleanup should succeed");
+    assert_eq!(completed.reason_code, "worker.completed");
+
+    let snapshot = state
+        .recent_journal_snapshot(100)
+        .await
+        .expect("recent journal snapshot should be returned");
+    let lifecycle_payloads = snapshot
+        .events
+        .iter()
+        .filter_map(|event| serde_json::from_str::<Value>(event.payload_json.as_str()).ok())
+        .filter(|payload| {
+            payload.get("event").and_then(Value::as_str) == Some("networked_worker.lifecycle")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle_payloads.len(),
+        3,
+        "registration, assignment, and cleanup should each emit a lifecycle journal event"
+    );
+    let reason_codes = lifecycle_payloads
+        .iter()
+        .filter_map(|payload| payload.get("reason_code").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        reason_codes.contains(&"worker.registered")
+            && reason_codes.contains(&"worker.assigned")
+            && reason_codes.contains(&"worker.completed"),
+        "worker lifecycle journal payloads should preserve all expected reason codes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn auth_refresh_journal_event_redacts_reason_text() {
     let state = build_test_runtime_state(false);
     let context = RequestContext {
@@ -2322,6 +2436,7 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_pending_record_acros
         .await
         .expect("second run should be started for route approval test");
 
+    let backend_selection = default_backend_selection();
     let mut tape_seq_first = 1_i64;
     let first_resolution = resolve_route_tool_approval_outcome(
         &state,
@@ -2333,6 +2448,7 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_pending_record_acros
         input_json.as_slice(),
         None,
         true,
+        &backend_selection,
         &mut tape_seq_first,
     )
     .await
@@ -2351,6 +2467,7 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_pending_record_acros
         input_json.as_slice(),
         None,
         true,
+        &backend_selection,
         &mut tape_seq_second,
     )
     .await
@@ -2470,6 +2587,7 @@ async fn resolve_route_tool_approval_outcome_does_not_rehydrate_resolved_record_
         })
         .await
         .expect("run should be started for resolved route approval test");
+    let backend_selection = default_backend_selection();
     let mut tape_seq = 1_i64;
     let resolution = resolve_route_tool_approval_outcome(
         &state,
@@ -2481,6 +2599,7 @@ async fn resolve_route_tool_approval_outcome_does_not_rehydrate_resolved_record_
         input_json.as_slice(),
         None,
         true,
+        &backend_selection,
         &mut tape_seq,
     )
     .await
@@ -2570,6 +2689,7 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_once_scope_record() 
         .await
         .expect("run should be started for route approval once test");
 
+    let backend_selection = default_backend_selection();
     let mut tape_seq = 1_i64;
     let resolution = resolve_route_tool_approval_outcome(
         &state,
@@ -2581,6 +2701,7 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_once_scope_record() 
         input_json.as_slice(),
         None,
         true,
+        &backend_selection,
         &mut tape_seq,
     )
     .await

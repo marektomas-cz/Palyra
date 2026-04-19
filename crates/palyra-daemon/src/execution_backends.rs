@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 
 use palyra_common::feature_rollouts::{
-    FeatureRolloutSetting, FeatureRolloutSource, EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV,
-    EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
+    FeatureRolloutSetting, FeatureRolloutSource,
+    EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_ENV,
+    EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV, EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV,
 };
+use palyra_workerd::{WorkerFleetPolicy, WorkerFleetSnapshot};
 use palyra_sandbox::{current_backend_capabilities, current_backend_kind};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +24,7 @@ pub(crate) enum ExecutionBackendPreference {
     Automatic,
     LocalSandbox,
     DesktopNode,
+    NetworkedWorker,
     SshTunnel,
 }
 
@@ -32,6 +35,7 @@ impl ExecutionBackendPreference {
             Self::Automatic => "automatic",
             Self::LocalSandbox => "local_sandbox",
             Self::DesktopNode => "desktop_node",
+            Self::NetworkedWorker => "networked_worker",
             Self::SshTunnel => "ssh_tunnel",
         }
     }
@@ -42,6 +46,7 @@ impl ExecutionBackendPreference {
             Self::Automatic => "Automatic",
             Self::LocalSandbox => "Local sandbox",
             Self::DesktopNode => "Desktop node",
+            Self::NetworkedWorker => "Networked worker",
             Self::SshTunnel => "SSH tunnel",
         }
     }
@@ -57,6 +62,9 @@ impl ExecutionBackendPreference {
             }
             Self::DesktopNode => {
                 "Hand work off to a paired first-party desktop node when a healthy node is available."
+            }
+            Self::NetworkedWorker => {
+                "Run work on an attested ephemeral worker with proxy-mediated egress and scoped artifact transport."
             }
             Self::SshTunnel => {
                 "Use an operator-established SSH tunnel for remote control-plane access and remote operator workflows."
@@ -99,6 +107,11 @@ pub(crate) struct ExecutionBackendInventoryRecord {
     pub(crate) rollout_enabled: bool,
     pub(crate) capabilities: Vec<String>,
     pub(crate) tradeoffs: Vec<String>,
+    pub(crate) requires_attestation: bool,
+    pub(crate) requires_egress_proxy: bool,
+    pub(crate) workspace_scope_mode: String,
+    pub(crate) artifact_transport: String,
+    pub(crate) cleanup_strategy: String,
     pub(crate) active_node_count: usize,
     pub(crate) total_node_count: usize,
 }
@@ -108,6 +121,8 @@ pub(crate) struct ExecutionBackendResolution {
     pub(crate) requested: ExecutionBackendPreference,
     pub(crate) resolved: ExecutionBackendPreference,
     pub(crate) fallback_used: bool,
+    pub(crate) reason_code: String,
+    pub(crate) approval_required: bool,
     pub(crate) reason: String,
 }
 
@@ -120,10 +135,13 @@ pub(crate) fn parse_execution_backend_preference(
         "" | "automatic" | "auto" => ExecutionBackendPreference::Automatic,
         "local_sandbox" | "local" | "sandbox" => ExecutionBackendPreference::LocalSandbox,
         "desktop_node" | "node" | "remote_node" => ExecutionBackendPreference::DesktopNode,
+        "networked_worker" | "networked" | "worker" | "remote_worker" => {
+            ExecutionBackendPreference::NetworkedWorker
+        }
         "ssh_tunnel" | "ssh" | "tunnel" => ExecutionBackendPreference::SshTunnel,
         _ => {
             return Err(format!(
-                "{field_name} must be one of automatic, local_sandbox, desktop_node, ssh_tunnel"
+                "{field_name} must be one of automatic, local_sandbox, desktop_node, networked_worker, ssh_tunnel"
             ));
         }
     };
@@ -137,12 +155,32 @@ pub(crate) fn parse_optional_execution_backend_preference(
     raw.map(|value| parse_execution_backend_preference(value, field_name)).transpose()
 }
 
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn build_execution_backend_inventory(
     policy: &SandboxProcessRunnerPolicy,
     nodes: &[RegisteredNodeRecord],
     now_unix_ms: i64,
     feature_rollouts: &FeatureRolloutsConfig,
+) -> Vec<ExecutionBackendInventoryRecord> {
+    build_execution_backend_inventory_with_worker_state(
+        policy,
+        nodes,
+        now_unix_ms,
+        feature_rollouts,
+        WorkerFleetSnapshot::default(),
+        &WorkerFleetPolicy::default(),
+    )
+}
+
+#[must_use]
+pub(crate) fn build_execution_backend_inventory_with_worker_state(
+    policy: &SandboxProcessRunnerPolicy,
+    nodes: &[RegisteredNodeRecord],
+    now_unix_ms: i64,
+    feature_rollouts: &FeatureRolloutsConfig,
+    worker_snapshot: WorkerFleetSnapshot,
+    worker_policy: &WorkerFleetPolicy,
 ) -> Vec<ExecutionBackendInventoryRecord> {
     let healthy_nodes = nodes
         .iter()
@@ -155,7 +193,10 @@ pub(crate) fn build_execution_backend_inventory(
         nodes.len(),
         healthy_nodes.as_slice(),
         feature_rollouts.execution_backend_remote_node,
+        feature_rollouts.execution_backend_networked_worker,
         feature_rollouts.execution_backend_ssh_tunnel,
+        worker_snapshot,
+        worker_policy,
     )
 }
 
@@ -164,11 +205,15 @@ fn build_execution_backend_inventory_with_rollout(
     total_nodes: usize,
     healthy_nodes: &[&RegisteredNodeRecord],
     remote_node_rollout: FeatureRolloutSetting,
+    networked_worker_rollout: FeatureRolloutSetting,
     ssh_tunnel_rollout: FeatureRolloutSetting,
+    worker_snapshot: WorkerFleetSnapshot,
+    worker_policy: &WorkerFleetPolicy,
 ) -> Vec<ExecutionBackendInventoryRecord> {
     vec![
         local_sandbox_inventory_record(policy),
         desktop_node_inventory_record(total_nodes, healthy_nodes, remote_node_rollout),
+        networked_worker_inventory_record(networked_worker_rollout, worker_snapshot, worker_policy),
         ssh_tunnel_inventory_record(ssh_tunnel_rollout),
     ]
 }
@@ -209,6 +254,8 @@ pub(crate) fn resolve_execution_backend(
                 requested: preference,
                 resolved: ExecutionBackendPreference::LocalSandbox,
                 fallback_used: false,
+                reason_code: "backend.default.local_sandbox".to_owned(),
+                approval_required: false,
                 reason: if record.selectable {
                     "Automatic keeps execution on the daemon host until an operator explicitly opts into a preview backend."
                         .to_owned()
@@ -224,6 +271,8 @@ pub(crate) fn resolve_execution_backend(
             requested: preference,
             resolved: ExecutionBackendPreference::Automatic,
             fallback_used: false,
+            reason_code: "backend.inventory.missing".to_owned(),
+            approval_required: false,
             reason: "No execution backend inventory is available.".to_owned(),
         };
     }
@@ -234,6 +283,8 @@ pub(crate) fn resolve_execution_backend(
                 requested: preference,
                 resolved: preference,
                 fallback_used: false,
+                reason_code: format!("backend.available.{}", preference.as_str()),
+                approval_required: !matches!(preference, ExecutionBackendPreference::LocalSandbox),
                 reason: record.operator_summary.clone(),
             };
         }
@@ -244,6 +295,8 @@ pub(crate) fn resolve_execution_backend(
             requested: preference,
             resolved: ExecutionBackendPreference::LocalSandbox,
             fallback_used: true,
+            reason_code: format!("backend.fallback.{}", preference.as_str()),
+            approval_required: false,
             reason: format!(
                 "Requested backend '{}' is not selectable right now; falling back to local_sandbox. {}",
                 preference.as_str(),
@@ -260,6 +313,8 @@ pub(crate) fn resolve_execution_backend(
             requested: preference,
             resolved,
             fallback_used: true,
+            reason_code: format!("backend.fallback.{}", record.backend_id),
+            approval_required: !matches!(resolved, ExecutionBackendPreference::LocalSandbox),
             reason: format!(
                 "Requested backend '{}' is not selectable; falling back to '{}'. {}",
                 preference.as_str(),
@@ -273,6 +328,8 @@ pub(crate) fn resolve_execution_backend(
         requested: preference,
         resolved: preference,
         fallback_used: false,
+        reason_code: format!("backend.unavailable.{}", preference.as_str()),
+        approval_required: !matches!(preference, ExecutionBackendPreference::LocalSandbox),
         reason: format!(
             "Requested backend '{}' is currently unavailable and no fallback backend is selectable.",
             preference.as_str()
@@ -334,6 +391,11 @@ fn local_sandbox_inventory_record(
             "Most conservative default posture".to_owned(),
             "Cannot satisfy first-party desktop-native capability requests by itself".to_owned(),
         ],
+        requires_attestation: false,
+        requires_egress_proxy: false,
+        workspace_scope_mode: "daemon_workspace_root".to_owned(),
+        artifact_transport: "direct_local_filesystem".to_owned(),
+        cleanup_strategy: "process_exit_and_workspace_scope_validation".to_owned(),
         active_node_count: 0,
         total_node_count: 0,
     }
@@ -396,8 +458,86 @@ fn desktop_node_inventory_record(
             "Supports first-party desktop capabilities and local mediation flows".to_owned(),
             "Depends on node heartbeat, pairing trust, and explicit rollout opt-in".to_owned(),
         ],
+        requires_attestation: true,
+        requires_egress_proxy: false,
+        workspace_scope_mode: "paired_node_workspace_contract".to_owned(),
+        artifact_transport: "node_rpc_transfer".to_owned(),
+        cleanup_strategy: "node_disconnect_or_run_completion_cleanup".to_owned(),
         active_node_count: healthy_nodes.len(),
         total_node_count: total_nodes,
+    }
+}
+
+fn networked_worker_inventory_record(
+    rollout: FeatureRolloutSetting,
+    worker_snapshot: WorkerFleetSnapshot,
+    worker_policy: &WorkerFleetPolicy,
+) -> ExecutionBackendInventoryRecord {
+    let (state, selectable, operator_summary) = if !rollout.enabled {
+        (
+            ExecutionBackendState::Disabled,
+            false,
+            format!(
+                "Preview backend is disabled. Set {}=1 before attested worker registration can advertise networked execution.",
+                EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_ENV
+            ),
+        )
+    } else if worker_snapshot.attested_workers > 0 {
+        (
+            ExecutionBackendState::Available,
+            true,
+            format!(
+                "{} attested worker(s) are registered with proxy-bound egress and ephemeral lease support.",
+                worker_snapshot.attested_workers
+            ),
+        )
+    } else if worker_snapshot.registered_workers > 0 {
+        (
+            ExecutionBackendState::Degraded,
+            false,
+            format!(
+                "{} worker(s) registered, but none passed attestation requirements for execution.",
+                worker_snapshot.registered_workers
+            ),
+        )
+    } else {
+        (
+            ExecutionBackendState::Degraded,
+            false,
+            "Preview backend is enabled, but no attested worker has registered yet.".to_owned(),
+        )
+    };
+    ExecutionBackendInventoryRecord {
+        backend_id: ExecutionBackendPreference::NetworkedWorker.as_str().to_owned(),
+        label: ExecutionBackendPreference::NetworkedWorker.label().to_owned(),
+        state,
+        selectable,
+        selected_by_default: false,
+        description: ExecutionBackendPreference::NetworkedWorker.description().to_owned(),
+        operator_summary,
+        executor_label: Some("networked_worker".to_owned()),
+        rollout_flag: Some(EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_ENV.to_owned()),
+        rollout_source: Some(rollout.source),
+        rollout_enabled: rollout.enabled,
+        capabilities: vec![
+            "attested_remote_execution".to_owned(),
+            "proxy_mediated_egress".to_owned(),
+            "scoped_artifact_transport".to_owned(),
+        ],
+        tradeoffs: vec![
+            "Requires explicit worker attestation plus cleanup verification before use".to_owned(),
+            format!(
+                "Worker leases stay ephemeral with ttl<={}ms and fail closed on cleanup gaps",
+                worker_policy.max_ttl_ms
+            ),
+        ],
+        requires_attestation: true,
+        requires_egress_proxy: worker_policy.attestation.require_egress_proxy,
+        workspace_scope_mode: "ephemeral_scoped_mount".to_owned(),
+        artifact_transport: "manifest_attested_bundle_transfer".to_owned(),
+        cleanup_strategy: "lease_ttl_reap_with_fail_closed_cleanup".to_owned(),
+        active_node_count: worker_snapshot.attested_workers,
+        total_node_count: worker_snapshot.registered_workers,
     }
 }
 
@@ -435,6 +575,11 @@ fn ssh_tunnel_inventory_record(rollout: FeatureRolloutSetting) -> ExecutionBacke
             "Requires manual tunnel setup and does not replace sandbox or node trust boundaries"
                 .to_owned(),
         ],
+        requires_attestation: false,
+        requires_egress_proxy: false,
+        workspace_scope_mode: "operator_managed_remote_scope".to_owned(),
+        artifact_transport: "out_of_band_operator_tunnel".to_owned(),
+        cleanup_strategy: "operator_managed_tunnel_teardown".to_owned(),
         active_node_count: 0,
         total_node_count: 0,
     }
@@ -460,6 +605,7 @@ mod tests {
     use std::path::PathBuf;
 
     use palyra_common::feature_rollouts::FeatureRolloutSource;
+    use palyra_workerd::{WorkerFleetPolicy, WorkerFleetSnapshot};
 
     use crate::sandbox_runner::{
         EgressEnforcementMode, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
@@ -495,6 +641,9 @@ mod tests {
             &[],
             FeatureRolloutSetting::default(),
             FeatureRolloutSetting::default(),
+            FeatureRolloutSetting::default(),
+            WorkerFleetSnapshot::default(),
+            &WorkerFleetPolicy::default(),
         );
         let resolution =
             resolve_execution_backend(ExecutionBackendPreference::Automatic, &inventory);
@@ -510,6 +659,9 @@ mod tests {
             &[],
             FeatureRolloutSetting::default(),
             FeatureRolloutSetting::default(),
+            FeatureRolloutSetting::default(),
+            WorkerFleetSnapshot::default(),
+            &WorkerFleetPolicy::default(),
         );
         let error = validate_execution_backend_selection(
             ExecutionBackendPreference::DesktopNode,
@@ -526,7 +678,10 @@ mod tests {
             0,
             &[],
             FeatureRolloutSetting::default(),
+            FeatureRolloutSetting::default(),
             FeatureRolloutSetting::from_config(true),
+            WorkerFleetSnapshot::default(),
+            &WorkerFleetPolicy::default(),
         );
         let resolution =
             resolve_execution_backend(ExecutionBackendPreference::DesktopNode, &inventory);
@@ -542,6 +697,9 @@ mod tests {
             &[],
             FeatureRolloutSetting::from_config(true),
             FeatureRolloutSetting::default(),
+            FeatureRolloutSetting::default(),
+            WorkerFleetSnapshot::default(),
+            &WorkerFleetPolicy::default(),
         );
         let desktop_node = inventory
             .iter()
@@ -551,5 +709,32 @@ mod tests {
         assert!(desktop_node.rollout_enabled);
         assert_eq!(desktop_node.rollout_source, Some(FeatureRolloutSource::Config));
         assert!(!desktop_node.selectable);
+    }
+
+    #[test]
+    fn networked_worker_inventory_is_available_only_with_attested_workers() {
+        let inventory = build_execution_backend_inventory_with_rollout(
+            &test_policy(),
+            0,
+            &[],
+            FeatureRolloutSetting::default(),
+            FeatureRolloutSetting::from_config(true),
+            FeatureRolloutSetting::default(),
+            WorkerFleetSnapshot {
+                registered_workers: 1,
+                attested_workers: 1,
+                active_leases: 0,
+                orphaned_workers: 0,
+            },
+            &WorkerFleetPolicy::default(),
+        );
+        let networked_worker = inventory
+            .iter()
+            .find(|entry| entry.backend_id == ExecutionBackendPreference::NetworkedWorker.as_str())
+            .expect("networked worker backend should exist");
+        assert_eq!(networked_worker.state, ExecutionBackendState::Available);
+        assert!(networked_worker.selectable);
+        assert!(networked_worker.requires_attestation);
+        assert!(networked_worker.requires_egress_proxy);
     }
 }

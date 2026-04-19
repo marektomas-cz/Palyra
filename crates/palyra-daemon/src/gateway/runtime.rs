@@ -54,6 +54,10 @@ use crate::tool_posture::{
 };
 use crate::usage_governance::SmartRoutingRuntimeConfig;
 use palyra_auth::AuthHealthReport;
+use palyra_workerd::{
+    WorkerAttestation, WorkerCleanupReport, WorkerFleetManager, WorkerFleetPolicy,
+    WorkerFleetSnapshot, WorkerLease, WorkerLeaseRequest, WorkerLifecycleEvent,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -366,6 +370,7 @@ pub struct GatewayRuntimeState {
     pub(crate) memory_search_cache: Mutex<HashMap<String, CachedMemorySearchEntry>>,
     pub(crate) http_fetch_cache: Mutex<HashMap<String, CachedHttpFetchEntry>>,
     tool_approval_cache: Mutex<HashMap<String, CachedToolApprovalDecision>>,
+    worker_fleet: RwLock<WorkerFleetManager>,
     pub(crate) provider_leases: ProviderLeaseManager,
     pub(crate) retrieval_backend: Arc<dyn RetrievalBackend>,
     pub(crate) tool_posture_registry: ToolPostureRegistry,
@@ -1138,6 +1143,7 @@ impl GatewayRuntimeState {
             memory_search_cache: Mutex::new(HashMap::new()),
             http_fetch_cache: Mutex::new(HashMap::new()),
             tool_approval_cache: Mutex::new(HashMap::new()),
+            worker_fleet: RwLock::new(WorkerFleetManager::default()),
             provider_leases: ProviderLeaseManager::default(),
             retrieval_backend,
             tool_posture_registry,
@@ -5461,6 +5467,167 @@ impl GatewayRuntimeState {
         decision_scope_ttl_ms: Option<i64>,
     ) -> PairingApprovalOutcome {
         self.channel_router.apply_pairing_approval(approval_id, approved, decision_scope_ttl_ms)
+    }
+
+    #[must_use]
+    pub fn worker_fleet_policy(&self) -> WorkerFleetPolicy {
+        WorkerFleetPolicy::default()
+    }
+
+    #[must_use]
+    pub fn worker_fleet_snapshot(&self) -> WorkerFleetSnapshot {
+        match self.worker_fleet.read() {
+            Ok(manager) => manager.snapshot(),
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while reading snapshot");
+                poisoned.into_inner().snapshot()
+            }
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn register_networked_worker(
+        self: &Arc<Self>,
+        attestation: WorkerAttestation,
+    ) -> Result<WorkerLifecycleEvent, Status> {
+        let policy = self.worker_fleet_policy();
+        let now_unix_ms = current_unix_ms();
+        let event = match self.worker_fleet.write() {
+            Ok(mut manager) => manager
+                .register_worker(attestation, &policy, now_unix_ms)
+                .map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "networked worker registration failed: {error}"
+                    ))
+                })?,
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while registering worker");
+                poisoned
+                    .into_inner()
+                    .register_worker(attestation, &policy, now_unix_ms)
+                    .map_err(|error| {
+                        Status::failed_precondition(format!(
+                            "networked worker registration failed: {error}"
+                        ))
+                    })?
+            }
+        };
+        self.record_networked_worker_lifecycle_event(&event).await?;
+        Ok(event)
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn assign_networked_worker_lease(
+        self: &Arc<Self>,
+        worker_id: &str,
+        request: WorkerLeaseRequest,
+    ) -> Result<(WorkerLease, WorkerLifecycleEvent), Status> {
+        let policy = self.worker_fleet_policy();
+        let now_unix_ms = current_unix_ms();
+        let assign_work = |manager: &mut WorkerFleetManager| {
+            manager
+                .assign_work(worker_id, request.clone(), &policy, now_unix_ms)
+                .map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "networked worker lease assignment failed: {error}"
+                    ))
+                })
+        };
+        let (lease, event) = match self.worker_fleet.write() {
+            Ok(mut manager) => assign_work(&mut manager)?,
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while assigning lease");
+                let mut manager = poisoned.into_inner();
+                assign_work(&mut manager)?
+            }
+        };
+        self.record_networked_worker_lifecycle_event(&event).await?;
+        Ok((lease, event))
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn complete_networked_worker_lease(
+        self: &Arc<Self>,
+        worker_id: &str,
+        cleanup_report: WorkerCleanupReport,
+    ) -> Result<WorkerLifecycleEvent, Status> {
+        let now_unix_ms = current_unix_ms();
+        let event = match self.worker_fleet.write() {
+            Ok(mut manager) => manager
+                .complete_work(worker_id, &cleanup_report, now_unix_ms)
+                .map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "networked worker cleanup failed: {error}"
+                    ))
+                })?,
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while completing worker lease");
+                poisoned
+                    .into_inner()
+                    .complete_work(worker_id, &cleanup_report, now_unix_ms)
+                    .map_err(|error| {
+                        Status::failed_precondition(format!(
+                            "networked worker cleanup failed: {error}"
+                        ))
+                    })?
+            }
+        };
+        self.record_networked_worker_lifecycle_event(&event).await?;
+        Ok(event)
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn reap_expired_networked_workers(
+        self: &Arc<Self>,
+    ) -> Result<Vec<WorkerLifecycleEvent>, Status> {
+        let now_unix_ms = current_unix_ms();
+        let events = match self.worker_fleet.write() {
+            Ok(mut manager) => manager.reap_expired_workers(now_unix_ms),
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while reaping expired workers");
+                poisoned.into_inner().reap_expired_workers(now_unix_ms)
+            }
+        };
+        for event in &events {
+            self.record_networked_worker_lifecycle_event(event).await?;
+        }
+        Ok(events)
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    async fn record_networked_worker_lifecycle_event(
+        self: &Arc<Self>,
+        event: &WorkerLifecycleEvent,
+    ) -> Result<(), Status> {
+        let session_id = event.run_id.clone().unwrap_or_else(|| Ulid::new().to_string());
+        let run_id = event.run_id.clone().unwrap_or_else(|| session_id.clone());
+        self.record_journal_event(JournalAppendRequest {
+            event_id: Ulid::new().to_string(),
+            session_id,
+            run_id,
+            kind: common_v1::journal_event::EventKind::ToolExecuted as i32,
+            actor: common_v1::journal_event::EventActor::System as i32,
+            timestamp_unix_ms: current_unix_ms(),
+            payload_json: serde_json::json!({
+                "event": "networked_worker.lifecycle",
+                "worker_id": event.worker_id.as_str(),
+                "run_id": &event.run_id,
+                "state": &event.state,
+                "reason_code": event.reason_code.as_str(),
+            })
+            .to_string()
+            .into_bytes(),
+            principal: "system:networked-worker".to_owned(),
+            device_id: "networked-worker".to_owned(),
+            channel: Some("system".to_owned()),
+        })
+        .await?;
+        Ok(())
     }
 
     pub fn clear_memory_search_cache(&self) {

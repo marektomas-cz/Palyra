@@ -6,15 +6,25 @@ pub const DYNAMIC_TOOL_BUILDER_ROLLOUT_ENV: &str = "PALYRA_EXPERIMENTAL_DYNAMIC_
 pub const CONTEXT_ENGINE_ROLLOUT_ENV: &str = "PALYRA_EXPERIMENTAL_CONTEXT_ENGINE";
 pub const EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_ENV: &str =
     "PALYRA_EXPERIMENTAL_EXECUTION_BACKEND_REMOTE_NODE";
+pub const EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_ENV: &str =
+    "PALYRA_EXPERIMENTAL_EXECUTION_BACKEND_NETWORKED_WORKER";
 pub const EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_ENV: &str =
     "PALYRA_EXPERIMENTAL_EXECUTION_BACKEND_SSH_TUNNEL";
+pub const SAFETY_BOUNDARY_ROLLOUT_ENV: &str = "PALYRA_EXPERIMENTAL_SAFETY_BOUNDARY";
+pub const EXECUTION_GATE_PIPELINE_V2_ROLLOUT_ENV: &str =
+    "PALYRA_EXPERIMENTAL_EXECUTION_GATE_PIPELINE_V2";
 
 pub const DYNAMIC_TOOL_BUILDER_ROLLOUT_CONFIG_PATH: &str = "feature_rollouts.dynamic_tool_builder";
 pub const CONTEXT_ENGINE_ROLLOUT_CONFIG_PATH: &str = "feature_rollouts.context_engine";
 pub const EXECUTION_BACKEND_REMOTE_NODE_ROLLOUT_CONFIG_PATH: &str =
     "feature_rollouts.execution_backend_remote_node";
+pub const EXECUTION_BACKEND_NETWORKED_WORKER_ROLLOUT_CONFIG_PATH: &str =
+    "feature_rollouts.execution_backend_networked_worker";
 pub const EXECUTION_BACKEND_SSH_TUNNEL_ROLLOUT_CONFIG_PATH: &str =
     "feature_rollouts.execution_backend_ssh_tunnel";
+pub const SAFETY_BOUNDARY_ROLLOUT_CONFIG_PATH: &str = "feature_rollouts.safety_boundary";
+pub const EXECUTION_GATE_PIPELINE_V2_ROLLOUT_CONFIG_PATH: &str =
+    "feature_rollouts.execution_gate_pipeline_v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
