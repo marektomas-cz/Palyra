@@ -16,10 +16,11 @@ use crate::{
         record_approval_requested_journal_event, record_approval_resolved_journal_event,
         resolve_cached_tool_approval_for_proposal,
     },
+    application::execution_gate::ToolProposalApprovalState,
     application::tool_security::{
         approval_execution_context_for_backend_selection, evaluate_tool_proposal_security,
         record_tool_proposal_decision_audit_trail, resolve_tool_proposal_decision_for_context,
-        ToolProposalBackendSelection, ToolProposalSecurityEvaluation,
+        ResolvedToolProposalDecision, ToolProposalBackendSelection, ToolProposalSecurityEvaluation,
     },
     gateway::{
         await_tool_approval_response, best_effort_mark_approval_error,
@@ -170,20 +171,25 @@ async fn prepare_run_stream_tool_proposal_execution(
         tape_seq,
     )
     .await?;
-    let decision = resolve_tool_proposal_decision_for_context(
-        runtime_state,
-        request_context,
-        request_context.channel.as_deref(),
-        session_id,
-        run_id,
-        tool_name,
-        skill_context.as_ref(),
-        remaining_tool_budget,
-        skill_gate_decision,
-        &effective_posture,
-        &backend_selection,
-        approval_outcome.as_ref(),
-    );
+    let ResolvedToolProposalDecision { decision, gate_report } =
+        resolve_tool_proposal_decision_for_context(
+            runtime_state,
+            request_context,
+            request_context.channel.as_deref(),
+            session_id,
+            run_id,
+            tool_name,
+            skill_context.as_ref(),
+            remaining_tool_budget,
+            skill_gate_decision,
+            proposal_approval_required,
+            &effective_posture,
+            &backend_selection,
+            ToolProposalApprovalState {
+                outcome: approval_outcome.as_ref(),
+                pending_approval_id: None,
+            },
+        );
     send_tool_decision_with_tape(
         sender,
         runtime_state,
@@ -206,6 +212,7 @@ async fn prepare_run_stream_tool_proposal_execution(
         tool_name,
         skill_context.as_ref(),
         &decision,
+        gate_report.as_ref(),
     )
     .await?;
     Ok(RunStreamToolProposalPreparation {

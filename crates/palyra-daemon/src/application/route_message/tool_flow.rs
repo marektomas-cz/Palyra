@@ -5,11 +5,13 @@ use tonic::Status;
 
 use crate::{
     application::{
+        execution_gate::ToolProposalApprovalState,
         route_message::approval::resolve_route_tool_approval_outcome,
         run_stream::tape::{append_tool_decision_tape_event, append_tool_proposal_tape_event},
         tool_security::{
             evaluate_tool_proposal_security, record_tool_proposal_decision_audit_trail,
-            resolve_tool_proposal_decision_for_context, ToolProposalSecurityEvaluation,
+            resolve_tool_proposal_decision_for_context, ResolvedToolProposalDecision,
+            ToolProposalSecurityEvaluation,
         },
     },
     gateway::{
@@ -77,25 +79,25 @@ pub(crate) async fn process_route_tool_proposal_event(
     )
     .await?;
 
-    let mut decision = resolve_tool_proposal_decision_for_context(
-        runtime_state,
-        route_request_context,
-        route_request_context.channel.as_deref(),
-        session_id,
-        run_id,
-        tool_name,
-        skill_context.as_ref(),
-        remaining_tool_budget,
-        skill_gate_decision,
-        &effective_posture,
-        &backend_selection,
-        None,
-    );
-    if let Some(approval_id) = pending_approval_id {
-        if !decision.allowed && decision.approval_required {
-            decision.reason = format!("approval required (pending approval_id={approval_id})");
-        }
-    }
+    let ResolvedToolProposalDecision { decision, gate_report } =
+        resolve_tool_proposal_decision_for_context(
+            runtime_state,
+            route_request_context,
+            route_request_context.channel.as_deref(),
+            session_id,
+            run_id,
+            tool_name,
+            skill_context.as_ref(),
+            remaining_tool_budget,
+            skill_gate_decision,
+            proposal_approval_required,
+            &effective_posture,
+            &backend_selection,
+            ToolProposalApprovalState {
+                outcome: None,
+                pending_approval_id: pending_approval_id.as_deref(),
+            },
+        );
     append_tool_decision_tape_event(
         runtime_state,
         run_id,
@@ -118,6 +120,7 @@ pub(crate) async fn process_route_tool_proposal_event(
         tool_name,
         skill_context.as_ref(),
         &decision,
+        gate_report.as_ref(),
     )
     .await?;
 

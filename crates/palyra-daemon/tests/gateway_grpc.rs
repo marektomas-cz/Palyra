@@ -4390,6 +4390,113 @@ async fn grpc_run_stream_uses_openai_compatible_provider_when_configured() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_route_message_pending_approval_records_execution_gate_report_when_rollout_enabled(
+) -> Result<()> {
+    let response_body = openai_tool_call_response(
+        "palyra.process.run",
+        &serde_json::json!({
+            "command": "echo",
+            "args": ["route-pending-approval"],
+        }),
+    )?;
+    let (openai_base_url, _request_count, server_handle) =
+        spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(200, response_body)])?;
+    let (child, admin_port, grpc_port, journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy_and_execution_gate_rollout(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+            "palyra.process.run",
+            2,
+            750,
+            true,
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+    let mut create_route_agent = tonic::Request::new(gateway_v1::CreateAgentRequest {
+        v: 1,
+        agent_id: "route".to_owned(),
+        display_name: "Route".to_owned(),
+        agent_dir: String::new(),
+        workspace_roots: vec!["workspace".to_owned()],
+        default_model_profile: "gpt-4o-mini".to_owned(),
+        execution_backend_preference: String::new(),
+        default_tool_allowlist: vec!["palyra.process.run".to_owned()],
+        default_skill_allowlist: vec!["acme.route".to_owned()],
+        set_default: true,
+        allow_absolute_paths: false,
+    });
+    authorize_metadata_with_principal(create_route_agent.metadata_mut(), "admin:ops")?;
+    client
+        .create_agent(create_route_agent)
+        .await
+        .context("failed to create route agent before pending-approval execution gate test")?;
+
+    let adapter = FakeChannelAdapter::default();
+    let mut response = adapter
+        .inject_message_with_envelope_id(
+            &mut client,
+            "hey @palyra run process command now",
+            false,
+            false,
+            ENVELOPE_ID,
+        )
+        .await?;
+    assert!(
+        response.accepted,
+        "route should accept message and return denied tool summary (reason={})",
+        response.decision_reason
+    );
+    let route_run_id =
+        response.run_id.take().map(|id| id.ulid).context("route response missing run_id")?;
+    let outbound = response
+        .outputs
+        .first()
+        .cloned()
+        .context("route response should include outbound payload")?;
+    assert!(
+        outbound.text.to_ascii_lowercase().contains("approval required"),
+        "route output should reflect the pending approval gate"
+    );
+
+    let policy_events = load_policy_decision_journal_events(&journal_db_path)?;
+    let event = policy_events
+        .iter()
+        .find(|payload| {
+            payload.get("_run_id").and_then(Value::as_str) == Some(route_run_id.as_str())
+                && payload.get("event").and_then(Value::as_str) == Some("policy_decision")
+                && payload.get("tool_name").and_then(Value::as_str) == Some("palyra.process.run")
+        })
+        .context("pending-approval route run should persist a policy decision journal event")?;
+    assert_eq!(
+        event.pointer("/execution_gate/final_reason_code").and_then(Value::as_str),
+        Some("approval.pending"),
+        "execution gate rollout should persist the pending approval reason code"
+    );
+    assert!(
+        event.pointer("/execution_gate/steps").and_then(Value::as_array).is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step.get("gate_id").and_then(Value::as_str) == Some("approval")
+                    && step.get("reason_code").and_then(Value::as_str) == Some("approval.pending")
+            }) && steps.iter().any(|step| {
+                step.get("gate_id").and_then(Value::as_str) == Some("audit.finalization")
+                    && step.get("reason_code").and_then(Value::as_str)
+                        == Some("audit.legacy_mismatch")
+            })
+        }),
+        "execution gate report should capture both approval.pending and the legacy comparison"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_run_stream_executes_allowlisted_tool_and_emits_attestation() -> Result<()> {
     let (openai_base_url, _request_count, server_handle) =
         spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(
@@ -4468,6 +4575,81 @@ async fn grpc_run_stream_executes_allowlisted_tool_and_emits_attestation() -> Re
     assert_eq!(
         run_snapshot.get("state").and_then(Value::as_str).context("run snapshot missing state")?,
         "done"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_run_stream_policy_decision_journal_includes_execution_gate_report_when_rollout_enabled(
+) -> Result<()> {
+    let response_body =
+        openai_tool_call_response("palyra.echo", &serde_json::json!({ "text": "hello tool" }))?;
+    let (openai_base_url, _request_count, server_handle) =
+        spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(200, response_body)])?;
+    let (child, admin_port, grpc_port, journal_db_path) =
+        spawn_palyrad_with_openai_provider_and_tool_policy_with_execution_gate_rollout(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+            "palyra.echo",
+            2,
+            250,
+            true,
+        )?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let mut stream_request =
+        tonic::Request::new(tokio_stream::iter(vec![sample_run_stream_request_with_text(
+            "trigger tool call".to_owned(),
+        )]));
+    stream_request.metadata_mut().insert("authorization", format!("Bearer {ADMIN_TOKEN}").parse()?);
+    stream_request.metadata_mut().insert("x-palyra-principal", "user:ops".parse()?);
+    stream_request.metadata_mut().insert("x-palyra-device-id", DEVICE_ID.parse()?);
+    stream_request.metadata_mut().insert("x-palyra-channel", "cli".parse()?);
+
+    let mut response_stream =
+        client.run_stream(stream_request).await.context("failed to call RunStream")?.into_inner();
+
+    while let Some(event) = response_stream.next().await {
+        let _ =
+            event.context("failed to read RunStream event during execution gate rollout test")?;
+    }
+
+    let policy_events = load_policy_decision_journal_events(&journal_db_path)?;
+    let event = policy_events
+        .iter()
+        .find(|payload| {
+            payload.get("_run_id").and_then(Value::as_str) == Some(RUN_ID)
+                && payload.get("event").and_then(Value::as_str) == Some("policy_decision")
+                && payload.get("tool_name").and_then(Value::as_str) == Some("palyra.echo")
+                && payload.get("kind").and_then(Value::as_str) == Some("allow")
+        })
+        .context(
+            "run-stream execution gate rollout should persist an allow policy journal event",
+        )?;
+    assert_eq!(
+        event.pointer("/execution_gate/final_reason_code").and_then(Value::as_str),
+        Some("policy.allowed"),
+        "execution gate rollout should preserve the allow-path reason code"
+    );
+    assert!(
+        event.pointer("/execution_gate/steps").and_then(Value::as_array).is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step.get("gate_id").and_then(Value::as_str) == Some("policy")
+                    && step.get("reason_code").and_then(Value::as_str) == Some("policy.allowed")
+            }) && steps.iter().any(|step| {
+                step.get("gate_id").and_then(Value::as_str) == Some("audit.finalization")
+                    && step.get("reason_code").and_then(Value::as_str) == Some("audit.finalized")
+            })
+        }),
+        "execution gate report should capture both the policy allow step and the legacy match"
     );
 
     server_handle.join().expect("scripted openai server thread should exit");
@@ -8534,6 +8716,24 @@ fn spawn_palyrad_with_openai_provider_and_tool_policy(
     max_calls_per_run: u32,
     execution_timeout_ms: u64,
 ) -> Result<(Child, u16, u16, PathBuf)> {
+    spawn_palyrad_with_openai_provider_and_tool_policy_with_execution_gate_rollout(
+        openai_base_url,
+        openai_api_key,
+        allowed_tools,
+        max_calls_per_run,
+        execution_timeout_ms,
+        false,
+    )
+}
+
+fn spawn_palyrad_with_openai_provider_and_tool_policy_with_execution_gate_rollout(
+    openai_base_url: &str,
+    openai_api_key: &str,
+    allowed_tools: &str,
+    max_calls_per_run: u32,
+    execution_timeout_ms: u64,
+    execution_gate_rollout_enabled: bool,
+) -> Result<(Child, u16, u16, PathBuf)> {
     let config_path = write_base_daemon_config()?;
     let journal_db_path = unique_temp_journal_db_path();
     let identity_store_dir = unique_temp_identity_store_dir();
@@ -8573,6 +8773,10 @@ fn spawn_palyrad_with_openai_provider_and_tool_policy(
         .env("PALYRA_TOOL_CALL_ALLOWED_TOOLS", allowed_tools)
         .env("PALYRA_TOOL_CALL_MAX_CALLS_PER_RUN", max_calls_per_run.to_string())
         .env("PALYRA_TOOL_CALL_TIMEOUT_MS", execution_timeout_ms.to_string())
+        .env(
+            "PALYRA_EXPERIMENTAL_EXECUTION_GATE_PIPELINE_V2",
+            if execution_gate_rollout_enabled { "true" } else { "false" },
+        )
         .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -8638,6 +8842,24 @@ fn spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy(
     max_calls_per_run: u32,
     execution_timeout_ms: u64,
 ) -> Result<(Child, u16, u16, PathBuf, PathBuf)> {
+    spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy_and_execution_gate_rollout(
+        openai_base_url,
+        openai_api_key,
+        allowed_tools,
+        max_calls_per_run,
+        execution_timeout_ms,
+        false,
+    )
+}
+
+fn spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy_and_execution_gate_rollout(
+    openai_base_url: &str,
+    openai_api_key: &str,
+    allowed_tools: &str,
+    max_calls_per_run: u32,
+    execution_timeout_ms: u64,
+    execution_gate_rollout_enabled: bool,
+) -> Result<(Child, u16, u16, PathBuf, PathBuf)> {
     let config_path = write_channel_router_config()?;
     let journal_db_path = unique_temp_journal_db_path();
     let identity_store_dir = unique_temp_identity_store_dir();
@@ -8675,6 +8897,10 @@ fn spawn_palyrad_with_openai_provider_and_channel_router_with_tool_policy(
         .env("PALYRA_TOOL_CALL_ALLOWED_TOOLS", allowed_tools)
         .env("PALYRA_TOOL_CALL_MAX_CALLS_PER_RUN", max_calls_per_run.to_string())
         .env("PALYRA_TOOL_CALL_TIMEOUT_MS", execution_timeout_ms.to_string())
+        .env(
+            "PALYRA_EXPERIMENTAL_EXECUTION_GATE_PIPELINE_V2",
+            if execution_gate_rollout_enabled { "true" } else { "false" },
+        )
         .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

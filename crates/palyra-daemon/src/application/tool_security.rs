@@ -14,6 +14,10 @@ use crate::{
     application::approvals::{
         apply_tool_approval_outcome, build_tool_approval_subject_id, ApprovalExecutionContext,
     },
+    application::execution_gate::{
+        append_audit_finalization_step, evaluate_execution_gate_pipeline,
+        ExecutionGatePipelineInput, ExecutionGateReport, ToolProposalApprovalState,
+    },
     execution_backends::{
         build_execution_backend_inventory_with_worker_state, resolve_execution_backend,
         ExecutionBackendPreference, ExecutionBackendResolution,
@@ -41,6 +45,12 @@ pub(crate) struct ToolProposalSecurityEvaluation {
     pub(crate) proposal_approval_required: bool,
     pub(crate) effective_posture: crate::tool_posture::EffectiveToolPosture,
     pub(crate) backend_selection: ToolProposalBackendSelection,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedToolProposalDecision {
+    pub(crate) decision: ToolDecision,
+    pub(crate) gate_report: Option<ExecutionGateReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,7 +244,7 @@ fn backend_capability_label(capability: ToolCapability) -> &'static str {
     }
 }
 
-fn evaluate_backend_capability_gate(
+pub(crate) fn evaluate_backend_capability_gate(
     tool_name: &str,
     backend_selection: &ToolProposalBackendSelection,
 ) -> Option<ToolDecision> {
@@ -275,7 +285,7 @@ fn evaluate_backend_capability_gate(
     })
 }
 
-fn annotate_tool_decision_with_backend_context(
+pub(crate) fn annotate_tool_decision_with_backend_context(
     mut decision: ToolDecision,
     backend_selection: &ToolProposalBackendSelection,
 ) -> ToolDecision {
@@ -484,10 +494,11 @@ pub(crate) fn resolve_tool_proposal_decision_for_context(
     skill_context: Option<&ToolSkillContext>,
     remaining_tool_budget: &mut u32,
     skill_gate_decision: Option<ToolDecision>,
+    proposal_approval_required: bool,
     effective_posture: &crate::tool_posture::EffectiveToolPosture,
     backend_selection: &ToolProposalBackendSelection,
-    approval_outcome: Option<&ToolApprovalOutcome>,
-) -> ToolDecision {
+    approval_state: ToolProposalApprovalState<'_>,
+) -> ResolvedToolProposalDecision {
     let policy_request_context = build_tool_policy_request_context(
         request_context,
         channel,
@@ -495,18 +506,43 @@ pub(crate) fn resolve_tool_proposal_decision_for_context(
         run_id,
         skill_context,
     );
-    let decision = resolve_tool_proposal_decision(
-        remaining_tool_budget,
+    let mut legacy_budget = *remaining_tool_budget;
+    let legacy_decision = resolve_tool_proposal_decision(
+        &mut legacy_budget,
         &policy_request_context,
         tool_name,
-        skill_gate_decision,
+        skill_gate_decision.clone(),
         effective_posture,
         backend_selection,
-        approval_outcome,
+        approval_state.outcome,
         runtime_state,
     );
+    let rollout_enabled = runtime_state.config.feature_rollouts.execution_gate_pipeline_v2.enabled;
+    let (decision, gate_report, resulting_budget) = if rollout_enabled {
+        let mut pipeline_outcome = evaluate_execution_gate_pipeline(ExecutionGatePipelineInput {
+            tool_call_config: &runtime_state.config.tool_call,
+            request_context: &policy_request_context,
+            tool_name,
+            skill_context,
+            skill_gate_decision,
+            proposal_approval_required,
+            effective_posture,
+            backend_selection,
+            approval_state,
+            remaining_budget: *remaining_tool_budget,
+        });
+        append_audit_finalization_step(&mut pipeline_outcome.report, &legacy_decision);
+        (
+            pipeline_outcome.decision,
+            Some(pipeline_outcome.report),
+            pipeline_outcome.remaining_budget,
+        )
+    } else {
+        (legacy_decision, None, legacy_budget)
+    };
+    *remaining_tool_budget = resulting_budget;
     runtime_state.record_tool_decision(tool_name, decision.allowed);
-    decision
+    ResolvedToolProposalDecision { decision, gate_report }
 }
 
 fn build_tool_policy_request_context(
@@ -536,6 +572,7 @@ pub(crate) async fn record_tool_proposal_decision_audit_trail(
     tool_name: &str,
     skill_context: Option<&ToolSkillContext>,
     decision: &ToolDecision,
+    gate_report: Option<&ExecutionGateReport>,
 ) -> Result<(), Status> {
     record_policy_decision_journal_event(
         runtime_state,
@@ -548,6 +585,7 @@ pub(crate) async fn record_tool_proposal_decision_audit_trail(
         decision.reason.as_str(),
         decision.approval_required,
         decision.policy_enforced,
+        gate_report,
     )
     .await?;
     record_skill_gate_denial_if_needed(
@@ -607,6 +645,7 @@ async fn record_policy_decision_journal_event(
     reason: &str,
     approval_required: bool,
     policy_enforced: bool,
+    gate_report: Option<&ExecutionGateReport>,
 ) -> Result<(), Status> {
     runtime_state
         .record_journal_event(JournalAppendRequest {
@@ -623,6 +662,7 @@ async fn record_policy_decision_journal_event(
                 reason,
                 approval_required,
                 policy_enforced,
+                gate_report,
             ),
             principal: context.principal.clone(),
             device_id: context.device_id.clone(),
@@ -639,8 +679,9 @@ fn tool_decision_journal_payload(
     reason: &str,
     approval_required: bool,
     policy_enforced: bool,
+    gate_report: Option<&ExecutionGateReport>,
 ) -> Vec<u8> {
-    json!({
+    let mut payload = json!({
         "event": "policy_decision",
         "proposal_id": proposal_id,
         "tool_name": tool_name,
@@ -648,9 +689,11 @@ fn tool_decision_journal_payload(
         "reason": reason,
         "approval_required": approval_required,
         "policy_enforced": policy_enforced,
-    })
-    .to_string()
-    .into_bytes()
+    });
+    if let Some(gate_report) = gate_report {
+        payload["execution_gate"] = json!(gate_report);
+    }
+    payload.to_string().into_bytes()
 }
 
 #[allow(clippy::result_large_err)]
