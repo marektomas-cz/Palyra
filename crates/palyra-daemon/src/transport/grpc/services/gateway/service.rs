@@ -27,8 +27,8 @@ use crate::{
     },
     execution_backends::{
         build_execution_backend_inventory_with_worker_state,
-        parse_optional_execution_backend_preference,
-        resolve_execution_backend, validate_execution_backend_selection,
+        parse_optional_execution_backend_preference, resolve_execution_backend,
+        validate_execution_backend_selection,
     },
     gateway::{
         agent_binding_message, agent_message, agent_resolution_source_to_proto, canonical_id,

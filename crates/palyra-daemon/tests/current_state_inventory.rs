@@ -46,13 +46,7 @@ fn current_state_inventory_snapshot_covers_capabilities_cli_and_compat_surface()
         .collect::<Vec<_>>();
     assert_eq!(
         execution_backend_preferences,
-        vec![
-            "automatic",
-            "local_sandbox",
-            "desktop_node",
-            "networked_worker",
-            "ssh_tunnel",
-        ],
+        vec!["automatic", "local_sandbox", "desktop_node", "networked_worker", "ssh_tunnel",],
         "inventory should continue to advertise the current execution backend preference set"
     );
 

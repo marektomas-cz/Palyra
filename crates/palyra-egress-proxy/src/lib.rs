@@ -73,11 +73,10 @@ impl EgressProxyPolicyService {
             return Err(EgressPolicyError::InvalidResponseBudget);
         }
 
-        let url = Url::parse(request.url)
-            .map_err(|error| EgressPolicyError::DnsResolution {
-                host: request.url.to_owned(),
-                message: error.to_string(),
-            })?;
+        let url = Url::parse(request.url).map_err(|error| EgressPolicyError::DnsResolution {
+            host: request.url.to_owned(),
+            message: error.to_string(),
+        })?;
         if !matches!(url.scheme(), "http" | "https") {
             return Err(EgressPolicyError::UnsupportedScheme(url.scheme().to_owned()));
         }
@@ -86,9 +85,7 @@ impl EgressProxyPolicyService {
         }
 
         let host = url.host_str().ok_or(EgressPolicyError::MissingHost)?.to_ascii_lowercase();
-        let port = url
-            .port_or_known_default()
-            .ok_or(EgressPolicyError::MissingPort)?;
+        let port = url.port_or_known_default().ok_or(EgressPolicyError::MissingPort)?;
         validate_host_allowlist(
             host.as_str(),
             request.allowed_hosts,
@@ -217,8 +214,8 @@ mod tests {
     use palyra_common::secret_refs::SecretRef;
 
     use super::{
-        validate_resolved_addrs, CredentialBindingPlan, EgressPolicyError, EgressProxyPolicyService,
-        EgressProxyRequest,
+        validate_resolved_addrs, CredentialBindingPlan, EgressPolicyError,
+        EgressProxyPolicyService, EgressProxyRequest,
     };
 
     fn binding(header_name: &str) -> CredentialBindingPlan {
@@ -249,12 +246,10 @@ mod tests {
 
     #[test]
     fn resolved_private_targets_are_blocked_fail_closed() {
-        let addrs = vec![
-            std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-                443,
-            ),
-        ];
+        let addrs = vec![std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            443,
+        )];
         let error = validate_resolved_addrs(addrs.as_slice(), false)
             .expect_err("loopback target should be rejected");
         assert_eq!(error, EgressPolicyError::PrivateTargetBlocked);

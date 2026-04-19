@@ -180,14 +180,16 @@ pub(crate) async fn console_diagnostics_handler(
 fn collect_console_execution_backend_diagnostics(state: &AppState) -> Result<Value, tonic::Status> {
     let now_unix_ms = crate::gateway::current_unix_ms_status()?;
     let nodes = state.node_runtime.nodes()?;
-    serde_json::to_value(crate::execution_backends::build_execution_backend_inventory_with_worker_state(
-        &state.runtime.config.tool_call.process_runner,
-        nodes.as_slice(),
-        now_unix_ms,
-        &state.runtime.config.feature_rollouts,
-        state.runtime.worker_fleet_snapshot(),
-        &state.runtime.worker_fleet_policy(),
-    ))
+    serde_json::to_value(
+        crate::execution_backends::build_execution_backend_inventory_with_worker_state(
+            &state.runtime.config.tool_call.process_runner,
+            nodes.as_slice(),
+            now_unix_ms,
+            &state.runtime.config.feature_rollouts,
+            state.runtime.worker_fleet_snapshot(),
+            &state.runtime.worker_fleet_policy(),
+        ),
+    )
     .map_err(|error| {
         tonic::Status::internal(format!("failed to serialize execution backends: {error}"))
     })

@@ -576,9 +576,7 @@ mod tests {
             Some(&execution_context),
         );
         assert!(
-            pending
-                .request_summary
-                .contains("backend_resolved=networked_worker"),
+            pending.request_summary.contains("backend_resolved=networked_worker"),
             "request summary should preserve backend explain metadata"
         );
         assert!(

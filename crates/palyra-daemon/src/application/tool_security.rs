@@ -27,7 +27,9 @@ use crate::{
         derive_scope_chain, evaluate_effective_tool_posture, ToolPostureScopeKind,
         ToolPostureScopeRef, ToolPostureState,
     },
-    tool_protocol::{decide_tool_call, tool_metadata, ToolCapability, ToolDecision, ToolRequestContext},
+    tool_protocol::{
+        decide_tool_call, tool_metadata, ToolCapability, ToolDecision, ToolRequestContext,
+    },
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
 };
 
@@ -370,10 +372,10 @@ pub(crate) async fn evaluate_tool_proposal_security(
         .ok()
         .and_then(|bindings| bindings.into_iter().next());
     let agent_scope = agent_binding.as_ref().map(|binding| ToolPostureScopeRef {
-            kind: ToolPostureScopeKind::Agent,
-            scope_id: binding.agent_id.clone(),
-            label: "Agent default".to_owned(),
-        });
+        kind: ToolPostureScopeKind::Agent,
+        scope_id: binding.agent_id.clone(),
+        label: "Agent default".to_owned(),
+    });
     let workspace_scope =
         request_context.principal.strip_prefix("workspace:").map(|workspace_id| {
             ToolPostureScopeRef {

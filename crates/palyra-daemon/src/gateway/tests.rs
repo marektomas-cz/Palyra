@@ -40,6 +40,7 @@ use super::{
     MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
     VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
 };
+use crate::application::tool_security::ToolProposalBackendSelection;
 use crate::application::{
     approvals::{apply_tool_approval_outcome, approval_risk_for_tool},
     auth::record_auth_refresh_journal_event,
@@ -76,18 +77,15 @@ use crate::application::{
         },
     },
 };
-use crate::application::tool_security::ToolProposalBackendSelection;
-use crate::execution_backends::{
-    ExecutionBackendPreference, ExecutionBackendResolution,
-};
-use palyra_workerd::{
-    WorkerArtifactTransport, WorkerAttestation, WorkerCleanupReport, WorkerLeaseRequest,
-    WorkerWorkspaceScope,
-};
+use crate::execution_backends::{ExecutionBackendPreference, ExecutionBackendResolution};
 use crate::media::MediaRuntimeConfig;
 use crate::model_provider::ProviderImageInput;
 use crate::transport::grpc::auth::{
     authorize_headers, authorize_metadata, request_context_from_headers, AuthError,
+};
+use palyra_workerd::{
+    WorkerArtifactTransport, WorkerAttestation, WorkerCleanupReport, WorkerLeaseRequest,
+    WorkerWorkspaceScope,
 };
 
 static TEMP_JOURNAL_COUNTER: AtomicU64 = AtomicU64::new(0);

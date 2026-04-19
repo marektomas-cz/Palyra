@@ -7,8 +7,8 @@ use crate::{
     application::service_authorization::authorize_agent_management_action,
     execution_backends::{
         build_execution_backend_inventory_with_worker_state,
-        parse_optional_execution_backend_preference,
-        resolve_execution_backend, validate_execution_backend_selection,
+        parse_optional_execution_backend_preference, resolve_execution_backend,
+        validate_execution_backend_selection,
     },
     gateway::{normalize_agent_identifier, record_agent_journal_event},
     *,

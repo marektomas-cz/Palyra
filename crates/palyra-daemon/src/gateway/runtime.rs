@@ -5494,23 +5494,22 @@ impl GatewayRuntimeState {
         let policy = self.worker_fleet_policy();
         let now_unix_ms = current_unix_ms();
         let event = match self.worker_fleet.write() {
-            Ok(mut manager) => manager
-                .register_worker(attestation, &policy, now_unix_ms)
-                .map_err(|error| {
+            Ok(mut manager) => {
+                manager.register_worker(attestation, &policy, now_unix_ms).map_err(|error| {
                     Status::failed_precondition(format!(
                         "networked worker registration failed: {error}"
                     ))
-                })?,
+                })?
+            }
             Err(poisoned) => {
                 warn!("worker fleet lock poisoned while registering worker");
-                poisoned
-                    .into_inner()
-                    .register_worker(attestation, &policy, now_unix_ms)
-                    .map_err(|error| {
+                poisoned.into_inner().register_worker(attestation, &policy, now_unix_ms).map_err(
+                    |error| {
                         Status::failed_precondition(format!(
                             "networked worker registration failed: {error}"
                         ))
-                    })?
+                    },
+                )?
             }
         };
         self.record_networked_worker_lifecycle_event(&event).await?;
@@ -5527,13 +5526,11 @@ impl GatewayRuntimeState {
         let policy = self.worker_fleet_policy();
         let now_unix_ms = current_unix_ms();
         let assign_work = |manager: &mut WorkerFleetManager| {
-            manager
-                .assign_work(worker_id, request.clone(), &policy, now_unix_ms)
-                .map_err(|error| {
-                    Status::failed_precondition(format!(
-                        "networked worker lease assignment failed: {error}"
-                    ))
-                })
+            manager.assign_work(worker_id, request.clone(), &policy, now_unix_ms).map_err(|error| {
+                Status::failed_precondition(format!(
+                    "networked worker lease assignment failed: {error}"
+                ))
+            })
         };
         let (lease, event) = match self.worker_fleet.write() {
             Ok(mut manager) => assign_work(&mut manager)?,
@@ -5556,13 +5553,11 @@ impl GatewayRuntimeState {
     ) -> Result<WorkerLifecycleEvent, Status> {
         let now_unix_ms = current_unix_ms();
         let event = match self.worker_fleet.write() {
-            Ok(mut manager) => manager
-                .complete_work(worker_id, &cleanup_report, now_unix_ms)
-                .map_err(|error| {
-                    Status::failed_precondition(format!(
-                        "networked worker cleanup failed: {error}"
-                    ))
-                })?,
+            Ok(mut manager) => {
+                manager.complete_work(worker_id, &cleanup_report, now_unix_ms).map_err(|error| {
+                    Status::failed_precondition(format!("networked worker cleanup failed: {error}"))
+                })?
+            }
             Err(poisoned) => {
                 warn!("worker fleet lock poisoned while completing worker lease");
                 poisoned

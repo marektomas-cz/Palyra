@@ -207,13 +207,9 @@ impl WorkerFleetManager {
     #[must_use]
     pub fn snapshot(&self) -> WorkerFleetSnapshot {
         let registered_workers = self.workers.len();
-        let attested_workers = self
-            .workers
-            .values()
-            .filter(|worker| worker.attestation.egress_proxy_attested)
-            .count();
-        let active_leases =
-            self.workers.values().filter(|worker| worker.lease.is_some()).count();
+        let attested_workers =
+            self.workers.values().filter(|worker| worker.attestation.egress_proxy_attested).count();
+        let active_leases = self.workers.values().filter(|worker| worker.lease.is_some()).count();
         let orphaned_workers = self
             .workers
             .values()
@@ -325,10 +321,8 @@ impl WorkerFleetManager {
     pub fn reap_expired_workers(&mut self, now_unix_ms: i64) -> Vec<WorkerLifecycleEvent> {
         let mut events = Vec::new();
         for (worker_id, worker) in &mut self.workers {
-            let expired = worker
-                .lease
-                .as_ref()
-                .is_some_and(|lease| lease.expires_at_unix_ms <= now_unix_ms);
+            let expired =
+                worker.lease.as_ref().is_some_and(|lease| lease.expires_at_unix_ms <= now_unix_ms);
             if expired {
                 let run_id = worker.lease.as_ref().map(|lease| lease.run_id.clone());
                 worker.state = WorkerLifecycleState::Orphaned;
@@ -439,9 +433,7 @@ mod tests {
         let mut manager = WorkerFleetManager::default();
         let policy = WorkerFleetPolicy::default();
         manager.register_worker(attestation("worker-c"), &policy, 2_000).unwrap();
-        manager
-            .assign_work("worker-c", lease_request("run-2", 500), &policy, 2_500)
-            .unwrap();
+        manager.assign_work("worker-c", lease_request("run-2", 500), &policy, 2_500).unwrap();
 
         let error = manager
             .complete_work(
@@ -463,9 +455,7 @@ mod tests {
         let mut manager = WorkerFleetManager::default();
         let policy = WorkerFleetPolicy::default();
         manager.register_worker(attestation("worker-d"), &policy, 2_000).unwrap();
-        manager
-            .assign_work("worker-d", lease_request("run-3", 250), &policy, 2_500)
-            .unwrap();
+        manager.assign_work("worker-d", lease_request("run-3", 250), &policy, 2_500).unwrap();
 
         let events = manager.reap_expired_workers(2_751);
         assert_eq!(events.len(), 1);
