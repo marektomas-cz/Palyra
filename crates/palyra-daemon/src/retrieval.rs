@@ -396,21 +396,31 @@ pub(crate) fn build_memory_embedding_runtime_selection(
     let retry_max = resolved.as_ref().map_or(config.max_retries, |entry| entry.max_retries);
     let request_timeout_ms =
         resolved.as_ref().map_or(config.request_timeout_ms, |entry| entry.request_timeout_ms);
+    let degraded_hash_fallback =
+        |posture, desired_model_id, degraded_reason_code, warning, active_dims| {
+            Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
+                posture,
+                desired_model_id,
+                degraded_reason_code,
+                warning,
+                active_dims,
+                request_timeout_ms,
+                retry_max,
+            ))
+        };
     let Some((desired_model_id, desired_dimensions)) = desired_embeddings else {
-        return Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
+        return degraded_hash_fallback(
             MemoryEmbeddingsPosture::DegradedConfigFallback,
             None,
             "embeddings_model_not_configured",
             "retrieval embeddings defaulted to hash fallback because no embeddings-capable provider or model is configured"
                 .to_owned(),
             DEFAULT_PRODUCTION_EMBEDDINGS_DIMS,
-            request_timeout_ms,
-            retry_max,
-        ));
+        );
     };
 
     let Some(dimensions) = desired_dimensions else {
-        return Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
+        return degraded_hash_fallback(
             MemoryEmbeddingsPosture::DegradedConfigFallback,
             Some(desired_model_id.clone()),
             "embeddings_dimensions_unknown",
@@ -419,39 +429,33 @@ pub(crate) fn build_memory_embedding_runtime_selection(
                 desired_model_id
             ),
             DEFAULT_PRODUCTION_EMBEDDINGS_DIMS,
-            request_timeout_ms,
-            retry_max,
-        ));
+        );
     };
 
     if offline_mode {
-        return Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
+        return degraded_hash_fallback(
             MemoryEmbeddingsPosture::DegradedOffline,
             Some(desired_model_id.clone()),
             "offline_mode_enabled",
             "PALYRA_OFFLINE is enabled; retrieval embeddings are using the explicit hash fallback"
                 .to_owned(),
             dimensions,
-            request_timeout_ms,
-            retry_max,
-        ));
+        );
     }
 
     let Some(provider_config) = resolved else {
-        return Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
+        return degraded_hash_fallback(
             MemoryEmbeddingsPosture::DegradedConfigFallback,
             Some(desired_model_id.clone()),
             "embeddings_credentials_missing",
             "retrieval embeddings are using hash fallback because the configured provider has no credential reference"
                 .to_owned(),
             dimensions,
-            request_timeout_ms,
-            retry_max,
-        ));
+        );
     };
 
     if provider_config.kind != ModelProviderKind::OpenAiCompatible {
-        return Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
+        return degraded_hash_fallback(
             MemoryEmbeddingsPosture::DegradedUnsupportedProvider,
             Some(desired_model_id.clone()),
             "embeddings_provider_kind_unsupported",
@@ -460,55 +464,35 @@ pub(crate) fn build_memory_embedding_runtime_selection(
                 provider_config.kind.as_str()
             ),
             dimensions,
-            request_timeout_ms,
-            retry_max,
-        ));
+        );
     }
 
     let Some(model_id) = provider_config.openai_embeddings_model.clone() else {
-        return Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
+        return degraded_hash_fallback(
             MemoryEmbeddingsPosture::DegradedConfigFallback,
             None,
             "embeddings_model_not_configured",
             "retrieval embeddings are using hash fallback because no embeddings model could be resolved"
                 .to_owned(),
             dimensions,
-            request_timeout_ms,
-            retry_max,
-        ));
+        );
     };
 
-    let Some(active_dimensions) =
-        provider_config.openai_embeddings_dims.map(|value| value as usize).or(Some(dimensions))
-    else {
-        return Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
-            MemoryEmbeddingsPosture::DegradedConfigFallback,
-            Some(model_id.clone()),
-            "embeddings_dimensions_unknown",
-            format!(
-                "retrieval embeddings are using hash fallback because dimensions for model '{}' are not known and were not configured",
-                model_id
-            ),
-            DEFAULT_PRODUCTION_EMBEDDINGS_DIMS,
-            request_timeout_ms,
-            retry_max,
-        ));
-    };
+    let active_dimensions =
+        provider_config.openai_embeddings_dims.map(|value| value as usize).unwrap_or(dimensions);
 
     let provider = match build_embeddings_provider(&provider_config) {
         Ok(provider) => provider,
         Err(error) => {
-            return Ok(MemoryEmbeddingsRuntimeProfile::degraded_hash_fallback(
+            return degraded_hash_fallback(
                 MemoryEmbeddingsPosture::DegradedProviderFallback,
                 Some(model_id.clone()),
                 "embeddings_runtime_init_failed",
                 format!(
-                "retrieval embeddings fell back to hash mode because the provider runtime could not initialize: {error}"
+                    "retrieval embeddings fell back to hash mode because the provider runtime could not initialize: {error}"
                 ),
                 active_dimensions,
-                request_timeout_ms,
-                retry_max,
-            ));
+            );
         }
     };
 
