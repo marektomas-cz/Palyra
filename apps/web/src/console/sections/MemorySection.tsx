@@ -198,7 +198,10 @@ export function MemorySection({ app }: MemorySectionProps) {
   const selectedLearningCandidatePayload = parseJsonObject(
     readString(selectedLearningCandidate ?? EMPTY_OBJECT, "content_json"),
   );
-  const selectedLearningPatch = readObject(selectedLearningCandidatePayload ?? EMPTY_OBJECT, "patch");
+  const selectedLearningPatch = readObject(
+    selectedLearningCandidatePayload ?? EMPTY_OBJECT,
+    "patch",
+  );
   const selectedLearningReasoning = readObject(
     selectedLearningCandidatePayload ?? EMPTY_OBJECT,
     "reasoning",
@@ -610,9 +613,10 @@ export function MemorySection({ app }: MemorySectionProps) {
                       : "none"}
                     . Capability delta:{" "}
                     {readBoolean(selectedLearningCapabilityDelta ?? EMPTY_OBJECT, "expands")
-                      ? readStringList(selectedLearningCapabilityDelta ?? EMPTY_OBJECT, "signals").join(
-                          ", ",
-                        )
+                      ? readStringList(
+                          selectedLearningCapabilityDelta ?? EMPTY_OBJECT,
+                          "signals",
+                        ).join(", ")
                       : "no expansion detected"}
                     . Poison reasons:{" "}
                     {selectedLearningPoisonReasons.length > 0

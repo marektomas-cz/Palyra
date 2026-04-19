@@ -330,7 +330,7 @@ export function CronSection({ app }: CronSectionProps) {
         ? undefined
         : parseJsonObject(dispatchPayloadText, "Test-run payload");
       const response = await app.api.testRunRoutine(selectedRoutineId, {
-        source_run_id: options?.replayLastRun ? lastRunId ?? undefined : undefined,
+        source_run_id: options?.replayLastRun ? (lastRunId ?? undefined) : undefined,
         trigger_reason: dispatchReason.trim() || undefined,
         trigger_payload: payload,
       });
@@ -732,8 +732,7 @@ export function CronSection({ app }: CronSectionProps) {
                   onChange={(executionPosture) =>
                     setRoutineForm((current) => ({
                       ...current,
-                      executionPosture:
-                        executionPosture as RoutineEditorForm["executionPosture"],
+                      executionPosture: executionPosture as RoutineEditorForm["executionPosture"],
                     }))
                   }
                   options={EXECUTION_POSTURE_OPTIONS}
@@ -1032,13 +1031,14 @@ export function CronSection({ app }: CronSectionProps) {
                   },
                   {
                     label: "Profiles",
-                    value: [
-                      readString(selectedRoutine, "procedure_profile_id"),
-                      readString(selectedRoutine, "skill_profile_id"),
-                      readString(selectedRoutine, "provider_profile_id"),
-                    ]
-                      .filter((value) => value !== null && value.length > 0)
-                      .join(" · ") || "none",
+                    value:
+                      [
+                        readString(selectedRoutine, "procedure_profile_id"),
+                        readString(selectedRoutine, "skill_profile_id"),
+                        readString(selectedRoutine, "provider_profile_id"),
+                      ]
+                        .filter((value) => value !== null && value.length > 0)
+                        .join(" · ") || "none",
                   },
                   {
                     label: "Delivery",
@@ -1289,7 +1289,9 @@ export function CronSection({ app }: CronSectionProps) {
               variant="secondary"
               size="sm"
               onPress={() => void safeTestRunSelectedRoutine({ replayLastRun: true })}
-              isDisabled={busy || selectedRoutineId === null || readString(selectedLastRun, "run_id") === null}
+              isDisabled={
+                busy || selectedRoutineId === null || readString(selectedLastRun, "run_id") === null
+              }
             >
               Replay last input
             </ActionButton>
@@ -1382,10 +1384,7 @@ function deliverySummary(routine: JsonObject): string {
     .join(" · ");
 }
 
-function deliveryPreviewSummary(
-  routine: JsonObject,
-  key: "success" | "failure",
-): string {
+function deliveryPreviewSummary(routine: JsonObject, key: "success" | "failure"): string {
   const preview = readObject(readObject(routine, "delivery_preview") ?? {}, key) ?? {};
   const mode = readString(preview, "mode") ?? "unknown";
   const channel = readString(preview, "channel");

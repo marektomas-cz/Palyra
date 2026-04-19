@@ -220,9 +220,8 @@ export function routineFormFromRecord(
     runMode:
       (readString(routine, "run_mode") as RoutineEditorForm["runMode"] | null) ?? form.runMode,
     executionPosture:
-      (readString(routine, "execution_posture") as
-        | RoutineEditorForm["executionPosture"]
-        | null) ?? form.executionPosture,
+      (readString(routine, "execution_posture") as RoutineEditorForm["executionPosture"] | null) ??
+      form.executionPosture,
     procedureProfileId: readString(routine, "procedure_profile_id") ?? "",
     skillProfileId: readString(routine, "skill_profile_id") ?? "",
     providerProfileId: readString(routine, "provider_profile_id") ?? "",
