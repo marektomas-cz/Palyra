@@ -868,6 +868,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(console::memory::console_learning_candidate_review_handler),
         )
         .route(
+            "/console/v1/memory/learning/candidates/{candidate_id}/apply",
+            post(console::memory::console_learning_candidate_apply_handler),
+        )
+        .route(
             "/console/v1/memory/preferences",
             get(console::memory::console_learning_preferences_list_handler),
         )

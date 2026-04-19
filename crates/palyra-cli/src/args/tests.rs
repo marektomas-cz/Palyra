@@ -2048,6 +2048,29 @@ fn parse_memory_learning_commands() {
         }
     );
 
+    let apply = Cli::parse_from([
+        "palyra",
+        "memory",
+        "learning",
+        "apply",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB8",
+        "--summary",
+        "validated diff and staged it into the workspace",
+        "--json",
+    ]);
+    assert_eq!(
+        apply.command,
+        Command::Memory {
+            command: MemoryCommand::Learning {
+                command: MemoryLearningCommand::Apply {
+                    candidate_id: "01ARZ3NDEKTSV4RRFFQ69G5FB8".to_owned(),
+                    summary: Some("validated diff and staged it into the workspace".to_owned()),
+                    json: true,
+                },
+            }
+        }
+    );
+
     let promote = Cli::parse_from([
         "palyra",
         "memory",

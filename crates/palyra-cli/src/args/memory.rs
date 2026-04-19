@@ -159,6 +159,13 @@ pub enum MemoryLearningCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Apply {
+        candidate_id: String,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Preferences {
         #[arg(long)]
         status: Option<String>,

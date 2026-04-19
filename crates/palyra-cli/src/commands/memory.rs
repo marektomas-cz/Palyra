@@ -639,6 +639,28 @@ async fn run_memory_admin_async(command: MemoryCommand) -> Result<()> {
                     &["/candidate", "/preference"],
                 )
             }
+            MemoryLearningCommand::Apply { candidate_id, summary, json } => {
+                let request = json!({
+                    "action_summary": summary,
+                });
+                let payload = context
+                    .client
+                    .post_json_value(
+                        format!(
+                            "console/v1/memory/learning/candidates/{}/apply",
+                            percent_encode_component(candidate_id.as_str())
+                        )
+                        .as_str(),
+                        &request,
+                    )
+                    .await?;
+                emit_admin_payload(
+                    "memory.learning.apply",
+                    &payload,
+                    output::preferred_json(json),
+                    &["/candidate", "/apply"],
+                )
+            }
             MemoryLearningCommand::Preferences {
                 status,
                 scope_kind,

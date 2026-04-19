@@ -3,7 +3,7 @@ use crate::gateway::ListOrchestratorSessionsRequest;
 use crate::journal::MemoryRetentionPolicy;
 use crate::*;
 use crate::{
-    application::learning::apply_preference_candidate,
+    application::learning::{apply_patch_learning_candidate, apply_preference_candidate},
     application::recall::{preview_recall, recall_preview_console_payload, RecallRequest},
     domain::workspace::{curated_workspace_roots, curated_workspace_templates},
 };
@@ -318,6 +318,7 @@ pub(crate) async fn console_learning_candidates_list_handler(
             scope_id: query.scope_id.and_then(trim_to_option),
             candidate_kind: query.candidate_kind.and_then(trim_to_option),
             status: query.status.and_then(trim_to_option),
+            risk_level: query.risk_level.and_then(trim_to_option),
             source_task_id: query.source_task_id.and_then(trim_to_option),
             min_confidence: query.min_confidence,
             max_confidence: query.max_confidence,
@@ -383,6 +384,35 @@ pub(crate) async fn console_learning_candidate_review_handler(
     Ok(Json(json!({
         "candidate": reviewed,
         "applied_preference": applied_preference,
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_learning_candidate_apply_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+    Json(payload): Json<ConsoleLearningCandidateApplyRequest>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    let candidate =
+        load_console_learning_candidate(&state, &session.context, candidate_id.as_str()).await?;
+    let applied = apply_patch_learning_candidate(
+        &state.runtime,
+        &candidate,
+        session.context.principal.as_str(),
+        payload.action_summary.as_deref(),
+    )
+    .await
+    .map_err(runtime_status_response)?
+    .ok_or_else(|| {
+        runtime_status_response(tonic::Status::failed_precondition(
+            "only patch-based learning candidates can be applied",
+        ))
+    })?;
+    Ok(Json(json!({
+        "candidate": applied.get("candidate").cloned().unwrap_or_else(|| json!(candidate)),
+        "apply": applied,
         "contract": contract_descriptor(),
     })))
 }
@@ -956,6 +986,7 @@ async fn load_console_learning_candidate(
             scope_id: None,
             candidate_kind: None,
             status: None,
+            risk_level: None,
             source_task_id: None,
             min_confidence: None,
             max_confidence: None,

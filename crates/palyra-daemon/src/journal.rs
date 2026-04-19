@@ -1868,6 +1868,7 @@ pub struct LearningCandidateListFilter {
     pub scope_id: Option<String>,
     pub candidate_kind: Option<String>,
     pub status: Option<String>,
+    pub risk_level: Option<String>,
     pub source_task_id: Option<String>,
     pub min_confidence: Option<f64>,
     pub max_confidence: Option<f64>,
@@ -7229,11 +7230,12 @@ impl JournalStore {
                   AND (?7 IS NULL OR scope_id = ?7)
                   AND (?8 IS NULL OR candidate_kind = ?8)
                   AND (?9 IS NULL OR status = ?9)
-                  AND (?10 IS NULL OR source_task_ulid = ?10)
-                  AND (?11 IS NULL OR confidence >= ?11)
-                  AND (?12 IS NULL OR confidence <= ?12)
+                  AND (?10 IS NULL OR risk_level = ?10)
+                  AND (?11 IS NULL OR source_task_ulid = ?11)
+                  AND (?12 IS NULL OR confidence >= ?12)
+                  AND (?13 IS NULL OR confidence <= ?13)
                 ORDER BY confidence DESC, created_at_unix_ms DESC
-                LIMIT ?13
+                LIMIT ?14
             "#,
         )?;
         let mut rows = statement.query(params![
@@ -7246,6 +7248,7 @@ impl JournalStore {
             filter.scope_id.as_deref(),
             filter.candidate_kind.as_deref(),
             filter.status.as_deref(),
+            filter.risk_level.as_deref(),
             filter.source_task_id.as_deref(),
             filter.min_confidence,
             filter.max_confidence,

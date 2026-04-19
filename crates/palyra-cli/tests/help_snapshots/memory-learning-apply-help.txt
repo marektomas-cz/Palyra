@@ -1,15 +1,12 @@
-Usage: palyra memory learning [OPTIONS] <COMMAND>
+Usage: palyra memory learning apply [OPTIONS] <CANDIDATE_ID>
 
-Commands:
-  list
-  history
-  review
-  apply
-  preferences
-  promote-procedure
+Arguments:
+  <CANDIDATE_ID>
 
 Options:
-  -h, --help  Print help
+      --summary <SUMMARY>
+      --json
+  -h, --help               Print help
 
 Global Options:
       --profile <PROFILE>

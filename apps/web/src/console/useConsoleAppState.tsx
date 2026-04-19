@@ -40,6 +40,7 @@ import type { Section } from "./sectionMetadata";
 import { DEFAULT_CRON_FORM, DEFAULT_LOGIN_FORM, type CronForm, type LoginForm } from "./stateTypes";
 import {
   emptyToUndefined,
+  isJsonObject,
   parseInteger,
   readObject,
   readString,
@@ -1256,6 +1257,34 @@ export function useConsoleAppState() {
     }
   }
 
+  async function applyLearningCandidate(
+    candidateId: string,
+    actionSummary?: string,
+  ): Promise<void> {
+    const trimmed = candidateId.trim();
+    if (trimmed.length === 0) {
+      setError("Learning candidate ID is missing.");
+      return;
+    }
+    setMemoryLearningBusy(true);
+    setError(null);
+    try {
+      const response = await api.applyLearningCandidate(trimmed, {
+        action_summary: actionSummary,
+      });
+      const applyRecord = isJsonObject(response.apply) ? response.apply : null;
+      setNotice(
+        `Learning candidate ${response.candidate.title} ${readString(applyRecord ?? {}, "result") ?? "updated"}.`,
+      );
+      await refreshLearningQueue();
+      await selectLearningCandidate(trimmed);
+    } catch (failure) {
+      setError(toErrorMessage(failure));
+    } finally {
+      setMemoryLearningBusy(false);
+    }
+  }
+
   async function refreshWorkspaceDocuments(): Promise<void> {
     setMemoryBusy(true);
     setError(null);
@@ -1837,6 +1866,7 @@ export function useConsoleAppState() {
     promoteMemoryHitToWorkspaceDraft,
     purgeMemory,
     reviewLearningCandidate,
+    applyLearningCandidate,
     ...skillsDomain,
     ...browserDomain,
     auditBusy,

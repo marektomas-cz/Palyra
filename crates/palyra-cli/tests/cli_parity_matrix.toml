@@ -200,6 +200,16 @@ path = "memory learning review"
 file = "memory-learning-review-help.txt"
 
 [[entries]]
+path = "memory learning apply"
+category = "nested_surface"
+status = "done"
+summary = "Apply a validated patch learning candidate into the workspace."
+
+[entries.snapshot]
+path = "memory learning apply"
+file = "memory-learning-apply-help.txt"
+
+[[entries]]
 path = "memory learning promote-procedure"
 category = "nested_surface"
 status = "done"

@@ -726,6 +726,7 @@ async fn load_console_procedure_candidate(
             scope_id: None,
             candidate_kind: None,
             status: None,
+            risk_level: None,
             source_task_id: None,
             min_confidence: None,
             max_confidence: None,

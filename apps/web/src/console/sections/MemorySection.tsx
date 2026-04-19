@@ -23,7 +23,14 @@ import {
   WorkspaceTable,
   workspaceToneForState,
 } from "../components/workspace/WorkspacePatterns";
-import { formatUnixMs, readNumber, readObject, readString, type JsonObject } from "../shared";
+import {
+  formatUnixMs,
+  readNumber,
+  readObject,
+  readString,
+  readStringList,
+  type JsonObject,
+} from "../shared";
 import type { JsonValue } from "../../consoleApi";
 import type { ConsoleAppState } from "../useConsoleAppState";
 import { collectCanvasFrameUrls } from "../../chat/chatShared";
@@ -96,6 +103,7 @@ type MemorySectionProps = {
     | "promoteMemoryHitToWorkspaceDraft"
     | "purgeMemory"
     | "reviewLearningCandidate"
+    | "applyLearningCandidate"
   >;
 };
 
@@ -187,6 +195,48 @@ export function MemorySection({ app }: MemorySectionProps) {
   const selectedLearningCandidateId =
     readString(selectedLearningCandidate ?? EMPTY_OBJECT, "candidate_id") ??
     app.memoryLearningCandidateId;
+  const selectedLearningCandidatePayload = parseJsonObject(
+    readString(selectedLearningCandidate ?? EMPTY_OBJECT, "content_json"),
+  );
+  const selectedLearningPatch = readObject(selectedLearningCandidatePayload ?? EMPTY_OBJECT, "patch");
+  const selectedLearningReasoning = readObject(
+    selectedLearningCandidatePayload ?? EMPTY_OBJECT,
+    "reasoning",
+  );
+  const selectedLearningSourceTool = readObject(
+    selectedLearningCandidatePayload ?? EMPTY_OBJECT,
+    "source_tool",
+  );
+  const selectedLearningPatchFiles = readJsonObjectArray(
+    selectedLearningPatch ?? EMPTY_OBJECT,
+    "files",
+  );
+  const selectedLearningPatchCandidate = [
+    "patch_skill",
+    "patch_procedure",
+    "write_support_file",
+  ].includes(readString(selectedLearningCandidate ?? EMPTY_OBJECT, "candidate_kind") ?? "");
+  const selectedLearningCapabilityDelta = readObject(
+    selectedLearningReasoning ?? EMPTY_OBJECT,
+    "capability_delta",
+  );
+  const selectedLearningExternalSources = readStringList(
+    selectedLearningReasoning ?? EMPTY_OBJECT,
+    "external_sources",
+  );
+  const selectedLearningPoisonReasons = readStringList(
+    selectedLearningReasoning ?? EMPTY_OBJECT,
+    "poison_reasons",
+  );
+  const selectedLearningHighRiskPaths = readStringList(
+    selectedLearningReasoning ?? EMPTY_OBJECT,
+    "high_risk_paths",
+  );
+  const selectedLearningPatchApplyAllowed =
+    selectedLearningPatchCandidate &&
+    !["denied", "suppressed", "applied", "conflicted"].includes(
+      readString(selectedLearningCandidate ?? EMPTY_OBJECT, "status") ?? "",
+    );
   const queuedLearningCount = learningCandidates.filter(
     (candidate) => readString(candidate, "status") === "queued",
   ).length;
@@ -347,7 +397,7 @@ export function MemorySection({ app }: MemorySectionProps) {
       <section className="workspace-aside-grid">
         <div className="workspace-stack">
           <WorkspaceSectionCard
-            description="Review durable facts, preferences, and reusable procedures that reflection extracted from completed runs."
+            description="Review durable facts, preferences, reusable procedures, and patch proposals that reflection extracted from completed runs."
             title="Learning review queue"
           >
             <div className="workspace-inline-actions">
@@ -377,6 +427,9 @@ export function MemorySection({ app }: MemorySectionProps) {
                   { key: "durable_fact", label: "Durable facts" },
                   { key: "preference", label: "Preferences" },
                   { key: "procedure", label: "Procedures" },
+                  { key: "patch_skill", label: "Skill patches" },
+                  { key: "patch_procedure", label: "Procedure patches" },
+                  { key: "write_support_file", label: "Support file writes" },
                 ]}
               />
               <SelectField
@@ -390,6 +443,8 @@ export function MemorySection({ app }: MemorySectionProps) {
                   { key: "accepted", label: "Accepted" },
                   { key: "denied", label: "Denied" },
                   { key: "suppressed", label: "Suppressed" },
+                  { key: "applied", label: "Applied" },
+                  { key: "conflicted", label: "Conflicted" },
                 ]}
               />
               <SelectField
@@ -441,7 +496,7 @@ export function MemorySection({ app }: MemorySectionProps) {
             {learningCandidates.length === 0 ? (
               <WorkspaceEmptyState
                 title="No learning candidates"
-                description="Run reflection-enabled sessions to populate durable facts, preferences, and procedure suggestions, or relax the queue filters above."
+                description="Run reflection-enabled sessions to populate durable facts, preferences, procedures, and patch proposals, or relax the queue filters above."
               />
             ) : (
               <div className="workspace-list workspace-list--queue">
@@ -484,13 +539,13 @@ export function MemorySection({ app }: MemorySectionProps) {
 
         <div className="workspace-stack">
           <WorkspaceSectionCard
-            description="Inspect candidate provenance and active prompt preferences before you accept or deny them."
+            description="Inspect candidate provenance, patch context, and active prompt preferences before you accept, deny, or apply them."
             title="Candidate detail"
           >
             {selectedLearningCandidate === null ? (
               <WorkspaceEmptyState
                 title="No candidate selected"
-                description="Choose a learning candidate to inspect its audit history and decide whether it should survive."
+                description="Choose a learning candidate to inspect its audit history, diff context, and decide whether it should survive."
               />
             ) : (
               <div className="workspace-stack">
@@ -525,7 +580,75 @@ export function MemorySection({ app }: MemorySectionProps) {
                   >
                     Deny
                   </ActionButton>
+                  {selectedLearningPatchApplyAllowed ? (
+                    <ActionButton
+                      isDisabled={app.memoryLearningBusy}
+                      type="button"
+                      variant="ghost"
+                      onPress={() => void app.applyLearningCandidate(selectedLearningCandidateId)}
+                    >
+                      Apply patch
+                    </ActionButton>
+                  ) : null}
                 </div>
+                {selectedLearningPatchCandidate ? (
+                  <WorkspaceInlineNotice tone="default" title="Patch review context">
+                    Source tool{" "}
+                    {readString(selectedLearningSourceTool ?? EMPTY_OBJECT, "tool_name") ??
+                      "unknown"}
+                    . Base digest{" "}
+                    {readString(selectedLearningPatch ?? EMPTY_OBJECT, "base_digest") ?? "n/a"}.
+                    Patch hash{" "}
+                    {readString(selectedLearningPatch ?? EMPTY_OBJECT, "patch_sha256") ?? "n/a"}.
+                    External sources:{" "}
+                    {selectedLearningExternalSources.length > 0
+                      ? selectedLearningExternalSources.join(", ")
+                      : "none"}
+                    . High-risk paths:{" "}
+                    {selectedLearningHighRiskPaths.length > 0
+                      ? selectedLearningHighRiskPaths.join(", ")
+                      : "none"}
+                    . Capability delta:{" "}
+                    {readBoolean(selectedLearningCapabilityDelta ?? EMPTY_OBJECT, "expands")
+                      ? readStringList(selectedLearningCapabilityDelta ?? EMPTY_OBJECT, "signals").join(
+                          ", ",
+                        )
+                      : "no expansion detected"}
+                    . Poison reasons:{" "}
+                    {selectedLearningPoisonReasons.length > 0
+                      ? selectedLearningPoisonReasons.join(", ")
+                      : "none"}
+                    .
+                  </WorkspaceInlineNotice>
+                ) : null}
+                {selectedLearningPatchCandidate ? (
+                  <TextAreaField
+                    label="Patch preview"
+                    rows={10}
+                    name="learning-candidate-patch-preview"
+                    value={
+                      readString(selectedLearningPatch ?? EMPTY_OBJECT, "redacted_preview") ?? ""
+                    }
+                    onChange={() => undefined}
+                  />
+                ) : null}
+                {selectedLearningPatchCandidate ? (
+                  <GroupedResultsSection
+                    title="Touched files"
+                    items={selectedLearningPatchFiles}
+                    emptyDescription="No patch files were recorded for this proposal."
+                    renderItem={(item, index) => (
+                      <div
+                        key={readString(item, "path") ?? `patch-file-${index + 1}`}
+                        className="workspace-list-item"
+                      >
+                        <strong>{readString(item, "path") ?? "path"}</strong>
+                        <span>{readString(item, "operation") ?? "update"}</span>
+                        <span>root {String(readNumber(item, "workspace_root_index") ?? 0)}</span>
+                      </div>
+                    )}
+                  />
+                ) : null}
                 <TextAreaField
                   label="Candidate payload"
                   rows={8}
@@ -1833,6 +1956,10 @@ function readObjectArray(source: JsonObject | null | undefined, key: string): Js
   return value.filter(isJsonObject);
 }
 
+function readJsonObjectArray(source: JsonObject | null | undefined, key: string): JsonObject[] {
+  return readObjectArray(source, key);
+}
+
 function readStringArray(source: JsonObject | null | undefined, key: string): string[] {
   const value = source?.[key];
   if (!Array.isArray(value)) {
@@ -1910,6 +2037,18 @@ function parseCanvasCandidate(value: string): JsonValue {
     return JSON.parse(value) as JsonValue;
   } catch {
     return value;
+  }
+}
+
+function parseJsonObject(value: string | null): JsonObject | null {
+  if (value === null || value.trim().length === 0) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value) as JsonValue;
+    return isJsonObject(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
 }
 

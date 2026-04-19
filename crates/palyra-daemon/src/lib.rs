@@ -638,6 +638,8 @@ struct ConsoleLearningCandidatesQuery {
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
+    risk_level: Option<String>,
+    #[serde(default)]
     scope_kind: Option<String>,
     #[serde(default)]
     scope_id: Option<String>,
@@ -660,6 +662,12 @@ struct ConsoleLearningCandidateReviewRequest {
     action_payload_json: Option<String>,
     #[serde(default)]
     apply_preference: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleLearningCandidateApplyRequest {
+    #[serde(default)]
+    action_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

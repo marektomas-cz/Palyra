@@ -5628,6 +5628,26 @@ export class ConsoleApiClient {
     );
   }
 
+  async applyLearningCandidate(
+    candidateId: string,
+    payload?: {
+      action_summary?: string;
+    },
+  ): Promise<{
+    candidate: LearningCandidateRecord;
+    apply: JsonValue;
+    contract: ContractDescriptor;
+  }> {
+    return this.request(
+      `/console/v1/memory/learning/candidates/${encodeURIComponent(candidateId)}/apply`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {}),
+      },
+      { csrf: true },
+    );
+  }
+
   async listLearningPreferences(params?: URLSearchParams): Promise<{
     preferences: LearningPreferenceRecord[];
     contract: ContractDescriptor;
