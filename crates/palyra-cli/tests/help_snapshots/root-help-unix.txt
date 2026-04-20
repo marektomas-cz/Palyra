@@ -32,7 +32,7 @@ Commands:
   node
   nodes
   browser         Operate the browser service and browser-backed automation sessions
-  system          Inspect runtime heartbeat, subsystem presence, and recent system events
+  system          Inspect runtime heartbeat, subsystem presence, operator insights, and recent system events
   sandbox         Inspect effective process-runner and WASM sandbox policy surfaces
   completion      Generate shell completion scripts
   onboarding      [aliases: onboard]

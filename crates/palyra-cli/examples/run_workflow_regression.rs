@@ -63,12 +63,14 @@ fn main() -> Result<()> {
     let mut setup_failed = false;
     for step in selected_setup_steps {
         let record = execute_entry(
-            step.id.as_str(),
-            step.label.as_str(),
-            "setup",
-            &[],
-            false,
-            step.command.as_slice(),
+            ExecutionDescriptor {
+                id: step.id.as_str(),
+                label: step.label.as_str(),
+                category: "setup",
+                subsystems: &[],
+                chaos: false,
+                command: step.command.as_slice(),
+            },
             logs_dir.as_path(),
             repo_root.as_path(),
         )?;
@@ -85,12 +87,14 @@ fn main() -> Result<()> {
     if setup_failed {
         for scenario in selected_scenarios {
             scenario_records.push(skipped_record(
-                scenario.id.as_str(),
-                scenario.label.as_str(),
-                scenario.category.as_str(),
-                scenario.subsystems.as_slice(),
-                scenario.chaos,
-                scenario.command.as_slice(),
+                ExecutionDescriptor {
+                    id: scenario.id.as_str(),
+                    label: scenario.label.as_str(),
+                    category: scenario.category.as_str(),
+                    subsystems: scenario.subsystems.as_slice(),
+                    chaos: scenario.chaos,
+                    command: scenario.command.as_slice(),
+                },
                 logs_dir.as_path(),
                 "skipped because a setup step failed",
             ));
@@ -98,12 +102,14 @@ fn main() -> Result<()> {
     } else {
         for scenario in selected_scenarios {
             scenario_records.push(execute_entry(
-                scenario.id.as_str(),
-                scenario.label.as_str(),
-                scenario.category.as_str(),
-                scenario.subsystems.as_slice(),
-                scenario.chaos,
-                scenario.command.as_slice(),
+                ExecutionDescriptor {
+                    id: scenario.id.as_str(),
+                    label: scenario.label.as_str(),
+                    category: scenario.category.as_str(),
+                    subsystems: scenario.subsystems.as_slice(),
+                    chaos: scenario.chaos,
+                    command: scenario.command.as_slice(),
+                },
                 logs_dir.as_path(),
                 repo_root.as_path(),
             )?);
@@ -284,25 +290,30 @@ fn recreate_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to create report directory {}", path.display()))
 }
 
-fn execute_entry(
-    id: &str,
-    label: &str,
-    category: &str,
-    subsystems: &[String],
+#[derive(Clone, Copy)]
+struct ExecutionDescriptor<'a> {
+    id: &'a str,
+    label: &'a str,
+    category: &'a str,
+    subsystems: &'a [String],
     chaos: bool,
-    command: &[String],
+    command: &'a [String],
+}
+
+fn execute_entry(
+    entry: ExecutionDescriptor<'_>,
     logs_dir: &Path,
     repo_root: &Path,
 ) -> Result<WorkflowRegressionExecutionRecord> {
-    let resolved_command = resolve_command(command);
-    let log_path = logs_dir.join(format!("{id}.log"));
+    let resolved_command = resolve_command(entry.command);
+    let log_path = logs_dir.join(format!("{}.log", entry.id));
     let started_at = Instant::now();
     let output = Command::new(&resolved_command[0])
         .args(&resolved_command[1..])
         .current_dir(repo_root)
         .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("failed to run workflow regression command '{}'", id))?;
+        .with_context(|| format!("failed to run workflow regression command '{}'", entry.id))?;
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -316,11 +327,11 @@ fn execute_entry(
         .with_context(|| format!("failed to write {}", log_path.display()))?;
 
     Ok(WorkflowRegressionExecutionRecord {
-        id: id.to_owned(),
-        label: label.to_owned(),
-        category: category.to_owned(),
-        subsystems: subsystems.to_vec(),
-        chaos,
+        id: entry.id.to_owned(),
+        label: entry.label.to_owned(),
+        category: entry.category.to_owned(),
+        subsystems: entry.subsystems.to_vec(),
+        chaos: entry.chaos,
         command: resolved_command.clone(),
         status: if output.status.success() {
             WorkflowRegressionExecutionStatus::Passed
@@ -335,24 +346,19 @@ fn execute_entry(
 }
 
 fn skipped_record(
-    id: &str,
-    label: &str,
-    category: &str,
-    subsystems: &[String],
-    chaos: bool,
-    command: &[String],
+    entry: ExecutionDescriptor<'_>,
     logs_dir: &Path,
     reason: &str,
 ) -> WorkflowRegressionExecutionRecord {
-    let log_path = logs_dir.join(format!("{id}.log"));
+    let log_path = logs_dir.join(format!("{}.log", entry.id));
     let _ = fs::write(log_path.as_path(), reason.as_bytes());
     WorkflowRegressionExecutionRecord {
-        id: id.to_owned(),
-        label: label.to_owned(),
-        category: category.to_owned(),
-        subsystems: subsystems.to_vec(),
-        chaos,
-        command: command.to_vec(),
+        id: entry.id.to_owned(),
+        label: entry.label.to_owned(),
+        category: entry.category.to_owned(),
+        subsystems: entry.subsystems.to_vec(),
+        chaos: entry.chaos,
+        command: entry.command.to_vec(),
         status: WorkflowRegressionExecutionStatus::Skipped,
         duration_ms: 0,
         log_path: log_path.display().to_string(),
