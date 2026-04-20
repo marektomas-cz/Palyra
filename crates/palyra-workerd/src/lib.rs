@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+pub use palyra_common::runtime_contracts::WorkerLifecycleState;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ulid::Ulid;
@@ -125,16 +126,6 @@ pub struct WorkerLease {
     pub expires_at_unix_ms: i64,
     pub workspace_scope: WorkerWorkspaceScope,
     pub artifact_transport: WorkerArtifactTransport,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerLifecycleState {
-    Registered,
-    Assigned,
-    Completed,
-    Failed,
-    Orphaned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

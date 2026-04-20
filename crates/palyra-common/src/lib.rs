@@ -11,6 +11,7 @@ pub mod netguard;
 pub mod process_runner_input;
 pub mod project_context;
 pub mod redaction;
+pub mod runtime_contracts;
 pub mod secret_refs;
 pub mod versioned_json;
 mod webhook;

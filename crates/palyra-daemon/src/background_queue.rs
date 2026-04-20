@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use palyra_common::runtime_contracts::AuxiliaryTaskState;
 use serde_json::{json, Value};
 use tokio_stream::StreamExt;
 use tonic::{Code, Request, Status};
@@ -71,7 +72,7 @@ async fn poll_background_queue(
             let _ = runtime
                 .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
                     task_id: task.task_id.clone(),
-                    state: Some("failed".to_owned()),
+                    state: Some(AuxiliaryTaskState::Failed.as_str().to_owned()),
                     target_run_id: None,
                     increment_attempt_count: false,
                     last_error: Some(Some(error.message().to_owned())),
@@ -99,7 +100,9 @@ async fn process_background_task(
     task: &OrchestratorBackgroundTaskRecord,
     all_tasks: &[OrchestratorBackgroundTaskRecord],
 ) -> Result<(), Status> {
-    if is_terminal_task_state(task.state.as_str()) || task.state == "paused" {
+    if is_terminal_task_state(task.state.as_str())
+        || AuxiliaryTaskState::from_str(task.state.as_str()) == Some(AuxiliaryTaskState::Paused)
+    {
         runtime
             .clear_self_healing_heartbeat(WorkHeartbeatKind::BackgroundTask, task.task_id.as_str());
         return Ok(());
@@ -117,7 +120,7 @@ async fn process_background_task(
             runtime
                 .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
                     task_id: task.task_id.clone(),
-                    state: Some("expired".to_owned()),
+                    state: Some(AuxiliaryTaskState::Expired.as_str().to_owned()),
                     target_run_id: None,
                     increment_attempt_count: false,
                     last_error: Some(Some("background task expired before dispatch".to_owned())),
@@ -146,7 +149,9 @@ async fn process_background_task(
     if sync_parent_run_cancellation(runtime, task).await? {
         return Ok(());
     }
-    if task.state == "cancel_requested" {
+    if AuxiliaryTaskState::from_str(task.state.as_str())
+        == Some(AuxiliaryTaskState::CancelRequested)
+    {
         if let Some(target_run_id) = task.target_run_id.as_deref() {
             let snapshot =
                 runtime.orchestrator_run_status_snapshot(target_run_id.to_owned()).await?;
@@ -161,7 +166,7 @@ async fn process_background_task(
             runtime
                 .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
                     task_id: task.task_id.clone(),
-                    state: Some("cancelled".to_owned()),
+                    state: Some(AuxiliaryTaskState::Cancelled.as_str().to_owned()),
                     target_run_id: None,
                     increment_attempt_count: false,
                     last_error: Some(Some("cancelled before dispatch".to_owned())),
@@ -183,7 +188,7 @@ async fn process_background_task(
         }
         return Ok(());
     }
-    if task.state == "running" {
+    if AuxiliaryTaskState::from_str(task.state.as_str()) == Some(AuxiliaryTaskState::Running) {
         if task.task_kind == REFLECTION_TASK_KIND && task.target_run_id.is_none() {
             return Ok(());
         }
@@ -202,7 +207,7 @@ async fn process_background_task(
         runtime
             .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
                 task_id: task.task_id.clone(),
-                state: Some("failed".to_owned()),
+                state: Some(AuxiliaryTaskState::Failed.as_str().to_owned()),
                 target_run_id: None,
                 increment_attempt_count: false,
                 last_error: Some(Some("background task exhausted retry budget".to_owned())),
@@ -242,7 +247,7 @@ async fn dispatch_background_task(
         runtime
             .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
                 task_id: task.task_id.clone(),
-                state: Some("running".to_owned()),
+                state: Some(AuxiliaryTaskState::Running.as_str().to_owned()),
                 target_run_id: Some(None),
                 increment_attempt_count: true,
                 last_error: Some(None),
@@ -260,7 +265,7 @@ async fn dispatch_background_task(
                         .update_orchestrator_background_task(
                             OrchestratorBackgroundTaskUpdateRequest {
                                 task_id: task.task_id.clone(),
-                                state: Some("succeeded".to_owned()),
+                                state: Some(AuxiliaryTaskState::Succeeded.as_str().to_owned()),
                                 target_run_id: Some(None),
                                 increment_attempt_count: false,
                                 last_error: Some(None),
@@ -286,7 +291,7 @@ async fn dispatch_background_task(
                         .update_orchestrator_background_task(
                             OrchestratorBackgroundTaskUpdateRequest {
                                 task_id: task.task_id.clone(),
-                                state: Some("failed".to_owned()),
+                                state: Some(AuxiliaryTaskState::Failed.as_str().to_owned()),
                                 target_run_id: Some(None),
                                 increment_attempt_count: false,
                                 last_error: Some(Some(error.message().to_owned())),
@@ -317,7 +322,7 @@ async fn dispatch_background_task(
     runtime
         .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
             task_id: task.task_id.clone(),
-            state: Some("running".to_owned()),
+            state: Some(AuxiliaryTaskState::Running.as_str().to_owned()),
             target_run_id: Some(Some(run_id.clone())),
             increment_attempt_count: true,
             last_error: Some(None),
@@ -345,7 +350,7 @@ async fn dispatch_background_task(
             let _ = runtime
                 .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
                     task_id: task.task_id.clone(),
-                    state: Some("failed".to_owned()),
+                    state: Some(AuxiliaryTaskState::Failed.as_str().to_owned()),
                     target_run_id: Some(None),
                     increment_attempt_count: false,
                     last_error: Some(Some(error.message().to_owned())),
@@ -525,7 +530,7 @@ async fn sync_parent_run_cancellation(
         runtime
             .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
                 task_id: task.task_id.clone(),
-                state: Some("cancel_requested".to_owned()),
+                state: Some(AuxiliaryTaskState::CancelRequested.as_str().to_owned()),
                 target_run_id: None,
                 increment_attempt_count: false,
                 last_error: Some(Some(cancellation_reason.clone())),
@@ -546,7 +551,7 @@ async fn sync_parent_run_cancellation(
     runtime
         .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
             task_id: task.task_id.clone(),
-            state: Some("cancelled".to_owned()),
+            state: Some(AuxiliaryTaskState::Cancelled.as_str().to_owned()),
             target_run_id: Some(None),
             increment_attempt_count: false,
             last_error: Some(Some(cancellation_reason.clone())),
@@ -591,13 +596,17 @@ fn serial_sibling_blocks(
     sibling: &OrchestratorBackgroundTaskRecord,
     current: &OrchestratorBackgroundTaskRecord,
 ) -> bool {
-    if is_terminal_task_state(sibling.state.as_str()) || sibling.state == "failed" {
+    if is_terminal_task_state(sibling.state.as_str())
+        || AuxiliaryTaskState::from_str(sibling.state.as_str()) == Some(AuxiliaryTaskState::Failed)
+    {
         return false;
     }
-    match sibling.state.as_str() {
-        "running" => true,
-        "cancel_requested" => sibling.target_run_id.is_some(),
-        "queued" | "paused" => task_precedes_in_serial_group(sibling, current),
+    match AuxiliaryTaskState::from_str(sibling.state.as_str()) {
+        Some(AuxiliaryTaskState::Running) => true,
+        Some(AuxiliaryTaskState::CancelRequested) => sibling.target_run_id.is_some(),
+        Some(AuxiliaryTaskState::Queued | AuxiliaryTaskState::Paused) => {
+            task_precedes_in_serial_group(sibling, current)
+        }
         _ => false,
     }
 }
@@ -618,13 +627,14 @@ async fn finalize_task_from_run(
     fallback_state: &str,
 ) -> Result<(), Status> {
     let normalized_state = match run.map(|value| value.state.as_str()).unwrap_or(fallback_state) {
-        "done" => "succeeded",
-        "cancelled" => "cancelled",
-        "failed" => "failed",
-        "running" | "accepted" | "in_progress" => "running",
-        other => other,
+        "done" => AuxiliaryTaskState::Succeeded,
+        "cancelled" => AuxiliaryTaskState::Cancelled,
+        "failed" => AuxiliaryTaskState::Failed,
+        "running" | "accepted" | "in_progress" => AuxiliaryTaskState::Running,
+        "expired" => AuxiliaryTaskState::Expired,
+        other => AuxiliaryTaskState::from_str(other).unwrap_or(AuxiliaryTaskState::Failed),
     };
-    if normalized_state == "running" {
+    if normalized_state == AuxiliaryTaskState::Running {
         return Ok(());
     }
     let completed_at_unix_ms = run
@@ -633,13 +643,13 @@ async fn finalize_task_from_run(
     runtime
         .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
             task_id: task.task_id.clone(),
-            state: Some(normalized_state.to_owned()),
+            state: Some(normalized_state.as_str().to_owned()),
             target_run_id: None,
             increment_attempt_count: false,
             last_error: Some(run.and_then(|value| value.last_error.clone())),
             result_json: Some(Some(
                 json!({
-                    "status": normalized_state,
+                    "status": normalized_state.as_str(),
                     "task_id": task.task_id,
                     "run": run.map(run_status_to_json).unwrap_or_else(|| json!({
                         "state": fallback_state,
@@ -1027,7 +1037,7 @@ fn run_status_to_json(run: &crate::journal::OrchestratorRunStatusSnapshot) -> Va
 }
 
 fn is_terminal_task_state(state: &str) -> bool {
-    matches!(state, "succeeded" | "failed" | "cancelled" | "expired")
+    AuxiliaryTaskState::from_str(state).is_some_and(AuxiliaryTaskState::is_terminal)
 }
 
 fn is_terminal_run_state(state: &str) -> bool {

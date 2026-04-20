@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 chrono.workspace = true
+palyra-common = { version = "0.1.0", path = "../palyra-common" }
 serde.workspace = true
 thiserror.workspace = true
 ulid.workspace = true

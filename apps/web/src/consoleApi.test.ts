@@ -2428,11 +2428,11 @@ describe("ConsoleApiClient", () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     const task = {
       task_id: "task-1",
-      task_kind: "chat_followup",
+      task_kind: "reflection",
       session_id: "session-1",
       owner_principal: "admin:web-console",
       device_id: "device-1",
-      state: "queued",
+      state: "pending",
       priority: 50,
       attempt_count: 0,
       max_attempts: 3,
@@ -2484,17 +2484,34 @@ describe("ConsoleApiClient", () => {
       device_id: "device-1",
       channel: "web",
     });
-    await client.listBackgroundTasks({
+    const listed = await client.listBackgroundTasks({
       session_id: "session-1",
       include_completed: false,
       limit: 5,
     });
-    await client.createBackgroundTask("session-1", { text: "follow up later" });
-    await client.getBackgroundTask("task-1");
-    await client.pauseBackgroundTask("task-1");
-    await client.resumeBackgroundTask("task-1");
-    await client.retryBackgroundTask("task-1");
-    await client.cancelBackgroundTask("task-1");
+    const created = await client.createBackgroundTask("session-1", { text: "follow up later" });
+    const loaded = await client.getBackgroundTask("task-1");
+    const paused = await client.pauseBackgroundTask("task-1");
+    const resumed = await client.resumeBackgroundTask("task-1");
+    const retried = await client.retryBackgroundTask("task-1");
+    const cancelled = await client.cancelBackgroundTask("task-1");
+
+    expect(listed.tasks[0]).toMatchObject({
+      task_kind: "post_run_reflection",
+      state: "queued",
+    });
+    expect(created.task).toMatchObject({
+      task_kind: "post_run_reflection",
+      state: "queued",
+    });
+    expect(loaded.task).toMatchObject({
+      task_kind: "post_run_reflection",
+      state: "queued",
+    });
+    expect(paused.task.state).toBe("paused");
+    expect(resumed.task.state).toBe("queued");
+    expect(retried.task.state).toBe("queued");
+    expect(cancelled.task.state).toBe("cancelled");
 
     expect(requestUrl(calls[1]?.input)).toBe(
       "/console/v1/chat/background-tasks?session_id=session-1&include_completed=false&limit=5",
@@ -2520,6 +2537,47 @@ describe("ConsoleApiClient", () => {
 
     expect(requestUrl(calls[7]?.input)).toBe("/console/v1/chat/background-tasks/task-1/cancel");
     expect(new Headers(calls[7]?.init?.headers).get("x-palyra-csrf-token")).toBe("csrf-1");
+  });
+
+  it("normalizes queued follow-up lifecycle aliases onto canonical queue states", async () => {
+    const responses = [
+      jsonResponse({
+        principal: "admin:web-console",
+        device_id: "device-1",
+        csrf_token: "csrf-1",
+        issued_at_unix_ms: 100,
+        expires_at_unix_ms: 200,
+      }),
+      jsonResponse({
+        queued_input: {
+          queued_input_id: "queued-1",
+          run_id: "run-1",
+          session_id: "session-1",
+          state: "delivered",
+          text: "continue",
+          created_at_unix_ms: 100,
+          updated_at_unix_ms: 120,
+        },
+        contract: { contract_version: "control-plane.v1" },
+      }),
+    ];
+    const client = new ConsoleApiClient("", (_input, _init) => {
+      const response = responses.shift();
+      if (response === undefined) {
+        throw new Error("No response queued for fetch mock.");
+      }
+      return Promise.resolve(response);
+    });
+
+    await client.login({
+      admin_token: "token",
+      principal: "admin:web-console",
+      device_id: "device-1",
+      channel: "web",
+    });
+    const queued = await client.queueFollowUp("run-1", { text: "continue" });
+
+    expect(queued.queued_input.state).toBe("forwarded");
   });
 
   it("submits approval decisions with CSRF protection", async () => {

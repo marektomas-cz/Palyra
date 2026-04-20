@@ -1,4 +1,5 @@
 use crate::*;
+use palyra_common::runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState};
 
 pub(crate) fn run_sessions(command: SessionsCommand) -> Result<()> {
     let root_context = app::current_root_context()
@@ -840,11 +841,12 @@ pub(crate) async fn run_sessions_async(
                 let task =
                     payload.pointer("/task").context("background task payload is missing")?;
                 println!(
-                    "sessions.background.enqueue task_id={} state={} priority={} max_attempts={}",
+                    "sessions.background.enqueue task_id={} kind={} state={} priority={} max_attempts={}",
                     redacted_optional_identifier_for_output(
                         task.pointer("/task_id").and_then(Value::as_str)
                     ),
-                    json_optional_string_in(task, "/state").unwrap_or_else(|| "unknown".to_owned()),
+                    render_auxiliary_task_kind(task.pointer("/task_kind").and_then(Value::as_str)),
+                    render_auxiliary_task_state(task.pointer("/state").and_then(Value::as_str)),
                     task.pointer("/priority").and_then(Value::as_i64).unwrap_or_default(),
                     task.pointer("/max_attempts").and_then(Value::as_u64).unwrap_or_default()
                 );
@@ -877,12 +879,12 @@ pub(crate) async fn run_sessions_async(
                 );
                 for task in tasks {
                     println!(
-                        "task task_id={} state={} priority={} run_id={} created_at_unix_ms={}",
+                        "task task_id={} kind={} state={} priority={} run_id={} created_at_unix_ms={}",
                         redacted_optional_identifier_for_output(
                             task.pointer("/task_id").and_then(Value::as_str)
                         ),
-                        json_optional_string_in(task, "/state")
-                            .unwrap_or_else(|| "unknown".to_owned()),
+                        render_auxiliary_task_kind(task.pointer("/task_kind").and_then(Value::as_str)),
+                        render_auxiliary_task_state(task.pointer("/state").and_then(Value::as_str)),
                         task.pointer("/priority").and_then(Value::as_i64).unwrap_or_default(),
                         redacted_optional_identifier_for_output(
                             task.pointer("/target_run_id").and_then(Value::as_str)
@@ -909,9 +911,10 @@ pub(crate) async fn run_sessions_async(
                 let task =
                     payload.pointer("/task").context("background task payload is missing")?;
                 println!(
-                    "sessions.background.show task_id={} state={} attempt_count={} max_attempts={} run_id={}",
+                    "sessions.background.show task_id={} kind={} state={} attempt_count={} max_attempts={} run_id={}",
                     redacted_optional_identifier_for_output(task.pointer("/task_id").and_then(Value::as_str)),
-                    json_optional_string_in(task, "/state").unwrap_or_else(|| "unknown".to_owned()),
+                    render_auxiliary_task_kind(task.pointer("/task_kind").and_then(Value::as_str)),
+                    render_auxiliary_task_state(task.pointer("/state").and_then(Value::as_str)),
                     task.pointer("/attempt_count").and_then(Value::as_u64).unwrap_or_default(),
                     task.pointer("/max_attempts").and_then(Value::as_u64).unwrap_or_default(),
                     redacted_optional_identifier_for_output(task.pointer("/target_run_id").and_then(Value::as_str))
@@ -1100,10 +1103,28 @@ async fn handle_background_task_action(
             redacted_optional_identifier_for_output(
                 task.pointer("/task_id").and_then(Value::as_str)
             ),
-            json_optional_string_in(task, "/state").unwrap_or_else(|| "unknown".to_owned())
+            render_auxiliary_task_state(task.pointer("/state").and_then(Value::as_str))
         );
     }
     Ok(())
+}
+
+fn render_auxiliary_task_kind(value: Option<&str>) -> String {
+    match value {
+        Some(raw) => AuxiliaryTaskKind::from_str(raw)
+            .map(|kind| kind.as_str().to_owned())
+            .unwrap_or_else(|| raw.to_owned()),
+        None => "unknown".to_owned(),
+    }
+}
+
+fn render_auxiliary_task_state(value: Option<&str>) -> String {
+    match value {
+        Some(raw) => AuxiliaryTaskState::from_str(raw)
+            .map(|state| state.as_str().to_owned())
+            .unwrap_or_else(|| raw.to_owned()),
+        None => "unknown".to_owned(),
+    }
 }
 
 fn json_required_string(payload: &Value, pointer: &str) -> Result<String> {
@@ -1140,6 +1161,25 @@ fn percent_encode_component(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::{render_auxiliary_task_kind, render_auxiliary_task_state};
+
+    #[test]
+    fn auxiliary_task_renderers_normalize_compat_aliases() {
+        assert_eq!(render_auxiliary_task_kind(Some("reflection")), "post_run_reflection");
+        assert_eq!(render_auxiliary_task_state(Some("pending")), "queued");
+        assert_eq!(render_auxiliary_task_state(Some("canceled")), "cancelled");
+    }
+
+    #[test]
+    fn auxiliary_task_renderers_preserve_unknown_values() {
+        assert_eq!(render_auxiliary_task_kind(Some("custom_task")), "custom_task");
+        assert_eq!(render_auxiliary_task_state(Some("mystery_state")), "mystery_state");
+        assert_eq!(render_auxiliary_task_state(None), "unknown");
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use palyra_common::runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState};
 use palyra_common::workspace_patch::{
     apply_workspace_patch, WorkspacePatchLimits, WorkspacePatchRedactionPolicy,
     WorkspacePatchRequest,
@@ -34,7 +35,7 @@ use crate::{
     },
 };
 
-pub(crate) const REFLECTION_TASK_KIND: &str = "post_run_reflection";
+pub(crate) const REFLECTION_TASK_KIND: &str = AuxiliaryTaskKind::PostRunReflection.as_str();
 const REFLECTION_TRIGGER_POLICY: &str = "post_run_learning_v1";
 const PATCH_SKILL_CANDIDATE_KIND: &str = "patch_skill";
 const PATCH_PROCEDURE_CANDIDATE_KIND: &str = "patch_procedure";
@@ -94,7 +95,14 @@ pub(crate) async fn schedule_post_run_reflection(
     if existing.iter().any(|task| {
         task.task_kind == REFLECTION_TASK_KIND
             && task.created_at_unix_ms >= now.saturating_sub(learning_config.cooldown_ms)
-            && !matches!(task.state.as_str(), "cancelled" | "failed" | "expired")
+            && !matches!(
+                AuxiliaryTaskState::from_str(task.state.as_str()),
+                Some(
+                    AuxiliaryTaskState::Cancelled
+                        | AuxiliaryTaskState::Failed
+                        | AuxiliaryTaskState::Expired
+                )
+            )
     }) {
         return Ok(None);
     }
@@ -110,7 +118,7 @@ pub(crate) async fn schedule_post_run_reflection(
             owner_principal: context.principal.clone(),
             device_id: context.device_id.clone(),
             channel: context.channel.clone(),
-            state: "queued".to_owned(),
+            state: AuxiliaryTaskState::Queued.as_str().to_owned(),
             priority: 25,
             max_attempts: 1,
             budget_tokens: learning_config.budget_tokens,

@@ -5,6 +5,7 @@ use crate::{
     *,
 };
 use base64::Engine as _;
+use palyra_common::runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState, QueuedInputState};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
@@ -567,7 +568,7 @@ pub(crate) async fn console_chat_attachment_upload_handler(
         .runtime
         .create_orchestrator_background_task(journal::OrchestratorBackgroundTaskCreateRequest {
             task_id: Ulid::new().to_string(),
-            task_kind: "attachment_derivation".to_owned(),
+            task_kind: AuxiliaryTaskKind::AttachmentDerivation.as_str().to_owned(),
             session_id: session_id.clone(),
             parent_run_id: None,
             target_run_id: None,
@@ -575,7 +576,7 @@ pub(crate) async fn console_chat_attachment_upload_handler(
             owner_principal: session.context.principal.clone(),
             device_id: session.context.device_id.clone(),
             channel: session.context.channel.clone(),
-            state: "queued".to_owned(),
+            state: AuxiliaryTaskState::Queued.as_str().to_owned(),
             priority: 50,
             max_attempts: 1,
             budget_tokens: estimate_console_chat_attachment_tokens(&artifact),
@@ -604,7 +605,7 @@ pub(crate) async fn console_chat_attachment_upload_handler(
         .runtime
         .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
             task_id: task.task_id.clone(),
-            state: Some("running".to_owned()),
+            state: Some(AuxiliaryTaskState::Running.as_str().to_owned()),
             started_at_unix_ms: Some(Some(task_started_at)),
             ..Default::default()
         })
@@ -630,7 +631,7 @@ pub(crate) async fn console_chat_attachment_upload_handler(
                 .update_orchestrator_background_task(
                     journal::OrchestratorBackgroundTaskUpdateRequest {
                         task_id: task.task_id.clone(),
-                        state: Some("succeeded".to_owned()),
+                        state: Some(AuxiliaryTaskState::Succeeded.as_str().to_owned()),
                         completed_at_unix_ms: Some(Some(completed_at_unix_ms)),
                         result_json: Some(Some(
                             json!({
@@ -657,7 +658,7 @@ pub(crate) async fn console_chat_attachment_upload_handler(
                 .update_orchestrator_background_task(
                     journal::OrchestratorBackgroundTaskUpdateRequest {
                         task_id: task.task_id.clone(),
-                        state: Some("failed".to_owned()),
+                        state: Some(AuxiliaryTaskState::Failed.as_str().to_owned()),
                         increment_attempt_count: true,
                         completed_at_unix_ms: Some(Some(completed_at_unix_ms)),
                         last_error: Some(Some(error.to_string())),
@@ -871,7 +872,7 @@ pub(crate) async fn console_chat_derived_artifact_recompute_handler(
         .runtime
         .create_orchestrator_background_task(journal::OrchestratorBackgroundTaskCreateRequest {
             task_id: Ulid::new().to_string(),
-            task_kind: "attachment_recompute".to_owned(),
+            task_kind: AuxiliaryTaskKind::AttachmentRecompute.as_str().to_owned(),
             session_id: session_id.clone(),
             parent_run_id: None,
             target_run_id: None,
@@ -879,7 +880,7 @@ pub(crate) async fn console_chat_derived_artifact_recompute_handler(
             owner_principal: session.context.principal.clone(),
             device_id: session.context.device_id.clone(),
             channel: session.context.channel.clone(),
-            state: "queued".to_owned(),
+            state: AuxiliaryTaskState::Queued.as_str().to_owned(),
             priority: 40,
             max_attempts: 1,
             budget_tokens: estimate_console_chat_attachment_tokens(&source_attachment),
@@ -908,7 +909,7 @@ pub(crate) async fn console_chat_derived_artifact_recompute_handler(
         .runtime
         .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
             task_id: task.task_id.clone(),
-            state: Some("running".to_owned()),
+            state: Some(AuxiliaryTaskState::Running.as_str().to_owned()),
             started_at_unix_ms: Some(Some(started_at_unix_ms)),
             ..Default::default()
         })
@@ -934,7 +935,7 @@ pub(crate) async fn console_chat_derived_artifact_recompute_handler(
                 .update_orchestrator_background_task(
                     journal::OrchestratorBackgroundTaskUpdateRequest {
                         task_id: task.task_id.clone(),
-                        state: Some("succeeded".to_owned()),
+                        state: Some(AuxiliaryTaskState::Succeeded.as_str().to_owned()),
                         completed_at_unix_ms: Some(Some(completed_at_unix_ms)),
                         result_json: Some(Some(
                             json!({
@@ -961,7 +962,7 @@ pub(crate) async fn console_chat_derived_artifact_recompute_handler(
                 .update_orchestrator_background_task(
                     journal::OrchestratorBackgroundTaskUpdateRequest {
                         task_id: task.task_id.clone(),
-                        state: Some("failed".to_owned()),
+                        state: Some(AuxiliaryTaskState::Failed.as_str().to_owned()),
                         increment_attempt_count: true,
                         completed_at_unix_ms: Some(Some(completed_at_unix_ms)),
                         last_error: Some(Some(error.to_string())),
@@ -2045,9 +2046,9 @@ pub(crate) async fn console_chat_background_task_create_handler(
         .create_orchestrator_background_task(journal::OrchestratorBackgroundTaskCreateRequest {
             task_id: Ulid::new().to_string(),
             task_kind: if delegation.is_some() {
-                "delegation_prompt".to_owned()
+                AuxiliaryTaskKind::DelegationPrompt.as_str().to_owned()
             } else {
-                "background_prompt".to_owned()
+                AuxiliaryTaskKind::BackgroundPrompt.as_str().to_owned()
             },
             session_id: session_record.session_id.clone(),
             parent_run_id: session_record.last_run_id.clone(),
@@ -2056,7 +2057,7 @@ pub(crate) async fn console_chat_background_task_create_handler(
             owner_principal: session.context.principal.clone(),
             device_id: session.context.device_id.clone(),
             channel: session.context.channel.clone(),
-            state: "queued".to_owned(),
+            state: AuxiliaryTaskState::Queued.as_str().to_owned(),
             priority: payload.priority.unwrap_or(0).clamp(-10, 10),
             max_attempts: task_max_attempts,
             budget_tokens: task_budget_tokens,
@@ -2139,7 +2140,10 @@ pub(crate) async fn console_chat_background_task_pause_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
     let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
-    if task.state != "queued" && task.state != "failed" {
+    if !matches!(
+        AuxiliaryTaskState::from_str(task.state.as_str()),
+        Some(AuxiliaryTaskState::Queued | AuxiliaryTaskState::Failed)
+    ) {
         return Err(runtime_status_response(tonic::Status::failed_precondition(
             "only queued or failed background tasks can be paused",
         )));
@@ -2148,7 +2152,7 @@ pub(crate) async fn console_chat_background_task_pause_handler(
         .runtime
         .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
             task_id: task.task_id.clone(),
-            state: Some("paused".to_owned()),
+            state: Some(AuxiliaryTaskState::Paused.as_str().to_owned()),
             ..Default::default()
         })
         .await
@@ -2169,7 +2173,7 @@ pub(crate) async fn console_chat_background_task_resume_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
     let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
-    if task.state != "paused" {
+    if AuxiliaryTaskState::from_str(task.state.as_str()) != Some(AuxiliaryTaskState::Paused) {
         return Err(runtime_status_response(tonic::Status::failed_precondition(
             "only paused background tasks can be resumed",
         )));
@@ -2178,7 +2182,7 @@ pub(crate) async fn console_chat_background_task_resume_handler(
         .runtime
         .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
             task_id: task.task_id.clone(),
-            state: Some("queued".to_owned()),
+            state: Some(AuxiliaryTaskState::Queued.as_str().to_owned()),
             completed_at_unix_ms: Some(None),
             ..Default::default()
         })
@@ -2200,7 +2204,14 @@ pub(crate) async fn console_chat_background_task_retry_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
     let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
-    if task.state != "failed" && task.state != "cancelled" && task.state != "expired" {
+    if !matches!(
+        AuxiliaryTaskState::from_str(task.state.as_str()),
+        Some(
+            AuxiliaryTaskState::Failed
+                | AuxiliaryTaskState::Cancelled
+                | AuxiliaryTaskState::Expired
+        )
+    ) {
         return Err(runtime_status_response(tonic::Status::failed_precondition(
             "only failed, cancelled, or expired background tasks can be retried",
         )));
@@ -2209,7 +2220,7 @@ pub(crate) async fn console_chat_background_task_retry_handler(
         .runtime
         .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
             task_id: task.task_id.clone(),
-            state: Some("queued".to_owned()),
+            state: Some(AuxiliaryTaskState::Queued.as_str().to_owned()),
             target_run_id: Some(None),
             last_error: Some(None),
             result_json: Some(None),
@@ -2235,7 +2246,7 @@ pub(crate) async fn console_chat_background_task_cancel_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
     let task = load_console_background_task(&state, &session.context, task_id.as_str()).await?;
-    if task.state == "running" {
+    if AuxiliaryTaskState::from_str(task.state.as_str()) == Some(AuxiliaryTaskState::Running) {
         if let Some(target_run_id) = task.target_run_id.clone() {
             state
                 .runtime
@@ -2250,7 +2261,7 @@ pub(crate) async fn console_chat_background_task_cancel_handler(
                 .update_orchestrator_background_task(
                     journal::OrchestratorBackgroundTaskUpdateRequest {
                         task_id: task.task_id.clone(),
-                        state: Some("cancel_requested".to_owned()),
+                        state: Some(AuxiliaryTaskState::CancelRequested.as_str().to_owned()),
                         ..Default::default()
                     },
                 )
@@ -2266,7 +2277,7 @@ pub(crate) async fn console_chat_background_task_cancel_handler(
             .runtime
             .update_orchestrator_background_task(journal::OrchestratorBackgroundTaskUpdateRequest {
                 task_id: task.task_id.clone(),
-                state: Some("cancelled".to_owned()),
+                state: Some(AuxiliaryTaskState::Cancelled.as_str().to_owned()),
                 completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
                 last_error: Some(Some("cancelled_by_operator".to_owned())),
                 ..Default::default()
@@ -2369,7 +2380,7 @@ pub(crate) async fn console_chat_queue_handler(
             .runtime
             .update_orchestrator_queued_input_state(journal::OrchestratorQueuedInputUpdateRequest {
                 queued_input_id,
-                state: "delivery_failed".to_owned(),
+                state: QueuedInputState::DeliveryFailed.as_str().to_owned(),
             })
             .await
             .map_err(runtime_status_response)?;
@@ -2381,11 +2392,11 @@ pub(crate) async fn console_chat_queue_handler(
         .runtime
         .update_orchestrator_queued_input_state(journal::OrchestratorQueuedInputUpdateRequest {
             queued_input_id: queued.queued_input_id.clone(),
-            state: "forwarded".to_owned(),
+            state: QueuedInputState::Forwarded.as_str().to_owned(),
         })
         .await
         .map_err(runtime_status_response)?;
-    queued.state = "forwarded".to_owned();
+    queued.state = QueuedInputState::Forwarded.as_str().to_owned();
     Ok(Json(json!({
         "queued_input": queued,
         "contract": contract_descriptor(),

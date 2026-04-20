@@ -27,6 +27,14 @@ import {
   refreshChannelHealth as refreshChannelHealthRequest,
   sendChannelDiscordTestSend as sendChannelDiscordTestSendRequest,
 } from "./consoleApi/channels/discord";
+import {
+  normalizeAuxiliaryTaskKind,
+  normalizeAuxiliaryTaskState,
+  normalizeQueuedInputState,
+  type AuxiliaryTaskKind,
+  type AuxiliaryTaskState,
+  type QueuedInputState,
+} from "./console/runtimeContracts";
 
 export type JsonValue =
   | string
@@ -1044,7 +1052,7 @@ export interface ChatQueuedInputRecord {
   queued_input_id: string;
   run_id: string;
   session_id: string;
-  state: string;
+  state: QueuedInputState;
   text: string;
   created_at_unix_ms: number;
   updated_at_unix_ms: number;
@@ -1392,7 +1400,7 @@ export interface WorkspaceRestoreResponseEnvelope {
 
 export interface ChatBackgroundTaskRecord {
   task_id: string;
-  task_kind: string;
+  task_kind: AuxiliaryTaskKind;
   session_id: string;
   parent_run_id?: string;
   target_run_id?: string;
@@ -1400,7 +1408,7 @@ export interface ChatBackgroundTaskRecord {
   owner_principal: string;
   device_id: string;
   channel?: string;
-  state: string;
+  state: AuxiliaryTaskState;
   priority: number;
   attempt_count: number;
   max_attempts: number;
@@ -1418,6 +1426,15 @@ export interface ChatBackgroundTaskRecord {
   started_at_unix_ms?: number;
   completed_at_unix_ms?: number;
 }
+
+type RawChatQueuedInputRecord = Omit<ChatQueuedInputRecord, "state"> & {
+  state: string;
+};
+
+type RawChatBackgroundTaskRecord = Omit<ChatBackgroundTaskRecord, "task_kind" | "state"> & {
+  task_kind: string;
+  state: string;
+};
 
 export interface LearningCandidateRecord {
   candidate_id: string;
@@ -3275,6 +3292,23 @@ function buildPathWithQuery(path: string, params?: URLSearchParams): string {
   return `${path}?${params.toString()}`;
 }
 
+function normalizeChatQueuedInputRecord(record: RawChatQueuedInputRecord): ChatQueuedInputRecord {
+  return {
+    ...record,
+    state: normalizeQueuedInputState(record.state),
+  };
+}
+
+function normalizeChatBackgroundTaskRecord(
+  record: RawChatBackgroundTaskRecord,
+): ChatBackgroundTaskRecord {
+  return {
+    ...record,
+    task_kind: normalizeAuxiliaryTaskKind(record.task_kind),
+    state: normalizeAuxiliaryTaskState(record.state),
+  };
+}
+
 function invokeFetch(
   fetcher: typeof fetch,
   input: RequestInfo | URL,
@@ -4538,7 +4572,10 @@ export class ConsoleApiClient {
     runId: string,
     payload: { text: string },
   ): Promise<{ queued_input: ChatQueuedInputRecord; contract: ContractDescriptor }> {
-    return this.request(
+    const response = await this.request<{
+      queued_input: RawChatQueuedInputRecord;
+      contract: ContractDescriptor;
+    }>(
       `/console/v1/chat/runs/${encodeURIComponent(runId)}/queue`,
       {
         method: "POST",
@@ -4546,6 +4583,10 @@ export class ConsoleApiClient {
       },
       { csrf: true },
     );
+    return {
+      ...response,
+      queued_input: normalizeChatQueuedInputRecord(response.queued_input),
+    };
   }
 
   async getSessionTranscript(sessionId: string): Promise<{
@@ -4561,7 +4602,24 @@ export class ConsoleApiClient {
     background_tasks: ChatBackgroundTaskRecord[];
     contract: ContractDescriptor;
   }> {
-    return this.request(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/transcript`);
+    const response = await this.request<{
+      session: SessionCatalogRecord;
+      records: ChatTranscriptRecord[];
+      attachments: ChatAttachmentRecord[];
+      derived_artifacts: MediaDerivedArtifactRecord[];
+      pins: ChatPinRecord[];
+      compactions: ChatCompactionArtifactRecord[];
+      checkpoints: ChatCheckpointRecord[];
+      queued_inputs: RawChatQueuedInputRecord[];
+      runs: ChatRunStatusRecord[];
+      background_tasks: RawChatBackgroundTaskRecord[];
+      contract: ContractDescriptor;
+    }>(`/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/transcript`);
+    return {
+      ...response,
+      queued_inputs: response.queued_inputs.map(normalizeChatQueuedInputRecord),
+      background_tasks: response.background_tasks.map(normalizeChatBackgroundTaskRecord),
+    };
   }
 
   async listSessionCanvases(sessionId: string): Promise<SessionCanvasListEnvelope> {
@@ -4742,7 +4800,14 @@ export class ConsoleApiClient {
     if (params?.limit !== undefined) {
       query.set("limit", String(params.limit));
     }
-    return this.request(buildPathWithQuery("/console/v1/chat/background-tasks", query));
+    const response = await this.request<{
+      tasks: RawChatBackgroundTaskRecord[];
+      contract: ContractDescriptor;
+    }>(buildPathWithQuery("/console/v1/chat/background-tasks", query));
+    return {
+      ...response,
+      tasks: response.tasks.map(normalizeChatBackgroundTaskRecord),
+    };
   }
 
   async createBackgroundTask(
@@ -4782,7 +4847,11 @@ export class ConsoleApiClient {
     task: ChatBackgroundTaskRecord;
     contract: ContractDescriptor;
   }> {
-    return this.request(
+    const response = await this.request<{
+      session: SessionCatalogRecord;
+      task: RawChatBackgroundTaskRecord;
+      contract: ContractDescriptor;
+    }>(
       `/console/v1/chat/sessions/${encodeURIComponent(sessionId)}/background-tasks`,
       {
         method: "POST",
@@ -4790,6 +4859,10 @@ export class ConsoleApiClient {
       },
       { csrf: true },
     );
+    return {
+      ...response,
+      task: normalizeChatBackgroundTaskRecord(response.task),
+    };
   }
 
   async getBackgroundTask(taskId: string): Promise<{
@@ -4797,7 +4870,15 @@ export class ConsoleApiClient {
     run?: ChatRunStatusRecord;
     contract: ContractDescriptor;
   }> {
-    return this.request(`/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}`);
+    const response = await this.request<{
+      task: RawChatBackgroundTaskRecord;
+      run?: ChatRunStatusRecord;
+      contract: ContractDescriptor;
+    }>(`/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}`);
+    return {
+      ...response,
+      task: normalizeChatBackgroundTaskRecord(response.task),
+    };
   }
 
   async pauseBackgroundTask(taskId: string): Promise<{
@@ -4805,11 +4886,19 @@ export class ConsoleApiClient {
     action: string;
     contract: ContractDescriptor;
   }> {
-    return this.request(
+    const response = await this.request<{
+      task: RawChatBackgroundTaskRecord;
+      action: string;
+      contract: ContractDescriptor;
+    }>(
       `/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}/pause`,
       { method: "POST" },
       { csrf: true },
     );
+    return {
+      ...response,
+      task: normalizeChatBackgroundTaskRecord(response.task),
+    };
   }
 
   async resumeBackgroundTask(taskId: string): Promise<{
@@ -4817,11 +4906,19 @@ export class ConsoleApiClient {
     action: string;
     contract: ContractDescriptor;
   }> {
-    return this.request(
+    const response = await this.request<{
+      task: RawChatBackgroundTaskRecord;
+      action: string;
+      contract: ContractDescriptor;
+    }>(
       `/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}/resume`,
       { method: "POST" },
       { csrf: true },
     );
+    return {
+      ...response,
+      task: normalizeChatBackgroundTaskRecord(response.task),
+    };
   }
 
   async retryBackgroundTask(taskId: string): Promise<{
@@ -4829,11 +4926,19 @@ export class ConsoleApiClient {
     action: string;
     contract: ContractDescriptor;
   }> {
-    return this.request(
+    const response = await this.request<{
+      task: RawChatBackgroundTaskRecord;
+      action: string;
+      contract: ContractDescriptor;
+    }>(
       `/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}/retry`,
       { method: "POST" },
       { csrf: true },
     );
+    return {
+      ...response,
+      task: normalizeChatBackgroundTaskRecord(response.task),
+    };
   }
 
   async cancelBackgroundTask(taskId: string): Promise<{
@@ -4841,11 +4946,19 @@ export class ConsoleApiClient {
     action: string;
     contract: ContractDescriptor;
   }> {
-    return this.request(
+    const response = await this.request<{
+      task: RawChatBackgroundTaskRecord;
+      action: string;
+      contract: ContractDescriptor;
+    }>(
       `/console/v1/chat/background-tasks/${encodeURIComponent(taskId)}/cancel`,
       { method: "POST" },
       { csrf: true },
     );
+    return {
+      ...response,
+      task: normalizeChatBackgroundTaskRecord(response.task),
+    };
   }
 
   async searchSessionTranscript(

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
+use palyra_common::runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -160,15 +161,36 @@ pub(crate) async fn console_mobile_inbox_handler(
     });
     alerts.truncate(MOBILE_INBOX_ALERT_LIMIT);
 
-    let failed_tasks =
-        tasks.iter().filter(|task| matches!(task.state.as_str(), "failed" | "expired")).count();
+    let failed_tasks = tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                AuxiliaryTaskState::from_str(task.state.as_str()),
+                Some(AuxiliaryTaskState::Failed | AuxiliaryTaskState::Expired)
+            )
+        })
+        .count();
     let completed_tasks = tasks
         .iter()
-        .filter(|task| matches!(task.state.as_str(), "succeeded" | "cancelled"))
+        .filter(|task| {
+            matches!(
+                AuxiliaryTaskState::from_str(task.state.as_str()),
+                Some(AuxiliaryTaskState::Succeeded | AuxiliaryTaskState::Cancelled)
+            )
+        })
         .count();
     let active_tasks = tasks
         .iter()
-        .filter(|task| matches!(task.state.as_str(), "queued" | "running" | "paused"))
+        .filter(|task| {
+            matches!(
+                AuxiliaryTaskState::from_str(task.state.as_str()),
+                Some(
+                    AuxiliaryTaskState::Queued
+                        | AuxiliaryTaskState::Running
+                        | AuxiliaryTaskState::Paused
+                )
+            )
+        })
         .count();
 
     Ok(Json(control_plane::MobileInboxEnvelope {
@@ -466,7 +488,7 @@ pub(crate) async fn console_mobile_voice_note_create_handler(
         .runtime
         .create_orchestrator_background_task(journal::OrchestratorBackgroundTaskCreateRequest {
             task_id: Ulid::new().to_string(),
-            task_kind: "background_prompt".to_owned(),
+            task_kind: AuxiliaryTaskKind::BackgroundPrompt.as_str().to_owned(),
             session_id: target_session.session_id.clone(),
             parent_run_id: target_session.last_run_id.clone(),
             target_run_id: None,
@@ -474,7 +496,7 @@ pub(crate) async fn console_mobile_voice_note_create_handler(
             owner_principal: session.context.principal.clone(),
             device_id: target_session.device_id.clone(),
             channel: target_session.channel.clone(),
-            state: "queued".to_owned(),
+            state: AuxiliaryTaskState::Queued.as_str().to_owned(),
             priority: 1,
             max_attempts: 3,
             budget_tokens: crate::orchestrator::estimate_token_count(transcript_text.as_str()),
@@ -751,43 +773,44 @@ fn build_mobile_task_alerts(
     tasks
         .iter()
         .filter_map(|task| {
-            let (kind, priority, title, body) = match task.state.as_str() {
-                "failed" => (
-                    control_plane::MobileInboxItemKind::Support,
-                    control_plane::MobileInboxPriority::High,
-                    "Background task failed".to_owned(),
-                    task.last_error
-                        .clone()
-                        .unwrap_or_else(|| "Inspect the session in the full console.".to_owned()),
-                ),
-                "expired" => (
-                    control_plane::MobileInboxItemKind::Support,
-                    control_plane::MobileInboxPriority::High,
-                    "Background task expired".to_owned(),
-                    "The queued task expired before it could run.".to_owned(),
-                ),
-                "queued" => (
-                    control_plane::MobileInboxItemKind::RunUpdate,
-                    control_plane::MobileInboxPriority::Medium,
-                    "Background task queued".to_owned(),
-                    task.input_text
-                        .clone()
-                        .unwrap_or_else(|| "Queued from another surface.".to_owned()),
-                ),
-                "running" => (
-                    control_plane::MobileInboxItemKind::RunUpdate,
-                    control_plane::MobileInboxPriority::Medium,
-                    "Background task running".to_owned(),
-                    "Work is still in progress.".to_owned(),
-                ),
-                "succeeded" => (
-                    control_plane::MobileInboxItemKind::RunUpdate,
-                    control_plane::MobileInboxPriority::Low,
-                    "Background task completed".to_owned(),
-                    "The task finished successfully.".to_owned(),
-                ),
-                _ => return None,
-            };
+            let (kind, priority, title, body) =
+                match AuxiliaryTaskState::from_str(task.state.as_str()) {
+                    Some(AuxiliaryTaskState::Failed) => (
+                        control_plane::MobileInboxItemKind::Support,
+                        control_plane::MobileInboxPriority::High,
+                        "Background task failed".to_owned(),
+                        task.last_error.clone().unwrap_or_else(|| {
+                            "Inspect the session in the full console.".to_owned()
+                        }),
+                    ),
+                    Some(AuxiliaryTaskState::Expired) => (
+                        control_plane::MobileInboxItemKind::Support,
+                        control_plane::MobileInboxPriority::High,
+                        "Background task expired".to_owned(),
+                        "The queued task expired before it could run.".to_owned(),
+                    ),
+                    Some(AuxiliaryTaskState::Queued) => (
+                        control_plane::MobileInboxItemKind::RunUpdate,
+                        control_plane::MobileInboxPriority::Medium,
+                        "Background task queued".to_owned(),
+                        task.input_text
+                            .clone()
+                            .unwrap_or_else(|| "Queued from another surface.".to_owned()),
+                    ),
+                    Some(AuxiliaryTaskState::Running) => (
+                        control_plane::MobileInboxItemKind::RunUpdate,
+                        control_plane::MobileInboxPriority::Medium,
+                        "Background task running".to_owned(),
+                        "Work is still in progress.".to_owned(),
+                    ),
+                    Some(AuxiliaryTaskState::Succeeded) => (
+                        control_plane::MobileInboxItemKind::RunUpdate,
+                        control_plane::MobileInboxPriority::Low,
+                        "Background task completed".to_owned(),
+                        "The task finished successfully.".to_owned(),
+                    ),
+                    _ => return None,
+                };
             let handoff = sessions.get(task.session_id.as_str()).map(|session| {
                 control_plane::MobileHandoffTarget {
                     path: build_handoff_path(
@@ -799,7 +822,10 @@ fn build_mobile_task_alerts(
                         ],
                     ),
                     intent: Some("resume-session".to_owned()),
-                    requires_full_console: matches!(task.state.as_str(), "failed" | "expired"),
+                    requires_full_console: matches!(
+                        AuxiliaryTaskState::from_str(task.state.as_str()),
+                        Some(AuxiliaryTaskState::Failed | AuxiliaryTaskState::Expired)
+                    ),
                 }
             });
             Some(control_plane::MobileInboxItem {

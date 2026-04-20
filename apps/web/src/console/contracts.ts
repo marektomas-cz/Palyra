@@ -2,6 +2,8 @@ import { findSectionByPath, getSectionPath } from "./navigation";
 import type { Section } from "./sectionMetadata";
 import type { JsonValue } from "../consoleApi";
 
+export * from "./runtimeContracts";
+
 export type ConsoleUiMode = "basic" | "advanced";
 export type ConsoleLocale = "en" | "cs" | "qps-ploc";
 export type TelemetrySurface = "web" | "desktop" | "tui" | "mobile";

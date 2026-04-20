@@ -3179,6 +3179,7 @@ name = "palyra-workerd"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "palyra-common",
  "serde",
  "serde_json",
  "thiserror",
