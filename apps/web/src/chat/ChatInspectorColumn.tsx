@@ -196,6 +196,8 @@ export function ChatInspectorColumn({
   openBrowserSessionWorkbench,
 }: ChatInspectorColumnProps) {
   const sessionMaintenanceBusy = sessionMaintenanceBusyKey !== null;
+  const queueBacklogActionDisabled =
+    selectedSession === null || sessionMaintenanceBusy || queuedInputs.length === 0;
   const browserSessionIds = extractBrowserSessionIds(runTape);
   const sessionProjectContext = selectedSession?.recap.project_context ?? null;
 
@@ -821,9 +823,7 @@ export function ChatInspectorColumn({
               {sessionMaintenanceBusyKey === "queue-resume" ? "Resuming..." : "Resume"}
             </ActionButton>
             <ActionButton
-              isDisabled={
-                selectedSession === null || sessionMaintenanceBusy || queuedInputs.length === 0
-              }
+              isDisabled={queueBacklogActionDisabled}
               size="sm"
               type="button"
               variant="secondary"
@@ -832,9 +832,7 @@ export function ChatInspectorColumn({
               {sessionMaintenanceBusyKey === "queue-collect-summary" ? "Collecting..." : "Collect"}
             </ActionButton>
             <ActionButton
-              isDisabled={
-                selectedSession === null || sessionMaintenanceBusy || queuedInputs.length === 0
-              }
+              isDisabled={queueBacklogActionDisabled}
               size="sm"
               type="button"
               variant="danger"
