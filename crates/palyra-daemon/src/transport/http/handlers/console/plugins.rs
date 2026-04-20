@@ -10,11 +10,11 @@ use crate::{
     plugins::{
         build_plugin_capability_diff, build_plugin_discovery_snapshot, delete_plugin_binding,
         inspect_plugin_filesystem_safety, load_plugin_bindings_index, load_plugin_config_instance,
-        normalize_plugin_binding_upsert, plugin_binding, prepare_plugin_root,
-        redact_plugin_config_values, remove_plugin_config_instance, resolve_plugins_root,
-        save_plugin_bindings_index, save_plugin_config_instance, set_plugin_binding_enabled,
-        upsert_plugin_binding, validate_plugin_config_instance, PluginBindingRecord,
-        PluginBindingUpsert, PluginCapabilityProfile, PluginConfigInstance,
+        negotiate_plugin_typed_contracts, normalize_plugin_binding_upsert, plugin_binding,
+        prepare_plugin_root, redact_plugin_config_values, remove_plugin_config_instance,
+        resolve_plugins_root, save_plugin_bindings_index, save_plugin_config_instance,
+        set_plugin_binding_enabled, upsert_plugin_binding, validate_plugin_config_instance,
+        PluginBindingRecord, PluginBindingUpsert, PluginCapabilityProfile, PluginConfigInstance,
         PluginConfigInstanceRef, PluginConfigValidationState, PluginOperatorMetadata,
     },
     wasm_plugin_runner::{
@@ -465,6 +465,7 @@ async fn evaluate_plugin_binding(
     let mut skill_status_payload = Value::Null;
     let mut capability_payload =
         serde_json::to_value(&binding.capability_diff).unwrap_or(Value::Null);
+    let mut contracts_payload = build_contracts_payload(&binding.typed_contracts, Value::Null);
     let mut config_payload = Value::Null;
     let mut resolved_payload = Value::Null;
 
@@ -539,6 +540,21 @@ async fn evaluate_plugin_binding(
             );
         }
         capability_payload = serde_json::to_value(&binding.capability_diff).unwrap_or(Value::Null);
+
+        binding.typed_contracts =
+            negotiate_plugin_typed_contracts(&resolved.manifest, &binding.capability_profile);
+        if binding.typed_contracts.mode == palyra_plugins_runtime::TypedPluginContractMode::Typed
+            && !binding.typed_contracts.ready
+        {
+            ready = false;
+            reasons.push("typed plugin contract negotiation failed".to_owned());
+            remediation.push(
+                "Align declared typed contracts with a supported daemon adapter version and compatible capability classes."
+                    .to_owned(),
+            );
+        }
+        let host_adapters = collect_typed_contract_host_adapters(state).await?;
+        contracts_payload = build_contracts_payload(&binding.typed_contracts, host_adapters);
 
         let (config_validation, effective_config) = validate_plugin_config_instance(
             &resolved.manifest,
@@ -621,11 +637,64 @@ async fn evaluate_plugin_binding(
             "skill_status": skill_status_payload,
             "resolved": resolved_payload,
             "capabilities": capability_payload,
+            "contracts": contracts_payload,
             "config": config_payload,
             "discovery": binding.discovery,
         }),
         installed_skill_payload,
     ))
+}
+
+fn build_contracts_payload(
+    report: &palyra_plugins_runtime::TypedPluginContractNegotiationReport,
+    host_adapters: Value,
+) -> Value {
+    json!({
+        "mode": report.mode,
+        "ready": report.ready,
+        "entries": report.entries,
+        "host_adapters": host_adapters,
+    })
+}
+
+async fn collect_typed_contract_host_adapters(state: &AppState) -> Result<Value, Response> {
+    let memory_embeddings =
+        state.runtime.memory_embeddings_status().await.map_err(runtime_status_response)?;
+    Ok(json!({
+        "memory_provider": {
+            "adapter": "journal.memory_embedding_provider",
+            "mode": memory_embeddings.mode,
+            "posture": memory_embeddings.posture,
+            "target_model_id": memory_embeddings.target_model_id,
+            "target_dims": memory_embeddings.target_dims,
+            "backfill_strategy": memory_embeddings.backfill_strategy,
+        },
+        "context_engine": {
+            "adapter": "application.context_engine",
+            "strategies": [
+                "noop",
+                "checkpoint_aware",
+                "summarizing",
+                "cost_aware",
+                "provider_aware",
+            ],
+            "stable_extension_boundary": [
+                "strategy_selection",
+                "segment_explain",
+                "drop_reason",
+            ],
+        },
+        "routing_strategy": {
+            "adapter": "usage_governance.routing",
+            "default_mode": state.runtime.config.smart_routing.default_mode,
+            "auxiliary_routing_enabled": state.runtime.config.smart_routing.auxiliary_routing_enabled,
+            "stable_extension_boundary": [
+                "candidate_selection",
+                "budget_gate",
+                "approval_gate",
+            ],
+        },
+    }))
 }
 
 fn build_wasm_policy(state: &AppState) -> Result<WasmPluginRunnerPolicy, Response> {

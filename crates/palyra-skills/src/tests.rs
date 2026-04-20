@@ -322,6 +322,45 @@ fn manifest_rejects_operator_plugin_default_tool_that_is_not_declared() {
 }
 
 #[test]
+fn manifest_accepts_typed_plugin_contract_declarations() {
+    let manifest = format!(
+        "{}\n\n[[operator.plugin.contracts]]\nkind = \"memory_provider\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"context_engine\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"routing_strategy\"\nversion = 1\n",
+        sample_manifest()
+    );
+    let parsed =
+        parse_manifest_toml(manifest.as_str()).expect("typed plugin contracts should validate");
+    assert_eq!(parsed.operator.plugin.contracts.len(), 3);
+}
+
+#[test]
+fn manifest_rejects_duplicate_typed_plugin_contract_kinds() {
+    let manifest = format!(
+        "{}\n\n[[operator.plugin.contracts]]\nkind = \"memory_provider\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"memory_provider\"\nversion = 1\n",
+        sample_manifest()
+    );
+    let error = parse_manifest_toml(manifest.as_str())
+        .expect_err("duplicate typed plugin contract kind must fail");
+    assert!(
+        matches!(error, SkillPackagingError::ManifestValidation(ref message) if message.contains("duplicate kind")),
+        "unexpected validation error: {error:?}"
+    );
+}
+
+#[test]
+fn manifest_rejects_zero_version_typed_plugin_contracts() {
+    let manifest = format!(
+        "{}\n\n[[operator.plugin.contracts]]\nkind = \"memory_provider\"\nversion = 0\n",
+        sample_manifest()
+    );
+    let error = parse_manifest_toml(manifest.as_str())
+        .expect_err("zero-version typed plugin contract must fail");
+    assert!(
+        matches!(error, SkillPackagingError::ManifestValidation(ref message) if message.contains("non-zero version")),
+        "unexpected validation error: {error:?}"
+    );
+}
+
+#[test]
 fn manifest_rejects_builder_metadata_without_test_harness() {
     let manifest = format!(
         "{}\n\n[builder]\nexperimental = true\nsource_kind = \"prompt\"\nsource_ref = \"prompt:generate release helper\"\nrollout_flag = \"PALYRA_EXPERIMENTAL_DYNAMIC_TOOL_BUILDER\"\n\n[builder.checklist]\ncapability_declaration_path = \"builder-capabilities.json\"\nprovenance_path = \"provenance.json\"\ntest_harness_path = \"\"\n",

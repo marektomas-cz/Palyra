@@ -9,6 +9,11 @@ use palyra_common::versioned_json::{
     migrate_updated_at_metadata_v0_to_v1, parse_versioned_json, JsonMigrationFn,
     VersionedJsonFormat,
 };
+use palyra_plugins_runtime::{
+    negotiate_typed_plugin_contracts, TypedPluginContractAdapterSupport,
+    TypedPluginContractNegotiationInput, TypedPluginContractNegotiationReport,
+};
+use palyra_plugins_sdk::{TypedPluginCapabilityClass, TypedPluginContractKind};
 use palyra_skills::{SkillConfigProperty, SkillConfigValueType, SkillManifest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -69,6 +74,8 @@ pub(crate) struct PluginBindingRecord {
     pub(crate) config: Option<PluginConfigInstanceRef>,
     #[serde(default)]
     pub(crate) capability_diff: PluginCapabilityDiffCache,
+    #[serde(default)]
+    pub(crate) typed_contracts: TypedPluginContractNegotiationReport,
     pub(crate) created_at_unix_ms: i64,
     pub(crate) updated_at_unix_ms: i64,
 }
@@ -322,6 +329,7 @@ pub(crate) fn normalize_plugin_binding_upsert(
         discovery: existing.map(|entry| entry.discovery.clone()).unwrap_or_default(),
         config: existing.and_then(|entry| entry.config.clone()),
         capability_diff: existing.map(|entry| entry.capability_diff.clone()).unwrap_or_default(),
+        typed_contracts: existing.map(|entry| entry.typed_contracts.clone()).unwrap_or_default(),
         created_at_unix_ms: existing.map(|entry| entry.created_at_unix_ms).unwrap_or(now_unix_ms),
         updated_at_unix_ms: now_unix_ms,
     })
@@ -1144,6 +1152,66 @@ impl PluginCapabilityProfile {
     }
 }
 
+pub(crate) fn negotiate_plugin_typed_contracts(
+    manifest: &SkillManifest,
+    capability_profile: &PluginCapabilityProfile,
+) -> TypedPluginContractNegotiationReport {
+    let capability_classes = plugin_capability_classes(capability_profile);
+    let adapters = supported_plugin_contract_adapters();
+    negotiate_typed_plugin_contracts(TypedPluginContractNegotiationInput {
+        declarations: manifest.operator.plugin.contracts.as_slice(),
+        capability_classes: capability_classes.as_slice(),
+        adapters: adapters.as_slice(),
+    })
+}
+
+fn supported_plugin_contract_adapters() -> Vec<TypedPluginContractAdapterSupport> {
+    let capability_classes = vec![
+        TypedPluginCapabilityClass::HttpHosts,
+        TypedPluginCapabilityClass::Secrets,
+        TypedPluginCapabilityClass::StoragePrefixes,
+    ];
+    vec![
+        TypedPluginContractAdapterSupport {
+            kind: TypedPluginContractKind::MemoryProvider,
+            adapter: "journal.memory_embedding_provider".to_owned(),
+            supported_versions: vec![1],
+            allowed_capability_classes: capability_classes.clone(),
+        },
+        TypedPluginContractAdapterSupport {
+            kind: TypedPluginContractKind::ContextEngine,
+            adapter: "application.context_engine".to_owned(),
+            supported_versions: vec![1],
+            allowed_capability_classes: capability_classes.clone(),
+        },
+        TypedPluginContractAdapterSupport {
+            kind: TypedPluginContractKind::RoutingStrategy,
+            adapter: "usage_governance.routing".to_owned(),
+            supported_versions: vec![1],
+            allowed_capability_classes: capability_classes,
+        },
+    ]
+}
+
+fn plugin_capability_classes(
+    capability_profile: &PluginCapabilityProfile,
+) -> Vec<TypedPluginCapabilityClass> {
+    let mut classes = Vec::new();
+    if !capability_profile.http_hosts.is_empty() {
+        classes.push(TypedPluginCapabilityClass::HttpHosts);
+    }
+    if !capability_profile.secrets.is_empty() {
+        classes.push(TypedPluginCapabilityClass::Secrets);
+    }
+    if !capability_profile.storage_prefixes.is_empty() {
+        classes.push(TypedPluginCapabilityClass::StoragePrefixes);
+    }
+    if !capability_profile.channels.is_empty() {
+        classes.push(TypedPluginCapabilityClass::Channels);
+    }
+    classes
+}
+
 pub(crate) fn plugin_capability_profile_from_manifest(
     manifest: &SkillManifest,
 ) -> PluginCapabilityProfile {
@@ -1180,6 +1248,7 @@ mod tests {
         PluginDiscoveryState, PluginFilesystemSafetySnapshot, PLUGIN_BINDINGS_LAYOUT_VERSION,
     };
     use crate::wasm_plugin_runner::WasmPluginRunnerPolicy;
+    use palyra_plugins_runtime::TypedPluginContractNegotiationReport;
 
     #[test]
     fn load_plugin_bindings_index_migrates_legacy_metadata() {
@@ -1241,6 +1310,8 @@ mod tests {
         assert!(entry.discovery.reasons.is_empty());
         assert!(entry.config.is_none());
         assert!(entry.capability_diff.entries.is_empty());
+        assert!(entry.typed_contracts.ready);
+        assert!(entry.typed_contracts.entries.is_empty());
     }
 
     #[test]
@@ -1315,6 +1386,7 @@ mod tests {
                         message: "binding grants capability not declared by manifest".to_owned(),
                     }],
                 },
+                typed_contracts: TypedPluginContractNegotiationReport::default(),
                 created_at_unix_ms: 1111,
                 updated_at_unix_ms: 2222,
             }],

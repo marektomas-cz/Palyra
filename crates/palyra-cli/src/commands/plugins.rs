@@ -215,8 +215,11 @@ fn emit_plugin_list(
         let config_state =
             json_path_string(entry.check.as_object(), &["config", "validation", "state"])
                 .unwrap_or_else(|| "unknown".to_owned());
+        let contract_mode = json_path_string(entry.check.as_object(), &["contracts", "mode"])
+            .unwrap_or_else(|| "untyped_legacy".to_owned());
+        let contracts_ready = json_path_bool(entry.check.as_object(), &["contracts", "ready"]);
         println!(
-            "{event}.entry plugin_id={} enabled={} skill_id={} skill_version={} ready={} discovery={} config={} tool_id={} module_path={}",
+            "{event}.entry plugin_id={} enabled={} skill_id={} skill_version={} ready={} discovery={} config={} contracts_mode={} contracts_ready={} tool_id={} module_path={}",
             entry.binding.plugin_id,
             entry.binding.enabled,
             entry.binding.skill_id,
@@ -224,6 +227,8 @@ fn emit_plugin_list(
             json_bool(entry.check.as_object(), "ready"),
             discovery_state,
             config_state,
+            contract_mode,
+            contracts_ready,
             entry.binding.tool_id.as_deref().unwrap_or("default"),
             entry.binding.module_path.as_deref().unwrap_or("auto"),
         );
@@ -290,6 +295,16 @@ fn emit_plugin_envelope(
     {
         println!("{event}.config state={config_state}");
     }
+    if let Some(contract_mode) =
+        json_path_string(envelope.check.as_object(), &["contracts", "mode"])
+    {
+        println!(
+            "{event}.contracts mode={} ready={}",
+            contract_mode,
+            json_path_bool(envelope.check.as_object(), &["contracts", "ready"])
+        );
+    }
+    emit_plugin_contract_entries(event, envelope.check.as_object());
     std::io::stdout().flush().context("stdout flush failed")
 }
 
@@ -334,6 +349,7 @@ fn emit_plugin_explain(envelope: &control_plane::PluginBindingEnvelope, json: bo
             );
         }
     }
+    emit_plugin_contract_entries("plugins.explain", envelope.check.as_object());
     std::io::stdout().flush().context("stdout flush failed")
 }
 
@@ -359,6 +375,8 @@ fn emit_plugin_doctor(
             "ready": is_ready,
             "discovery": json_path_string(entry.check.as_object(), &["discovery", "state"]),
             "config": json_path_string(entry.check.as_object(), &["config", "validation", "state"]),
+            "contracts_mode": json_path_string(entry.check.as_object(), &["contracts", "mode"]),
+            "contracts_ready": json_path_bool(entry.check.as_object(), &["contracts", "ready"]),
             "reasons": json_string_array(entry.check.as_object(), "reasons").unwrap_or_default(),
             "remediation": json_string_array(entry.check.as_object(), "remediation").unwrap_or_default(),
         }));
@@ -384,11 +402,13 @@ fn emit_plugin_doctor(
     if let Some(plugins) = summary.get("plugins").and_then(Value::as_array) {
         for plugin in plugins {
             println!(
-                "plugins.doctor.entry plugin_id={} ready={} discovery={} config={}",
+                "plugins.doctor.entry plugin_id={} ready={} discovery={} config={} contracts_mode={} contracts_ready={}",
                 plugin.get("plugin_id").and_then(Value::as_str).unwrap_or("unknown"),
                 plugin.get("ready").and_then(Value::as_bool).unwrap_or(false),
                 plugin.get("discovery").and_then(Value::as_str).unwrap_or("unknown"),
                 plugin.get("config").and_then(Value::as_str).unwrap_or("unknown"),
+                plugin.get("contracts_mode").and_then(Value::as_str).unwrap_or("unknown"),
+                plugin.get("contracts_ready").and_then(Value::as_bool).unwrap_or(false),
             );
             if let Some(reasons) = plugin.get("reasons").and_then(Value::as_array) {
                 for reason in reasons.iter().filter_map(Value::as_str) {
@@ -428,6 +448,10 @@ fn json_path_array<'a>(
     json_path_value(object, path).and_then(Value::as_array)
 }
 
+fn json_path_bool(object: Option<&serde_json::Map<String, Value>>, path: &[&str]) -> bool {
+    json_path_value(object, path).and_then(Value::as_bool).unwrap_or(false)
+}
+
 fn json_path_value<'a>(
     object: Option<&'a serde_json::Map<String, Value>>,
     path: &[&str],
@@ -437,6 +461,28 @@ fn json_path_value<'a>(
         current = current.as_object()?.get(*segment)?;
     }
     Some(current)
+}
+
+fn emit_plugin_contract_entries(event: &str, object: Option<&serde_json::Map<String, Value>>) {
+    let Some(entries) = json_path_array(object, &["contracts", "entries"]) else {
+        return;
+    };
+    for entry in entries {
+        let kind = entry.get("kind").and_then(Value::as_str).unwrap_or("unknown");
+        let requested_version =
+            entry.get("requested_version").and_then(Value::as_u64).unwrap_or_default();
+        let status = entry.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let adapter = entry.get("adapter").and_then(Value::as_str).unwrap_or("n/a");
+        let reasons = entry
+            .get("reasons")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" | "))
+            .unwrap_or_default();
+        println!(
+            "{event}.contract kind={} requested_version={} status={} adapter={} reasons={}",
+            kind, requested_version, status, adapter, reasons
+        );
+    }
 }
 
 fn parse_config_json(raw: Option<&str>) -> Result<Option<Value>> {

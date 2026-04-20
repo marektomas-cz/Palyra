@@ -1120,6 +1120,7 @@ fn build_builder_skill_manifest(
                 ),
                 default_module_path: Some("modules/module.wasm".to_owned()),
                 default_entrypoint: Some("run".to_owned()),
+                contracts: Vec::new(),
             },
             config: None,
         },

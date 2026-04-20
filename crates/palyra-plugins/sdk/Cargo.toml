@@ -13,3 +13,4 @@ name = "palyra_plugins_sdk"
 path = "src/lib.rs"
 
 [dependencies]
+serde.workspace = true

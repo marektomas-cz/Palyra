@@ -10,5 +10,6 @@ workspace = true
 
 [dependencies]
 palyra-plugins-sdk = { version = "0.1.0", path = "../sdk" }
+serde.workspace = true
 thiserror.workspace = true
 wasmtime.workspace = true

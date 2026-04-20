@@ -1,12 +1,14 @@
-use std::{sync::mpsc, time::Duration};
+use std::{collections::BTreeSet, sync::mpsc, time::Duration};
 
 use palyra_plugins_sdk::{
-    HOST_CAPABILITIES_IMPORT_MODULE, HOST_CAPABILITY_CHANNEL_COUNT_FN,
-    HOST_CAPABILITY_CHANNEL_HANDLE_FN, HOST_CAPABILITY_HTTP_COUNT_FN,
-    HOST_CAPABILITY_HTTP_HANDLE_FN, HOST_CAPABILITY_SECRET_COUNT_FN,
+    typed_plugin_contract_descriptor, TypedPluginCapabilityClass, TypedPluginContractDeclaration,
+    TypedPluginContractDescriptor, TypedPluginContractKind, HOST_CAPABILITIES_IMPORT_MODULE,
+    HOST_CAPABILITY_CHANNEL_COUNT_FN, HOST_CAPABILITY_CHANNEL_HANDLE_FN,
+    HOST_CAPABILITY_HTTP_COUNT_FN, HOST_CAPABILITY_HTTP_HANDLE_FN, HOST_CAPABILITY_SECRET_COUNT_FN,
     HOST_CAPABILITY_SECRET_HANDLE_FN, HOST_CAPABILITY_STORAGE_COUNT_FN,
     HOST_CAPABILITY_STORAGE_HANDLE_FN,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wasmtime::{
     Caller, Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
@@ -77,6 +79,150 @@ impl CapabilityHandles {
             storage_handles: build_handles(grants.storage_prefixes.as_slice(), STORAGE_HANDLE_BASE),
             channel_handles: build_handles(grants.channels.as_slice(), CHANNEL_HANDLE_BASE),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedPluginContractAdapterSupport {
+    pub kind: TypedPluginContractKind,
+    pub adapter: String,
+    #[serde(default)]
+    pub supported_versions: Vec<u32>,
+    #[serde(default)]
+    pub allowed_capability_classes: Vec<TypedPluginCapabilityClass>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedPluginContractMode {
+    #[default]
+    UntypedLegacy,
+    Typed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedPluginContractStatus {
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedPluginContractNegotiationEntry {
+    pub kind: TypedPluginContractKind,
+    pub requested_version: u32,
+    pub status: TypedPluginContractStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<TypedPluginContractDescriptor>,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedPluginContractNegotiationReport {
+    pub mode: TypedPluginContractMode,
+    pub ready: bool,
+    #[serde(default)]
+    pub entries: Vec<TypedPluginContractNegotiationEntry>,
+}
+
+impl Default for TypedPluginContractNegotiationReport {
+    fn default() -> Self {
+        Self { mode: TypedPluginContractMode::UntypedLegacy, ready: true, entries: Vec::new() }
+    }
+}
+
+pub struct TypedPluginContractNegotiationInput<'a> {
+    pub declarations: &'a [TypedPluginContractDeclaration],
+    pub capability_classes: &'a [TypedPluginCapabilityClass],
+    pub adapters: &'a [TypedPluginContractAdapterSupport],
+}
+
+#[must_use]
+pub fn negotiate_typed_plugin_contracts(
+    input: TypedPluginContractNegotiationInput<'_>,
+) -> TypedPluginContractNegotiationReport {
+    if input.declarations.is_empty() {
+        return TypedPluginContractNegotiationReport::default();
+    }
+
+    let capability_classes = canonicalized_capability_classes(input.capability_classes);
+    let mut entries = Vec::with_capacity(input.declarations.len());
+    for declaration in input.declarations {
+        let mut reasons = Vec::new();
+        let descriptor = typed_plugin_contract_descriptor(declaration.kind, declaration.version);
+        if descriptor.is_none() {
+            reasons.push(format!(
+                "host does not publish contract {} version {}",
+                declaration.kind.as_str(),
+                declaration.version
+            ));
+        }
+
+        let adapter = input.adapters.iter().find(|candidate| candidate.kind == declaration.kind);
+        let adapter_name = adapter.map(|candidate| candidate.adapter.clone());
+        let Some(adapter) = adapter else {
+            reasons.push(format!(
+                "daemon does not expose a typed adapter for {}",
+                declaration.kind.as_str()
+            ));
+            entries.push(TypedPluginContractNegotiationEntry {
+                kind: declaration.kind,
+                requested_version: declaration.version,
+                status: TypedPluginContractStatus::Rejected,
+                adapter: adapter_name,
+                descriptor,
+                reasons,
+            });
+            continue;
+        };
+
+        let supported_versions = canonicalized_versions(adapter.supported_versions.as_slice());
+        if !supported_versions.contains(&declaration.version) {
+            reasons.push(format!(
+                "adapter '{}' supports versions {}",
+                adapter.adapter,
+                join_u32_values(supported_versions.as_slice())
+            ));
+        }
+
+        let allowed_capability_classes =
+            canonicalized_capability_classes(adapter.allowed_capability_classes.as_slice());
+        let unsupported_capability_classes = capability_classes
+            .iter()
+            .copied()
+            .filter(|class| !allowed_capability_classes.contains(class))
+            .map(TypedPluginCapabilityClass::as_str)
+            .collect::<Vec<_>>();
+        if !unsupported_capability_classes.is_empty() {
+            reasons.push(format!(
+                "adapter '{}' does not allow capability classes {}",
+                adapter.adapter,
+                unsupported_capability_classes.join(", ")
+            ));
+        }
+
+        let status = if reasons.is_empty() {
+            TypedPluginContractStatus::Accepted
+        } else {
+            TypedPluginContractStatus::Rejected
+        };
+        entries.push(TypedPluginContractNegotiationEntry {
+            kind: declaration.kind,
+            requested_version: declaration.version,
+            status,
+            adapter: Some(adapter.adapter.clone()),
+            descriptor,
+            reasons,
+        });
+    }
+
+    TypedPluginContractNegotiationReport {
+        mode: TypedPluginContractMode::Typed,
+        ready: entries.iter().all(|entry| entry.status == TypedPluginContractStatus::Accepted),
+        entries,
     }
 }
 
@@ -409,6 +555,20 @@ fn dedupe_sorted(values: &[String]) -> Vec<String> {
     normalized
 }
 
+fn canonicalized_capability_classes(
+    values: &[TypedPluginCapabilityClass],
+) -> Vec<TypedPluginCapabilityClass> {
+    values.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+fn canonicalized_versions(values: &[u32]) -> Vec<u32> {
+    values.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+fn join_u32_values(values: &[u32]) -> String {
+    values.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+}
+
 fn build_handles(values: &[String], base: i32) -> Vec<i32> {
     values.iter().enumerate().map(|(index, _)| base + index as i32).collect()
 }
@@ -417,13 +577,129 @@ fn build_handles(values: &[String], base: i32) -> Vec<i32> {
 mod tests {
     use std::time::Duration;
 
-    use super::{CapabilityGrantSet, RuntimeError, RuntimeLimits, WasmRuntime};
+    use super::{
+        negotiate_typed_plugin_contracts, CapabilityGrantSet, RuntimeError, RuntimeLimits,
+        TypedPluginContractAdapterSupport, TypedPluginContractMode,
+        TypedPluginContractNegotiationInput, TypedPluginContractStatus, WasmRuntime,
+    };
     use palyra_plugins_sdk::{
+        TypedPluginCapabilityClass, TypedPluginContractDeclaration, TypedPluginContractKind,
         DEFAULT_RUNTIME_ENTRYPOINT, HOST_CAPABILITIES_IMPORT_MODULE,
         HOST_CAPABILITY_CHANNEL_COUNT_FN, HOST_CAPABILITY_HTTP_COUNT_FN,
         HOST_CAPABILITY_HTTP_HANDLE_FN, HOST_CAPABILITY_SECRET_COUNT_FN,
         HOST_CAPABILITY_STORAGE_COUNT_FN,
     };
+
+    #[test]
+    fn typed_contract_negotiation_accepts_supported_declarations() {
+        let report = negotiate_typed_plugin_contracts(TypedPluginContractNegotiationInput {
+            declarations: &[
+                TypedPluginContractDeclaration {
+                    kind: TypedPluginContractKind::MemoryProvider,
+                    version: 1,
+                },
+                TypedPluginContractDeclaration {
+                    kind: TypedPluginContractKind::ContextEngine,
+                    version: 1,
+                },
+                TypedPluginContractDeclaration {
+                    kind: TypedPluginContractKind::RoutingStrategy,
+                    version: 1,
+                },
+            ],
+            capability_classes: &[
+                TypedPluginCapabilityClass::HttpHosts,
+                TypedPluginCapabilityClass::Secrets,
+                TypedPluginCapabilityClass::StoragePrefixes,
+            ],
+            adapters: &[
+                TypedPluginContractAdapterSupport {
+                    kind: TypedPluginContractKind::MemoryProvider,
+                    adapter: "journal.memory_embedding_provider".to_owned(),
+                    supported_versions: vec![1],
+                    allowed_capability_classes: vec![
+                        TypedPluginCapabilityClass::HttpHosts,
+                        TypedPluginCapabilityClass::Secrets,
+                        TypedPluginCapabilityClass::StoragePrefixes,
+                    ],
+                },
+                TypedPluginContractAdapterSupport {
+                    kind: TypedPluginContractKind::ContextEngine,
+                    adapter: "application.context_engine".to_owned(),
+                    supported_versions: vec![1],
+                    allowed_capability_classes: vec![
+                        TypedPluginCapabilityClass::HttpHosts,
+                        TypedPluginCapabilityClass::Secrets,
+                        TypedPluginCapabilityClass::StoragePrefixes,
+                    ],
+                },
+                TypedPluginContractAdapterSupport {
+                    kind: TypedPluginContractKind::RoutingStrategy,
+                    adapter: "usage_governance.routing".to_owned(),
+                    supported_versions: vec![1],
+                    allowed_capability_classes: vec![
+                        TypedPluginCapabilityClass::HttpHosts,
+                        TypedPluginCapabilityClass::Secrets,
+                        TypedPluginCapabilityClass::StoragePrefixes,
+                    ],
+                },
+            ],
+        });
+
+        assert_eq!(report.mode, TypedPluginContractMode::Typed);
+        assert!(report.ready);
+        assert_eq!(report.entries.len(), 3);
+        assert!(report
+            .entries
+            .iter()
+            .all(|entry| entry.status == TypedPluginContractStatus::Accepted));
+    }
+
+    #[test]
+    fn typed_contract_negotiation_rejects_incompatible_versions_and_capabilities() {
+        let report = negotiate_typed_plugin_contracts(TypedPluginContractNegotiationInput {
+            declarations: &[TypedPluginContractDeclaration {
+                kind: TypedPluginContractKind::MemoryProvider,
+                version: 2,
+            }],
+            capability_classes: &[TypedPluginCapabilityClass::Channels],
+            adapters: &[TypedPluginContractAdapterSupport {
+                kind: TypedPluginContractKind::MemoryProvider,
+                adapter: "journal.memory_embedding_provider".to_owned(),
+                supported_versions: vec![1],
+                allowed_capability_classes: vec![
+                    TypedPluginCapabilityClass::HttpHosts,
+                    TypedPluginCapabilityClass::Secrets,
+                    TypedPluginCapabilityClass::StoragePrefixes,
+                ],
+            }],
+        });
+
+        assert!(!report.ready);
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].status, TypedPluginContractStatus::Rejected);
+        assert!(report.entries[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("host does not publish contract")));
+        assert!(report.entries[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("does not allow capability classes channels")));
+    }
+
+    #[test]
+    fn typed_contract_negotiation_keeps_legacy_plugins_compatible() {
+        let report = negotiate_typed_plugin_contracts(TypedPluginContractNegotiationInput {
+            declarations: &[],
+            capability_classes: &[],
+            adapters: &[],
+        });
+
+        assert_eq!(report.mode, TypedPluginContractMode::UntypedLegacy);
+        assert!(report.ready);
+        assert!(report.entries.is_empty());
+    }
 
     #[test]
     fn runtime_can_load_module_and_call_exported_function() {

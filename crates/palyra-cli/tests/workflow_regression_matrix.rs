@@ -490,6 +490,119 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
         Some("signature_failed")
     );
 
+    let typed_contracts_artifact = artifacts_dir.join("echo-typed-contracts.palyra-skill");
+    build_workflow_plugin_artifact(
+        &fixtures,
+        typed_contracts_artifact.as_path(),
+        plugin_manifest_with_typed_contracts("acme.echo_typed_contracts", "1.0.0", "acme"),
+        [7_u8; 32],
+    )?;
+    let typed_contracts_artifact_string = typed_contracts_artifact.display().to_string();
+    let typed_contracts_payload = assert_json_success(
+        run_cli(
+            &workdir,
+            &[
+                "plugins",
+                "install",
+                "acme.echo_typed_contracts",
+                "--artifact",
+                typed_contracts_artifact_string.as_str(),
+                "--cap-http-host",
+                "api.example.com",
+                "--cap-secret",
+                "api_token",
+                "--cap-storage-prefix",
+                "skills/cache",
+                "--json",
+            ],
+            &cli_env,
+        )?,
+        "plugins install typed contracts",
+    )?;
+    assert_eq!(
+        typed_contracts_payload
+            .get("check")
+            .and_then(|value| value.get("contracts"))
+            .and_then(|value| value.get("mode"))
+            .and_then(Value::as_str),
+        Some("typed")
+    );
+    assert_eq!(
+        typed_contracts_payload
+            .get("check")
+            .and_then(|value| value.get("contracts"))
+            .and_then(|value| value.get("ready"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    let typed_contract_entries = typed_contracts_payload
+        .get("check")
+        .and_then(|value| value.get("contracts"))
+        .and_then(|value| value.get("entries"))
+        .and_then(Value::as_array)
+        .context("typed-contract install should expose negotiation entries")?;
+    assert_eq!(typed_contract_entries.len(), 3);
+    assert!(
+        typed_contract_entries.iter().all(|entry| {
+            entry.get("status").and_then(Value::as_str) == Some("accepted")
+                && entry.get("adapter").and_then(Value::as_str).is_some()
+        }),
+        "typed-contract install should accept every declared contract"
+    );
+
+    let typed_contract_blocked_artifact =
+        artifacts_dir.join("echo-typed-contract-blocked.palyra-skill");
+    build_workflow_plugin_artifact(
+        &fixtures,
+        typed_contract_blocked_artifact.as_path(),
+        plugin_manifest_with_memory_provider_channel_contract(
+            "acme.echo_typed_contract_blocked",
+            "1.0.0",
+            "acme",
+        ),
+        [7_u8; 32],
+    )?;
+    let typed_contract_blocked_artifact_string =
+        typed_contract_blocked_artifact.display().to_string();
+    let typed_contract_blocked_payload = assert_json_success(
+        run_cli(
+            &workdir,
+            &[
+                "plugins",
+                "install",
+                "acme.echo_typed_contract_blocked",
+                "--artifact",
+                typed_contract_blocked_artifact_string.as_str(),
+                "--cap-channel",
+                "discord",
+                "--json",
+            ],
+            &cli_env,
+        )?,
+        "plugins install incompatible typed contract",
+    )?;
+    assert_eq!(
+        typed_contract_blocked_payload
+            .get("check")
+            .and_then(|value| value.get("contracts"))
+            .and_then(|value| value.get("ready"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert!(
+        typed_contract_blocked_payload
+            .get("check")
+            .and_then(|value| value.get("reasons"))
+            .and_then(Value::as_array)
+            .is_some_and(|reasons| {
+                reasons
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|reason| reason.contains("typed plugin contract negotiation failed"))
+            }),
+        "incompatible typed-contract install should surface contract negotiation failure"
+    );
+
     let inspect_payload = assert_json_success(
         run_cli(&workdir, &["plugins", "inspect", "acme.echo_invalid_config", "--json"], &cli_env)?,
         "plugins inspect",
@@ -511,16 +624,33 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
         Some("invalid")
     );
 
+    let typed_inspect_payload = assert_json_success(
+        run_cli(
+            &workdir,
+            &["plugins", "inspect", "acme.echo_typed_contracts", "--json"],
+            &cli_env,
+        )?,
+        "plugins inspect typed contracts",
+    )?;
+    assert_eq!(
+        typed_inspect_payload
+            .get("check")
+            .and_then(|value| value.get("contracts"))
+            .and_then(|value| value.get("mode"))
+            .and_then(Value::as_str),
+        Some("typed")
+    );
+
     let discover_payload = assert_json_success(
         run_cli(&workdir, &["plugins", "discover", "--json"], &cli_env)?,
         "plugins discover",
     )?;
-    assert_eq!(discover_payload.get("count").and_then(Value::as_u64), Some(3));
+    assert_eq!(discover_payload.get("count").and_then(Value::as_u64), Some(5));
     let discover_entries = discover_payload
         .get("entries")
         .and_then(Value::as_array)
         .context("plugins discover should return entries")?;
-    assert_eq!(discover_entries.len(), 3);
+    assert_eq!(discover_entries.len(), 5);
     assert!(
         discover_entries.iter().any(|entry| {
             entry.get("binding").and_then(|value| value.get("plugin_id")).and_then(Value::as_str)
@@ -533,6 +663,19 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
                     == Some("signature_failed")
         }),
         "plugins discover should include signature failure state"
+    );
+    assert!(
+        discover_entries.iter().any(|entry| {
+            entry.get("binding").and_then(|value| value.get("plugin_id")).and_then(Value::as_str)
+                == Some("acme.echo_typed_contracts")
+                && entry
+                    .get("check")
+                    .and_then(|value| value.get("contracts"))
+                    .and_then(|value| value.get("ready"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }),
+        "plugins discover should include accepted typed contract state"
     );
 
     let explain_payload = assert_json_success(
@@ -560,13 +703,36 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
         "plugins explain should include remediation guidance"
     );
 
+    let typed_explain_payload = assert_json_success(
+        run_cli(
+            &workdir,
+            &["plugins", "explain", "acme.echo_typed_contract_blocked", "--json"],
+            &cli_env,
+        )?,
+        "plugins explain incompatible typed contract",
+    )?;
+    assert!(
+        typed_explain_payload
+            .get("check")
+            .and_then(|value| value.get("contracts"))
+            .and_then(|value| value.get("entries"))
+            .and_then(Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("kind").and_then(Value::as_str) == Some("memory_provider")
+                        && entry.get("status").and_then(Value::as_str) == Some("rejected")
+                })
+            }),
+        "plugins explain should surface rejected typed contracts"
+    );
+
     let doctor_payload = assert_json_success(
         run_cli(&workdir, &["plugins", "doctor", "--json"], &cli_env)?,
         "plugins doctor",
     )?;
-    assert_eq!(doctor_payload.get("total").and_then(Value::as_u64), Some(3));
+    assert_eq!(doctor_payload.get("total").and_then(Value::as_u64), Some(5));
     assert_eq!(doctor_payload.get("ready").and_then(Value::as_u64), Some(0));
-    assert_eq!(doctor_payload.get("unhealthy").and_then(Value::as_u64), Some(3));
+    assert_eq!(doctor_payload.get("unhealthy").and_then(Value::as_u64), Some(5));
     let doctor_plugins = doctor_payload
         .get("plugins")
         .and_then(Value::as_array)
@@ -584,6 +750,14 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
                 && plugin.get("discovery").and_then(Value::as_str) == Some("signature_failed")
         }),
         "plugins doctor should summarize signature failure state"
+    );
+    assert!(
+        doctor_plugins.iter().any(|plugin| {
+            plugin.get("plugin_id").and_then(Value::as_str) == Some("acme.echo_typed_contracts")
+                && plugin.get("contracts_mode").and_then(Value::as_str) == Some("typed")
+                && plugin.get("contracts_ready").and_then(Value::as_bool) == Some(true)
+        }),
+        "plugins doctor should summarize accepted typed contract state"
     );
 
     Ok(())
@@ -2261,6 +2435,116 @@ title = "API base URL"
 type = "string"
 title = "API token"
 redacted = true
+"#
+    )
+    .trim()
+    .to_owned()
+}
+
+fn plugin_manifest_with_typed_contracts(skill_id: &str, version: &str, publisher: &str) -> String {
+    format!(
+        r#"
+manifest_version = 2
+skill_id = "{skill_id}"
+name = "Typed Workflow Plugin"
+version = "{version}"
+publisher = "{publisher}"
+
+[entrypoints]
+[[entrypoints.tools]]
+id = "acme.echo"
+name = "echo"
+description = "Echo fixture with typed plugin contracts"
+input_schema = {{ type = "object", properties = {{ text = {{ type = "string" }} }}, required = ["text"] }}
+output_schema = {{ type = "object", properties = {{ echo = {{ type = "string" }} }}, required = ["echo"] }}
+risk = {{ default_sensitive = false, requires_approval = false }}
+
+[capabilities.filesystem]
+read_roots = ["skills/data"]
+write_roots = ["skills/cache"]
+
+[capabilities]
+http_egress_allowlist = ["api.example.com"]
+device_capabilities = []
+node_capabilities = []
+
+[[capabilities.secrets]]
+scope = "skill:{skill_id}"
+key_names = ["api_token"]
+
+[compat]
+required_protocol_major = 1
+min_palyra_version = "0.1.0"
+
+[operator]
+display_name = "Typed Workflow Plugin"
+summary = "Workflow regression fixture with typed contracts"
+
+[operator.plugin]
+default_tool_id = "acme.echo"
+default_module_path = "modules/module.wasm"
+default_entrypoint = "run"
+
+[[operator.plugin.contracts]]
+kind = "memory_provider"
+version = 1
+
+[[operator.plugin.contracts]]
+kind = "context_engine"
+version = 1
+
+[[operator.plugin.contracts]]
+kind = "routing_strategy"
+version = 1
+"#
+    )
+    .trim()
+    .to_owned()
+}
+
+fn plugin_manifest_with_memory_provider_channel_contract(
+    skill_id: &str,
+    version: &str,
+    publisher: &str,
+) -> String {
+    format!(
+        r#"
+manifest_version = 2
+skill_id = "{skill_id}"
+name = "Blocked Typed Workflow Plugin"
+version = "{version}"
+publisher = "{publisher}"
+
+[entrypoints]
+[[entrypoints.tools]]
+id = "acme.echo"
+name = "echo"
+description = "Echo fixture with incompatible typed contract capability class"
+input_schema = {{ type = "object", properties = {{ text = {{ type = "string" }} }}, required = ["text"] }}
+output_schema = {{ type = "object", properties = {{ echo = {{ type = "string" }} }}, required = ["echo"] }}
+risk = {{ default_sensitive = false, requires_approval = false }}
+
+[capabilities]
+http_egress_allowlist = []
+device_capabilities = []
+node_capabilities = ["discord"]
+
+[compat]
+required_protocol_major = 1
+min_palyra_version = "0.1.0"
+
+[operator]
+display_name = "Blocked Typed Workflow Plugin"
+summary = "Workflow regression fixture with incompatible typed capability class"
+
+[operator.plugin]
+default_tool_id = "acme.echo"
+default_module_path = "modules/module.wasm"
+default_entrypoint = "run"
+
+[[operator.plugin.contracts]]
+kind = "memory_provider"
+version = 1
 "#
     )
     .trim()

@@ -110,6 +110,10 @@ export function SkillsSection({ app }: SkillsSectionProps) {
     selectedPluginCheck === null ? [] : readStringList(selectedPluginCheck, "remediation");
   const selectedPluginCapabilityEntries =
     selectedPluginCheck === null ? [] : pluginCapabilityEntries(selectedPluginCheck);
+  const selectedPluginContracts =
+    selectedPluginCheck === null ? null : readObject(selectedPluginCheck, "contracts");
+  const selectedPluginContractEntries =
+    selectedPluginCheck === null ? [] : pluginContractEntries(selectedPluginCheck);
   const selectedPluginFilesystemIssues =
     selectedPlugin === null ? [] : pluginFilesystemIssues(selectedPlugin);
   const selectedPluginInstalledSkill =
@@ -578,6 +582,61 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                     </WorkspaceTable>
                   </WorkspaceSectionCard>
                 )}
+                {selectedPluginContracts !== null && (
+                  <WorkspaceSectionCard
+                    title="Typed contracts"
+                    description="Typed contracts stay explicit so operators can see whether the daemon is using a legacy fallback or a negotiated adapter."
+                  >
+                    <div className="workspace-stack">
+                      <PrettyJsonBlock
+                        value={{
+                          mode: readString(selectedPluginContracts, "mode") ?? "untyped_legacy",
+                          ready: readBool(selectedPluginContracts, "ready"),
+                          host_adapters: readObject(selectedPluginContracts, "host_adapters"),
+                        }}
+                        revealSensitiveValues={app.revealSensitiveValues}
+                        className="workspace-code-panel"
+                      />
+                      {selectedPluginContractEntries.length > 0 ? (
+                        <WorkspaceTable
+                          ariaLabel="Plugin typed contracts"
+                          columns={["Contract", "Version", "Status", "Adapter", "Detail"]}
+                        >
+                          {selectedPluginContractEntries.map((entry, index) => {
+                            const kind = readString(entry, "kind") ?? `contract-${index + 1}`;
+                            const requestedVersion = String(
+                              readNumber(entry, "requested_version") ?? 0,
+                            );
+                            const status = readString(entry, "status") ?? "unknown";
+                            const adapter = readString(entry, "adapter") ?? "n/a";
+                            const reasons = readStringList(entry, "reasons").join(" | ");
+                            return (
+                              <tr key={`${kind}-${requestedVersion}-${index}`}>
+                                <td>{humanizeState(kind)}</td>
+                                <td>{requestedVersion}</td>
+                                <td>
+                                  <WorkspaceStatusChip tone={toneForPluginState(status)}>
+                                    {humanizeState(status)}
+                                  </WorkspaceStatusChip>
+                                </td>
+                                <td>{adapter}</td>
+                                <td>{reasons.length > 0 ? reasons : "Negotiation accepted."}</td>
+                              </tr>
+                            );
+                          })}
+                        </WorkspaceTable>
+                      ) : (
+                        <WorkspaceInlineNotice title="Compatibility mode" tone="warning">
+                          <p>
+                            This plugin currently uses the legacy untyped binding path. That keeps
+                            existing artifacts compatible, but the daemon cannot negotiate a typed
+                            adapter until the signed manifest declares one.
+                          </p>
+                        </WorkspaceInlineNotice>
+                      )}
+                    </div>
+                  </WorkspaceSectionCard>
+                )}
                 {selectedPluginFilesystemIssues.length > 0 && (
                   <WorkspaceSectionCard
                     title="Filesystem safety"
@@ -956,6 +1015,12 @@ function pluginCapabilityEntries(check: JsonObject): JsonObject[] {
   return Array.isArray(entries) ? toJsonObjectArray(entries) : [];
 }
 
+function pluginContractEntries(check: JsonObject): JsonObject[] {
+  const contractsPayload = readObject(check, "contracts");
+  const entries = contractsPayload?.["entries"];
+  return Array.isArray(entries) ? toJsonObjectArray(entries) : [];
+}
+
 function pluginFilesystemIssues(detail: JsonObject): JsonObject[] {
   const discovery = pluginDiscovery(detail);
   const filesystem = readObject(discovery, "filesystem");
@@ -984,6 +1049,7 @@ function toneForPluginState(
     case "resolved":
     case "valid":
     case "ready":
+    case "accepted":
     case "tofu_pinned":
       return "success";
     case "requires_migration":
@@ -993,6 +1059,7 @@ function toneForPluginState(
     case "blocked":
     case "disabled":
     case "invalid":
+    case "rejected":
     case "signature_failed":
     case "untrusted_override":
     case "missing_module":

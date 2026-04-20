@@ -3077,6 +3077,7 @@ name = "palyra-plugins-runtime"
 version = "0.1.0"
 dependencies = [
  "palyra-plugins-sdk",
+ "serde",
  "thiserror",
  "wasmtime",
 ]
@@ -3084,6 +3085,9 @@ dependencies = [
 [[package]]
 name = "palyra-plugins-sdk"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "palyra-policy"
@@ -3120,6 +3124,7 @@ dependencies = [
  "hex",
  "palyra-common",
  "palyra-plugins-runtime",
+ "palyra-plugins-sdk",
  "palyra-policy",
  "serde",
  "serde_json",

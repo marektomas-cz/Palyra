@@ -13,6 +13,7 @@ base64.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
 palyra-common = { version = "0.1.0", path = "../palyra-common" }
+palyra-plugins-sdk = { version = "0.1.0", path = "../palyra-plugins/sdk" }
 palyra-plugins-runtime = { version = "0.1.0", path = "../palyra-plugins/runtime" }
 palyra-policy = { version = "0.1.0", path = "../palyra-policy" }
 serde.workspace = true

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palyra_common::{build_metadata, CANONICAL_PROTOCOL_MAJOR};
+use palyra_plugins_sdk::TypedPluginContractKind;
 use serde_json::Value;
 
 use crate::artifact::normalize_artifact_path;
@@ -347,6 +348,7 @@ fn validate_operator_metadata(
     if let Some(entrypoint) = operator.plugin.default_entrypoint.as_deref() {
         validate_plugin_entrypoint(entrypoint, "operator.plugin.default_entrypoint")?;
     }
+    validate_plugin_contract_declarations(operator.plugin.contracts.as_slice())?;
     if let Some(config) = operator.config.as_ref() {
         validate_config_contract(config)?;
     }
@@ -513,6 +515,27 @@ fn validate_plugin_entrypoint(
         return Err(SkillPackagingError::ManifestValidation(format!(
             "{field_name} must use [a-z0-9_-]"
         )));
+    }
+    Ok(())
+}
+
+fn validate_plugin_contract_declarations(
+    contracts: &[palyra_plugins_sdk::TypedPluginContractDeclaration],
+) -> Result<(), SkillPackagingError> {
+    let mut kinds = BTreeSet::<TypedPluginContractKind>::new();
+    for contract in contracts {
+        if contract.version == 0 {
+            return Err(SkillPackagingError::ManifestValidation(format!(
+                "operator.plugin.contracts '{}' must use a non-zero version",
+                contract.kind.as_str()
+            )));
+        }
+        if !kinds.insert(contract.kind) {
+            return Err(SkillPackagingError::ManifestValidation(format!(
+                "operator.plugin.contracts contains duplicate kind '{}'",
+                contract.kind.as_str()
+            )));
+        }
     }
     Ok(())
 }

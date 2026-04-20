@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use palyra_plugins_sdk::TypedPluginContractDeclaration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -218,6 +219,8 @@ pub struct SkillPluginMetadata {
     pub default_module_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_entrypoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contracts: Vec<TypedPluginContractDeclaration>,
 }
 
 impl SkillPluginMetadata {
@@ -226,6 +229,7 @@ impl SkillPluginMetadata {
         self.default_tool_id.is_none()
             && self.default_module_path.is_none()
             && self.default_entrypoint.is_none()
+            && self.contracts.is_empty()
     }
 }
 
