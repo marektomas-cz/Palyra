@@ -16,10 +16,15 @@ use crate::{
         default_recall_request, explicit_recall_tape_payload, materialize_explicit_recall_context,
         parse_explicit_recall_selection, render_explicit_recall_prompt,
     },
+    application::run_stream::tape::append_runtime_decision_tape_event,
     application::service_authorization::authorize_memory_action,
     application::session_compaction::{
         apply_session_compaction, preview_session_compaction, render_compaction_prompt_block,
         SessionCompactionApplyRequest,
+    },
+    application::session_pruning::{
+        apply_ephemeral_prompt_pruning, classify_pruning_task, detect_pruning_risk,
+        pruning_decision_from_config, SessionPruningOutcome,
     },
     gateway::{
         ingest_memory_best_effort, non_empty, truncate_with_ellipsis, GatewayRuntimeState,
@@ -34,6 +39,10 @@ use crate::{
     media::MediaRuntimeConfig,
     model_provider::ProviderImageInput,
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
+};
+use palyra_common::runtime_preview::{
+    RuntimeDecisionActorKind, RuntimeDecisionEventType, RuntimeDecisionPayload,
+    RuntimeDecisionTiming, RuntimeEntityRef, RuntimeResourceBudget,
 };
 
 const AUTO_SESSION_COMPACTION_ENABLED_ENV: &str = "PALYRA_SESSION_AUTO_COMPACTION_ENABLED";
@@ -809,6 +818,17 @@ async fn prepare_model_provider_input_legacy(
             Some(value) => value,
             None => provider_input_text,
         };
+        let provider_input_text = finalize_provider_input_with_pruning(
+            runtime_state,
+            context,
+            run_id,
+            tape_seq,
+            session_id,
+            parameter_delta_json,
+            memory_ingest_reason,
+            provider_input_text,
+        )
+        .await?;
         return Ok(PreparedModelProviderInput {
             provider_input_text,
             vision_inputs: build_provider_image_inputs(attachments, &runtime_state.config.media),
@@ -873,10 +893,92 @@ async fn prepare_model_provider_input_legacy(
             provider_input_text
         }
     };
+    let provider_input_text = finalize_provider_input_with_pruning(
+        runtime_state,
+        context,
+        run_id,
+        tape_seq,
+        session_id,
+        parameter_delta_json,
+        memory_ingest_reason,
+        provider_input_text,
+    )
+    .await?;
     Ok(PreparedModelProviderInput {
         provider_input_text,
         vision_inputs: build_provider_image_inputs(attachments, &runtime_state.config.media),
     })
+}
+
+#[allow(clippy::result_large_err)]
+async fn finalize_provider_input_with_pruning(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: &RequestContext,
+    run_id: &str,
+    tape_seq: &mut i64,
+    session_id: &str,
+    parameter_delta_json: Option<&str>,
+    memory_ingest_reason: &str,
+    provider_input_text: String,
+) -> Result<String, Status> {
+    let task_class = classify_pruning_task(memory_ingest_reason, parameter_delta_json);
+    let risk_level = detect_pruning_risk(provider_input_text.as_str());
+    let decision = pruning_decision_from_config(
+        &runtime_state.config.pruning_policy_matrix,
+        task_class,
+        risk_level,
+    );
+    let outcome = apply_ephemeral_prompt_pruning(provider_input_text.as_str(), &decision);
+    if outcome.eligible {
+        record_provider_pruning_decision(
+            runtime_state,
+            context,
+            run_id,
+            tape_seq,
+            session_id,
+            &outcome,
+        )
+        .await?;
+    }
+    Ok(outcome.provider_input_text)
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn record_provider_pruning_decision(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: &RequestContext,
+    run_id: &str,
+    tape_seq: &mut i64,
+    session_id: &str,
+    outcome: &SessionPruningOutcome,
+) -> Result<(), Status> {
+    let payload = RuntimeDecisionPayload::new(
+        RuntimeDecisionEventType::PruningApply,
+        runtime_state
+            .runtime_decision_actor_from_context(context, RuntimeDecisionActorKind::System),
+        outcome.reason.clone(),
+        "session_pruning.v1",
+        RuntimeDecisionTiming::observed(crate::gateway::current_unix_ms()),
+    )
+    .with_input(RuntimeEntityRef::new("provider_input", "provider_input", run_id.to_owned()))
+    .with_output(
+        RuntimeEntityRef::new("provider_input", "provider_input", run_id.to_owned())
+            .with_state(if outcome.applied { "pruned" } else { "preview" }),
+    )
+    .with_resource_budget(RuntimeResourceBudget {
+        queue_depth: None,
+        token_budget: Some(outcome.output_tokens),
+        pruning_token_delta: Some(outcome.tokens_saved),
+        retrieval_branch_latency_ms: None,
+        retry_count: None,
+        suppression_count: None,
+    })
+    .with_related_entity(RuntimeEntityRef::new("session", "session", session_id.to_owned()))
+    .with_details(outcome.explain_json.clone());
+    runtime_state
+        .record_runtime_decision_event(context, Some(session_id), Some(run_id), payload.clone())
+        .await?;
+    append_runtime_decision_tape_event(runtime_state, run_id, tape_seq, &payload).await
 }
 
 pub(crate) fn render_memory_augmented_prompt(hits: &[MemorySearchHit], input_text: &str) -> String {

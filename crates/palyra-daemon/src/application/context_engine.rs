@@ -20,8 +20,12 @@ use crate::{
             build_attachment_recall_prompt, build_explicit_recall_prompt,
             build_memory_augmented_prompt, build_previous_run_context_prompt,
             build_project_context_prompt, build_provider_image_inputs,
-            resolve_latest_session_compaction_artifact, MemoryPromptFailureMode,
-            PrepareModelProviderInputRequest, PreparedModelProviderInput,
+            record_provider_pruning_decision, resolve_latest_session_compaction_artifact,
+            MemoryPromptFailureMode, PrepareModelProviderInputRequest, PreparedModelProviderInput,
+        },
+        session_pruning::{
+            classify_pruning_task, context_engine_pruning_outcome, detect_pruning_risk,
+            pruning_decision_from_config,
         },
     },
     gateway::{ingest_memory_best_effort, GatewayRuntimeState},
@@ -490,6 +494,29 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
     );
 
     record_context_engine_plan(runtime_state, run_id, tape_seq, assembled.explain.clone()).await?;
+    let pruning_task_class = classify_pruning_task(memory_ingest_reason, parameter_delta_json);
+    let pruning_risk_level = detect_pruning_risk(assembled.prompt_text.as_str());
+    let pruning_decision = pruning_decision_from_config(
+        &runtime_state.config.pruning_policy_matrix,
+        pruning_task_class,
+        pruning_risk_level,
+    );
+    if let Some(pruning_outcome) = context_engine_pruning_outcome(
+        &pruning_decision,
+        assembled.explain.budget.selected_tokens,
+        assembled.explain.budget.dropped_tokens,
+        serde_json::to_value(&assembled.explain.dropped_segments).unwrap_or_else(|_| json!([])),
+    ) {
+        record_provider_pruning_decision(
+            runtime_state,
+            context,
+            run_id,
+            tape_seq,
+            session_id,
+            &pruning_outcome,
+        )
+        .await?;
+    }
 
     Ok(PreparedModelProviderInput { provider_input_text: assembled.prompt_text, vision_inputs })
 }
