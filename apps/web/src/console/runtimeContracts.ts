@@ -160,6 +160,7 @@ export const QUEUED_INPUT_STATES = [
   "steered",
   "interrupted",
   "overflowed",
+  "cancelled",
 ] as const;
 export type QueuedInputState = (typeof QUEUED_INPUT_STATES)[number];
 
@@ -183,6 +184,9 @@ export function normalizeQueuedInputState(value?: string | null): QueuedInputSta
     case "overflow":
     case "overflowed":
       return "overflowed";
+    case "canceled":
+    case "cancelled":
+      return "cancelled";
     default:
       return "pending";
   }

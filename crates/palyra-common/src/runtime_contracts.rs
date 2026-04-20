@@ -155,7 +155,8 @@ runtime_contract_enum! {
         Merged => "merged",
         Steered => "steered",
         Interrupted => "interrupted",
-        Overflowed => "overflowed" | "overflow"
+        Overflowed => "overflowed" | "overflow",
+        Cancelled => "cancelled" | "canceled"
     }
 }
 

@@ -1448,6 +1448,8 @@ struct ConsoleChatWorkspaceArtifactQuery {
 #[derive(Debug, Deserialize)]
 struct ConsoleChatQueueRequest {
     text: String,
+    #[serde(default)]
+    queue_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

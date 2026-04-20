@@ -2,11 +2,16 @@ use crate::{
     application::session_compaction::{
         apply_session_compaction, preview_session_compaction, SessionCompactionApplyRequest,
     },
+    application::session_queue::{
+        decide_session_queue_mode, SessionQueuePolicy, SessionQueueSafeBoundary,
+    },
     *,
 };
 use base64::Engine as _;
 use palyra_common::{
-    runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState, QueuedInputState},
+    runtime_contracts::{
+        AuxiliaryTaskKind, AuxiliaryTaskState, QueueDecision, QueueMode, QueuedInputState,
+    },
     runtime_preview::{
         RuntimeDecisionActorKind, RuntimeDecisionEventType, RuntimeDecisionPayload,
         RuntimeDecisionTiming, RuntimeEntityRef, RuntimePreviewCapability, RuntimeResourceBudget,
@@ -2451,16 +2456,32 @@ pub(crate) async fn console_chat_queue_handler(
             "chat run does not belong to the authenticated console session context",
         )));
     }
-    if !lock_console_chat_pending_approvals(&stream.pending_approvals).is_empty() {
-        return Err(runtime_status_response(tonic::Status::failed_precondition(
-            "cannot queue a follow-up while approval decisions are still pending",
-        )));
-    }
+    let pending_approval =
+        !lock_console_chat_pending_approvals(&stream.pending_approvals).is_empty();
     let timestamp_unix_ms = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
         )))
     })?;
+    let requested_mode = payload.queue_mode.as_deref().and_then(QueueMode::parse);
+    let existing_queued_inputs = state
+        .runtime
+        .list_orchestrator_queued_inputs(stream.session_id.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let current_depth = existing_queued_inputs
+        .iter()
+        .filter(|queued| queued.state == QueuedInputState::Pending.as_str())
+        .count();
+    let policy = SessionQueuePolicy::from_config(
+        &state.runtime.config.session_queue_policy,
+        stream.session_id.as_str(),
+        session.context.channel.as_deref(),
+        None,
+    );
+    let safe_boundary = SessionQueueSafeBoundary::active(true, pending_approval);
+    let queue_decision =
+        decide_session_queue_mode(policy, requested_mode, safe_boundary, current_depth);
     let queued_input_id = Ulid::new().to_string();
     let mut queued = state
         .runtime
@@ -2470,18 +2491,35 @@ pub(crate) async fn console_chat_queue_handler(
             session_id: stream.session_id.clone(),
             text: text.clone(),
             origin_run_id: Some(run_id.clone()),
+            queue_mode: queue_decision.mode.as_str().to_owned(),
+            priority_lane: queue_decision.policy.priority_lane.clone(),
+            coalescing_group: Some(queue_decision.policy.coalescing_group.clone()),
+            overflow_summary_ref: None,
+            safe_boundary_flags_json: serde_json::to_string(&queue_decision.safe_boundary)
+                .unwrap_or_else(|_| "{}".to_owned()),
+            decision_reason: queue_decision.reason.clone(),
+            accepted_at_unix_ms: Some(timestamp_unix_ms),
+            policy_snapshot_json: queue_decision.policy.snapshot_json().to_string(),
+            explain_json: queue_decision.explain_json().to_string(),
         })
         .await
         .map_err(runtime_status_response)?;
     let mut queue_tape_seq = run.tape_events as i64;
+    let queue_event_type = match queue_decision.decision {
+        QueueDecision::Overflow => RuntimeDecisionEventType::QueueOverflow,
+        QueueDecision::Steer | QueueDecision::SteerBacklog => RuntimeDecisionEventType::QueueSteer,
+        QueueDecision::Interrupt => RuntimeDecisionEventType::QueueInterrupt,
+        QueueDecision::Merge => RuntimeDecisionEventType::QueueMerge,
+        QueueDecision::Enqueue | QueueDecision::Defer => RuntimeDecisionEventType::QueueEnqueue,
+    };
     let queue_enqueue_payload = RuntimeDecisionPayload::new(
-        RuntimeDecisionEventType::QueueEnqueue,
+        queue_event_type,
         state.runtime.runtime_decision_actor_from_context(
             &session.context,
             RuntimeDecisionActorKind::Operator,
         ),
-        "queued_followup_submitted",
-        "session_queue.preview.followup",
+        queue_decision.reason.clone(),
+        queue_decision.policy.policy_id.clone(),
         RuntimeDecisionTiming::observed(timestamp_unix_ms),
     )
     .with_input(
@@ -2490,7 +2528,7 @@ pub(crate) async fn console_chat_queue_handler(
     )
     .with_output(RuntimeEntityRef::new("run", "run", run_id.clone()).with_state("active"))
     .with_resource_budget(RuntimeResourceBudget {
-        queue_depth: Some(1),
+        queue_depth: Some((current_depth.saturating_add(1)) as u64),
         token_budget: None,
         pruning_token_delta: None,
         retrieval_branch_latency_ms: None,
@@ -2501,6 +2539,10 @@ pub(crate) async fn console_chat_queue_handler(
     .with_details(json!({
         "origin_kind": "queued",
         "origin_run_id": run_id,
+        "decision": queue_decision.decision.as_str(),
+        "queue_mode": queue_decision.mode.as_str(),
+        "safe_boundary": queue_decision.safe_boundary,
+        "policy": queue_decision.policy.snapshot_json(),
     }));
     state
         .runtime
@@ -2512,7 +2554,7 @@ pub(crate) async fn console_chat_queue_handler(
         )
         .await
         .map_err(runtime_status_response)?;
-    state.observability.observe_runtime_queue_depth(1);
+    state.observability.observe_runtime_queue_depth((current_depth.saturating_add(1)) as u64);
     crate::application::run_stream::tape::append_runtime_decision_tape_event(
         &state.runtime,
         run_id.as_str(),
@@ -2521,6 +2563,18 @@ pub(crate) async fn console_chat_queue_handler(
     )
     .await
     .map_err(runtime_status_response)?;
+    if !matches!(
+        queue_decision.mode,
+        QueueMode::Followup | QueueMode::Steer | QueueMode::SteerBacklog | QueueMode::Interrupt
+    ) || pending_approval
+    {
+        return Ok(Json(json!({
+            "queued_input": queued,
+            "decision": queue_decision.explain_json(),
+            "policy": queue_decision.policy.snapshot_json(),
+            "contract": contract_descriptor(),
+        })));
+    }
     let request = common_v1::RunStreamRequest {
         v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
         session_id: Some(common_v1::CanonicalId { ulid: stream.session_id.clone() }),
@@ -2659,6 +2713,8 @@ pub(crate) async fn console_chat_queue_handler(
     queued.state = QueuedInputState::Forwarded.as_str().to_owned();
     Ok(Json(json!({
         "queued_input": queued,
+        "decision": queue_decision.explain_json(),
+        "policy": queue_decision.policy.snapshot_json(),
         "contract": contract_descriptor(),
     })))
 }

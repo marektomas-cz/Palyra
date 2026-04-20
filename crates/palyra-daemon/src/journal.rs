@@ -1429,7 +1429,25 @@ pub struct OrchestratorQueuedInputRecord {
     pub run_id: String,
     pub session_id: String,
     pub state: String,
+    pub queue_mode: String,
+    pub priority_lane: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coalescing_group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overflow_summary_ref: Option<String>,
+    pub safe_boundary_flags_json: String,
+    pub decision_reason: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coalesced_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forwarded_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_at_unix_ms: Option<i64>,
+    pub policy_snapshot_json: String,
+    pub explain_json: String,
     pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1954,6 +1972,15 @@ pub struct OrchestratorQueuedInputCreateRequest {
     pub session_id: String,
     pub text: String,
     pub origin_run_id: Option<String>,
+    pub queue_mode: String,
+    pub priority_lane: String,
+    pub coalescing_group: Option<String>,
+    pub overflow_summary_ref: Option<String>,
+    pub safe_boundary_flags_json: String,
+    pub decision_reason: String,
+    pub accepted_at_unix_ms: Option<i64>,
+    pub policy_snapshot_json: String,
+    pub explain_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3479,6 +3506,41 @@ const MIGRATIONS: &[Migration] = &[
                 ON workspace_restore_reports(checkpoint_ulid, created_at_unix_ms DESC);
             CREATE INDEX IF NOT EXISTS idx_workspace_restore_reports_session
                 ON workspace_restore_reports(session_ulid, created_at_unix_ms DESC);
+        "#,
+    },
+    Migration {
+        version: 25,
+        name: "session_queue_policy_metadata",
+        sql: r#"
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN queue_mode TEXT NOT NULL DEFAULT 'followup';
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN priority_lane TEXT NOT NULL DEFAULT 'normal';
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN coalescing_group TEXT;
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN overflow_summary_ref TEXT;
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN safe_boundary_flags_json TEXT NOT NULL DEFAULT '{}';
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN decision_reason TEXT NOT NULL DEFAULT 'legacy_followup';
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN accepted_at_unix_ms INTEGER;
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN coalesced_at_unix_ms INTEGER;
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN forwarded_at_unix_ms INTEGER;
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN terminal_at_unix_ms INTEGER;
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN policy_snapshot_json TEXT NOT NULL DEFAULT '{}';
+            ALTER TABLE orchestrator_queued_inputs
+                ADD COLUMN explain_json TEXT NOT NULL DEFAULT '{}';
+
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_queued_inputs_state
+                ON orchestrator_queued_inputs(session_ulid, state, created_at_unix_ms);
+            CREATE INDEX IF NOT EXISTS idx_orchestrator_queued_inputs_mode
+                ON orchestrator_queued_inputs(session_ulid, queue_mode, created_at_unix_ms);
         "#,
     },
 ];
@@ -5328,18 +5390,39 @@ impl JournalStore {
                     run_ulid,
                     session_ulid,
                     state,
+                    queue_mode,
+                    priority_lane,
+                    coalescing_group,
+                    overflow_summary_ref,
+                    safe_boundary_flags_json,
+                    decision_reason,
                     text,
                     origin_run_ulid,
+                    accepted_at_unix_ms,
+                    policy_snapshot_json,
+                    explain_json,
                     created_at_unix_ms,
                     updated_at_unix_ms
-                ) VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?6)
+                ) VALUES (
+                    ?1, ?2, ?3, 'pending',
+                    ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15
+                )
             "#,
             params![
                 request.queued_input_id,
                 request.run_id,
                 request.session_id,
+                request.queue_mode,
+                request.priority_lane,
+                request.coalescing_group,
+                request.overflow_summary_ref,
+                request.safe_boundary_flags_json,
+                request.decision_reason,
                 request.text,
                 request.origin_run_id,
+                request.accepted_at_unix_ms,
+                request.policy_snapshot_json,
+                request.explain_json,
                 now,
             ],
         )?;
@@ -5348,7 +5431,19 @@ impl JournalStore {
             run_id: request.run_id.clone(),
             session_id: request.session_id.clone(),
             state: "pending".to_owned(),
+            queue_mode: request.queue_mode.clone(),
+            priority_lane: request.priority_lane.clone(),
+            coalescing_group: request.coalescing_group.clone(),
+            overflow_summary_ref: request.overflow_summary_ref.clone(),
+            safe_boundary_flags_json: request.safe_boundary_flags_json.clone(),
+            decision_reason: request.decision_reason.clone(),
             text: request.text.clone(),
+            accepted_at_unix_ms: request.accepted_at_unix_ms,
+            coalesced_at_unix_ms: None,
+            forwarded_at_unix_ms: None,
+            terminal_at_unix_ms: None,
+            policy_snapshot_json: request.policy_snapshot_json.clone(),
+            explain_json: request.explain_json.clone(),
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
             origin_run_id: request.origin_run_id.clone(),
@@ -5366,6 +5461,18 @@ impl JournalStore {
                 UPDATE orchestrator_queued_inputs
                 SET
                     state = ?2,
+                    forwarded_at_unix_ms = CASE
+                        WHEN ?2 = 'forwarded' THEN COALESCE(forwarded_at_unix_ms, ?3)
+                        ELSE forwarded_at_unix_ms
+                    END,
+                    coalesced_at_unix_ms = CASE
+                        WHEN ?2 IN ('merged', 'overflowed') THEN COALESCE(coalesced_at_unix_ms, ?3)
+                        ELSE coalesced_at_unix_ms
+                    END,
+                    terminal_at_unix_ms = CASE
+                        WHEN ?2 <> 'pending' THEN COALESCE(terminal_at_unix_ms, ?3)
+                        ELSE terminal_at_unix_ms
+                    END,
                     updated_at_unix_ms = ?3
                 WHERE queued_input_ulid = ?1
             "#,
@@ -5386,7 +5493,19 @@ impl JournalStore {
                     run_ulid,
                     session_ulid,
                     state,
+                    queue_mode,
+                    priority_lane,
+                    coalescing_group,
+                    overflow_summary_ref,
+                    safe_boundary_flags_json,
+                    decision_reason,
                     text,
+                    accepted_at_unix_ms,
+                    coalesced_at_unix_ms,
+                    forwarded_at_unix_ms,
+                    terminal_at_unix_ms,
+                    policy_snapshot_json,
+                    explain_json,
                     created_at_unix_ms,
                     updated_at_unix_ms,
                     origin_run_ulid
@@ -5403,10 +5522,22 @@ impl JournalStore {
                 run_id: row.get(1)?,
                 session_id: row.get(2)?,
                 state: row.get(3)?,
-                text: row.get(4)?,
-                created_at_unix_ms: row.get(5)?,
-                updated_at_unix_ms: row.get(6)?,
-                origin_run_id: row.get(7)?,
+                queue_mode: row.get(4)?,
+                priority_lane: row.get(5)?,
+                coalescing_group: row.get(6)?,
+                overflow_summary_ref: row.get(7)?,
+                safe_boundary_flags_json: row.get(8)?,
+                decision_reason: row.get(9)?,
+                text: row.get(10)?,
+                accepted_at_unix_ms: row.get(11)?,
+                coalesced_at_unix_ms: row.get(12)?,
+                forwarded_at_unix_ms: row.get(13)?,
+                terminal_at_unix_ms: row.get(14)?,
+                policy_snapshot_json: row.get(15)?,
+                explain_json: row.get(16)?,
+                created_at_unix_ms: row.get(17)?,
+                updated_at_unix_ms: row.get(18)?,
+                origin_run_id: row.get(19)?,
             });
         }
         Ok(records)

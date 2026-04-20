@@ -30,9 +30,11 @@ import {
 import {
   normalizeAuxiliaryTaskKind,
   normalizeAuxiliaryTaskState,
+  normalizeQueueMode,
   normalizeQueuedInputState,
   type AuxiliaryTaskKind,
   type AuxiliaryTaskState,
+  type QueueMode,
   type QueuedInputState,
 } from "./console/runtimeContracts";
 
@@ -1053,7 +1055,19 @@ export interface ChatQueuedInputRecord {
   run_id: string;
   session_id: string;
   state: QueuedInputState;
+  queue_mode: QueueMode;
+  priority_lane: string;
+  coalescing_group?: string;
+  overflow_summary_ref?: string;
+  safe_boundary_flags_json: string;
+  decision_reason: string;
   text: string;
+  accepted_at_unix_ms?: number;
+  coalesced_at_unix_ms?: number;
+  forwarded_at_unix_ms?: number;
+  terminal_at_unix_ms?: number;
+  policy_snapshot_json: string;
+  explain_json: string;
   created_at_unix_ms: number;
   updated_at_unix_ms: number;
   origin_run_id?: string;
@@ -3299,6 +3313,12 @@ function normalizeChatQueuedInputRecord(record: RawChatQueuedInputRecord): ChatQ
   return {
     ...record,
     state: normalizeQueuedInputState(record.state),
+    queue_mode: normalizeQueueMode(record.queue_mode),
+    priority_lane: record.priority_lane ?? "normal",
+    safe_boundary_flags_json: record.safe_boundary_flags_json ?? "{}",
+    decision_reason: record.decision_reason ?? "legacy_followup",
+    policy_snapshot_json: record.policy_snapshot_json ?? "{}",
+    explain_json: record.explain_json ?? "{}",
   };
 }
 
