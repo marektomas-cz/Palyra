@@ -66,7 +66,7 @@ export function OperationsSection({ app }: OperationsSectionProps) {
   const browser = readObject(observability ?? {}, "browser");
   const doctorRecovery = readObject(observability ?? {}, "doctor_recovery");
   const runtimePreview = readObject(observability ?? {}, "runtime_preview");
-  const runtimePreviewMetrics = readObject(runtimePreview ?? {}, "metrics");
+  const previewMetrics = readObject(runtimePreview ?? {}, "metrics") ?? {};
   const runtimePreviewCatalog = readJsonObjectArray(runtimePreview?.catalog);
   const runtimePreviewEvents = readJsonObjectArray(runtimePreview?.recent_events);
   const configRefHealth = readObject(observability ?? {}, "config_ref_health");
@@ -213,7 +213,7 @@ export function OperationsSection({ app }: OperationsSectionProps) {
         <WorkspaceMetricCard
           label="Runtime preview"
           value={readString(runtimePreview ?? {}, "state") ?? "n/a"}
-          detail={`${readNumber(runtimePreviewMetrics ?? {}, "queue_depth") ?? 0} queue depth · ${readNumber(runtimePreviewMetrics ?? {}, "pruning_tokens_saved") ?? 0} tokens saved`}
+          detail={`${readNumber(previewMetrics, "queue_depth") ?? 0} queue depth · ${readNumber(previewMetrics, "pruning_tokens_saved") ?? 0} tokens saved`}
           tone={workspaceToneForState(readString(runtimePreview ?? {}, "state") ?? "unknown")}
         />
         <WorkspaceMetricCard
@@ -364,44 +364,33 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                   <tr>
                     <td>Queue depth</td>
                     <td>
-                      {readNumber(runtimePreviewMetrics ?? {}, "queue_depth") ?? 0} /{" "}
-                      {readNumber(runtimePreviewMetrics ?? {}, "queue_peak_depth") ?? 0}
+                      {readNumber(previewMetrics, "queue_depth") ?? 0} /{" "}
+                      {readNumber(previewMetrics, "queue_peak_depth") ?? 0}
                     </td>
                     <td>Current / peak observed queue depth.</td>
                   </tr>
                   <tr>
                     <td>Recall latency</td>
+                    <td>{readNumber(previewMetrics, "retrieval_branch_latency_avg_ms") ?? 0} ms</td>
                     <td>
-                      {readNumber(runtimePreviewMetrics ?? {}, "retrieval_branch_latency_avg_ms") ??
-                        0}{" "}
-                      ms
-                    </td>
-                    <td>
-                      Max{" "}
-                      {readNumber(runtimePreviewMetrics ?? {}, "retrieval_branch_latency_max_ms") ??
-                        0}{" "}
-                      ms across recall preview branches.
+                      Max {readNumber(previewMetrics, "retrieval_branch_latency_max_ms") ?? 0} ms
+                      across recall preview branches.
                     </td>
                   </tr>
                   <tr>
                     <td>Auxiliary spend</td>
+                    <td>{readNumber(previewMetrics, "auxiliary_budget_tokens") ?? 0}</td>
                     <td>
-                      {readNumber(runtimePreviewMetrics ?? {}, "auxiliary_budget_tokens") ?? 0}
-                    </td>
-                    <td>
-                      {readNumber(runtimePreviewMetrics ?? {}, "auxiliary_task_events") ?? 0} task
-                      lifecycle events captured.
+                      {readNumber(previewMetrics, "auxiliary_task_events") ?? 0} task lifecycle
+                      events captured.
                     </td>
                   </tr>
                   <tr>
                     <td>Worker orphan rate</td>
+                    <td>{readNumber(previewMetrics, "worker_orphan_rate_bps") ?? 0}</td>
                     <td>
-                      {readNumber(runtimePreviewMetrics ?? {}, "worker_orphan_rate_bps") ?? 0}
-                    </td>
-                    <td>
-                      {readNumber(runtimePreviewMetrics ?? {}, "worker_orphaned_events") ?? 0} of{" "}
-                      {readNumber(runtimePreviewMetrics ?? {}, "worker_events") ?? 0} worker
-                      lifecycle events.
+                      {readNumber(previewMetrics, "worker_orphaned_events") ?? 0} of{" "}
+                      {readNumber(previewMetrics, "worker_events") ?? 0} worker lifecycle events.
                     </td>
                   </tr>
                 </WorkspaceTable>
