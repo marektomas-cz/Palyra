@@ -178,13 +178,11 @@ export function OperationsSection({ app }: OperationsSectionProps) {
             readString(operatorSummary ?? {}, "recommendation") ??
             "Refresh diagnostics to load operator hotspots."
           }
-          tone={
-            workspaceToneForState(
-              readString(operatorSummary ?? {}, "severity") ??
-                readString(operatorSummary ?? {}, "state") ??
-                "unknown",
-            )
-          }
+          tone={workspaceToneForState(
+            readString(operatorSummary ?? {}, "severity") ??
+              readString(operatorSummary ?? {}, "state") ??
+              "unknown",
+          )}
         />
         <WorkspaceMetricCard
           label="Self-healing incidents"
@@ -348,7 +346,9 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                         <td>{readString(hotspot, "subsystem") ?? "unknown"}</td>
                         <td>
                           <WorkspaceStatusChip
-                            tone={workspaceToneForState(readString(hotspot, "severity") ?? "unknown")}
+                            tone={workspaceToneForState(
+                              readString(hotspot, "severity") ?? "unknown",
+                            )}
                           >
                             {readString(hotspot, "severity") ?? "unknown"}
                           </WorkspaceStatusChip>
@@ -382,7 +382,9 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                   <tr>
                     <td>Provider</td>
                     <td>{readString(operatorProvider ?? {}, "state") ?? "unknown"}</td>
-                    <td>{readString(operatorProvider ?? {}, "summary") ?? "No provider summary"}</td>
+                    <td>
+                      {readString(operatorProvider ?? {}, "summary") ?? "No provider summary"}
+                    </td>
                   </tr>
                   <tr>
                     <td>Recall</td>

@@ -177,7 +177,9 @@ const EMPTY_OPERATOR_INSIGHTS: OperatorInsightsEnvelope = {
   reload: EMPTY_RELOAD,
 };
 
-export function normalizeUsageInsightsEnvelope(value: UsageInsightsEnvelope): UsageInsightsEnvelope {
+export function normalizeUsageInsightsEnvelope(
+  value: UsageInsightsEnvelope,
+): UsageInsightsEnvelope {
   return {
     ...value,
     timeline: Array.isArray(value.timeline) ? value.timeline : [],
