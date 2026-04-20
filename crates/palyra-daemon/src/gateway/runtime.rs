@@ -54,6 +54,9 @@ use crate::tool_posture::{
 };
 use crate::usage_governance::SmartRoutingRuntimeConfig;
 use palyra_auth::AuthHealthReport;
+use palyra_common::runtime_preview::{
+    RuntimeDecisionActor, RuntimeDecisionActorKind, RuntimeDecisionPayload,
+};
 use palyra_workerd::{
     WorkerAttestation, WorkerCleanupReport, WorkerFleetManager, WorkerFleetPolicy,
     WorkerFleetSnapshot, WorkerLease, WorkerLeaseRequest, WorkerLifecycleEvent,
@@ -390,6 +393,7 @@ pub struct GatewayRuntimeState {
     canvas_signing_secret: [u8; 32],
     agent_registry: AgentRegistry,
     pub(crate) channel_router: ChannelRouter,
+    pub(crate) observability: Arc<crate::observability::ObservabilityState>,
     pub(crate) self_healing: Arc<SelfHealingState>,
 }
 
@@ -1164,6 +1168,7 @@ impl GatewayRuntimeState {
             canvas_signing_secret: generate_canvas_signing_secret(),
             agent_registry,
             channel_router,
+            observability: Arc::new(crate::observability::ObservabilityState::default()),
             self_healing: Arc::new(SelfHealingState::new()),
         }))
     }
@@ -5330,6 +5335,94 @@ impl GatewayRuntimeState {
         .map(|_| ())
     }
 
+    #[allow(clippy::result_large_err)]
+    async fn append_runtime_decision_event(
+        self: &Arc<Self>,
+        principal: String,
+        device_id: String,
+        channel: Option<String>,
+        session_id: Option<String>,
+        run_id: Option<String>,
+        payload: RuntimeDecisionPayload,
+    ) -> Result<(), Status> {
+        let session_id = session_id.unwrap_or_else(|| Ulid::new().to_string());
+        let run_id = run_id.unwrap_or_else(|| session_id.clone());
+        self.record_journal_event(JournalAppendRequest {
+            event_id: Ulid::new().to_string(),
+            session_id,
+            run_id,
+            kind: common_v1::journal_event::EventKind::ToolExecuted as i32,
+            actor: common_v1::journal_event::EventActor::System as i32,
+            timestamp_unix_ms: current_unix_ms(),
+            payload_json: json!({
+                "event": payload.event_type.journal_event(),
+                "payload": payload,
+            })
+            .to_string()
+            .into_bytes(),
+            principal,
+            device_id,
+            channel,
+        })
+        .await?;
+        self.observability.record_runtime_decision_event(&payload);
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn record_runtime_decision_event(
+        self: &Arc<Self>,
+        context: &RequestContext,
+        session_id: Option<&str>,
+        run_id: Option<&str>,
+        payload: RuntimeDecisionPayload,
+    ) -> Result<(), Status> {
+        self.append_runtime_decision_event(
+            context.principal.clone(),
+            context.device_id.clone(),
+            context.channel.clone(),
+            session_id.map(ToOwned::to_owned),
+            run_id.map(ToOwned::to_owned),
+            payload,
+        )
+        .await
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn record_system_runtime_decision_event(
+        self: &Arc<Self>,
+        principal: &str,
+        device_id: &str,
+        channel: Option<&str>,
+        session_id: Option<&str>,
+        run_id: Option<&str>,
+        payload: RuntimeDecisionPayload,
+    ) -> Result<(), Status> {
+        self.append_runtime_decision_event(
+            principal.to_owned(),
+            device_id.to_owned(),
+            channel.map(ToOwned::to_owned),
+            session_id.map(ToOwned::to_owned),
+            run_id.map(ToOwned::to_owned),
+            payload,
+        )
+        .await
+    }
+
+    #[must_use]
+    pub fn runtime_decision_actor_from_context(
+        &self,
+        context: &RequestContext,
+        kind: RuntimeDecisionActorKind,
+    ) -> RuntimeDecisionActor {
+        RuntimeDecisionActor::new(
+            kind,
+            context.principal.clone(),
+            context.device_id.clone(),
+            context.channel.clone(),
+        )
+    }
+
     pub fn configure_memory(&self, config: MemoryRuntimeConfig) {
         match self.memory_config.write() {
             Ok(mut guard) => {
@@ -5637,30 +5730,41 @@ impl GatewayRuntimeState {
         self: &Arc<Self>,
         event: &WorkerLifecycleEvent,
     ) -> Result<(), Status> {
-        let session_id = event.run_id.clone().unwrap_or_else(|| Ulid::new().to_string());
-        let run_id = event.run_id.clone().unwrap_or_else(|| session_id.clone());
-        self.record_journal_event(JournalAppendRequest {
-            event_id: Ulid::new().to_string(),
-            session_id,
-            run_id,
-            kind: common_v1::journal_event::EventKind::ToolExecuted as i32,
-            actor: common_v1::journal_event::EventActor::System as i32,
-            timestamp_unix_ms: current_unix_ms(),
-            payload_json: serde_json::json!({
-                "event": "networked_worker.lifecycle",
-                "worker_id": event.worker_id.as_str(),
-                "run_id": &event.run_id,
-                "state": &event.state,
-                "reason_code": event.reason_code.as_str(),
-            })
-            .to_string()
-            .into_bytes(),
-            principal: "system:networked-worker".to_owned(),
-            device_id: "networked-worker".to_owned(),
-            channel: Some("system".to_owned()),
-        })
-        .await?;
-        Ok(())
+        use palyra_common::runtime_preview::{
+            RuntimeDecisionEventType, RuntimeDecisionTiming, RuntimeEntityRef,
+            RuntimeResourceBudget,
+        };
+
+        self.record_system_runtime_decision_event(
+            "system:networked-worker",
+            "networked-worker",
+            Some("system"),
+            event.run_id.as_deref(),
+            event.run_id.as_deref(),
+            RuntimeDecisionPayload::new(
+                RuntimeDecisionEventType::WorkerLeaseLifecycle,
+                RuntimeDecisionActor::new(
+                    RuntimeDecisionActorKind::Worker,
+                    "system:networked-worker",
+                    "networked-worker",
+                    Some("system".to_owned()),
+                ),
+                event.reason_code.clone(),
+                "networked_workers.lease.preview",
+                RuntimeDecisionTiming::observed(event.timestamp_unix_ms),
+            )
+            .with_input(RuntimeEntityRef::new("worker", "worker", event.worker_id.clone()))
+            .with_output(
+                RuntimeEntityRef::new("worker_lifecycle", "worker", event.worker_id.clone())
+                    .with_state(event.state.as_str()),
+            )
+            .with_resource_budget(RuntimeResourceBudget::default())
+            .with_details(json!({
+                "run_id": event.run_id,
+                "reason_code": event.reason_code,
+            })),
+        )
+        .await
     }
 
     pub fn clear_memory_search_cache(&self) {

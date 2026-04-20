@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use palyra_common::runtime_preview::{
+    RuntimeDecisionActorKind, RuntimeDecisionEventType, RuntimeDecisionPayload,
+    RuntimeDecisionTiming, RuntimeEntityRef, RuntimeResourceBudget,
+};
 use tokio::sync::mpsc;
 use tonic::{Status, Streaming};
 
@@ -7,7 +11,8 @@ use crate::{
     application::{
         route_message::tool_flow::process_route_tool_proposal_event,
         run_stream::{
-            cancellation::transition_run_stream_to_cancelled, tape::send_model_token_with_tape,
+            cancellation::transition_run_stream_to_cancelled,
+            tape::{append_runtime_decision_tape_event, send_model_token_with_tape},
             tool_flow::process_run_stream_tool_proposal_event,
         },
     },
@@ -59,12 +64,44 @@ pub(crate) enum ProviderEventSurface<'a> {
 async fn gate_run_stream_provider_event_on_cancellation(
     sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
     runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
     run_state: &mut RunStateMachine,
+    session_id: &str,
     run_id: &str,
     tape_seq: &mut i64,
 ) -> Result<RunStreamProviderEventGateOutcome, Status> {
     match runtime_state.is_orchestrator_cancel_requested(run_id.to_owned()).await {
         Ok(true) => {
+            let event_payload = RuntimeDecisionPayload::new(
+                RuntimeDecisionEventType::FlowLifecycle,
+                runtime_state.runtime_decision_actor_from_context(
+                    request_context,
+                    RuntimeDecisionActorKind::RunStream,
+                ),
+                "run_cancel_requested",
+                "flow_orchestration.preview.cancellation_gate",
+                RuntimeDecisionTiming::observed(crate::gateway::current_unix_ms()),
+            )
+            .with_input(RuntimeEntityRef::new("run", "run", run_id).with_state("running"))
+            .with_output(RuntimeEntityRef::new("run", "run", run_id).with_state("cancelled"))
+            .with_resource_budget(RuntimeResourceBudget {
+                queue_depth: None,
+                token_budget: None,
+                pruning_token_delta: None,
+                retrieval_branch_latency_ms: None,
+                retry_count: Some(0),
+                suppression_count: None,
+            });
+            runtime_state
+                .record_runtime_decision_event(
+                    request_context,
+                    Some(session_id),
+                    Some(run_id),
+                    event_payload.clone(),
+                )
+                .await?;
+            append_runtime_decision_tape_event(runtime_state, run_id, tape_seq, &event_payload)
+                .await?;
             transition_run_stream_to_cancelled(sender, runtime_state, run_state, run_id, tape_seq)
                 .await?;
             Ok(RunStreamProviderEventGateOutcome::Cancelled)
@@ -188,7 +225,9 @@ pub(crate) async fn process_run_stream_provider_events(
         match gate_run_stream_provider_event_on_cancellation(
             sender,
             runtime_state,
+            request_context,
             run_state,
+            session_id,
             run_id,
             tape_seq,
         )

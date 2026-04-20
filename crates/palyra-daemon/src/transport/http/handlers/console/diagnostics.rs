@@ -601,6 +601,8 @@ pub(crate) async fn build_observability_payload(
     let doctor_recovery = build_doctor_recovery_observability(state);
     let recent_failures = state.observability.recent_failures();
     let failure_classes = build_failure_class_summary(recent_failures.as_slice());
+    let runtime_preview = serde_json::to_value(state.observability.runtime_decision_snapshot())
+        .unwrap_or_else(|_| json!({ "state": "encode_failed" }));
     let healing_settings = state.runtime.self_healing_settings_snapshot();
     let healing_summary = state.runtime.self_healing_incident_summary();
     let healing_incidents = state.runtime.self_healing_active_incidents(32);
@@ -620,6 +622,7 @@ pub(crate) async fn build_observability_payload(
         "connector": connector,
         "lease_manager": state.runtime.provider_lease_snapshot(),
         "browser": browser,
+        "runtime_preview": runtime_preview,
         "self_healing": {
             "settings": healing_settings,
             "summary": healing_summary,
@@ -1135,6 +1138,8 @@ pub(crate) async fn collect_console_browser_action_diagnostics(state: &AppState)
 
 pub(crate) fn build_support_bundle_observability(state: &AppState) -> Value {
     let summary = state.observability.support_bundle_snapshot();
+    let runtime_preview = serde_json::to_value(state.observability.runtime_decision_snapshot())
+        .unwrap_or_else(|_| json!({ "state": "encode_failed" }));
     let latest_job = lock_support_bundle_jobs(&state.support_bundle_jobs)
         .values()
         .cloned()
@@ -1149,6 +1154,7 @@ pub(crate) fn build_support_bundle_observability(state: &AppState) -> Value {
             10_000_u32.saturating_sub(summary.failure_rate_bps)
         },
         "workspace_restore": build_workspace_restore_observability(state),
+        "runtime_preview": runtime_preview,
         "last_job": latest_job.map(|job| json!({
             "job_id": job.job_id,
             "state": match job.state {

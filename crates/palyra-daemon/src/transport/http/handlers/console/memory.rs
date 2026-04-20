@@ -7,6 +7,10 @@ use crate::{
     application::recall::{preview_recall, recall_preview_console_payload, RecallRequest},
     domain::workspace::{curated_workspace_roots, curated_workspace_templates},
 };
+use palyra_common::runtime_preview::{
+    RuntimeDecisionActorKind, RuntimeDecisionEventType, RuntimeDecisionPayload,
+    RuntimeDecisionTiming, RuntimeEntityRef, RuntimeResourceBudget,
+};
 
 pub(crate) async fn console_memory_status_handler(
     State(state): State<AppState>,
@@ -251,7 +255,7 @@ pub(crate) async fn console_memory_search_handler(
         .search_memory(journal::MemorySearchRequest {
             principal: session.context.principal,
             channel: query.channel.or(session.context.channel),
-            session_id: session_scope,
+            session_id: session_scope.clone(),
             query: search_query.to_owned(),
             top_k: query.top_k.unwrap_or(8).clamp(1, 50),
             min_score,
@@ -796,13 +800,14 @@ pub(crate) async fn console_recall_preview_handler(
             "prompt_budget_tokens must be in range 512..=4096",
         )));
     }
+    let started_at_unix_ms = current_unix_ms();
     let preview = preview_recall(
         &state.runtime,
         &session.context,
         RecallRequest {
             query: query_text.to_owned(),
             channel: payload.channel.clone().or(session.context.channel.clone()),
-            session_id: session_scope,
+            session_id: session_scope.clone(),
             agent_id: payload.agent_id.and_then(trim_to_option),
             memory_top_k: payload.memory_top_k.unwrap_or(4).clamp(0, 16),
             workspace_top_k: payload.workspace_top_k.unwrap_or(4).clamp(0, 16),
@@ -816,6 +821,49 @@ pub(crate) async fn console_recall_preview_handler(
     )
     .await
     .map_err(runtime_status_response)?;
+    let elapsed_ms = current_unix_ms().saturating_sub(started_at_unix_ms).max(0) as u64;
+    state
+        .runtime
+        .record_runtime_decision_event(
+            &session.context,
+            session_scope.as_deref(),
+            None,
+            RuntimeDecisionPayload::new(
+                RuntimeDecisionEventType::RecallSessionSearch,
+                state.runtime.runtime_decision_actor_from_context(
+                    &session.context,
+                    RuntimeDecisionActorKind::Operator,
+                ),
+                "recall_preview_requested",
+                "retrieval_dual_path.preview.recall",
+                RuntimeDecisionTiming::observed_with_duration(started_at_unix_ms, elapsed_ms),
+            )
+            .with_input(RuntimeEntityRef::new(
+                "session",
+                "session",
+                session_scope.clone().unwrap_or_else(|| session.context.principal.clone()),
+            ))
+            .with_output(RuntimeEntityRef::new("preview", "recall_preview", "console"))
+            .with_resource_budget(RuntimeResourceBudget {
+                queue_depth: None,
+                token_budget: Some(prompt_budget_tokens as u64),
+                pruning_token_delta: None,
+                retrieval_branch_latency_ms: Some(elapsed_ms),
+                retry_count: None,
+                suppression_count: None,
+            })
+            .with_details(json!({
+                "query": query_text,
+                "memory_hits": preview.memory_hits.len(),
+                "workspace_hits": preview.workspace_hits.len(),
+                "transcript_hits": preview.transcript_hits.len(),
+                "checkpoint_hits": preview.checkpoint_hits.len(),
+                "compaction_hits": preview.compaction_hits.len(),
+                "top_candidates": preview.top_candidates.len(),
+            })),
+        )
+        .await
+        .map_err(runtime_status_response)?;
     if let Err(error) = state
         .runtime
         .record_console_event(

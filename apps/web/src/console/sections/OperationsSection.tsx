@@ -65,6 +65,10 @@ export function OperationsSection({ app }: OperationsSectionProps) {
   const connector = readObject(observability ?? {}, "connector");
   const browser = readObject(observability ?? {}, "browser");
   const doctorRecovery = readObject(observability ?? {}, "doctor_recovery");
+  const runtimePreview = readObject(observability ?? {}, "runtime_preview");
+  const runtimePreviewMetrics = readObject(runtimePreview ?? {}, "metrics");
+  const runtimePreviewCatalog = readJsonObjectArray(runtimePreview?.catalog);
+  const runtimePreviewEvents = readJsonObjectArray(runtimePreview?.recent_events);
   const configRefHealth = readObject(observability ?? {}, "config_ref_health");
   const configRefSummary = readObject(configRefHealth ?? {}, "summary");
   const configRefItems = readJsonObjectArray(configRefHealth?.items);
@@ -207,6 +211,12 @@ export function OperationsSection({ app }: OperationsSectionProps) {
           tone={workspaceToneForState(readString(configRefHealth ?? {}, "state") ?? "unknown")}
         />
         <WorkspaceMetricCard
+          label="Runtime preview"
+          value={readString(runtimePreview ?? {}, "state") ?? "n/a"}
+          detail={`${readNumber(runtimePreviewMetrics ?? {}, "queue_depth") ?? 0} queue depth · ${readNumber(runtimePreviewMetrics ?? {}, "pruning_tokens_saved") ?? 0} tokens saved`}
+          tone={workspaceToneForState(readString(runtimePreview ?? {}, "state") ?? "unknown")}
+        />
+        <WorkspaceMetricCard
           label="Learning reflections"
           value={readNumber(learningCounters ?? {}, "reflections_scheduled") ?? 0}
           detail={`${readNumber(learningCounters ?? {}, "candidates_created") ?? 0} candidates · ${readNumber(learningCounters ?? {}, "candidates_auto_applied") ?? 0} auto-applied`}
@@ -315,6 +325,98 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                       ))}
                     </ul>
                   </WorkspaceInlineNotice>
+                ) : null}
+              </div>
+            )}
+          </WorkspaceSectionCard>
+
+          <WorkspaceSectionCard
+            title="Runtime preview"
+            description="Phase 1 queue, pruning, retrieval, flow, delivery, and worker telemetry stays visible here before the deeper runtime refactor ships."
+          >
+            {runtimePreviewCatalog.length === 0 ? (
+              <WorkspaceEmptyState
+                compact
+                title="No runtime preview telemetry"
+                description="Refresh diagnostics after the daemon records Phase 1 runtime events."
+              />
+            ) : (
+              <div className="workspace-stack">
+                <WorkspaceTable
+                  ariaLabel="Runtime preview catalog"
+                  columns={["Event", "Emitted", "Last seen", "Summary"]}
+                >
+                  {runtimePreviewCatalog.slice(0, 8).map((entry, index) => (
+                    <tr
+                      key={`${readString(entry, "event_type") ?? readString(entry, "journal_event") ?? "runtime"}-${index}`}
+                    >
+                      <td>{readString(entry, "event_type") ?? "unknown"}</td>
+                      <td>{readNumber(entry, "emitted") ?? 0}</td>
+                      <td>{formatUnixMs(readNumber(entry, "last_seen_at_unix_ms")) ?? "n/a"}</td>
+                      <td>{readString(entry, "summary") ?? "No summary published."}</td>
+                    </tr>
+                  ))}
+                </WorkspaceTable>
+                <WorkspaceTable
+                  ariaLabel="Runtime preview metrics"
+                  columns={["Metric", "Value", "Detail"]}
+                >
+                  <tr>
+                    <td>Queue depth</td>
+                    <td>
+                      {readNumber(runtimePreviewMetrics ?? {}, "queue_depth") ?? 0} /{" "}
+                      {readNumber(runtimePreviewMetrics ?? {}, "queue_peak_depth") ?? 0}
+                    </td>
+                    <td>Current / peak observed queue depth.</td>
+                  </tr>
+                  <tr>
+                    <td>Recall latency</td>
+                    <td>
+                      {readNumber(runtimePreviewMetrics ?? {}, "retrieval_branch_latency_avg_ms") ??
+                        0}{" "}
+                      ms
+                    </td>
+                    <td>
+                      Max{" "}
+                      {readNumber(runtimePreviewMetrics ?? {}, "retrieval_branch_latency_max_ms") ??
+                        0}{" "}
+                      ms across recall preview branches.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Auxiliary spend</td>
+                    <td>{readNumber(runtimePreviewMetrics ?? {}, "auxiliary_budget_tokens") ?? 0}</td>
+                    <td>
+                      {readNumber(runtimePreviewMetrics ?? {}, "auxiliary_task_events") ?? 0} task
+                      lifecycle events captured.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Worker orphan rate</td>
+                    <td>{readNumber(runtimePreviewMetrics ?? {}, "worker_orphan_rate_bps") ?? 0}</td>
+                    <td>
+                      {readNumber(runtimePreviewMetrics ?? {}, "worker_orphaned_events") ?? 0} of{" "}
+                      {readNumber(runtimePreviewMetrics ?? {}, "worker_events") ?? 0} worker
+                      lifecycle events.
+                    </td>
+                  </tr>
+                </WorkspaceTable>
+                {runtimePreviewEvents.length > 0 ? (
+                  <WorkspaceTable
+                    ariaLabel="Runtime preview recent events"
+                    columns={["When", "Event", "Reason", "Principal"]}
+                  >
+                    {runtimePreviewEvents.slice(0, 5).map((event, index) => (
+                      <tr
+                        key={`${readString(event, "event_type") ?? readString(event, "reason") ?? "event"}-${index}`}
+                      >
+                        <td>{formatUnixMs(readNumber(event, "observed_at_unix_ms")) ?? "n/a"}</td>
+                        <td>{readString(event, "event_type") ?? "unknown"}</td>
+                        <td>{readString(event, "reason") ?? "No reason published."}</td>
+                        <td>{readString(event, "principal") ?? "n/a"}</td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
                 ) : null}
               </div>
             )}

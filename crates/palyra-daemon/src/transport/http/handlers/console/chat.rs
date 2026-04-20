@@ -5,7 +5,13 @@ use crate::{
     *,
 };
 use base64::Engine as _;
-use palyra_common::runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState, QueuedInputState};
+use palyra_common::{
+    runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState, QueuedInputState},
+    runtime_preview::{
+        RuntimeDecisionActorKind, RuntimeDecisionEventType, RuntimeDecisionPayload,
+        RuntimeDecisionTiming, RuntimeEntityRef, RuntimeResourceBudget,
+    },
+};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
@@ -1402,6 +1408,66 @@ pub(crate) async fn console_chat_compaction_apply_handler(
     })
     .await
     .map_err(runtime_status_response)?;
+    state
+        .runtime
+        .record_runtime_decision_event(
+            &session.context,
+            Some(session_record.session_id.as_str()),
+            execution.checkpoint.run_id.as_deref().or(session_record.last_run_id.as_deref()),
+            RuntimeDecisionPayload::new(
+                RuntimeDecisionEventType::PruningApply,
+                state.runtime.runtime_decision_actor_from_context(
+                    &session.context,
+                    RuntimeDecisionActorKind::Operator,
+                ),
+                payload
+                    .trigger_reason
+                    .clone()
+                    .unwrap_or_else(|| "session_compaction_applied".to_owned()),
+                payload
+                    .trigger_policy
+                    .clone()
+                    .unwrap_or_else(|| "pruning.preview.session_compaction".to_owned()),
+                RuntimeDecisionTiming::observed(execution.artifact.created_at_unix_ms),
+            )
+            .with_input(RuntimeEntityRef::new(
+                "session",
+                "session",
+                session_record.session_id.clone(),
+            ))
+            .with_output(RuntimeEntityRef::new(
+                "checkpoint",
+                "checkpoint",
+                execution.checkpoint.checkpoint_id.clone(),
+            ))
+            .with_resource_budget(RuntimeResourceBudget {
+                queue_depth: None,
+                token_budget: None,
+                pruning_token_delta: Some(
+                    execution
+                        .plan
+                        .estimated_input_tokens
+                        .saturating_sub(execution.plan.estimated_output_tokens),
+                ),
+                retrieval_branch_latency_ms: None,
+                retry_count: None,
+                suppression_count: None,
+            })
+            .with_related_entity(RuntimeEntityRef::new(
+                "artifact",
+                "compaction_artifact",
+                execution.artifact.artifact_id.clone(),
+            ))
+            .with_details(json!({
+                "checkpoint_id": execution.checkpoint.checkpoint_id,
+                "artifact_id": execution.artifact.artifact_id,
+                "candidate_count": execution.plan.candidates.len(),
+                "write_count": execution.writes.len(),
+                "mode": "manual",
+            })),
+        )
+        .await
+        .map_err(runtime_status_response)?;
     Ok(Json(json!({
         "session": session_record,
         "artifact": execution.artifact,
@@ -2079,6 +2145,14 @@ pub(crate) async fn console_chat_background_task_create_handler(
         })
         .await
         .map_err(runtime_status_response)?;
+    record_background_task_runtime_preview(
+        &state,
+        &session.context,
+        &task,
+        "background_task_created",
+        None,
+    )
+    .await?;
     Ok(Json(json!({
         "session": session_record,
         "task": task,
@@ -2159,6 +2233,14 @@ pub(crate) async fn console_chat_background_task_pause_handler(
         .map_err(runtime_status_response)?;
     let task =
         load_console_background_task(&state, &session.context, task.task_id.as_str()).await?;
+    record_background_task_runtime_preview(
+        &state,
+        &session.context,
+        &task,
+        "background_task_paused",
+        None,
+    )
+    .await?;
     Ok(Json(json!({
         "task": task,
         "action": "pause",
@@ -2190,6 +2272,14 @@ pub(crate) async fn console_chat_background_task_resume_handler(
         .map_err(runtime_status_response)?;
     let task =
         load_console_background_task(&state, &session.context, task.task_id.as_str()).await?;
+    record_background_task_runtime_preview(
+        &state,
+        &session.context,
+        &task,
+        "background_task_resumed",
+        None,
+    )
+    .await?;
     Ok(Json(json!({
         "task": task,
         "action": "resume",
@@ -2232,6 +2322,14 @@ pub(crate) async fn console_chat_background_task_retry_handler(
         .map_err(runtime_status_response)?;
     let task =
         load_console_background_task(&state, &session.context, task.task_id.as_str()).await?;
+    record_background_task_runtime_preview(
+        &state,
+        &session.context,
+        &task,
+        "background_task_requeued",
+        Some(1),
+    )
+    .await?;
     Ok(Json(json!({
         "task": task,
         "action": "retry",
@@ -2287,6 +2385,14 @@ pub(crate) async fn console_chat_background_task_cancel_handler(
     }
     let task =
         load_console_background_task(&state, &session.context, task.task_id.as_str()).await?;
+    record_background_task_runtime_preview(
+        &state,
+        &session.context,
+        &task,
+        "background_task_cancelled",
+        None,
+    )
+    .await?;
     Ok(Json(json!({
         "task": task,
         "action": "cancel",
@@ -2353,6 +2459,54 @@ pub(crate) async fn console_chat_queue_handler(
         })
         .await
         .map_err(runtime_status_response)?;
+    let mut queue_tape_seq = run.tape_events as i64;
+    let queue_enqueue_payload = RuntimeDecisionPayload::new(
+        RuntimeDecisionEventType::QueueEnqueue,
+        state.runtime.runtime_decision_actor_from_context(
+            &session.context,
+            RuntimeDecisionActorKind::Operator,
+        ),
+        "queued_followup_submitted",
+        "session_queue.preview.followup",
+        RuntimeDecisionTiming::observed(timestamp_unix_ms),
+    )
+    .with_input(
+        RuntimeEntityRef::new("queued_input", "queued_input", queued.queued_input_id.clone())
+            .with_state(QueuedInputState::Pending.as_str()),
+    )
+    .with_output(RuntimeEntityRef::new("run", "run", run_id.clone()).with_state("active"))
+    .with_resource_budget(RuntimeResourceBudget {
+        queue_depth: Some(1),
+        token_budget: None,
+        pruning_token_delta: None,
+        retrieval_branch_latency_ms: None,
+        retry_count: None,
+        suppression_count: None,
+    })
+    .with_related_entity(RuntimeEntityRef::new("session", "session", stream.session_id.clone()))
+    .with_details(json!({
+        "origin_kind": "queued",
+        "origin_run_id": run_id,
+    }));
+    state
+        .runtime
+        .record_runtime_decision_event(
+            &session.context,
+            Some(stream.session_id.as_str()),
+            Some(run_id.as_str()),
+            queue_enqueue_payload.clone(),
+        )
+        .await
+        .map_err(runtime_status_response)?;
+    state.observability.observe_runtime_queue_depth(1);
+    crate::application::run_stream::tape::append_runtime_decision_tape_event(
+        &state.runtime,
+        run_id.as_str(),
+        &mut queue_tape_seq,
+        &queue_enqueue_payload,
+    )
+    .await
+    .map_err(runtime_status_response)?;
     let request = common_v1::RunStreamRequest {
         v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
         session_id: Some(common_v1::CanonicalId { ulid: stream.session_id.clone() }),
@@ -2384,6 +2538,52 @@ pub(crate) async fn console_chat_queue_handler(
             })
             .await
             .map_err(runtime_status_response)?;
+        let delivery_failed_payload = RuntimeDecisionPayload::new(
+            RuntimeDecisionEventType::FlowLifecycle,
+            state.runtime.runtime_decision_actor_from_context(
+                &session.context,
+                RuntimeDecisionActorKind::Operator,
+            ),
+            "queued_followup_delivery_failed",
+            "flow_orchestration.preview.queue_delivery",
+            RuntimeDecisionTiming::observed(crate::gateway::current_unix_ms()),
+        )
+        .with_input(
+            RuntimeEntityRef::new("queued_input", "queued_input", queued.queued_input_id.clone())
+                .with_state(QueuedInputState::DeliveryFailed.as_str()),
+        )
+        .with_output(RuntimeEntityRef::new("run", "run", run_id.clone()).with_state("active"))
+        .with_resource_budget(RuntimeResourceBudget {
+            queue_depth: Some(0),
+            token_budget: None,
+            pruning_token_delta: None,
+            retrieval_branch_latency_ms: None,
+            retry_count: Some(0),
+            suppression_count: None,
+        })
+        .with_related_entity(RuntimeEntityRef::new("session", "session", stream.session_id.clone()))
+        .with_details(json!({
+            "queued_input_state": QueuedInputState::DeliveryFailed.as_str(),
+        }));
+        state
+            .runtime
+            .record_runtime_decision_event(
+                &session.context,
+                Some(stream.session_id.as_str()),
+                Some(run_id.as_str()),
+                delivery_failed_payload.clone(),
+            )
+            .await
+            .map_err(runtime_status_response)?;
+        state.observability.observe_runtime_queue_depth(0);
+        crate::application::run_stream::tape::append_runtime_decision_tape_event(
+            &state.runtime,
+            run_id.as_str(),
+            &mut queue_tape_seq,
+            &delivery_failed_payload,
+        )
+        .await
+        .map_err(runtime_status_response)?;
         return Err(runtime_status_response(tonic::Status::failed_precondition(
             "failed to forward queued follow-up to the active run stream",
         )));
@@ -2396,6 +2596,52 @@ pub(crate) async fn console_chat_queue_handler(
         })
         .await
         .map_err(runtime_status_response)?;
+    let forwarded_payload = RuntimeDecisionPayload::new(
+        RuntimeDecisionEventType::FlowLifecycle,
+        state.runtime.runtime_decision_actor_from_context(
+            &session.context,
+            RuntimeDecisionActorKind::Operator,
+        ),
+        "queued_followup_forwarded",
+        "flow_orchestration.preview.queue_delivery",
+        RuntimeDecisionTiming::observed(crate::gateway::current_unix_ms()),
+    )
+    .with_input(
+        RuntimeEntityRef::new("queued_input", "queued_input", queued.queued_input_id.clone())
+            .with_state(QueuedInputState::Forwarded.as_str()),
+    )
+    .with_output(RuntimeEntityRef::new("run", "run", run_id.clone()).with_state("active"))
+    .with_resource_budget(RuntimeResourceBudget {
+        queue_depth: Some(0),
+        token_budget: None,
+        pruning_token_delta: None,
+        retrieval_branch_latency_ms: None,
+        retry_count: Some(0),
+        suppression_count: None,
+    })
+    .with_related_entity(RuntimeEntityRef::new("session", "session", stream.session_id.clone()))
+    .with_details(json!({
+        "queued_input_state": QueuedInputState::Forwarded.as_str(),
+    }));
+    state
+        .runtime
+        .record_runtime_decision_event(
+            &session.context,
+            Some(stream.session_id.as_str()),
+            Some(run_id.as_str()),
+            forwarded_payload.clone(),
+        )
+        .await
+        .map_err(runtime_status_response)?;
+    state.observability.observe_runtime_queue_depth(0);
+    crate::application::run_stream::tape::append_runtime_decision_tape_event(
+        &state.runtime,
+        run_id.as_str(),
+        &mut queue_tape_seq,
+        &forwarded_payload,
+    )
+    .await
+    .map_err(runtime_status_response)?;
     queued.state = QueuedInputState::Forwarded.as_str().to_owned();
     Ok(Json(json!({
         "queued_input": queued,
@@ -3411,6 +3657,61 @@ async fn load_console_background_task(
         )));
     }
     Ok(task)
+}
+
+#[allow(clippy::result_large_err)]
+async fn record_background_task_runtime_preview(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    task: &journal::OrchestratorBackgroundTaskRecord,
+    reason: &str,
+    retry_count: Option<u32>,
+) -> Result<(), Response> {
+    let anchor_run_id = task.target_run_id.as_deref().or(task.parent_run_id.as_deref());
+    state
+        .runtime
+        .record_runtime_decision_event(
+            context,
+            Some(task.session_id.as_str()),
+            anchor_run_id,
+            RuntimeDecisionPayload::new(
+                RuntimeDecisionEventType::AuxiliaryTaskLifecycle,
+                state.runtime.runtime_decision_actor_from_context(
+                    context,
+                    RuntimeDecisionActorKind::Operator,
+                ),
+                reason,
+                "auxiliary_executor.preview.lifecycle",
+                RuntimeDecisionTiming::observed(task.updated_at_unix_ms),
+            )
+            .with_input(RuntimeEntityRef::new("task", "background_task", task.task_id.clone()))
+            .with_output(
+                RuntimeEntityRef::new("task", "background_task", task.task_id.clone())
+                    .with_state(task.state.clone()),
+            )
+            .with_resource_budget(RuntimeResourceBudget {
+                queue_depth: None,
+                token_budget: Some(task.budget_tokens),
+                pruning_token_delta: None,
+                retrieval_branch_latency_ms: None,
+                retry_count,
+                suppression_count: None,
+            })
+            .with_related_entity(RuntimeEntityRef::new(
+                "session",
+                "session",
+                task.session_id.clone(),
+            ))
+            .with_details(json!({
+                "task_kind": task.task_kind,
+                "attempt_count": task.attempt_count,
+                "max_attempts": task.max_attempts,
+                "queued_input_id": task.queued_input_id,
+                "target_run_id": task.target_run_id,
+            })),
+        )
+        .await
+        .map_err(runtime_status_response)
 }
 
 fn load_console_derived_artifact(

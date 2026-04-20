@@ -18,9 +18,7 @@ use crate::{
     config::{BrowserServiceConfig, LoadedConfig},
     gateway::{self, GatewayAuthConfig, GatewayRuntimeState},
     node_runtime::NodeRuntimeState,
-    objectives,
-    observability::ObservabilityState,
-    routines, webhooks,
+    objectives, routines, webhooks,
 };
 use palyra_identity::IdentityManager;
 use palyra_vault::Vault;
@@ -47,6 +45,7 @@ pub(crate) fn build_app_state(
     configured_secrets: ConfiguredSecretsState,
     context: AppStateBuildContext,
 ) -> AppState {
+    let observability = Arc::clone(&context.runtime.observability);
     AppState {
         started_at: Instant::now(),
         loaded_config: Arc::new(Mutex::new(loaded.clone())),
@@ -81,7 +80,7 @@ pub(crate) fn build_app_state(
         console_chat_streams: Arc::new(Mutex::new(HashMap::<String, ConsoleChatRunStream>::new())),
         support_bundle_jobs: Arc::new(Mutex::new(HashMap::new())),
         doctor_jobs: Arc::new(Mutex::new(HashMap::new())),
-        observability: Arc::new(ObservabilityState::default()),
+        observability,
         configured_secrets: Arc::new(Mutex::new(configured_secrets)),
         reload_state: Arc::new(Mutex::new(ReloadOperationsState::default())),
         deployment: build_deployment_runtime_snapshot(loaded, dangerous_remote_bind_ack_env),

@@ -1811,7 +1811,9 @@ fn build_support_bundle_observability_snapshot(
         diagnostics.admin_status.as_ref().and_then(|payload| payload.get("observability")).cloned();
     let recent_failures =
         summary.as_ref().and_then(|payload| payload.get("recent_failures")).cloned();
-    SupportBundleObservabilitySnapshot { summary, recent_failures }
+    let runtime_preview =
+        summary.as_ref().and_then(|payload| payload.get("runtime_preview")).cloned();
+    SupportBundleObservabilitySnapshot { summary, recent_failures, runtime_preview }
 }
 
 fn build_support_bundle_triage_snapshot() -> SupportBundleTriageSnapshot {
@@ -6945,6 +6947,8 @@ struct SupportBundleObservabilitySnapshot {
     summary: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recent_failures: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_preview: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8466,11 +8470,19 @@ mod diagnostics_bundle_tests {
                     "provider_auth": { "attempts": 4, "failures": 1, "failure_rate_bps": 2500 },
                     "recent_failures": [
                         { "operation": "provider_auth.oauth_refresh", "message": "http 503" }
-                    ]
+                    ],
+                    "runtime_preview": {
+                        "state": "active",
+                        "metrics": { "queue_depth": 0, "pruning_tokens_saved": 128 }
+                    }
                 })),
                 recent_failures: Some(json!([
                     { "operation": "provider_auth.oauth_refresh", "message": "http 503" }
                 ])),
+                runtime_preview: Some(json!({
+                    "state": "active",
+                    "metrics": { "queue_depth": 0, "pruning_tokens_saved": 128 }
+                })),
             },
             triage: SupportBundleTriageSnapshot {
                 playbook:

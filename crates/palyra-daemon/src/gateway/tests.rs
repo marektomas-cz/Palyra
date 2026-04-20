@@ -2250,7 +2250,7 @@ async fn networked_worker_lifecycle_events_are_journaled() {
         .iter()
         .filter_map(|event| serde_json::from_str::<Value>(event.payload_json.as_str()).ok())
         .filter(|payload| {
-            payload.get("event").and_then(Value::as_str) == Some("networked_worker.lifecycle")
+            payload.get("event").and_then(Value::as_str) == Some("runtime.worker_lease.lifecycle")
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -2260,7 +2260,9 @@ async fn networked_worker_lifecycle_events_are_journaled() {
     );
     let reason_codes = lifecycle_payloads
         .iter()
-        .filter_map(|payload| payload.get("reason_code").and_then(Value::as_str))
+        .filter_map(|payload| {
+            payload.pointer("/payload/details/reason_code").and_then(Value::as_str)
+        })
         .collect::<Vec<_>>();
     assert!(
         reason_codes.contains(&"worker.registered")

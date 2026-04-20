@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use palyra_common::runtime_preview::RuntimeDecisionPayload;
 use palyra_common::CANONICAL_PROTOCOL_MAJOR;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -218,6 +219,28 @@ fn tool_attestation_event(
             },
         )),
     }
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn append_runtime_decision_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    payload: &RuntimeDecisionPayload,
+) -> Result<(), Status> {
+    let payload_json = serde_json::to_string(payload).map_err(|error| {
+        Status::internal(format!("failed to serialize runtime decision payload: {error}"))
+    })?;
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: payload.event_type.journal_event().to_owned(),
+            payload_json,
+        })
+        .await?;
+    *tape_seq += 1;
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
