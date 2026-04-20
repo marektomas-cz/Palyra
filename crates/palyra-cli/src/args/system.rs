@@ -10,6 +10,11 @@ pub enum SystemCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Inspect aggregated operator insights and hotspots")]
+    Insights {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     #[command(visible_alias = "events")]
     Event {
         #[command(subcommand)]

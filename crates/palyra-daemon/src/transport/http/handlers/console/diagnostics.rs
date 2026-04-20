@@ -88,8 +88,14 @@ pub(crate) async fn console_diagnostics_handler(
                 "failed to serialize canvas experiment diagnostics payload: {error}"
             )))
         })?;
-    let observability_payload =
-        build_observability_payload(&state, &auth_payload, &media_payload).await?;
+    let observability_payload = build_observability_payload(
+        &state,
+        &session.context,
+        &status_snapshot.model_provider,
+        &auth_payload,
+        &media_payload,
+    )
+    .await?;
     let generated_at_unix_ms = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
@@ -575,11 +581,20 @@ pub(crate) fn collect_console_deployment_diagnostics(state: &AppState) -> Value 
 
 pub(crate) async fn build_observability_payload(
     state: &AppState,
+    context: &gateway::RequestContext,
+    provider_snapshot: &crate::model_provider::ProviderStatusSnapshot,
     auth_payload: &Value,
     media_payload: &Value,
 ) -> Result<Value, Response> {
     let provider_auth =
         build_provider_auth_observability(auth_payload, state.observability.as_ref());
+    let operator_insights = super::usage::build_operator_insights_for_context(
+        state,
+        context,
+        provider_snapshot,
+        &provider_auth,
+    )
+    .await?;
     let connector = build_connector_observability(state, media_payload).map_err(|error| *error)?;
     let browser = collect_console_browser_action_diagnostics(state).await;
     let support_bundle = build_support_bundle_observability(state);
@@ -596,6 +611,7 @@ pub(crate) async fn build_observability_payload(
     Ok(json!({
         "failure_classes": failure_classes,
         "provider_auth": provider_auth,
+        "operator_insights": operator_insights,
         "config_ref_health": build_config_ref_health_observability(state),
         "dashboard": serde_json::to_value(state.observability.dashboard_mutation_snapshot())
             .unwrap_or_else(|_| json!({})),

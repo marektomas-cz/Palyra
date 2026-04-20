@@ -1,8 +1,10 @@
 use super::diagnostics::{
     authorize_console_session, build_connector_observability, build_page_info,
-    build_support_bundle_observability, collect_console_browser_diagnostics,
-    collect_console_deployment_diagnostics, redact_console_diagnostics_value,
+    build_provider_auth_observability, build_support_bundle_observability,
+    collect_console_browser_diagnostics, collect_console_deployment_diagnostics,
+    redact_console_diagnostics_value,
 };
+use super::usage::build_operator_insights_for_context;
 use crate::gateway::current_unix_ms;
 use crate::*;
 
@@ -154,6 +156,42 @@ pub(crate) async fn console_system_presence_handler(
         },
         "deployment": deployment,
     })))
+}
+
+pub(crate) async fn console_system_insights_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let status_snapshot = state
+        .runtime
+        .status_snapshot_async(session.context.clone(), state.auth.clone())
+        .await
+        .map_err(runtime_status_response)?;
+    let auth_snapshot = state
+        .auth_runtime
+        .admin_status_snapshot(Arc::clone(&state.runtime))
+        .await
+        .map_err(runtime_status_response)?;
+    let auth_payload = serde_json::to_value(auth_snapshot).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to serialize auth status snapshot for system insights: {error}"
+        )))
+    })?;
+    let provider_auth =
+        build_provider_auth_observability(&auth_payload, state.observability.as_ref());
+    let insights = build_operator_insights_for_context(
+        &state,
+        &session.context,
+        &status_snapshot.model_provider,
+        &provider_auth,
+    )
+    .await?;
+    Ok(Json(serde_json::to_value(insights).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to serialize system insights payload: {error}"
+        )))
+    })?))
 }
 
 pub(crate) async fn console_system_events_list_handler(

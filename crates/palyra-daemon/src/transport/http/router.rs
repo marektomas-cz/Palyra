@@ -1227,6 +1227,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(console::system::console_system_heartbeat_handler),
         )
         .route("/console/v1/system/presence", get(console::system::console_system_presence_handler))
+        .route("/console/v1/system/insights", get(console::system::console_system_insights_handler))
         .route(
             "/console/v1/system/events",
             get(console::system::console_system_events_list_handler),

@@ -1,3 +1,5 @@
+import { useNavigate } from "react-router-dom";
+
 import type { CapabilityCatalog } from "../../consoleApi";
 import { capabilitiesByMode, capabilitiesForSection } from "../capabilityCatalog";
 import { CapabilityCardList } from "../components/CapabilityCards";
@@ -47,6 +49,7 @@ type OperationsSectionProps = {
 };
 
 export function OperationsSection({ app }: OperationsSectionProps) {
+  const navigate = useNavigate();
   const catalog = readCapabilityCatalog(app.overviewCatalog);
   const groupedCapabilities = capabilitiesByMode(capabilitiesForSection(catalog, "operations"));
   const diagnostics = app.diagnosticsSnapshot;
@@ -71,6 +74,14 @@ export function OperationsSection({ app }: OperationsSectionProps) {
   const selfHealing = readObject(observability ?? {}, "self_healing");
   const selfHealingSummary = readObject(selfHealing ?? {}, "summary");
   const selfHealingSettings = readObject(selfHealing ?? {}, "settings");
+  const operatorInsights = readObject(observability ?? {}, "operator_insights");
+  const operatorSummary = readObject(operatorInsights ?? {}, "summary");
+  const operatorHotspots = readJsonObjectArray(operatorInsights?.hotspots);
+  const operatorProvider = readObject(operatorInsights ?? {}, "provider_health");
+  const operatorRecall = readObject(operatorInsights ?? {}, "recall");
+  const operatorPlugins = readObject(operatorInsights ?? {}, "plugins");
+  const operatorCron = readObject(operatorInsights ?? {}, "cron");
+  const operatorReload = readObject(operatorInsights ?? {}, "reload");
   const latestDoctorRecovery = readObject(doctorRecovery ?? {}, "last_job");
   const activeIncidents = readJsonObjectArray(selfHealing?.active_incidents);
   const recentRemediationAttempts = readJsonObjectArray(selfHealing?.recent_remediation_attempts);
@@ -161,10 +172,19 @@ export function OperationsSection({ app }: OperationsSectionProps) {
           tone={recentFailures.length > 0 ? "warning" : "default"}
         />
         <WorkspaceMetricCard
-          label="Usage alerts"
-          value={usageAlertCount}
-          detail={usageDefaultMode}
-          tone={usageAlertCount > 0 ? "warning" : "default"}
+          label="Operator hotspots"
+          value={readNumber(operatorSummary ?? {}, "hotspot_count") ?? 0}
+          detail={
+            readString(operatorSummary ?? {}, "recommendation") ??
+            "Refresh diagnostics to load operator hotspots."
+          }
+          tone={
+            workspaceToneForState(
+              readString(operatorSummary ?? {}, "severity") ??
+                readString(operatorSummary ?? {}, "state") ??
+                "unknown",
+            )
+          }
         />
         <WorkspaceMetricCard
           label="Self-healing incidents"
@@ -298,6 +318,94 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                     </ul>
                   </WorkspaceInlineNotice>
                 ) : null}
+              </div>
+            )}
+          </WorkspaceSectionCard>
+
+          <WorkspaceSectionCard
+            title="Operator hotspots"
+            description="This is the aggregated operator surface: severity, next action, and the quickest jump into the right section stay together instead of being buried in logs."
+          >
+            {operatorHotspots.length === 0 ? (
+              <WorkspaceEmptyState
+                compact
+                title="No operator hotspots published"
+                description="Refresh diagnostics after the daemon publishes operator insights."
+              />
+            ) : (
+              <div className="workspace-stack">
+                <WorkspaceTable
+                  ariaLabel="Operator hotspots"
+                  columns={["Subsystem", "Severity", "Summary", "Action", "Open"]}
+                >
+                  {operatorHotspots.slice(0, 5).map((hotspot, index) => {
+                    const drillDown = readObject(hotspot, "drill_down");
+                    const consolePath = readString(drillDown ?? {}, "console_path");
+                    return (
+                      <tr
+                        key={`${readString(hotspot, "hotspot_id") ?? readString(hotspot, "subsystem") ?? "hotspot"}-${index}`}
+                      >
+                        <td>{readString(hotspot, "subsystem") ?? "unknown"}</td>
+                        <td>
+                          <WorkspaceStatusChip
+                            tone={workspaceToneForState(readString(hotspot, "severity") ?? "unknown")}
+                          >
+                            {readString(hotspot, "severity") ?? "unknown"}
+                          </WorkspaceStatusChip>
+                        </td>
+                        <td>{readString(hotspot, "summary") ?? "No hotspot summary published."}</td>
+                        <td>
+                          {readString(hotspot, "recommended_action") ??
+                            "No operator action published."}
+                        </td>
+                        <td>
+                          {consolePath === null ? (
+                            "n/a"
+                          ) : (
+                            <ActionButton
+                              size="sm"
+                              variant="ghost"
+                              onPress={() => void navigate(consolePath)}
+                            >
+                              Open
+                            </ActionButton>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </WorkspaceTable>
+                <WorkspaceTable
+                  ariaLabel="Operator insight summary"
+                  columns={["Metric", "Value", "Detail"]}
+                >
+                  <tr>
+                    <td>Provider</td>
+                    <td>{readString(operatorProvider ?? {}, "state") ?? "unknown"}</td>
+                    <td>{readString(operatorProvider ?? {}, "summary") ?? "No provider summary"}</td>
+                  </tr>
+                  <tr>
+                    <td>Recall</td>
+                    <td>{readString(operatorRecall ?? {}, "state") ?? "unknown"}</td>
+                    <td>{readString(operatorRecall ?? {}, "summary") ?? "No recall summary"}</td>
+                  </tr>
+                  <tr>
+                    <td>Plugins</td>
+                    <td>{readString(operatorPlugins ?? {}, "state") ?? "unknown"}</td>
+                    <td>{readString(operatorPlugins ?? {}, "summary") ?? "No plugin summary"}</td>
+                  </tr>
+                  <tr>
+                    <td>Cron / reload</td>
+                    <td>
+                      {readString(operatorCron ?? {}, "state") ?? "unknown"} /{" "}
+                      {readString(operatorReload ?? {}, "state") ?? "unknown"}
+                    </td>
+                    <td>
+                      {readString(operatorCron ?? {}, "summary") ?? "No cron summary"};{" "}
+                      {readString(operatorReload ?? {}, "summary") ?? "No reload summary"}
+                    </td>
+                  </tr>
+                </WorkspaceTable>
               </div>
             )}
           </WorkspaceSectionCard>

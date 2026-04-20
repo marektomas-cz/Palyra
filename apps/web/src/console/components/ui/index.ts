@@ -53,7 +53,8 @@ export function workspaceToneForState(state: string | null | undefined): UiTone 
     normalized === "cooldown" ||
     normalized === "not_due" ||
     normalized === "pending" ||
-    normalized === "queued"
+    normalized === "queued" ||
+    normalized === "stale"
   ) {
     return "warning";
   }
@@ -61,11 +62,13 @@ export function workspaceToneForState(state: string | null | undefined): UiTone 
   if (
     normalized === "down" ||
     normalized === "failed" ||
+    normalized === "blocking" ||
     normalized === "blocked" ||
     normalized === "error" ||
     normalized === "expired" ||
     normalized === "missing" ||
-    normalized === "quarantined"
+    normalized === "quarantined" ||
+    normalized === "critical"
   ) {
     return "danger";
   }

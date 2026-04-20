@@ -10,6 +10,7 @@ import type {
   UsageSummaryEnvelope,
 } from "../../consoleApi";
 import { toErrorMessage } from "../shared";
+import { normalizeUsageInsightsEnvelope } from "../usageInsights";
 
 type UsageWindowKey = "24h" | "7d" | "30d" | "90d";
 type UsageBucketKey = "auto" | "hour" | "day";
@@ -79,7 +80,7 @@ export function useUsageDomain({ api, setError, setNotice }: UseUsageDomainArgs)
         api.listUsageModels(topParams),
       ]);
       setSummary(nextSummary);
-      setInsights(nextInsights);
+      setInsights(normalizeUsageInsightsEnvelope(nextInsights));
       setSessions(nextSessions.sessions);
       setAgents(nextAgents.agents);
       setModels(nextModels.models);

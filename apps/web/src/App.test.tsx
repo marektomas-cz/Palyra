@@ -1712,6 +1712,8 @@ describe("M35 web console app", () => {
     expect(await screen.findByRole("heading", { name: "Usage" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Usage session" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Open in sessions" })).toBeInTheDocument();
+    expect((await screen.findAllByText("Operator hotspots")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("Provider error rate is elevated.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("switch", { name: /Show archived/i }));
 
@@ -2379,10 +2381,266 @@ function routeM56BaselineRequest(
       model_mix: [],
       scope_mix: [],
       tool_mix: [],
+      operator: operatorInsightsFixture(),
       cost_tracking_available: false,
     });
   }
   return undefined;
+}
+
+function operatorInsightsFixture() {
+  return {
+    generated_at_unix_ms: 123,
+    summary: {
+      state: "degraded",
+      severity: "warning",
+      hotspot_count: 2,
+      blocking_hotspots: 0,
+      warning_hotspots: 2,
+      recommendation: "Inspect provider health and reload posture before broader rollout.",
+    },
+    hotspots: [
+      {
+        hotspot_id: "provider-health",
+        subsystem: "provider_health",
+        state: "degraded",
+        severity: "warning",
+        summary: "Provider error rate is elevated.",
+        detail: "Error rate crossed the warning threshold in the current window.",
+        recommended_action: "Open diagnostics and inspect auth/profile health.",
+        drill_down: {
+          label: "Provider and auth diagnostics",
+          section: "operations",
+          api_path: "/console/v1/diagnostics",
+          console_path: "/settings/diagnostics",
+        },
+      },
+      {
+        hotspot_id: "reload-health",
+        subsystem: "reload",
+        state: "warning",
+        severity: "warning",
+        summary: "Config ref reload requires follow-up.",
+        detail: "One config ref is stale in the running runtime.",
+        recommended_action: "Review config ref health before applying reload changes.",
+        drill_down: {
+          label: "Config ref health",
+          section: "operations",
+          api_path: "/console/v1/diagnostics",
+          console_path: "/settings/diagnostics",
+        },
+      },
+    ],
+    retention: {
+      source_of_truth: "journal",
+      aggregation_mode: "on_demand",
+      derived_metrics_persisted: false,
+      support_bundle_embeds_latest_snapshot: true,
+      window_start_at_unix_ms: 0,
+      window_end_at_unix_ms: 100,
+    },
+    sampling: {
+      run_sample_limit: 32,
+      tape_event_limit_per_run: 64,
+      cron_run_limit: 16,
+      plugin_limit: 8,
+      observed_runs: 12,
+      sampled_runs: 12,
+      observed_cron_runs: 4,
+      sampled_cron_runs: 4,
+      observed_plugins: 2,
+      sampled_plugins: 2,
+      notes: ["samples are redacted and bounded"],
+    },
+    privacy: {
+      redaction_mode: "operator_safe",
+      raw_queries_included: false,
+      raw_error_messages_included: false,
+      raw_config_values_included: false,
+      secret_like_values_redacted: true,
+    },
+    provider_health: {
+      state: "degraded",
+      severity: "warning",
+      summary: "Provider latency and error rate are above baseline.",
+      provider_kind: "deterministic",
+      error_rate_bps: 180,
+      avg_latency_ms: 540,
+      circuit_open: false,
+      auth_state: "ok",
+      refresh_failures: 0,
+      response_cache_enabled: true,
+      response_cache_entries: 4,
+      response_cache_hit_rate_bps: 5000,
+      recommended_action: "Inspect diagnostics for provider health and auth posture.",
+      drill_down: {
+        label: "Provider and auth diagnostics",
+        section: "operations",
+        api_path: "/console/v1/diagnostics",
+        console_path: "/settings/diagnostics",
+      },
+    },
+    recall: {
+      state: "warning",
+      severity: "warning",
+      summary: "Recall misses are elevated for explicit recall.",
+      explicit_recall_events: 4,
+      explicit_recall_zero_hit_events: 1,
+      explicit_recall_zero_hit_rate_bps: 2500,
+      auto_inject_events: 2,
+      auto_inject_zero_hit_events: 0,
+      auto_inject_avg_hits: 2.5,
+      samples: [
+        {
+          run_id: "run-1",
+          session_id: "session-1",
+          kind: "explicit_recall",
+          query_preview: "deployment posture",
+          total_hits: 1,
+          memory_hits: 1,
+          workspace_hits: 0,
+          transcript_hits: 0,
+          checkpoint_hits: 0,
+          compaction_hits: 0,
+        },
+      ],
+      recommended_action: "Review recall tuning for the affected session.",
+      drill_down: {
+        label: "Recall diagnostics",
+        section: "usage",
+        api_path: "/console/v1/usage/insights",
+        console_path: "/control/usage",
+      },
+    },
+    compaction: {
+      state: "ok",
+      severity: "ok",
+      summary: "Compaction is reducing prompt size within baseline.",
+      preview_events: 2,
+      created_events: 1,
+      dry_run_events: 1,
+      avg_token_delta: -120,
+      avg_reduction_bps: 3100,
+      samples: [
+        {
+          run_id: "run-2",
+          session_id: "session-1",
+          trigger: "auto",
+          token_delta: -120,
+          estimated_input_tokens: 420,
+          estimated_output_tokens: 300,
+          artifact_id: "artifact-1",
+        },
+      ],
+      recommended_action: "No compaction action is needed.",
+      drill_down: {
+        label: "Compaction diagnostics",
+        section: "usage",
+        api_path: "/console/v1/usage/insights",
+        console_path: "/control/usage",
+      },
+    },
+    safety_boundary: {
+      state: "warning",
+      severity: "warning",
+      summary: "Tool denies occurred in the selected window.",
+      inspected_tool_decisions: 8,
+      denied_tool_decisions: 2,
+      policy_enforced_denies: 1,
+      approval_required_decisions: 2,
+      deny_rate_bps: 2500,
+      samples: [
+        {
+          run_id: "run-3",
+          tool_name: "palyra.fs.apply_patch",
+          reason: "approval required",
+          approval_required: true,
+        },
+      ],
+      recommended_action: "Inspect approval posture before widening tool policy.",
+      drill_down: {
+        label: "Safety and approval diagnostics",
+        section: "operations",
+        api_path: "/console/v1/diagnostics",
+        console_path: "/settings/diagnostics",
+      },
+    },
+    plugins: {
+      state: "ok",
+      severity: "ok",
+      summary: "Plugins are ready.",
+      total_bindings: 2,
+      ready_bindings: 2,
+      unhealthy_bindings: 0,
+      typed_contract_failures: 0,
+      config_failures: 0,
+      discovery_failures: 0,
+      samples: [
+        {
+          plugin_id: "plugin.echo",
+          discovery_state: "ready",
+          config_state: "valid",
+          contracts_mode: "typed",
+          reasons: [],
+        },
+      ],
+      recommended_action: "No plugin action is needed.",
+      drill_down: {
+        label: "Plugin operability",
+        section: "operations",
+        api_path: "/console/v1/plugins",
+        console_path: "/settings/diagnostics",
+      },
+    },
+    cron: {
+      state: "ok",
+      severity: "ok",
+      summary: "Cron delivery is healthy.",
+      total_runs: 4,
+      failed_runs: 0,
+      success_rate_bps: 10000,
+      total_tool_denies: 0,
+      samples: [
+        {
+          run_id: "cron-run-1",
+          job_id: "nightly-maintenance",
+          status: "succeeded",
+          tool_denies: 0,
+        },
+      ],
+      recommended_action: "No cron action is needed.",
+      drill_down: {
+        label: "Cron delivery history",
+        section: "cron",
+        api_path: "/console/v1/routines",
+        console_path: "/control/routines",
+      },
+    },
+    reload: {
+      state: "warning",
+      severity: "warning",
+      summary: "One config ref is stale in runtime memory.",
+      blocking_refs: 0,
+      warning_refs: 1,
+      hotspots: [
+        {
+          ref_id: "admin.auth_token_secret_ref:fp-1",
+          config_path: "admin.auth_token_secret_ref",
+          state: "stale",
+          severity: "warning",
+          reload_mode: "restart_required",
+          advice: "Restart the daemon to refresh this config ref in the running runtime.",
+        },
+      ],
+      recommended_action: "Review config ref health before rollout.",
+      drill_down: {
+        label: "Config ref health",
+        section: "operations",
+        api_path: "/console/v1/diagnostics",
+        console_path: "/settings/diagnostics",
+      },
+    },
+  };
 }
 
 function findRequestCall(

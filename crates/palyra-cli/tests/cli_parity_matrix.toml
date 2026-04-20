@@ -428,7 +428,7 @@ file = "browser-help.txt"
 path = "system"
 category = "canonical_family"
 status = "done"
-summary = "Runtime heartbeat, presence, and system event surface."
+summary = "Runtime heartbeat, presence, operator insights, and system event surface."
 
 [entries.snapshot]
 path = "system"
@@ -1188,6 +1188,17 @@ required_aliases = ["events"]
 [entries.snapshot]
 path = "system event"
 file = "system-event-help.txt"
+
+[[entries]]
+path = "system insights"
+category = "nested_surface"
+status = "done"
+summary = "Aggregated operator insights and hotspot surface."
+required_flags = ["json"]
+
+[entries.snapshot]
+path = "system insights"
+file = "system-insights-help.txt"
 
 [[entries]]
 path = "node install"

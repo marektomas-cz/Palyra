@@ -553,6 +553,234 @@ export interface UsageInsightsBudgetsEnvelope {
   evaluations: UsageBudgetEvaluation[];
 }
 
+export interface OperatorInsightsRetentionPolicy {
+  source_of_truth: string;
+  aggregation_mode: string;
+  derived_metrics_persisted: boolean;
+  support_bundle_embeds_latest_snapshot: boolean;
+  window_start_at_unix_ms: number;
+  window_end_at_unix_ms: number;
+}
+
+export interface OperatorInsightsSamplingPolicy {
+  run_sample_limit: number;
+  tape_event_limit_per_run: number;
+  cron_run_limit: number;
+  plugin_limit: number;
+  observed_runs: number;
+  sampled_runs: number;
+  observed_cron_runs: number;
+  sampled_cron_runs: number;
+  observed_plugins: number;
+  sampled_plugins: number;
+  notes: string[];
+}
+
+export interface OperatorInsightsPrivacyPolicy {
+  redaction_mode: string;
+  raw_queries_included: boolean;
+  raw_error_messages_included: boolean;
+  raw_config_values_included: boolean;
+  secret_like_values_redacted: boolean;
+}
+
+export interface OperatorInsightDrillDown {
+  label: string;
+  section: string;
+  api_path: string;
+  console_path: string;
+}
+
+export interface OperatorInsightHotspot {
+  hotspot_id: string;
+  subsystem: string;
+  state: string;
+  severity: string;
+  summary: string;
+  detail: string;
+  recommended_action: string;
+  drill_down: OperatorInsightDrillDown;
+}
+
+export interface OperatorInsightsSummary {
+  state: string;
+  severity: string;
+  hotspot_count: number;
+  blocking_hotspots: number;
+  warning_hotspots: number;
+  recommendation: string;
+}
+
+export interface OperatorProviderHealthInsight {
+  state: string;
+  severity: string;
+  summary: string;
+  provider_kind: string;
+  error_rate_bps: number;
+  avg_latency_ms: number;
+  circuit_open: boolean;
+  auth_state: string;
+  refresh_failures: number;
+  response_cache_enabled: boolean;
+  response_cache_entries: number;
+  response_cache_hit_rate_bps: number;
+  recommended_action: string;
+  drill_down: OperatorInsightDrillDown;
+}
+
+export interface OperatorRecallSample {
+  run_id: string;
+  session_id?: string;
+  kind: string;
+  query_preview: string;
+  total_hits: number;
+  memory_hits: number;
+  workspace_hits: number;
+  transcript_hits: number;
+  checkpoint_hits: number;
+  compaction_hits: number;
+}
+
+export interface OperatorRecallInsight {
+  state: string;
+  severity: string;
+  summary: string;
+  explicit_recall_events: number;
+  explicit_recall_zero_hit_events: number;
+  explicit_recall_zero_hit_rate_bps: number;
+  auto_inject_events: number;
+  auto_inject_zero_hit_events: number;
+  auto_inject_avg_hits: number;
+  samples: OperatorRecallSample[];
+  recommended_action: string;
+  drill_down: OperatorInsightDrillDown;
+}
+
+export interface OperatorCompactionSample {
+  run_id: string;
+  session_id?: string;
+  trigger: string;
+  token_delta: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  artifact_id?: string;
+}
+
+export interface OperatorCompactionInsight {
+  state: string;
+  severity: string;
+  summary: string;
+  preview_events: number;
+  created_events: number;
+  dry_run_events: number;
+  avg_token_delta: number;
+  avg_reduction_bps: number;
+  samples: OperatorCompactionSample[];
+  recommended_action: string;
+  drill_down: OperatorInsightDrillDown;
+}
+
+export interface OperatorSafetySample {
+  run_id: string;
+  tool_name: string;
+  reason: string;
+  approval_required: boolean;
+}
+
+export interface OperatorSafetyBoundaryInsight {
+  state: string;
+  severity: string;
+  summary: string;
+  inspected_tool_decisions: number;
+  denied_tool_decisions: number;
+  policy_enforced_denies: number;
+  approval_required_decisions: number;
+  deny_rate_bps: number;
+  samples: OperatorSafetySample[];
+  recommended_action: string;
+  drill_down: OperatorInsightDrillDown;
+}
+
+export interface OperatorPluginSample {
+  plugin_id: string;
+  discovery_state?: string;
+  config_state?: string;
+  contracts_mode?: string;
+  reasons: string[];
+}
+
+export interface OperatorPluginInsight {
+  state: string;
+  severity: string;
+  summary: string;
+  total_bindings: number;
+  ready_bindings: number;
+  unhealthy_bindings: number;
+  typed_contract_failures: number;
+  config_failures: number;
+  discovery_failures: number;
+  samples: OperatorPluginSample[];
+  recommended_action: string;
+  drill_down: OperatorInsightDrillDown;
+}
+
+export interface OperatorCronRunSample {
+  run_id: string;
+  job_id: string;
+  status: string;
+  error_kind?: string;
+  tool_denies: number;
+}
+
+export interface OperatorCronInsight {
+  state: string;
+  severity: string;
+  summary: string;
+  total_runs: number;
+  failed_runs: number;
+  success_rate_bps: number;
+  total_tool_denies: number;
+  samples: OperatorCronRunSample[];
+  recommended_action: string;
+  drill_down: OperatorInsightDrillDown;
+}
+
+export interface OperatorReloadHotspot {
+  ref_id: string;
+  config_path: string;
+  state: string;
+  severity: string;
+  reload_mode: string;
+  advice?: string;
+}
+
+export interface OperatorReloadInsight {
+  state: string;
+  severity: string;
+  summary: string;
+  blocking_refs: number;
+  warning_refs: number;
+  hotspots: OperatorReloadHotspot[];
+  recommended_action: string;
+  drill_down: OperatorInsightDrillDown;
+}
+
+export interface OperatorInsightsEnvelope {
+  generated_at_unix_ms: number;
+  summary: OperatorInsightsSummary;
+  hotspots: OperatorInsightHotspot[];
+  retention: OperatorInsightsRetentionPolicy;
+  sampling: OperatorInsightsSamplingPolicy;
+  privacy: OperatorInsightsPrivacyPolicy;
+  provider_health: OperatorProviderHealthInsight;
+  recall: OperatorRecallInsight;
+  compaction: OperatorCompactionInsight;
+  safety_boundary: OperatorSafetyBoundaryInsight;
+  plugins: OperatorPluginInsight;
+  cron: OperatorCronInsight;
+  reload: OperatorReloadInsight;
+}
+
 export interface UsageInsightsEnvelope {
   contract: ContractDescriptor;
   query: UsageQueryEcho;
@@ -581,6 +809,7 @@ export interface UsageInsightsEnvelope {
     tool_name: string;
     proposals: number;
   }>;
+  operator: OperatorInsightsEnvelope;
   cost_tracking_available: boolean;
 }
 
@@ -5337,6 +5566,10 @@ export class ConsoleApiClient {
         ? "/console/v1/system/events"
         : buildPathWithQuery("/console/v1/system/events", params);
     return this.request(path);
+  }
+
+  async getSystemInsights(): Promise<OperatorInsightsEnvelope> {
+    return this.request("/console/v1/system/insights");
   }
 
   async listChannels(): Promise<{ connectors: JsonValue[] }> {

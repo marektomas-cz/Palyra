@@ -8,7 +8,13 @@ import type {
   UsageTimelineBucket,
 } from "../../consoleApi";
 import { getSectionPath } from "../navigation";
-import { ActionButton, EntityTable, SelectField, SwitchField } from "../components/ui";
+import {
+  ActionButton,
+  EntityTable,
+  SelectField,
+  SwitchField,
+  workspaceToneForState,
+} from "../components/ui";
 import {
   WorkspaceMetricCard,
   WorkspacePageHeader,
@@ -44,6 +50,7 @@ export function UsageSection({ app }: UsageSectionProps) {
     () => (usage.summary?.timeline ?? []).slice(-8).reverse(),
     [usage.summary?.timeline],
   );
+  const operatorInsights = usage.insights?.operator ?? null;
   const recentRoutingDecisions = useMemo(
     () =>
       (usage.insights?.routing.recent_decisions ?? []).slice(0, 8).map((decision) => ({
@@ -52,6 +59,118 @@ export function UsageSection({ app }: UsageSectionProps) {
       })),
     [usage.insights?.routing.recent_decisions],
   );
+  const operatorHotspots = useMemo(
+    () => operatorInsights?.hotspots.slice(0, 5) ?? [],
+    [operatorInsights?.hotspots],
+  );
+  const operatorDrilldownRows = useMemo(
+    () =>
+      operatorInsights === null
+        ? []
+        : [
+            {
+              key: "provider",
+              label: "Provider health",
+              state: operatorInsights.provider_health.state,
+              severity: operatorInsights.provider_health.severity,
+              summary: operatorInsights.provider_health.summary,
+              action: operatorInsights.provider_health.recommended_action,
+              path: operatorInsights.provider_health.drill_down.console_path,
+            },
+            {
+              key: "recall",
+              label: "Recall quality",
+              state: operatorInsights.recall.state,
+              severity: operatorInsights.recall.severity,
+              summary: operatorInsights.recall.summary,
+              action: operatorInsights.recall.recommended_action,
+              path: operatorInsights.recall.drill_down.console_path,
+            },
+            {
+              key: "compaction",
+              label: "Compaction efficiency",
+              state: operatorInsights.compaction.state,
+              severity: operatorInsights.compaction.severity,
+              summary: operatorInsights.compaction.summary,
+              action: operatorInsights.compaction.recommended_action,
+              path: operatorInsights.compaction.drill_down.console_path,
+            },
+            {
+              key: "safety",
+              label: "Safety boundary",
+              state: operatorInsights.safety_boundary.state,
+              severity: operatorInsights.safety_boundary.severity,
+              summary: operatorInsights.safety_boundary.summary,
+              action: operatorInsights.safety_boundary.recommended_action,
+              path: operatorInsights.safety_boundary.drill_down.console_path,
+            },
+            {
+              key: "plugins",
+              label: "Plugin operability",
+              state: operatorInsights.plugins.state,
+              severity: operatorInsights.plugins.severity,
+              summary: operatorInsights.plugins.summary,
+              action: operatorInsights.plugins.recommended_action,
+              path: operatorInsights.plugins.drill_down.console_path,
+            },
+            {
+              key: "cron",
+              label: "Cron delivery",
+              state: operatorInsights.cron.state,
+              severity: operatorInsights.cron.severity,
+              summary: operatorInsights.cron.summary,
+              action: operatorInsights.cron.recommended_action,
+              path: operatorInsights.cron.drill_down.console_path,
+            },
+            {
+              key: "reload",
+              label: "Reload hotspots",
+              state: operatorInsights.reload.state,
+              severity: operatorInsights.reload.severity,
+              summary: operatorInsights.reload.summary,
+              action: operatorInsights.reload.recommended_action,
+              path: operatorInsights.reload.drill_down.console_path,
+            },
+          ],
+    [operatorInsights],
+  );
+  const operatorSamplePreview = useMemo(() => {
+    if (operatorInsights === null) {
+      return [];
+    }
+    return [
+      ...operatorInsights.recall.samples.slice(0, 2).map((sample) => ({
+        key: `recall-${sample.run_id}-${sample.kind}`,
+        label: "Recall",
+        detail: `${sample.kind} ${sample.query_preview} (${sample.total_hits} hits, memory ${sample.memory_hits})`,
+      })),
+      ...operatorInsights.compaction.samples.slice(0, 2).map((sample) => ({
+        key: `compaction-${sample.run_id}-${sample.trigger}`,
+        label: "Compaction",
+        detail: `${sample.trigger} ${sample.run_id} delta ${sample.token_delta}, output ${sample.estimated_output_tokens}`,
+      })),
+      ...operatorInsights.safety_boundary.samples.slice(0, 1).map((sample) => ({
+        key: `safety-${sample.run_id}-${sample.tool_name}`,
+        label: "Safety",
+        detail: `${sample.tool_name} ${sample.reason}${sample.approval_required ? " (approval required)" : ""}`,
+      })),
+      ...operatorInsights.plugins.samples.slice(0, 1).map((sample) => ({
+        key: `plugin-${sample.plugin_id}`,
+        label: "Plugin",
+        detail: `${sample.plugin_id} ${sample.reasons.join(", ") || "no reasons published"}`,
+      })),
+      ...operatorInsights.cron.samples.slice(0, 1).map((sample) => ({
+        key: `cron-${sample.run_id}`,
+        label: "Cron",
+        detail: `${sample.job_id} ${sample.status}${sample.error_kind ? ` (${sample.error_kind})` : ""}`,
+      })),
+      ...operatorInsights.reload.hotspots.slice(0, 1).map((sample) => ({
+        key: `reload-${sample.ref_id}`,
+        label: "Reload",
+        detail: `${sample.config_path} ${sample.state}${sample.advice ? `: ${sample.advice}` : ""}`,
+      })),
+    ].slice(0, 6);
+  }, [operatorInsights]);
   const credentialAttentionCount =
     providerRegistry?.credentials.filter(
       (credential) => credential.availabilityState !== "available",
@@ -155,6 +274,22 @@ export function UsageSection({ app }: UsageSectionProps) {
           }
           value={readNumber(learningCounters ?? {}, "reflections_scheduled") ?? 0}
         />
+        <WorkspaceMetricCard
+          detail={
+            operatorInsights === null
+              ? "Refresh usage to load operator hotspots."
+              : operatorInsights.summary.recommendation
+          }
+          label="Operator hotspots"
+          tone={workspaceToneForState(operatorInsights?.summary.severity ?? "unknown")}
+          value={operatorInsights?.summary.hotspot_count ?? 0}
+        />
+        <WorkspaceMetricCard
+          detail="Blocking hotspots are the issues that should stop routine rollout until resolved."
+          label="Blocking hotspots"
+          tone={(operatorInsights?.summary.blocking_hotspots ?? 0) > 0 ? "danger" : "default"}
+          value={operatorInsights?.summary.blocking_hotspots ?? 0}
+        />
       </section>
 
       <WorkspaceSectionCard
@@ -209,6 +344,133 @@ export function UsageSection({ app }: UsageSectionProps) {
           />
         </div>
       </WorkspaceSectionCard>
+
+      {operatorInsights !== null ? (
+        <section className="workspace-two-column">
+          <WorkspaceSectionCard
+            title="Operator posture"
+            description="One aggregate now ties provider health, recall, compaction, safety, plugins, cron, and reload health into a single operator narrative."
+          >
+            <dl className="workspace-key-value-grid">
+              <div>
+                <dt>State</dt>
+                <dd>{operatorInsights.summary.state}</dd>
+              </div>
+              <div>
+                <dt>Severity</dt>
+                <dd>{operatorInsights.summary.severity}</dd>
+              </div>
+              <div>
+                <dt>Hotspots</dt>
+                <dd>{operatorInsights.summary.hotspot_count}</dd>
+              </div>
+              <div>
+                <dt>Blocking</dt>
+                <dd>{operatorInsights.summary.blocking_hotspots}</dd>
+              </div>
+              <div>
+                <dt>Warnings</dt>
+                <dd>{operatorInsights.summary.warning_hotspots}</dd>
+              </div>
+              <div>
+                <dt>Window</dt>
+                <dd>
+                  {formatUnixMs(operatorInsights.retention.window_start_at_unix_ms)} to{" "}
+                  {formatUnixMs(operatorInsights.retention.window_end_at_unix_ms)}
+                </dd>
+              </div>
+            </dl>
+            <WorkspaceInlineNotice
+              title="Recommended next step"
+              tone={operatorInsights.summary.blocking_hotspots > 0 ? "warning" : "default"}
+            >
+              <p>{operatorInsights.summary.recommendation}</p>
+            </WorkspaceInlineNotice>
+            {operatorHotspots.length === 0 ? (
+              <WorkspaceEmptyState
+                compact
+                title="No hotspots in the current window"
+                description="The selected usage window did not produce operator hotspots."
+              />
+            ) : (
+              <EntityTable
+                ariaLabel="Operator hotspots"
+                columns={[
+                  { key: "subsystem", label: "Subsystem", render: (row) => row.subsystem },
+                  {
+                    key: "severity",
+                    label: "Severity",
+                    render: (row) => (
+                      <WorkspaceStatusChip tone={workspaceToneForState(row.severity)}>
+                        {row.severity}
+                      </WorkspaceStatusChip>
+                    ),
+                  },
+                  { key: "summary", label: "Summary", render: (row) => row.summary },
+                  { key: "action", label: "Action", render: (row) => row.recommended_action },
+                ]}
+                getRowId={(row) => row.hotspot_id}
+                rows={operatorHotspots}
+              />
+            )}
+          </WorkspaceSectionCard>
+
+          <WorkspaceSectionCard
+            title="Operator drill-down"
+            description="Every aggregate keeps the next operator move and the destination section explicit, so the page can guide follow-up instead of leaving operators in raw JSON."
+          >
+            <EntityTable
+              ariaLabel="Operator drill-down"
+              columns={[
+                { key: "surface", label: "Surface", render: (row) => row.label },
+                {
+                  key: "state",
+                  label: "State",
+                  render: (row) => (
+                    <div className="workspace-inline">
+                      <WorkspaceStatusChip tone={workspaceToneForState(row.state)}>
+                        {row.state}
+                      </WorkspaceStatusChip>
+                      <WorkspaceStatusChip tone={workspaceToneForState(row.severity)}>
+                        {row.severity}
+                      </WorkspaceStatusChip>
+                    </div>
+                  ),
+                },
+                { key: "summary", label: "Summary", render: (row) => row.summary },
+                { key: "next", label: "Next step", render: (row) => row.action },
+                {
+                  key: "open",
+                  label: "Open",
+                  render: (row) => (
+                    <ActionButton
+                      size="sm"
+                      type="button"
+                      variant="ghost"
+                      onPress={() => void navigate(row.path)}
+                    >
+                      Open
+                    </ActionButton>
+                  ),
+                },
+              ]}
+              getRowId={(row) => row.key}
+              rows={operatorDrilldownRows}
+            />
+            {operatorSamplePreview.length > 0 ? (
+              <WorkspaceInlineNotice title="Recent samples" tone="default">
+                <ul className="console-compact-list">
+                  {operatorSamplePreview.map((item) => (
+                    <li key={item.key}>
+                      <strong>{item.label}</strong>: {item.detail}
+                    </li>
+                  ))}
+                </ul>
+              </WorkspaceInlineNotice>
+            ) : null}
+          </WorkspaceSectionCard>
+        </section>
+      ) : null}
 
       {usage.insights !== null ? (
         <section className="workspace-two-column">

@@ -5,11 +5,15 @@ use std::{
 
 use axum::http::{header::CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
-use super::diagnostics::{build_page_info, contract_descriptor};
+use super::diagnostics::{
+    build_config_ref_health_observability, build_page_info, build_provider_auth_observability,
+    contract_descriptor,
+};
 use crate::agents::{AgentBindingQuery, AgentRecord, SessionAgentBinding};
 use crate::journal::{self, OrchestratorUsageQuery};
+use crate::plugins::{load_plugin_bindings_index, resolve_plugins_root};
 use crate::usage_governance::{
     build_alert_candidates, build_model_mix, build_scope_mix, build_tool_mix,
     estimate_cost_for_model, evaluate_budget_policies, load_budget_override_approvals,
@@ -26,6 +30,11 @@ const DEFAULT_USAGE_BREAKDOWN_LIMIT: usize = 10;
 const MAX_USAGE_BREAKDOWN_LIMIT: usize = 50;
 const DEFAULT_USAGE_RUN_LIMIT: usize = 12;
 const MAX_USAGE_RUN_LIMIT: usize = 25;
+const OPERATOR_INSIGHTS_RUN_SAMPLE_LIMIT: usize = 24;
+const OPERATOR_INSIGHTS_TAPE_SAMPLE_LIMIT: usize = 128;
+const OPERATOR_INSIGHTS_CRON_RUN_LIMIT: usize = 32;
+const OPERATOR_INSIGHTS_PLUGIN_LIMIT: usize = 32;
+const OPERATOR_INSIGHTS_QUERY_PREVIEW_BYTES: usize = 160;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConsoleUsageSummaryQuery {
@@ -282,6 +291,254 @@ pub(crate) struct UsageInsightsBudgetsEnvelope {
     evaluations: Vec<UsageBudgetEvaluation>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorInsightsRetentionPolicy {
+    source_of_truth: String,
+    aggregation_mode: String,
+    derived_metrics_persisted: bool,
+    support_bundle_embeds_latest_snapshot: bool,
+    window_start_at_unix_ms: i64,
+    window_end_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorInsightsSamplingPolicy {
+    run_sample_limit: usize,
+    tape_event_limit_per_run: usize,
+    cron_run_limit: usize,
+    plugin_limit: usize,
+    observed_runs: usize,
+    sampled_runs: usize,
+    observed_cron_runs: usize,
+    sampled_cron_runs: usize,
+    observed_plugins: usize,
+    sampled_plugins: usize,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorInsightsPrivacyPolicy {
+    redaction_mode: String,
+    raw_queries_included: bool,
+    raw_error_messages_included: bool,
+    raw_config_values_included: bool,
+    secret_like_values_redacted: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorInsightDrillDown {
+    label: String,
+    section: String,
+    api_path: String,
+    console_path: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorInsightHotspot {
+    hotspot_id: String,
+    subsystem: String,
+    state: String,
+    severity: String,
+    summary: String,
+    detail: String,
+    recommended_action: String,
+    drill_down: OperatorInsightDrillDown,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorInsightsSummary {
+    state: String,
+    severity: String,
+    hotspot_count: usize,
+    blocking_hotspots: usize,
+    warning_hotspots: usize,
+    recommendation: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorProviderHealthInsight {
+    state: String,
+    severity: String,
+    summary: String,
+    provider_kind: String,
+    error_rate_bps: u32,
+    avg_latency_ms: u64,
+    circuit_open: bool,
+    auth_state: String,
+    refresh_failures: u64,
+    response_cache_enabled: bool,
+    response_cache_entries: usize,
+    response_cache_hit_rate_bps: u32,
+    recommended_action: String,
+    drill_down: OperatorInsightDrillDown,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorRecallSample {
+    run_id: String,
+    session_id: Option<String>,
+    kind: String,
+    query_preview: String,
+    total_hits: usize,
+    memory_hits: usize,
+    workspace_hits: usize,
+    transcript_hits: usize,
+    checkpoint_hits: usize,
+    compaction_hits: usize,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorRecallInsight {
+    state: String,
+    severity: String,
+    summary: String,
+    explicit_recall_events: usize,
+    explicit_recall_zero_hit_events: usize,
+    explicit_recall_zero_hit_rate_bps: u32,
+    auto_inject_events: usize,
+    auto_inject_zero_hit_events: usize,
+    auto_inject_avg_hits: f64,
+    samples: Vec<OperatorRecallSample>,
+    recommended_action: String,
+    drill_down: OperatorInsightDrillDown,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorCompactionSample {
+    run_id: String,
+    session_id: Option<String>,
+    trigger: String,
+    token_delta: i64,
+    estimated_input_tokens: u64,
+    estimated_output_tokens: u64,
+    artifact_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorCompactionInsight {
+    state: String,
+    severity: String,
+    summary: String,
+    preview_events: usize,
+    created_events: usize,
+    dry_run_events: usize,
+    avg_token_delta: i64,
+    avg_reduction_bps: u32,
+    samples: Vec<OperatorCompactionSample>,
+    recommended_action: String,
+    drill_down: OperatorInsightDrillDown,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorSafetySample {
+    run_id: String,
+    tool_name: String,
+    reason: String,
+    approval_required: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorSafetyBoundaryInsight {
+    state: String,
+    severity: String,
+    summary: String,
+    inspected_tool_decisions: usize,
+    denied_tool_decisions: usize,
+    policy_enforced_denies: usize,
+    approval_required_decisions: usize,
+    deny_rate_bps: u32,
+    samples: Vec<OperatorSafetySample>,
+    recommended_action: String,
+    drill_down: OperatorInsightDrillDown,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorPluginSample {
+    plugin_id: String,
+    discovery_state: Option<String>,
+    config_state: Option<String>,
+    contracts_mode: Option<String>,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorPluginInsight {
+    state: String,
+    severity: String,
+    summary: String,
+    total_bindings: usize,
+    ready_bindings: usize,
+    unhealthy_bindings: usize,
+    typed_contract_failures: usize,
+    config_failures: usize,
+    discovery_failures: usize,
+    samples: Vec<OperatorPluginSample>,
+    recommended_action: String,
+    drill_down: OperatorInsightDrillDown,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorCronRunSample {
+    run_id: String,
+    job_id: String,
+    status: String,
+    error_kind: Option<String>,
+    tool_denies: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorCronInsight {
+    state: String,
+    severity: String,
+    summary: String,
+    total_runs: usize,
+    failed_runs: usize,
+    success_rate_bps: u32,
+    total_tool_denies: u64,
+    samples: Vec<OperatorCronRunSample>,
+    recommended_action: String,
+    drill_down: OperatorInsightDrillDown,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorReloadHotspot {
+    ref_id: String,
+    config_path: String,
+    state: String,
+    severity: String,
+    reload_mode: String,
+    advice: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorReloadInsight {
+    state: String,
+    severity: String,
+    summary: String,
+    blocking_refs: usize,
+    warning_refs: usize,
+    hotspots: Vec<OperatorReloadHotspot>,
+    recommended_action: String,
+    drill_down: OperatorInsightDrillDown,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct OperatorInsightsEnvelope {
+    generated_at_unix_ms: i64,
+    summary: OperatorInsightsSummary,
+    hotspots: Vec<OperatorInsightHotspot>,
+    retention: OperatorInsightsRetentionPolicy,
+    sampling: OperatorInsightsSamplingPolicy,
+    privacy: OperatorInsightsPrivacyPolicy,
+    provider_health: OperatorProviderHealthInsight,
+    recall: OperatorRecallInsight,
+    compaction: OperatorCompactionInsight,
+    safety_boundary: OperatorSafetyBoundaryInsight,
+    plugins: OperatorPluginInsight,
+    cron: OperatorCronInsight,
+    reload: OperatorReloadInsight,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct UsageInsightsEnvelope {
     contract: control_plane::ContractDescriptor,
@@ -296,6 +553,7 @@ pub(crate) struct UsageInsightsEnvelope {
     model_mix: Vec<UsageModelMixRecord>,
     scope_mix: Vec<UsageScopeMixRecord>,
     tool_mix: Vec<UsageToolMixRecord>,
+    operator: OperatorInsightsEnvelope,
     cost_tracking_available: bool,
 }
 
@@ -573,6 +831,18 @@ pub(crate) async fn console_usage_insights_handler(
         .status_snapshot_async(session.context.clone(), state.auth.clone())
         .await
         .map_err(runtime_status_response)?;
+    let auth_snapshot = state
+        .auth_runtime
+        .admin_status_snapshot(std::sync::Arc::clone(&state.runtime))
+        .await
+        .map_err(runtime_status_response)?;
+    let auth_payload = serde_json::to_value(auth_snapshot).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to serialize usage auth status snapshot: {error}"
+        )))
+    })?;
+    let provider_auth_observability =
+        build_provider_auth_observability(&auth_payload, state.observability.as_ref());
     let provider_snapshot = &status_snapshot.model_provider;
     let provider_kind = provider_snapshot.kind.clone();
     let default_model_id = provider_snapshot
@@ -695,6 +965,14 @@ pub(crate) async fn console_usage_insights_handler(
     };
     let cost_tracking_available =
         enriched_runs.iter().any(|entry| entry.cost_estimate.upper_usd.is_some());
+    let operator = build_operator_insights_snapshot(
+        &state,
+        &resolved,
+        runs.as_slice(),
+        provider_snapshot,
+        &provider_auth_observability,
+    )
+    .await?;
 
     Ok(Json(UsageInsightsEnvelope {
         contract: contract_descriptor(),
@@ -728,6 +1006,7 @@ pub(crate) async fn console_usage_insights_handler(
         model_mix,
         scope_mix,
         tool_mix,
+        operator,
         cost_tracking_available,
     }))
 }
@@ -1060,6 +1339,1092 @@ async fn load_usage_tool_mix(
     }
 
     build_tool_mix(&tool_counts)
+}
+
+#[derive(Debug, Default)]
+struct OperatorTapeAggregation {
+    explicit_recall_events: usize,
+    explicit_recall_zero_hit_events: usize,
+    auto_inject_events: usize,
+    auto_inject_zero_hit_events: usize,
+    auto_inject_total_hits: u64,
+    compaction_preview_events: usize,
+    compaction_created_events: usize,
+    compaction_blocked_events: usize,
+    compaction_dry_run_events: usize,
+    compaction_total_token_delta: i128,
+    compaction_total_input_tokens: u128,
+    inspected_tool_decisions: usize,
+    denied_tool_decisions: usize,
+    policy_enforced_denies: usize,
+    approval_required_decisions: usize,
+    recall_samples: Vec<OperatorRecallSample>,
+    compaction_samples: Vec<OperatorCompactionSample>,
+    safety_samples: Vec<OperatorSafetySample>,
+    truncated_tape_runs: usize,
+}
+
+pub(crate) async fn build_operator_insights_for_context(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    provider_snapshot: &crate::model_provider::ProviderStatusSnapshot,
+    provider_auth_observability: &Value,
+) -> Result<OperatorInsightsEnvelope, Response> {
+    let resolved = resolve_usage_query(None, None, None, false, context, None)?;
+    let runs = state
+        .runtime
+        .list_orchestrator_usage_runs(resolved.query.clone(), 500)
+        .await
+        .map_err(runtime_status_response)?;
+    build_operator_insights_snapshot(
+        state,
+        &resolved,
+        runs.as_slice(),
+        provider_snapshot,
+        provider_auth_observability,
+    )
+    .await
+}
+
+async fn build_operator_insights_snapshot(
+    state: &AppState,
+    resolved: &ResolvedUsageQuery,
+    runs: &[journal::OrchestratorUsageInsightsRunRecord],
+    provider_snapshot: &crate::model_provider::ProviderStatusSnapshot,
+    provider_auth_observability: &Value,
+) -> Result<OperatorInsightsEnvelope, Response> {
+    let generated_at_unix_ms = current_unix_ms().map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to resolve operator insights timestamp: {error}"
+        )))
+    })?;
+    let mut sampled_runs = runs.iter().collect::<Vec<_>>();
+    sampled_runs.sort_by(|left, right| {
+        right
+            .started_at_unix_ms
+            .cmp(&left.started_at_unix_ms)
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+    let observed_runs = sampled_runs.len();
+    if sampled_runs.len() > OPERATOR_INSIGHTS_RUN_SAMPLE_LIMIT {
+        sampled_runs.truncate(OPERATOR_INSIGHTS_RUN_SAMPLE_LIMIT);
+    }
+    let tape_aggregation =
+        collect_operator_tape_aggregation(state, sampled_runs.as_slice()).await?;
+
+    let (cron_runs, cron_next_after) = state
+        .runtime
+        .list_cron_runs(None, None, Some(OPERATOR_INSIGHTS_CRON_RUN_LIMIT))
+        .await
+        .map_err(runtime_status_response)?;
+
+    let (plugin_index, plugin_error) = load_operator_plugin_index();
+    let provider_health =
+        build_operator_provider_health_insight(provider_snapshot, provider_auth_observability);
+    let recall = build_operator_recall_insight(&tape_aggregation);
+    let compaction = build_operator_compaction_insight(&tape_aggregation);
+    let safety_boundary = build_operator_safety_boundary_insight(&tape_aggregation);
+    let plugins = build_operator_plugin_insight(plugin_index.as_ref(), plugin_error.as_deref());
+    let cron = build_operator_cron_insight(cron_runs.as_slice());
+    let reload = build_operator_reload_insight(build_config_ref_health_observability(state));
+    let hotspots = build_operator_hotspots(
+        &provider_health,
+        &recall,
+        &compaction,
+        &safety_boundary,
+        &plugins,
+        &cron,
+        &reload,
+    );
+    let blocking_hotspots =
+        hotspots.iter().filter(|hotspot| hotspot.severity == "blocking").count();
+    let warning_hotspots = hotspots.iter().filter(|hotspot| hotspot.severity == "warning").count();
+    let summary = build_operator_summary(hotspots.as_slice());
+
+    let observed_cron_runs = cron_runs.len().saturating_add(usize::from(cron_next_after.is_some()));
+    let sampled_cron_runs = cron_runs.len();
+    let observed_plugins = plugin_index.as_ref().map(|index| index.entries.len()).unwrap_or(0);
+    let sampled_plugins = observed_plugins.min(OPERATOR_INSIGHTS_PLUGIN_LIMIT);
+    let mut sampling_notes = vec![
+        "window is scoped to the authorized operator principal and request context".to_owned(),
+    ];
+    if observed_runs > sampled_runs.len() {
+        sampling_notes.push(format!(
+            "run sampling capped at {} of {} observed runs",
+            sampled_runs.len(),
+            observed_runs
+        ));
+    }
+    if tape_aggregation.truncated_tape_runs > 0 {
+        sampling_notes.push(format!(
+            "{} sampled runs exceeded the per-run tape event cap",
+            tape_aggregation.truncated_tape_runs
+        ));
+    }
+    if cron_next_after.is_some() {
+        sampling_notes.push(format!(
+            "cron sampling stopped after {} runs; additional history is available",
+            sampled_cron_runs
+        ));
+    }
+    if observed_plugins > sampled_plugins {
+        sampling_notes.push(format!(
+            "plugin samples capped at {} of {} bindings",
+            sampled_plugins, observed_plugins
+        ));
+    }
+    if plugin_error.is_some() {
+        sampling_notes.push(
+            "plugin operability data is degraded because bindings could not be loaded".to_owned(),
+        );
+    }
+
+    Ok(OperatorInsightsEnvelope {
+        generated_at_unix_ms,
+        summary: OperatorInsightsSummary {
+            state: summary.0.to_owned(),
+            severity: summary.1.to_owned(),
+            hotspot_count: hotspots.len(),
+            blocking_hotspots,
+            warning_hotspots,
+            recommendation: if let Some(first) = hotspots.first() {
+                first.recommended_action.clone()
+            } else {
+                "No blocking operator hotspots were detected in the sampled window.".to_owned()
+            },
+        },
+        hotspots,
+        retention: OperatorInsightsRetentionPolicy {
+            source_of_truth: "append_only_journal_and_runtime_snapshots".to_owned(),
+            aggregation_mode: "on_demand_window_scan".to_owned(),
+            derived_metrics_persisted: false,
+            support_bundle_embeds_latest_snapshot: true,
+            window_start_at_unix_ms: resolved.query.start_at_unix_ms,
+            window_end_at_unix_ms: resolved.query.end_at_unix_ms,
+        },
+        sampling: OperatorInsightsSamplingPolicy {
+            run_sample_limit: OPERATOR_INSIGHTS_RUN_SAMPLE_LIMIT,
+            tape_event_limit_per_run: OPERATOR_INSIGHTS_TAPE_SAMPLE_LIMIT,
+            cron_run_limit: OPERATOR_INSIGHTS_CRON_RUN_LIMIT,
+            plugin_limit: OPERATOR_INSIGHTS_PLUGIN_LIMIT,
+            observed_runs,
+            sampled_runs: sampled_runs.len(),
+            observed_cron_runs,
+            sampled_cron_runs,
+            observed_plugins,
+            sampled_plugins,
+            notes: sampling_notes,
+        },
+        privacy: OperatorInsightsPrivacyPolicy {
+            redaction_mode: "query_previews_and_sanitized_operator_samples".to_owned(),
+            raw_queries_included: false,
+            raw_error_messages_included: false,
+            raw_config_values_included: false,
+            secret_like_values_redacted: true,
+        },
+        provider_health,
+        recall,
+        compaction,
+        safety_boundary,
+        plugins,
+        cron,
+        reload,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+async fn collect_operator_tape_aggregation(
+    state: &AppState,
+    sampled_runs: &[&journal::OrchestratorUsageInsightsRunRecord],
+) -> Result<OperatorTapeAggregation, Response> {
+    let mut aggregation = OperatorTapeAggregation::default();
+    for run in sampled_runs {
+        let tape = state
+            .runtime
+            .orchestrator_tape_snapshot(
+                run.run_id.clone(),
+                None,
+                Some(OPERATOR_INSIGHTS_TAPE_SAMPLE_LIMIT),
+            )
+            .await
+            .map_err(runtime_status_response)?;
+        if tape.next_after_seq.is_some() {
+            aggregation.truncated_tape_runs = aggregation.truncated_tape_runs.saturating_add(1);
+        }
+        for event in tape.events {
+            accumulate_operator_tape_event(run, &event, &mut aggregation);
+        }
+    }
+    Ok(aggregation)
+}
+
+fn accumulate_operator_tape_event(
+    run: &journal::OrchestratorUsageInsightsRunRecord,
+    event: &journal::OrchestratorTapeRecord,
+    aggregation: &mut OperatorTapeAggregation,
+) {
+    let Ok(payload) = serde_json::from_str::<Value>(event.payload_json.as_str()) else {
+        return;
+    };
+
+    match event.event_type.as_str() {
+        "explicit_recall" => {
+            let memory_hits = json_usize(payload.get("memory_hits"));
+            let workspace_hits = json_usize(payload.get("workspace_hits"));
+            let transcript_hits = json_usize(payload.get("transcript_hits"));
+            let checkpoint_hits = json_usize(payload.get("checkpoint_hits"));
+            let compaction_hits = json_usize(payload.get("compaction_hits"));
+            let total_hits = memory_hits
+                .saturating_add(workspace_hits)
+                .saturating_add(transcript_hits)
+                .saturating_add(checkpoint_hits)
+                .saturating_add(compaction_hits);
+            aggregation.explicit_recall_events =
+                aggregation.explicit_recall_events.saturating_add(1);
+            if total_hits == 0 {
+                aggregation.explicit_recall_zero_hit_events =
+                    aggregation.explicit_recall_zero_hit_events.saturating_add(1);
+            }
+            if aggregation.recall_samples.len() < 8 {
+                aggregation.recall_samples.push(OperatorRecallSample {
+                    run_id: run.run_id.clone(),
+                    session_id: Some(run.session_id.clone()),
+                    kind: "explicit_recall".to_owned(),
+                    query_preview: operator_query_preview(
+                        payload.get("query").and_then(Value::as_str).unwrap_or_default(),
+                    ),
+                    total_hits,
+                    memory_hits,
+                    workspace_hits,
+                    transcript_hits,
+                    checkpoint_hits,
+                    compaction_hits,
+                });
+            }
+        }
+        "memory_auto_inject" => {
+            let total_hits = payload
+                .get("hits")
+                .and_then(Value::as_array)
+                .map(std::vec::Vec::len)
+                .unwrap_or_else(|| json_usize(payload.get("injected_count")));
+            aggregation.auto_inject_events = aggregation.auto_inject_events.saturating_add(1);
+            aggregation.auto_inject_total_hits =
+                aggregation.auto_inject_total_hits.saturating_add(total_hits as u64);
+            if total_hits == 0 {
+                aggregation.auto_inject_zero_hit_events =
+                    aggregation.auto_inject_zero_hit_events.saturating_add(1);
+            }
+            if aggregation.recall_samples.len() < 8 {
+                aggregation.recall_samples.push(OperatorRecallSample {
+                    run_id: run.run_id.clone(),
+                    session_id: Some(run.session_id.clone()),
+                    kind: "memory_auto_inject".to_owned(),
+                    query_preview: operator_query_preview(
+                        payload.get("query").and_then(Value::as_str).unwrap_or_default(),
+                    ),
+                    total_hits,
+                    memory_hits: total_hits,
+                    workspace_hits: 0,
+                    transcript_hits: 0,
+                    checkpoint_hits: 0,
+                    compaction_hits: 0,
+                });
+            }
+        }
+        "session.compaction.auto_preview"
+        | "session.compaction.auto_created"
+        | "session.compaction" => {
+            let event_name =
+                payload.get("event").and_then(Value::as_str).unwrap_or(event.event_type.as_str());
+            let estimated_input_tokens = json_u64(payload.get("estimated_input_tokens"));
+            let estimated_output_tokens = json_u64(payload.get("estimated_output_tokens"));
+            let token_delta =
+                payload.get("token_delta").and_then(Value::as_i64).unwrap_or_else(|| {
+                    estimated_input_tokens
+                        .saturating_sub(estimated_output_tokens)
+                        .min(i64::MAX as u64) as i64
+                });
+            aggregation.compaction_total_input_tokens = aggregation
+                .compaction_total_input_tokens
+                .saturating_add(u128::from(estimated_input_tokens));
+            aggregation.compaction_total_token_delta =
+                aggregation.compaction_total_token_delta.saturating_add(i128::from(token_delta));
+            if event_name.contains("preview") || event_name.contains("blocked") {
+                aggregation.compaction_preview_events =
+                    aggregation.compaction_preview_events.saturating_add(1);
+            }
+            if event_name.contains("created") || event_name.contains("applied") {
+                aggregation.compaction_created_events =
+                    aggregation.compaction_created_events.saturating_add(1);
+            }
+            if event_name.contains("blocked") {
+                aggregation.compaction_blocked_events =
+                    aggregation.compaction_blocked_events.saturating_add(1);
+            }
+            if payload.get("dry_run").and_then(Value::as_bool).unwrap_or(false) {
+                aggregation.compaction_dry_run_events =
+                    aggregation.compaction_dry_run_events.saturating_add(1);
+            }
+            if aggregation.compaction_samples.len() < 8 {
+                aggregation.compaction_samples.push(OperatorCompactionSample {
+                    run_id: run.run_id.clone(),
+                    session_id: Some(run.session_id.clone()),
+                    trigger: event_name.to_owned(),
+                    token_delta,
+                    estimated_input_tokens,
+                    estimated_output_tokens,
+                    artifact_id: payload
+                        .get("artifact_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                });
+            }
+        }
+        "tool_decision" => {
+            aggregation.inspected_tool_decisions =
+                aggregation.inspected_tool_decisions.saturating_add(1);
+            let denied = payload.get("kind").and_then(Value::as_str) == Some("deny");
+            let approval_required =
+                payload.get("approval_required").and_then(Value::as_bool).unwrap_or(false);
+            let policy_enforced =
+                payload.get("policy_enforced").and_then(Value::as_bool).unwrap_or(false);
+            if denied {
+                aggregation.denied_tool_decisions =
+                    aggregation.denied_tool_decisions.saturating_add(1);
+                if policy_enforced {
+                    aggregation.policy_enforced_denies =
+                        aggregation.policy_enforced_denies.saturating_add(1);
+                }
+            }
+            if approval_required {
+                aggregation.approval_required_decisions =
+                    aggregation.approval_required_decisions.saturating_add(1);
+            }
+            if denied && aggregation.safety_samples.len() < 8 {
+                aggregation.safety_samples.push(OperatorSafetySample {
+                    run_id: run.run_id.clone(),
+                    tool_name: payload
+                        .get("tool_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_owned(),
+                    reason: sanitize_http_error_message(
+                        payload.get("reason").and_then(Value::as_str).unwrap_or("policy deny"),
+                    ),
+                    approval_required,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn build_operator_provider_health_insight(
+    provider_snapshot: &crate::model_provider::ProviderStatusSnapshot,
+    provider_auth_observability: &Value,
+) -> OperatorProviderHealthInsight {
+    let auth_state =
+        provider_auth_observability.get("state").and_then(Value::as_str).unwrap_or("unknown");
+    let cache_total = provider_snapshot
+        .response_cache
+        .hit_count
+        .saturating_add(provider_snapshot.response_cache.miss_count);
+    let response_cache_hit_rate_bps =
+        ratio_bps_u64(provider_snapshot.response_cache.hit_count, cache_total);
+    let (state, severity, recommended_action) = if auth_state != "ok"
+        || model_provider_health_state(provider_snapshot) == "missing_auth"
+    {
+        (
+            "blocking",
+            "blocking",
+            "Inspect auth profiles and provider credential wiring before trusting degraded model output."
+                .to_owned(),
+        )
+    } else if provider_snapshot.circuit_breaker.open
+        || provider_snapshot.runtime_metrics.error_rate_bps > 0
+    {
+        (
+            "degraded",
+            "warning",
+            "Review provider health, failover posture, and cache coverage before widening usage."
+                .to_owned(),
+        )
+    } else {
+        ("ok", "info", "Provider health is within the expected operating envelope.".to_owned())
+    };
+
+    OperatorProviderHealthInsight {
+        state: state.to_owned(),
+        severity: severity.to_owned(),
+        summary: format!(
+            "{} provider auth={} error_rate_bps={} avg_latency_ms={} cache_hit_rate_bps={}",
+            provider_snapshot.kind,
+            auth_state,
+            provider_snapshot.runtime_metrics.error_rate_bps,
+            provider_snapshot.runtime_metrics.avg_latency_ms,
+            response_cache_hit_rate_bps
+        ),
+        provider_kind: provider_snapshot.kind.clone(),
+        error_rate_bps: provider_snapshot.runtime_metrics.error_rate_bps,
+        avg_latency_ms: provider_snapshot.runtime_metrics.avg_latency_ms,
+        circuit_open: provider_snapshot.circuit_breaker.open,
+        auth_state: auth_state.to_owned(),
+        refresh_failures: provider_auth_observability
+            .get("refresh_failures")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        response_cache_enabled: provider_snapshot.response_cache.enabled,
+        response_cache_entries: provider_snapshot.response_cache.entry_count,
+        response_cache_hit_rate_bps,
+        recommended_action,
+        drill_down: operator_drill_down(
+            "Provider and auth diagnostics",
+            "operations",
+            "/console/v1/diagnostics",
+            "/control/operations",
+        ),
+    }
+}
+
+fn build_operator_recall_insight(aggregation: &OperatorTapeAggregation) -> OperatorRecallInsight {
+    let explicit_recall_zero_hit_rate_bps =
+        ratio_bps(aggregation.explicit_recall_zero_hit_events, aggregation.explicit_recall_events);
+    let auto_inject_avg_hits = if aggregation.auto_inject_events == 0 {
+        0.0
+    } else {
+        aggregation.auto_inject_total_hits as f64 / aggregation.auto_inject_events as f64
+    };
+    let (state, severity, recommended_action) = if aggregation.explicit_recall_events > 0
+        && explicit_recall_zero_hit_rate_bps >= 5_000
+    {
+        (
+            "degraded",
+            "warning",
+            "Inspect recall samples, workspace indexing, and durable memory coverage before trusting follow-up answers."
+                .to_owned(),
+        )
+    } else if aggregation.auto_inject_events > 0 && auto_inject_avg_hits < 1.0 {
+        (
+            "degraded",
+            "warning",
+            "Memory auto-inject is finding too little context; review retrieval tuning and scoped memory coverage."
+                .to_owned(),
+        )
+    } else {
+        ("ok", "info", "Recall hit quality is stable in the sampled run window.".to_owned())
+    };
+
+    OperatorRecallInsight {
+        state: state.to_owned(),
+        severity: severity.to_owned(),
+        summary: format!(
+            "explicit_recall={} zero_hit_rate_bps={} memory_auto_inject={} avg_hits={:.2}",
+            aggregation.explicit_recall_events,
+            explicit_recall_zero_hit_rate_bps,
+            aggregation.auto_inject_events,
+            auto_inject_avg_hits
+        ),
+        explicit_recall_events: aggregation.explicit_recall_events,
+        explicit_recall_zero_hit_events: aggregation.explicit_recall_zero_hit_events,
+        explicit_recall_zero_hit_rate_bps,
+        auto_inject_events: aggregation.auto_inject_events,
+        auto_inject_zero_hit_events: aggregation.auto_inject_zero_hit_events,
+        auto_inject_avg_hits,
+        samples: aggregation.recall_samples.clone(),
+        recommended_action,
+        drill_down: operator_drill_down(
+            "Recall diagnostics",
+            "usage",
+            "/console/v1/usage/insights",
+            "/control/usage",
+        ),
+    }
+}
+
+fn build_operator_compaction_insight(
+    aggregation: &OperatorTapeAggregation,
+) -> OperatorCompactionInsight {
+    let avg_token_delta = if aggregation.compaction_samples.is_empty() {
+        0
+    } else {
+        (aggregation.compaction_total_token_delta / aggregation.compaction_samples.len() as i128)
+            .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+    };
+    let avg_reduction_bps = if aggregation.compaction_total_input_tokens == 0 {
+        0
+    } else {
+        ((aggregation.compaction_total_token_delta.max(0) as u128) * 10_000
+            / aggregation.compaction_total_input_tokens)
+            .min(u128::from(u32::MAX)) as u32
+    };
+    let (state, severity, recommended_action) = if aggregation.compaction_blocked_events > 0
+        || (aggregation.compaction_preview_events > 0
+            && aggregation.compaction_created_events == 0
+            && aggregation.compaction_dry_run_events == 0)
+    {
+        (
+            "degraded",
+            "warning",
+            "Inspect compaction blockers and preview samples before relying on long-running session continuity."
+                .to_owned(),
+        )
+    } else {
+        (
+            "ok",
+            "info",
+            "Automatic compaction is either quiet or behaving within the sampled window."
+                .to_owned(),
+        )
+    };
+
+    OperatorCompactionInsight {
+        state: state.to_owned(),
+        severity: severity.to_owned(),
+        summary: format!(
+            "preview_events={} created_events={} blocked_events={} avg_reduction_bps={}",
+            aggregation.compaction_preview_events,
+            aggregation.compaction_created_events,
+            aggregation.compaction_blocked_events,
+            avg_reduction_bps
+        ),
+        preview_events: aggregation.compaction_preview_events,
+        created_events: aggregation.compaction_created_events,
+        dry_run_events: aggregation.compaction_dry_run_events,
+        avg_token_delta,
+        avg_reduction_bps,
+        samples: aggregation.compaction_samples.clone(),
+        recommended_action,
+        drill_down: operator_drill_down(
+            "Compaction diagnostics",
+            "usage",
+            "/console/v1/usage/insights",
+            "/control/usage",
+        ),
+    }
+}
+
+fn build_operator_safety_boundary_insight(
+    aggregation: &OperatorTapeAggregation,
+) -> OperatorSafetyBoundaryInsight {
+    let deny_rate_bps =
+        ratio_bps(aggregation.denied_tool_decisions, aggregation.inspected_tool_decisions);
+    let (state, severity, recommended_action) = if aggregation.denied_tool_decisions > 0 {
+        (
+            "degraded",
+            "warning",
+            "Review denied tool decisions and approval-required branches to confirm policy behavior matches operator intent."
+                .to_owned(),
+        )
+    } else {
+        ("ok", "info", "Sampled tool decisions did not surface policy-enforced denies.".to_owned())
+    };
+
+    OperatorSafetyBoundaryInsight {
+        state: state.to_owned(),
+        severity: severity.to_owned(),
+        summary: format!(
+            "inspected={} denied={} approval_required={} policy_enforced_denies={}",
+            aggregation.inspected_tool_decisions,
+            aggregation.denied_tool_decisions,
+            aggregation.approval_required_decisions,
+            aggregation.policy_enforced_denies
+        ),
+        inspected_tool_decisions: aggregation.inspected_tool_decisions,
+        denied_tool_decisions: aggregation.denied_tool_decisions,
+        policy_enforced_denies: aggregation.policy_enforced_denies,
+        approval_required_decisions: aggregation.approval_required_decisions,
+        deny_rate_bps,
+        samples: aggregation.safety_samples.clone(),
+        recommended_action,
+        drill_down: operator_drill_down(
+            "Safety and approval diagnostics",
+            "operations",
+            "/console/v1/diagnostics",
+            "/control/operations",
+        ),
+    }
+}
+
+fn build_operator_plugin_insight(
+    index: Option<&crate::plugins::PluginBindingsIndex>,
+    load_error: Option<&str>,
+) -> OperatorPluginInsight {
+    let Some(index) = index else {
+        return OperatorPluginInsight {
+            state: "degraded".to_owned(),
+            severity: "warning".to_owned(),
+            summary: load_error
+                .map(|error| format!("plugin operability is unavailable: {error}"))
+                .unwrap_or_else(|| "plugin operability bindings are unavailable".to_owned()),
+            total_bindings: 0,
+            ready_bindings: 0,
+            unhealthy_bindings: 0,
+            typed_contract_failures: 0,
+            config_failures: 0,
+            discovery_failures: 0,
+            samples: Vec::new(),
+            recommended_action:
+                "Rebuild or restore the plugin bindings index before relying on plugin insights."
+                    .to_owned(),
+            drill_down: operator_drill_down(
+                "Plugin operability",
+                "operations",
+                "/console/v1/plugins",
+                "/control/operations",
+            ),
+        };
+    };
+
+    let mut typed_contract_failures = 0_usize;
+    let mut config_failures = 0_usize;
+    let mut discovery_failures = 0_usize;
+    let mut ready_bindings = 0_usize;
+    let mut unhealthy_bindings = 0_usize;
+    let mut samples = Vec::new();
+    for entry in &index.entries {
+        let discovery_state = plugin_discovery_state_label(entry);
+        let config_state = plugin_config_state_label(entry);
+        let typed_failed = entry.typed_contracts.mode
+            == palyra_plugins_runtime::TypedPluginContractMode::Typed
+            && (!entry.typed_contracts.ready
+                || entry.typed_contracts.entries.iter().any(|contract| {
+                    contract.status == palyra_plugins_runtime::TypedPluginContractStatus::Rejected
+                }));
+        let config_failed = !matches!(config_state.as_deref(), Some("valid") | Some("unknown"))
+            && entry.config.is_some();
+        let discovery_failed =
+            entry.enabled && !matches!(discovery_state.as_str(), "installed" | "unknown");
+        let capability_drift = !entry.capability_diff.valid;
+        let ready = entry.enabled
+            && !typed_failed
+            && !config_failed
+            && !discovery_failed
+            && !capability_drift;
+        if ready {
+            ready_bindings = ready_bindings.saturating_add(1);
+        } else {
+            unhealthy_bindings = unhealthy_bindings.saturating_add(1);
+        }
+        if typed_failed {
+            typed_contract_failures = typed_contract_failures.saturating_add(1);
+        }
+        if config_failed {
+            config_failures = config_failures.saturating_add(1);
+        }
+        if discovery_failed {
+            discovery_failures = discovery_failures.saturating_add(1);
+        }
+
+        if !ready && samples.len() < 8 {
+            samples.push(OperatorPluginSample {
+                plugin_id: entry.plugin_id.clone(),
+                discovery_state: Some(discovery_state),
+                config_state,
+                contracts_mode: Some(
+                    format!("{:?}", entry.typed_contracts.mode).to_ascii_lowercase(),
+                ),
+                reasons: collect_plugin_sample_reasons(entry),
+            });
+        }
+    }
+
+    let (state, severity, recommended_action) = if typed_contract_failures > 0
+        || config_failures > 0
+    {
+        (
+            "blocking",
+            "blocking",
+            "Fix typed contract or plugin config failures before enabling additional operator automation."
+                .to_owned(),
+        )
+    } else if unhealthy_bindings > 0 || discovery_failures > 0 {
+        (
+            "degraded",
+            "warning",
+            "Review discovery and capability drift before assuming plugin routes are healthy."
+                .to_owned(),
+        )
+    } else {
+        ("ok", "info", "Plugin bindings look operable in the current bindings index.".to_owned())
+    };
+
+    OperatorPluginInsight {
+        state: state.to_owned(),
+        severity: severity.to_owned(),
+        summary: format!(
+            "bindings={} ready={} unhealthy={} typed_failures={} config_failures={}",
+            index.entries.len(),
+            ready_bindings,
+            unhealthy_bindings,
+            typed_contract_failures,
+            config_failures
+        ),
+        total_bindings: index.entries.len(),
+        ready_bindings,
+        unhealthy_bindings,
+        typed_contract_failures,
+        config_failures,
+        discovery_failures,
+        samples,
+        recommended_action,
+        drill_down: operator_drill_down(
+            "Plugin operability",
+            "operations",
+            "/console/v1/plugins",
+            "/control/operations",
+        ),
+    }
+}
+
+fn build_operator_cron_insight(cron_runs: &[journal::CronRunRecord]) -> OperatorCronInsight {
+    let total_runs = cron_runs.len();
+    let failed_runs = cron_runs
+        .iter()
+        .filter(|run| {
+            matches!(run.status, journal::CronRunStatus::Failed | journal::CronRunStatus::Denied)
+        })
+        .count();
+    let succeeded_runs =
+        cron_runs.iter().filter(|run| run.status == journal::CronRunStatus::Succeeded).count();
+    let total_tool_denies = cron_runs.iter().map(|run| run.tool_denies).sum::<u64>();
+    let success_rate_bps = ratio_bps(succeeded_runs, total_runs);
+    let (state, severity, recommended_action) = if failed_runs > 0 || total_tool_denies > 0 {
+        (
+            "degraded",
+            "warning",
+            "Inspect routine runs and cron delivery history before widening unattended automation."
+                .to_owned(),
+        )
+    } else {
+        ("ok", "info", "Recent cron runs are not showing delivery or policy failures.".to_owned())
+    };
+
+    OperatorCronInsight {
+        state: state.to_owned(),
+        severity: severity.to_owned(),
+        summary: format!(
+            "total_runs={} failed_runs={} success_rate_bps={} tool_denies={}",
+            total_runs, failed_runs, success_rate_bps, total_tool_denies
+        ),
+        total_runs,
+        failed_runs,
+        success_rate_bps,
+        total_tool_denies,
+        samples: cron_runs
+            .iter()
+            .take(8)
+            .map(|run| OperatorCronRunSample {
+                run_id: run.run_id.clone(),
+                job_id: run.job_id.clone(),
+                status: format!("{:?}", run.status).to_ascii_lowercase(),
+                error_kind: run.error_kind.clone(),
+                tool_denies: run.tool_denies,
+            })
+            .collect(),
+        recommended_action,
+        drill_down: operator_drill_down(
+            "Cron delivery history",
+            "cron",
+            "/console/v1/routines",
+            "/control/cron",
+        ),
+    }
+}
+
+fn build_operator_reload_insight(config_ref_health: Value) -> OperatorReloadInsight {
+    let state = config_ref_health.get("state").and_then(Value::as_str).unwrap_or("unknown");
+    let severity = config_ref_health
+        .get("severity")
+        .and_then(Value::as_str)
+        .unwrap_or(if state == "ok" { "info" } else { "warning" });
+    let summary = config_ref_health.get("summary").unwrap_or(&Value::Null);
+    let hotspots = config_ref_health
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let item_severity = item.get("severity").and_then(Value::as_str).unwrap_or("info");
+            if item_severity == "info" {
+                return None;
+            }
+            Some(OperatorReloadHotspot {
+                ref_id: item.get("ref_id").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
+                config_path: item
+                    .get("config_path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                state: item.get("state").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
+                severity: item_severity.to_owned(),
+                reload_mode: item
+                    .get("reload_mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                advice: item.get("advice").and_then(Value::as_str).map(ToOwned::to_owned),
+            })
+        })
+        .take(8)
+        .collect::<Vec<_>>();
+
+    OperatorReloadInsight {
+        state: state.to_owned(),
+        severity: severity.to_owned(),
+        summary: format!(
+            "blocking_refs={} warning_refs={} active_runs={}",
+            json_u64(summary.get("blocking_refs")),
+            json_u64(summary.get("warning_refs")),
+            json_u64(summary.get("active_runs"))
+        ),
+        blocking_refs: json_usize(summary.get("blocking_refs")),
+        warning_refs: json_usize(summary.get("warning_refs")),
+        hotspots,
+        recommended_action: config_ref_health
+            .get("recommendations")
+            .and_then(Value::as_array)
+            .and_then(|values| values.first())
+            .and_then(Value::as_str)
+            .unwrap_or("Inspect config ref health before applying runtime reload changes.")
+            .to_owned(),
+        drill_down: operator_drill_down(
+            "Config ref health",
+            "operations",
+            "/console/v1/diagnostics",
+            "/control/operations",
+        ),
+    }
+}
+
+fn build_operator_hotspots(
+    provider_health: &OperatorProviderHealthInsight,
+    recall: &OperatorRecallInsight,
+    compaction: &OperatorCompactionInsight,
+    safety_boundary: &OperatorSafetyBoundaryInsight,
+    plugins: &OperatorPluginInsight,
+    cron: &OperatorCronInsight,
+    reload: &OperatorReloadInsight,
+) -> Vec<OperatorInsightHotspot> {
+    let mut hotspots = Vec::new();
+    for (hotspot_id, subsystem, state, severity, summary, detail, recommended_action, drill_down) in [
+        (
+            "provider_health",
+            "provider_health",
+            provider_health.state.as_str(),
+            provider_health.severity.as_str(),
+            provider_health.summary.as_str(),
+            format!(
+                "auth_state={} error_rate_bps={} avg_latency_ms={} cache_hit_rate_bps={}",
+                provider_health.auth_state,
+                provider_health.error_rate_bps,
+                provider_health.avg_latency_ms,
+                provider_health.response_cache_hit_rate_bps
+            ),
+            provider_health.recommended_action.clone(),
+            provider_health.drill_down.clone(),
+        ),
+        (
+            "recall_quality",
+            "recall_quality",
+            recall.state.as_str(),
+            recall.severity.as_str(),
+            recall.summary.as_str(),
+            format!(
+                "explicit_zero_hit_rate_bps={} auto_inject_avg_hits={:.2}",
+                recall.explicit_recall_zero_hit_rate_bps, recall.auto_inject_avg_hits
+            ),
+            recall.recommended_action.clone(),
+            recall.drill_down.clone(),
+        ),
+        (
+            "compaction_efficiency",
+            "compaction_efficiency",
+            compaction.state.as_str(),
+            compaction.severity.as_str(),
+            compaction.summary.as_str(),
+            format!(
+                "preview_events={} created_events={} avg_reduction_bps={}",
+                compaction.preview_events, compaction.created_events, compaction.avg_reduction_bps
+            ),
+            compaction.recommended_action.clone(),
+            compaction.drill_down.clone(),
+        ),
+        (
+            "safety_boundary",
+            "safety_boundary",
+            safety_boundary.state.as_str(),
+            safety_boundary.severity.as_str(),
+            safety_boundary.summary.as_str(),
+            format!(
+                "deny_rate_bps={} approval_required={}",
+                safety_boundary.deny_rate_bps, safety_boundary.approval_required_decisions
+            ),
+            safety_boundary.recommended_action.clone(),
+            safety_boundary.drill_down.clone(),
+        ),
+        (
+            "plugin_operability",
+            "plugin_operability",
+            plugins.state.as_str(),
+            plugins.severity.as_str(),
+            plugins.summary.as_str(),
+            format!(
+                "typed_failures={} config_failures={} discovery_failures={}",
+                plugins.typed_contract_failures,
+                plugins.config_failures,
+                plugins.discovery_failures
+            ),
+            plugins.recommended_action.clone(),
+            plugins.drill_down.clone(),
+        ),
+        (
+            "cron_delivery",
+            "cron_delivery",
+            cron.state.as_str(),
+            cron.severity.as_str(),
+            cron.summary.as_str(),
+            format!(
+                "failed_runs={} success_rate_bps={} tool_denies={}",
+                cron.failed_runs, cron.success_rate_bps, cron.total_tool_denies
+            ),
+            cron.recommended_action.clone(),
+            cron.drill_down.clone(),
+        ),
+        (
+            "reload_health",
+            "reload_health",
+            reload.state.as_str(),
+            reload.severity.as_str(),
+            reload.summary.as_str(),
+            format!("blocking_refs={} warning_refs={}", reload.blocking_refs, reload.warning_refs),
+            reload.recommended_action.clone(),
+            reload.drill_down.clone(),
+        ),
+    ] {
+        if severity == "info" {
+            continue;
+        }
+        hotspots.push(OperatorInsightHotspot {
+            hotspot_id: hotspot_id.to_owned(),
+            subsystem: subsystem.to_owned(),
+            state: state.to_owned(),
+            severity: severity.to_owned(),
+            summary: summary.to_owned(),
+            detail,
+            recommended_action,
+            drill_down,
+        });
+    }
+    hotspots
+}
+
+fn build_operator_summary(hotspots: &[OperatorInsightHotspot]) -> (&'static str, &'static str) {
+    if hotspots.iter().any(|hotspot| hotspot.severity == "blocking") {
+        ("blocking", "blocking")
+    } else if hotspots.iter().any(|hotspot| hotspot.severity == "warning") {
+        ("degraded", "warning")
+    } else {
+        ("ok", "info")
+    }
+}
+
+fn load_operator_plugin_index() -> (Option<crate::plugins::PluginBindingsIndex>, Option<String>) {
+    let plugins_root = match resolve_plugins_root() {
+        Ok(path) => path,
+        Err(error) => return (None, Some(sanitize_http_error_message(error.to_string().as_str()))),
+    };
+    match load_plugin_bindings_index(plugins_root.as_path()) {
+        Ok(index) => (Some(index), None),
+        Err(error) => (None, Some(sanitize_http_error_message(error.to_string().as_str()))),
+    }
+}
+
+fn plugin_discovery_state_label(entry: &crate::plugins::PluginBindingRecord) -> String {
+    serde_json::to_value(entry.discovery.state)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn plugin_config_state_label(entry: &crate::plugins::PluginBindingRecord) -> Option<String> {
+    entry.config.as_ref().and_then(|config| {
+        serde_json::to_value(config.validation.state)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+    })
+}
+
+fn collect_plugin_sample_reasons(entry: &crate::plugins::PluginBindingRecord) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if !entry.enabled {
+        reasons.push("binding is disabled".to_owned());
+    }
+    reasons.extend(entry.discovery.reasons.iter().cloned());
+    if let Some(config) = entry.config.as_ref() {
+        reasons.extend(config.validation.issues.iter().cloned());
+    }
+    reasons.extend(entry.capability_diff.entries.iter().map(|issue| issue.message.clone()));
+    if entry.typed_contracts.mode == palyra_plugins_runtime::TypedPluginContractMode::Typed {
+        reasons.extend(
+            entry
+                .typed_contracts
+                .entries
+                .iter()
+                .flat_map(|contract| contract.reasons.iter().cloned()),
+        );
+    }
+    if reasons.is_empty() {
+        reasons.push("binding did not satisfy the sampled operability checks".to_owned());
+    }
+    reasons.truncate(4);
+    reasons
+}
+
+fn operator_drill_down(
+    label: &str,
+    section: &str,
+    api_path: &str,
+    console_path: &str,
+) -> OperatorInsightDrillDown {
+    OperatorInsightDrillDown {
+        label: label.to_owned(),
+        section: section.to_owned(),
+        api_path: api_path.to_owned(),
+        console_path: console_path.to_owned(),
+    }
+}
+
+fn operator_query_preview(raw: &str) -> String {
+    let flattened = raw.replace(['\r', '\n', '\t'], " ");
+    let collapsed = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
+    let truncated =
+        crate::gateway::truncate_with_ellipsis(collapsed, OPERATOR_INSIGHTS_QUERY_PREVIEW_BYTES);
+    sanitize_http_error_message(truncated.as_str())
+}
+
+fn ratio_bps(numerator: usize, denominator: usize) -> u32 {
+    if denominator == 0 {
+        0
+    } else {
+        ((numerator as u128) * 10_000 / (denominator as u128)).min(u128::from(u32::MAX)) as u32
+    }
+}
+
+fn ratio_bps_u64(numerator: u64, denominator: u64) -> u32 {
+    if denominator == 0 {
+        0
+    } else {
+        ((numerator as u128) * 10_000 / (denominator as u128)).min(u128::from(u32::MAX)) as u32
+    }
+}
+
+fn json_usize(value: Option<&Value>) -> usize {
+    value.and_then(Value::as_u64).unwrap_or(0).min(usize::MAX as u64) as usize
+}
+
+fn json_u64(value: Option<&Value>) -> u64 {
+    value.and_then(Value::as_u64).unwrap_or(0)
 }
 
 #[allow(clippy::result_large_err)]
@@ -1605,7 +2970,12 @@ fn current_unix_ms() -> Result<i64, std::time::SystemTimeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::csv_escape;
+    use super::{
+        build_operator_hotspots, build_operator_summary, csv_escape, operator_drill_down,
+        operator_query_preview, OperatorCompactionInsight, OperatorCronInsight,
+        OperatorPluginInsight, OperatorProviderHealthInsight, OperatorRecallInsight,
+        OperatorReloadInsight, OperatorSafetyBoundaryInsight,
+    };
 
     #[test]
     fn csv_escape_neutralizes_formula_prefixes() {
@@ -1614,5 +2984,183 @@ mod tests {
         assert_eq!(csv_escape("-10"), "\"'-10\"");
         assert_eq!(csv_escape("@user"), "\"'@user\"");
         assert_eq!(csv_escape("safe"), "\"safe\"");
+    }
+
+    #[test]
+    fn operator_summary_prioritizes_blocking_hotspots() {
+        let warning = test_provider_health("degraded", "warning", "provider warning");
+        let blocking = test_reload("blocking", "blocking", "reload blocking");
+        let hotspots = build_operator_hotspots(
+            &warning,
+            &test_recall("ok", "info", "recall ok"),
+            &test_compaction("ok", "info", "compaction ok"),
+            &test_safety("ok", "info", "safety ok"),
+            &test_plugins("ok", "info", "plugins ok"),
+            &test_cron("ok", "info", "cron ok"),
+            &blocking,
+        );
+        assert_eq!(build_operator_summary(hotspots.as_slice()), ("blocking", "blocking"));
+    }
+
+    #[test]
+    fn operator_query_preview_redacts_and_truncates() {
+        let preview = operator_query_preview(
+            "Authorization: Bearer sk-live-super-secret\nwith several words to force truncation after normalization.",
+        );
+        assert!(!preview.contains("sk-live-super-secret"));
+        assert!(!preview.contains('\n'));
+        assert!(preview.len() <= 240);
+    }
+
+    fn test_provider_health(
+        state: &str,
+        severity: &str,
+        summary: &str,
+    ) -> OperatorProviderHealthInsight {
+        OperatorProviderHealthInsight {
+            state: state.to_owned(),
+            severity: severity.to_owned(),
+            summary: summary.to_owned(),
+            provider_kind: "deterministic".to_owned(),
+            error_rate_bps: 0,
+            avg_latency_ms: 0,
+            circuit_open: false,
+            auth_state: "ok".to_owned(),
+            refresh_failures: 0,
+            response_cache_enabled: true,
+            response_cache_entries: 1,
+            response_cache_hit_rate_bps: 0,
+            recommended_action: "Inspect provider diagnostics.".to_owned(),
+            drill_down: operator_drill_down(
+                "Provider and auth diagnostics",
+                "operations",
+                "/console/v1/diagnostics",
+                "/control/operations",
+            ),
+        }
+    }
+
+    fn test_recall(state: &str, severity: &str, summary: &str) -> OperatorRecallInsight {
+        OperatorRecallInsight {
+            state: state.to_owned(),
+            severity: severity.to_owned(),
+            summary: summary.to_owned(),
+            explicit_recall_events: 0,
+            explicit_recall_zero_hit_events: 0,
+            explicit_recall_zero_hit_rate_bps: 0,
+            auto_inject_events: 0,
+            auto_inject_zero_hit_events: 0,
+            auto_inject_avg_hits: 0.0,
+            samples: Vec::new(),
+            recommended_action: "Inspect recall diagnostics.".to_owned(),
+            drill_down: operator_drill_down(
+                "Recall diagnostics",
+                "usage",
+                "/console/v1/usage/insights",
+                "/control/usage",
+            ),
+        }
+    }
+
+    fn test_compaction(state: &str, severity: &str, summary: &str) -> OperatorCompactionInsight {
+        OperatorCompactionInsight {
+            state: state.to_owned(),
+            severity: severity.to_owned(),
+            summary: summary.to_owned(),
+            preview_events: 0,
+            created_events: 0,
+            dry_run_events: 0,
+            avg_token_delta: 0,
+            avg_reduction_bps: 0,
+            samples: Vec::new(),
+            recommended_action: "Inspect compaction diagnostics.".to_owned(),
+            drill_down: operator_drill_down(
+                "Compaction diagnostics",
+                "usage",
+                "/console/v1/usage/insights",
+                "/control/usage",
+            ),
+        }
+    }
+
+    fn test_safety(state: &str, severity: &str, summary: &str) -> OperatorSafetyBoundaryInsight {
+        OperatorSafetyBoundaryInsight {
+            state: state.to_owned(),
+            severity: severity.to_owned(),
+            summary: summary.to_owned(),
+            inspected_tool_decisions: 0,
+            denied_tool_decisions: 0,
+            policy_enforced_denies: 0,
+            approval_required_decisions: 0,
+            deny_rate_bps: 0,
+            samples: Vec::new(),
+            recommended_action: "Inspect safety diagnostics.".to_owned(),
+            drill_down: operator_drill_down(
+                "Safety and approval diagnostics",
+                "operations",
+                "/console/v1/diagnostics",
+                "/control/operations",
+            ),
+        }
+    }
+
+    fn test_plugins(state: &str, severity: &str, summary: &str) -> OperatorPluginInsight {
+        OperatorPluginInsight {
+            state: state.to_owned(),
+            severity: severity.to_owned(),
+            summary: summary.to_owned(),
+            total_bindings: 0,
+            ready_bindings: 0,
+            unhealthy_bindings: 0,
+            typed_contract_failures: 0,
+            config_failures: 0,
+            discovery_failures: 0,
+            samples: Vec::new(),
+            recommended_action: "Inspect plugin operability.".to_owned(),
+            drill_down: operator_drill_down(
+                "Plugin operability",
+                "operations",
+                "/console/v1/plugins",
+                "/control/operations",
+            ),
+        }
+    }
+
+    fn test_cron(state: &str, severity: &str, summary: &str) -> OperatorCronInsight {
+        OperatorCronInsight {
+            state: state.to_owned(),
+            severity: severity.to_owned(),
+            summary: summary.to_owned(),
+            total_runs: 0,
+            failed_runs: 0,
+            success_rate_bps: 0,
+            total_tool_denies: 0,
+            samples: Vec::new(),
+            recommended_action: "Inspect cron delivery.".to_owned(),
+            drill_down: operator_drill_down(
+                "Cron delivery history",
+                "cron",
+                "/console/v1/routines",
+                "/control/cron",
+            ),
+        }
+    }
+
+    fn test_reload(state: &str, severity: &str, summary: &str) -> OperatorReloadInsight {
+        OperatorReloadInsight {
+            state: state.to_owned(),
+            severity: severity.to_owned(),
+            summary: summary.to_owned(),
+            blocking_refs: 0,
+            warning_refs: 0,
+            hotspots: Vec::new(),
+            recommended_action: "Inspect config ref health.".to_owned(),
+            drill_down: operator_drill_down(
+                "Config ref health",
+                "operations",
+                "/console/v1/diagnostics",
+                "/control/operations",
+            ),
+        }
     }
 }

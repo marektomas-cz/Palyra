@@ -2474,6 +2474,38 @@ fn console_system_surface_returns_presence_and_enforces_emit_csrf() -> Result<()
         "system presence should include model provider subsystem"
     );
 
+    let insights_response = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/system/insights"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to call system insights endpoint")?
+        .error_for_status()
+        .context("system insights endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse system insights response json")?;
+    assert!(
+        insights_response.pointer("/summary/state").is_some(),
+        "system insights should include summary state"
+    );
+    assert!(
+        insights_response.pointer("/provider_health/summary").is_some(),
+        "system insights should include provider health summary"
+    );
+
+    let diagnostics_response = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/diagnostics"))
+        .header("Cookie", cookie.clone())
+        .send()
+        .context("failed to call diagnostics endpoint for operator insights")?
+        .error_for_status()
+        .context("diagnostics endpoint returned non-success status for operator insights")?
+        .json::<Value>()
+        .context("failed to parse diagnostics response json for operator insights")?;
+    assert!(
+        diagnostics_response.pointer("/observability/operator_insights/summary/state").is_some(),
+        "diagnostics should include operator insights summary"
+    );
+
     let initial_events = client
         .get(format!("http://127.0.0.1:{admin_port}/console/v1/system/events?limit=5"))
         .header("Cookie", cookie.clone())

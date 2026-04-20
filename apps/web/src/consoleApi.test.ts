@@ -217,6 +217,7 @@ describe("ConsoleApiClient", () => {
       jsonResponse({ routine: { routine_id: "R1" }, imported_from: "R0" }),
       jsonResponse({ routine_id: "R1", run_id: "run-1", status: "queued", message: "queued" }),
       jsonResponse({ status: "emitted", event: "system.operator.nightly", routine_dispatches: [] }),
+      jsonResponse({ summary: { state: "ok" }, hotspots: [] }),
     ];
     const fetcher: typeof fetch = (input, init) => {
       calls.push({ input, init });
@@ -240,6 +241,7 @@ describe("ConsoleApiClient", () => {
     await client.importRoutine({ export: { schema_id: "palyra.routine.export" } });
     await client.dispatchRoutine("R1", { trigger_kind: "manual", trigger_payload: {} });
     await client.emitSystemEvent({ name: "nightly", details: { ok: true } });
+    await client.getSystemInsights();
 
     expect(requestUrl(calls[1]?.input)).toBe("/console/v1/routines/templates");
     expect(requestUrl(calls[2]?.input)).toBe("/console/v1/routines/schedule-preview");
@@ -248,6 +250,8 @@ describe("ConsoleApiClient", () => {
     expect(requestUrl(calls[4]?.input)).toBe("/console/v1/routines/import");
     expect(requestUrl(calls[5]?.input)).toBe("/console/v1/routines/R1/dispatch");
     expect(requestUrl(calls[6]?.input)).toBe("/console/v1/system/events/emit");
+    expect(requestUrl(calls[7]?.input)).toBe("/console/v1/system/insights");
+    expect(new Headers(calls[7]?.init?.headers).get("x-palyra-csrf-token")).toBeNull();
   });
 
   it("uses objective endpoints with GET without CSRF and mutating requests with CSRF", async () => {

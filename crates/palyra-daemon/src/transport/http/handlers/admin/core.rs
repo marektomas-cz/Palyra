@@ -15,7 +15,7 @@ pub(crate) async fn admin_status_handler(
     state.runtime.record_admin_status_request();
     let snapshot = state
         .runtime
-        .status_snapshot_async(context, state.auth.clone())
+        .status_snapshot_async(context.clone(), state.auth.clone())
         .await
         .map_err(runtime_status_response)?;
     let auth_snapshot = state
@@ -23,7 +23,7 @@ pub(crate) async fn admin_status_handler(
         .admin_status_snapshot(Arc::clone(&state.runtime))
         .await
         .map_err(runtime_status_response)?;
-    let mut payload = serde_json::to_value(snapshot).map_err(|error| {
+    let mut payload = serde_json::to_value(&snapshot).map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to serialize admin status snapshot: {error}"
         )))
@@ -34,8 +34,14 @@ pub(crate) async fn admin_status_handler(
         )))
     })?;
     let media_payload = state.channels.media_snapshot().map_err(channel_platform_error_response)?;
-    let observability_payload =
-        build_observability_payload(&state, &auth_payload, &media_payload).await?;
+    let observability_payload = build_observability_payload(
+        &state,
+        &context,
+        &snapshot.model_provider,
+        &auth_payload,
+        &media_payload,
+    )
+    .await?;
     if let Value::Object(ref mut map) = payload {
         map.insert("auth".to_owned(), auth_payload);
         map.insert("media".to_owned(), media_payload);

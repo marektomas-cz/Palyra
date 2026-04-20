@@ -278,6 +278,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
   const diagnostics = app.overviewDiagnostics;
   const toolPermissions = app.overviewToolPermissions;
   const usageInsights = app.overviewUsageInsights;
+  const operatorInsights = usageInsights?.operator ?? null;
   const observability = readObject(diagnostics ?? {}, "observability");
   const connector = readObject(observability ?? {}, "connector");
   const providerAuth = readObject(observability ?? {}, "provider_auth");
@@ -296,6 +297,11 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     readString(providerAuth ?? {}, "state") ??
     readString(readObject(diagnostics ?? {}, "auth_profiles") ?? {}, "state") ??
     "unknown";
+  const operatorSummary = operatorInsights?.summary ?? null;
+  const operatorHotspots = operatorInsights?.hotspots ?? [];
+  const operatorPrimaryHotspot = operatorHotspots[0] ?? null;
+  const operatorHotspotCount = operatorSummary?.hotspot_count ?? 0;
+  const operatorBlockingHotspots = operatorSummary?.blocking_hotspots ?? 0;
   const leaseForegroundWaiters = readNumber(leaseManager ?? {}, "foreground_waiters") ?? 0;
   const leaseBackgroundWaiters = readNumber(leaseManager ?? {}, "background_waiters") ?? 0;
   const leaseDeferredTotal = readNumber(leaseManager ?? {}, "deferred_total") ?? 0;
@@ -337,6 +343,8 @@ export function OverviewSection({ app }: OverviewSectionProps) {
     connectorDegraded,
     providerState,
     alertCount: usageInsights?.alerts.length ?? 0,
+    operatorHotspotCount,
+    operatorBlockingHotspots,
     objectiveAttentionCount,
     leaseForegroundWaiters,
     leaseBackgroundWaiters,
@@ -865,12 +873,14 @@ export function OverviewSection({ app }: OverviewSectionProps) {
         <WorkspaceMetricCard
           detail={
             usageInsights === null
-              ? "Refresh overview to load routing posture and active alerts."
-              : `${usageInsights.routing.default_mode} default mode with ${usageInsights.alerts.length} active alerts, ${leaseForegroundWaiters + leaseBackgroundWaiters} shared waiters, ${leaseDeferredTotal} deferrals.`
+              ? "Refresh overview to load operator posture and active hotspots."
+              : operatorPrimaryHotspot === null
+                ? `${operatorSummary?.recommendation ?? "No operator recommendation published."} ${leaseForegroundWaiters + leaseBackgroundWaiters} shared waiters, ${leaseDeferredTotal} deferrals.`
+                : `${operatorPrimaryHotspot.summary} ${operatorBlockingHotspots} blocking hotspots, ${usageInsights.alerts.length} active usage alerts, ${leaseForegroundWaiters + leaseBackgroundWaiters} shared waiters.`
           }
-          label="Routing posture"
-          tone={(usageInsights?.alerts.length ?? 0) > 0 ? "warning" : "default"}
-          value={usageInsights?.routing.default_mode ?? "suggest"}
+          label="Operator posture"
+          tone={workspaceToneForState(operatorSummary?.severity ?? operatorSummary?.state)}
+          value={operatorSummary?.state ?? "unknown"}
         />
         <WorkspaceMetricCard
           detail={
@@ -1347,6 +1357,8 @@ function buildAttentionItems({
   connectorDegraded,
   providerState,
   alertCount,
+  operatorHotspotCount,
+  operatorBlockingHotspots,
   objectiveAttentionCount,
   leaseForegroundWaiters,
   leaseBackgroundWaiters,
@@ -1358,6 +1370,8 @@ function buildAttentionItems({
   connectorDegraded: number;
   providerState: string;
   alertCount: number;
+  operatorHotspotCount: number;
+  operatorBlockingHotspots: number;
   objectiveAttentionCount: number;
   leaseForegroundWaiters: number;
   leaseBackgroundWaiters: number;
@@ -1368,6 +1382,11 @@ function buildAttentionItems({
   if (failedSupportJobs > 0) items.push(`${failedSupportJobs} support bundle jobs failed.`);
   if (connectorDegraded > 0) items.push(`${connectorDegraded} connectors are degraded.`);
   if (alertCount > 0) items.push(`${alertCount} usage governance alerts are active.`);
+  if (operatorBlockingHotspots > 0) {
+    items.push(`${operatorBlockingHotspots} operator hotspots are blocking follow-up.`);
+  } else if (operatorHotspotCount > 0) {
+    items.push(`${operatorHotspotCount} operator hotspots need follow-up.`);
+  }
   if (leaseForegroundWaiters + leaseBackgroundWaiters > 0) {
     items.push(
       `${leaseForegroundWaiters + leaseBackgroundWaiters} provider lease waiters are queued.`,

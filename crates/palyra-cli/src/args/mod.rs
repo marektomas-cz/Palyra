@@ -323,10 +323,11 @@ const SYSTEM_AFTER_HELP: &str = "\
 Examples:
   palyra system heartbeat
   palyra system presence --json
+  palyra system insights --json
   palyra system event --limit 50
 
 Discoverability:
-  `system` is the top-level operator view over runtime heartbeat, subsystem presence, and recent journal events.";
+  `system` is the top-level operator view over runtime heartbeat, subsystem presence, operator insights, and recent journal events.";
 
 const SANDBOX_AFTER_HELP: &str = "\
 Examples:
@@ -623,7 +624,7 @@ pub enum Command {
         command: BrowserCommand,
     },
     #[command(
-        about = "Inspect runtime heartbeat, subsystem presence, and recent system events",
+        about = "Inspect runtime heartbeat, subsystem presence, operator insights, and recent system events",
         after_long_help = SYSTEM_AFTER_HELP
     )]
     System {

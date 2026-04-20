@@ -25,6 +25,10 @@ async fn run_system_async(command: SystemCommand) -> Result<()> {
             let payload = context.client.get_json_value("console/v1/system/presence").await?;
             emit_system_presence(&payload, output::preferred_json(json))
         }
+        SystemCommand::Insights { json } => {
+            let payload = context.client.get_json_value("console/v1/system/insights").await?;
+            emit_system_insights(&payload, output::preferred_json(json))
+        }
         SystemCommand::Event { command } => match command {
             SystemEventCommand::List { limit, json } => {
                 let payload =
@@ -245,6 +249,116 @@ fn emit_system_presence(payload: &Value, json_output: bool) -> Result<()> {
         println!(
             "system.presence.entry subsystem={} state={} detail={}",
             entry.subsystem, entry.state, entry.detail
+        );
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_system_insights(payload: &Value, json_output: bool) -> Result<()> {
+    if json_output {
+        return output::print_json_pretty(payload, "failed to encode system insights as JSON");
+    }
+
+    let summary = payload.get("summary").unwrap_or(&Value::Null);
+    let hotspots = payload.get("hotspots").and_then(Value::as_array).cloned().unwrap_or_default();
+    let provider = payload.get("provider_health").unwrap_or(&Value::Null);
+    let recall = payload.get("recall").unwrap_or(&Value::Null);
+    let compaction = payload.get("compaction").unwrap_or(&Value::Null);
+    let safety = payload.get("safety_boundary").unwrap_or(&Value::Null);
+    let plugins = payload.get("plugins").unwrap_or(&Value::Null);
+    let cron = payload.get("cron").unwrap_or(&Value::Null);
+    let reload = payload.get("reload").unwrap_or(&Value::Null);
+    println!(
+        "system.insights state={} severity={} generated_at_unix_ms={} hotspots={} blocking={} warnings={}",
+        summary.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+        summary.get("severity").and_then(Value::as_str).unwrap_or("unknown"),
+        payload
+            .get("generated_at_unix_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        summary.get("hotspot_count").and_then(Value::as_u64).unwrap_or(0),
+        summary.get("blocking_hotspots").and_then(Value::as_u64).unwrap_or(0),
+        summary.get("warning_hotspots").and_then(Value::as_u64).unwrap_or(0)
+    );
+    if let Some(recommendation) = summary.get("recommendation").and_then(Value::as_str) {
+        println!("system.insights.recommendation={recommendation}");
+    }
+    println!(
+        "system.insights.provider state={} auth_state={} error_rate_bps={} avg_latency_ms={} circuit_open={} cache_hit_rate_bps={}",
+        provider.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+        provider.get("auth_state").and_then(Value::as_str).unwrap_or("unknown"),
+        provider.get("error_rate_bps").and_then(Value::as_u64).unwrap_or(0),
+        provider.get("avg_latency_ms").and_then(Value::as_u64).unwrap_or(0),
+        provider.get("circuit_open").and_then(Value::as_bool).unwrap_or(false),
+        provider
+            .get("response_cache_hit_rate_bps")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+    println!(
+        "system.insights.recall state={} zero_hit_rate_bps={} auto_inject_avg_hits={:.2}",
+        recall.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+        recall.get("explicit_recall_zero_hit_rate_bps").and_then(Value::as_u64).unwrap_or(0),
+        recall.get("auto_inject_avg_hits").and_then(Value::as_f64).unwrap_or(0.0)
+    );
+    println!(
+        "system.insights.compaction state={} avg_reduction_bps={} avg_token_delta={}",
+        compaction.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+        compaction.get("avg_reduction_bps").and_then(Value::as_u64).unwrap_or(0),
+        compaction.get("avg_token_delta").and_then(Value::as_i64).unwrap_or_default()
+    );
+    println!(
+        "system.insights.safety state={} deny_rate_bps={} approvals={} denies={}",
+        safety.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+        safety.get("deny_rate_bps").and_then(Value::as_u64).unwrap_or(0),
+        safety.get("approval_required_decisions").and_then(Value::as_u64).unwrap_or(0),
+        safety.get("policy_enforced_denies").and_then(Value::as_u64).unwrap_or(0)
+    );
+    println!(
+        "system.insights.plugins state={} unhealthy_bindings={} typed_contract_failures={} config_failures={} discovery_failures={}",
+        plugins.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+        plugins
+            .get("unhealthy_bindings")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        plugins
+            .get("typed_contract_failures")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        plugins
+            .get("config_failures")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        plugins
+            .get("discovery_failures")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+    println!(
+        "system.insights.cron state={} success_rate_bps={} failed_runs={} tool_denies={}",
+        cron.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+        cron.get("success_rate_bps").and_then(Value::as_u64).unwrap_or(0),
+        cron.get("failed_runs").and_then(Value::as_u64).unwrap_or(0),
+        cron.get("total_tool_denies").and_then(Value::as_u64).unwrap_or(0)
+    );
+    println!(
+        "system.insights.reload state={} blocking_refs={} warning_refs={}",
+        reload.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+        reload.get("blocking_refs").and_then(Value::as_u64).unwrap_or(0),
+        reload.get("warning_refs").and_then(Value::as_u64).unwrap_or(0)
+    );
+    for hotspot in hotspots.iter().take(5) {
+        println!(
+            "system.insights.hotspot hotspot_id={} subsystem={} severity={} state={} summary={} action={}",
+            hotspot.get("hotspot_id").and_then(Value::as_str).unwrap_or("unknown"),
+            hotspot.get("subsystem").and_then(Value::as_str).unwrap_or("unknown"),
+            hotspot.get("severity").and_then(Value::as_str).unwrap_or("unknown"),
+            hotspot.get("state").and_then(Value::as_str).unwrap_or("unknown"),
+            hotspot.get("summary").and_then(Value::as_str).unwrap_or("none"),
+            hotspot
+                .get("recommended_action")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
         );
     }
     std::io::stdout().flush().context("stdout flush failed")

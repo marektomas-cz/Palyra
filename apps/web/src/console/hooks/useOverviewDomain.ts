@@ -8,6 +8,7 @@ import type {
   UsageInsightsEnvelope,
 } from "../../consoleApi";
 import { isJsonObject, toErrorMessage, toJsonObjectArray, type JsonObject } from "../shared";
+import { normalizeUsageInsightsEnvelope } from "../usageInsights";
 
 export type OverviewOnboardingFlow = "quickstart" | "manual" | "remote";
 
@@ -143,29 +144,6 @@ export function useOverviewDomain({ api, setError }: UseOverviewDomainArgs) {
     resetOverviewDomain,
   };
 }
-
-function normalizeUsageInsightsEnvelope(value: UsageInsightsEnvelope): UsageInsightsEnvelope {
-  return {
-    ...value,
-    timeline: Array.isArray(value.timeline) ? value.timeline : [],
-    routing: {
-      ...value.routing,
-      recent_decisions: Array.isArray(value.routing?.recent_decisions)
-        ? value.routing.recent_decisions
-        : [],
-    },
-    budgets: {
-      ...value.budgets,
-      policies: Array.isArray(value.budgets?.policies) ? value.budgets.policies : [],
-      evaluations: Array.isArray(value.budgets?.evaluations) ? value.budgets.evaluations : [],
-    },
-    alerts: Array.isArray(value.alerts) ? value.alerts : [],
-    model_mix: Array.isArray(value.model_mix) ? value.model_mix : [],
-    scope_mix: Array.isArray(value.scope_mix) ? value.scope_mix : [],
-    tool_mix: Array.isArray(value.tool_mix) ? value.tool_mix : [],
-  };
-}
-
 function firstRejectedReason(results: ReadonlyArray<PromiseSettledResult<unknown>>): unknown {
   for (const result of results) {
     if (result.status === "rejected") {
