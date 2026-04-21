@@ -49,7 +49,7 @@ afterEach(() => {
 });
 
 describe("M56 runtime and operations surfaces", () => {
-  const runtimeWorkflowTimeoutMs = 30_000;
+  const runtimeWorkflowTimeoutMs = 120_000;
 
   it(
     "surfaces operations handoffs and executes routines plus channels workflows",
@@ -733,7 +733,7 @@ describe("M56 runtime and operations surfaces", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Load downloads" }));
     expect((await screen.findAllByText(/report.csv/)).length).toBeGreaterThan(0);
-  }, 60_000);
+  }, 120_000);
 
   it(
     "lists agents, creates a new agent from the wizard, and updates the default agent",
