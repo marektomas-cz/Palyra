@@ -1947,6 +1947,46 @@ fn parse_memory_search() {
 }
 
 #[test]
+fn parse_memory_session_search() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "memory",
+        "session-search",
+        "cross session recall",
+        "--channel",
+        "cli",
+        "--top-k",
+        "6",
+        "--min-score",
+        "0.2",
+        "--window-before",
+        "2",
+        "--window-after",
+        "3",
+        "--max-windows-per-session",
+        "4",
+        "--include-archived",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Memory {
+            command: MemoryCommand::SessionSearch {
+                query: "cross session recall".to_owned(),
+                channel: Some("cli".to_owned()),
+                top_k: Some(6),
+                min_score: Some("0.2".to_owned()),
+                window_before: Some(2),
+                window_after: Some(3),
+                max_windows_per_session: Some(4),
+                include_archived: true,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_memory_status_and_index() {
     let status = Cli::parse_from(["palyra", "memory", "status", "--json"]);
     assert_eq!(status.command, Command::Memory { command: MemoryCommand::Status { json: true } });

@@ -24,14 +24,15 @@ use crate::journal::{
     OrchestratorUsageQuery, OrchestratorUsageRunRecord, OrchestratorUsageSessionRecord,
     OrchestratorUsageSummary, RetrievalBranchDiagnostics, SessionProjectContextStateCopyRequest,
     SessionProjectContextStateRecord, SessionProjectContextStateUpsertRequest,
-    WorkspaceBootstrapOutcome, WorkspaceBootstrapRequest, WorkspaceCheckpointCreateRequest,
-    WorkspaceCheckpointFilePayload, WorkspaceCheckpointFileRecord, WorkspaceCheckpointListFilter,
-    WorkspaceCheckpointRecord, WorkspaceCheckpointRestoreMarkRequest,
-    WorkspaceDocumentDeleteRequest, WorkspaceDocumentListFilter, WorkspaceDocumentMoveRequest,
-    WorkspaceDocumentRecord, WorkspaceDocumentVersionRecord, WorkspaceDocumentWriteRequest,
-    WorkspaceRestoreActivityFilter, WorkspaceRestoreActivitySummary,
-    WorkspaceRestoreReportCreateRequest, WorkspaceRestoreReportListFilter,
-    WorkspaceRestoreReportRecord, WorkspaceSearchHit, WorkspaceSearchRequest,
+    SessionSearchOutcome, SessionSearchRequest, WorkspaceBootstrapOutcome,
+    WorkspaceBootstrapRequest, WorkspaceCheckpointCreateRequest, WorkspaceCheckpointFilePayload,
+    WorkspaceCheckpointFileRecord, WorkspaceCheckpointListFilter, WorkspaceCheckpointRecord,
+    WorkspaceCheckpointRestoreMarkRequest, WorkspaceDocumentDeleteRequest,
+    WorkspaceDocumentListFilter, WorkspaceDocumentMoveRequest, WorkspaceDocumentRecord,
+    WorkspaceDocumentVersionRecord, WorkspaceDocumentWriteRequest, WorkspaceRestoreActivityFilter,
+    WorkspaceRestoreActivitySummary, WorkspaceRestoreReportCreateRequest,
+    WorkspaceRestoreReportListFilter, WorkspaceRestoreReportRecord, WorkspaceSearchHit,
+    WorkspaceSearchRequest,
 };
 use crate::provider_leases::{
     ProviderLeaseAcquireError, ProviderLeaseAcquireRequest, ProviderLeaseExecutionContext,
@@ -3945,6 +3946,29 @@ impl GatewayRuntimeState {
         })
         .await
         .map_err(|_| Status::internal("orchestrator transcript worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn search_orchestrator_session_windows_blocking(
+        &self,
+        request: &SessionSearchRequest,
+    ) -> Result<SessionSearchOutcome, Status> {
+        self.journal_store.search_orchestrator_session_windows(request).map_err(|error| {
+            map_orchestrator_store_error("search orchestrator session windows", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn search_orchestrator_session_windows(
+        self: &Arc<Self>,
+        request: SessionSearchRequest,
+    ) -> Result<SessionSearchOutcome, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.search_orchestrator_session_windows_blocking(&request)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator session search worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

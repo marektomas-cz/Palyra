@@ -86,6 +86,7 @@ type MemorySectionProps = {
     | "memorySearchAllQuery"
     | "setMemorySearchAllQuery"
     | "memorySearchAllResults"
+    | "memorySessionSearchResults"
     | "memoryRecallPreview"
     | "refreshMemoryStatus"
     | "refreshLearningQueue"
@@ -179,6 +180,13 @@ export function MemorySection({ app }: MemorySectionProps) {
   const unifiedMemoryHits = readObjectArray(unifiedGroups, "memory");
   const unifiedCounts =
     readObject(app.memorySearchAllResults ?? EMPTY_OBJECT, "counts") ?? EMPTY_OBJECT;
+  const sessionSearchGroups = readObjectArray(app.memorySessionSearchResults, "groups");
+  const sessionSearchDiagnostics =
+    readObject(app.memorySessionSearchResults ?? EMPTY_OBJECT, "diagnostics") ?? EMPTY_OBJECT;
+  const sessionSearchWindowCount = sessionSearchGroups.reduce(
+    (count, group) => count + readObjectArray(group, "windows").length,
+    0,
+  );
   const selectedDerivedArtifact = useMemo(
     () =>
       app.memoryDerivedArtifacts.find(
@@ -279,14 +287,15 @@ export function MemorySection({ app }: MemorySectionProps) {
             <WorkspaceStatusChip
               tone={
                 unifiedSessionHits.length + unifiedWorkspaceHits.length + unifiedMemoryHits.length >
-                0
+                  0 || sessionSearchWindowCount > 0
                   ? "success"
                   : "default"
               }
             >
               {readNumber(unifiedCounts, "sessions") ?? unifiedSessionHits.length}/
               {readNumber(unifiedCounts, "workspace") ?? unifiedWorkspaceHits.length}/
-              {readNumber(unifiedCounts, "memory") ?? unifiedMemoryHits.length} grouped
+              {readNumber(unifiedCounts, "memory") ?? unifiedMemoryHits.length} grouped ·{" "}
+              {sessionSearchWindowCount} windows
             </WorkspaceStatusChip>
           </>
         }
@@ -1707,7 +1716,63 @@ export function MemorySection({ app }: MemorySectionProps) {
                   <WorkspaceStatusChip tone={unifiedMemoryHits.length > 0 ? "warning" : "default"}>
                     Memory {readNumber(unifiedCounts, "memory") ?? unifiedMemoryHits.length}
                   </WorkspaceStatusChip>
+                  <WorkspaceStatusChip tone={sessionSearchWindowCount > 0 ? "success" : "default"}>
+                    Windows {sessionSearchWindowCount}
+                  </WorkspaceStatusChip>
+                  <WorkspaceStatusChip tone="default">
+                    Transcript branch {readNumber(sessionSearchDiagnostics, "total_latency_ms") ?? 0}
+                    ms
+                  </WorkspaceStatusChip>
                 </div>
+
+                <GroupedResultsSection
+                  emptyDescription="No bounded session windows were returned for this query."
+                  items={sessionSearchGroups}
+                  title="Session windows"
+                  renderItem={(item, index) => {
+                    const sessionRecord = readObject(item, "session") ?? EMPTY_OBJECT;
+                    const sessionId =
+                      readString(sessionRecord, "session_id") ?? `session-window-${index + 1}`;
+                    const windows = readObjectArray(item, "windows");
+                    const firstWindow = windows[0] ?? EMPTY_OBJECT;
+                    return (
+                      <article key={sessionId} className="chat-ops-card">
+                        <div className="chat-ops-card__copy">
+                          <strong>{readString(sessionRecord, "title") ?? sessionId}</strong>
+                          <span>
+                            {sessionId} · {windows.length} window
+                            {windows.length === 1 ? "" : "s"}
+                          </span>
+                          <p>{readString(firstWindow, "snippet") ?? "No window snippet returned."}</p>
+                          {windows.slice(0, 3).map((windowRecord, windowIndex) => {
+                            const matched = readObject(windowRecord, "matched") ?? EMPTY_OBJECT;
+                            return (
+                              <p
+                                key={
+                                  readString(windowRecord, "window_id") ??
+                                  `${sessionId}-window-${windowIndex}`
+                                }
+                                className="chat-muted"
+                              >
+                                {readString(matched, "event_type") ?? "event"} seq{" "}
+                                {readNumber(matched, "seq") ?? 0}:{" "}
+                                {readString(matched, "text") ?? "No matched text returned."}
+                              </p>
+                            );
+                          })}
+                        </div>
+                        <div className="chat-ops-card__actions">
+                          <WorkspaceStatusChip tone="success">
+                            {formatScore({ score: readNumber(item, "best_score") ?? 0 })}
+                          </WorkspaceStatusChip>
+                          <WorkspaceStatusChip tone="default">
+                            {formatUnixMs(readNumber(firstWindow, "match_created_at_unix_ms"))}
+                          </WorkspaceStatusChip>
+                        </div>
+                      </article>
+                    );
+                  }}
+                />
 
                 <GroupedResultsSection
                   emptyDescription="No session catalog matches were returned for this query."

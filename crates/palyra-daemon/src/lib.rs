@@ -858,6 +858,25 @@ struct ConsoleSearchAllQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConsoleSessionSearchQuery {
+    q: String,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    top_k: Option<usize>,
+    #[serde(default)]
+    min_score: Option<f64>,
+    #[serde(default)]
+    window_before: Option<usize>,
+    #[serde(default)]
+    window_after: Option<usize>,
+    #[serde(default)]
+    max_windows_per_session: Option<usize>,
+    #[serde(default)]
+    include_archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChannelLogsQuery {
     limit: Option<usize>,
 }

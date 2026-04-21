@@ -1,6 +1,6 @@
 use crate::gateway::current_unix_ms;
 use crate::gateway::ListOrchestratorSessionsRequest;
-use crate::journal::MemoryRetentionPolicy;
+use crate::journal::{MemoryRetentionPolicy, SessionSearchRequest};
 use crate::*;
 use crate::{
     application::learning::{apply_patch_learning_candidate, apply_preference_candidate},
@@ -1002,6 +1002,69 @@ pub(crate) async fn console_search_all_handler(
             "workspace": workspace_hits.len(),
             "memory": memory_hits.len(),
         },
+        "contract": contract_descriptor(),
+    })))
+}
+
+pub(crate) async fn console_session_search_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ConsoleSessionSearchQuery>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let search_query = query.q.trim();
+    if search_query.is_empty() {
+        return Err(runtime_status_response(tonic::Status::invalid_argument("q cannot be empty")));
+    }
+    let min_score = query.min_score.unwrap_or(0.0);
+    if !min_score.is_finite() || !(0.0..=1.0).contains(&min_score) {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "min_score must be in range 0.0..=1.0",
+        )));
+    }
+    let channel = query.channel.or(session.context.channel.clone());
+    let outcome = state
+        .runtime
+        .search_orchestrator_session_windows(SessionSearchRequest {
+            principal: session.context.principal.clone(),
+            device_id: session.context.device_id.clone(),
+            channel,
+            query: search_query.to_owned(),
+            top_k: query.top_k.unwrap_or(8).clamp(1, 24),
+            min_score,
+            window_before: query.window_before.unwrap_or(2).min(8),
+            window_after: query.window_after.unwrap_or(2).min(8),
+            max_windows_per_session: query.max_windows_per_session.unwrap_or(3).clamp(1, 8),
+            include_archived: query.include_archived.unwrap_or(false),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    if let Err(error) = state
+        .runtime
+        .record_console_event(
+            &session.context,
+            "memory.session_search",
+            json!({
+                "capability": "palyra.recall.session_search",
+                "query": search_query,
+                "group_count": outcome.groups.len(),
+                "window_count": outcome
+                    .groups
+                    .iter()
+                    .map(|group| group.windows.len())
+                    .sum::<usize>(),
+                "diagnostics": outcome.diagnostics.clone(),
+            }),
+        )
+        .await
+    {
+        warn!(error = %error, "failed to record session search console event");
+    }
+    Ok(Json(json!({
+        "capability": "palyra.recall.session_search",
+        "query": outcome.query,
+        "groups": outcome.groups,
+        "diagnostics": outcome.diagnostics,
         "contract": contract_descriptor(),
     })))
 }

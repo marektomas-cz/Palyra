@@ -905,6 +905,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/console/v1/memory/search-all", get(console::memory::console_search_all_handler))
         .route(
+            "/console/v1/memory/session-search",
+            get(console::memory::console_session_search_handler),
+        )
+        .route(
             "/console/v1/memory/recall/preview",
             post(console::memory::console_recall_preview_handler),
         )

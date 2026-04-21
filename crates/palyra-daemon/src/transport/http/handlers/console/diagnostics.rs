@@ -3068,6 +3068,7 @@ pub(crate) fn build_capability_catalog() -> Result<control_plane::CapabilityCata
                     "/console/v1/memory/search",
                     "/console/v1/memory/recall/preview",
                     "/console/v1/memory/search-all",
+                    "/console/v1/memory/session-search",
                     "/console/v1/memory/workspace/documents",
                     "/console/v1/memory/workspace/document",
                     "/console/v1/memory/workspace/document/move",

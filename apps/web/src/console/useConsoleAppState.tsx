@@ -441,6 +441,8 @@ export function useConsoleAppState() {
   const [memoryWorkspaceHits, setMemoryWorkspaceHits] = useState<JsonObject[]>([]);
   const [memorySearchAllQuery, setMemorySearchAllQuery] = useState("");
   const [memorySearchAllResults, setMemorySearchAllResults] = useState<JsonObject | null>(null);
+  const [memorySessionSearchResults, setMemorySessionSearchResults] =
+    useState<JsonObject | null>(null);
   const [memoryRecallPreview, setMemoryRecallPreview] = useState<JsonObject | null>(null);
   const [memoryDerivedArtifacts, setMemoryDerivedArtifacts] = useState<JsonObject[]>([]);
   const [memoryLearningBusy, setMemoryLearningBusy] = useState(false);
@@ -891,6 +893,7 @@ export function useConsoleAppState() {
     setMemoryWorkspaceHits([]);
     setMemorySearchAllQuery("");
     setMemorySearchAllResults(null);
+    setMemorySessionSearchResults(null);
     setMemoryRecallPreview(null);
     setMemoryDerivedArtifacts([]);
     setMemoryLearningBusy(false);
@@ -1575,8 +1578,12 @@ export function useConsoleAppState() {
       if (memoryChannel.trim().length > 0) {
         params.set("channel", memoryChannel.trim());
       }
-      const response = await api.searchAll(params);
+      const [response, sessionResponse] = await Promise.all([
+        api.searchAll(params),
+        api.searchSessionHistory(params),
+      ]);
       setMemorySearchAllResults(response as unknown as JsonObject);
+      setMemorySessionSearchResults(sessionResponse as unknown as JsonObject);
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -1848,6 +1855,7 @@ export function useConsoleAppState() {
     memorySearchAllQuery,
     setMemorySearchAllQuery,
     memorySearchAllResults,
+    memorySessionSearchResults,
     memoryRecallPreview,
     refreshMemoryStatus,
     refreshLearningQueue,

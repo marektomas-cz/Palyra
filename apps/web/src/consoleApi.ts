@@ -1825,6 +1825,50 @@ export interface UnifiedSearchEnvelope {
   contract: ContractDescriptor;
 }
 
+export interface SessionSearchEvent {
+  session_id: string;
+  run_id: string;
+  seq: number;
+  event_type: string;
+  created_at_unix_ms: number;
+  origin_kind: string;
+  origin_run_id?: string;
+  parent_run_id?: string;
+  text: string;
+  is_match: boolean;
+}
+
+export interface SessionSearchWindow {
+  window_id: string;
+  session_id: string;
+  run_id: string;
+  match_seq: number;
+  match_event_type: string;
+  match_created_at_unix_ms: number;
+  score: number;
+  snippet: string;
+  before: SessionSearchEvent[];
+  matched: SessionSearchEvent;
+  after: SessionSearchEvent[];
+  provenance: JsonValue;
+}
+
+export interface SessionSearchGroup {
+  session: JsonValue;
+  best_score: number;
+  match_count: number;
+  lineage: JsonValue;
+  windows: SessionSearchWindow[];
+}
+
+export interface SessionSearchEnvelope {
+  capability: "palyra.recall.session_search";
+  query: string;
+  groups: SessionSearchGroup[];
+  diagnostics: RetrievalBranchDiagnostics;
+  contract: ContractDescriptor;
+}
+
 export interface ChatStreamMetaLine {
   type: "meta";
   run_id: string;
@@ -6398,6 +6442,10 @@ export class ConsoleApiClient {
 
   async searchAll(params?: URLSearchParams): Promise<UnifiedSearchEnvelope> {
     return this.request(buildPathWithQuery("/console/v1/memory/search-all", params));
+  }
+
+  async searchSessionHistory(params?: URLSearchParams): Promise<SessionSearchEnvelope> {
+    return this.request(buildPathWithQuery("/console/v1/memory/session-search", params));
   }
 
   async purgeMemory(payload: {

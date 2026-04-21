@@ -112,6 +112,26 @@ pub enum MemoryCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(name = "session-search")]
+    SessionSearch {
+        query: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        top_k: Option<u32>,
+        #[arg(long)]
+        min_score: Option<String>,
+        #[arg(long)]
+        window_before: Option<u32>,
+        #[arg(long)]
+        window_after: Option<u32>,
+        #[arg(long)]
+        max_windows_per_session: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Learning {
         #[command(subcommand)]
         command: MemoryLearningCommand,

@@ -11,6 +11,7 @@ pub(crate) fn run_memory(command: MemoryCommand) -> Result<()> {
         | MemoryCommand::Workspace { .. }
         | MemoryCommand::Recall { .. }
         | MemoryCommand::SearchAll { .. }
+        | MemoryCommand::SessionSearch { .. }
         | MemoryCommand::Learning { .. } => runtime.block_on(run_memory_admin_async(command)),
         other => {
             let connection = root_context.resolve_grpc_connection(
@@ -233,6 +234,7 @@ pub(crate) async fn run_memory_async(
         | MemoryCommand::Workspace { .. }
         | MemoryCommand::Recall { .. }
         | MemoryCommand::SearchAll { .. }
+        | MemoryCommand::SessionSearch { .. }
         | MemoryCommand::Learning { .. } => {
             unreachable!("memory admin commands are handled by run_memory_admin_async")
         }
@@ -552,6 +554,48 @@ async fn run_memory_admin_async(command: MemoryCommand) -> Result<()> {
                 &payload,
                 output::preferred_json(json),
                 &["/groups"],
+            )
+        }
+        MemoryCommand::SessionSearch {
+            query,
+            channel,
+            top_k,
+            min_score,
+            window_before,
+            window_after,
+            max_windows_per_session,
+            include_archived,
+            json,
+        } => {
+            let min_score = parse_float_arg(
+                min_score,
+                "memory session-search --min-score",
+                0.0,
+                1.0,
+                Some(0.0),
+            )?;
+            let path = build_console_query_path(
+                "console/v1/memory/session-search",
+                vec![
+                    ("q", Some(query)),
+                    ("channel", channel),
+                    ("top_k", top_k.map(|value| value.to_string())),
+                    ("min_score", Some(min_score.to_string())),
+                    ("window_before", window_before.map(|value| value.to_string())),
+                    ("window_after", window_after.map(|value| value.to_string())),
+                    (
+                        "max_windows_per_session",
+                        max_windows_per_session.map(|value| value.to_string()),
+                    ),
+                    ("include_archived", include_archived.then(|| "true".to_owned())),
+                ],
+            );
+            let payload = context.client.get_json_value(path.as_str()).await?;
+            emit_admin_payload(
+                "memory.session_search",
+                &payload,
+                output::preferred_json(json),
+                &["/groups", "/diagnostics"],
             )
         }
         MemoryCommand::Learning { command } => match command {
