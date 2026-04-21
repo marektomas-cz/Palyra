@@ -892,14 +892,18 @@ pub(crate) async fn run_sessions_async(
                 let task =
                     payload.pointer("/task").context("background task payload is missing")?;
                 println!(
-                    "sessions.background.enqueue task_id={} kind={} state={} priority={} max_attempts={}",
+                    "sessions.background.enqueue task_id={} kind={} state={} priority={} max_attempts={} topology={} delegation={} limits={} diagnostic={}",
                     redacted_optional_identifier_for_output(
                         task.pointer("/task_id").and_then(Value::as_str)
                     ),
                     render_auxiliary_task_kind(task.pointer("/task_kind").and_then(Value::as_str)),
                     render_auxiliary_task_state(task.pointer("/state").and_then(Value::as_str)),
                     task.pointer("/priority").and_then(Value::as_i64).unwrap_or_default(),
-                    task.pointer("/max_attempts").and_then(Value::as_u64).unwrap_or_default()
+                    task.pointer("/max_attempts").and_then(Value::as_u64).unwrap_or_default(),
+                    render_background_task_topology(task),
+                    render_background_task_delegation(task),
+                    render_background_task_limits(task),
+                    render_background_task_diagnostic(task, None)
                 );
             }
         }
@@ -930,16 +934,17 @@ pub(crate) async fn run_sessions_async(
                 );
                 for task in tasks {
                     println!(
-                        "task task_id={} kind={} state={} priority={} run_id={} created_at_unix_ms={}",
+                        "task task_id={} kind={} state={} priority={} topology={} delegation={} limits={} diagnostic={} created_at_unix_ms={}",
                         redacted_optional_identifier_for_output(
                             task.pointer("/task_id").and_then(Value::as_str)
                         ),
                         render_auxiliary_task_kind(task.pointer("/task_kind").and_then(Value::as_str)),
                         render_auxiliary_task_state(task.pointer("/state").and_then(Value::as_str)),
                         task.pointer("/priority").and_then(Value::as_i64).unwrap_or_default(),
-                        redacted_optional_identifier_for_output(
-                            task.pointer("/target_run_id").and_then(Value::as_str)
-                        ),
+                        render_background_task_topology(task),
+                        render_background_task_delegation(task),
+                        render_background_task_limits(task),
+                        render_background_task_diagnostic(task, None),
                         task.pointer("/created_at_unix_ms")
                             .and_then(Value::as_i64)
                             .unwrap_or_default()
@@ -961,14 +966,18 @@ pub(crate) async fn run_sessions_async(
             } else {
                 let task =
                     payload.pointer("/task").context("background task payload is missing")?;
+                let run = payload.pointer("/run");
                 println!(
-                    "sessions.background.show task_id={} kind={} state={} attempt_count={} max_attempts={} run_id={}",
+                    "sessions.background.show task_id={} kind={} state={} attempt_count={} max_attempts={} topology={} delegation={} limits={} diagnostic={}",
                     redacted_optional_identifier_for_output(task.pointer("/task_id").and_then(Value::as_str)),
                     render_auxiliary_task_kind(task.pointer("/task_kind").and_then(Value::as_str)),
                     render_auxiliary_task_state(task.pointer("/state").and_then(Value::as_str)),
                     task.pointer("/attempt_count").and_then(Value::as_u64).unwrap_or_default(),
                     task.pointer("/max_attempts").and_then(Value::as_u64).unwrap_or_default(),
-                    redacted_optional_identifier_for_output(task.pointer("/target_run_id").and_then(Value::as_str))
+                    render_background_task_topology(task),
+                    render_background_task_delegation(task),
+                    render_background_task_limits(task),
+                    render_background_task_diagnostic(task, run)
                 );
             }
         }
@@ -1243,6 +1252,80 @@ fn render_auxiliary_task_state(value: Option<&str>) -> String {
             .unwrap_or_else(|| raw.to_owned()),
         None => "unknown".to_owned(),
     }
+}
+
+fn render_background_task_topology(task: &Value) -> String {
+    format!(
+        "parent={} child={} session={}",
+        redacted_optional_identifier_for_output(
+            task.pointer("/parent_run_id").and_then(Value::as_str)
+        ),
+        redacted_optional_identifier_for_output(
+            task.pointer("/target_run_id").and_then(Value::as_str)
+        ),
+        redacted_optional_identifier_for_output(
+            task.pointer("/session_id").and_then(Value::as_str)
+        )
+    )
+}
+
+fn render_background_task_delegation(task: &Value) -> String {
+    let Some(delegation) = task.pointer("/delegation") else {
+        return "none".to_owned();
+    };
+    format!(
+        "profile={} mode={} group={}",
+        delegation.pointer("/profile_id").and_then(Value::as_str).unwrap_or("unknown"),
+        delegation.pointer("/execution_mode").and_then(Value::as_str).unwrap_or("unknown"),
+        delegation.pointer("/group_id").and_then(Value::as_str).unwrap_or("unknown")
+    )
+}
+
+fn render_background_task_limits(task: &Value) -> String {
+    let budget_tokens = task.pointer("/budget_tokens").and_then(Value::as_u64).unwrap_or_default();
+    let Some(limits) = task.pointer("/delegation/runtime_limits") else {
+        return format!("budget_tokens={budget_tokens}");
+    };
+    let budget_override = limits
+        .pointer("/child_budget_override")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    format!(
+        "budget_tokens={} max_concurrent_children={} max_children_per_parent={} max_parallel_groups={} child_timeout_ms={} child_budget_override={}",
+        budget_tokens,
+        limits.pointer("/max_concurrent_children").and_then(Value::as_u64).unwrap_or_default(),
+        limits.pointer("/max_children_per_parent").and_then(Value::as_u64).unwrap_or_default(),
+        limits.pointer("/max_parallel_groups").and_then(Value::as_u64).unwrap_or_default(),
+        limits.pointer("/child_timeout_ms").and_then(Value::as_u64).unwrap_or_default(),
+        budget_override
+    )
+}
+
+fn render_background_task_diagnostic(task: &Value, run: Option<&Value>) -> String {
+    if let Some(result) = parse_json_string(task.pointer("/result_json").and_then(Value::as_str)) {
+        if result.pointer("/status").and_then(Value::as_str) == Some("waiting") {
+            return format!(
+                "waiting:{}",
+                result.pointer("/reason").and_then(Value::as_str).unwrap_or("unknown")
+            );
+        }
+    }
+    if let Some(failure_category) = run
+        .and_then(|value| value.pointer("/merge_result/failure_category"))
+        .and_then(Value::as_str)
+    {
+        let total_tokens = run
+            .and_then(|value| value.pointer("/merge_result/usage_summary/total_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        return format!("merge_failure={failure_category} merge_tokens={total_tokens}");
+    }
+    task.pointer("/last_error")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("error={value}"))
+        .unwrap_or_else(|| "none".to_owned())
 }
 
 fn json_required_string(payload: &Value, pointer: &str) -> Result<String> {

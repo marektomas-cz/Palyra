@@ -84,6 +84,9 @@ pub(crate) async fn console_diagnostics_handler(
     };
     let objectives_payload =
         collect_console_objectives_diagnostics(&state, session.context.principal.as_str())?;
+    let delegation_payload = collect_console_delegation_diagnostics(&state, &session.context)
+        .await
+        .map_err(runtime_status_response)?;
     let deployment_payload = collect_console_deployment_diagnostics(&state);
     let execution_backends_payload =
         collect_console_execution_backend_diagnostics(&state).map_err(runtime_status_response)?;
@@ -139,6 +142,7 @@ pub(crate) async fn console_diagnostics_handler(
         "webhooks": webhook_payload,
         "media": media_payload,
         "objectives": objectives_payload,
+        "delegation": delegation_payload,
         "access": {
             "feature_flags": access_snapshot.feature_flags,
             "migration": access_snapshot.migration,
@@ -200,6 +204,183 @@ pub(crate) async fn console_diagnostics_handler(
             }
         },
     })))
+}
+
+async fn collect_console_delegation_diagnostics(
+    state: &AppState,
+    context: &crate::gateway::RequestContext,
+) -> Result<Value, tonic::Status> {
+    let tasks = state
+        .runtime
+        .list_orchestrator_background_tasks(crate::journal::OrchestratorBackgroundTaskListFilter {
+            owner_principal: Some(context.principal.clone()),
+            device_id: None,
+            channel: None,
+            session_id: None,
+            include_completed: false,
+            limit: 256,
+        })
+        .await?;
+    let delegated_tasks = tasks.iter().filter(|task| task.delegation.is_some()).collect::<Vec<_>>();
+    let mut parent_groups =
+        std::collections::BTreeMap::<String, DelegationParentDiagnostics>::new();
+    let mut recent_children = Vec::new();
+    let mut running_children = 0_usize;
+    let mut queued_children = 0_usize;
+    let mut waiting_children = 0_usize;
+    let mut failed_children = 0_usize;
+
+    for task in delegated_tasks.iter() {
+        match task.state.as_str() {
+            "running" | "cancel_requested" => running_children += 1,
+            "queued" => queued_children += 1,
+            "failed" => failed_children += 1,
+            _ => {}
+        }
+        let waiting_reason = delegation_waiting_reason(task);
+        if waiting_reason.is_some() {
+            waiting_children += 1;
+        }
+        if let (Some(parent_run_id), Some(delegation)) =
+            (task.parent_run_id.as_deref(), task.delegation.as_ref())
+        {
+            let group = parent_groups.entry(parent_run_id.to_owned()).or_insert_with(|| {
+                DelegationParentDiagnostics {
+                    parent_run_id: parent_run_id.to_owned(),
+                    child_count: 0,
+                    running_children: 0,
+                    queued_children: 0,
+                    waiting_children: 0,
+                    failed_children: 0,
+                    active_parallel_groups: Vec::new(),
+                    max_concurrent_children: delegation.runtime_limits.max_concurrent_children,
+                    max_children_per_parent: delegation.runtime_limits.max_children_per_parent,
+                    max_parallel_groups: delegation.runtime_limits.max_parallel_groups,
+                    child_timeout_ms: delegation.runtime_limits.child_timeout_ms,
+                }
+            });
+            group.child_count += 1;
+            group.max_concurrent_children = group
+                .max_concurrent_children
+                .min(delegation.runtime_limits.max_concurrent_children);
+            group.max_children_per_parent = group
+                .max_children_per_parent
+                .min(delegation.runtime_limits.max_children_per_parent);
+            group.max_parallel_groups =
+                group.max_parallel_groups.min(delegation.runtime_limits.max_parallel_groups);
+            group.child_timeout_ms =
+                group.child_timeout_ms.min(delegation.runtime_limits.child_timeout_ms);
+            match task.state.as_str() {
+                "running" | "cancel_requested" => {
+                    group.running_children += 1;
+                    if delegation.execution_mode
+                        == crate::delegation::DelegationExecutionMode::Parallel
+                        && !group
+                            .active_parallel_groups
+                            .iter()
+                            .any(|value| value == &delegation.group_id)
+                    {
+                        group.active_parallel_groups.push(delegation.group_id.clone());
+                    }
+                }
+                "queued" => group.queued_children += 1,
+                "failed" => group.failed_children += 1,
+                _ => {}
+            }
+            if waiting_reason.is_some() {
+                group.waiting_children += 1;
+            }
+        }
+        if recent_children.len() < 24 {
+            let delegation = task.delegation.as_ref().expect("filtered delegated task");
+            recent_children.push(json!({
+                "task_id": task.task_id,
+                "session_id": task.session_id,
+                "parent_run_id": task.parent_run_id,
+                "child_run_id": task.target_run_id,
+                "state": task.state,
+                "task_kind": task.task_kind,
+                "profile_id": delegation.profile_id,
+                "display_name": delegation.display_name,
+                "execution_mode": delegation.execution_mode,
+                "group_id": delegation.group_id,
+                "budget_tokens": task.budget_tokens,
+                "runtime_limits": delegation.runtime_limits,
+                "waiting_reason": waiting_reason,
+                "last_error": task.last_error.as_deref().map(|value| truncate_diagnostic_text(value, 240)),
+                "created_at_unix_ms": task.created_at_unix_ms,
+                "started_at_unix_ms": task.started_at_unix_ms,
+                "updated_at_unix_ms": task.updated_at_unix_ms,
+            }));
+        }
+    }
+
+    let parents = parent_groups
+        .into_values()
+        .map(|group| {
+            json!({
+                "parent_run_id": group.parent_run_id,
+                "child_count": group.child_count,
+                "running_children": group.running_children,
+                "queued_children": group.queued_children,
+                "waiting_children": group.waiting_children,
+                "failed_children": group.failed_children,
+                "active_parallel_groups": group.active_parallel_groups,
+                "active_parallel_group_count": group.active_parallel_groups.len(),
+                "max_concurrent_children": group.max_concurrent_children,
+                "max_children_per_parent": group.max_children_per_parent,
+                "max_parallel_groups": group.max_parallel_groups,
+                "child_timeout_ms": group.child_timeout_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "active_child_count": delegated_tasks.len(),
+        "running_children": running_children,
+        "queued_children": queued_children,
+        "waiting_children": waiting_children,
+        "failed_children": failed_children,
+        "parent_count": parents.len(),
+        "parents": parents,
+        "recent_children": recent_children,
+        "catalog": crate::delegation::built_in_delegation_catalog(),
+    }))
+}
+
+struct DelegationParentDiagnostics {
+    parent_run_id: String,
+    child_count: usize,
+    running_children: usize,
+    queued_children: usize,
+    waiting_children: usize,
+    failed_children: usize,
+    active_parallel_groups: Vec<String>,
+    max_concurrent_children: u64,
+    max_children_per_parent: u64,
+    max_parallel_groups: u64,
+    child_timeout_ms: u64,
+}
+
+fn delegation_waiting_reason(
+    task: &crate::journal::OrchestratorBackgroundTaskRecord,
+) -> Option<String> {
+    task.result_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| {
+            (value.get("status").and_then(Value::as_str) == Some("waiting")).then(|| {
+                value.get("reason").and_then(Value::as_str).unwrap_or("waiting").to_owned()
+            })
+        })
+}
+
+fn truncate_diagnostic_text(value: &str, max_chars: usize) -> String {
+    let mut truncated = value.trim().chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 fn collect_console_execution_backend_diagnostics(state: &AppState) -> Result<Value, tonic::Status> {

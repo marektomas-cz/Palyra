@@ -890,6 +890,7 @@ export function ChatInspectorColumn({
           ) : (
             [...backgroundTasks].reverse().map((task) => {
               const targetRunId = task.target_run_id;
+              const taskDiagnostic = describeBackgroundTaskDiagnostic(task);
               return (
                 <article key={task.task_id} className="chat-ops-card">
                   <div className="chat-ops-card__copy">
@@ -902,6 +903,13 @@ export function ChatInspectorColumn({
                       {" · "}
                       {task.attempt_count}/{task.max_attempts} attempts
                     </span>
+                    {task.delegation !== undefined ? (
+                      <span>{describeDelegationTopology(task)}</span>
+                    ) : null}
+                    {task.delegation !== undefined ? (
+                      <span>{describeDelegationLimits(task)}</span>
+                    ) : null}
+                    {taskDiagnostic !== null ? <span>{taskDiagnostic}</span> : null}
                     <p>{task.input_text ?? task.last_error ?? "No task text or error recorded."}</p>
                   </div>
                   <div className="chat-ops-card__actions">
@@ -1088,6 +1096,54 @@ export function ChatInspectorColumn({
 
 function formatCountLabel(count: number, singularLabel: string): string {
   return `${count} ${singularLabel}${count === 1 ? "" : "s"}`;
+}
+
+function describeDelegationTopology(task: ChatBackgroundTaskRecord): string {
+  const parent = task.parent_run_id !== undefined ? shortId(task.parent_run_id) : "none";
+  const child = task.target_run_id !== undefined ? shortId(task.target_run_id) : "pending";
+  const group = task.delegation?.group_id ?? "n/a";
+  return `parent ${parent} · child ${child} · group ${group}`;
+}
+
+function describeDelegationLimits(task: ChatBackgroundTaskRecord): string {
+  const limits = task.delegation?.runtime_limits;
+  if (limits === undefined) {
+    return `budget ${formatApproxTokens(task.budget_tokens)}`;
+  }
+  const budget =
+    limits.child_budget_override !== undefined
+      ? ` · override ${formatApproxTokens(limits.child_budget_override)}`
+      : "";
+  return `${limits.max_concurrent_children} concurrent · ${limits.max_parallel_groups} groups · timeout ${limits.child_timeout_ms} ms · budget ${formatApproxTokens(task.budget_tokens)}${budget}`;
+}
+
+function describeBackgroundTaskDiagnostic(task: ChatBackgroundTaskRecord): string | null {
+  const result = parseBackgroundTaskResult(task.result_json);
+  const waitingReason =
+    result !== null && result.status === "waiting" && typeof result.reason === "string"
+      ? result.reason
+      : null;
+  if (waitingReason !== null) {
+    return `waiting: ${waitingReason}`;
+  }
+  if (task.last_error !== undefined && task.last_error.trim().length > 0) {
+    return task.last_error;
+  }
+  return null;
+}
+
+function parseBackgroundTaskResult(value: string | undefined): Record<string, unknown> | null {
+  if (value === undefined || value.trim().length === 0) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function extractBrowserSessionIds(runTape: ChatRunTapeSnapshot | null): string[] {

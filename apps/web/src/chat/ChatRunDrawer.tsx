@@ -173,8 +173,28 @@ export function ChatRunDrawer({
                         value: runStatus.delegation?.execution_mode ?? "n/a",
                       },
                       {
+                        label: "Delegation group",
+                        value: runStatus.delegation?.group_id ?? "n/a",
+                      },
+                      {
+                        label: "Child limits",
+                        value: formatDelegationRuntimeLimits(runStatus),
+                      },
+                      {
                         label: "Merge strategy",
                         value: runStatus.merge_result?.strategy ?? "n/a",
+                      },
+                      {
+                        label: "Merge failure",
+                        value: runStatus.merge_result?.failure_category ?? "none",
+                      },
+                      {
+                        label: "Merge usage",
+                        value: formatMergeUsage(runStatus),
+                      },
+                      {
+                        label: "Approval path",
+                        value: formatMergeApprovals(runStatus),
                       },
                       { label: "Prompt tokens", value: runStatus.prompt_tokens },
                       { label: "Completion tokens", value: runStatus.completion_tokens },
@@ -265,6 +285,12 @@ export function ChatRunDrawer({
                           {row.run.parent_run_id !== undefined
                             ? ` · parent ${shortId(row.run.parent_run_id)}`
                             : ""}
+                          {row.run.delegation !== undefined
+                            ? ` · group ${row.run.delegation.group_id}`
+                            : ""}
+                          {row.run.merge_result?.failure_category !== undefined
+                            ? ` · ${row.run.merge_result.failure_category}`
+                            : ""}
                         </p>
                       </article>
                     ))}
@@ -327,6 +353,44 @@ export function ChatRunDrawer({
       )}
     </aside>
   );
+}
+
+function formatDelegationRuntimeLimits(run: ChatRunStatusRecord): string {
+  const limits = run.delegation?.runtime_limits;
+  if (limits === undefined) {
+    return "n/a";
+  }
+  const budget =
+    limits.child_budget_override !== undefined
+      ? ` · override ${limits.child_budget_override.toLocaleString()} tokens`
+      : "";
+  return `${limits.max_concurrent_children} concurrent · ${limits.max_parallel_groups} groups · ${limits.child_timeout_ms} ms timeout${budget}`;
+}
+
+function formatMergeUsage(run: ChatRunStatusRecord): string {
+  const usage = run.merge_result?.usage_summary;
+  if (usage === undefined) {
+    return "n/a";
+  }
+  const duration =
+    usage.duration_ms !== undefined ? ` · ${usage.duration_ms.toLocaleString()} ms` : "";
+  return `${usage.total_tokens.toLocaleString()} tokens${duration}`;
+}
+
+function formatMergeApprovals(run: ChatRunStatusRecord): string {
+  const approvals = run.merge_result?.approval_summary;
+  if (approvals === undefined) {
+    return "n/a";
+  }
+  if (!approvals.approval_required && approvals.approval_events === 0) {
+    return "not required";
+  }
+  const state = approvals.approval_denied
+    ? "denied"
+    : approvals.approval_pending
+      ? "pending"
+      : "resolved";
+  return `${state} · ${approvals.approval_events} event(s)`;
 }
 
 function buildLineageRows(

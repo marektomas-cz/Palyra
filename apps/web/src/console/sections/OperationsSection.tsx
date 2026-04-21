@@ -66,6 +66,9 @@ export function OperationsSection({ app }: OperationsSectionProps) {
   const browser = readObject(observability ?? {}, "browser");
   const doctorRecovery = readObject(observability ?? {}, "doctor_recovery");
   const runtimePreview = readObject(observability ?? {}, "runtime_preview");
+  const delegation = readObject(diagnostics ?? {}, "delegation");
+  const delegationParents = readJsonObjectArray(delegation?.parents);
+  const delegationChildren = readJsonObjectArray(delegation?.recent_children);
   const previewMetrics = readObject(runtimePreview ?? {}, "metrics") ?? {};
   const previewGuardrails = readObject(runtimePreview ?? {}, "guardrails");
   const runtimePreviewCatalog = readJsonObjectArray(runtimePreview?.catalog);
@@ -628,6 +631,85 @@ export function OperationsSection({ app }: OperationsSectionProps) {
           </WorkspaceSectionCard>
 
           <WorkspaceSectionCard
+            title="Delegated children"
+            description="Parent/child topology, scheduler backpressure, and child runtime limits stay visible without opening each run tape."
+          >
+            {delegation === null ? (
+              <WorkspaceEmptyState
+                compact
+                title="No delegation snapshot loaded"
+                description="Refresh diagnostics to load delegated child topology."
+              />
+            ) : (
+              <div className="workspace-stack">
+                <WorkspaceTable
+                  ariaLabel="Delegation summary"
+                  columns={["Metric", "Value", "Detail"]}
+                >
+                  <tr>
+                    <td>Active children</td>
+                    <td>{readNumber(delegation, "active_child_count") ?? 0}</td>
+                    <td>
+                      {readNumber(delegation, "running_children") ?? 0} running ·{" "}
+                      {readNumber(delegation, "queued_children") ?? 0} queued ·{" "}
+                      {readNumber(delegation, "waiting_children") ?? 0} waiting
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Parents</td>
+                    <td>{readNumber(delegation, "parent_count") ?? delegationParents.length}</td>
+                    <td>{readNumber(delegation, "failed_children") ?? 0} failed children</td>
+                  </tr>
+                </WorkspaceTable>
+                {delegationParents.length > 0 ? (
+                  <WorkspaceTable
+                    ariaLabel="Delegation parents"
+                    columns={["Parent run", "Children", "Limits"]}
+                  >
+                    {delegationParents.slice(0, 8).map((parent, index) => (
+                      <tr key={`${readString(parent, "parent_run_id") ?? "parent"}-${index}`}>
+                        <td>{shortDiagnosticId(readString(parent, "parent_run_id"))}</td>
+                        <td>
+                          {readNumber(parent, "running_children") ?? 0} running ·{" "}
+                          {readNumber(parent, "queued_children") ?? 0} queued ·{" "}
+                          {readNumber(parent, "waiting_children") ?? 0} waiting
+                        </td>
+                        <td>
+                          max {readNumber(parent, "max_concurrent_children") ?? 0} concurrent ·{" "}
+                          {readNumber(parent, "active_parallel_group_count") ?? 0}/
+                          {readNumber(parent, "max_parallel_groups") ?? 0} groups · timeout{" "}
+                          {readNumber(parent, "child_timeout_ms") ?? 0} ms
+                        </td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
+                ) : null}
+                {delegationChildren.length > 0 ? (
+                  <WorkspaceTable
+                    ariaLabel="Delegation recent children"
+                    columns={["Child", "State", "Diagnostics"]}
+                  >
+                    {delegationChildren.slice(0, 8).map((child, index) => (
+                      <tr key={`${readString(child, "task_id") ?? "child"}-${index}`}>
+                        <td>
+                          {shortDiagnosticId(readString(child, "child_run_id"))} ·{" "}
+                          {readString(child, "display_name") ?? readString(child, "profile_id") ?? "profile"}
+                        </td>
+                        <td>{readString(child, "state") ?? "unknown"}</td>
+                        <td>
+                          {readString(child, "waiting_reason") ??
+                            readString(child, "last_error") ??
+                            `group ${readString(child, "group_id") ?? "n/a"}`}
+                        </td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
+                ) : null}
+              </div>
+            )}
+          </WorkspaceSectionCard>
+
+          <WorkspaceSectionCard
             title="Learning workload"
             description="Reflection stays visible as a separate background workload so operators can distinguish learning activity from user-facing runs."
           >
@@ -890,6 +972,13 @@ function formatAuditEventName(event: JsonObject): string {
     mapAuditKind(readNumber(event, "kind")) ??
     "unknown"
   );
+}
+
+function shortDiagnosticId(value: string | null): string {
+  if (value === null || value.length === 0) {
+    return "n/a";
+  }
+  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
 }
 
 function formatAuditSummary(event: JsonObject): string {

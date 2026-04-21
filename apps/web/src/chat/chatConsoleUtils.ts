@@ -120,8 +120,54 @@ export function buildDetailFromBackgroundTask(
         result_json:
           task.result_json === undefined ? undefined : safeParseJsonString(task.result_json),
       } as unknown as JsonValue,
+      delegation_topology: buildBackgroundTaskTopology(task) as unknown as JsonValue,
+      delegation_diagnostics: buildBackgroundTaskDiagnostics(task, run) as unknown as JsonValue,
       run: run as unknown as JsonValue,
     },
+  };
+}
+
+function buildBackgroundTaskTopology(task: ChatBackgroundTaskRecord): Record<string, unknown> {
+  return {
+    task_id: task.task_id,
+    parent_run_id: task.parent_run_id,
+    child_run_id: task.target_run_id,
+    session_id: task.session_id,
+    profile_id: task.delegation?.profile_id,
+    display_name: task.delegation?.display_name,
+    execution_mode: task.delegation?.execution_mode,
+    group_id: task.delegation?.group_id,
+    parent_short_id: task.parent_run_id === undefined ? undefined : shortId(task.parent_run_id),
+    child_short_id: task.target_run_id === undefined ? undefined : shortId(task.target_run_id),
+  };
+}
+
+function buildBackgroundTaskDiagnostics(
+  task: ChatBackgroundTaskRecord,
+  run?: ChatRunStatusRecord,
+): Record<string, unknown> {
+  const result =
+    task.result_json === undefined ? undefined : safeParseJsonString(task.result_json);
+  const resultObject =
+    result !== undefined && result !== null && typeof result === "object" && !Array.isArray(result)
+      ? (result as Record<string, unknown>)
+      : undefined;
+  return {
+    state: task.state,
+    runtime_limits: task.delegation?.runtime_limits,
+    budget_tokens: task.budget_tokens,
+    attempts: {
+      attempt_count: task.attempt_count,
+      max_attempts: task.max_attempts,
+    },
+    waiting_reason:
+      resultObject?.status === "waiting" && typeof resultObject.reason === "string"
+        ? resultObject.reason
+        : undefined,
+    failure_category: run?.merge_result?.failure_category,
+    approval_summary: run?.merge_result?.approval_summary,
+    usage_summary: run?.merge_result?.usage_summary,
+    last_error: task.last_error,
   };
 }
 
