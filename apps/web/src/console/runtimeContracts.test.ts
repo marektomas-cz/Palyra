@@ -18,6 +18,11 @@ describe("runtimeContracts", () => {
     expect(normalizeQueueMode("steer_backlog")).toBe("steer_backlog");
     expect(normalizeQueueDecision("merge")).toBe("merge");
     expect(normalizePruningPolicyClass("balanced")).toBe("balanced");
+    expect(normalizeAuxiliaryTaskKind("summary")).toBe("summary");
+    expect(normalizeAuxiliaryTaskKind("recall_search")).toBe("recall_search");
+    expect(normalizeAuxiliaryTaskKind("classification")).toBe("classification");
+    expect(normalizeAuxiliaryTaskKind("extraction")).toBe("extraction");
+    expect(normalizeAuxiliaryTaskKind("vision")).toBe("vision");
     expect(normalizeAuxiliaryTaskKind("post_run_reflection")).toBe("post_run_reflection");
     expect(normalizeAuxiliaryTaskState("cancel_requested")).toBe("cancel_requested");
     expect(normalizeQueuedInputState("delivery_failed")).toBe("delivery_failed");
@@ -31,6 +36,11 @@ describe("runtimeContracts", () => {
     expect(normalizeQueueMode("follow_up")).toBe("followup");
     expect(normalizeQueueDecision("coalesce")).toBe("merge");
     expect(normalizePruningPolicyClass("off")).toBe("disabled");
+    expect(normalizeAuxiliaryTaskKind("auxiliary_summary")).toBe("summary");
+    expect(normalizeAuxiliaryTaskKind("auxiliary_recall")).toBe("recall_search");
+    expect(normalizeAuxiliaryTaskKind("auxiliary_classification")).toBe("classification");
+    expect(normalizeAuxiliaryTaskKind("auxiliary_extraction")).toBe("extraction");
+    expect(normalizeAuxiliaryTaskKind("auxiliary_vision")).toBe("vision");
     expect(normalizeAuxiliaryTaskKind("reflection")).toBe("post_run_reflection");
     expect(normalizeAuxiliaryTaskState("pending")).toBe("queued");
     expect(normalizeQueuedInputState("delivered")).toBe("forwarded");

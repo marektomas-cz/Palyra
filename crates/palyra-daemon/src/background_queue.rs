@@ -11,13 +11,15 @@ use ulid::Ulid;
 
 use crate::{
     application::learning::{process_post_run_reflection_task, REFLECTION_TASK_KIND},
+    auxiliary_executor::{execute_auxiliary_task, AuxiliaryExecutionRequest, AuxiliaryTaskType},
     delegation::{
         DelegationExecutionMode, DelegationMergeProvenanceRecord, DelegationMergeResult,
         DelegationMergeStrategy, DelegationSnapshot,
     },
     gateway::{
         proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
-        GatewayAuthConfig, GatewayRuntimeState, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
+        GatewayAuthConfig, GatewayRuntimeState, RequestContext, HEADER_CHANNEL, HEADER_DEVICE_ID,
+        HEADER_PRINCIPAL,
     },
     journal::{
         OrchestratorBackgroundTaskRecord, OrchestratorBackgroundTaskUpdateRequest,
@@ -318,6 +320,11 @@ async fn dispatch_background_task(
         return Ok(());
     }
 
+    if let Some(task_type) = AuxiliaryTaskType::from_task_kind_str(task.task_kind.as_str()) {
+        dispatch_auxiliary_executor_task(runtime, task, task_type, started_at_unix_ms).await?;
+        return Ok(());
+    }
+
     let run_id = Ulid::new().to_string();
     runtime
         .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
@@ -371,6 +378,112 @@ async fn dispatch_background_task(
                 WorkHeartbeatKind::BackgroundTask,
                 task.task_id.as_str(),
             );
+        }
+    });
+    Ok(())
+}
+
+async fn dispatch_auxiliary_executor_task(
+    runtime: &Arc<GatewayRuntimeState>,
+    task: &OrchestratorBackgroundTaskRecord,
+    task_type: AuxiliaryTaskType,
+    started_at_unix_ms: i64,
+) -> Result<(), Status> {
+    runtime
+        .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
+            task_id: task.task_id.clone(),
+            state: Some(AuxiliaryTaskState::Running.as_str().to_owned()),
+            target_run_id: Some(None),
+            increment_attempt_count: true,
+            last_error: Some(None),
+            result_json: Some(None),
+            started_at_unix_ms: Some(Some(started_at_unix_ms)),
+            completed_at_unix_ms: Some(None),
+        })
+        .await?;
+
+    let runtime = Arc::clone(runtime);
+    let task = task.clone();
+    tokio::spawn(async move {
+        let parameter_delta_json = extract_parameter_delta_value(task.payload_json.as_deref())
+            .ok()
+            .flatten()
+            .map(|value| value.to_string());
+        let context = RequestContext {
+            principal: task.owner_principal.clone(),
+            device_id: task.device_id.clone(),
+            channel: task.channel.clone(),
+        };
+        let input_text = task
+            .input_text
+            .clone()
+            .unwrap_or_else(|| format!("Auxiliary task {} ({})", task.task_id, task.task_kind));
+        match execute_auxiliary_task(
+            &runtime,
+            AuxiliaryExecutionRequest {
+                task_id: task.task_id.clone(),
+                session_id: task.session_id.clone(),
+                run_id: None,
+                context,
+                task_type,
+                input_text,
+                parameter_delta_json,
+                token_budget: Some(task.budget_tokens),
+                vision_inputs: Vec::new(),
+            },
+        )
+        .await
+        {
+            Ok(result) => {
+                let _ = runtime
+                    .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
+                        task_id: task.task_id.clone(),
+                        state: Some(AuxiliaryTaskState::Succeeded.as_str().to_owned()),
+                        target_run_id: Some(None),
+                        increment_attempt_count: false,
+                        last_error: Some(None),
+                        result_json: Some(Some(result.to_result_json().to_string())),
+                        started_at_unix_ms: None,
+                        completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
+                    })
+                    .await;
+                runtime.clear_self_healing_heartbeat(
+                    WorkHeartbeatKind::BackgroundTask,
+                    task.task_id.as_str(),
+                );
+            }
+            Err(error) => {
+                warn!(
+                    task_id = %task.task_id,
+                    status_code = ?error.code(),
+                    status_message = %error.message(),
+                    "auxiliary executor task failed"
+                );
+                let _ = runtime
+                    .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
+                        task_id: task.task_id.clone(),
+                        state: Some(AuxiliaryTaskState::Failed.as_str().to_owned()),
+                        target_run_id: Some(None),
+                        increment_attempt_count: false,
+                        last_error: Some(Some(error.message().to_owned())),
+                        result_json: Some(Some(
+                            json!({
+                                "status": "failed",
+                                "task_id": task.task_id,
+                                "task_type": task_type.as_str(),
+                                "error": error.message(),
+                            })
+                            .to_string(),
+                        )),
+                        started_at_unix_ms: None,
+                        completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
+                    })
+                    .await;
+                runtime.clear_self_healing_heartbeat(
+                    WorkHeartbeatKind::BackgroundTask,
+                    task.task_id.as_str(),
+                );
+            }
         }
     });
     Ok(())

@@ -2110,6 +2110,12 @@ pub(crate) async fn console_chat_background_task_create_handler(
     } else {
         None
     };
+    let requested_task_kind = payload.task_kind.clone().and_then(trim_to_option);
+    let task_kind = if delegation.is_some() {
+        resolve_console_delegation_task_kind(requested_task_kind.as_deref())?
+    } else {
+        resolve_console_background_task_kind(requested_task_kind.as_deref())?
+    };
     let task_budget_tokens =
         delegation.as_ref().map(|value| value.budget_tokens).unwrap_or(requested_budget_tokens);
     let task_max_attempts =
@@ -2122,11 +2128,7 @@ pub(crate) async fn console_chat_background_task_create_handler(
         .runtime
         .create_orchestrator_background_task(journal::OrchestratorBackgroundTaskCreateRequest {
             task_id: Ulid::new().to_string(),
-            task_kind: if delegation.is_some() {
-                AuxiliaryTaskKind::DelegationPrompt.as_str().to_owned()
-            } else {
-                AuxiliaryTaskKind::BackgroundPrompt.as_str().to_owned()
-            },
+            task_kind,
             session_id: session_record.session_id.clone(),
             parent_run_id: session_record.last_run_id.clone(),
             target_run_id: None,
@@ -2169,6 +2171,52 @@ pub(crate) async fn console_chat_background_task_create_handler(
         "task": task,
         "contract": contract_descriptor(),
     })))
+}
+
+fn resolve_console_delegation_task_kind(value: Option<&str>) -> Result<String, Response> {
+    match value {
+        None => Ok(AuxiliaryTaskKind::DelegationPrompt.as_str().to_owned()),
+        Some(raw) => match AuxiliaryTaskKind::from_str(raw) {
+            Some(AuxiliaryTaskKind::DelegationPrompt) => {
+                Ok(AuxiliaryTaskKind::DelegationPrompt.as_str().to_owned())
+            }
+            Some(_) => Err(runtime_status_response(tonic::Status::invalid_argument(
+                "delegated background tasks must use task_kind=delegation_prompt",
+            ))),
+            None => Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+                "unsupported auxiliary task_kind: {raw}"
+            )))),
+        },
+    }
+}
+
+fn resolve_console_background_task_kind(value: Option<&str>) -> Result<String, Response> {
+    let Some(raw) = value else {
+        return Ok(AuxiliaryTaskKind::BackgroundPrompt.as_str().to_owned());
+    };
+    let Some(kind) = AuxiliaryTaskKind::from_str(raw) else {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+            "unsupported auxiliary task_kind: {raw}"
+        ))));
+    };
+    match kind {
+        AuxiliaryTaskKind::BackgroundPrompt
+        | AuxiliaryTaskKind::Summary
+        | AuxiliaryTaskKind::RecallSearch
+        | AuxiliaryTaskKind::Classification
+        | AuxiliaryTaskKind::Extraction
+        | AuxiliaryTaskKind::Vision => Ok(kind.as_str().to_owned()),
+        AuxiliaryTaskKind::DelegationPrompt => Err(runtime_status_response(
+            tonic::Status::invalid_argument("task_kind=delegation_prompt requires delegation"),
+        )),
+        AuxiliaryTaskKind::AttachmentDerivation
+        | AuxiliaryTaskKind::AttachmentRecompute
+        | AuxiliaryTaskKind::PostRunReflection => {
+            Err(runtime_status_response(tonic::Status::invalid_argument(
+                "requested task_kind is reserved for internal runtime tasks",
+            )))
+        }
+    }
 }
 
 pub(crate) async fn console_chat_background_tasks_list_handler(

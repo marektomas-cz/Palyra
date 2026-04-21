@@ -114,6 +114,11 @@ runtime_contract_enum! {
     pub enum AuxiliaryTaskKind {
         BackgroundPrompt => "background_prompt",
         DelegationPrompt => "delegation_prompt",
+        Summary => "summary" | "auxiliary_summary",
+        RecallSearch => "recall_search" | "auxiliary_recall",
+        Classification => "classification" | "auxiliary_classification",
+        Extraction => "extraction" | "auxiliary_extraction",
+        Vision => "vision" | "auxiliary_vision",
         AttachmentDerivation => "attachment_derivation",
         AttachmentRecompute => "attachment_recompute",
         PostRunReflection => "post_run_reflection" | "reflection"
@@ -290,6 +295,11 @@ mod tests {
     #[test]
     fn extended_runtime_contracts_expose_expected_canonical_names() {
         assert_eq!(PruningPolicyClass::Balanced.as_str(), "balanced");
+        assert_eq!(AuxiliaryTaskKind::Summary.as_str(), "summary");
+        assert_eq!(AuxiliaryTaskKind::RecallSearch.as_str(), "recall_search");
+        assert_eq!(AuxiliaryTaskKind::Classification.as_str(), "classification");
+        assert_eq!(AuxiliaryTaskKind::Extraction.as_str(), "extraction");
+        assert_eq!(AuxiliaryTaskKind::Vision.as_str(), "vision");
         assert_eq!(AuxiliaryTaskKind::PostRunReflection.as_str(), "post_run_reflection");
         assert_eq!(DeliveryPolicy::PreferTerminalDescendant.as_str(), "prefer_terminal_descendant");
     }

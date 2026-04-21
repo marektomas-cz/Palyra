@@ -4,6 +4,7 @@ mod access_control;
 mod agents;
 pub mod app;
 pub mod application;
+mod auxiliary_executor;
 mod background_queue;
 mod channel_router;
 mod channels;
@@ -1625,6 +1626,8 @@ struct ConsoleChatBackgroundTasksQuery {
 #[derive(Debug, Deserialize, Default)]
 struct ConsoleChatBackgroundTaskCreateRequest {
     text: String,
+    #[serde(default)]
+    task_kind: Option<String>,
     #[serde(default)]
     priority: Option<i64>,
     #[serde(default)]

@@ -88,6 +88,11 @@ export function normalizePruningPolicyClass(value?: string | null): PruningPolic
 export const AUXILIARY_TASK_KINDS = [
   "background_prompt",
   "delegation_prompt",
+  "summary",
+  "recall_search",
+  "classification",
+  "extraction",
+  "vision",
   "attachment_derivation",
   "attachment_recompute",
   "post_run_reflection",
@@ -100,6 +105,21 @@ export function normalizeAuxiliaryTaskKind(value?: string | null): AuxiliaryTask
       return "background_prompt";
     case "delegation_prompt":
       return "delegation_prompt";
+    case "auxiliary_summary":
+    case "summary":
+      return "summary";
+    case "auxiliary_recall":
+    case "recall_search":
+      return "recall_search";
+    case "auxiliary_classification":
+    case "classification":
+      return "classification";
+    case "auxiliary_extraction":
+    case "extraction":
+      return "extraction";
+    case "auxiliary_vision":
+    case "vision":
+      return "vision";
     case "attachment_derivation":
       return "attachment_derivation";
     case "attachment_recompute":

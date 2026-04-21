@@ -5105,6 +5105,7 @@ export class ConsoleApiClient {
     sessionId: string,
     payload: {
       text: string;
+      task_kind?: AuxiliaryTaskKind;
       priority?: number;
       max_attempts?: number;
       budget_tokens?: number;

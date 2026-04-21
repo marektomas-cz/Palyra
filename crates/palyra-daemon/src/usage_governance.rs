@@ -75,6 +75,8 @@ pub(crate) enum RoutingTaskClass {
     AuxiliarySummary,
     AuxiliaryRecall,
     AuxiliaryClassification,
+    AuxiliaryExtraction,
+    AuxiliaryVision,
 }
 
 impl RoutingTaskClass {
@@ -85,6 +87,8 @@ impl RoutingTaskClass {
             Self::AuxiliarySummary => "auxiliary_summary",
             Self::AuxiliaryRecall => "auxiliary_recall",
             Self::AuxiliaryClassification => "auxiliary_classification",
+            Self::AuxiliaryExtraction => "auxiliary_extraction",
+            Self::AuxiliaryVision => "auxiliary_vision",
         }
     }
 
@@ -94,7 +98,9 @@ impl RoutingTaskClass {
             Self::BackgroundAutomation
             | Self::AuxiliarySummary
             | Self::AuxiliaryRecall
-            | Self::AuxiliaryClassification => LeasePriority::Background,
+            | Self::AuxiliaryClassification
+            | Self::AuxiliaryExtraction
+            | Self::AuxiliaryVision => LeasePriority::Background,
         }
     }
 
@@ -104,6 +110,8 @@ impl RoutingTaskClass {
             Self::BackgroundAutomation => 200,
             Self::AuxiliarySummary | Self::AuxiliaryRecall => 150,
             Self::AuxiliaryClassification => 100,
+            Self::AuxiliaryExtraction => 150,
+            Self::AuxiliaryVision => 200,
         }
     }
 
@@ -112,7 +120,13 @@ impl RoutingTaskClass {
     }
 
     const fn prefers_low_cost(self) -> bool {
-        matches!(self, Self::BackgroundAutomation | Self::AuxiliarySummary | Self::AuxiliaryRecall)
+        matches!(
+            self,
+            Self::BackgroundAutomation
+                | Self::AuxiliarySummary
+                | Self::AuxiliaryRecall
+                | Self::AuxiliaryExtraction
+        )
     }
 
     const fn prefers_low_latency(self) -> bool {
