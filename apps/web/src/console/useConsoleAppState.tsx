@@ -1177,15 +1177,10 @@ export function useConsoleAppState() {
       return;
     }
     const artifactId = readString(artifact, "artifact_id");
+    const isDuplicate = (entry: JsonObject) =>
+      artifactId === null ? entry === artifact : readString(entry, "artifact_id") === artifactId;
     setMemoryRecallArtifacts((previous) =>
-      [
-        artifact,
-        ...previous.filter((entry) =>
-          artifactId === null
-            ? entry !== artifact
-            : readString(entry, "artifact_id") !== artifactId,
-        ),
-      ].slice(0, 8),
+      [artifact, ...previous.filter((entry) => !isDuplicate(entry))].slice(0, 8),
     );
   }
 

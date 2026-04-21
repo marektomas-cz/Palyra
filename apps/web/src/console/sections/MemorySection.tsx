@@ -1890,10 +1890,7 @@ export function MemorySection({ app }: MemorySectionProps) {
               </>
             )}
           </WorkspaceSectionCard>
-          <WorkspaceSectionCard
-            description="Recall previews and session searches create scoped provenance artifacts without writing durable memories."
-            title="Recall artifacts"
-          >
+          <WorkspaceSectionCard title="Recall artifacts">
             <GroupedResultsSection
               emptyDescription="Run recall preview or session search to create a scoped artifact."
               items={app.memoryRecallArtifacts}
