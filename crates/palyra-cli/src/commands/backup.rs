@@ -288,6 +288,7 @@ fn build_embedded_support_bundle(generated_at_unix_ms: i64) -> Result<SupportBun
         config: build_support_bundle_config_snapshot(),
         observability: build_support_bundle_observability_snapshot(&diagnostics),
         triage: build_support_bundle_triage_snapshot(),
+        replay: build_support_bundle_replay_snapshot(),
         diagnostics,
         journal: build_support_bundle_journal_snapshot(32, 16),
         truncated: false,

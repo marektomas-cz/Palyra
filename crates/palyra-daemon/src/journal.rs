@@ -5558,7 +5558,7 @@ impl JournalStore {
         Ok(value == 1)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn orchestrator_tape(
         &self,
         run_id: &str,
@@ -11741,7 +11741,7 @@ fn map_workspace_document_version_row(
     })
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn load_orchestrator_tape(
     connection: &Connection,
     run_id: &str,

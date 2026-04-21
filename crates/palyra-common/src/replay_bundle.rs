@@ -917,13 +917,11 @@ fn scan_for_unredacted_secrets(
         Value::Object(object) => {
             for (key, entry) in object {
                 let entry_path = format!("{path}.{key}");
-                if is_replay_secret_key(key) {
-                    if !entry_is_redacted_or_empty(entry) {
-                        issues.push(ReplayValidationIssue {
-                            path: entry_path.clone(),
-                            reason: "sensitive field is not redacted".to_owned(),
-                        });
-                    }
+                if is_replay_secret_key(key) && !entry_is_redacted_or_empty(entry) {
+                    issues.push(ReplayValidationIssue {
+                        path: entry_path.clone(),
+                        reason: "sensitive field is not redacted".to_owned(),
+                    });
                 }
                 scan_for_unredacted_secrets(
                     entry,
@@ -1143,8 +1141,7 @@ fn is_nondeterministic_time_key(key: &str) -> bool {
 
 fn looks_like_ulid(value: &str) -> bool {
     let trimmed = value.trim();
-    trimmed.len() == 26
-        && trimmed.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, 'A'..='Z' | 'a'..='z'))
+    trimmed.len() == 26 && trimmed.chars().all(|ch| ch.is_ascii_digit() || ch.is_ascii_alphabetic())
 }
 
 fn normalize_key(key: &str) -> String {

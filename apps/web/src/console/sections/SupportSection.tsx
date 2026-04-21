@@ -16,6 +16,7 @@ import {
 import {
   PrettyJsonBlock,
   formatUnixMs,
+  readBool,
   readNumber,
   readObject,
   readString,
@@ -92,6 +93,10 @@ const SUPPORT_MESSAGES = {
   "metric.attempts": "{count} attempts",
   "metric.deploymentPosture": "Deployment posture",
   "metric.modeUnavailableLong": "Mode unavailable",
+  "metric.replayGate": "Replay gate",
+  "metric.replayOffline": "offline-only",
+  "metric.replayUnavailable": "not published",
+  "metric.replayWorkflows": "{count} workflows",
   "bundle.title": "Queue support bundle",
   "bundle.description":
     "Support bundle work remains queue-backed so command execution survives browser disconnects.",
@@ -141,6 +146,16 @@ const SUPPORT_MESSAGES = {
   "playbook.step3": "Load the latest support bundle and recovery jobs to inspect command output.",
   "playbook.step4": "Inspect diagnostics before changing config or auth posture.",
   "playbook.reference": "Reference",
+  "replay.title": "Incident replay",
+  "replay.description":
+    "Redacted bundles, offline runner gates, and diff reporting stay visible next to support handoffs.",
+  "replay.offlineOnly": "Offline-only",
+  "replay.liveDisabled": "Live runtime disabled",
+  "replay.cliWorkflows": "CLI workflows",
+  "replay.gateProfiles": "Gate profiles",
+  "replay.reporting": "Reporting",
+  "replay.emptyTitle": "No replay contract published",
+  "replay.emptyDescription": "Refresh support after the daemon publishes replay support diagnostics.",
   "summary.title": "Latest recovery summary",
   "summary.description": "Surface the latest published doctor summary directly from diagnostics.",
   "summary.emptyTitle": "No recovery summary published",
@@ -204,6 +219,10 @@ const SUPPORT_MESSAGES_CS: Readonly<Record<SupportMessageKey, string>> = {
   "metric.attempts": "{count} pokusů",
   "metric.deploymentPosture": "Postura nasazení",
   "metric.modeUnavailableLong": "Režim není dostupný",
+  "metric.replayGate": "Replay gate",
+  "metric.replayOffline": "pouze offline",
+  "metric.replayUnavailable": "nepublikováno",
+  "metric.replayWorkflows": "{count} workflow",
   "bundle.title": "Zařadit support bundle",
   "bundle.description":
     "Práce se support bundle zůstává frontovaná, aby spuštění příkazů přežilo odpojení prohlížeče.",
@@ -253,6 +272,16 @@ const SUPPORT_MESSAGES_CS: Readonly<Record<SupportMessageKey, string>> = {
   "playbook.step3": "Načti poslední support bundle a recovery joby pro kontrolu výstupu příkazů.",
   "playbook.step4": "Před změnou config nebo auth postury zkontroluj diagnostiku.",
   "playbook.reference": "Reference",
+  "replay.title": "Incident replay",
+  "replay.description":
+    "Redigované bundle, offline runner gates a diff reporting zůstávají viditelné vedle support handoffů.",
+  "replay.offlineOnly": "Pouze offline",
+  "replay.liveDisabled": "Živý runtime vypnutý",
+  "replay.cliWorkflows": "CLI workflow",
+  "replay.gateProfiles": "Gate profily",
+  "replay.reporting": "Reporting",
+  "replay.emptyTitle": "Replay contract není publikovaný",
+  "replay.emptyDescription": "Obnov podporu po publikování replay support diagnostiky daemonem.",
   "summary.title": "Poslední recovery souhrn",
   "summary.description": "Zobraz nejnovější publikovaný souhrn doctoru přímo z diagnostiky.",
   "summary.emptyTitle": "Žádný recovery souhrn nebyl publikován",
@@ -312,6 +341,20 @@ export function SupportSection({ app }: SupportSectionProps) {
   const warnings = toStringArray(Array.isArray(deployment.warnings) ? deployment.warnings : []);
   const observability = readObject(app.supportDiagnosticsSnapshot ?? {}, "observability");
   const supportBundle = readObject(observability ?? {}, "support_bundle");
+  const replay = readObject(supportBundle ?? {}, "replay");
+  const replayReporting = readObject(replay ?? {}, "reporting");
+  const replayCliWorkflows = toStringArray(
+    Array.isArray(replay?.cli_workflows) ? replay.cli_workflows : [],
+  );
+  const replayGateProfiles = toStringArray(
+    Array.isArray(replay?.gate_profiles) ? replay.gate_profiles : [],
+  );
+  const replayMetrics = toStringArray(
+    Array.isArray(replayReporting?.metrics) ? replayReporting.metrics : [],
+  );
+  const replayDiffCategories = toStringArray(
+    Array.isArray(replayReporting?.diff_categories) ? replayReporting.diff_categories : [],
+  );
   const doctorRecovery = readObject(observability ?? {}, "doctor_recovery");
   const providerAuth = readObject(observability ?? {}, "provider_auth");
   const workspaceRestore = readObject(observability ?? {}, "workspace_restore");
@@ -421,6 +464,16 @@ export function SupportSection({ app }: SupportSectionProps) {
           label={t("metric.deploymentPosture")}
           value={readString(deployment, "bind_profile") ?? "unknown"}
           detail={readString(deployment, "mode") ?? t("metric.modeUnavailableLong")}
+        />
+        <WorkspaceMetricCard
+          label={t("metric.replayGate")}
+          value={readBool(replay ?? {}, "offline_only") ? t("metric.replayOffline") : "unknown"}
+          detail={
+            replay === null
+              ? t("metric.replayUnavailable")
+              : t("metric.replayWorkflows", { count: replayCliWorkflows.length })
+          }
+          tone={replay === null ? "warning" : "success"}
         />
         <WorkspaceMetricCard
           label="Config ref health"
@@ -709,6 +762,44 @@ export function SupportSection({ app }: SupportSectionProps) {
           </div>
         </WorkspaceSectionCard>
 
+        <WorkspaceSectionCard title={t("replay.title")} description={t("replay.description")}>
+          {replay === null ? (
+            <EmptyState
+              compact
+              title={t("replay.emptyTitle")}
+              description={t("replay.emptyDescription")}
+            />
+          ) : (
+            <div className="workspace-stack">
+              <div className="workspace-inline">
+                <WorkspaceStatusChip tone="success">{t("replay.offlineOnly")}</WorkspaceStatusChip>
+                <WorkspaceStatusChip tone="default">{t("replay.liveDisabled")}</WorkspaceStatusChip>
+              </div>
+              <div className="workspace-stack">
+                <strong>{t("replay.cliWorkflows")}</strong>
+                <ul className="console-compact-list">
+                  {replayCliWorkflows.map((workflow) => (
+                    <li key={workflow}>{workflow}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="workspace-stack">
+                <strong>{t("replay.gateProfiles")}</strong>
+                <ul className="console-compact-list">
+                  {replayGateProfiles.map((profile) => (
+                    <li key={profile}>{profile}</li>
+                  ))}
+                </ul>
+              </div>
+              <InlineNotice title={t("replay.reporting")} tone="default">
+                {[...replayMetrics, ...replayDiffCategories].join(" · ")}
+              </InlineNotice>
+            </div>
+          )}
+        </WorkspaceSectionCard>
+      </section>
+
+      <section className="workspace-two-column">
         <WorkspaceSectionCard title={t("summary.title")} description={t("summary.description")}>
           {latestDoctorRecovery === null ? (
             <EmptyState

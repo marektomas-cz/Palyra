@@ -58,6 +58,7 @@ use crate::tool_posture::{
 };
 use crate::usage_governance::SmartRoutingRuntimeConfig;
 use palyra_auth::AuthHealthReport;
+use palyra_common::replay_bundle::ReplayBundle;
 use palyra_common::runtime_preview::{
     RuntimeDecisionActor, RuntimeDecisionActorKind, RuntimeDecisionPayload,
 };
@@ -4901,6 +4902,44 @@ impl GatewayRuntimeState {
         })
         .await
         .map_err(|_| Status::internal("orchestrator tape snapshot worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    fn incident_replay_bundle_blocking(
+        &self,
+        run_id: &str,
+        requested_limit: Option<usize>,
+    ) -> Result<ReplayBundle, Status> {
+        let max_events = requested_limit
+            .unwrap_or(self.config.replay_capture.max_events_per_run)
+            .clamp(MIN_TAPE_PAGE_LIMIT, self.config.replay_capture.max_events_per_run);
+        crate::replay_capture::capture_incident_replay_bundle(
+            crate::replay_capture::IncidentReplayCaptureRequest {
+                journal_store: &self.journal_store,
+                replay_capture: &self.config.replay_capture,
+                feature_rollouts: &self.config.feature_rollouts,
+                run_id,
+                generated_at_unix_ms: current_unix_ms(),
+                max_events,
+            },
+        )
+        .map_err(|error| Status::internal(format!("failed to capture replay bundle: {error:#}")))
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn incident_replay_bundle(
+        self: &Arc<Self>,
+        run_id: String,
+        limit: Option<usize>,
+    ) -> Result<ReplayBundle, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.incident_replay_bundle_blocking(run_id.as_str(), limit)
+        })
+        .await
+        .map_err(|_| Status::internal("incident replay capture worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

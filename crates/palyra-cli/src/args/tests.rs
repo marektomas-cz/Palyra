@@ -3975,6 +3975,53 @@ fn parse_support_bundle_export_with_overrides() {
 }
 
 #[test]
+fn parse_support_bundle_replay_workflows() {
+    let export = Cli::parse_from([
+        "palyra",
+        "support-bundle",
+        "replay-export",
+        "--run-id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+        "--output",
+        "artifacts/replay.json",
+        "--journal-db",
+        "data/journal.sqlite3",
+        "--max-events",
+        "256",
+    ]);
+    assert_eq!(
+        export.command,
+        Command::SupportBundle {
+            command: SupportBundleCommand::ReplayExport {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FA2".to_owned(),
+                output: "artifacts/replay.json".to_owned(),
+                journal_db: Some("data/journal.sqlite3".to_owned()),
+                max_events: 256,
+            },
+        }
+    );
+
+    let replay = Cli::parse_from([
+        "palyra",
+        "support-bundle",
+        "replay-run",
+        "--input",
+        "artifacts/replay.json",
+        "--diff-output",
+        "artifacts/replay-diff.json",
+    ]);
+    assert_eq!(
+        replay.command,
+        Command::SupportBundle {
+            command: SupportBundleCommand::ReplayRun {
+                input: "artifacts/replay.json".to_owned(),
+                diff_output: Some("artifacts/replay-diff.json".to_owned()),
+            },
+        }
+    );
+}
+
+#[test]
 fn parse_daemon_admin_status_with_explicit_context() {
     let parsed = Cli::parse_from([
         "palyra",

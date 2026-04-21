@@ -1,14 +1,9 @@
-Usage: palyra support-bundle [OPTIONS] <COMMAND>
-
-Commands:
-  export
-  replay-export
-  replay-import
-  replay-run
-  replay-baseline
+Usage: palyra support-bundle replay-baseline [OPTIONS] --input <INPUT> --output <OUTPUT>
 
 Options:
-  -h, --help  Print help
+      --input <INPUT>
+      --output <OUTPUT>
+  -h, --help             Print help
 
 Global Options:
       --profile <PROFILE>

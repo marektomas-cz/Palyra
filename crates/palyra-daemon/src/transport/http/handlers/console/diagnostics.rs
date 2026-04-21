@@ -17,6 +17,7 @@ use palyra_common::feature_rollouts::{
     SAFETY_BOUNDARY_ROLLOUT_CONFIG_PATH, SAFETY_BOUNDARY_ROLLOUT_ENV,
     SESSION_QUEUE_POLICY_ROLLOUT_CONFIG_PATH, SESSION_QUEUE_POLICY_ROLLOUT_ENV,
 };
+use palyra_common::replay_bundle::replay_contract_snapshot;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -1403,6 +1404,7 @@ pub(crate) fn build_support_bundle_observability(state: &AppState) -> Value {
             10_000_u32.saturating_sub(summary.failure_rate_bps)
         },
         "workspace_restore": build_workspace_restore_observability(state),
+        "replay": build_replay_support_observability(),
         "runtime_preview": runtime_preview,
         "last_job": latest_job.map(|job| json!({
             "job_id": job.job_id,
@@ -1417,6 +1419,48 @@ pub(crate) fn build_support_bundle_observability(state: &AppState) -> Value {
             "output_path": job.output_path,
             "error": job.error,
         })),
+    })
+}
+
+fn build_replay_support_observability() -> Value {
+    json!({
+        "contract": replay_contract_snapshot(),
+        "cli_workflows": [
+            "support-bundle replay-export",
+            "support-bundle replay-import",
+            "support-bundle replay-run",
+            "support-bundle replay-baseline"
+        ],
+        "gate_profiles": [
+            "scripts/test/run-replay-gate.sh",
+            "scripts/test/run-replay-gate.ps1",
+            "cli-full-regression replay gate"
+        ],
+        "incident_workflow": [
+            "export a run-scoped bundle from the journal",
+            "import only after redaction validation and offline replay pass",
+            "run offline replay with an optional diff report during triage",
+            "promote verified bundles into a baseline artifact"
+        ],
+        "reporting": {
+            "metrics": [
+                "success_rate_bps",
+                "unstable_bundle_rate_bps",
+                "diff_category_breakdown"
+            ],
+            "diff_categories": [
+                "validation",
+                "model",
+                "tape",
+                "tool",
+                "approval",
+                "http",
+                "auxiliary",
+                "flow",
+                "artifact"
+            ]
+        },
+        "offline_only": true,
     })
 }
 

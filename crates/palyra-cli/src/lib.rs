@@ -104,6 +104,12 @@ use palyra_common::{
     redaction::{
         is_sensitive_key, redact_auth_error, redact_url, redact_url_segments_in_text, REDACTED,
     },
+    replay_bundle::{
+        build_replay_bundle, canonical_replay_bundle_bytes, ensure_replay_report_passed,
+        finalize_replay_bundle, parse_replay_bundle, replay_bundle_offline,
+        replay_contract_snapshot, ReplayArtifactRef, ReplayBundle, ReplayBundleBuildInput,
+        ReplayCaptureMetadata, ReplayRunSnapshot, ReplaySource, ReplayTapeEvent,
+    },
     validate_canonical_id,
     workspace_patch::{
         apply_workspace_patch, compute_patch_sha256, redact_patch_preview, WorkspacePatchLimits,
@@ -1835,6 +1841,48 @@ fn build_support_bundle_triage_snapshot() -> SupportBundleTriageSnapshot {
             "If still unresolved, inspect observability.recent_failures and diagnostics.admin_status."
                 .to_owned(),
         ],
+    }
+}
+
+fn build_support_bundle_replay_snapshot() -> SupportBundleReplaySnapshot {
+    SupportBundleReplaySnapshot {
+        contract: replay_contract_snapshot(),
+        cli_workflows: vec![
+            "support-bundle replay-export".to_owned(),
+            "support-bundle replay-import".to_owned(),
+            "support-bundle replay-run".to_owned(),
+            "support-bundle replay-baseline".to_owned(),
+        ],
+        gate_profiles: vec![
+            "scripts/test/run-replay-gate.sh".to_owned(),
+            "scripts/test/run-replay-gate.ps1".to_owned(),
+            "cli-full-regression replay gate".to_owned(),
+        ],
+        incident_workflow: vec![
+            "export a run-scoped bundle from the journal".to_owned(),
+            "import only after redaction validation and offline replay pass".to_owned(),
+            "run offline replay with an optional diff report during triage".to_owned(),
+            "promote verified bundles into a baseline artifact".to_owned(),
+        ],
+        reporting: SupportBundleReplayReportingSnapshot {
+            metrics: vec![
+                "success_rate_bps".to_owned(),
+                "unstable_bundle_rate_bps".to_owned(),
+                "diff_category_breakdown".to_owned(),
+            ],
+            diff_categories: vec![
+                "validation".to_owned(),
+                "model".to_owned(),
+                "tape".to_owned(),
+                "tool".to_owned(),
+                "approval".to_owned(),
+                "http".to_owned(),
+                "auxiliary".to_owned(),
+                "flow".to_owned(),
+                "artifact".to_owned(),
+            ],
+        },
+        offline_only: true,
     }
 }
 
@@ -6888,6 +6936,7 @@ struct SupportBundle {
     config: SupportBundleConfigSnapshot,
     observability: SupportBundleObservabilitySnapshot,
     triage: SupportBundleTriageSnapshot,
+    replay: SupportBundleReplaySnapshot,
     diagnostics: SupportBundleDiagnosticsSnapshot,
     journal: SupportBundleJournalSnapshot,
     truncated: bool,
@@ -6956,6 +7005,22 @@ struct SupportBundleTriageSnapshot {
     playbook: String,
     failure_classes: Vec<String>,
     common_order: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SupportBundleReplaySnapshot {
+    contract: Value,
+    cli_workflows: Vec<String>,
+    gate_profiles: Vec<String>,
+    incident_workflow: Vec<String>,
+    reporting: SupportBundleReplayReportingSnapshot,
+    offline_only: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SupportBundleReplayReportingSnapshot {
+    metrics: Vec<String>,
+    diff_categories: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8282,7 +8347,8 @@ mod diagnostics_bundle_tests {
         DoctorSummary, SkillsInventorySnapshot, SupportBundle, SupportBundleBuildSnapshot,
         SupportBundleConfigSnapshot, SupportBundleDiagnosticsSnapshot,
         SupportBundleJournalErrorRecord, SupportBundleJournalSnapshot,
-        SupportBundleObservabilitySnapshot, SupportBundleTriageSnapshot,
+        SupportBundleObservabilitySnapshot, SupportBundleReplaySnapshot,
+        SupportBundleTriageSnapshot,
     };
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
@@ -8494,6 +8560,45 @@ mod diagnostics_bundle_tests {
                     "product_failure".to_owned(),
                 ],
                 common_order: vec!["Check deployment posture and operator auth first.".to_owned()],
+            },
+            replay: SupportBundleReplaySnapshot {
+                contract: crate::replay_contract_snapshot(),
+                cli_workflows: vec![
+                    "support-bundle replay-export".to_owned(),
+                    "support-bundle replay-import".to_owned(),
+                    "support-bundle replay-run".to_owned(),
+                    "support-bundle replay-baseline".to_owned(),
+                ],
+                gate_profiles: vec![
+                    "scripts/test/run-replay-gate.sh".to_owned(),
+                    "scripts/test/run-replay-gate.ps1".to_owned(),
+                    "cli-full-regression replay gate".to_owned(),
+                ],
+                incident_workflow: vec![
+                    "export a run-scoped bundle from the journal".to_owned(),
+                    "import only after redaction validation and offline replay pass".to_owned(),
+                    "run offline replay with an optional diff report during triage".to_owned(),
+                    "promote verified bundles into a baseline artifact".to_owned(),
+                ],
+                reporting: super::SupportBundleReplayReportingSnapshot {
+                    metrics: vec![
+                        "success_rate_bps".to_owned(),
+                        "unstable_bundle_rate_bps".to_owned(),
+                        "diff_category_breakdown".to_owned(),
+                    ],
+                    diff_categories: vec![
+                        "validation".to_owned(),
+                        "model".to_owned(),
+                        "tape".to_owned(),
+                        "tool".to_owned(),
+                        "approval".to_owned(),
+                        "http".to_owned(),
+                        "auxiliary".to_owned(),
+                        "flow".to_owned(),
+                        "artifact".to_owned(),
+                    ],
+                },
+                offline_only: true,
             },
             diagnostics: SupportBundleDiagnosticsSnapshot {
                 gateway_health: Some(json!({

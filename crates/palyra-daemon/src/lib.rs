@@ -30,6 +30,8 @@ mod orchestrator;
 mod plugins;
 mod provider_leases;
 mod quic_runtime;
+#[allow(dead_code)]
+mod replay_capture;
 mod retrieval;
 mod routines;
 mod runtime_preview_controls;

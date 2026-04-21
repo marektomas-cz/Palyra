@@ -1179,6 +1179,50 @@ path = "support-bundle export"
 file = "support-bundle-export-help.txt"
 
 [[entries]]
+path = "support-bundle replay-export"
+category = "nested_surface"
+status = "done"
+summary = "Incident replay bundle export from journal tape."
+required_flags = ["run-id", "output", "journal-db", "max-events"]
+
+[entries.snapshot]
+path = "support-bundle replay-export"
+file = "support-bundle-replay-export-help.txt"
+
+[[entries]]
+path = "support-bundle replay-import"
+category = "nested_surface"
+status = "done"
+summary = "Validate and import a replay bundle for incident triage."
+required_flags = ["input", "output-dir"]
+
+[entries.snapshot]
+path = "support-bundle replay-import"
+file = "support-bundle-replay-import-help.txt"
+
+[[entries]]
+path = "support-bundle replay-run"
+category = "nested_surface"
+status = "done"
+summary = "Offline replay runner for incident bundles."
+required_flags = ["input", "diff-output"]
+
+[entries.snapshot]
+path = "support-bundle replay-run"
+file = "support-bundle-replay-run-help.txt"
+
+[[entries]]
+path = "support-bundle replay-baseline"
+category = "nested_surface"
+status = "done"
+summary = "Create a canonical replay baseline from a verified bundle."
+required_flags = ["input", "output"]
+
+[entries.snapshot]
+path = "support-bundle replay-baseline"
+file = "support-bundle-replay-baseline-help.txt"
+
+[[entries]]
 path = "system event"
 category = "nested_surface"
 status = "done"

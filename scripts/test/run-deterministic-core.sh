@@ -62,6 +62,7 @@ bash "$ROOT_DIR/scripts/test/ensure-desktop-ui.sh"
 
 bash "$ROOT_DIR/scripts/test/check-deterministic-fixtures.sh"
 bash "$ROOT_DIR/scripts/test/run-retrieval-benchmark.sh"
+bash "$ROOT_DIR/scripts/test/run-replay-gate.sh"
 
 "$CARGO_BIN" build -p palyra-cli --locked
 

@@ -560,6 +560,24 @@ export function diagnosticsFixture() {
         successes: 3,
         failures: 1,
         success_rate_bps: 7500,
+        replay: {
+          cli_workflows: [
+            "support-bundle replay-export",
+            "support-bundle replay-import",
+            "support-bundle replay-run",
+            "support-bundle replay-baseline",
+          ],
+          gate_profiles: [
+            "scripts/test/run-replay-gate.sh",
+            "scripts/test/run-replay-gate.ps1",
+            "cli-full-regression replay gate",
+          ],
+          reporting: {
+            metrics: ["success_rate_bps", "unstable_bundle_rate_bps", "diff_category_breakdown"],
+            diff_categories: ["validation", "model", "tape", "tool", "approval", "http"],
+          },
+          offline_only: true,
+        },
         last_job: {
           job_id: "support-job-0",
           state: "succeeded",

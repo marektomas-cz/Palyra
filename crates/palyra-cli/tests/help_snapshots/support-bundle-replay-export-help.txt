@@ -1,14 +1,11 @@
-Usage: palyra support-bundle [OPTIONS] <COMMAND>
-
-Commands:
-  export
-  replay-export
-  replay-import
-  replay-run
-  replay-baseline
+Usage: palyra support-bundle replay-export [OPTIONS] --run-id <RUN_ID> --output <OUTPUT>
 
 Options:
-  -h, --help  Print help
+      --run-id <RUN_ID>
+      --output <OUTPUT>
+      --journal-db <JOURNAL_DB>
+      --max-events <MAX_EVENTS>  [default: 128]
+  -h, --help                     Print help
 
 Global Options:
       --profile <PROFILE>

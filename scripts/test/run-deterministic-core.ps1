@@ -12,6 +12,7 @@ Set-Location $rootDir
 
 & (Join-Path $PSScriptRoot "check-deterministic-fixtures.ps1")
 & (Join-Path $PSScriptRoot "run-retrieval-benchmark.ps1")
+& (Join-Path $PSScriptRoot "run-replay-gate.ps1")
 
 cargo build -p palyra-cli --locked
 

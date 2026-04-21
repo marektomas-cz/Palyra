@@ -12,4 +12,32 @@ pub enum SupportBundleCommand {
         #[arg(long, default_value_t = 64)]
         error_limit: usize,
     },
+    ReplayExport {
+        #[arg(long)]
+        run_id: String,
+        #[arg(long)]
+        output: String,
+        #[arg(long)]
+        journal_db: Option<String>,
+        #[arg(long, default_value_t = 128)]
+        max_events: usize,
+    },
+    ReplayImport {
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        output_dir: String,
+    },
+    ReplayRun {
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        diff_output: Option<String>,
+    },
+    ReplayBaseline {
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
 }

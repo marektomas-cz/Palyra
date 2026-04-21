@@ -427,6 +427,9 @@ describe("M56 config, access, and support surfaces", () => {
     expect(screen.getByText("Provider auth recovery")).toBeInTheDocument();
     expect(screen.getByText("Secret and reload health")).toBeInTheDocument();
     expect(screen.getAllByText("Bundle reliability").length).toBeGreaterThan(0);
+    expect(screen.getByText("Incident replay")).toBeInTheDocument();
+    expect(screen.getByText("support-bundle replay-export")).toBeInTheDocument();
+    expect(screen.getByText(/diff_category_breakdown/)).toBeInTheDocument();
     expect(screen.getByText("Triage playbook")).toBeInTheDocument();
     expect(
       screen.getByText("Wait for active runs to finish, then rerun the reload plan or apply step."),
