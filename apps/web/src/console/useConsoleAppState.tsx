@@ -441,8 +441,9 @@ export function useConsoleAppState() {
   const [memoryWorkspaceHits, setMemoryWorkspaceHits] = useState<JsonObject[]>([]);
   const [memorySearchAllQuery, setMemorySearchAllQuery] = useState("");
   const [memorySearchAllResults, setMemorySearchAllResults] = useState<JsonObject | null>(null);
-  const [memorySessionSearchResults, setMemorySessionSearchResults] =
-    useState<JsonObject | null>(null);
+  const [memorySessionSearchResults, setMemorySessionSearchResults] = useState<JsonObject | null>(
+    null,
+  );
   const [memoryRecallPreview, setMemoryRecallPreview] = useState<JsonObject | null>(null);
   const [memoryRecallArtifacts, setMemoryRecallArtifacts] = useState<JsonObject[]>([]);
   const [memoryDerivedArtifacts, setMemoryDerivedArtifacts] = useState<JsonObject[]>([]);
@@ -1176,12 +1177,16 @@ export function useConsoleAppState() {
       return;
     }
     const artifactId = readString(artifact, "artifact_id");
-    setMemoryRecallArtifacts((previous) => [
-      artifact,
-      ...previous.filter((entry) =>
-        artifactId === null ? entry !== artifact : readString(entry, "artifact_id") !== artifactId,
-      ),
-    ].slice(0, 8));
+    setMemoryRecallArtifacts((previous) =>
+      [
+        artifact,
+        ...previous.filter((entry) =>
+          artifactId === null
+            ? entry !== artifact
+            : readString(entry, "artifact_id") !== artifactId,
+        ),
+      ].slice(0, 8),
+    );
   }
 
   async function refreshLearningQueue(): Promise<void> {

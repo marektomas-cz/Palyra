@@ -6404,9 +6404,7 @@ export class ConsoleApiClient {
     );
   }
 
-  async searchWorkspaceDocuments(
-    params?: URLSearchParams,
-  ): Promise<{
+  async searchWorkspaceDocuments(params?: URLSearchParams): Promise<{
     hits: WorkspaceSearchHit[];
     diagnostics?: RetrievalBranchDiagnostics;
     contract: ContractDescriptor;

@@ -185,7 +185,10 @@ export function MemorySection({ app }: MemorySectionProps) {
   const sessionSearchGroups = readObjectArray(app.memorySessionSearchResults, "groups");
   const sessionSearchDiagnostics =
     readObject(app.memorySessionSearchResults ?? EMPTY_OBJECT, "diagnostics") ?? EMPTY_OBJECT;
-  const sessionSearchArtifact = readObject(app.memorySessionSearchResults ?? EMPTY_OBJECT, "artifact");
+  const sessionSearchArtifact = readObject(
+    app.memorySessionSearchResults ?? EMPTY_OBJECT,
+    "artifact",
+  );
   const sessionSearchWindowCount = sessionSearchGroups.reduce(
     (count, group) => count + readObjectArray(group, "windows").length,
     0,
@@ -1728,7 +1731,8 @@ export function MemorySection({ app }: MemorySectionProps) {
                     Windows {sessionSearchWindowCount}
                   </WorkspaceStatusChip>
                   <WorkspaceStatusChip tone="default">
-                    Transcript branch {readNumber(sessionSearchDiagnostics, "total_latency_ms") ?? 0}
+                    Transcript branch{" "}
+                    {readNumber(sessionSearchDiagnostics, "total_latency_ms") ?? 0}
                     ms
                   </WorkspaceStatusChip>
                   {sessionSearchArtifact !== null ? (
@@ -1757,7 +1761,9 @@ export function MemorySection({ app }: MemorySectionProps) {
                             {sessionId} · {windows.length} window
                             {windows.length === 1 ? "" : "s"}
                           </span>
-                          <p>{readString(firstWindow, "snippet") ?? "No window snippet returned."}</p>
+                          <p>
+                            {readString(firstWindow, "snippet") ?? "No window snippet returned."}
+                          </p>
                           {windows.slice(0, 3).map((windowRecord, windowIndex) => {
                             const matched = readObject(windowRecord, "matched") ?? EMPTY_OBJECT;
                             return (
@@ -1893,7 +1899,8 @@ export function MemorySection({ app }: MemorySectionProps) {
               items={app.memoryRecallArtifacts}
               title="Latest artifacts"
               renderItem={(item, index) => {
-                const artifactId = readString(item, "artifact_id") ?? `recall-artifact-${index + 1}`;
+                const artifactId =
+                  readString(item, "artifact_id") ?? `recall-artifact-${index + 1}`;
                 const artifactKind = readString(item, "artifact_kind") ?? "recall_artifact";
                 return (
                   <article key={artifactId} className="chat-ops-card">
