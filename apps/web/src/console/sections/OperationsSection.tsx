@@ -693,7 +693,9 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                       <tr key={`${readString(child, "task_id") ?? "child"}-${index}`}>
                         <td>
                           {shortDiagnosticId(readString(child, "child_run_id"))} ·{" "}
-                          {readString(child, "display_name") ?? readString(child, "profile_id") ?? "profile"}
+                          {readString(child, "display_name") ??
+                            readString(child, "profile_id") ??
+                            "profile"}
                         </td>
                         <td>{readString(child, "state") ?? "unknown"}</td>
                         <td>
@@ -708,7 +710,6 @@ export function OperationsSection({ app }: OperationsSectionProps) {
               </div>
             )}
           </WorkspaceSectionCard>
-
           <WorkspaceSectionCard
             title="Learning workload"
             description="Reflection stays visible as a separate background workload so operators can distinguish learning activity from user-facing runs."
@@ -776,7 +777,6 @@ export function OperationsSection({ app }: OperationsSectionProps) {
               emptyMessage="No CLI handoffs are currently published for diagnostics."
             />
           </WorkspaceSectionCard>
-
           <WorkspaceSectionCard
             title="Interop surfaces"
             description="ACP remains the stateful editor bridge, MCP stays the narrower stdio facade, and compat responses now carry `_palyra` metadata so run/session IDs stay explainable across transports."

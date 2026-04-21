@@ -146,8 +146,7 @@ function buildBackgroundTaskDiagnostics(
   task: ChatBackgroundTaskRecord,
   run?: ChatRunStatusRecord,
 ): Record<string, unknown> {
-  const result =
-    task.result_json === undefined ? undefined : safeParseJsonString(task.result_json);
+  const result = task.result_json === undefined ? undefined : safeParseJsonString(task.result_json);
   const resultObject =
     result !== undefined && result !== null && typeof result === "object" && !Array.isArray(result)
       ? (result as Record<string, unknown>)
