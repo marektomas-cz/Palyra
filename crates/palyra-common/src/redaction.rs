@@ -17,8 +17,15 @@ const SENSITIVE_KEY_MARKERS: &[&str] = &[
     "secret",
     "session",
     "set_cookie",
+    "signature",
+    "sig",
     "token",
     "vault_ref",
+    "x_amz_credential",
+    "x_amz_security_token",
+    "x_amz_signature",
+    "x_goog_credential",
+    "x_goog_signature",
 ];
 
 #[must_use]
