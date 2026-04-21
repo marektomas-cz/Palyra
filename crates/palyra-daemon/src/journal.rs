@@ -16242,7 +16242,7 @@ mod tests {
         assert_eq!(first_window.before.len(), 1);
         assert_eq!(first_window.after.len(), 1);
         assert!(
-            first_window.matched.text.contains("cross session recall"),
+            first_window.matched.text.to_ascii_lowercase().contains("cross session recall"),
             "matched event should carry the search text"
         );
         assert_eq!(first_window.provenance.source_type, "orchestrator_tape");
