@@ -104,6 +104,9 @@ pub(crate) fn map_memory_store_error(operation: &str, error: JournalError) -> St
         JournalError::DuplicateMemoryId { memory_id } => {
             Status::already_exists(format!("memory item already exists: {memory_id}"))
         }
+        JournalError::DuplicateRecallArtifactId { artifact_id } => {
+            Status::already_exists(format!("recall artifact already exists: {artifact_id}"))
+        }
         JournalError::PayloadTooLarge { payload_kind, actual_bytes, max_bytes } => {
             Status::invalid_argument(format!(
                 "{payload_kind} payload exceeds maximum size ({actual_bytes} > {max_bytes})"

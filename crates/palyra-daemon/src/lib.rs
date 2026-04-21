@@ -877,6 +877,18 @@ struct ConsoleSessionSearchQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConsoleRecallArtifactsQuery {
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChannelLogsQuery {
     limit: Option<usize>,
 }

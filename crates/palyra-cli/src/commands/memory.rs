@@ -12,6 +12,7 @@ pub(crate) fn run_memory(command: MemoryCommand) -> Result<()> {
         | MemoryCommand::Recall { .. }
         | MemoryCommand::SearchAll { .. }
         | MemoryCommand::SessionSearch { .. }
+        | MemoryCommand::RecallArtifacts { .. }
         | MemoryCommand::Learning { .. } => runtime.block_on(run_memory_admin_async(command)),
         other => {
             let connection = root_context.resolve_grpc_connection(
@@ -235,6 +236,7 @@ pub(crate) async fn run_memory_async(
         | MemoryCommand::Recall { .. }
         | MemoryCommand::SearchAll { .. }
         | MemoryCommand::SessionSearch { .. }
+        | MemoryCommand::RecallArtifacts { .. }
         | MemoryCommand::Learning { .. } => {
             unreachable!("memory admin commands are handled by run_memory_admin_async")
         }
@@ -519,6 +521,7 @@ async fn run_memory_admin_async(command: MemoryCommand) -> Result<()> {
                     "/transcript_hits",
                     "/checkpoint_hits",
                     "/compaction_hits",
+                    "/artifact",
                     "/parameter_delta",
                     "/prompt_preview",
                 ],
@@ -595,7 +598,25 @@ async fn run_memory_admin_async(command: MemoryCommand) -> Result<()> {
                 "memory.session_search",
                 &payload,
                 output::preferred_json(json),
-                &["/groups", "/diagnostics"],
+                &["/groups", "/diagnostics", "/artifact"],
+            )
+        }
+        MemoryCommand::RecallArtifacts { kind, session, channel, limit, json } => {
+            let path = build_console_query_path(
+                "console/v1/memory/recall-artifacts",
+                vec![
+                    ("kind", kind),
+                    ("session_id", session),
+                    ("channel", channel),
+                    ("limit", limit.map(|value| value.to_string())),
+                ],
+            );
+            let payload = context.client.get_json_value(path.as_str()).await?;
+            emit_admin_payload(
+                "memory.recall_artifacts",
+                &payload,
+                output::preferred_json(json),
+                &["/artifacts"],
             )
         }
         MemoryCommand::Learning { command } => match command {

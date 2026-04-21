@@ -909,6 +909,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(console::memory::console_session_search_handler),
         )
         .route(
+            "/console/v1/memory/recall-artifacts",
+            get(console::memory::console_recall_artifacts_handler),
+        )
+        .route(
             "/console/v1/memory/recall/preview",
             post(console::memory::console_recall_preview_handler),
         )

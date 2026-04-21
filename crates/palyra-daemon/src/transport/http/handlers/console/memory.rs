@@ -1,16 +1,23 @@
 use crate::gateway::current_unix_ms;
 use crate::gateway::ListOrchestratorSessionsRequest;
-use crate::journal::{MemoryRetentionPolicy, SessionSearchRequest};
+use crate::journal::{
+    MemoryRetentionPolicy, RecallArtifactCreateRequest, RecallArtifactListFilter,
+    SessionSearchOutcome, SessionSearchRequest, RECALL_ARTIFACT_KIND_PREVIEW,
+    RECALL_ARTIFACT_KIND_SESSION_SEARCH,
+};
 use crate::*;
 use crate::{
     application::learning::{apply_patch_learning_candidate, apply_preference_candidate},
-    application::recall::{preview_recall, recall_preview_console_payload, RecallRequest},
+    application::recall::{
+        preview_recall, recall_preview_console_payload, RecallPreviewEnvelope, RecallRequest,
+    },
     domain::workspace::{curated_workspace_roots, curated_workspace_templates},
 };
 use palyra_common::runtime_preview::{
     RuntimeDecisionActorKind, RuntimeDecisionEventType, RuntimeDecisionPayload,
     RuntimeDecisionTiming, RuntimeEntityRef, RuntimePreviewCapability, RuntimeResourceBudget,
 };
+use ulid::Ulid;
 
 pub(crate) async fn console_memory_status_handler(
     State(state): State<AppState>,
@@ -35,6 +42,18 @@ pub(crate) async fn console_memory_status_handler(
             agent_id: None,
             prefix: None,
             include_deleted: false,
+            limit: 8,
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    let latest_recall_artifacts = state
+        .runtime
+        .list_recall_artifacts(RecallArtifactListFilter {
+            principal: _session.context.principal.clone(),
+            device_id: _session.context.device_id.clone(),
+            channel: _session.context.channel.clone(),
+            session_id: None,
+            artifact_kind: None,
             limit: 8,
         })
         .await
@@ -100,6 +119,9 @@ pub(crate) async fn console_memory_status_handler(
                 .map(|template| template.path)
                 .collect::<Vec<_>>(),
             "recent_documents": workspace_preview,
+        },
+        "recall_artifacts": {
+            "latest": latest_recall_artifacts,
         },
         "derived": derived,
     })))
@@ -813,13 +835,14 @@ pub(crate) async fn console_recall_preview_handler(
             "prompt_budget_tokens must be in range 512..=4096",
         )));
     }
+    let recall_channel = payload.channel.clone().or(session.context.channel.clone());
     let started_at_unix_ms = current_unix_ms();
     let preview = preview_recall(
         &state.runtime,
         &session.context,
         RecallRequest {
             query: query_text.to_owned(),
-            channel: payload.channel.clone().or(session.context.channel.clone()),
+            channel: recall_channel.clone(),
             session_id: session_scope.clone(),
             agent_id: payload.agent_id.and_then(trim_to_option),
             memory_top_k: payload.memory_top_k.unwrap_or(4).clamp(0, 16),
@@ -834,6 +857,16 @@ pub(crate) async fn console_recall_preview_handler(
     )
     .await
     .map_err(runtime_status_response)?;
+    let artifact = state
+        .runtime
+        .create_recall_artifact(build_recall_preview_artifact_request(
+            &session.context,
+            recall_channel,
+            session_scope.clone(),
+            &preview,
+        ))
+        .await
+        .map_err(runtime_status_response)?;
     let elapsed_ms = current_unix_ms().saturating_sub(started_at_unix_ms).max(0) as u64;
     state
         .runtime
@@ -883,7 +916,7 @@ pub(crate) async fn console_recall_preview_handler(
         .record_console_event(
             &session.context,
             "memory.recall.preview",
-            recall_preview_console_payload(&preview),
+            recall_preview_console_event_payload(&preview, artifact.artifact_id.as_str()),
         )
         .await
     {
@@ -902,6 +935,7 @@ pub(crate) async fn console_recall_preview_handler(
         "diagnostics": preview.diagnostics,
         "parameter_delta": preview.parameter_delta,
         "prompt_preview": preview.prompt_preview,
+        "artifact": artifact,
         "contract": contract_descriptor(),
     })))
 }
@@ -1028,7 +1062,7 @@ pub(crate) async fn console_session_search_handler(
         .search_orchestrator_session_windows(SessionSearchRequest {
             principal: session.context.principal.clone(),
             device_id: session.context.device_id.clone(),
-            channel,
+            channel: channel.clone(),
             query: search_query.to_owned(),
             top_k: query.top_k.unwrap_or(8).clamp(1, 24),
             min_score,
@@ -1037,6 +1071,15 @@ pub(crate) async fn console_session_search_handler(
             max_windows_per_session: query.max_windows_per_session.unwrap_or(3).clamp(1, 8),
             include_archived: query.include_archived.unwrap_or(false),
         })
+        .await
+        .map_err(runtime_status_response)?;
+    let artifact = state
+        .runtime
+        .create_recall_artifact(build_session_search_artifact_request(
+            &session.context,
+            channel,
+            &outcome,
+        ))
         .await
         .map_err(runtime_status_response)?;
     if let Err(error) = state
@@ -1054,6 +1097,7 @@ pub(crate) async fn console_session_search_handler(
                     .map(|group| group.windows.len())
                     .sum::<usize>(),
                 "diagnostics": outcome.diagnostics.clone(),
+                "artifact_id": artifact.artifact_id,
             }),
         )
         .await
@@ -1065,8 +1109,202 @@ pub(crate) async fn console_session_search_handler(
         "query": outcome.query,
         "groups": outcome.groups,
         "diagnostics": outcome.diagnostics,
+        "artifact": artifact,
         "contract": contract_descriptor(),
     })))
+}
+
+pub(crate) async fn console_recall_artifacts_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ConsoleRecallArtifactsQuery>,
+) -> Result<Json<Value>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let session_scope = query.session_id.and_then(trim_to_option);
+    if let Some(session_scope) = session_scope.as_deref() {
+        validate_canonical_id(session_scope).map_err(|_| {
+            runtime_status_response(tonic::Status::invalid_argument(
+                "session_id must be a canonical ULID",
+            ))
+        })?;
+    }
+    let artifacts = state
+        .runtime
+        .list_recall_artifacts(RecallArtifactListFilter {
+            principal: session.context.principal.clone(),
+            device_id: session.context.device_id.clone(),
+            channel: query.channel.or(session.context.channel.clone()),
+            session_id: session_scope,
+            artifact_kind: query.kind.and_then(trim_to_option),
+            limit: query.limit.unwrap_or(24).clamp(1, 100),
+        })
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(json!({
+        "artifacts": artifacts,
+        "contract": contract_descriptor(),
+    })))
+}
+
+fn build_recall_preview_artifact_request(
+    context: &RequestContext,
+    channel: Option<String>,
+    session_id: Option<String>,
+    preview: &RecallPreviewEnvelope,
+) -> RecallArtifactCreateRequest {
+    RecallArtifactCreateRequest {
+        artifact_id: Ulid::new().to_string(),
+        artifact_kind: RECALL_ARTIFACT_KIND_PREVIEW.to_owned(),
+        principal: context.principal.clone(),
+        device_id: context.device_id.clone(),
+        channel,
+        session_id,
+        query: preview.query.clone(),
+        summary: recall_preview_summary(preview),
+        payload: json!({
+            "query": preview.query,
+            "plan": preview.plan,
+            "memory_hits": preview.memory_hits,
+            "workspace_hits": preview.workspace_hits,
+            "transcript_hits": preview.transcript_hits,
+            "checkpoint_hits": preview.checkpoint_hits,
+            "compaction_hits": preview.compaction_hits,
+            "top_candidates": preview.top_candidates,
+            "structured_output": preview.structured_output,
+            "diagnostics": preview.diagnostics,
+            "parameter_delta": preview.parameter_delta,
+            "prompt_preview": preview.prompt_preview,
+            "durable_memory_write": false,
+        }),
+        diagnostics: json!({
+            "branches": preview.diagnostics,
+            "top_candidate_count": preview.top_candidates.len(),
+            "memory_hit_count": preview.memory_hits.len(),
+            "workspace_hit_count": preview.workspace_hits.len(),
+            "transcript_hit_count": preview.transcript_hits.len(),
+        }),
+        provenance: recall_preview_provenance(preview),
+        created_by_principal: context.principal.clone(),
+    }
+}
+
+fn build_session_search_artifact_request(
+    context: &RequestContext,
+    channel: Option<String>,
+    outcome: &SessionSearchOutcome,
+) -> RecallArtifactCreateRequest {
+    RecallArtifactCreateRequest {
+        artifact_id: Ulid::new().to_string(),
+        artifact_kind: RECALL_ARTIFACT_KIND_SESSION_SEARCH.to_owned(),
+        principal: context.principal.clone(),
+        device_id: context.device_id.clone(),
+        channel,
+        session_id: None,
+        query: outcome.query.clone(),
+        summary: session_search_summary(outcome),
+        payload: json!({
+            "capability": "palyra.recall.session_search",
+            "query": outcome.query,
+            "groups": outcome.groups,
+            "diagnostics": outcome.diagnostics,
+            "durable_memory_write": false,
+        }),
+        diagnostics: json!({
+            "source_kind": outcome.diagnostics.source_kind,
+            "candidate_count": outcome.diagnostics.candidate_count,
+            "fused_hit_count": outcome.diagnostics.fused_hit_count,
+            "total_latency_ms": outcome.diagnostics.total_latency_ms,
+            "latency_budget_exceeded": outcome.diagnostics.latency_budget_exceeded,
+            "degraded_reason": outcome.diagnostics.degraded_reason,
+        }),
+        provenance: session_search_provenance(outcome),
+        created_by_principal: context.principal.clone(),
+    }
+}
+
+fn recall_preview_summary(preview: &RecallPreviewEnvelope) -> String {
+    format!(
+        "{} candidate(s), {} memory hit(s), {} workspace hit(s), {} transcript hit(s)",
+        preview.top_candidates.len(),
+        preview.memory_hits.len(),
+        preview.workspace_hits.len(),
+        preview.transcript_hits.len()
+    )
+}
+
+fn session_search_summary(outcome: &SessionSearchOutcome) -> String {
+    let window_count = outcome.groups.iter().map(|group| group.windows.len()).sum::<usize>();
+    format!("{} session group(s), {window_count} bounded window(s)", outcome.groups.len())
+}
+
+fn recall_preview_provenance(preview: &RecallPreviewEnvelope) -> Value {
+    json!({
+        "source": "recall_preview",
+        "memory": preview.memory_hits.iter().map(|hit| {
+            json!({
+                "source_type": "memory",
+                "memory_id": hit.item.memory_id,
+                "channel": hit.item.channel,
+                "session_id": hit.item.session_id,
+                "source": hit.item.source,
+            })
+        }).collect::<Vec<_>>(),
+        "workspace": preview.workspace_hits.iter().map(|hit| {
+            json!({
+                "source_type": "workspace_document",
+                "document_id": hit.document.document_id,
+                "path": hit.document.path,
+                "version": hit.version,
+                "chunk_index": hit.chunk_index,
+            })
+        }).collect::<Vec<_>>(),
+        "transcript": preview.transcript_hits.iter().map(|hit| {
+            json!({
+                "source_type": "orchestrator_tape",
+                "run_id": hit.run_id,
+                "seq": hit.seq,
+                "event_type": hit.event_type,
+            })
+        }).collect::<Vec<_>>(),
+        "checkpoints": preview.checkpoint_hits.iter().map(|hit| {
+            json!({
+                "source_type": "checkpoint",
+                "checkpoint_id": hit.checkpoint_id,
+                "workspace_paths": hit.workspace_paths,
+            })
+        }).collect::<Vec<_>>(),
+        "compactions": preview.compaction_hits.iter().map(|hit| {
+            json!({
+                "source_type": "compaction_artifact",
+                "artifact_id": hit.artifact_id,
+                "mode": hit.mode,
+                "strategy": hit.strategy,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn session_search_provenance(outcome: &SessionSearchOutcome) -> Value {
+    json!({
+        "source": "session_search",
+        "windows": outcome
+            .groups
+            .iter()
+            .flat_map(|group| group.windows.iter())
+            .map(|window| json!(window.provenance))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn recall_preview_console_event_payload(
+    preview: &RecallPreviewEnvelope,
+    artifact_id: &str,
+) -> Value {
+    let mut payload = recall_preview_console_payload(preview);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("artifact_id".to_owned(), json!(artifact_id));
+    }
+    payload
 }
 
 #[allow(clippy::result_large_err)]

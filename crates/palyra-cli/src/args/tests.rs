@@ -1987,6 +1987,36 @@ fn parse_memory_session_search() {
 }
 
 #[test]
+fn parse_memory_recall_artifacts() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "memory",
+        "recall-artifacts",
+        "--kind",
+        "session_search",
+        "--session",
+        "01ARZ3NDEKTSV4RRFFQ69G5SA1",
+        "--channel",
+        "cli",
+        "--limit",
+        "12",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Memory {
+            command: MemoryCommand::RecallArtifacts {
+                kind: Some("session_search".to_owned()),
+                session: Some("01ARZ3NDEKTSV4RRFFQ69G5SA1".to_owned()),
+                channel: Some("cli".to_owned()),
+                limit: Some(12),
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_memory_status_and_index() {
     let status = Cli::parse_from(["palyra", "memory", "status", "--json"]);
     assert_eq!(status.command, Command::Memory { command: MemoryCommand::Status { json: true } });

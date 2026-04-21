@@ -410,6 +410,11 @@ export function ChatComposer({
             <StatusChip tone={recallCacheHits > 0 ? "success" : "default"}>
               {recallCacheHits}/{recallDiagnostics.length} cached
             </StatusChip>
+            {recallPreview?.artifact ? (
+              <StatusChip tone="accent">
+                Artifact {recallPreview.artifact.artifact_id.slice(0, 8)}
+              </StatusChip>
+            ) : null}
             <StatusChip tone={recallPreviewStale ? "warning" : "default"}>
               {recallPreviewStale ? "Draft changed" : "In sync"}
             </StatusChip>

@@ -132,6 +132,19 @@ pub enum MemoryCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(name = "recall-artifacts")]
+    RecallArtifacts {
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Learning {
         #[command(subcommand)]
         command: MemoryLearningCommand,

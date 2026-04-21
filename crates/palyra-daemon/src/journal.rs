@@ -2107,6 +2107,54 @@ pub struct SessionSearchRequest {
     pub include_archived: bool,
 }
 
+pub const RECALL_ARTIFACT_KIND_PREVIEW: &str = "recall_preview";
+pub const RECALL_ARTIFACT_KIND_SESSION_SEARCH: &str = "session_search";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallArtifactCreateRequest {
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+    pub session_id: Option<String>,
+    pub query: String,
+    pub summary: String,
+    pub payload: Value,
+    pub diagnostics: Value,
+    pub provenance: Value,
+    pub created_by_principal: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RecallArtifactRecord {
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub principal: String,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub query: String,
+    pub summary: String,
+    pub payload: Value,
+    pub diagnostics: Value,
+    pub provenance: Value,
+    pub created_by_principal: String,
+    pub created_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallArtifactListFilter {
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+    pub session_id: Option<String>,
+    pub artifact_kind: Option<String>,
+    pub limit: usize,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SessionSearchOutcome {
     pub query: String,
@@ -2560,6 +2608,8 @@ pub enum JournalError {
     DuplicateCronRunId { run_id: String },
     #[error("memory item already exists: {memory_id}")]
     DuplicateMemoryId { memory_id: String },
+    #[error("recall artifact already exists: {artifact_id}")]
+    DuplicateRecallArtifactId { artifact_id: String },
     #[error("canvas state already exists for canvas {canvas_id} at version {state_version}")]
     DuplicateCanvasStateVersion { canvas_id: String, state_version: u64 },
     #[error("cron job not found: {job_id}")]
@@ -3719,6 +3769,43 @@ const MIGRATIONS: &[Migration] = &[
                 ON orchestrator_session_queue_controls(paused, updated_at_unix_ms DESC);
         "#,
     },
+    Migration {
+        version: 27,
+        name: "create_recall_artifacts",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS recall_artifacts (
+                artifact_ulid TEXT PRIMARY KEY,
+                artifact_kind TEXT NOT NULL,
+                principal TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                channel TEXT,
+                session_ulid TEXT,
+                query TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                diagnostics_json TEXT NOT NULL,
+                provenance_json TEXT NOT NULL,
+                created_by_principal TEXT NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_recall_artifacts_scope
+                ON recall_artifacts(principal, device_id, channel, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_recall_artifacts_session
+                ON recall_artifacts(session_ulid, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_recall_artifacts_kind
+                ON recall_artifacts(artifact_kind, created_at_unix_ms DESC);
+            CREATE TRIGGER IF NOT EXISTS trg_recall_artifacts_prevent_update
+            BEFORE UPDATE ON recall_artifacts
+            BEGIN
+                SELECT RAISE(ABORT, 'recall_artifacts is append-only');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_recall_artifacts_prevent_delete
+            BEFORE DELETE ON recall_artifacts
+            BEGIN
+                SELECT RAISE(ABORT, 'recall_artifacts is append-only');
+            END;
+        "#,
+    },
 ];
 
 fn serialize_json_field<T: Serialize>(
@@ -3736,6 +3823,16 @@ fn parse_optional_json_column<T: DeserializeOwned>(
         return Ok(None);
     };
     serde_json::from_str::<T>(raw.as_str()).map(Some).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            raw.len(),
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(format!("failed to decode {field}: {error}"))),
+        )
+    })
+}
+
+fn parse_json_column<T: DeserializeOwned>(raw: String, field: &'static str) -> rusqlite::Result<T> {
+    serde_json::from_str::<T>(raw.as_str()).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             raw.len(),
             rusqlite::types::Type::Text,
@@ -5685,6 +5782,151 @@ impl JournalStore {
         let started_at = Instant::now();
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         search_orchestrator_session_windows(&guard, request, started_at)
+    }
+
+    pub fn create_recall_artifact(
+        &self,
+        request: &RecallArtifactCreateRequest,
+    ) -> Result<RecallArtifactRecord, JournalError> {
+        let now = current_unix_ms()?;
+        let artifact_kind =
+            sanitize_object_text_field("artifact_kind", request.artifact_kind.as_str())?;
+        let query = sanitize_object_text_field("query", request.query.as_str())?;
+        let summary = sanitize_object_text_field("summary", request.summary.as_str())?;
+        let payload_json = serialize_json_field(&request.payload, "payload")?;
+        let diagnostics_json = serialize_json_field(&request.diagnostics, "diagnostics")?;
+        let provenance_json = serialize_json_field(&request.provenance, "provenance")?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        match guard.execute(
+            r#"
+                INSERT INTO recall_artifacts (
+                    artifact_ulid,
+                    artifact_kind,
+                    principal,
+                    device_id,
+                    channel,
+                    session_ulid,
+                    query,
+                    summary,
+                    payload_json,
+                    diagnostics_json,
+                    provenance_json,
+                    created_by_principal,
+                    created_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                request.artifact_id.as_str(),
+                artifact_kind.as_str(),
+                request.principal.as_str(),
+                request.device_id.as_str(),
+                request.channel.as_deref(),
+                request.session_id.as_deref(),
+                query.as_str(),
+                summary.as_str(),
+                payload_json.as_str(),
+                diagnostics_json.as_str(),
+                provenance_json.as_str(),
+                request.created_by_principal.as_str(),
+                now,
+            ],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(error, message))
+                if error.code == ErrorCode::ConstraintViolation
+                    && (error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                        || error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                        || message
+                            .as_deref()
+                            .map(|value| value.contains("recall_artifacts.artifact_ulid"))
+                            .unwrap_or(false)) =>
+            {
+                return Err(JournalError::DuplicateRecallArtifactId {
+                    artifact_id: request.artifact_id.clone(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(RecallArtifactRecord {
+            artifact_id: request.artifact_id.clone(),
+            artifact_kind,
+            principal: request.principal.clone(),
+            device_id: request.device_id.clone(),
+            channel: request.channel.clone(),
+            session_id: request.session_id.clone(),
+            query,
+            summary,
+            payload: request.payload.clone(),
+            diagnostics: request.diagnostics.clone(),
+            provenance: request.provenance.clone(),
+            created_by_principal: request.created_by_principal.clone(),
+            created_at_unix_ms: now,
+        })
+    }
+
+    pub fn list_recall_artifacts(
+        &self,
+        filter: &RecallArtifactListFilter,
+    ) -> Result<Vec<RecallArtifactRecord>, JournalError> {
+        let limit = i64::try_from(filter.limit.clamp(1, 100)).unwrap_or(100);
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let mut sql = r#"
+                SELECT
+                    artifact_ulid,
+                    artifact_kind,
+                    principal,
+                    device_id,
+                    channel,
+                    session_ulid,
+                    query,
+                    summary,
+                    payload_json,
+                    diagnostics_json,
+                    provenance_json,
+                    created_by_principal,
+                    created_at_unix_ms
+                FROM recall_artifacts
+            "#
+        .to_owned();
+        let mut conditions = Vec::new();
+        let mut params = Vec::<Box<dyn rusqlite::ToSql>>::new();
+        let push_condition = |conditions: &mut Vec<String>,
+                              params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+                              column: &str,
+                              value: &Option<String>| {
+            if let Some(value) = value.as_ref() {
+                let placeholder = params.len() + 1;
+                conditions.push(format!("{column} = ?{placeholder}"));
+                params.push(Box::new(value.clone()));
+            }
+        };
+        conditions.push("principal = ?1".to_owned());
+        params.push(Box::new(filter.principal.clone()));
+        conditions.push("device_id = ?2".to_owned());
+        params.push(Box::new(filter.device_id.clone()));
+        push_condition(&mut conditions, &mut params, "channel", &filter.channel);
+        push_condition(&mut conditions, &mut params, "session_ulid", &filter.session_id);
+        push_condition(&mut conditions, &mut params, "artifact_kind", &filter.artifact_kind);
+        sql.push_str(" WHERE ");
+        sql.push_str(conditions.join(" AND ").as_str());
+        let limit_placeholder = params.len() + 1;
+        sql.push_str(
+            format!(
+                " ORDER BY created_at_unix_ms DESC, artifact_ulid DESC LIMIT ?{limit_placeholder}"
+            )
+            .as_str(),
+        );
+        params.push(Box::new(limit));
+
+        let mut statement = guard.prepare(sql.as_str())?;
+        let mut rows = statement.query(params_from_iter(
+            params.iter().map(|value| value.as_ref() as &dyn rusqlite::ToSql),
+        ))?;
+        let mut artifacts = Vec::new();
+        while let Some(row) = rows.next()? {
+            artifacts.push(map_recall_artifact_row(row)?);
+        }
+        Ok(artifacts)
     }
 
     pub fn create_orchestrator_queued_input(
@@ -11655,6 +11897,26 @@ fn build_orchestrator_session_match_snippet(
     .map(ToOwned::to_owned)
 }
 
+fn map_recall_artifact_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<RecallArtifactRecord, rusqlite::Error> {
+    Ok(RecallArtifactRecord {
+        artifact_id: row.get(0)?,
+        artifact_kind: row.get(1)?,
+        principal: row.get(2)?,
+        device_id: row.get(3)?,
+        channel: row.get(4)?,
+        session_id: row.get(5)?,
+        query: row.get(6)?,
+        summary: row.get(7)?,
+        payload: parse_json_column(row.get(8)?, "recall_artifacts.payload_json")?,
+        diagnostics: parse_json_column(row.get(9)?, "recall_artifacts.diagnostics_json")?,
+        provenance: parse_json_column(row.get(10)?, "recall_artifacts.provenance_json")?,
+        created_by_principal: row.get(11)?,
+        created_at_unix_ms: row.get(12)?,
+    })
+}
+
 #[derive(Debug, Clone)]
 struct SessionSearchCandidate {
     session: OrchestratorSessionRecord,
@@ -15033,10 +15295,12 @@ mod tests {
         MemoryMaintenanceRequest, MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest,
         MemorySource, OrchestratorCancelRequest, OrchestratorRunStartRequest,
         OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
-        SessionSearchRequest, SkillExecutionStatus, SkillStatusUpsertRequest,
-        WorkspaceBootstrapRequest, WorkspaceDocumentDeleteRequest, WorkspaceDocumentMoveRequest,
+        RecallArtifactCreateRequest, RecallArtifactListFilter, SessionSearchRequest,
+        SkillExecutionStatus, SkillStatusUpsertRequest, WorkspaceBootstrapRequest,
+        WorkspaceDocumentDeleteRequest, WorkspaceDocumentMoveRequest,
         WorkspaceDocumentWriteRequest, WorkspaceSearchRequest, CURRENT_MEMORY_EMBEDDING_VERSION,
-        MEMORY_RETENTION_DAY_MS, MIGRATIONS,
+        MEMORY_RETENTION_DAY_MS, MIGRATIONS, RECALL_ARTIFACT_KIND_PREVIEW,
+        RECALL_ARTIFACT_KIND_SESSION_SEARCH,
     };
 
     static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -15332,86 +15596,20 @@ mod tests {
             .expect("journal store should open");
 
         let connection = Connection::open(db_path).expect("journal db should open");
-        let migration_v1: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![1],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v2: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![2],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v3: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![3],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v4: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![4],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v5: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![5],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v6: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![6],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v7: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![7],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v8: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![8],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v9: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![9],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        let migration_v10: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                params![10],
-                |row| row.get(0),
-            )
-            .expect("schema migrations should be queryable");
-        assert_eq!(migration_v1, 1, "migration v1 should be recorded exactly once");
-        assert_eq!(migration_v2, 1, "migration v2 should be recorded exactly once");
-        assert_eq!(migration_v3, 1, "migration v3 should be recorded exactly once");
-        assert_eq!(migration_v4, 1, "migration v4 should be recorded exactly once");
-        assert_eq!(migration_v5, 1, "migration v5 should be recorded exactly once");
-        assert_eq!(migration_v6, 1, "migration v6 should be recorded exactly once");
-        assert_eq!(migration_v7, 1, "migration v7 should be recorded exactly once");
-        assert_eq!(migration_v8, 1, "migration v8 should be recorded exactly once");
-        assert_eq!(migration_v9, 1, "migration v9 should be recorded exactly once");
-        assert_eq!(migration_v10, 1, "migration v10 should be recorded exactly once");
+        for migration in MIGRATIONS {
+            let applied_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                    params![migration.version],
+                    |row| row.get(0),
+                )
+                .expect("schema migrations should be queryable");
+            assert_eq!(
+                applied_count, 1,
+                "migration v{} should be recorded exactly once",
+                migration.version
+            );
+        }
     }
 
     #[test]
@@ -16039,6 +16237,137 @@ mod tests {
             outcome.diagnostics.degraded_reason.as_deref(),
             Some("transcript_vector_index_unavailable")
         );
+    }
+
+    #[test]
+    fn recall_artifacts_are_scoped_filterable_and_do_not_write_memory() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path.clone(), false))
+            .expect("journal store should open");
+
+        let preview_artifact = store
+            .create_recall_artifact(&RecallArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5RA1".to_owned(),
+                artifact_kind: RECALL_ARTIFACT_KIND_PREVIEW.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SA1".to_owned()),
+                query: "runtime posture".to_owned(),
+                summary: "2 recall candidates".to_owned(),
+                payload: json!({
+                    "query": "runtime posture",
+                    "durable_memory_write": false,
+                    "top_candidates": [{"source_type": "memory", "id": "mem-1"}],
+                }),
+                diagnostics: json!({
+                    "branches": [{"source_kind": "memory", "candidate_count": 1}],
+                }),
+                provenance: json!({
+                    "source": "recall_preview",
+                    "memory": [{"memory_id": "mem-1"}],
+                }),
+                created_by_principal: "user:ops".to_owned(),
+            })
+            .expect("preview artifact should be created");
+        store
+            .create_recall_artifact(&RecallArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5RA2".to_owned(),
+                artifact_kind: RECALL_ARTIFACT_KIND_SESSION_SEARCH.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SA1".to_owned()),
+                query: "runtime posture".to_owned(),
+                summary: "1 matching session window".to_owned(),
+                payload: json!({
+                    "query": "runtime posture",
+                    "durable_memory_write": false,
+                    "groups": [{"session_id": "01ARZ3NDEKTSV4RRFFQ69G5SA1"}],
+                }),
+                diagnostics: json!({
+                    "source_kind": "transcript",
+                    "candidate_count": 1,
+                }),
+                provenance: json!({
+                    "source": "session_search",
+                    "windows": [{"run_id": "01ARZ3NDEKTSV4RRFFQ69G5RAA", "seq": 2}],
+                }),
+                created_by_principal: "user:ops".to_owned(),
+            })
+            .expect("session search artifact should be created");
+        store
+            .create_recall_artifact(&RecallArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5RA3".to_owned(),
+                artifact_kind: RECALL_ARTIFACT_KIND_PREVIEW.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5ZZZ".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SA1".to_owned()),
+                query: "runtime posture".to_owned(),
+                summary: "foreign device artifact".to_owned(),
+                payload: json!({"durable_memory_write": false}),
+                diagnostics: json!({}),
+                provenance: json!({}),
+                created_by_principal: "user:ops".to_owned(),
+            })
+            .expect("foreign scoped artifact should be created");
+
+        let scoped = store
+            .list_recall_artifacts(&RecallArtifactListFilter {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SA1".to_owned()),
+                artifact_kind: None,
+                limit: 10,
+            })
+            .expect("scoped artifact listing should succeed");
+        assert_eq!(scoped.len(), 2, "foreign device artifacts must not leak");
+        assert!(
+            scoped.iter().all(|artifact| artifact.payload["durable_memory_write"] == false),
+            "recall artifacts must explicitly describe non-durable memory writes"
+        );
+
+        let preview_only = store
+            .list_recall_artifacts(&RecallArtifactListFilter {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SA1".to_owned()),
+                artifact_kind: Some(RECALL_ARTIFACT_KIND_PREVIEW.to_owned()),
+                limit: 10,
+            })
+            .expect("artifact kind filtering should succeed");
+        assert_eq!(preview_only, vec![preview_artifact]);
+
+        let duplicate = store
+            .create_recall_artifact(&RecallArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5RA1".to_owned(),
+                artifact_kind: RECALL_ARTIFACT_KIND_PREVIEW.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: None,
+                query: "runtime posture".to_owned(),
+                summary: "duplicate".to_owned(),
+                payload: json!({"durable_memory_write": false}),
+                diagnostics: json!({}),
+                provenance: json!({}),
+                created_by_principal: "user:ops".to_owned(),
+            })
+            .expect_err("duplicate artifact IDs should fail loudly");
+        assert!(matches!(
+            duplicate,
+            JournalError::DuplicateRecallArtifactId { artifact_id }
+                if artifact_id == "01ARZ3NDEKTSV4RRFFQ69G5RA1"
+        ));
+
+        let connection = Connection::open(db_path).expect("journal db should open");
+        let memory_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM memory_items", [], |row| row.get(0))
+            .expect("memory item count should be queryable");
+        assert_eq!(memory_count, 0, "recall artifacts must not create durable memories");
     }
 
     #[test]

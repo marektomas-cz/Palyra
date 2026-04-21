@@ -1770,7 +1770,24 @@ export interface RecallPreviewEnvelope {
   diagnostics?: RetrievalBranchDiagnostics[];
   parameter_delta: JsonValue;
   prompt_preview: string;
+  artifact?: RecallArtifactRecord;
   contract: ContractDescriptor;
+}
+
+export interface RecallArtifactRecord {
+  artifact_id: string;
+  artifact_kind: string;
+  principal: string;
+  device_id: string;
+  channel?: string;
+  session_id?: string;
+  query: string;
+  summary: string;
+  payload: JsonValue;
+  diagnostics: JsonValue;
+  provenance: JsonValue;
+  created_by_principal: string;
+  created_at_unix_ms: number;
 }
 
 export interface ContextReferenceProvenance {
@@ -1866,6 +1883,7 @@ export interface SessionSearchEnvelope {
   query: string;
   groups: SessionSearchGroup[];
   diagnostics: RetrievalBranchDiagnostics;
+  artifact?: RecallArtifactRecord;
   contract: ContractDescriptor;
 }
 
@@ -6195,6 +6213,9 @@ export class ConsoleApiClient {
       curated_paths: string[];
       recent_documents: WorkspaceDocumentRecord[];
     };
+    recall_artifacts?: {
+      latest: RecallArtifactRecord[];
+    };
   }> {
     return this.request("/console/v1/memory/status");
   }
@@ -6446,6 +6467,13 @@ export class ConsoleApiClient {
 
   async searchSessionHistory(params?: URLSearchParams): Promise<SessionSearchEnvelope> {
     return this.request(buildPathWithQuery("/console/v1/memory/session-search", params));
+  }
+
+  async listRecallArtifacts(params?: URLSearchParams): Promise<{
+    artifacts: RecallArtifactRecord[];
+    contract: ContractDescriptor;
+  }> {
+    return this.request(buildPathWithQuery("/console/v1/memory/recall-artifacts", params));
   }
 
   async purgeMemory(payload: {

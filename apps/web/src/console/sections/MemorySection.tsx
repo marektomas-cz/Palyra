@@ -88,6 +88,7 @@ type MemorySectionProps = {
     | "memorySearchAllResults"
     | "memorySessionSearchResults"
     | "memoryRecallPreview"
+    | "memoryRecallArtifacts"
     | "refreshMemoryStatus"
     | "refreshLearningQueue"
     | "refreshWorkspaceDocuments"
@@ -169,6 +170,7 @@ export function MemorySection({ app }: MemorySectionProps) {
   const recallPlanSources = readObjectArray(recallPlan, "sources");
   const recallPlanBudget = readObject(recallPlan, "budget") ?? EMPTY_OBJECT;
   const recallExpandedQueries = readStringArray(recallPlan, "expanded_queries");
+  const recallArtifact = readObject(app.memoryRecallPreview ?? EMPTY_OBJECT, "artifact");
   const recallStructuredOutput =
     readObject(app.memoryRecallPreview ?? EMPTY_OBJECT, "structured_output") ?? EMPTY_OBJECT;
   const recallFacts = readObjectArray(recallStructuredOutput, "facts");
@@ -183,6 +185,7 @@ export function MemorySection({ app }: MemorySectionProps) {
   const sessionSearchGroups = readObjectArray(app.memorySessionSearchResults, "groups");
   const sessionSearchDiagnostics =
     readObject(app.memorySessionSearchResults ?? EMPTY_OBJECT, "diagnostics") ?? EMPTY_OBJECT;
+  const sessionSearchArtifact = readObject(app.memorySessionSearchResults ?? EMPTY_OBJECT, "artifact");
   const sessionSearchWindowCount = sessionSearchGroups.reduce(
     (count, group) => count + readObjectArray(group, "windows").length,
     0,
@@ -1323,6 +1326,11 @@ export function MemorySection({ app }: MemorySectionProps) {
                 <WorkspaceStatusChip tone={recallCacheHits > 0 ? "success" : "default"}>
                   {recallCacheHits}/{recallDiagnostics.length} cached
                 </WorkspaceStatusChip>
+                {recallArtifact !== null ? (
+                  <WorkspaceStatusChip tone="accent">
+                    Artifact {(readString(recallArtifact, "artifact_id") ?? "n/a").slice(0, 8)}
+                  </WorkspaceStatusChip>
+                ) : null}
               </div>
             </form>
 
@@ -1723,6 +1731,12 @@ export function MemorySection({ app }: MemorySectionProps) {
                     Transcript branch {readNumber(sessionSearchDiagnostics, "total_latency_ms") ?? 0}
                     ms
                   </WorkspaceStatusChip>
+                  {sessionSearchArtifact !== null ? (
+                    <WorkspaceStatusChip tone="accent">
+                      Artifact{" "}
+                      {(readString(sessionSearchArtifact, "artifact_id") ?? "n/a").slice(0, 8)}
+                    </WorkspaceStatusChip>
+                  ) : null}
                 </div>
 
                 <GroupedResultsSection
@@ -1869,6 +1883,47 @@ export function MemorySection({ app }: MemorySectionProps) {
                 />
               </>
             )}
+          </WorkspaceSectionCard>
+          <WorkspaceSectionCard
+            description="Recall previews and session searches create scoped provenance artifacts without writing durable memories."
+            title="Recall artifacts"
+          >
+            <GroupedResultsSection
+              emptyDescription="Run recall preview or session search to create a scoped artifact."
+              items={app.memoryRecallArtifacts}
+              title="Latest artifacts"
+              renderItem={(item, index) => {
+                const artifactId = readString(item, "artifact_id") ?? `recall-artifact-${index + 1}`;
+                const artifactKind = readString(item, "artifact_kind") ?? "recall_artifact";
+                return (
+                  <article key={artifactId} className="chat-ops-card">
+                    <div className="chat-ops-card__copy">
+                      <strong>{readString(item, "summary") ?? artifactId}</strong>
+                      <span>
+                        {artifactKind} · {artifactId}
+                      </span>
+                      <p>{readString(item, "query") ?? "No query returned."}</p>
+                    </div>
+                    <div className="chat-ops-card__actions">
+                      <WorkspaceStatusChip tone="accent">{artifactKind}</WorkspaceStatusChip>
+                      {readString(item, "session_id") !== null ? (
+                        <WorkspaceStatusChip tone="success">
+                          Session {(readString(item, "session_id") ?? "").slice(0, 8)}
+                        </WorkspaceStatusChip>
+                      ) : null}
+                      {readString(item, "channel") !== null ? (
+                        <WorkspaceStatusChip tone="default">
+                          {readString(item, "channel")}
+                        </WorkspaceStatusChip>
+                      ) : null}
+                      <WorkspaceStatusChip tone="default">
+                        {formatUnixMs(readNumber(item, "created_at_unix_ms"))}
+                      </WorkspaceStatusChip>
+                    </div>
+                  </article>
+                );
+              }}
+            />
           </WorkspaceSectionCard>
           <WorkspaceSectionCard
             description="Keep retention posture visible and make purge explicitly destructive."

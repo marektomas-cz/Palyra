@@ -444,6 +444,7 @@ export function useConsoleAppState() {
   const [memorySessionSearchResults, setMemorySessionSearchResults] =
     useState<JsonObject | null>(null);
   const [memoryRecallPreview, setMemoryRecallPreview] = useState<JsonObject | null>(null);
+  const [memoryRecallArtifacts, setMemoryRecallArtifacts] = useState<JsonObject[]>([]);
   const [memoryDerivedArtifacts, setMemoryDerivedArtifacts] = useState<JsonObject[]>([]);
   const [memoryLearningBusy, setMemoryLearningBusy] = useState(false);
   const [memoryLearningCandidates, setMemoryLearningCandidates] = useState<JsonObject[]>([]);
@@ -895,6 +896,7 @@ export function useConsoleAppState() {
     setMemorySearchAllResults(null);
     setMemorySessionSearchResults(null);
     setMemoryRecallPreview(null);
+    setMemoryRecallArtifacts([]);
     setMemoryDerivedArtifacts([]);
     setMemoryLearningBusy(false);
     setMemoryLearningCandidates([]);
@@ -1157,11 +1159,29 @@ export function useConsoleAppState() {
           toJsonObjectArray(response.workspace.recent_documents as unknown as JsonValue[]),
         );
       }
+      if (response.recall_artifacts?.latest !== undefined) {
+        setMemoryRecallArtifacts(
+          toJsonObjectArray(response.recall_artifacts.latest as unknown as JsonValue[]),
+        );
+      }
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
       setMemoryStatusBusy(false);
     }
+  }
+
+  function rememberRecallArtifact(artifact: JsonValue | undefined): void {
+    if (artifact === undefined || !isJsonObject(artifact)) {
+      return;
+    }
+    const artifactId = readString(artifact, "artifact_id");
+    setMemoryRecallArtifacts((previous) => [
+      artifact,
+      ...previous.filter((entry) =>
+        artifactId === null ? entry !== artifact : readString(entry, "artifact_id") !== artifactId,
+      ),
+    ].slice(0, 8));
   }
 
   async function refreshLearningQueue(): Promise<void> {
@@ -1557,6 +1577,7 @@ export function useConsoleAppState() {
       });
       setMemoryRecallPreview(response as unknown as JsonObject);
       setMemoryHits(toJsonObjectArray(response.memory_hits));
+      rememberRecallArtifact(response.artifact as unknown as JsonValue | undefined);
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -1584,6 +1605,7 @@ export function useConsoleAppState() {
       ]);
       setMemorySearchAllResults(response as unknown as JsonObject);
       setMemorySessionSearchResults(sessionResponse as unknown as JsonObject);
+      rememberRecallArtifact(sessionResponse.artifact as unknown as JsonValue | undefined);
     } catch (failure) {
       setError(toErrorMessage(failure));
     } finally {
@@ -1857,6 +1879,7 @@ export function useConsoleAppState() {
     memorySearchAllResults,
     memorySessionSearchResults,
     memoryRecallPreview,
+    memoryRecallArtifacts,
     refreshMemoryStatus,
     refreshLearningQueue,
     refreshWorkspaceDocuments,

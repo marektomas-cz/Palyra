@@ -22,7 +22,8 @@ use crate::journal::{
     OrchestratorSessionQueueControlUpdateRequest, OrchestratorSessionRecord,
     OrchestratorSessionTitleUpdateRequest, OrchestratorSessionTranscriptRecord,
     OrchestratorUsageQuery, OrchestratorUsageRunRecord, OrchestratorUsageSessionRecord,
-    OrchestratorUsageSummary, RetrievalBranchDiagnostics, SessionProjectContextStateCopyRequest,
+    OrchestratorUsageSummary, RecallArtifactCreateRequest, RecallArtifactListFilter,
+    RecallArtifactRecord, RetrievalBranchDiagnostics, SessionProjectContextStateCopyRequest,
     SessionProjectContextStateRecord, SessionProjectContextStateUpsertRequest,
     SessionSearchOutcome, SessionSearchRequest, WorkspaceBootstrapOutcome,
     WorkspaceBootstrapRequest, WorkspaceCheckpointCreateRequest, WorkspaceCheckpointFilePayload,
@@ -3969,6 +3970,48 @@ impl GatewayRuntimeState {
         })
         .await
         .map_err(|_| Status::internal("orchestrator session search worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn create_recall_artifact_blocking(
+        &self,
+        request: &RecallArtifactCreateRequest,
+    ) -> Result<RecallArtifactRecord, Status> {
+        self.journal_store
+            .create_recall_artifact(request)
+            .map_err(|error| map_memory_store_error("create recall artifact", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn create_recall_artifact(
+        self: &Arc<Self>,
+        request: RecallArtifactCreateRequest,
+    ) -> Result<RecallArtifactRecord, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.create_recall_artifact_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("recall artifact create worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn list_recall_artifacts_blocking(
+        &self,
+        filter: &RecallArtifactListFilter,
+    ) -> Result<Vec<RecallArtifactRecord>, Status> {
+        self.journal_store
+            .list_recall_artifacts(filter)
+            .map_err(|error| map_memory_store_error("list recall artifacts", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_recall_artifacts(
+        self: &Arc<Self>,
+        filter: RecallArtifactListFilter,
+    ) -> Result<Vec<RecallArtifactRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.list_recall_artifacts_blocking(&filter))
+            .await
+            .map_err(|_| Status::internal("recall artifact list worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]
