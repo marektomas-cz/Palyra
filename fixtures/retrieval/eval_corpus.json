@@ -271,6 +271,60 @@
       ]
     },
     {
+      "case_id": "cross_session_router_recovery",
+      "query": "dead letter replay router pairing recovery",
+      "top_k": 4,
+      "latency_budget_ms": 12.0,
+      "expected_ranked_ids": [
+        "transcript.router_recovery_reply",
+        "checkpoint.router_pairing"
+      ],
+      "candidates": [
+        {
+          "candidate_id": "transcript.router_recovery_reply",
+          "source_kind": "transcript",
+          "title": "message.replied",
+          "snippet": "Recovered the channel router by replaying dead letters after pairing refresh.",
+          "search_text": "channel router recovery replay dead letters pairing refresh outbound verification",
+          "created_at_unix_ms": 1700000027000,
+          "event_type": "message.replied"
+        },
+        {
+          "candidate_id": "checkpoint.router_pairing",
+          "source_kind": "checkpoint",
+          "title": "Router pairing checkpoint",
+          "snippet": "Checkpoint captured before channel router pairing-code recovery.",
+          "search_text": "checkpoint channel router pairing code recovery before dead letter replay",
+          "created_at_unix_ms": 1700000026500,
+          "checkpoint_note": "router recovery point",
+          "checkpoint_restore_count": 1,
+          "checkpoint_workspace_paths": ["channels/router.toml", "operations/recovery.md"]
+        },
+        {
+          "candidate_id": "memory.router_note",
+          "source_kind": "memory",
+          "title": "Router note",
+          "snippet": "Operator asked for dead-letter replay status after Discord onboarding.",
+          "search_text": "operator dead letter replay status discord onboarding router",
+          "created_at_unix_ms": 1700000025000,
+          "memory_source": "summary",
+          "confidence": 0.84
+        },
+        {
+          "candidate_id": "workspace.router_docs",
+          "source_kind": "workspace_document",
+          "title": "operations/router.md",
+          "snippet": "Channel router warnings, pairings, and recovery commands.",
+          "search_text": "channel router warnings pairings recovery commands operations",
+          "created_at_unix_ms": 1700000023000,
+          "pinned": false,
+          "manual_override": true,
+          "prompt_binding": "advisory",
+          "risk_state": "clean"
+        }
+      ]
+    },
+    {
       "case_id": "negative_unrelated_query",
       "query": "ios voice shortcut battery widget",
       "top_k": 3,

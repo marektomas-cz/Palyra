@@ -1119,7 +1119,7 @@ fn normalize_embedding_dimensions(mut vector: Vec<f32>, expected_dims: usize) ->
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
@@ -1311,6 +1311,8 @@ mod tests {
         query: String,
         top_k: usize,
         #[serde(default)]
+        latency_budget_ms: Option<f64>,
+        #[serde(default)]
         expected_ranked_ids: Vec<String>,
         #[serde(default)]
         max_negative_top_score: Option<f64>,
@@ -1370,14 +1372,28 @@ mod tests {
         negative_cases: usize,
         hit_at_1: f64,
         hit_at_3: f64,
+        recall_at_k: f64,
+        mean_ndcg_at_k: f64,
         coverage: f64,
         mean_reciprocal_rank: f64,
         false_positive_rate: f64,
         stability_score: f64,
+        branch_hit_contribution: RetrievalEvalBranchContribution,
+        latency_budget_pass_rate: f64,
+        explainability_completeness: f64,
         estimated_latency_ms_p50: f64,
         estimated_latency_ms_p95: f64,
         estimated_cost_units_total: f64,
         embedding_batches_total: usize,
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+    struct RetrievalEvalBranchContribution {
+        lexical_hits: usize,
+        vector_hits: usize,
+        hybrid_hits: usize,
+        source_quality_hits: usize,
+        by_source_kind: BTreeMap<String, usize>,
     }
 
     #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1386,10 +1402,16 @@ mod tests {
         query: String,
         top_ids: Vec<String>,
         matched_expected_count: usize,
+        recall_at_k: f64,
         reciprocal_rank: f64,
+        ndcg_at_k: f64,
         coverage: f64,
         stability_score: f64,
         false_positive: bool,
+        branch_hit_contribution: RetrievalEvalBranchContribution,
+        latency_budget_ms: f64,
+        latency_budget_exceeded: bool,
+        explainability_completeness: f64,
         estimated_latency_ms: f64,
         estimated_cost_units: f64,
         embedding_batches: usize,
@@ -1401,6 +1423,9 @@ mod tests {
         candidate_id: String,
         source_kind: String,
         title: String,
+        snippet: String,
+        branch_contribution: String,
+        explainability_complete: bool,
         final_score: f64,
         lexical_score: f64,
         vector_score: f64,
@@ -1424,6 +1449,12 @@ mod tests {
         for case in corpus.cases.as_slice() {
             if case.top_k == 0 {
                 return Err(format!("eval case '{}' must use top_k > 0", case.case_id));
+            }
+            if case.latency_budget_ms.is_some_and(|budget| !budget.is_finite() || budget <= 0.0) {
+                return Err(format!(
+                    "eval case '{}' latency_budget_ms must be a positive finite value",
+                    case.case_id
+                ));
             }
             if !case_ids.insert(case.case_id.clone()) {
                 return Err(format!("duplicate eval case id '{}'", case.case_id));
@@ -1519,6 +1550,44 @@ mod tests {
         }
     }
 
+    fn eval_source_kind_label(kind: RetrievalSourceProfileKind) -> &'static str {
+        match kind {
+            RetrievalSourceProfileKind::Memory => "memory",
+            RetrievalSourceProfileKind::WorkspaceDocument => "workspace_document",
+            RetrievalSourceProfileKind::Transcript => "transcript",
+            RetrievalSourceProfileKind::Checkpoint => "checkpoint",
+            RetrievalSourceProfileKind::CompactionArtifact => "compaction_artifact",
+        }
+    }
+
+    fn explainability_complete(candidate: &RetrievalEvalRankedCandidate) -> bool {
+        !candidate.candidate_id.trim().is_empty()
+            && !candidate.source_kind.trim().is_empty()
+            && !candidate.title.trim().is_empty()
+            && !candidate.snippet.trim().is_empty()
+            && candidate.final_score.is_finite()
+            && candidate.lexical_score.is_finite()
+            && candidate.vector_score.is_finite()
+            && candidate.recency_score.is_finite()
+            && candidate.source_quality_score.is_finite()
+    }
+
+    fn branch_contribution(candidate: &RetrievalEvalRankedCandidate) -> String {
+        let lexical_active = candidate.lexical_score >= 0.1;
+        let vector_active = candidate.vector_score >= 0.1;
+        match (lexical_active, vector_active) {
+            (true, true) if (candidate.lexical_score - candidate.vector_score).abs() <= 0.15 => {
+                "hybrid"
+            }
+            (true, true) if candidate.lexical_score > candidate.vector_score => "lexical",
+            (true, true) => "vector",
+            (true, false) => "lexical",
+            (false, true) => "vector",
+            (false, false) => "source_quality",
+        }
+        .to_owned()
+    }
+
     fn score_eval_candidate(
         query: &str,
         candidate: &RetrievalEvalCandidate,
@@ -1573,22 +1642,22 @@ mod tests {
             profile,
         );
 
-        RetrievalEvalRankedCandidate {
+        let mut ranked = RetrievalEvalRankedCandidate {
             candidate_id: candidate.candidate_id.clone(),
-            source_kind: match candidate.source_kind {
-                RetrievalSourceProfileKind::Memory => "memory".to_owned(),
-                RetrievalSourceProfileKind::WorkspaceDocument => "workspace_document".to_owned(),
-                RetrievalSourceProfileKind::Transcript => "transcript".to_owned(),
-                RetrievalSourceProfileKind::Checkpoint => "checkpoint".to_owned(),
-                RetrievalSourceProfileKind::CompactionArtifact => "compaction_artifact".to_owned(),
-            },
+            source_kind: eval_source_kind_label(candidate.source_kind).to_owned(),
             title: candidate.title.clone(),
+            snippet: candidate.snippet.clone(),
+            branch_contribution: String::new(),
+            explainability_complete: false,
             final_score: round_metric(breakdown.final_score),
             lexical_score: round_metric(breakdown.lexical_score),
             vector_score: round_metric(breakdown.vector_score),
             recency_score: round_metric(breakdown.recency_score),
             source_quality_score: round_metric(breakdown.source_quality_score),
-        }
+        };
+        ranked.branch_contribution = branch_contribution(&ranked);
+        ranked.explainability_complete = explainability_complete(&ranked);
+        ranked
     }
 
     fn estimate_case_latency_ms(
@@ -1618,6 +1687,75 @@ mod tests {
         round_metric(sorted_values[rank.min(sorted_values.len() - 1)])
     }
 
+    fn relevance_for(case: &RetrievalEvalCase, candidate_id: &str) -> f64 {
+        case.expected_ranked_ids
+            .iter()
+            .position(|expected_id| expected_id == candidate_id)
+            .map_or(0.0, |index| (case.expected_ranked_ids.len() - index) as f64)
+    }
+
+    fn dcg_for_relevances(relevances: impl Iterator<Item = f64>) -> f64 {
+        relevances
+            .enumerate()
+            .map(|(index, relevance)| {
+                if relevance <= 0.0 {
+                    0.0
+                } else {
+                    (2_f64.powf(relevance) - 1.0) / ((index + 2) as f64).log2()
+                }
+            })
+            .sum::<f64>()
+    }
+
+    fn ndcg_at_k(case: &RetrievalEvalCase, ranked: &[RetrievalEvalRankedCandidate]) -> f64 {
+        if case.expected_ranked_ids.is_empty() {
+            return 1.0;
+        }
+        let actual_dcg = dcg_for_relevances(
+            ranked
+                .iter()
+                .take(case.top_k)
+                .map(|candidate| relevance_for(case, candidate.candidate_id.as_str())),
+        );
+        let ideal_dcg = dcg_for_relevances(
+            (0..case.expected_ranked_ids.len())
+                .take(case.top_k)
+                .map(|index| (case.expected_ranked_ids.len() - index) as f64),
+        );
+        if ideal_dcg <= f64::EPSILON {
+            0.0
+        } else {
+            round_metric(actual_dcg / ideal_dcg)
+        }
+    }
+
+    fn record_branch_hit(
+        contribution: &mut RetrievalEvalBranchContribution,
+        candidate: &RetrievalEvalRankedCandidate,
+    ) {
+        match candidate.branch_contribution.as_str() {
+            "lexical" => contribution.lexical_hits = contribution.lexical_hits.saturating_add(1),
+            "vector" => contribution.vector_hits = contribution.vector_hits.saturating_add(1),
+            "hybrid" => contribution.hybrid_hits = contribution.hybrid_hits.saturating_add(1),
+            _ => {
+                contribution.source_quality_hits =
+                    contribution.source_quality_hits.saturating_add(1);
+            }
+        }
+        let entry = contribution.by_source_kind.entry(candidate.source_kind.clone()).or_default();
+        *entry = entry.saturating_add(1);
+    }
+
+    fn explainability_ratio(candidates: &[RetrievalEvalRankedCandidate]) -> f64 {
+        if candidates.is_empty() {
+            return 1.0;
+        }
+        round_metric(
+            candidates.iter().filter(|candidate| candidate.explainability_complete).count() as f64
+                / candidates.len() as f64,
+        )
+    }
+
     fn run_eval_harness(
         corpus: &RetrievalEvalCorpus,
         config: &RetrievalRuntimeConfig,
@@ -1632,10 +1770,15 @@ mod tests {
         let mut negative_cases = 0usize;
         let mut false_positives = 0usize;
         let mut coverage_sum = 0.0;
+        let mut recall_at_k_sum = 0.0;
         let mut reciprocal_rank_sum = 0.0;
+        let mut ndcg_sum = 0.0;
         let mut stability_sum = 0.0;
+        let mut latency_budget_passes = 0usize;
+        let mut explainability_sum = 0.0;
         let mut total_cost_units = 0.0;
         let mut embedding_batches_total = 0usize;
+        let mut branch_hit_contribution = RetrievalEvalBranchContribution::default();
         let mut latencies = Vec::<f64>::new();
         let mut cases = Vec::<RetrievalEvalCaseReport>::new();
 
@@ -1686,6 +1829,24 @@ mod tests {
             let top_score = top_candidates.first().map_or(0.0, |candidate| candidate.final_score);
             let false_positive =
                 case.expected_ranked_ids.is_empty() && top_score > negative_threshold;
+            let recall_at_k = if case.expected_ranked_ids.is_empty() {
+                if false_positive {
+                    0.0
+                } else {
+                    1.0
+                }
+            } else {
+                matched_expected_count as f64 / case.expected_ranked_ids.len() as f64
+            };
+            let ndcg_at_k = if case.expected_ranked_ids.is_empty() {
+                if false_positive {
+                    0.0
+                } else {
+                    1.0
+                }
+            } else {
+                ndcg_at_k(case, ranked.as_slice())
+            };
             let coverage = if case.expected_ranked_ids.is_empty() {
                 if false_positive {
                     0.0
@@ -1728,6 +1889,21 @@ mod tests {
             };
             let estimated_latency_ms =
                 estimate_case_latency_ms(case, production_default_active, batch_limit);
+            let latency_budget_ms = case.latency_budget_ms.unwrap_or(12.0);
+            let latency_budget_exceeded = estimated_latency_ms > latency_budget_ms;
+            if !latency_budget_exceeded {
+                latency_budget_passes = latency_budget_passes.saturating_add(1);
+            }
+            let explainability_completeness = explainability_ratio(top_candidates.as_slice());
+            let mut case_branch_hit_contribution = RetrievalEvalBranchContribution::default();
+            for candidate in top_candidates.iter().filter(|candidate| {
+                case.expected_ranked_ids
+                    .iter()
+                    .any(|expected_id| expected_id == &candidate.candidate_id)
+            }) {
+                record_branch_hit(&mut case_branch_hit_contribution, candidate);
+                record_branch_hit(&mut branch_hit_contribution, candidate);
+            }
 
             if case.expected_ranked_ids.is_empty() {
                 negative_cases = negative_cases.saturating_add(1);
@@ -1742,11 +1918,14 @@ mod tests {
                 if first_expected_rank.is_some_and(|rank| rank <= 3) {
                     hit_at_3 = hit_at_3.saturating_add(1);
                 }
+                recall_at_k_sum += recall_at_k;
                 reciprocal_rank_sum += reciprocal_rank;
+                ndcg_sum += ndcg_at_k;
             }
 
             coverage_sum += coverage;
             stability_sum += stability_score;
+            explainability_sum += explainability_completeness;
             total_cost_units += estimated_cost_units;
             embedding_batches_total = embedding_batches_total.saturating_add(embedding_batches);
             latencies.push(estimated_latency_ms);
@@ -1755,10 +1934,16 @@ mod tests {
                 query: case.query.clone(),
                 top_ids,
                 matched_expected_count,
+                recall_at_k: round_metric(recall_at_k),
                 reciprocal_rank: round_metric(reciprocal_rank),
+                ndcg_at_k: round_metric(ndcg_at_k),
                 coverage: round_metric(coverage),
                 stability_score: round_metric(stability_score),
                 false_positive,
+                branch_hit_contribution: case_branch_hit_contribution,
+                latency_budget_ms,
+                latency_budget_exceeded,
+                explainability_completeness,
                 estimated_latency_ms,
                 estimated_cost_units,
                 embedding_batches,
@@ -1788,6 +1973,16 @@ mod tests {
                 } else {
                     round_metric(hit_at_3 as f64 / positive_cases as f64)
                 },
+                recall_at_k: if positive_cases == 0 {
+                    0.0
+                } else {
+                    round_metric(recall_at_k_sum / positive_cases as f64)
+                },
+                mean_ndcg_at_k: if positive_cases == 0 {
+                    0.0
+                } else {
+                    round_metric(ndcg_sum / positive_cases as f64)
+                },
                 coverage: if corpus.cases.is_empty() {
                     0.0
                 } else {
@@ -1807,6 +2002,17 @@ mod tests {
                     0.0
                 } else {
                     round_metric(stability_sum / corpus.cases.len() as f64)
+                },
+                branch_hit_contribution,
+                latency_budget_pass_rate: if corpus.cases.is_empty() {
+                    0.0
+                } else {
+                    round_metric(latency_budget_passes as f64 / corpus.cases.len() as f64)
+                },
+                explainability_completeness: if corpus.cases.is_empty() {
+                    0.0
+                } else {
+                    round_metric(explainability_sum / corpus.cases.len() as f64)
                 },
                 estimated_latency_ms_p50: percentile(&latencies, 1, 2),
                 estimated_latency_ms_p95: percentile(&latencies, 95, 100),
@@ -1828,10 +2034,30 @@ mod tests {
     fn retrieval_eval_harness_smoke_report_is_deterministic() {
         let report =
             run_eval_harness(&load_eval_corpus(), &RetrievalRuntimeConfig::default(), true, 64);
-        assert_eq!(report.summary.total_cases, 7);
+        assert_eq!(report.summary.total_cases, 8);
         assert!(
             report.summary.hit_at_1 >= 0.6,
             "default retrieval benchmark should keep a healthy hit@1 baseline"
+        );
+        assert!(
+            report.summary.recall_at_k >= 0.85,
+            "default retrieval benchmark should keep high recall@k"
+        );
+        assert!(
+            report.summary.mean_ndcg_at_k >= 0.85,
+            "default retrieval benchmark should keep high graded ranking quality"
+        );
+        assert!(
+            report.summary.latency_budget_pass_rate >= 0.9,
+            "default retrieval benchmark should stay inside the offline latency budget"
+        );
+        assert_eq!(
+            report.summary.explainability_completeness, 1.0,
+            "every top candidate should expose score explanations"
+        );
+        assert!(
+            report.summary.branch_hit_contribution.hybrid_hits > 0,
+            "eval report should expose hybrid branch contribution"
         );
         let serialized = serde_json::to_string_pretty(&report)
             .expect("retrieval eval report should serialize to deterministic json");
@@ -1859,6 +2085,40 @@ mod tests {
             production.summary.estimated_cost_units_total
                 > degraded.summary.estimated_cost_units_total,
             "production benchmark should expose a non-zero embeddings cost signal"
+        );
+    }
+
+    #[test]
+    fn retrieval_eval_harness_compares_fusion_configurations() {
+        let corpus = load_eval_corpus();
+        let baseline = run_eval_harness(&corpus, &RetrievalRuntimeConfig::default(), true, 64);
+        let mut vector_heavy_config = RetrievalRuntimeConfig::default();
+        for profile in [
+            &mut vector_heavy_config.scoring.default_profile,
+            &mut vector_heavy_config.scoring.memory,
+            &mut vector_heavy_config.scoring.workspace,
+            &mut vector_heavy_config.scoring.transcript,
+            &mut vector_heavy_config.scoring.checkpoint,
+            &mut vector_heavy_config.scoring.compaction,
+        ] {
+            profile.lexical_bps = 2_500;
+            profile.vector_bps = 5_000;
+            profile.recency_bps = 1_500;
+            profile.source_quality_bps = 1_000;
+        }
+        vector_heavy_config.validate().expect("comparison scoring config should remain valid");
+
+        let vector_heavy = run_eval_harness(&corpus, &vector_heavy_config, true, 64);
+        assert_eq!(baseline.corpus_version, vector_heavy.corpus_version);
+        assert_eq!(baseline.cases.len(), vector_heavy.cases.len());
+        assert!(
+            vector_heavy.summary.mean_ndcg_at_k >= 0.8,
+            "comparison config should remain above the relevance floor"
+        );
+        assert_ne!(
+            baseline.cases[0].top_candidates[0].final_score,
+            vector_heavy.cases[0].top_candidates[0].final_score,
+            "eval harness should make scoring configuration changes visible"
         );
     }
 }
