@@ -1,6 +1,5 @@
 import { useNavigate } from "react-router-dom";
 
-import type { CapabilityCatalog } from "../../consoleApi";
 import { capabilitiesByMode, capabilitiesForSection } from "../capabilityCatalog";
 import { CapabilityCardList } from "../components/CapabilityCards";
 import { ActionButton, TextInputField } from "../components/ui";
@@ -23,13 +22,22 @@ import {
   readObject,
   readString,
   toStringArray,
-  type JsonObject,
 } from "../shared";
+import { FlowOperationsPanel } from "./FlowOperationsPanel";
+import {
+  formatAuditEventName,
+  formatAuditSummary,
+  formatAuditTime,
+  readCapabilityCatalog,
+  readJsonObjectArray,
+  shortDiagnosticId,
+} from "./operationDiagnostics";
 import type { ConsoleAppState } from "../useConsoleAppState";
 
 type OperationsSectionProps = {
   app: Pick<
     ConsoleAppState,
+    | "api"
     | "auditBusy"
     | "auditFilterContains"
     | "setAuditFilterContains"
@@ -45,6 +53,8 @@ type OperationsSectionProps = {
     | "memoryStatus"
     | "refreshMemoryStatus"
     | "revealSensitiveValues"
+    | "setError"
+    | "setNotice"
   >;
 };
 
@@ -630,6 +640,13 @@ export function OperationsSection({ app }: OperationsSectionProps) {
             )}
           </WorkspaceSectionCard>
 
+          <FlowOperationsPanel
+            api={app.api}
+            diagnostics={diagnostics}
+            setError={app.setError}
+            setNotice={app.setNotice}
+          />
+
           <WorkspaceSectionCard
             title="Delegated children"
             description="Parent/child topology, scheduler backpressure, and child runtime limits stay visible without opening each run tape."
@@ -935,95 +952,4 @@ export function OperationsSection({ app }: OperationsSectionProps) {
       </section>
     </main>
   );
-}
-
-function readCapabilityCatalog(value: JsonObject | null): CapabilityCatalog | null {
-  return value !== null && Array.isArray(value.capabilities)
-    ? (value as unknown as CapabilityCatalog)
-    : null;
-}
-
-function readJsonObjectArray(value: unknown): JsonObject[] {
-  return Array.isArray(value)
-    ? value.filter(
-        (entry): entry is JsonObject =>
-          entry !== null && typeof entry === "object" && !Array.isArray(entry),
-      )
-    : [];
-}
-
-function formatAuditTime(event: JsonObject): string {
-  return (
-    formatUnixMs(
-      readNumber(event, "timestamp_unix_ms") ??
-        readNumber(event, "observed_at_unix_ms") ??
-        readNumber(event, "created_at_unix_ms"),
-    ) ??
-    readString(event, "occurred_at") ??
-    readString(event, "created_at") ??
-    "n/a"
-  );
-}
-
-function formatAuditEventName(event: JsonObject): string {
-  return (
-    readString(event, "event_type") ??
-    readString(event, "event") ??
-    mapAuditKind(readNumber(event, "kind")) ??
-    "unknown"
-  );
-}
-
-function shortDiagnosticId(value: string | null): string {
-  if (value === null || value.length === 0) {
-    return "n/a";
-  }
-  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
-}
-
-function formatAuditSummary(event: JsonObject): string {
-  const summary =
-    readString(event, "message") ?? readString(event, "summary") ?? readString(event, "reason");
-  if (summary !== null) {
-    return summary;
-  }
-
-  if (event.payload !== undefined && event.payload !== null) {
-    if (
-      typeof event.payload === "string" ||
-      typeof event.payload === "number" ||
-      typeof event.payload === "boolean"
-    ) {
-      return String(event.payload);
-    }
-    if (typeof event.payload === "object" && !Array.isArray(event.payload)) {
-      const entries = Object.entries(event.payload as Record<string, unknown>);
-      if (entries.length > 0) {
-        return entries.map(([key, value]) => `${key}: ${String(value)}`).join(", ");
-      }
-    }
-  }
-
-  return readString(event, "payload_json") ?? "No summary";
-}
-
-function mapAuditKind(kind: number | null): string | null {
-  switch (kind) {
-    case 1:
-      return "message.received";
-    case 2:
-      return "model.token";
-    case 3:
-      return "tool.proposed";
-    case 4:
-      return "tool.executed";
-    case 5:
-      return "a2ui.updated";
-    case 6:
-      return "run.completed";
-    case 7:
-      return "run.failed";
-    default:
-      return null;
-  }
 }

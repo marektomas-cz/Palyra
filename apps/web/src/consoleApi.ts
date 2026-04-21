@@ -7207,11 +7207,7 @@ export class ConsoleApiClient {
     );
   }
 
-  private async request<T>(
-    path: string,
-    init: RequestInit = {},
-    options: RequestOptions = {},
-  ): Promise<T> {
+  async request<T>(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {
     const headers = new Headers(init.headers);
     if (init.body !== undefined && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");

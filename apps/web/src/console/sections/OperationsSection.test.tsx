@@ -56,6 +56,9 @@ describe("OperationsSection", () => {
             overviewCatalog: null,
             memoryStatus: null,
             refreshMemoryStatus: vi.fn(async () => {}),
+            api: {} as never,
+            setError: vi.fn(),
+            setNotice: vi.fn(),
             revealSensitiveValues: false,
           }}
         />
