@@ -167,6 +167,8 @@ const DEFAULT_DEPLOYMENT_MODE: &str = "local_desktop";
 pub(crate) const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7142";
 const DEFAULT_BROWSER_SERVICE_ENDPOINT: &str = "http://127.0.0.1:7543";
 const DEFAULT_JOURNAL_DB_PATH: &str = "data/journal.sqlite3";
+const SUPPORT_BUNDLE_FLOW_LIMIT: usize = 16;
+const SUPPORT_BUNDLE_FLOW_EVENT_LIMIT: usize = 64;
 const DEFAULT_BROWSER_URL: &str = "http://127.0.0.1:7143";
 const DEFAULT_CHANNEL: &str = "cli";
 const DEFAULT_DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -268,6 +270,7 @@ fn run_cli() -> Result<()> {
         CliCommand::Agents { command } => commands::agents::run_agents(command),
         CliCommand::Routines { command } => commands::routines::run_routines(command),
         CliCommand::Objectives { command } => commands::objectives::run_objectives(command),
+        CliCommand::Flows { command } => commands::flows::run_flows(command),
         CliCommand::Cron { command } => commands::cron::run_cron(command),
         CliCommand::Memory { command } => commands::memory::run_memory(command),
         CliCommand::Message { command } => commands::message::run_message(command),
@@ -1931,6 +1934,7 @@ fn build_support_bundle_journal_snapshot(
                 latest_hash: None,
                 recent_hashes: Vec::new(),
                 last_errors: Vec::new(),
+                flow_timeline: unavailable_support_bundle_flow_timeline(error.to_string()),
                 error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
             };
         }
@@ -1944,6 +1948,9 @@ fn build_support_bundle_journal_snapshot(
             latest_hash: None,
             recent_hashes: Vec::new(),
             last_errors: Vec::new(),
+            flow_timeline: unavailable_support_bundle_flow_timeline(
+                "journal database is unavailable",
+            ),
             error: Some("journal database is unavailable".to_owned()),
         };
     }
@@ -1958,6 +1965,7 @@ fn build_support_bundle_journal_snapshot(
                 latest_hash: None,
                 recent_hashes: Vec::new(),
                 last_errors: Vec::new(),
+                flow_timeline: unavailable_support_bundle_flow_timeline(error.to_string()),
                 error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
             };
         }
@@ -1968,6 +1976,7 @@ fn build_support_bundle_journal_snapshot(
         read_recent_journal_hashes(&connection, journal_hash_limit).unwrap_or_default();
     let last_errors =
         read_recent_journal_errors(&connection, error_limit.clamp(1, 256)).unwrap_or_default();
+    let flow_timeline = read_support_bundle_flow_timeline(&connection);
     SupportBundleJournalSnapshot {
         db_path,
         available: true,
@@ -1975,8 +1984,101 @@ fn build_support_bundle_journal_snapshot(
         latest_hash,
         recent_hashes,
         last_errors,
+        flow_timeline,
         error: None,
     }
+}
+
+fn unavailable_support_bundle_flow_timeline(
+    error: impl Into<String>,
+) -> SupportBundleFlowTimelineSnapshot {
+    let error = error.into();
+    SupportBundleFlowTimelineSnapshot {
+        available: false,
+        active_flows: 0,
+        recent_flows: Vec::new(),
+        recent_events: Vec::new(),
+        error: Some(sanitize_diagnostic_error(error.as_str())),
+    }
+}
+
+fn read_support_bundle_flow_timeline(connection: &Connection) -> SupportBundleFlowTimelineSnapshot {
+    let recent_flows = match read_recent_support_bundle_flows(connection, SUPPORT_BUNDLE_FLOW_LIMIT)
+    {
+        Ok(records) => records,
+        Err(error) => return unavailable_support_bundle_flow_timeline(error.to_string()),
+    };
+    let recent_events =
+        match read_recent_support_bundle_flow_events(connection, SUPPORT_BUNDLE_FLOW_EVENT_LIMIT) {
+            Ok(records) => records,
+            Err(error) => return unavailable_support_bundle_flow_timeline(error.to_string()),
+        };
+    let active_flows = recent_flows
+        .iter()
+        .filter(|flow| {
+            !matches!(flow.state.as_str(), "completed" | "failed" | "cancelled" | "compensated")
+        })
+        .count();
+    SupportBundleFlowTimelineSnapshot {
+        available: true,
+        active_flows,
+        recent_flows,
+        recent_events,
+        error: None,
+    }
+}
+
+fn read_recent_support_bundle_flows(
+    connection: &Connection,
+    limit: usize,
+) -> Result<Vec<SupportBundleFlowRecord>> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let mut statement = connection.prepare(
+        "SELECT flow_id, mode, state, title, current_step_id, revision, objective_id, routine_id, webhook_id, origin_run_id, updated_at_unix_ms \
+         FROM flows ORDER BY updated_at_unix_ms DESC LIMIT ?1",
+    )?;
+    let rows = statement.query_map([limit], |row| {
+        Ok(SupportBundleFlowRecord {
+            flow_id: row.get(0)?,
+            mode: row.get(1)?,
+            state: row.get(2)?,
+            title: row.get(3)?,
+            current_step_id: row.get(4)?,
+            revision: row.get(5)?,
+            objective_id: row.get(6)?,
+            routine_id: row.get(7)?,
+            webhook_id: row.get(8)?,
+            origin_run_id: row.get(9)?,
+            updated_at_unix_ms: row.get(10)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, rusqlite::Error>>()
+        .context("failed to read support-bundle flow timeline")
+}
+
+fn read_recent_support_bundle_flow_events(
+    connection: &Connection,
+    limit: usize,
+) -> Result<Vec<SupportBundleFlowEventRecord>> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let mut statement = connection.prepare(
+        "SELECT event_id, flow_id, step_id, event_type, from_state, to_state, summary, created_at_unix_ms \
+         FROM flow_events ORDER BY created_at_unix_ms DESC LIMIT ?1",
+    )?;
+    let rows = statement.query_map([limit], |row| {
+        Ok(SupportBundleFlowEventRecord {
+            event_id: row.get(0)?,
+            flow_id: row.get(1)?,
+            step_id: row.get(2)?,
+            event_type: row.get(3)?,
+            from_state: row.get(4)?,
+            to_state: row.get(5)?,
+            summary: row.get(6)?,
+            created_at_unix_ms: row.get(7)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, rusqlite::Error>>()
+        .context("failed to read support-bundle flow events")
 }
 
 fn read_latest_journal_hash(connection: &Connection) -> Result<Option<String>> {
@@ -7032,8 +7134,54 @@ struct SupportBundleJournalSnapshot {
     latest_hash: Option<String>,
     recent_hashes: Vec<String>,
     last_errors: Vec<SupportBundleJournalErrorRecord>,
+    flow_timeline: SupportBundleFlowTimelineSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SupportBundleFlowTimelineSnapshot {
+    available: bool,
+    active_flows: usize,
+    recent_flows: Vec<SupportBundleFlowRecord>,
+    recent_events: Vec<SupportBundleFlowEventRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SupportBundleFlowRecord {
+    flow_id: String,
+    mode: String,
+    state: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_step_id: Option<String>,
+    revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objective_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routine_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_run_id: Option<String>,
+    updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct SupportBundleFlowEventRecord {
+    event_id: String,
+    flow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step_id: Option<String>,
+    event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to_state: Option<String>,
+    summary: String,
+    created_at_unix_ms: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -8340,16 +8488,18 @@ mod init_command_tests {
 #[cfg(test)]
 mod diagnostics_bundle_tests {
     use super::{
-        encode_support_bundle_with_cap, extract_support_bundle_error_message, DoctorAccessSnapshot,
-        DoctorBrowserSnapshot, DoctorConfigSnapshot, DoctorConnectivityProbe,
-        DoctorConnectivitySnapshot, DoctorDeploymentBindSnapshot, DoctorDeploymentSnapshot,
-        DoctorIdentitySnapshot, DoctorProviderAuthSnapshot, DoctorReport, DoctorSandboxSnapshot,
-        DoctorSummary, SkillsInventorySnapshot, SupportBundle, SupportBundleBuildSnapshot,
+        encode_support_bundle_with_cap, extract_support_bundle_error_message,
+        read_support_bundle_flow_timeline, DoctorAccessSnapshot, DoctorBrowserSnapshot,
+        DoctorConfigSnapshot, DoctorConnectivityProbe, DoctorConnectivitySnapshot,
+        DoctorDeploymentBindSnapshot, DoctorDeploymentSnapshot, DoctorIdentitySnapshot,
+        DoctorProviderAuthSnapshot, DoctorReport, DoctorSandboxSnapshot, DoctorSummary,
+        SkillsInventorySnapshot, SupportBundle, SupportBundleBuildSnapshot,
         SupportBundleConfigSnapshot, SupportBundleDiagnosticsSnapshot,
-        SupportBundleJournalErrorRecord, SupportBundleJournalSnapshot,
-        SupportBundleObservabilitySnapshot, SupportBundleReplaySnapshot,
-        SupportBundleTriageSnapshot,
+        SupportBundleFlowTimelineSnapshot, SupportBundleJournalErrorRecord,
+        SupportBundleJournalSnapshot, SupportBundleObservabilitySnapshot,
+        SupportBundleReplaySnapshot, SupportBundleTriageSnapshot,
     };
+    use rusqlite::{params, Connection};
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
 
@@ -8651,6 +8801,13 @@ mod diagnostics_bundle_tests {
                 latest_hash: Some("f".repeat(64)),
                 recent_hashes: hashes,
                 last_errors: errors,
+                flow_timeline: SupportBundleFlowTimelineSnapshot {
+                    available: true,
+                    active_flows: 0,
+                    recent_flows: Vec::new(),
+                    recent_events: Vec::new(),
+                    error: None,
+                },
                 error: None,
             },
             truncated: false,
@@ -8677,6 +8834,109 @@ mod diagnostics_bundle_tests {
                 && !extracted.contains("qwerty"),
             "extracted error message must not leak raw secret values: {extracted}"
         );
+    }
+
+    #[test]
+    fn support_bundle_flow_timeline_reads_recent_flow_events() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE flows (
+                    flow_id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    current_step_id TEXT,
+                    revision INTEGER NOT NULL,
+                    objective_id TEXT,
+                    routine_id TEXT,
+                    webhook_id TEXT,
+                    origin_run_id TEXT,
+                    updated_at_unix_ms INTEGER NOT NULL
+                );
+                CREATE TABLE flow_events (
+                    event_id TEXT PRIMARY KEY,
+                    flow_id TEXT NOT NULL,
+                    step_id TEXT,
+                    event_type TEXT NOT NULL,
+                    from_state TEXT,
+                    to_state TEXT,
+                    summary TEXT,
+                    created_at_unix_ms INTEGER NOT NULL
+                );
+                "#,
+            )
+            .expect("flow tables should be created");
+        connection
+            .execute(
+                "INSERT INTO flows (
+                    flow_id, mode, state, title, current_step_id, revision, objective_id,
+                    routine_id, webhook_id, origin_run_id, updated_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    "flow-active",
+                    "managed",
+                    "running",
+                    "Active flow",
+                    "step-1",
+                    3_i64,
+                    "objective-1",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "run-1",
+                    1_730_000_000_100_i64,
+                ],
+            )
+            .expect("active flow should insert");
+        connection
+            .execute(
+                "INSERT INTO flows (
+                    flow_id, mode, state, title, current_step_id, revision, objective_id,
+                    routine_id, webhook_id, origin_run_id, updated_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    "flow-complete",
+                    "mirrored",
+                    "completed",
+                    "Completed flow",
+                    Option::<String>::None,
+                    1_i64,
+                    Option::<String>::None,
+                    "routine-1",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    1_730_000_000_000_i64,
+                ],
+            )
+            .expect("completed flow should insert");
+        connection
+            .execute(
+                "INSERT INTO flow_events (
+                    event_id, flow_id, step_id, event_type, from_state, to_state, summary,
+                    created_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    "event-1",
+                    "flow-active",
+                    "step-1",
+                    "step.state_changed",
+                    "queued",
+                    "running",
+                    "step queued",
+                    1_730_000_000_200_i64,
+                ],
+            )
+            .expect("flow event should insert");
+
+        let snapshot = read_support_bundle_flow_timeline(&connection);
+
+        assert!(snapshot.available, "flow timeline should be available");
+        assert_eq!(snapshot.active_flows, 1);
+        assert_eq!(snapshot.recent_flows.len(), 2);
+        assert_eq!(snapshot.recent_flows[0].flow_id, "flow-active");
+        assert_eq!(snapshot.recent_events.len(), 1);
+        assert_eq!(snapshot.recent_events[0].summary, "step queued");
     }
 
     #[test]

@@ -160,6 +160,16 @@ path = "objectives"
 file = "objectives-help.txt"
 
 [[entries]]
+path = "flows"
+category = "top_level"
+status = "done"
+summary = "Durable orchestration flow timeline and operator control surface."
+
+[entries.snapshot]
+path = "flows"
+file = "flows-help.txt"
+
+[[entries]]
 path = "memory"
 category = "top_level"
 status = "done"

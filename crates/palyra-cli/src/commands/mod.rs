@@ -14,6 +14,7 @@ pub mod daemon;
 pub mod devices;
 pub mod docs;
 pub mod doctor;
+pub mod flows;
 pub mod health;
 pub mod hooks;
 pub mod init;

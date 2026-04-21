@@ -16,6 +16,7 @@ mod cron;
 mod daemon;
 mod devices;
 mod docs;
+mod flows;
 mod hooks;
 mod init;
 mod mcp;
@@ -76,6 +77,7 @@ pub use cron::{CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg, Cron
 pub use daemon::{DaemonCommand, JournalCheckpointModeArg};
 pub use devices::DevicesCommand;
 pub use docs::DocsCommand;
+pub use flows::{FlowStateArg, FlowsCommand};
 pub use hooks::HooksCommand;
 pub use init::{InitModeArg, InitTlsScaffoldArg};
 pub use mcp::{McpCommand, McpSubcommand};
@@ -536,6 +538,11 @@ pub enum Command {
     Objectives {
         #[command(subcommand)]
         command: ObjectivesCommand,
+    },
+    #[command(about = "Inspect and control durable orchestration flows")]
+    Flows {
+        #[command(subcommand)]
+        command: FlowsCommand,
     },
     #[command(
         about = "Manage schedule-only cron workflows through the routines compatibility layer",

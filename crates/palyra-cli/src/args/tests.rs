@@ -10,20 +10,21 @@ use super::{
     ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell,
     ConfigCommand, ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg,
     CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, DevicesCommand, DocsCommand,
-    GatewayBindProfileArg, HooksCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg,
-    MemoryCommand, MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, MessageCommand,
-    ModelsCommand, NodeCommand, NodesCommand, ObjectiveKindArg, ObjectivePriorityArg,
-    ObjectiveScheduleTypeArg, ObjectiveUpsertCommandArgs, ObjectivesCommand,
-    OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PairingClientKindArg,
-    PairingCommand, PairingMethodArg, PairingStateArg, PatchCommand, PluginsCommand, PolicyCommand,
-    ProfileCommand, ProfileExportModeArg, ProfileModeArg, ProfileRiskLevelArg, ProtocolCommand,
-    RemoteVerificationModeArg, ResetCommand, ResetScopeArg, RoutineApprovalModeArg,
-    RoutineDeliveryModeArg, RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
-    RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg, RoutineUpsertCommand,
-    RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand, SecretsConfigureCommand,
-    SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
-    SupportBundleCommand, SystemCommand, SystemEventCommand, SystemEventSeverityArg, TuiCommand,
-    UninstallCommand, UpdateCommand, WebhooksCommand, WizardOverridesArg, WorkspaceRoleArg,
+    FlowStateArg, FlowsCommand, GatewayBindProfileArg, HooksCommand, InitModeArg,
+    InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand, MemoryLearningCommand,
+    MemoryScopeArg, MemorySourceArg, MessageCommand, ModelsCommand, NodeCommand, NodesCommand,
+    ObjectiveKindArg, ObjectivePriorityArg, ObjectiveScheduleTypeArg, ObjectiveUpsertCommandArgs,
+    ObjectivesCommand, OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg,
+    PairingClientKindArg, PairingCommand, PairingMethodArg, PairingStateArg, PatchCommand,
+    PluginsCommand, PolicyCommand, ProfileCommand, ProfileExportModeArg, ProfileModeArg,
+    ProfileRiskLevelArg, ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg,
+    RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutineExecutionPostureArg,
+    RoutinePreviewTimezoneArg, RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg,
+    RoutineUpsertCommand, RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
+    SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
+    SkillsCommand, SkillsPackageCommand, SupportBundleCommand, SystemCommand, SystemEventCommand,
+    SystemEventSeverityArg, TuiCommand, UninstallCommand, UpdateCommand, WebhooksCommand,
+    WizardOverridesArg, WorkspaceRoleArg,
 };
 
 #[test]
@@ -1798,6 +1799,56 @@ fn parse_objectives_list_with_filters() {
                 limit: Some(25),
                 kind: Some(ObjectiveKindArg::Heartbeat),
                 state: Some(super::ObjectiveStateArg::Active),
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_flows_controls() {
+    let list = Cli::parse_from([
+        "palyra",
+        "flows",
+        "list",
+        "--limit",
+        "25",
+        "--state",
+        "waiting-for-approval",
+        "--active-only",
+        "--json",
+    ]);
+    assert_eq!(
+        list.command,
+        Command::Flows {
+            command: FlowsCommand::List {
+                limit: Some(25),
+                state: Some(FlowStateArg::WaitingForApproval),
+                active_only: true,
+                json: true,
+            }
+        }
+    );
+
+    let retry = Cli::parse_from([
+        "palyra",
+        "flows",
+        "retry-step",
+        "--id",
+        "flow-01",
+        "--step-id",
+        "step-01",
+        "--reason",
+        "adapter recovered",
+        "--json",
+    ]);
+    assert_eq!(
+        retry.command,
+        Command::Flows {
+            command: FlowsCommand::RetryStep {
+                id: "flow-01".to_owned(),
+                step_id: "step-01".to_owned(),
+                reason: Some("adapter recovered".to_owned()),
                 json: true,
             }
         }
