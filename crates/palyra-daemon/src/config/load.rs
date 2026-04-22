@@ -561,10 +561,6 @@ pub fn load_config() -> Result<LoadedConfig> {
                     openai_api_key_vault_ref.as_str(),
                     "model_provider.openai_api_key_vault_ref",
                 )?;
-                model_provider.openai_api_key_secret_ref = model_provider
-                    .openai_api_key_vault_ref
-                    .clone()
-                    .map(SecretRef::from_legacy_vault_ref);
             }
             if let Some(anthropic_api_key) = file_model_provider.anthropic_api_key {
                 model_provider.anthropic_api_key = if anthropic_api_key.trim().is_empty() {
@@ -589,10 +585,6 @@ pub fn load_config() -> Result<LoadedConfig> {
                     anthropic_api_key_vault_ref.as_str(),
                     "model_provider.anthropic_api_key_vault_ref",
                 )?;
-                model_provider.anthropic_api_key_secret_ref = model_provider
-                    .anthropic_api_key_vault_ref
-                    .clone()
-                    .map(SecretRef::from_legacy_vault_ref);
             }
             if let Some(auth_profile_ref) = file_model_provider.auth_profile_ref {
                 model_provider.auth_profile_id = parse_optional_auth_profile_id(
@@ -1406,8 +1398,6 @@ pub fn load_config() -> Result<LoadedConfig> {
             openai_api_key_vault_ref.as_str(),
             "PALYRA_MODEL_PROVIDER_OPENAI_API_KEY_VAULT_REF",
         )?;
-        model_provider.openai_api_key_secret_ref =
-            model_provider.openai_api_key_vault_ref.clone().map(SecretRef::from_legacy_vault_ref);
         source.push_str(" +env(PALYRA_MODEL_PROVIDER_OPENAI_API_KEY_VAULT_REF)");
     }
     if let Ok(auth_profile_ref) = env::var("PALYRA_MODEL_PROVIDER_AUTH_PROFILE_REF") {
@@ -4382,6 +4372,48 @@ mod tests {
             "auth provider kind should default to unset"
         );
         assert_eq!(config.max_retries, 2);
+    }
+
+    #[test]
+    fn load_config_accepts_legacy_model_provider_vault_ref() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let tempdir = tempfile::tempdir().expect("temporary directory should be created");
+        let config_path = tempdir.path().join("palyra.toml");
+        std::fs::write(
+            config_path.as_path(),
+            r#"
+version = 1
+
+[admin]
+require_auth = false
+
+[model_provider]
+kind = "openai_compatible"
+openai_base_url = "https://api.openai.com/v1"
+openai_model = "gpt-4o-mini"
+openai_api_key_vault_ref = "global/openai_api_key"
+"#,
+        )
+        .expect("legacy vault-ref config should be written");
+
+        let _config = ScopedEnvVar::set(
+            "PALYRA_CONFIG",
+            config_path.to_str().expect("test path should be UTF-8"),
+        );
+        let _api_key = ScopedEnvVar::unset("PALYRA_MODEL_PROVIDER_OPENAI_API_KEY");
+        let _api_key_vault_ref =
+            ScopedEnvVar::unset("PALYRA_MODEL_PROVIDER_OPENAI_API_KEY_VAULT_REF");
+
+        let loaded = super::load_config().expect("legacy vault-ref config should load");
+
+        assert_eq!(
+            loaded.model_provider.openai_api_key_vault_ref.as_deref(),
+            Some("global/openai_api_key")
+        );
+        assert!(
+            loaded.model_provider.openai_api_key_secret_ref.is_none(),
+            "legacy vault ref should not be converted during config loading and then self-conflict"
+        );
     }
 
     #[test]
