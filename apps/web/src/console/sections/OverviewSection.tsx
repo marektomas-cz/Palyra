@@ -853,7 +853,7 @@ export function OverviewSection({ app }: OverviewSectionProps) {
           detail={warnings[0] ?? tOverview("metric.remoteStable")}
           label={tOverview("metric.accessPosture")}
           tone={warnings.length > 0 ? "warning" : "default"}
-          value={`${readString(deployment ?? {}, "mode") ?? "unknown"} / ${readString(deployment ?? {}, "bind_profile") ?? "n/a"}`}
+          value={`${readString(deployment ?? {}, "profile") ?? "unknown"} / ${readString(deployment ?? {}, "bind_profile") ?? "n/a"}`}
         />
         <WorkspaceMetricCard
           detail={
@@ -1272,6 +1272,10 @@ export function OverviewSection({ app }: OverviewSectionProps) {
             />
           ) : (
             <dl className="workspace-key-value-grid">
+              <div>
+                <dt>Profile</dt>
+                <dd>{readString(deployment, "profile") ?? "n/a"}</dd>
+              </div>
               <div>
                 <dt>Mode</dt>
                 <dd>{readString(deployment, "mode") ?? "n/a"}</dd>

@@ -2575,6 +2575,8 @@ export interface CapabilityCatalog {
 
 export interface DeploymentPostureSummary {
   contract: ContractDescriptor;
+  profile: string;
+  profile_manifest: JsonValue;
   mode: string;
   bind_profile: string;
   bind_addresses: {

@@ -107,6 +107,20 @@ export function capabilityCatalogFixture() {
 export function deploymentPostureFixture(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     contract: controlPlaneContract(),
+    profile: "local",
+    profile_manifest: {
+      schema_version: 1,
+      profile_id: "local",
+      display_name: "Local operator workstation",
+      deployment_mode: "local_desktop",
+      bind_profile: "loopback_only",
+      capabilities: [],
+      defaults: [],
+      blockers: [],
+      health_preflights: [],
+      recipe_targets: [],
+      next_steps: [],
+    },
     mode: "local",
     bind_profile: "loopback",
     bind_addresses: {
@@ -632,6 +646,44 @@ export function diagnosticsFixture() {
           completed_at_unix_ms: 1700000001000,
           output_path: "state/support-bundles/support-job-0.zip",
         },
+        runtime_support: {
+          queue_state: {
+            support_bundle_jobs_by_state: { succeeded: 1 },
+            session_queue_policy: { mode: "preview_only", max_depth: 8 },
+          },
+          pruning_explain: {
+            mode: "preview_only",
+            min_token_savings: 128,
+          },
+          recall_artifacts: {
+            endpoint: "/console/v1/memory/recall-artifacts",
+          },
+          flow_snapshots: {
+            endpoint: "/console/v1/diagnostics",
+          },
+        },
+        operator_runbooks: [
+          {
+            id: "queue_backlog",
+            failure_mode: "Queue backlog",
+            trigger: "Queued inputs, support jobs, or delegated children keep growing.",
+          },
+          {
+            id: "degraded_retrieval",
+            failure_mode: "Degraded retrieval",
+            trigger: "Memory retrieval backend reports degraded state or recall artifacts are missing.",
+          },
+        ],
+        incident_checklists: [
+          {
+            id: "first_response",
+            title: "First response",
+            items: [
+              "Queue or export a fresh support bundle.",
+              "Check recent failures and config ref health before changing config.",
+            ],
+          },
+        ],
       },
       doctor_recovery: {
         queued: 1,

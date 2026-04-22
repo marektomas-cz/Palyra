@@ -434,11 +434,8 @@ describe("M56 config, access, and support surfaces", () => {
     expect(
       screen.getByText("Wait for active runs to finish, then rerun the reload plan or apply step."),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "docs-codebase/docs-tree/web_console_operator_dashboard/console_sections_and_navigation/support_recovery.md",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Embedded runbooks")).toBeInTheDocument();
+    expect(screen.getByText(/Queued inputs, support jobs, or delegated children/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Retain jobs"), { target: { value: "8" } });
     fireEvent.click(screen.getByRole("button", { name: "Queue support bundle" }));

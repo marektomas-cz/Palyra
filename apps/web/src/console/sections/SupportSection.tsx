@@ -145,7 +145,9 @@ const SUPPORT_MESSAGES = {
   "playbook.step2": "Queue a doctor preview before applying repair or rollback.",
   "playbook.step3": "Load the latest support bundle and recovery jobs to inspect command output.",
   "playbook.step4": "Inspect diagnostics before changing config or auth posture.",
-  "playbook.reference": "Reference",
+  "playbook.reference": "Embedded runbooks",
+  "playbook.checklists": "Incident checklists",
+  "playbook.noRunbooks": "No embedded runbooks published",
   "replay.title": "Incident replay",
   "replay.description":
     "Redacted bundles, offline runner gates, and diff reporting stay visible next to support handoffs.",
@@ -272,7 +274,9 @@ const SUPPORT_MESSAGES_CS: Readonly<Record<SupportMessageKey, string>> = {
   "playbook.step2": "Zařaď doctor preview před aplikací opravy nebo rollbacku.",
   "playbook.step3": "Načti poslední support bundle a recovery joby pro kontrolu výstupu příkazů.",
   "playbook.step4": "Před změnou config nebo auth postury zkontroluj diagnostiku.",
-  "playbook.reference": "Reference",
+  "playbook.reference": "Vestavěné runbooky",
+  "playbook.checklists": "Incident checklisty",
+  "playbook.noRunbooks": "Nejsou publikované žádné vestavěné runbooky",
   "replay.title": "Incident replay",
   "replay.description":
     "Redigované bundle, offline runner gates a diff reporting zůstávají viditelné vedle support handoffů.",
@@ -356,6 +360,8 @@ export function SupportSection({ app }: SupportSectionProps) {
   const replayDiffCategories = toStringArray(
     Array.isArray(replayReporting?.diff_categories) ? replayReporting.diff_categories : [],
   );
+  const operatorRunbooks = toJsonObjectArray(supportBundle?.operator_runbooks);
+  const incidentChecklists = toJsonObjectArray(supportBundle?.incident_checklists);
   const doctorRecovery = readObject(observability ?? {}, "doctor_recovery");
   const providerAuth = readObject(observability ?? {}, "provider_auth");
   const workspaceRestore = readObject(observability ?? {}, "workspace_restore");
@@ -464,7 +470,7 @@ export function SupportSection({ app }: SupportSectionProps) {
         <WorkspaceMetricCard
           label={t("metric.deploymentPosture")}
           value={readString(deployment, "bind_profile") ?? "unknown"}
-          detail={readString(deployment, "mode") ?? t("metric.modeUnavailableLong")}
+          detail={`${readString(deployment, "profile") ?? "unknown"} · ${readString(deployment, "mode") ?? t("metric.modeUnavailableLong")}`}
         />
         <WorkspaceMetricCard
           label={t("metric.replayGate")}
@@ -757,9 +763,44 @@ export function SupportSection({ app }: SupportSectionProps) {
               <li>{t("playbook.step3")}</li>
               <li>{t("playbook.step4")}</li>
             </ol>
-            <InlineNotice title={t("playbook.reference")} tone="default">
-              docs-codebase/docs-tree/web_console_operator_dashboard/console_sections_and_navigation/support_recovery.md
-            </InlineNotice>
+            {operatorRunbooks.length === 0 ? (
+              <InlineNotice title={t("playbook.reference")} tone="default">
+                {t("playbook.noRunbooks")}
+              </InlineNotice>
+            ) : (
+              <div className="workspace-stack">
+                <strong>{t("playbook.reference")}</strong>
+                <ul className="console-compact-list">
+                  {operatorRunbooks.slice(0, 6).map((runbook) => {
+                    const id = readString(runbook, "id") ?? "runbook";
+                    return (
+                      <li key={id}>
+                        <strong>{readString(runbook, "failure_mode") ?? id}</strong>:{" "}
+                        {readString(runbook, "trigger") ?? "No trigger published."}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+            {incidentChecklists.length > 0 ? (
+              <InlineNotice title={t("playbook.checklists")} tone="default">
+                <ul className="console-compact-list">
+                  {incidentChecklists.slice(0, 2).map((checklist) => {
+                    const id = readString(checklist, "id") ?? "checklist";
+                    const items = toStringArray(
+                      Array.isArray(checklist.items) ? checklist.items : [],
+                    );
+                    return (
+                      <li key={id}>
+                        <strong>{readString(checklist, "title") ?? id}</strong>:{" "}
+                        {items.slice(0, 3).join(" · ")}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </InlineNotice>
+            ) : null}
           </div>
         </WorkspaceSectionCard>
         <WorkspaceSectionCard title={t("replay.title")} description={t("replay.description")}>
