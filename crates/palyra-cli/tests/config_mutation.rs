@@ -23,6 +23,25 @@ fn backup_path(path: &Path, index: usize) -> PathBuf {
 }
 
 #[test]
+fn config_set_help_describes_value_as_toml_literal() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let output = run_cli(&workdir, &["config", "set", "--help"])?;
+
+    assert!(
+        output.status.success(),
+        "config set help should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not UTF-8")?;
+    assert!(stdout.contains("--value <TOML_LITERAL>"), "unexpected help output: {stdout}");
+    assert!(
+        stdout.contains("TOML literal to write; quote strings"),
+        "unexpected help output: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_set_get_unset_roundtrip_and_rotates_backups() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("palyra.toml");

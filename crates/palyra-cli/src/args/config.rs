@@ -38,7 +38,11 @@ pub enum ConfigCommand {
         path: Option<String>,
         #[arg(long)]
         key: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "TOML_LITERAL",
+            help = "TOML literal to write; quote strings, for example '\"value\"'"
+        )]
         value: String,
         #[arg(long, default_value_t = 5)]
         backups: usize,
