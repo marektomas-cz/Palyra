@@ -7130,6 +7130,12 @@ fn process_runner_tier_b_allowlist_config_ok_impl() -> Result<bool> {
 }
 
 fn doctor_config_path() -> Option<PathBuf> {
+    if let Some(path) =
+        app::current_root_context().and_then(|context| context.config_path().map(Path::to_path_buf))
+    {
+        return Some(path);
+    }
+
     match env::var("PALYRA_CONFIG") {
         Ok(explicit) => {
             let trimmed = explicit.trim();
