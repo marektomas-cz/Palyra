@@ -37,6 +37,7 @@ Commands:
   sandbox         Inspect effective process-runner and WASM sandbox policy surfaces
   completion      Generate shell completion scripts
   onboarding      [aliases: onboard]
+  deployment      Inspect deployment profiles, run preflights, and generate deploy recipes
   configure       Safely reconfigure an existing installation
   gateway         Gateway and runtime diagnostics surface [aliases: daemon]
   dashboard       Resolve or open the operator dashboard URL
@@ -90,6 +91,8 @@ Global Options:
 
 Examples:
   palyra setup --mode local
+  palyra setup --deployment-profile single-vm --path ./config/palyra.toml
+  palyra deployment profiles --json
   palyra acp --session-key ops:triage
   palyra docs search gateway
   palyra gateway status

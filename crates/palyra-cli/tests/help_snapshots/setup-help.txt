@@ -37,6 +37,9 @@ Options:
 
       --api-key-prompt
 
+      --deployment-profile <DEPLOYMENT_PROFILE>
+          [possible values: local, single-vm, worker-enabled]
+
       --bind-profile <BIND_PROFILE>
           [possible values: loopback-only, public-tls]
 
@@ -106,6 +109,8 @@ Global Options:
 
 Examples:
   palyra setup --mode local
+  palyra setup --deployment-profile single-vm --path ./config/palyra.toml
+  palyra setup --deployment-profile worker-enabled --wizard --non-interactive --accept-risk
   palyra setup --mode local --wizard
   palyra setup --mode remote --path ./config/palyra.toml --force
 

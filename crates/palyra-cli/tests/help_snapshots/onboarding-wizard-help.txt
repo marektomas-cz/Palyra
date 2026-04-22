@@ -23,6 +23,8 @@ Options:
 
       --api-key-prompt
 
+      --deployment-profile <DEPLOYMENT_PROFILE>
+          [possible values: local, single-vm, worker-enabled]
       --bind-profile <BIND_PROFILE>
           [possible values: loopback-only, public-tls]
       --daemon-port <DAEMON_PORT>

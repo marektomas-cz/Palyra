@@ -6,7 +6,10 @@ Options:
       --path <PATH>
 
       --section <SECTIONS>
-          [possible values: workspace, auth-model, gateway, runtime-controls, daemon-service, channels, skills, health-security]
+          [possible values: deployment-profile, workspace, auth-model, gateway, runtime-controls, daemon-service, channels, skills, health-security]
+
+      --deployment-profile <DEPLOYMENT_PROFILE>
+          [possible values: local, single-vm, worker-enabled]
 
       --non-interactive
 
