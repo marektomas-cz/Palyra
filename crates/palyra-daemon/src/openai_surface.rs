@@ -12,6 +12,13 @@ const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
 const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_DEFAULT_MODEL: &str = "claude-3-5-sonnet-latest";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+const MINIMAX_DEFAULT_BASE_URL: &str = "https://api.minimax.io/anthropic";
+const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M2.7";
+const MINIMAX_PROVIDER_CUSTOM_NAME: &str = "minimax";
+const MINIMAX_OAUTH_DEFAULT_BASE_URL: &str = "https://api.minimax.io";
+const MINIMAX_OAUTH_DEFAULT_CLIENT_ID: &str = "78257093-7e40-4613-99e0-527b14b39113";
+const MINIMAX_OAUTH_DEFAULT_SCOPES: &[&str] = &["group_id", "profile", "model.completion"];
+const MINIMAX_OAUTH_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:user_code";
 const OPENAI_OAUTH_CALLBACK_PATH: &str = "console/v1/auth/providers/openai/callback";
 
 #[allow(clippy::result_large_err)]
@@ -141,6 +148,66 @@ pub(crate) async fn connect_anthropic_api_key(
 }
 
 #[allow(clippy::result_large_err)]
+pub(crate) async fn connect_minimax_api_key(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::ProviderApiKeyUpsertRequest,
+) -> Result<control_plane::ProviderAuthActionEnvelope, Response> {
+    let profile_name = normalize_openai_profile_name(payload.profile_name.as_str())?;
+    let profile_id = payload
+        .profile_id
+        .as_deref()
+        .map(|value| normalize_openai_identifier(value, "profile_id"))
+        .transpose()?
+        .unwrap_or_else(|| generate_provider_profile_id("minimax", profile_name.as_str()));
+    let scope = normalize_openai_profile_scope(Some(payload.scope))?;
+    let api_key = normalize_required_openai_text(payload.api_key.as_str(), "api_key")?;
+    let validation_base_url = load_minimax_validation_base_url(None);
+    validate_minimax_api_key(
+        validation_base_url.as_str(),
+        api_key.as_str(),
+        ANTHROPIC_HTTP_TIMEOUT,
+    )
+    .await
+    .map_err(|error| map_minimax_validation_error("api_key", error))?;
+
+    let api_key_vault_ref = store_provider_secret(
+        state.vault.as_ref(),
+        &scope,
+        profile_id.as_str(),
+        "minimax",
+        "api_key",
+        api_key.as_bytes(),
+    )?;
+    let profile = control_plane::AuthProfileView {
+        profile_id: profile_id.clone(),
+        provider: minimax_auth_profile_provider(),
+        profile_name,
+        scope: scope.clone(),
+        credential: control_plane::AuthCredentialView::ApiKey { api_key_vault_ref },
+        created_at_unix_ms: 0,
+        updated_at_unix_ms: 0,
+    };
+    persist_openai_auth_profile(state, context, profile).await?;
+    if payload.set_default {
+        persist_model_provider_auth_profile_selection(
+            state,
+            context,
+            profile_id.as_str(),
+            ModelProviderAuthProviderKind::Minimax,
+        )
+        .await?;
+    }
+
+    let (state_name, message) = if payload.set_default {
+        ("selected", "MiniMax API key profile saved and selected as the default auth profile.")
+    } else {
+        ("saved", "MiniMax API key profile saved.")
+    };
+    Ok(provider_action_envelope("minimax", "api_key", state_name, message, Some(profile_id)))
+}
+
+#[allow(clippy::result_large_err)]
 pub(crate) async fn start_openai_oauth_attempt_from_request(
     state: &AppState,
     context: &RequestContext,
@@ -188,6 +255,193 @@ pub(crate) async fn start_openai_oauth_attempt_from_request(
 }
 
 #[allow(clippy::result_large_err)]
+pub(crate) async fn start_minimax_oauth_attempt_from_request(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::OpenAiOAuthBootstrapRequest,
+) -> Result<control_plane::OpenAiOAuthBootstrapEnvelope, Response> {
+    let control_plane::OpenAiOAuthBootstrapRequest {
+        profile_id: payload_profile_id,
+        profile_name: payload_profile_name,
+        scope: payload_scope,
+        client_id: payload_client_id,
+        client_secret: _,
+        scopes: payload_scopes,
+        set_default,
+    } = payload;
+    let profile_name = payload_profile_name
+        .as_deref()
+        .map(normalize_openai_profile_name)
+        .transpose()?
+        .unwrap_or_else(|| "MiniMax".to_owned());
+    let profile_id = payload_profile_id
+        .as_deref()
+        .map(|value| normalize_openai_identifier(value, "profile_id"))
+        .transpose()?
+        .unwrap_or_else(|| generate_provider_profile_id("minimax", profile_name.as_str()));
+    let scope = normalize_openai_profile_scope(payload_scope)?;
+    let client_id = payload_client_id
+        .as_deref()
+        .and_then(normalize_optional_text)
+        .map(str::to_owned)
+        .or_else(|| env::var("PALYRA_MINIMAX_OAUTH_CLIENT_ID").ok())
+        .and_then(|value| normalize_optional_text(value.as_str()).map(str::to_owned))
+        .unwrap_or_else(|| MINIMAX_OAUTH_DEFAULT_CLIENT_ID.to_owned());
+    let scopes = normalize_minimax_scopes(&payload_scopes);
+    start_minimax_oauth_attempt(
+        state,
+        context,
+        profile_id,
+        profile_name,
+        scope,
+        client_id,
+        scopes,
+        set_default,
+    )
+    .await
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn load_minimax_oauth_callback_state(
+    state: &AppState,
+    attempt_id: &str,
+) -> Result<control_plane::OpenAiOAuthCallbackStateEnvelope, Response> {
+    let attempt_id = normalize_openai_identifier(attempt_id, "attempt_id")?;
+    let now = unix_ms_now().map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to read system clock: {error}"
+        )))
+    })?;
+    let attempt_to_poll = {
+        let mut attempts = lock_openai_oauth_attempts(state)?;
+        cleanup_openai_oauth_attempts(&mut attempts, now);
+        let attempt = attempts.get_mut(attempt_id.as_str()).ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "MiniMax OAuth attempt not found: {attempt_id}"
+            )))
+        })?;
+        if attempt.provider != ModelProviderAuthProviderKind::Minimax {
+            return Err(runtime_status_response(tonic::Status::failed_precondition(
+                "OAuth attempt does not belong to MiniMax",
+            )));
+        }
+        if matches!(attempt.state, OpenAiOAuthAttemptStateRecord::Pending { .. })
+            && attempt.expires_at_unix_ms <= now
+        {
+            attempt.state = OpenAiOAuthAttemptStateRecord::Failed {
+                message: "MiniMax OAuth attempt expired before authorization completed.".to_owned(),
+                completed_at_unix_ms: now,
+            };
+        }
+        if matches!(attempt.state, OpenAiOAuthAttemptStateRecord::Pending { .. })
+            && attempt.next_poll_after_unix_ms <= now
+        {
+            attempt.next_poll_after_unix_ms =
+                now.saturating_add(attempt.poll_interval_ms.try_into().unwrap_or(i64::MAX));
+            Some(attempt.clone())
+        } else {
+            None
+        }
+    };
+
+    if let Some(attempt) = attempt_to_poll {
+        apply_minimax_oauth_poll_result(state, attempt, now).await?;
+    }
+
+    let attempts = lock_openai_oauth_attempts(state)?;
+    let attempt = attempts.get(attempt_id.as_str()).ok_or_else(|| {
+        runtime_status_response(tonic::Status::not_found(format!(
+            "MiniMax OAuth attempt not found: {attempt_id}"
+        )))
+    })?;
+    Ok(oauth_callback_state_envelope(attempt))
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn reconnect_minimax_oauth_attempt(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::ProviderAuthActionRequest,
+) -> Result<control_plane::OpenAiOAuthBootstrapEnvelope, Response> {
+    let profile_id = payload
+        .profile_id
+        .as_deref()
+        .ok_or_else(|| {
+            validation_error_response(
+                "profile_id",
+                "required",
+                "profile_id is required for provider reconnect",
+            )
+        })
+        .and_then(|value| normalize_openai_identifier(value, "profile_id"))?;
+    let profile = load_minimax_auth_profile_record(state, profile_id.as_str())?;
+    let (client_id, scopes) = match &profile.credential {
+        AuthCredential::Oauth { client_id, scopes, .. } => (
+            client_id.clone().unwrap_or_else(|| MINIMAX_OAUTH_DEFAULT_CLIENT_ID.to_owned()),
+            scopes.clone(),
+        ),
+        AuthCredential::ApiKey { .. } => {
+            return Err(runtime_status_response(tonic::Status::failed_precondition(
+                "profile is not a MiniMax OAuth auth profile",
+            )))
+        }
+    };
+    start_minimax_oauth_attempt(
+        state,
+        context,
+        profile.profile_id,
+        profile.profile_name,
+        auth_scope_to_control_plane(&profile.scope),
+        client_id,
+        normalize_minimax_scopes(&scopes),
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn refresh_minimax_oauth_profile(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::ProviderAuthActionRequest,
+) -> Result<control_plane::ProviderAuthActionEnvelope, Response> {
+    let profile_id = payload
+        .profile_id
+        .as_deref()
+        .ok_or_else(|| {
+            validation_error_response(
+                "profile_id",
+                "required",
+                "profile_id is required for provider refresh",
+            )
+        })
+        .and_then(|value| normalize_openai_identifier(value, "profile_id"))?;
+    let _profile = load_minimax_auth_profile_record(state, profile_id.as_str())?;
+    let outcome = state
+        .auth_runtime
+        .refresh_oauth_profile(profile_id.clone(), Arc::clone(&state.vault))
+        .await
+        .map_err(runtime_status_response)?;
+    record_auth_refresh_journal_event(&state.runtime, context, &outcome)
+        .await
+        .map_err(runtime_status_response)?;
+    let (state_name, message) = match outcome.kind {
+        OAuthRefreshOutcomeKind::Succeeded => ("refreshed", outcome.reason.as_str()),
+        OAuthRefreshOutcomeKind::SkippedNotDue => ("not_due", outcome.reason.as_str()),
+        OAuthRefreshOutcomeKind::SkippedCooldown => ("cooldown", outcome.reason.as_str()),
+        OAuthRefreshOutcomeKind::SkippedNotOauth => ("not_oauth", outcome.reason.as_str()),
+        OAuthRefreshOutcomeKind::Failed => ("failed", outcome.reason.as_str()),
+    };
+    Ok(provider_action_envelope(
+        "minimax",
+        "refresh",
+        state_name,
+        sanitize_http_error_message(message).as_str(),
+        Some(outcome.profile_id),
+    ))
+}
+
+#[allow(clippy::result_large_err)]
 pub(crate) async fn load_openai_oauth_callback_state(
     state: &AppState,
     attempt_id: &str,
@@ -205,6 +459,11 @@ pub(crate) async fn load_openai_oauth_callback_state(
             "OpenAI OAuth attempt not found: {attempt_id}"
         )))
     })?;
+    if attempt.provider != ModelProviderAuthProviderKind::Openai {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "OAuth attempt does not belong to OpenAI",
+        )));
+    }
     if matches!(attempt.state, OpenAiOAuthAttemptStateRecord::Pending { .. })
         && attempt.expires_at_unix_ms <= now
     {
@@ -213,7 +472,7 @@ pub(crate) async fn load_openai_oauth_callback_state(
             completed_at_unix_ms: now,
         };
     }
-    Ok(openai_oauth_callback_state_envelope(attempt))
+    Ok(oauth_callback_state_envelope(attempt))
 }
 
 #[allow(clippy::result_large_err)]
@@ -235,6 +494,11 @@ pub(crate) async fn complete_openai_oauth_callback(
                 "OpenAI OAuth attempt not found: {attempt_id}"
             )))
         })?;
+        if attempt.provider != ModelProviderAuthProviderKind::Openai {
+            return Err(runtime_status_response(tonic::Status::failed_precondition(
+                "OAuth attempt does not belong to OpenAI",
+            )));
+        }
         if let Some((title, body)) = callback_terminal_page(attempt, now) {
             let payload = callback_payload_json(attempt, Some(body.as_str()), None);
             return Ok(render_callback_page(title.as_str(), body.as_str(), Some(payload.as_str())));
@@ -733,6 +997,97 @@ pub(crate) async fn select_default_anthropic_auth_profile(
     ))
 }
 
+#[allow(clippy::result_large_err)]
+pub(crate) async fn revoke_minimax_auth_profile(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::ProviderAuthActionRequest,
+) -> Result<control_plane::ProviderAuthActionEnvelope, Response> {
+    let profile_id = payload
+        .profile_id
+        .as_deref()
+        .ok_or_else(|| {
+            validation_error_response(
+                "profile_id",
+                "required",
+                "profile_id is required for MiniMax revoke",
+            )
+        })
+        .and_then(|value| normalize_openai_identifier(value, "profile_id"))?;
+    let profile = load_minimax_auth_profile_record(state, profile_id.as_str())?;
+    let deleted =
+        delete_auth_profile_via_console_service(state, context, profile_id.as_str()).await?;
+    if !deleted {
+        return Ok(provider_action_envelope(
+            "minimax",
+            "revoke",
+            "not_found",
+            "MiniMax auth profile was already removed.",
+            Some(profile_id),
+        ));
+    }
+    let default_cleared =
+        clear_model_provider_auth_profile_selection_if_matches(state, context, profile_id.as_str())
+            .await?;
+    append_console_auth_journal_event(
+        state,
+        context,
+        json!({
+            "event": "auth.profile.revoked",
+            "provider": "minimax",
+            "profile_id": profile.profile_id,
+            "credential_type": match profile.credential.credential_type() {
+                palyra_auth::AuthCredentialType::ApiKey => "api_key",
+                palyra_auth::AuthCredentialType::Oauth => "oauth",
+            },
+            "remote_revocation": false,
+            "default_cleared": default_cleared,
+        }),
+    )
+    .await?;
+    Ok(provider_action_envelope(
+        "minimax",
+        "revoke",
+        "revoked",
+        "MiniMax auth profile revoked.",
+        Some(profile_id),
+    ))
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn select_default_minimax_auth_profile(
+    state: &AppState,
+    context: &RequestContext,
+    payload: control_plane::ProviderAuthActionRequest,
+) -> Result<control_plane::ProviderAuthActionEnvelope, Response> {
+    let profile_id = payload
+        .profile_id
+        .as_deref()
+        .ok_or_else(|| {
+            validation_error_response(
+                "profile_id",
+                "required",
+                "profile_id is required for default profile selection",
+            )
+        })
+        .and_then(|value| normalize_openai_identifier(value, "profile_id"))?;
+    let _profile = load_minimax_auth_profile_record(state, profile_id.as_str())?;
+    persist_model_provider_auth_profile_selection(
+        state,
+        context,
+        profile_id.as_str(),
+        ModelProviderAuthProviderKind::Minimax,
+    )
+    .await?;
+    Ok(provider_action_envelope(
+        "minimax",
+        "default_profile",
+        "selected",
+        "MiniMax default auth profile updated.",
+        Some(profile_id),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::result_large_err)]
 fn start_openai_oauth_attempt(
@@ -777,6 +1132,7 @@ fn start_openai_oauth_attempt(
         )))
     })?;
     let attempt = OpenAiOAuthAttempt {
+        provider: ModelProviderAuthProviderKind::Openai,
         attempt_id: attempt_id.clone(),
         expires_at_unix_ms,
         redirect_uri,
@@ -788,6 +1144,9 @@ fn start_openai_oauth_attempt(
         scopes,
         token_endpoint: endpoint_config.token_endpoint,
         code_verifier,
+        device_user_code: None,
+        poll_interval_ms: 0,
+        next_poll_after_unix_ms: 0,
         set_default,
         context: ConsoleActionContext {
             principal: context.principal.clone(),
@@ -812,8 +1171,556 @@ fn start_openai_oauth_attempt(
     })
 }
 
+#[derive(Debug, Clone)]
+struct MinimaxOAuthEndpointConfig {
+    code_endpoint: Url,
+    token_endpoint: Url,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MinimaxOAuthCodeResponse {
+    user_code: String,
+    verification_uri: String,
+    expired_in: i64,
+    #[serde(default)]
+    interval: Option<u64>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MinimaxOAuthTokenResponse {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expired_in: Option<u64>,
+    #[serde(default)]
+    resource_url: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+enum MinimaxOAuthPollOutcome {
+    Pending(String),
+    Succeeded {
+        access_token: String,
+        refresh_token: String,
+        expires_at_unix_ms: Option<i64>,
+        resource_url: Option<String>,
+    },
+    Failed(String),
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::result_large_err)]
+async fn start_minimax_oauth_attempt(
+    state: &AppState,
+    context: &RequestContext,
+    profile_id: String,
+    profile_name: String,
+    scope: control_plane::AuthProfileScope,
+    client_id: String,
+    scopes: Vec<String>,
+    set_default: bool,
+) -> Result<control_plane::OpenAiOAuthBootstrapEnvelope, Response> {
+    let now = unix_ms_now().map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to read system clock: {error}"
+        )))
+    })?;
+    let attempt_id = Ulid::new().to_string().to_ascii_lowercase();
+    let endpoint_config = minimax_oauth_endpoint_config_from_env().map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to load MiniMax OAuth endpoint config: {error}"
+        )))
+    })?;
+    let code_verifier = generate_pkce_verifier();
+    let code_challenge = pkce_challenge(code_verifier.as_str());
+    let code_response = request_minimax_user_code(
+        &endpoint_config.code_endpoint,
+        client_id.as_str(),
+        &scopes,
+        code_challenge.as_str(),
+        attempt_id.as_str(),
+    )
+    .await
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::unavailable(format!(
+            "MiniMax OAuth code request failed: {}",
+            sanitize_http_error_message(error.to_string().as_str())
+        )))
+    })?;
+    let expires_at_unix_ms = normalize_minimax_expired_in_to_unix_ms(code_response.expired_in, now);
+    let poll_interval_ms = normalize_minimax_poll_interval_ms(code_response.interval);
+    let attempt = OpenAiOAuthAttempt {
+        provider: ModelProviderAuthProviderKind::Minimax,
+        attempt_id: attempt_id.clone(),
+        expires_at_unix_ms,
+        redirect_uri: String::new(),
+        profile_id: profile_id.clone(),
+        profile_name,
+        scope,
+        client_id,
+        client_secret: String::new(),
+        scopes,
+        token_endpoint: endpoint_config.token_endpoint,
+        code_verifier,
+        device_user_code: Some(code_response.user_code.clone()),
+        poll_interval_ms,
+        next_poll_after_unix_ms: now.saturating_add(poll_interval_ms.try_into().unwrap_or(0)),
+        set_default,
+        context: ConsoleActionContext {
+            principal: context.principal.clone(),
+            device_id: context.device_id.clone(),
+            channel: context.channel.clone(),
+        },
+        state: OpenAiOAuthAttemptStateRecord::Pending {
+            message: format!(
+                "Awaiting MiniMax OAuth authorization. Enter user code {} in the MiniMax portal.",
+                code_response.user_code
+            ),
+        },
+    };
+    let mut attempts = lock_openai_oauth_attempts(state)?;
+    cleanup_openai_oauth_attempts(&mut attempts, now);
+    attempts.insert(attempt_id.clone(), attempt);
+    Ok(control_plane::OpenAiOAuthBootstrapEnvelope {
+        contract: contract_descriptor(),
+        provider: "minimax".to_owned(),
+        attempt_id,
+        authorization_url: code_response.verification_uri,
+        expires_at_unix_ms,
+        profile_id: Some(profile_id),
+        message: format!(
+            "MiniMax OAuth user code issued. Enter code {} in the MiniMax portal.",
+            code_response.user_code
+        ),
+    })
+}
+
+async fn apply_minimax_oauth_poll_result(
+    state: &AppState,
+    attempt: OpenAiOAuthAttempt,
+    now: i64,
+) -> Result<(), Response> {
+    let user_code = attempt.device_user_code.clone().ok_or_else(|| {
+        runtime_status_response(tonic::Status::failed_precondition(
+            "MiniMax OAuth attempt is missing a user_code",
+        ))
+    })?;
+    let outcome = poll_minimax_oauth_token(
+        &attempt.token_endpoint,
+        attempt.client_id.as_str(),
+        user_code.as_str(),
+        attempt.code_verifier.as_str(),
+        now,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        MinimaxOAuthPollOutcome::Pending(format!(
+            "MiniMax OAuth authorization is still pending: {}",
+            sanitize_http_error_message(error.to_string().as_str())
+        ))
+    });
+    match outcome {
+        MinimaxOAuthPollOutcome::Pending(message) => {
+            let mut attempts = lock_openai_oauth_attempts(state)?;
+            if let Some(stored) = attempts.get_mut(attempt.attempt_id.as_str()) {
+                stored.state = OpenAiOAuthAttemptStateRecord::Pending { message };
+            }
+            Ok(())
+        }
+        MinimaxOAuthPollOutcome::Failed(message) => {
+            let mut attempts = lock_openai_oauth_attempts(state)?;
+            if let Some(stored) = attempts.get_mut(attempt.attempt_id.as_str()) {
+                stored.state =
+                    OpenAiOAuthAttemptStateRecord::Failed { message, completed_at_unix_ms: now };
+            }
+            Ok(())
+        }
+        MinimaxOAuthPollOutcome::Succeeded {
+            access_token,
+            refresh_token,
+            expires_at_unix_ms,
+            resource_url,
+        } => {
+            let context = request_context_from_console_action(&attempt.context);
+            let access_token_vault_ref = store_provider_secret(
+                state.vault.as_ref(),
+                &attempt.scope,
+                attempt.profile_id.as_str(),
+                "minimax",
+                "oauth_access_token",
+                access_token.as_bytes(),
+            )?;
+            let refresh_token_vault_ref = store_provider_secret(
+                state.vault.as_ref(),
+                &attempt.scope,
+                attempt.profile_id.as_str(),
+                "minimax",
+                "oauth_refresh_token",
+                refresh_token.as_bytes(),
+            )?;
+            let refresh_state =
+                serde_json::to_value(OAuthRefreshState::default()).map_err(|error| {
+                    runtime_status_response(tonic::Status::internal(format!(
+                        "failed to serialize OAuth refresh state: {error}"
+                    )))
+                })?;
+            let profile = control_plane::AuthProfileView {
+                profile_id: attempt.profile_id.clone(),
+                provider: minimax_auth_profile_provider(),
+                profile_name: attempt.profile_name.clone(),
+                scope: attempt.scope.clone(),
+                credential: control_plane::AuthCredentialView::Oauth {
+                    access_token_vault_ref,
+                    refresh_token_vault_ref,
+                    token_endpoint: attempt.token_endpoint.to_string(),
+                    client_id: Some(attempt.client_id.clone()),
+                    client_secret_vault_ref: None,
+                    scopes: attempt.scopes.clone(),
+                    expires_at_unix_ms,
+                    refresh_state,
+                },
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            };
+            persist_openai_auth_profile(state, &context, profile).await?;
+            if attempt.set_default {
+                persist_model_provider_auth_profile_selection(
+                    state,
+                    &context,
+                    attempt.profile_id.as_str(),
+                    ModelProviderAuthProviderKind::Minimax,
+                )
+                .await?;
+            }
+            if let Some(base_url) =
+                resource_url.and_then(|url| normalize_minimax_resource_url(&url))
+            {
+                persist_minimax_resource_base_url(state, &context, base_url.as_str()).await?;
+            }
+            let message = if attempt.set_default {
+                "MiniMax OAuth profile connected and selected as the default auth profile."
+            } else {
+                "MiniMax OAuth profile connected."
+            };
+            let mut attempts = lock_openai_oauth_attempts(state)?;
+            if let Some(stored) = attempts.get_mut(attempt.attempt_id.as_str()) {
+                stored.state = OpenAiOAuthAttemptStateRecord::Succeeded {
+                    profile_id: attempt.profile_id,
+                    message: message.to_owned(),
+                    completed_at_unix_ms: now,
+                };
+            }
+            Ok(())
+        }
+    }
+}
+
+fn normalize_minimax_scopes(scopes: &[String]) -> Vec<String> {
+    let normalized = scopes
+        .iter()
+        .filter_map(|scope| normalize_optional_text(scope))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return MINIMAX_OAUTH_DEFAULT_SCOPES.iter().map(|scope| (*scope).to_owned()).collect();
+    }
+    normalized
+}
+
+fn minimax_oauth_endpoint_config_from_env() -> Result<MinimaxOAuthEndpointConfig> {
+    let base_url = env::var("PALYRA_MINIMAX_OAUTH_BASE_URL")
+        .ok()
+        .and_then(|value| normalize_optional_text(value.as_str()).map(str::to_owned))
+        .unwrap_or_else(|| MINIMAX_OAUTH_DEFAULT_BASE_URL.to_owned());
+    let base_url = Url::parse(base_url.trim()).context("MiniMax OAuth base URL must be valid")?;
+    if base_url.scheme() != "https" {
+        anyhow::bail!("MiniMax OAuth base URL must use https");
+    }
+    if base_url.host_str().is_none() {
+        anyhow::bail!("MiniMax OAuth base URL must include a host");
+    }
+    if !base_url.username().is_empty()
+        || base_url.password().is_some()
+        || base_url.query().is_some()
+        || base_url.fragment().is_some()
+    {
+        anyhow::bail!("MiniMax OAuth base URL must not include credentials, query, or fragment");
+    }
+    Ok(MinimaxOAuthEndpointConfig {
+        code_endpoint: base_url.join("/oauth/code")?,
+        token_endpoint: base_url.join("/oauth/token")?,
+    })
+}
+
+async fn request_minimax_user_code(
+    code_endpoint: &Url,
+    client_id: &str,
+    scopes: &[String],
+    code_challenge: &str,
+    state: &str,
+) -> Result<MinimaxOAuthCodeResponse> {
+    let client = ReqwestClient::builder()
+        .timeout(OPENAI_HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("failed to build MiniMax OAuth code client")?;
+    let form_fields = [
+        ("response_type", "code".to_owned()),
+        ("client_id", client_id.to_owned()),
+        ("scope", scopes.join(" ")),
+        ("code_challenge", code_challenge.to_owned()),
+        ("code_challenge_method", "S256".to_owned()),
+        ("state", state.to_owned()),
+    ];
+    let response = client.post(code_endpoint.clone()).form(&form_fields).send().await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!(
+            "MiniMax OAuth code endpoint returned HTTP {}: {}",
+            status.as_u16(),
+            crate::model_provider::sanitize_remote_error(body.as_str())
+        );
+    }
+    let payload: MinimaxOAuthCodeResponse = serde_json::from_str(body.as_str())
+        .context("MiniMax OAuth code response was invalid JSON")?;
+    if let Some(returned_state) =
+        payload.state.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    {
+        if returned_state != state {
+            anyhow::bail!("MiniMax OAuth code response state did not match the request");
+        }
+    }
+    if payload.user_code.trim().is_empty() || payload.verification_uri.trim().is_empty() {
+        anyhow::bail!("MiniMax OAuth code response did not include user_code and verification_uri");
+    }
+    Ok(payload)
+}
+
+async fn poll_minimax_oauth_token(
+    token_endpoint: &Url,
+    client_id: &str,
+    user_code: &str,
+    code_verifier: &str,
+    now_unix_ms: i64,
+) -> Result<MinimaxOAuthPollOutcome> {
+    let client = ReqwestClient::builder()
+        .timeout(OPENAI_HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("failed to build MiniMax OAuth token client")?;
+    let form_fields = [
+        ("grant_type", MINIMAX_OAUTH_GRANT_TYPE.to_owned()),
+        ("client_id", client_id.to_owned()),
+        ("user_code", user_code.to_owned()),
+        ("code_verifier", code_verifier.to_owned()),
+    ];
+    let response = client.post(token_endpoint.clone()).form(&form_fields).send().await?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let sanitized = crate::model_provider::sanitize_remote_error(body.as_str());
+    if !status.is_success() {
+        let lower = body.to_ascii_lowercase();
+        if lower.contains("authorization_pending") || lower.contains("pending") {
+            return Ok(MinimaxOAuthPollOutcome::Pending(
+                "Awaiting MiniMax OAuth authorization.".to_owned(),
+            ));
+        }
+        return Ok(MinimaxOAuthPollOutcome::Failed(format!(
+            "MiniMax OAuth token endpoint returned HTTP {}: {}",
+            status.as_u16(),
+            sanitized
+        )));
+    }
+    let payload: MinimaxOAuthTokenResponse = serde_json::from_str(body.as_str())
+        .context("MiniMax OAuth token response was invalid JSON")?;
+    let status_text = payload.status.as_deref().unwrap_or_default().to_ascii_lowercase();
+    if status_text == "success" || payload.access_token.is_some() {
+        let access_token = payload
+            .access_token
+            .and_then(|value| normalize_optional_text(value.as_str()).map(str::to_owned))
+            .ok_or_else(|| anyhow::anyhow!("MiniMax OAuth token response missing access_token"))?;
+        let refresh_token = payload
+            .refresh_token
+            .and_then(|value| normalize_optional_text(value.as_str()).map(str::to_owned))
+            .ok_or_else(|| anyhow::anyhow!("MiniMax OAuth token response missing refresh_token"))?;
+        return Ok(MinimaxOAuthPollOutcome::Succeeded {
+            access_token,
+            refresh_token,
+            expires_at_unix_ms: payload
+                .expired_in
+                .and_then(|value| i64::try_from(value).ok())
+                .map(|value| normalize_minimax_expired_in_to_unix_ms(value, now_unix_ms)),
+            resource_url: payload.resource_url,
+        });
+    }
+    let message = payload
+        .error_description
+        .or(payload.message)
+        .or(payload.error)
+        .unwrap_or_else(|| "Awaiting MiniMax OAuth authorization.".to_owned());
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("pending") || lower.contains("slow_down") {
+        Ok(MinimaxOAuthPollOutcome::Pending(sanitize_http_error_message(message.as_str())))
+    } else {
+        Ok(MinimaxOAuthPollOutcome::Failed(sanitize_http_error_message(message.as_str())))
+    }
+}
+
+fn normalize_minimax_expired_in_to_unix_ms(expired_in: i64, now_unix_ms: i64) -> i64 {
+    let normalized = expired_in.max(1);
+    if normalized >= 1_000_000_000_000 {
+        return normalized;
+    }
+    if normalized >= 1_000_000_000 {
+        return normalized.saturating_mul(1_000);
+    }
+    now_unix_ms.saturating_add(normalized.saturating_mul(1_000))
+}
+
+fn normalize_minimax_poll_interval_ms(interval: Option<u64>) -> u64 {
+    let raw = interval.unwrap_or(2_000).max(1);
+    if raw < 100 {
+        return raw.saturating_mul(1_000);
+    }
+    raw
+}
+
+fn normalize_minimax_resource_url(raw: &str) -> Option<String> {
+    let trimmed = normalize_optional_text(raw)?;
+    let mut url = Url::parse(trimmed).ok()?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return None;
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/').to_owned();
+    if path.ends_with("/anthropic") {
+        return Some(url.to_string().trim_end_matches('/').to_owned());
+    }
+    url.set_path(format!("{path}/anthropic").as_str());
+    Some(url.to_string().trim_end_matches('/').to_owned())
+}
+
+#[allow(clippy::result_large_err)]
+async fn persist_minimax_resource_base_url(
+    state: &AppState,
+    context: &RequestContext,
+    base_url: &str,
+) -> Result<(), Response> {
+    let path = resolve_console_config_mutation_path(None)?;
+    let path_ref = FsPath::new(path.as_str());
+    ensure_console_config_parent_dir(path_ref)?;
+    let (mut document, _) = load_console_document_for_mutation(path_ref)?;
+    set_string_value_at_path(&mut document, "model_provider.anthropic_base_url", base_url)?;
+    validate_daemon_compatible_document(&document)?;
+    write_document_with_backups(path_ref, &document, OPENAI_DEFAULT_CONFIG_BACKUPS).map_err(
+        |error| {
+            runtime_status_response(tonic::Status::internal(format!(
+                "failed to persist config {}: {error}",
+                path_ref.display()
+            )))
+        },
+    )?;
+    append_console_auth_journal_event(
+        state,
+        context,
+        json!({
+            "event": "auth.profile.minimax_resource_url_updated",
+            "provider": "minimax",
+            "source_path": path,
+        }),
+    )
+    .await
+}
+
 fn default_openai_profile_scope() -> control_plane::AuthProfileScope {
     control_plane::AuthProfileScope { kind: "global".to_owned(), agent_id: None }
+}
+
+fn normalize_optional_text(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn minimax_auth_profile_provider() -> control_plane::AuthProfileProvider {
+    control_plane::AuthProfileProvider {
+        kind: "custom".to_owned(),
+        custom_name: Some(MINIMAX_PROVIDER_CUSTOM_NAME.to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod minimax_tests {
+    use super::{
+        normalize_minimax_expired_in_to_unix_ms, normalize_minimax_poll_interval_ms,
+        normalize_minimax_resource_url,
+    };
+
+    #[test]
+    fn minimax_expired_in_normalizes_openclaw_timestamp_and_standard_durations() {
+        let now = 1_700_000_000_000_i64;
+        assert_eq!(
+            normalize_minimax_expired_in_to_unix_ms(1_700_000_060_000, now),
+            1_700_000_060_000,
+            "MiniMax/OpenClaw absolute millisecond timestamps should be preserved"
+        );
+        assert_eq!(
+            normalize_minimax_expired_in_to_unix_ms(1_700_000_060, now),
+            1_700_000_060_000,
+            "absolute second timestamps should be converted to milliseconds"
+        );
+        assert_eq!(
+            normalize_minimax_expired_in_to_unix_ms(60, now),
+            1_700_000_060_000,
+            "standard OAuth duration seconds should be added to the current time"
+        );
+    }
+
+    #[test]
+    fn minimax_resource_url_normalizes_to_anthropic_base_url() {
+        assert_eq!(
+            normalize_minimax_resource_url("https://tenant.minimax.io"),
+            Some("https://tenant.minimax.io/anthropic".to_owned())
+        );
+        assert_eq!(
+            normalize_minimax_resource_url("https://tenant.minimax.io/anthropic"),
+            Some("https://tenant.minimax.io/anthropic".to_owned())
+        );
+        assert_eq!(
+            normalize_minimax_resource_url("https://tenant.minimax.io/path?token=secret"),
+            None,
+            "resource URLs with query secrets must be rejected"
+        );
+    }
+
+    #[test]
+    fn minimax_poll_interval_accepts_openclaw_milliseconds_and_standard_seconds() {
+        assert_eq!(normalize_minimax_poll_interval_ms(None), 2_000);
+        assert_eq!(normalize_minimax_poll_interval_ms(Some(2_000)), 2_000);
+        assert_eq!(normalize_minimax_poll_interval_ms(Some(2)), 2_000);
+        assert_eq!(normalize_minimax_poll_interval_ms(Some(500)), 500);
+    }
 }
 
 fn request_context_from_console_action(context: &ConsoleActionContext) -> RequestContext {
@@ -1038,6 +1945,21 @@ fn load_anthropic_validation_base_url(document: Option<&toml::Value>) -> String 
         .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_owned())
 }
 
+fn load_minimax_validation_base_url(document: Option<&toml::Value>) -> String {
+    env::var("PALYRA_MODEL_PROVIDER_MINIMAX_BASE_URL")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        })
+        .or_else(|| document.and_then(minimax_validation_base_url_from_document))
+        .unwrap_or_else(|| MINIMAX_DEFAULT_BASE_URL.to_owned())
+}
+
 #[allow(clippy::result_large_err)]
 fn load_openai_console_config_snapshot(
 ) -> Result<(toml::Value, ConfigMigrationInfo, String), Response> {
@@ -1074,6 +1996,15 @@ fn anthropic_validation_base_url_from_document(document: &toml::Value) -> Option
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn minimax_validation_base_url_from_document(document: &toml::Value) -> Option<String> {
+    let configured_auth_provider = get_value_at_path(document, "model_provider.auth_provider_kind")
+        .ok()
+        .and_then(|value| value.and_then(toml::Value::as_str))
+        .map(str::trim)
+        .filter(|value| value.eq_ignore_ascii_case(MINIMAX_PROVIDER_CUSTOM_NAME));
+    configured_auth_provider.and_then(|_| anthropic_validation_base_url_from_document(document))
 }
 
 fn openai_callback_base_url_from_document(document: &toml::Value) -> Option<String> {
@@ -1149,6 +2080,35 @@ fn load_openai_auth_profile_record(
     profile_id: &str,
 ) -> Result<AuthProfileRecord, Response> {
     load_auth_profile_record_for_provider(state, profile_id, AuthProviderKind::Openai)
+}
+
+#[allow(clippy::result_large_err)]
+fn load_minimax_auth_profile_record(
+    state: &AppState,
+    profile_id: &str,
+) -> Result<AuthProfileRecord, Response> {
+    let record = state
+        .auth_runtime
+        .registry()
+        .get_profile(profile_id)
+        .map_err(auth_profile_error_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "auth profile not found: {profile_id}"
+            )))
+        })?;
+    let is_minimax = matches!(record.provider.kind, AuthProviderKind::Custom)
+        && record
+            .provider
+            .custom_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(MINIMAX_PROVIDER_CUSTOM_NAME));
+    if !is_minimax {
+        return Err(runtime_status_response(tonic::Status::failed_precondition(
+            "auth profile does not belong to MiniMax",
+        )));
+    }
+    Ok(record)
 }
 
 #[allow(clippy::result_large_err)]
@@ -1281,7 +2241,9 @@ pub(crate) async fn persist_model_provider_auth_profile_selection(
     let (mut document, _) = load_console_document_for_mutation(path_ref)?;
     let provider_kind_value = match provider_kind {
         ModelProviderAuthProviderKind::Openai => "openai_compatible",
-        ModelProviderAuthProviderKind::Anthropic => "anthropic",
+        ModelProviderAuthProviderKind::Anthropic | ModelProviderAuthProviderKind::Minimax => {
+            "anthropic"
+        }
     };
     set_value_at_path(
         &mut document,
@@ -1336,6 +2298,18 @@ pub(crate) async fn persist_model_provider_auth_profile_selection(
                 &mut document,
                 "model_provider.anthropic_model",
                 ANTHROPIC_DEFAULT_MODEL,
+            )?;
+        }
+        ModelProviderAuthProviderKind::Minimax => {
+            set_string_value_at_path(
+                &mut document,
+                "model_provider.anthropic_base_url",
+                MINIMAX_DEFAULT_BASE_URL,
+            )?;
+            set_string_value_at_path(
+                &mut document,
+                "model_provider.anthropic_model",
+                MINIMAX_DEFAULT_MODEL,
             )?;
         }
     }
@@ -1427,6 +2401,19 @@ fn ensure_string_value_at_path(
     )
 }
 
+#[allow(clippy::result_large_err)]
+fn set_string_value_at_path(
+    document: &mut toml::Value,
+    path: &str,
+    value: &str,
+) -> Result<(), Response> {
+    set_value_at_path(document, path, toml::Value::String(value.to_owned())).map_err(|error| {
+        runtime_status_response(tonic::Status::invalid_argument(format!(
+            "failed to set {path}: {error}"
+        )))
+    })
+}
+
 enum AnthropicCredentialValidationError {
     InvalidCredential,
     RateLimited,
@@ -1501,6 +2488,84 @@ async fn validate_anthropic_api_key(
     Err(AnthropicCredentialValidationError::ProviderUnavailable)
 }
 
+#[allow(clippy::result_large_err)]
+async fn validate_minimax_api_key(
+    base_url: &str,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<(), AnthropicCredentialValidationError> {
+    let base = base_url.trim().trim_end_matches('/');
+    let endpoint = format!("{base}/v1/messages");
+    let client = ReqwestClient::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| AnthropicCredentialValidationError::Unexpected(error.to_string()))?;
+    let body = json!({
+        "model": MINIMAX_DEFAULT_MODEL,
+        "max_tokens": 1,
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "ping"
+            }]
+        }],
+    });
+
+    for attempt in 1..=ANTHROPIC_VALIDATION_RETRY_ATTEMPTS {
+        let response = client
+            .post(endpoint.as_str())
+            .bearer_auth(api_key)
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .json(&body)
+            .send()
+            .await;
+
+        let outcome = match response {
+            Ok(response) => match response.status() {
+                status if status.is_success() => Ok(()),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                    Err(AnthropicCredentialValidationError::InvalidCredential)
+                }
+                StatusCode::TOO_MANY_REQUESTS => {
+                    Err(AnthropicCredentialValidationError::RateLimited)
+                }
+                status if status.is_server_error() => {
+                    Err(AnthropicCredentialValidationError::ProviderUnavailable)
+                }
+                status => {
+                    let body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "<minimax error body unavailable>".to_owned());
+                    Err(AnthropicCredentialValidationError::Unexpected(format!(
+                        "MiniMax endpoint returned HTTP {status}: {body}"
+                    )))
+                }
+            },
+            Err(error) => {
+                if error.is_timeout() {
+                    Err(AnthropicCredentialValidationError::ProviderUnavailable)
+                } else {
+                    Err(AnthropicCredentialValidationError::Unexpected(error.to_string()))
+                }
+            }
+        };
+
+        match outcome {
+            Ok(()) => return Ok(()),
+            Err(AnthropicCredentialValidationError::ProviderUnavailable)
+                if attempt < ANTHROPIC_VALIDATION_RETRY_ATTEMPTS =>
+            {
+                tokio::time::sleep(ANTHROPIC_VALIDATION_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(AnthropicCredentialValidationError::ProviderUnavailable)
+}
+
 fn map_anthropic_validation_error(
     field: &str,
     error: AnthropicCredentialValidationError,
@@ -1522,6 +2587,31 @@ fn map_anthropic_validation_error(
         AnthropicCredentialValidationError::Unexpected(message) => {
             runtime_status_response(tonic::Status::internal(format!(
                 "Anthropic credential validation failed: {}",
+                sanitize_http_error_message(message.as_str())
+            )))
+        }
+    }
+}
+
+fn map_minimax_validation_error(
+    field: &str,
+    error: AnthropicCredentialValidationError,
+) -> Response {
+    match error {
+        AnthropicCredentialValidationError::InvalidCredential => validation_error_response(
+            field,
+            "invalid_credential",
+            "MiniMax credential is invalid or does not have the required access.",
+        ),
+        AnthropicCredentialValidationError::RateLimited => runtime_status_response(
+            tonic::Status::resource_exhausted("MiniMax credential validation was rate limited"),
+        ),
+        AnthropicCredentialValidationError::ProviderUnavailable => runtime_status_response(
+            tonic::Status::unavailable("MiniMax credential validation is temporarily unavailable"),
+        ),
+        AnthropicCredentialValidationError::Unexpected(message) => {
+            runtime_status_response(tonic::Status::internal(format!(
+                "MiniMax credential validation failed: {}",
                 sanitize_http_error_message(message.as_str())
             )))
         }
@@ -1683,14 +2773,15 @@ fn cleanup_openai_oauth_attempts(attempts: &mut HashMap<String, OpenAiOAuthAttem
     });
 }
 
-fn openai_oauth_callback_state_envelope(
+fn oauth_callback_state_envelope(
     attempt: &OpenAiOAuthAttempt,
 ) -> control_plane::OpenAiOAuthCallbackStateEnvelope {
+    let provider = attempt.provider.as_str().to_owned();
     match &attempt.state {
         OpenAiOAuthAttemptStateRecord::Pending { message } => {
             control_plane::OpenAiOAuthCallbackStateEnvelope {
                 contract: contract_descriptor(),
-                provider: "openai".to_owned(),
+                provider,
                 attempt_id: attempt.attempt_id.clone(),
                 state: "pending".to_owned(),
                 message: message.clone(),
@@ -1702,7 +2793,7 @@ fn openai_oauth_callback_state_envelope(
         OpenAiOAuthAttemptStateRecord::Succeeded { profile_id, message, completed_at_unix_ms } => {
             control_plane::OpenAiOAuthCallbackStateEnvelope {
                 contract: contract_descriptor(),
-                provider: "openai".to_owned(),
+                provider,
                 attempt_id: attempt.attempt_id.clone(),
                 state: "succeeded".to_owned(),
                 message: message.clone(),
@@ -1714,7 +2805,7 @@ fn openai_oauth_callback_state_envelope(
         OpenAiOAuthAttemptStateRecord::Failed { message, completed_at_unix_ms } => {
             control_plane::OpenAiOAuthCallbackStateEnvelope {
                 contract: contract_descriptor(),
-                provider: "openai".to_owned(),
+                provider,
                 attempt_id: attempt.attempt_id.clone(),
                 state: "failed".to_owned(),
                 message: message.clone(),
@@ -1748,7 +2839,7 @@ fn callback_payload_json(
     override_message: Option<&str>,
     override_completed_at_unix_ms: Option<i64>,
 ) -> String {
-    let envelope = openai_oauth_callback_state_envelope(attempt);
+    let envelope = oauth_callback_state_envelope(attempt);
     json!({
         "type": OPENAI_OAUTH_CALLBACK_EVENT_TYPE,
         "attempt_id": envelope.attempt_id,
@@ -1798,7 +2889,7 @@ fn fail_openai_oauth_attempt(
         completed_at_unix_ms,
     };
     let payload = callback_payload_json(attempt, None, Some(completed_at_unix_ms));
-    let body = openai_oauth_callback_state_envelope(attempt).message;
+    let body = oauth_callback_state_envelope(attempt).message;
     Ok(render_callback_page("OpenAI Connection Failed", body.as_str(), Some(payload.as_str())))
 }
 
@@ -1872,6 +2963,7 @@ mod tests {
     #[test]
     fn openai_callback_state_envelope_reports_terminal_state() {
         let attempt = OpenAiOAuthAttempt {
+            provider: ModelProviderAuthProviderKind::Openai,
             attempt_id: "attempt-1".to_owned(),
             expires_at_unix_ms: 10,
             redirect_uri: "http://127.0.0.1/callback".to_owned(),
@@ -1884,6 +2976,9 @@ mod tests {
             token_endpoint: Url::parse("https://auth0.openai.com/oauth/token")
                 .expect("token endpoint URL should parse"),
             code_verifier: "verifier".to_owned(),
+            device_user_code: None,
+            poll_interval_ms: 0,
+            next_poll_after_unix_ms: 0,
             set_default: false,
             context: ConsoleActionContext {
                 principal: "admin:test".to_owned(),
@@ -1896,7 +2991,7 @@ mod tests {
                 completed_at_unix_ms: 11,
             },
         };
-        let envelope = openai_oauth_callback_state_envelope(&attempt);
+        let envelope = oauth_callback_state_envelope(&attempt);
         assert_eq!(envelope.state, "succeeded");
         assert_eq!(envelope.profile_id.as_deref(), Some("openai-default"));
         assert_eq!(envelope.completed_at_unix_ms, Some(11));
@@ -1906,6 +3001,7 @@ mod tests {
     #[test]
     fn callback_terminal_page_marks_expired_pending_attempt_failed() {
         let mut attempt = OpenAiOAuthAttempt {
+            provider: ModelProviderAuthProviderKind::Openai,
             attempt_id: "attempt-2".to_owned(),
             expires_at_unix_ms: 100,
             redirect_uri: "http://127.0.0.1/callback".to_owned(),
@@ -1918,6 +3014,9 @@ mod tests {
             token_endpoint: Url::parse("https://auth0.openai.com/oauth/token")
                 .expect("token endpoint URL should parse"),
             code_verifier: "verifier".to_owned(),
+            device_user_code: None,
+            poll_interval_ms: 0,
+            next_poll_after_unix_ms: 0,
             set_default: false,
             context: ConsoleActionContext {
                 principal: "admin:test".to_owned(),

@@ -63,6 +63,7 @@ struct ConsoleProbeTarget {
     enabled: bool,
     endpoint_base_url: Option<String>,
     auth_profile_id: Option<String>,
+    auth_profile_provider_kind: Option<String>,
     inline_api_key: Option<String>,
     vault_ref: Option<String>,
     configured_model_ids: Vec<String>,
@@ -188,6 +189,9 @@ fn build_console_probe_targets(config: &FileModelProviderConfig) -> Vec<ConsoleP
                     auth_profile_id: entry.auth_profile_id.clone().or_else(|| {
                         inherit_globals.then(|| config.auth_profile_id.clone()).flatten()
                     }),
+                    auth_profile_provider_kind: entry.auth_provider_kind.clone().or_else(|| {
+                        inherit_globals.then(|| config.auth_provider_kind.clone()).flatten()
+                    }),
                     inline_api_key: entry.api_key.clone().or_else(|| {
                         inherit_globals
                             .then(|| inline_api_key_for_kind(kind.as_str(), config))
@@ -213,6 +217,7 @@ fn build_console_probe_targets(config: &FileModelProviderConfig) -> Vec<ConsoleP
         enabled: true,
         endpoint_base_url: default_base_url_for_kind(provider_kind.as_str(), config),
         auth_profile_id: config.auth_profile_id.clone(),
+        auth_profile_provider_kind: config.auth_provider_kind.clone(),
         inline_api_key: inline_api_key_for_kind(provider_kind.as_str(), config),
         vault_ref: vault_ref_for_kind(provider_kind.as_str(), config),
         configured_model_ids: models_by_provider
@@ -242,6 +247,10 @@ fn overlay_probe_targets_with_runtime_snapshot(
             if runtime_provider.auth_profile_id.is_some() {
                 target.auth_profile_id = runtime_provider.auth_profile_id.clone();
             }
+            if runtime_provider.auth_profile_provider_kind.is_some() {
+                target.auth_profile_provider_kind =
+                    runtime_provider.auth_profile_provider_kind.clone();
+            }
         }
 
         if target.provider_id == snapshot.provider_id {
@@ -253,6 +262,9 @@ fn overlay_probe_targets_with_runtime_snapshot(
             }
             if snapshot.auth_profile_id.is_some() {
                 target.auth_profile_id = snapshot.auth_profile_id.clone();
+            }
+            if snapshot.auth_profile_provider_kind.is_some() {
+                target.auth_profile_provider_kind = snapshot.auth_profile_provider_kind.clone();
             }
         }
     }
@@ -436,7 +448,9 @@ async fn probe_console_provider(
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     match &credential {
-        ResolvedCredential::ApiKey { token, .. } if target.kind == ANTHROPIC_PROVIDER_KIND => {
+        ResolvedCredential::ApiKey { token, .. }
+            if target.kind == ANTHROPIC_PROVIDER_KIND && !target_uses_minimax_auth(target) =>
+        {
             headers.insert(
                 "x-api-key",
                 HeaderValue::from_str(token.as_str())
@@ -522,13 +536,19 @@ fn resolve_provider_credential(
             .get_profile(profile_id)
             .with_context(|| format!("failed to load auth profile '{profile_id}'"))?
             .ok_or_else(|| anyhow::anyhow!("auth profile not found: {profile_id}"))?;
-        let expected_provider = match target.kind.as_str() {
-            OPENAI_COMPATIBLE_PROVIDER_KIND => Some(AuthProviderKind::Openai),
-            ANTHROPIC_PROVIDER_KIND => Some(AuthProviderKind::Anthropic),
-            _ => None,
-        };
+        let expected_provider = expected_auth_provider_for_probe_target(target);
         if let Some(expected_provider) = expected_provider {
-            if profile.provider.kind != expected_provider {
+            let matches_expected = if expected_provider == AuthProviderKind::Custom {
+                matches!(profile.provider.kind, AuthProviderKind::Custom)
+                    && profile
+                        .provider
+                        .custom_name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("minimax"))
+            } else {
+                profile.provider.kind == expected_provider
+            };
+            if !matches_expected {
                 anyhow::bail!(
                     "auth profile '{}' belongs to provider '{}' instead of '{}'",
                     profile_id,
@@ -563,6 +583,26 @@ fn resolve_provider_credential(
         }));
     }
     Ok(None)
+}
+
+fn target_uses_minimax_auth(target: &ConsoleProbeTarget) -> bool {
+    target
+        .auth_profile_provider_kind
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("minimax"))
+}
+
+fn expected_auth_provider_for_probe_target(
+    target: &ConsoleProbeTarget,
+) -> Option<AuthProviderKind> {
+    if target_uses_minimax_auth(target) {
+        return Some(AuthProviderKind::Custom);
+    }
+    match target.kind.as_str() {
+        OPENAI_COMPATIBLE_PROVIDER_KIND => Some(AuthProviderKind::Openai),
+        ANTHROPIC_PROVIDER_KIND => Some(AuthProviderKind::Anthropic),
+        _ => None,
+    }
 }
 
 fn load_vault_secret_utf8(

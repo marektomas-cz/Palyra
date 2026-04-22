@@ -342,6 +342,38 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/auth/providers/anthropic/default-profile",
             post(console::auth::console_anthropic_provider_default_profile_handler),
         )
+        .route(
+            "/console/v1/auth/providers/minimax",
+            get(console::auth::console_minimax_provider_state_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/minimax/api-key",
+            post(console::auth::console_minimax_provider_api_key_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/minimax/bootstrap",
+            post(console::auth::console_minimax_provider_bootstrap_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/minimax/callback-state",
+            get(console::auth::console_minimax_provider_callback_state_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/minimax/reconnect",
+            post(console::auth::console_minimax_provider_reconnect_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/minimax/refresh",
+            post(console::auth::console_minimax_provider_refresh_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/minimax/revoke",
+            post(console::auth::console_minimax_provider_revoke_handler),
+        )
+        .route(
+            "/console/v1/auth/providers/minimax/default-profile",
+            post(console::auth::console_minimax_provider_default_profile_handler),
+        )
         .route("/console/v1/config/inspect", post(console::config::console_config_inspect_handler))
         .route(
             "/console/v1/config/validate",

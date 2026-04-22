@@ -104,13 +104,18 @@ impl OAuthRefreshAdapter for HttpOAuthRefreshAdapter {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
-        let expires_in_seconds = match parsed.get("expires_in") {
-            Some(Value::Number(value)) => value.as_u64(),
-            Some(Value::String(value)) => value.parse::<u64>().ok(),
-            Some(_) | None => None,
-        };
+        let expires_in_seconds = parse_oauth_expires_in(&parsed, "expires_in")
+            .or_else(|| parse_oauth_expires_in(&parsed, "expired_in"));
 
         Ok(OAuthRefreshResponse { access_token, refresh_token, expires_in_seconds })
+    }
+}
+
+fn parse_oauth_expires_in(parsed: &Value, field: &str) -> Option<u64> {
+    match parsed.get(field) {
+        Some(Value::Number(value)) => value.as_u64(),
+        Some(Value::String(value)) => value.parse::<u64>().ok(),
+        Some(_) | None => None,
     }
 }
 

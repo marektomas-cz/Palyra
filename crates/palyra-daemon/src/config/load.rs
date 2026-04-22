@@ -2653,6 +2653,9 @@ fn parse_model_provider_registry_entry(
             ModelProviderAuthProviderKind::Anthropic => {
                 ModelProviderCredentialSource::AuthProfileApiKey
             }
+            ModelProviderAuthProviderKind::Minimax => {
+                ModelProviderCredentialSource::AuthProfileApiKey
+            }
         })
     } else {
         None
@@ -2822,7 +2825,7 @@ fn parse_model_provider_auth_provider_kind(
     source_name: &str,
 ) -> Result<ModelProviderAuthProviderKind> {
     ModelProviderAuthProviderKind::parse(raw).with_context(|| {
-        format!("{source_name} must be one of: openai, openai_compatible, anthropic")
+        format!("{source_name} must be one of: openai, openai_compatible, anthropic, minimax")
     })
 }
 

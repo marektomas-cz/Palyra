@@ -19,6 +19,7 @@ const DETERMINISTIC_PROVIDER_KIND: &str = "deterministic";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+const MINIMAX_AUTH_PROVIDER_KIND: &str = "minimax";
 const PROVIDER_CHECKS_CACHE_PATH: &str = "models/provider_checks.json";
 const CURATED_TEXT_MODELS: &[&str] = &["gpt-4o-mini", "gpt-4.1-mini"];
 const CURATED_EMBEDDING_MODELS: &[&str] = &["text-embedding-3-small", "text-embedding-3-large"];
@@ -1436,7 +1437,9 @@ fn probe_provider(
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     match &credential {
-        ResolvedCredential::ApiKey { token, .. } if target.kind == ANTHROPIC_PROVIDER_KIND => {
+        ResolvedCredential::ApiKey { token, .. }
+            if target.kind == ANTHROPIC_PROVIDER_KIND && !target_uses_minimax_auth(target) =>
+        {
             headers.insert(
                 "x-api-key",
                 HeaderValue::from_str(token.as_str())
@@ -1515,13 +1518,18 @@ fn resolve_provider_credential(
         let Some(profile) = registry.get_profile(profile_id)? else {
             anyhow::bail!("auth profile not found: {profile_id}");
         };
-        let expected_provider = match target.kind.as_str() {
-            OPENAI_COMPATIBLE_PROVIDER_KIND => Some(AuthProviderKind::Openai),
-            ANTHROPIC_PROVIDER_KIND => Some(AuthProviderKind::Anthropic),
-            _ => None,
-        };
+        let expected_provider = expected_auth_provider_for_probe_target(target);
         if let Some(expected_provider) = expected_provider {
-            if profile.provider.kind != expected_provider {
+            let matches_expected =
+                if expected_provider == AuthProviderKind::Custom {
+                    matches!(profile.provider.kind, AuthProviderKind::Custom)
+                        && profile.provider.custom_name.as_deref().is_some_and(|name| {
+                            name.eq_ignore_ascii_case(MINIMAX_AUTH_PROVIDER_KIND)
+                        })
+                } else {
+                    profile.provider.kind == expected_provider
+                };
+            if !matches_expected {
                 anyhow::bail!(
                     "auth profile '{}' belongs to provider '{}' instead of '{}'",
                     profile_id,
@@ -1559,6 +1567,24 @@ fn resolve_provider_credential(
         }));
     }
     Ok(None)
+}
+
+fn target_uses_minimax_auth(target: &ProbeableProvider) -> bool {
+    target
+        .auth_provider_kind
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case(MINIMAX_AUTH_PROVIDER_KIND))
+}
+
+fn expected_auth_provider_for_probe_target(target: &ProbeableProvider) -> Option<AuthProviderKind> {
+    if target_uses_minimax_auth(target) {
+        return Some(AuthProviderKind::Custom);
+    }
+    match target.kind.as_str() {
+        OPENAI_COMPATIBLE_PROVIDER_KIND => Some(AuthProviderKind::Openai),
+        ANTHROPIC_PROVIDER_KIND => Some(AuthProviderKind::Anthropic),
+        _ => None,
+    }
 }
 
 fn load_vault_secret_utf8(vault: &palyra_vault::Vault, vault_ref: &str) -> Result<String> {

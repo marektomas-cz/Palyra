@@ -388,6 +388,12 @@ pub(crate) async fn console_auth_profile_delete_handler(
     if response.deleted
         && existing_profile.as_ref().is_some_and(|profile| {
             matches!(profile.provider.kind, AuthProviderKind::Openai | AuthProviderKind::Anthropic)
+                || (matches!(profile.provider.kind, AuthProviderKind::Custom)
+                    && profile
+                        .provider
+                        .custom_name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("minimax")))
         })
     {
         let _ = clear_model_provider_auth_profile_selection_if_matches(
@@ -466,6 +472,17 @@ pub(crate) async fn console_anthropic_provider_state_handler(
     Ok(Json(build_provider_state(&document, profiles, ModelProviderAuthProviderKind::Anthropic)))
 }
 
+pub(crate) async fn console_minimax_provider_state_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<control_plane::ProviderAuthStateEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, false)?;
+    let profiles = list_console_custom_auth_profiles(&state, &session, "minimax").await?;
+    let configured_path = std::env::var("PALYRA_CONFIG").ok();
+    let (document, _, _) = load_console_config_snapshot(configured_path.as_deref(), true)?;
+    Ok(Json(build_provider_state(&document, profiles, ModelProviderAuthProviderKind::Minimax)))
+}
+
 pub(crate) async fn console_openai_provider_api_key_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -524,6 +541,35 @@ pub(crate) async fn console_anthropic_provider_api_key_handler(
     }
 }
 
+pub(crate) async fn console_minimax_provider_api_key_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::ProviderApiKeyUpsertRequest>,
+) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    state.observability.record_provider_auth_attempt();
+    let profile_id = payload.profile_id.clone();
+    match connect_minimax_api_key(&state, &session.context, payload).await {
+        Ok(envelope) => Ok(Json(envelope)),
+        Err(response) => {
+            record_provider_auth_failure(
+                &state,
+                "provider_auth.api_key_connect",
+                response.status(),
+                auth_correlation_from_context(
+                    &session.context,
+                    profile_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                ),
+                false,
+            );
+            Err(response)
+        }
+    }
+}
+
 pub(crate) async fn console_openai_provider_bootstrap_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -554,6 +600,35 @@ pub(crate) async fn console_openai_provider_bootstrap_handler(
     }
 }
 
+pub(crate) async fn console_minimax_provider_bootstrap_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::OpenAiOAuthBootstrapRequest>,
+) -> Result<Json<control_plane::OpenAiOAuthBootstrapEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    state.observability.record_provider_auth_attempt();
+    let profile_id = payload.profile_id.clone();
+    match start_minimax_oauth_attempt_from_request(&state, &session.context, payload).await {
+        Ok(envelope) => Ok(Json(envelope)),
+        Err(response) => {
+            record_provider_auth_failure(
+                &state,
+                "provider_auth.oauth_bootstrap",
+                response.status(),
+                auth_correlation_from_context(
+                    &session.context,
+                    profile_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                ),
+                false,
+            );
+            Err(response)
+        }
+    }
+}
+
 pub(crate) async fn console_openai_provider_callback_state_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -561,6 +636,15 @@ pub(crate) async fn console_openai_provider_callback_state_handler(
 ) -> Result<Json<control_plane::OpenAiOAuthCallbackStateEnvelope>, Response> {
     let _session = authorize_console_session(&state, &headers, false)?;
     load_openai_oauth_callback_state(&state, query.attempt_id.as_str()).await.map(Json)
+}
+
+pub(crate) async fn console_minimax_provider_callback_state_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ConsoleOpenAiCallbackStateQuery>,
+) -> Result<Json<control_plane::OpenAiOAuthCallbackStateEnvelope>, Response> {
+    let _session = authorize_console_session(&state, &headers, false)?;
+    load_minimax_oauth_callback_state(&state, query.attempt_id.as_str()).await.map(Json)
 }
 
 pub(crate) async fn console_openai_provider_callback_handler(
@@ -616,6 +700,35 @@ pub(crate) async fn console_openai_provider_reconnect_handler(
     }
 }
 
+pub(crate) async fn console_minimax_provider_reconnect_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::ProviderAuthActionRequest>,
+) -> Result<Json<control_plane::OpenAiOAuthBootstrapEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    state.observability.record_provider_auth_attempt();
+    let profile_id = payload.profile_id.clone();
+    match reconnect_minimax_oauth_attempt(&state, &session.context, payload).await {
+        Ok(envelope) => Ok(Json(envelope)),
+        Err(response) => {
+            record_provider_auth_failure(
+                &state,
+                "provider_auth.oauth_reconnect",
+                response.status(),
+                auth_correlation_from_context(
+                    &session.context,
+                    profile_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                ),
+                false,
+            );
+            Err(response)
+        }
+    }
+}
+
 pub(crate) async fn console_openai_provider_refresh_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -625,6 +738,35 @@ pub(crate) async fn console_openai_provider_refresh_handler(
     state.observability.record_provider_auth_attempt();
     let profile_id = payload.profile_id.clone();
     match refresh_openai_oauth_profile(&state, &session.context, payload).await {
+        Ok(envelope) => Ok(Json(envelope)),
+        Err(response) => {
+            record_provider_auth_failure(
+                &state,
+                "provider_auth.oauth_refresh",
+                response.status(),
+                auth_correlation_from_context(
+                    &session.context,
+                    profile_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                ),
+                true,
+            );
+            Err(response)
+        }
+    }
+}
+
+pub(crate) async fn console_minimax_provider_refresh_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::ProviderAuthActionRequest>,
+) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    state.observability.record_provider_auth_attempt();
+    let profile_id = payload.profile_id.clone();
+    match refresh_minimax_oauth_profile(&state, &session.context, payload).await {
         Ok(envelope) => Ok(Json(envelope)),
         Err(response) => {
             record_provider_auth_failure(
@@ -712,6 +854,35 @@ pub(crate) async fn console_anthropic_provider_revoke_handler(
     }
 }
 
+pub(crate) async fn console_minimax_provider_revoke_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::ProviderAuthActionRequest>,
+) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    state.observability.record_provider_auth_attempt();
+    let profile_id = payload.profile_id.clone();
+    match revoke_minimax_auth_profile(&state, &session.context, payload).await {
+        Ok(envelope) => Ok(Json(envelope)),
+        Err(response) => {
+            record_provider_auth_failure(
+                &state,
+                "provider_auth.api_key_revoke",
+                response.status(),
+                auth_correlation_from_context(
+                    &session.context,
+                    profile_id.as_deref(),
+                    None,
+                    None,
+                    None,
+                ),
+                false,
+            );
+            Err(response)
+        }
+    }
+}
+
 pub(crate) async fn console_anthropic_provider_default_profile_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -719,6 +890,15 @@ pub(crate) async fn console_anthropic_provider_default_profile_handler(
 ) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
     select_default_anthropic_auth_profile(&state, &session.context, payload).await.map(Json)
+}
+
+pub(crate) async fn console_minimax_provider_default_profile_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<control_plane::ProviderAuthActionRequest>,
+) -> Result<Json<control_plane::ProviderAuthActionEnvelope>, Response> {
+    let session = authorize_console_session(&state, &headers, true)?;
+    select_default_minimax_auth_profile(&state, &session.context, payload).await.map(Json)
 }
 
 pub(crate) fn issue_console_session(

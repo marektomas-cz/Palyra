@@ -20,6 +20,7 @@ use crate::{
     config::LoadedConfig,
     cron::CronTimezoneMode,
     gateway::{self, GatewayAuthConfig, GatewayRuntimeState},
+    model_provider::ModelProviderAuthProviderKind,
     node_runtime::NodeRuntimeState,
     objectives,
     observability::ObservabilityState,
@@ -104,6 +105,7 @@ pub(crate) struct ConsoleActionContext {
 
 #[derive(Clone)]
 pub(crate) struct OpenAiOAuthAttempt {
+    pub(crate) provider: ModelProviderAuthProviderKind,
     pub(crate) attempt_id: String,
     pub(crate) expires_at_unix_ms: i64,
     pub(crate) redirect_uri: String,
@@ -115,6 +117,9 @@ pub(crate) struct OpenAiOAuthAttempt {
     pub(crate) scopes: Vec<String>,
     pub(crate) token_endpoint: Url,
     pub(crate) code_verifier: String,
+    pub(crate) device_user_code: Option<String>,
+    pub(crate) poll_interval_ms: u64,
+    pub(crate) next_poll_after_unix_ms: i64,
     pub(crate) set_default: bool,
     pub(crate) context: ConsoleActionContext,
     pub(crate) state: OpenAiOAuthAttemptStateRecord,
@@ -124,6 +129,7 @@ impl std::fmt::Debug for OpenAiOAuthAttempt {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("OpenAiOAuthAttempt")
+            .field("provider", &self.provider.as_str())
             .field("attempt_id", &self.attempt_id)
             .field("expires_at_unix_ms", &self.expires_at_unix_ms)
             .field("redirect_uri", &redact_url(self.redirect_uri.as_str()))
@@ -135,6 +141,9 @@ impl std::fmt::Debug for OpenAiOAuthAttempt {
             .field("scopes", &self.scopes)
             .field("token_endpoint", &redact_url(self.token_endpoint.as_str()))
             .field("code_verifier", &REDACTED)
+            .field("device_user_code", &self.device_user_code)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("next_poll_after_unix_ms", &self.next_poll_after_unix_ms)
             .field("set_default", &self.set_default)
             .field("context", &self.context)
             .field("state", &self.state)

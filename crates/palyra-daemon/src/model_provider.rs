@@ -237,6 +237,7 @@ fn build_openai_chat_content(request: &ProviderRequest) -> Value {
 pub enum ModelProviderAuthProviderKind {
     Openai,
     Anthropic,
+    Minimax,
 }
 
 impl ModelProviderAuthProviderKind {
@@ -245,6 +246,7 @@ impl ModelProviderAuthProviderKind {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::Minimax => "minimax",
         }
     }
 
@@ -252,9 +254,14 @@ impl ModelProviderAuthProviderKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "openai" | "openai_compatible" | "openai-compatible" => Ok(Self::Openai),
             "anthropic" => Ok(Self::Anthropic),
+            "minimax" | "minimax-portal" => Ok(Self::Minimax),
             _ => anyhow::bail!("unsupported model provider auth provider kind: {value}"),
         }
     }
+}
+
+fn anthropic_compatible_uses_bearer_auth(kind: Option<ModelProviderAuthProviderKind>) -> bool {
+    matches!(kind, Some(ModelProviderAuthProviderKind::Minimax))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -370,10 +377,13 @@ impl ModelProviderConfig {
 }
 
 fn legacy_registry_from_config(config: &ModelProviderConfig) -> ModelProviderRegistryConfig {
-    let provider_id = match config.kind {
-        ModelProviderKind::Deterministic => "deterministic-primary".to_owned(),
-        ModelProviderKind::OpenAiCompatible => "openai-primary".to_owned(),
-        ModelProviderKind::Anthropic => "anthropic-primary".to_owned(),
+    let provider_id = match (config.kind, config.auth_profile_provider_kind) {
+        (ModelProviderKind::Deterministic, _) => "deterministic-primary".to_owned(),
+        (ModelProviderKind::OpenAiCompatible, _) => "openai-primary".to_owned(),
+        (ModelProviderKind::Anthropic, Some(ModelProviderAuthProviderKind::Minimax)) => {
+            "minimax-primary".to_owned()
+        }
+        (ModelProviderKind::Anthropic, _) => "anthropic-primary".to_owned(),
     };
     let (
         display_name,
@@ -384,38 +394,52 @@ fn legacy_registry_from_config(config: &ModelProviderConfig) -> ModelProviderReg
         model_id,
         auth_kind,
         capabilities,
-    ) = match config.kind {
-        ModelProviderKind::Deterministic => (
-            Some("Deterministic".to_owned()),
-            None,
-            None,
-            None,
-            None,
-            "deterministic".to_owned(),
-            None,
-            capability_defaults_for_kind(config.kind, ProviderModelRole::Chat),
-        ),
-        ModelProviderKind::OpenAiCompatible => (
-            Some("OpenAI-compatible".to_owned()),
-            Some(config.openai_base_url.clone()),
-            config.openai_api_key.clone(),
-            config.openai_api_key_secret_ref.clone(),
-            config.openai_api_key_vault_ref.clone(),
-            config.openai_model.clone(),
-            Some(ModelProviderAuthProviderKind::Openai),
-            capability_defaults_for_kind(config.kind, ProviderModelRole::Chat),
-        ),
-        ModelProviderKind::Anthropic => (
-            Some("Anthropic".to_owned()),
-            Some(config.anthropic_base_url.clone()),
-            config.anthropic_api_key.clone(),
-            config.anthropic_api_key_secret_ref.clone(),
-            config.anthropic_api_key_vault_ref.clone(),
-            config.anthropic_model.clone(),
-            Some(ModelProviderAuthProviderKind::Anthropic),
-            capability_defaults_for_kind(config.kind, ProviderModelRole::Chat),
-        ),
-    };
+    ) =
+        match config.kind {
+            ModelProviderKind::Deterministic => (
+                Some("Deterministic".to_owned()),
+                None,
+                None,
+                None,
+                None,
+                "deterministic".to_owned(),
+                None,
+                capability_defaults_for_kind(config.kind, ProviderModelRole::Chat),
+            ),
+            ModelProviderKind::OpenAiCompatible => (
+                Some("OpenAI-compatible".to_owned()),
+                Some(config.openai_base_url.clone()),
+                config.openai_api_key.clone(),
+                config.openai_api_key_secret_ref.clone(),
+                config.openai_api_key_vault_ref.clone(),
+                config.openai_model.clone(),
+                Some(ModelProviderAuthProviderKind::Openai),
+                capability_defaults_for_kind(config.kind, ProviderModelRole::Chat),
+            ),
+            ModelProviderKind::Anthropic => (
+                Some(
+                    if config.auth_profile_provider_kind
+                        == Some(ModelProviderAuthProviderKind::Minimax)
+                    {
+                        "MiniMax"
+                    } else {
+                        "Anthropic"
+                    }
+                    .to_owned(),
+                ),
+                Some(config.anthropic_base_url.clone()),
+                config.anthropic_api_key.clone(),
+                config.anthropic_api_key_secret_ref.clone(),
+                config.anthropic_api_key_vault_ref.clone(),
+                config.anthropic_model.clone(),
+                Some(
+                    config
+                        .auth_profile_provider_kind
+                        .unwrap_or(ModelProviderAuthProviderKind::Anthropic),
+                ),
+                capability_defaults_for_kind(config.kind, ProviderModelRole::Chat),
+            ),
+        };
     let mut registry = ModelProviderRegistryConfig {
         providers: vec![ProviderRegistryEntryConfig {
             provider_id: provider_id.clone(),
@@ -3908,21 +3932,23 @@ impl AnthropicProvider {
             body["system"] = json!("Return valid JSON only.");
         }
 
-        let response = self
+        let request_builder = self
             .client
             .post(self.messages_endpoint())
-            .header("x-api-key", api_key)
-            .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| {
-                AttemptError::request_failed(
-                    format!("anthropic request failed: {error}"),
-                    true,
-                    classify_network_provider_failure("anthropic_chat_request"),
-                )
-            })?;
+            .header("anthropic-version", ANTHROPIC_API_VERSION);
+        let request_builder =
+            if anthropic_compatible_uses_bearer_auth(self.config.auth_profile_provider_kind) {
+                request_builder.bearer_auth(api_key)
+            } else {
+                request_builder.header("x-api-key", api_key)
+            };
+        let response = request_builder.json(&body).send().await.map_err(|error| {
+            AttemptError::request_failed(
+                format!("anthropic request failed: {error}"),
+                true,
+                classify_network_provider_failure("anthropic_chat_request"),
+            )
+        })?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -4880,6 +4906,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn minimax_anthropic_compatible_provider_uses_bearer_auth() {
+        let (base_url, request_count, request_log, handle) =
+            spawn_inspecting_scripted_server(vec![(
+                200_u16,
+                r#"{"content":[{"type":"text","text":"hello from minimax"}],"stop_reason":"end_turn"}"#
+                    .to_owned(),
+            )]);
+        let anthropic_base_url =
+            base_url.strip_suffix("/v1").unwrap_or(base_url.as_str()).to_owned();
+        let config = ModelProviderConfig {
+            kind: ModelProviderKind::Anthropic,
+            anthropic_base_url,
+            allow_private_base_url: true,
+            anthropic_model: "MiniMax-M2.7".to_owned(),
+            anthropic_api_key: Some("minimax-secret".to_owned()),
+            auth_profile_provider_kind: Some(ModelProviderAuthProviderKind::Minimax),
+            request_timeout_ms: 5_000,
+            max_retries: 0,
+            retry_backoff_ms: 1,
+            circuit_breaker_failure_threshold: 1,
+            circuit_breaker_cooldown_ms: 60_000,
+            ..ModelProviderConfig::default()
+        };
+        let provider = build_model_provider(&config).expect("minimax provider should build");
+
+        provider
+            .complete(ProviderRequest {
+                input_text: "hello".to_owned(),
+                json_mode: false,
+                vision_inputs: Vec::new(),
+                model_override: None,
+            })
+            .await
+            .expect("minimax-compatible provider should succeed");
+
+        assert_eq!(request_count.load(Ordering::Relaxed), 1);
+        let requests = request_log.lock().expect("request log lock should not be poisoned");
+        assert_eq!(requests[0].path, "/v1/messages");
+        let authorization = requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(authorization, Some("Bearer minimax-secret"));
+        assert!(
+            !requests[0].headers.iter().any(|(name, _)| name == "x-api-key"),
+            "MiniMax Anthropic-compatible transport must not use Anthropic x-api-key auth"
+        );
+        handle.join().expect("minimax scripted server thread should exit");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn openai_embeddings_provider_sends_expected_request_payload() {
         let scripted = vec![(
             200_u16,
@@ -5327,6 +5405,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct CapturedHttpRequest {
         path: String,
+        headers: Vec<(String, String)>,
         body: String,
         received_at_ms: u64,
     }
@@ -5398,6 +5477,7 @@ mod tests {
         let path = request_line.split_ascii_whitespace().nth(1).unwrap_or_default().to_owned();
 
         let mut content_length = 0_usize;
+        let mut headers = Vec::new();
         loop {
             let mut line = String::new();
             let bytes_read =
@@ -5407,6 +5487,7 @@ mod tests {
             }
             let line_trimmed = line.trim_end_matches(['\r', '\n']);
             if let Some((name, value)) = line_trimmed.split_once(':') {
+                headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
                 if name.trim().eq_ignore_ascii_case("content-length") {
                     content_length = value.trim().parse::<usize>().unwrap_or(0);
                 }
@@ -5421,6 +5502,6 @@ mod tests {
             body_text = String::from_utf8_lossy(body.as_slice()).into_owned();
         }
 
-        CapturedHttpRequest { path, body: body_text, received_at_ms: 0 }
+        CapturedHttpRequest { path, headers, body: body_text, received_at_ms: 0 }
     }
 }

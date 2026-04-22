@@ -2808,13 +2808,36 @@ pub(crate) async fn list_console_auth_profiles(
     session: &ConsoleSession,
     provider_kind: gateway::proto::palyra::auth::v1::AuthProviderKind,
 ) -> Result<Vec<control_plane::AuthProfileView>, Response> {
+    list_console_auth_profiles_with_custom_name(state, session, provider_kind, "").await
+}
+
+pub(crate) async fn list_console_custom_auth_profiles(
+    state: &AppState,
+    session: &ConsoleSession,
+    provider_custom_name: &str,
+) -> Result<Vec<control_plane::AuthProfileView>, Response> {
+    list_console_auth_profiles_with_custom_name(
+        state,
+        session,
+        gateway::proto::palyra::auth::v1::AuthProviderKind::Custom,
+        provider_custom_name,
+    )
+    .await
+}
+
+pub(crate) async fn list_console_auth_profiles_with_custom_name(
+    state: &AppState,
+    session: &ConsoleSession,
+    provider_kind: gateway::proto::palyra::auth::v1::AuthProviderKind,
+    provider_custom_name: &str,
+) -> Result<Vec<control_plane::AuthProfileView>, Response> {
     let mut request =
         TonicRequest::new(gateway::proto::palyra::auth::v1::ListAuthProfilesRequest {
             v: palyra_common::CANONICAL_PROTOCOL_MAJOR,
             after_profile_id: String::new(),
             limit: 256,
             provider_kind: provider_kind as i32,
-            provider_custom_name: String::new(),
+            provider_custom_name: provider_custom_name.to_owned(),
             scope_kind: gateway::proto::palyra::auth::v1::AuthScopeKind::Unspecified as i32,
             scope_agent_id: String::new(),
         });
@@ -2913,6 +2936,7 @@ pub(crate) fn build_provider_state(
             "model_provider.anthropic_api_key",
             false,
         ),
+        ModelProviderAuthProviderKind::Minimax => ("minimax", "", "", true),
     };
     let api_key_vault_ref = get_value_at_path(document, api_key_path)
         .ok()
@@ -2948,6 +2972,7 @@ pub(crate) fn build_provider_state(
                 None
             }
         }
+        ModelProviderAuthProviderKind::Minimax => None,
     };
     control_plane::ProviderAuthStateEnvelope {
         contract: contract_descriptor(),
@@ -4051,6 +4076,14 @@ pub(crate) fn build_capability_catalog() -> Result<control_plane::CapabilityCata
                     "/console/v1/auth/providers/anthropic/api-key",
                     "/console/v1/auth/providers/anthropic/revoke",
                     "/console/v1/auth/providers/anthropic/default-profile",
+                    "/console/v1/auth/providers/minimax",
+                    "/console/v1/auth/providers/minimax/api-key",
+                    "/console/v1/auth/providers/minimax/bootstrap",
+                    "/console/v1/auth/providers/minimax/callback-state",
+                    "/console/v1/auth/providers/minimax/reconnect",
+                    "/console/v1/auth/providers/minimax/refresh",
+                    "/console/v1/auth/providers/minimax/revoke",
+                    "/console/v1/auth/providers/minimax/default-profile",
                     "/console/v1/models/test-connection",
                     "/console/v1/models/discover",
                 ],

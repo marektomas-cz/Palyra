@@ -106,10 +106,13 @@ use openai_auth::{
 };
 use openai_surface::{
     clear_model_provider_auth_profile_selection_if_matches, complete_openai_oauth_callback,
-    connect_anthropic_api_key, connect_openai_api_key, load_openai_oauth_callback_state,
-    reconnect_openai_oauth_attempt, refresh_openai_oauth_profile, revoke_anthropic_auth_profile,
+    connect_anthropic_api_key, connect_minimax_api_key, connect_openai_api_key,
+    load_minimax_oauth_callback_state, load_openai_oauth_callback_state,
+    reconnect_minimax_oauth_attempt, reconnect_openai_oauth_attempt, refresh_minimax_oauth_profile,
+    refresh_openai_oauth_profile, revoke_anthropic_auth_profile, revoke_minimax_auth_profile,
     revoke_openai_auth_profile, select_default_anthropic_auth_profile,
-    select_default_openai_auth_profile, start_openai_oauth_attempt_from_request,
+    select_default_minimax_auth_profile, select_default_openai_auth_profile,
+    start_minimax_oauth_attempt_from_request, start_openai_oauth_attempt_from_request,
 };
 use palyra_auth::{
     AuthCredential, AuthProfileError, AuthProfileRecord, AuthProfileRegistry, AuthProfileScope,
@@ -3118,6 +3121,14 @@ fn resolve_provider_secret_from_auth_profile(
         ModelProviderAuthProviderKind::Anthropic => {
             matches!(profile.provider.kind, AuthProviderKind::Anthropic)
         }
+        ModelProviderAuthProviderKind::Minimax => {
+            matches!(profile.provider.kind, AuthProviderKind::Custom)
+                && profile
+                    .provider
+                    .custom_name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("minimax"))
+        }
     };
     if !provider_matches {
         anyhow::bail!(
@@ -4501,6 +4512,54 @@ mod tests {
             error.to_string().contains("provider mismatch"),
             "resolver should explain provider mismatch when auth profile kind is incompatible"
         );
+    }
+
+    #[test]
+    fn model_provider_secret_resolver_accepts_minimax_custom_auth_profile() {
+        let (tempdir, auth_registry, vault) = setup_auth_registry_and_vault();
+        let resolver = SecretResolver::with_working_dir(Some(&vault), tempdir.path());
+        let auth_ref =
+            VaultRef::parse("global/minimax_api_key").expect("minimax vault ref should parse");
+        vault
+            .put_secret(&auth_ref.scope, auth_ref.key.as_str(), b"minimax-secret")
+            .expect("minimax auth profile API key should be written");
+        auth_registry
+            .set_profile(AuthProfileSetRequest {
+                profile_id: "minimax-default".to_owned(),
+                provider: AuthProvider {
+                    kind: AuthProviderKind::Custom,
+                    custom_name: Some("minimax".to_owned()),
+                },
+                profile_name: "MiniMax Default".to_owned(),
+                scope: AuthProfileScope::Global,
+                credential: AuthCredential::ApiKey {
+                    api_key_vault_ref: "global/minimax_api_key".to_owned(),
+                },
+            })
+            .expect("minimax auth profile should be persisted");
+
+        let mut model_provider = ModelProviderConfig {
+            kind: ModelProviderKind::Anthropic,
+            auth_profile_id: Some("minimax-default".to_owned()),
+            auth_profile_provider_kind: Some(ModelProviderAuthProviderKind::Minimax),
+            ..ModelProviderConfig::default()
+        };
+
+        let audits =
+            resolve_model_provider_secret(&mut model_provider, &auth_registry, &vault, &resolver)
+                .expect("minimax custom auth profile resolution should succeed");
+        let audit =
+            audits.into_iter().next().expect("audit record should be emitted for resolved secret");
+        assert_eq!(
+            model_provider.anthropic_api_key.as_deref(),
+            Some("minimax-secret"),
+            "MiniMax should hydrate the Anthropic-compatible transport credential"
+        );
+        assert_eq!(
+            model_provider.credential_source,
+            Some(ModelProviderCredentialSource::AuthProfileApiKey)
+        );
+        assert_eq!(audit.action, "model_provider.auth_profile.api_key.resolve");
     }
 
     #[test]

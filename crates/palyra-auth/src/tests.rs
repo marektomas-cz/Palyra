@@ -569,6 +569,52 @@ fn oauth_refresh_integration_updates_vault_secret() {
 }
 
 #[test]
+fn oauth_refresh_integration_accepts_expired_in_alias() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let identity_root = tempdir.path().join("identity");
+    let vault_root = tempdir.path().join("vault");
+    let registry =
+        AuthProfileRegistry::open(identity_root.as_path()).expect("registry should initialize");
+    let vault = open_test_vault(vault_root.as_path(), identity_root.as_path());
+    persist_secret_utf8(&vault, "global/auth_openai_access", "access-old")
+        .expect("access secret should persist");
+    persist_secret_utf8(&vault, "global/auth_openai_refresh", "refresh-static")
+        .expect("refresh secret should persist");
+    persist_secret_utf8(&vault, "global/auth_openai_client_secret", "client-secret")
+        .expect("client secret should persist");
+
+    let now = 1_730_000_000_000_i64;
+    let (token_endpoint, server_thread) = spawn_oauth_server(
+        r#"{"access_token":"access-new","refresh_token":"refresh-new","expired_in":"120"}"#
+            .to_owned(),
+    );
+
+    registry
+        .set_profile(sample_oauth_profile_request(
+            token_endpoint,
+            Some(now.saturating_sub(1_000)),
+            OAuthRefreshState::default(),
+        ))
+        .expect("profile should persist");
+    let adapter = HttpOAuthRefreshAdapter::with_timeout(Duration::from_secs(2))
+        .expect("HTTP adapter should initialize");
+    let outcome = registry
+        .refresh_oauth_profile_with_clock("openai-default", &vault, &adapter, now)
+        .expect("refresh should succeed");
+    assert_eq!(outcome.kind, OAuthRefreshOutcomeKind::Succeeded);
+
+    let profile = registry
+        .get_profile("openai-default")
+        .expect("profile lookup should succeed")
+        .expect("profile should exist");
+    let AuthCredential::Oauth { expires_at_unix_ms, .. } = profile.credential else {
+        panic!("profile should keep oauth credential type");
+    };
+    assert_eq!(expires_at_unix_ms, Some(now.saturating_add(120_000)));
+    server_thread.join().expect("test server thread should exit cleanly");
+}
+
+#[test]
 fn refresh_fails_when_client_secret_reference_is_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let identity_root = tempdir.path().join("identity");
