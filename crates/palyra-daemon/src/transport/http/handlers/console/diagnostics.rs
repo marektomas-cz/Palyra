@@ -94,6 +94,7 @@ pub(crate) async fn console_diagnostics_handler(
     let deployment_payload = collect_console_deployment_diagnostics(&state);
     let execution_backends_payload =
         collect_console_execution_backend_diagnostics(&state).map_err(runtime_status_response)?;
+    let networked_workers_payload = collect_console_networked_worker_diagnostics(&state);
     let runtime_controls_payload = serde_json::to_value(
         crate::runtime_preview_controls::build_runtime_preview_config_snapshot(
             &state.runtime.config,
@@ -158,6 +159,7 @@ pub(crate) async fn console_diagnostics_handler(
         "runtime_controls": runtime_controls_payload,
         "deployment": deployment_payload,
         "execution_backends": execution_backends_payload,
+        "networked_workers": networked_workers_payload,
         "canvas_experiments": canvas_experiments_payload,
         "observability": observability_payload,
         "memory": {
@@ -209,6 +211,110 @@ pub(crate) async fn console_diagnostics_handler(
             }
         },
     })))
+}
+
+pub(crate) async fn console_networked_workers_reap_expired_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let events =
+        state.runtime.reap_expired_networked_workers().await.map_err(runtime_status_response)?;
+    Ok(Json(networked_worker_action_response(&state, "reap_expired", events)))
+}
+
+pub(crate) async fn console_networked_workers_drain_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let events = state.runtime.drain_networked_workers().await.map_err(runtime_status_response)?;
+    Ok(Json(networked_worker_action_response(&state, "drain", events)))
+}
+
+pub(crate) async fn console_networked_worker_quarantine_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(worker_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let worker_id = normalize_non_empty_field(worker_id, "worker_id")?;
+    let event = state
+        .runtime
+        .quarantine_networked_worker(worker_id.as_str())
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(networked_worker_action_response(&state, "quarantine", vec![event])))
+}
+
+pub(crate) async fn console_networked_worker_reverify_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(worker_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let worker_id = normalize_non_empty_field(worker_id, "worker_id")?;
+    let event = state
+        .runtime
+        .reverify_networked_worker(worker_id.as_str())
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(networked_worker_action_response(&state, "reverify", vec![event])))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConsoleNetworkedWorkerForceCleanupRequest {
+    #[serde(default)]
+    removed_workspace_scope: bool,
+    #[serde(default)]
+    removed_artifacts: bool,
+    #[serde(default)]
+    removed_logs: bool,
+    #[serde(default)]
+    failure_reason: Option<String>,
+}
+
+pub(crate) async fn console_networked_worker_force_cleanup_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(worker_id): Path<String>,
+    Json(payload): Json<ConsoleNetworkedWorkerForceCleanupRequest>,
+) -> Result<Json<Value>, Response> {
+    let _session = authorize_console_session(&state, &headers, true)?;
+    let worker_id = normalize_non_empty_field(worker_id, "worker_id")?;
+    let failure_reason = payload
+        .failure_reason
+        .map(|value| sanitize_http_error_message(value.as_str()))
+        .filter(|value| !value.trim().is_empty());
+    let event = state
+        .runtime
+        .force_cleanup_networked_worker(
+            worker_id.as_str(),
+            palyra_workerd::WorkerCleanupReport {
+                removed_workspace_scope: payload.removed_workspace_scope,
+                removed_artifacts: payload.removed_artifacts,
+                removed_logs: payload.removed_logs,
+                failure_reason,
+            },
+        )
+        .await
+        .map_err(runtime_status_response)?;
+    Ok(Json(networked_worker_action_response(&state, "force_cleanup", vec![event])))
+}
+
+fn networked_worker_action_response(
+    state: &AppState,
+    action: &str,
+    events: Vec<palyra_workerd::WorkerLifecycleEvent>,
+) -> Value {
+    json!({
+        "contract": contract_descriptor(),
+        "action": action,
+        "event_count": events.len(),
+        "events": events,
+        "snapshot": state.runtime.worker_fleet_snapshot(),
+        "diagnostics": collect_console_networked_worker_diagnostics(state),
+    })
 }
 
 async fn collect_console_delegation_diagnostics(
@@ -405,6 +511,233 @@ fn collect_console_execution_backend_diagnostics(state: &AppState) -> Result<Val
     .map_err(|error| {
         tonic::Status::internal(format!("failed to serialize execution backends: {error}"))
     })
+}
+
+pub(crate) fn collect_console_networked_worker_diagnostics(state: &AppState) -> Value {
+    let snapshot = state.runtime.worker_fleet_snapshot();
+    let policy = state.runtime.worker_fleet_policy();
+    let recent_events = state.runtime.worker_fleet_recent_events();
+    let runtime_preview = state.observability.runtime_decision_snapshot();
+    let mut reason_counts = std::collections::BTreeMap::<String, u64>::new();
+    for event in &recent_events {
+        *reason_counts.entry(event.reason_code.clone()).or_default() += 1;
+    }
+    let lease_failures = recent_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.reason_code.as_str(),
+                "worker.cleanup_failed"
+                    | "worker.ttl_expired"
+                    | "worker.quarantined_by_operator"
+                    | "worker.drained_by_operator"
+            )
+        })
+        .count() as u64;
+    let transport_failures = runtime_preview
+        .recent_events
+        .iter()
+        .filter(|event| {
+            event.reason.contains("artifact_transport")
+                && (event.reason.contains("failed") || event.reason.contains("denied"))
+        })
+        .count() as u64;
+    let fallback_events = runtime_preview
+        .recent_events
+        .iter()
+        .filter(|event| event.reason.contains("fallback"))
+        .count() as u64;
+    let fallback_rate_bps = if runtime_preview.recent_events.is_empty() {
+        0
+    } else {
+        u32::try_from(
+            fallback_events.saturating_mul(10_000) / runtime_preview.recent_events.len() as u64,
+        )
+        .unwrap_or(u32::MAX)
+    };
+    let recent_events_payload = recent_events
+        .iter()
+        .take(16)
+        .map(|event| {
+            json!({
+                "worker_id": event.worker_id,
+                "state": event.state.as_str(),
+                "run_id": event.run_id,
+                "reason_code": event.reason_code,
+                "timestamp_unix_ms": event.timestamp_unix_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "state": networked_worker_health_state(&snapshot, lease_failures, transport_failures),
+        "mode": state.runtime.config.networked_workers.mode.as_str(),
+        "snapshot": snapshot,
+        "metrics": {
+            "registered_workers": snapshot.registered_workers,
+            "attested_workers": snapshot.attested_workers,
+            "active_leases": snapshot.active_leases,
+            "orphaned_workers": snapshot.orphaned_workers,
+            "failed_closed_workers": snapshot.failed_closed_workers,
+            "orphan_rate_bps": runtime_preview.metrics.worker_orphan_rate_bps,
+            "lease_failures": lease_failures,
+            "transport_failures": transport_failures,
+            "fallback_to_local_rate_bps": fallback_rate_bps,
+        },
+        "policy": {
+            "lease_ttl_ms": policy.max_ttl_ms,
+            "require_egress_proxy": policy.attestation.require_egress_proxy,
+            "expected_image_digest_configured": policy.attestation.image_digest_sha256.is_some(),
+            "expected_build_digest_configured": policy.attestation.build_digest_sha256.is_some(),
+            "expected_artifact_digest_configured": policy.attestation.artifact_digest_sha256.is_some(),
+        },
+        "rollout": {
+            "networked_workers": {
+                "enabled": state.runtime.config.feature_rollouts.networked_workers.enabled,
+                "source": state.runtime.config.feature_rollouts.networked_workers.source,
+            },
+            "execution_backend_networked_worker": {
+                "enabled": state
+                    .runtime
+                    .config
+                    .feature_rollouts
+                    .execution_backend_networked_worker
+                    .enabled,
+                "source": state
+                    .runtime
+                    .config
+                    .feature_rollouts
+                    .execution_backend_networked_worker
+                    .source,
+            },
+        },
+        "reason_counts": reason_counts,
+        "recent_events": recent_events_payload,
+        "attestation_mismatch_samples": recent_events
+            .iter()
+            .filter(|event| event.reason_code.contains("attestation"))
+            .take(5)
+            .map(|event| {
+                json!({
+                    "worker_id": event.worker_id,
+                    "reason_code": event.reason_code,
+                    "timestamp_unix_ms": event.timestamp_unix_ms,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "recovery": {
+            "orphan_classification": if snapshot.orphaned_workers > 0 {
+                "recoverable_requires_force_cleanup"
+            } else if snapshot.failed_closed_workers > 0 {
+                "non_recoverable_until_reverified"
+            } else {
+                "none"
+            },
+            "recommended_actions": networked_worker_recommended_actions(
+                &snapshot,
+                lease_failures,
+                transport_failures,
+            ),
+            "gate_criteria": [
+                "attested_workers >= active_leases",
+                "orphaned_workers == 0",
+                "failed_closed_workers == 0",
+                "lease_failures == 0",
+                "transport_failures == 0",
+                "fallback_to_local_rate_bps == 0"
+            ],
+        },
+        "actions": networked_worker_action_descriptors(),
+    })
+}
+
+fn networked_worker_health_state(
+    snapshot: &palyra_workerd::WorkerFleetSnapshot,
+    lease_failures: u64,
+    transport_failures: u64,
+) -> &'static str {
+    if snapshot.failed_closed_workers > 0 || transport_failures > 0 {
+        "failed"
+    } else if snapshot.orphaned_workers > 0 || lease_failures > 0 {
+        "degraded"
+    } else if snapshot.registered_workers == 0 {
+        "disabled"
+    } else {
+        "ready"
+    }
+}
+
+fn networked_worker_recommended_actions(
+    snapshot: &palyra_workerd::WorkerFleetSnapshot,
+    lease_failures: u64,
+    transport_failures: u64,
+) -> Vec<&'static str> {
+    let mut actions = Vec::new();
+    if snapshot.orphaned_workers > 0 {
+        actions.push("Run force cleanup for orphaned workers, then re-verify their attestation.");
+    }
+    if snapshot.failed_closed_workers > 0 {
+        actions.push("Quarantine affected workers until cleanup evidence and attestation match.");
+    }
+    if lease_failures > 0 {
+        actions.push("Drain the fleet before increasing networked-worker rollout.");
+    }
+    if transport_failures > 0 {
+        actions.push("Check artifact transport manifests and egress proxy attestation.");
+    }
+    if actions.is_empty() {
+        actions.push(
+            "Keep rollout gated until active leases, orphan rate, and fallback rate stay clean.",
+        );
+    }
+    actions
+}
+
+fn networked_worker_action_descriptors() -> Value {
+    json!([
+        {
+            "id": "reap_expired",
+            "scope": "fleet",
+            "label": "Reap expired leases",
+            "method": "POST",
+            "api_path": "/console/v1/networked-workers/reap-expired"
+        },
+        {
+            "id": "drain",
+            "scope": "fleet",
+            "label": "Drain fleet",
+            "method": "POST",
+            "api_path": "/console/v1/networked-workers/drain"
+        },
+        {
+            "id": "quarantine",
+            "scope": "worker",
+            "label": "Quarantine worker",
+            "method": "POST",
+            "api_path_template": "/console/v1/networked-workers/{worker_id}/quarantine"
+        },
+        {
+            "id": "reverify",
+            "scope": "worker",
+            "label": "Re-verify worker",
+            "method": "POST",
+            "api_path_template": "/console/v1/networked-workers/{worker_id}/reverify"
+        },
+        {
+            "id": "force_cleanup",
+            "scope": "worker",
+            "label": "Force cleanup",
+            "method": "POST",
+            "api_path_template": "/console/v1/networked-workers/{worker_id}/force-cleanup"
+        },
+        {
+            "id": "rollout_preview",
+            "scope": "fleet",
+            "label": "Refresh rollout preview",
+            "method": "GET",
+            "api_path": "/console/v1/diagnostics"
+        }
+    ])
 }
 
 fn collect_console_feature_rollouts_diagnostics(state: &AppState) -> Value {
@@ -1503,6 +1836,7 @@ pub(crate) fn build_support_bundle_observability(state: &AppState) -> Value {
     let summary = state.observability.support_bundle_snapshot();
     let runtime_preview = serde_json::to_value(state.observability.runtime_decision_snapshot())
         .unwrap_or_else(|_| json!({ "state": "encode_failed" }));
+    let networked_workers = collect_console_networked_worker_diagnostics(state);
     let latest_job = lock_support_bundle_jobs(&state.support_bundle_jobs)
         .values()
         .cloned()
@@ -1519,6 +1853,7 @@ pub(crate) fn build_support_bundle_observability(state: &AppState) -> Value {
         "workspace_restore": build_workspace_restore_observability(state),
         "replay": build_replay_support_observability(),
         "runtime_preview": runtime_preview,
+        "networked_workers": networked_workers,
         "last_job": latest_job.map(|job| json!({
             "job_id": job.job_id,
             "state": match job.state {

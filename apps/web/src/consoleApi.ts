@@ -2019,6 +2019,7 @@ export interface ConsoleDiagnosticsSnapshot {
   feature_rollouts?: JsonValue;
   runtime_controls?: JsonValue;
   execution_backends?: JsonValue;
+  networked_workers?: JsonValue;
   observability?: JsonValue;
   memory?: JsonValue;
   media?: JsonValue;

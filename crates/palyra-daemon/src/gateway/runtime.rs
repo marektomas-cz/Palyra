@@ -5955,7 +5955,6 @@ impl GatewayRuntimeState {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn worker_fleet_recent_events(&self) -> Vec<WorkerLifecycleEvent> {
         match self.worker_fleet.read() {
             Ok(manager) => manager.recent_events(),
@@ -6078,7 +6077,19 @@ impl GatewayRuntimeState {
                     })?
             }
         };
-        self.record_networked_worker_lifecycle_event(&outcome.event).await?;
+        self.record_networked_worker_lifecycle_event_with_details(
+            &outcome.event,
+            json!({
+                "cleanup_report": outcome.cleanup_report,
+                "cleanup_succeeded": outcome.cleanup_succeeded,
+                "orphan_classification": if outcome.cleanup_succeeded {
+                    "resolved"
+                } else {
+                    "non_recoverable_requires_operator_cleanup"
+                },
+            }),
+        )
+        .await?;
         if outcome.cleanup_succeeded {
             Ok(outcome.event)
         } else {
@@ -6102,9 +6113,168 @@ impl GatewayRuntimeState {
             }
         };
         for event in &events {
-            self.record_networked_worker_lifecycle_event(event).await?;
+            self.record_networked_worker_lifecycle_event_with_details(
+                event,
+                json!({
+                    "orphan_classification": "recoverable_requires_force_cleanup",
+                    "recommended_actions": [
+                        "force_cleanup",
+                        "reverify",
+                        "quarantine"
+                    ],
+                }),
+            )
+            .await?;
         }
         Ok(events)
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn drain_networked_workers(
+        self: &Arc<Self>,
+    ) -> Result<Vec<WorkerLifecycleEvent>, Status> {
+        let now_unix_ms = current_unix_ms();
+        let events = match self.worker_fleet.write() {
+            Ok(mut manager) => {
+                manager.quarantine_all_workers("worker.drained_by_operator", now_unix_ms)
+            }
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while draining workers");
+                poisoned
+                    .into_inner()
+                    .quarantine_all_workers("worker.drained_by_operator", now_unix_ms)
+            }
+        };
+        for event in &events {
+            self.record_networked_worker_lifecycle_event_with_details(
+                event,
+                json!({
+                    "operator_action": "drain",
+                    "cleanup_required": true,
+                }),
+            )
+            .await?;
+        }
+        Ok(events)
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn quarantine_networked_worker(
+        self: &Arc<Self>,
+        worker_id: &str,
+    ) -> Result<WorkerLifecycleEvent, Status> {
+        let now_unix_ms = current_unix_ms();
+        let event = match self.worker_fleet.write() {
+            Ok(mut manager) => manager
+                .quarantine_worker(worker_id, "worker.quarantined_by_operator", now_unix_ms)
+                .map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "networked worker quarantine failed: {error}"
+                    ))
+                })?,
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while quarantining worker");
+                poisoned
+                    .into_inner()
+                    .quarantine_worker(worker_id, "worker.quarantined_by_operator", now_unix_ms)
+                    .map_err(|error| {
+                        Status::failed_precondition(format!(
+                            "networked worker quarantine failed: {error}"
+                        ))
+                    })?
+            }
+        };
+        self.record_networked_worker_lifecycle_event_with_details(
+            &event,
+            json!({ "operator_action": "quarantine" }),
+        )
+        .await?;
+        Ok(event)
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn reverify_networked_worker(
+        self: &Arc<Self>,
+        worker_id: &str,
+    ) -> Result<WorkerLifecycleEvent, Status> {
+        let policy = self.worker_fleet_policy();
+        let now_unix_ms = current_unix_ms();
+        let event = match self.worker_fleet.write() {
+            Ok(mut manager) => {
+                manager.reverify_worker(worker_id, &policy, now_unix_ms).map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "networked worker re-verification failed: {error}"
+                    ))
+                })?
+            }
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while re-verifying worker");
+                poisoned.into_inner().reverify_worker(worker_id, &policy, now_unix_ms).map_err(
+                    |error| {
+                        Status::failed_precondition(format!(
+                            "networked worker re-verification failed: {error}"
+                        ))
+                    },
+                )?
+            }
+        };
+        self.record_networked_worker_lifecycle_event_with_details(
+            &event,
+            json!({ "operator_action": "reverify" }),
+        )
+        .await?;
+        Ok(event)
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
+    pub async fn force_cleanup_networked_worker(
+        self: &Arc<Self>,
+        worker_id: &str,
+        cleanup_report: WorkerCleanupReport,
+    ) -> Result<WorkerLifecycleEvent, Status> {
+        let now_unix_ms = current_unix_ms();
+        let force_cleanup = |manager: &mut WorkerFleetManager| {
+            manager.force_cleanup_worker(worker_id, cleanup_report.clone(), now_unix_ms).map_err(
+                |error| {
+                    Status::failed_precondition(format!(
+                        "networked worker force cleanup failed: {error}"
+                    ))
+                },
+            )
+        };
+        let outcome = match self.worker_fleet.write() {
+            Ok(mut manager) => force_cleanup(&mut manager)?,
+            Err(poisoned) => {
+                warn!("worker fleet lock poisoned while force-cleaning worker");
+                let mut manager = poisoned.into_inner();
+                force_cleanup(&mut manager)?
+            }
+        };
+        self.record_networked_worker_lifecycle_event_with_details(
+            &outcome.event,
+            json!({
+                "operator_action": "force_cleanup",
+                "cleanup_report": outcome.cleanup_report,
+                "cleanup_succeeded": outcome.cleanup_succeeded,
+                "orphan_classification": if outcome.cleanup_succeeded {
+                    "resolved"
+                } else {
+                    "non_recoverable_requires_operator_cleanup"
+                },
+            }),
+        )
+        .await?;
+        if outcome.cleanup_succeeded {
+            Ok(outcome.event)
+        } else {
+            Err(Status::failed_precondition(outcome.cleanup_report.failure_reason.unwrap_or_else(
+                || "networked worker force cleanup did not remove all scoped data".to_owned(),
+            )))
+        }
     }
 
     #[allow(clippy::result_large_err)]
@@ -6113,10 +6283,29 @@ impl GatewayRuntimeState {
         self: &Arc<Self>,
         event: &WorkerLifecycleEvent,
     ) -> Result<(), Status> {
+        self.record_networked_worker_lifecycle_event_with_details(event, Value::Null).await
+    }
+
+    #[allow(clippy::result_large_err)]
+    async fn record_networked_worker_lifecycle_event_with_details(
+        self: &Arc<Self>,
+        event: &WorkerLifecycleEvent,
+        extra_details: Value,
+    ) -> Result<(), Status> {
         use palyra_common::runtime_preview::{
             RuntimeDecisionEventType, RuntimeDecisionTiming, RuntimeEntityRef,
             RuntimeResourceBudget,
         };
+        let mut details = json!({
+            "run_id": event.run_id,
+            "reason_code": event.reason_code,
+            "state": event.state.as_str(),
+        });
+        if let (Some(details), Value::Object(extra)) = (details.as_object_mut(), extra_details) {
+            for (key, value) in extra {
+                details.insert(key, value);
+            }
+        }
 
         self.record_system_runtime_decision_event(
             "system:networked-worker",
@@ -6142,11 +6331,7 @@ impl GatewayRuntimeState {
                     .with_state(event.state.as_str()),
             )
             .with_resource_budget(RuntimeResourceBudget::default())
-            .with_details(json!({
-                "run_id": event.run_id,
-                "reason_code": event.reason_code,
-                "state": event.state.as_str(),
-            })),
+            .with_details(details),
         )
         .await
     }

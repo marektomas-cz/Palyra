@@ -2352,6 +2352,76 @@ async fn networked_worker_cleanup_failure_is_journaled_and_fail_closed() {
         failed_payload.pointer("/payload/details/state").and_then(Value::as_str),
         Some("failed")
     );
+    assert_eq!(
+        failed_payload
+            .pointer("/payload/details/cleanup_report/removed_artifacts")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        failed_payload.pointer("/payload/details/orphan_classification").and_then(Value::as_str),
+        Some("non_recoverable_requires_operator_cleanup")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn networked_worker_operator_actions_are_journaled() {
+    let state = build_test_runtime_state(false);
+    state
+        .register_networked_worker(test_worker_attestation("worker-operator"))
+        .await
+        .expect("worker registration should succeed");
+    state
+        .assign_networked_worker_lease(
+            "worker-operator",
+            test_worker_lease_request("run-worker-operator"),
+        )
+        .await
+        .expect("worker lease assignment should succeed");
+
+    let drain = state.drain_networked_workers().await.expect("operator drain should be journaled");
+    assert_eq!(drain.len(), 1);
+    assert_eq!(drain[0].reason_code, "worker.drained_by_operator");
+    assert_eq!(state.worker_fleet_snapshot().failed_closed_workers, 1);
+
+    let reverify = state
+        .reverify_networked_worker("worker-operator")
+        .await
+        .expect("operator reverify should restore registered state");
+    assert_eq!(reverify.reason_code, "worker.reverified_by_operator");
+
+    let force_cleanup = state
+        .force_cleanup_networked_worker(
+            "worker-operator",
+            WorkerCleanupReport {
+                removed_workspace_scope: true,
+                removed_artifacts: true,
+                removed_logs: true,
+                failure_reason: None,
+            },
+        )
+        .await
+        .expect("operator force cleanup should be journaled");
+    assert_eq!(force_cleanup.reason_code, "worker.completed");
+
+    let snapshot = state
+        .recent_journal_snapshot(100)
+        .await
+        .expect("recent journal snapshot should be returned");
+    let operator_actions = snapshot
+        .events
+        .iter()
+        .filter_map(|event| serde_json::from_str::<Value>(event.payload_json.as_str()).ok())
+        .filter_map(|payload| {
+            payload
+                .pointer("/payload/details/operator_action")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    assert!(operator_actions.contains(&"drain".to_owned()));
+    assert!(operator_actions.contains(&"reverify".to_owned()));
+    assert!(operator_actions.contains(&"force_cleanup".to_owned()));
 }
 
 #[tokio::test(flavor = "multi_thread")]

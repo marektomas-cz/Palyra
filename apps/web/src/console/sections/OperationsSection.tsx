@@ -76,6 +76,20 @@ export function OperationsSection({ app }: OperationsSectionProps) {
   const browser = readObject(observability ?? {}, "browser");
   const doctorRecovery = readObject(observability ?? {}, "doctor_recovery");
   const runtimePreview = readObject(observability ?? {}, "runtime_preview");
+  const networkedWorkers = readObject(diagnostics ?? {}, "networked_workers");
+  const workerMetrics = readObject(networkedWorkers ?? {}, "metrics") ?? {};
+  const workerRecovery = readObject(networkedWorkers ?? {}, "recovery");
+  const workerEvents = readJsonObjectArray(networkedWorkers?.recent_events);
+  const workerActions = readJsonObjectArray(networkedWorkers?.actions);
+  const workerFleetActions = workerActions.filter(
+    (action) => readString(action, "scope") === "fleet" && readString(action, "method") === "POST",
+  );
+  const workerRecommendations = toStringArray(
+    Array.isArray(workerRecovery?.recommended_actions) ? workerRecovery.recommended_actions : [],
+  );
+  const workerGateCriteria = toStringArray(
+    Array.isArray(workerRecovery?.gate_criteria) ? workerRecovery.gate_criteria : [],
+  );
   const delegation = readObject(diagnostics ?? {}, "delegation");
   const delegationParents = readJsonObjectArray(delegation?.parents);
   const delegationChildren = readJsonObjectArray(delegation?.recent_children);
@@ -124,6 +138,17 @@ export function OperationsSection({ app }: OperationsSectionProps) {
   const usageRoutingOverrides = usageInsights?.routing?.overrides ?? 0;
   const usageProviderHealth = usageInsights?.health?.provider_state ?? "unknown";
   const usageProviderErrorRateBps = usageInsights?.health?.error_rate_bps ?? 0;
+
+  const runNetworkedWorkerAction = async (label: string, apiPath: string): Promise<void> => {
+    try {
+      await app.api.request(apiPath, { method: "POST", body: JSON.stringify({}) });
+      app.setNotice(`${label} completed.`);
+      await app.refreshDiagnostics();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      app.setError(`${label} failed: ${message}`);
+    }
+  };
 
   return (
     <main className="workspace-page">
@@ -238,6 +263,12 @@ export function OperationsSection({ app }: OperationsSectionProps) {
           value={readString(runtimePreview ?? {}, "state") ?? "n/a"}
           detail={`${readNumber(previewMetrics, "queue_average_depth") ?? 0} avg queue depth · ${readNumber(previewMetrics, "pruning_tokens_saved") ?? 0} pruning tokens saved`}
           tone={workspaceToneForState(readString(runtimePreview ?? {}, "state") ?? "unknown")}
+        />
+        <WorkspaceMetricCard
+          label="Networked workers"
+          value={readString(networkedWorkers ?? {}, "state") ?? "n/a"}
+          detail={`${readNumber(workerMetrics, "active_leases") ?? 0} active leases · ${readNumber(workerMetrics, "orphaned_workers") ?? 0} orphaned`}
+          tone={workspaceToneForState(readString(networkedWorkers ?? {}, "state") ?? "unknown")}
         />
         <WorkspaceMetricCard
           label="Runtime guardrails"
@@ -517,6 +548,141 @@ export function OperationsSection({ app }: OperationsSectionProps) {
                       <tr key={`failure-${item}`}>
                         <td>Failure mode</td>
                         <td>{item}</td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
+                ) : null}
+              </div>
+            )}
+          </WorkspaceSectionCard>
+
+          <WorkspaceSectionCard
+            title="Networked workers"
+            description="Fleet health, active leases, cleanup state, attestation signals, and rollout gates are grouped here for the preview worker runtime."
+          >
+            {networkedWorkers === null ? (
+              <WorkspaceEmptyState
+                compact
+                title="No worker diagnostics published"
+                description="Refresh diagnostics after the daemon publishes networked worker state."
+              />
+            ) : (
+              <div className="workspace-stack">
+                <WorkspaceTable
+                  ariaLabel="Networked worker metrics"
+                  columns={["Metric", "Value", "Detail"]}
+                >
+                  <tr>
+                    <td>Fleet</td>
+                    <td>
+                      {readNumber(workerMetrics, "attested_workers") ?? 0} /{" "}
+                      {readNumber(workerMetrics, "registered_workers") ?? 0}
+                    </td>
+                    <td>
+                      Attested / registered workers. Mode{" "}
+                      {readString(networkedWorkers, "mode") ?? "unknown"}.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Leases</td>
+                    <td>{readNumber(workerMetrics, "active_leases") ?? 0}</td>
+                    <td>
+                      {readNumber(workerMetrics, "lease_failures") ?? 0} recent lease failures;{" "}
+                      {readNumber(workerMetrics, "fallback_to_local_rate_bps") ?? 0} fallback bps.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Cleanup</td>
+                    <td>
+                      {readNumber(workerMetrics, "orphaned_workers") ?? 0} /{" "}
+                      {readNumber(workerMetrics, "failed_closed_workers") ?? 0}
+                    </td>
+                    <td>
+                      Orphaned / fail-closed workers. Orphan rate{" "}
+                      {readNumber(workerMetrics, "orphan_rate_bps") ?? 0} bps.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Transport</td>
+                    <td>{readNumber(workerMetrics, "transport_failures") ?? 0}</td>
+                    <td>
+                      Recent artifact transport failures from the runtime preview event stream.
+                    </td>
+                  </tr>
+                </WorkspaceTable>
+
+                {workerEvents.length > 0 ? (
+                  <WorkspaceTable
+                    ariaLabel="Networked worker recent events"
+                    columns={["When", "Worker", "State", "Reason"]}
+                  >
+                    {workerEvents.slice(0, 6).map((event, index) => (
+                      <tr
+                        key={`${readString(event, "worker_id") ?? "worker"}-${readString(event, "reason_code") ?? "event"}-${index}`}
+                      >
+                        <td>{formatUnixMs(readNumber(event, "timestamp_unix_ms")) ?? "n/a"}</td>
+                        <td>{shortDiagnosticId(readString(event, "worker_id") ?? "worker")}</td>
+                        <td>
+                          <WorkspaceStatusChip
+                            tone={workspaceToneForState(readString(event, "state") ?? "unknown")}
+                          >
+                            {readString(event, "state") ?? "unknown"}
+                          </WorkspaceStatusChip>
+                        </td>
+                        <td>{readString(event, "reason_code") ?? "No reason published."}</td>
+                      </tr>
+                    ))}
+                  </WorkspaceTable>
+                ) : null}
+
+                {workerFleetActions.length > 0 ? (
+                  <WorkspaceTable
+                    ariaLabel="Networked worker actions"
+                    columns={["Action", "Scope", "Run"]}
+                  >
+                    {workerFleetActions.map((action) => {
+                      const label = readString(action, "label") ?? "Worker action";
+                      const apiPath = readString(action, "api_path");
+                      return (
+                        <tr key={readString(action, "id") ?? label}>
+                          <td>{label}</td>
+                          <td>{readString(action, "scope") ?? "fleet"}</td>
+                          <td>
+                            {apiPath === null ? (
+                              "n/a"
+                            ) : (
+                              <ActionButton
+                                type="button"
+                                size="sm"
+                                variant="secondary"
+                                onPress={() => void runNetworkedWorkerAction(label, apiPath)}
+                                isDisabled={app.diagnosticsBusy}
+                              >
+                                Run
+                              </ActionButton>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </WorkspaceTable>
+                ) : null}
+
+                {workerRecommendations.length > 0 || workerGateCriteria.length > 0 ? (
+                  <WorkspaceTable
+                    ariaLabel="Networked worker rollout gates"
+                    columns={["Area", "Operator signal"]}
+                  >
+                    {workerRecommendations.slice(0, 3).map((recommendation) => (
+                      <tr key={`worker-rec-${recommendation}`}>
+                        <td>Recommendation</td>
+                        <td>{recommendation}</td>
+                      </tr>
+                    ))}
+                    {workerGateCriteria.slice(0, 4).map((criterion) => (
+                      <tr key={`worker-gate-${criterion}`}>
+                        <td>Gate</td>
+                        <td>{criterion}</td>
                       </tr>
                     ))}
                   </WorkspaceTable>

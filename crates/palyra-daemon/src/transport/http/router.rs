@@ -451,6 +451,26 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/support-bundle/jobs/{job_id}",
             get(console::support_bundle::console_support_bundle_job_get_handler),
         )
+        .route(
+            "/console/v1/networked-workers/reap-expired",
+            post(console::diagnostics::console_networked_workers_reap_expired_handler),
+        )
+        .route(
+            "/console/v1/networked-workers/drain",
+            post(console::diagnostics::console_networked_workers_drain_handler),
+        )
+        .route(
+            "/console/v1/networked-workers/{worker_id}/quarantine",
+            post(console::diagnostics::console_networked_worker_quarantine_handler),
+        )
+        .route(
+            "/console/v1/networked-workers/{worker_id}/reverify",
+            post(console::diagnostics::console_networked_worker_reverify_handler),
+        )
+        .route(
+            "/console/v1/networked-workers/{worker_id}/force-cleanup",
+            post(console::diagnostics::console_networked_worker_force_cleanup_handler),
+        )
         .route("/console/v1/doctor/jobs", get(console::doctor::console_doctor_jobs_list_handler))
         .route("/console/v1/doctor/jobs", post(console::doctor::console_doctor_job_create_handler))
         .route(

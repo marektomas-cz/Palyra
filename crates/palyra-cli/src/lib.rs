@@ -1723,6 +1723,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
             service_status,
             browser_status: None,
             node_status: None,
+            worker_status: None,
             admin_status: None,
             config_ref_health: None,
             admin_status_error: Some("skipped (PALYRA_ADMIN_TOKEN is not set)".to_owned()),
@@ -1738,6 +1739,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
                 service_status,
                 browser_status: None,
                 node_status: None,
+                worker_status: None,
                 admin_status: None,
                 config_ref_health: None,
                 admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
@@ -1753,6 +1755,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
                 service_status,
                 browser_status: None,
                 node_status: None,
+                worker_status: None,
                 admin_status: None,
                 config_ref_health: None,
                 admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
@@ -1774,6 +1777,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
         Ok(mut payload) => {
             let browser_status = payload.get("browserd").cloned();
             let node_status = payload.get("node").cloned();
+            let worker_status = payload.get("networked_workers").cloned();
             let config_ref_health = payload.pointer("/observability/config_ref_health").cloned();
             redact_json_value_tree(&mut payload, None);
             SupportBundleDiagnosticsSnapshot {
@@ -1781,6 +1785,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
                 service_status,
                 browser_status,
                 node_status,
+                worker_status,
                 admin_status: Some(payload),
                 config_ref_health,
                 admin_status_error: None,
@@ -1792,6 +1797,7 @@ fn build_support_bundle_diagnostics_snapshot() -> SupportBundleDiagnosticsSnapsh
             service_status,
             browser_status: None,
             node_status: None,
+            worker_status: None,
             admin_status: None,
             config_ref_health: None,
             admin_status_error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
@@ -1822,7 +1828,16 @@ fn build_support_bundle_observability_snapshot(
         summary.as_ref().and_then(|payload| payload.get("recent_failures")).cloned();
     let runtime_preview =
         summary.as_ref().and_then(|payload| payload.get("runtime_preview")).cloned();
-    SupportBundleObservabilitySnapshot { summary, recent_failures, runtime_preview }
+    let networked_workers = diagnostics
+        .worker_status
+        .clone()
+        .or_else(|| summary.as_ref().and_then(|payload| payload.get("networked_workers")).cloned());
+    SupportBundleObservabilitySnapshot {
+        summary,
+        recent_failures,
+        runtime_preview,
+        networked_workers,
+    }
 }
 
 fn build_support_bundle_triage_snapshot() -> SupportBundleTriageSnapshot {
@@ -7084,6 +7099,8 @@ struct SupportBundleDiagnosticsSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     node_status: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    worker_status: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     admin_status: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_ref_health: Option<Value>,
@@ -7100,6 +7117,8 @@ struct SupportBundleObservabilitySnapshot {
     recent_failures: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime_preview: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    networked_workers: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8699,6 +8718,7 @@ mod diagnostics_bundle_tests {
                     "state": "active",
                     "metrics": { "queue_depth": 0, "pruning_tokens_saved": 128 }
                 })),
+                networked_workers: None,
             },
             triage: SupportBundleTriageSnapshot {
                 playbook:
@@ -8758,6 +8778,7 @@ mod diagnostics_bundle_tests {
                 service_status: None,
                 browser_status: None,
                 node_status: None,
+                worker_status: None,
                 admin_status: Some(json!({
                     "model_provider": {
                         "kind": "openai-compatible",

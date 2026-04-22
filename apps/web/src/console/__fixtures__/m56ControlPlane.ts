@@ -536,6 +536,51 @@ export function diagnosticsFixture() {
       state: "ready",
       engine_mode: "chromium",
     },
+    networked_workers: {
+      state: "degraded",
+      mode: "preview_only",
+      snapshot: {
+        registered_workers: 2,
+        attested_workers: 2,
+        active_leases: 1,
+        orphaned_workers: 1,
+        failed_closed_workers: 0,
+      },
+      metrics: {
+        registered_workers: 2,
+        attested_workers: 2,
+        active_leases: 1,
+        orphaned_workers: 1,
+        failed_closed_workers: 0,
+        orphan_rate_bps: 1250,
+        lease_failures: 1,
+        transport_failures: 0,
+        fallback_to_local_rate_bps: 0,
+      },
+      recent_events: [
+        {
+          worker_id: "worker-fixture-01",
+          state: "orphaned",
+          run_id: "run-fixture-01",
+          reason_code: "worker.ttl_expired",
+          timestamp_unix_ms: 1700000002800,
+        },
+      ],
+      recovery: {
+        orphan_classification: "recoverable_requires_force_cleanup",
+        recommended_actions: ["Run force cleanup for orphaned workers, then re-verify their attestation."],
+        gate_criteria: ["orphaned_workers == 0", "fallback_to_local_rate_bps == 0"],
+      },
+      actions: [
+        {
+          id: "reap_expired",
+          scope: "fleet",
+          label: "Reap expired leases",
+          method: "POST",
+          api_path: "/console/v1/networked-workers/reap-expired",
+        },
+      ],
+    },
     observability: {
       failure_classes: {
         config_failure: 1,

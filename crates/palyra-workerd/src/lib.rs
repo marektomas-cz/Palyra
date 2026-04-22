@@ -383,6 +383,96 @@ impl WorkerFleetManager {
         Ok(WorkerCleanupOutcome { event, cleanup_report: cleanup, cleanup_succeeded })
     }
 
+    pub fn quarantine_worker(
+        &mut self,
+        worker_id: &str,
+        reason_code: &str,
+        now_unix_ms: i64,
+    ) -> Result<WorkerLifecycleEvent, WorkerLifecycleError> {
+        let worker = self
+            .workers
+            .get_mut(worker_id)
+            .ok_or_else(|| WorkerLifecycleError::UnknownWorker(worker_id.to_owned()))?;
+        let run_id = worker.lease.as_ref().map(|lease| lease.run_id.clone());
+        worker.state = WorkerLifecycleState::Failed;
+        worker.lease = None;
+        let event = WorkerLifecycleEvent {
+            worker_id: worker_id.to_owned(),
+            state: WorkerLifecycleState::Failed,
+            run_id,
+            reason_code: normalize_operator_reason_code(
+                reason_code,
+                "worker.quarantined_by_operator",
+            ),
+            timestamp_unix_ms: now_unix_ms,
+        };
+        self.push_recent_event(event.clone());
+        Ok(event)
+    }
+
+    pub fn quarantine_all_workers(
+        &mut self,
+        reason_code: &str,
+        now_unix_ms: i64,
+    ) -> Vec<WorkerLifecycleEvent> {
+        let reason_code = normalize_operator_reason_code(reason_code, "worker.drained_by_operator");
+        let mut events = Vec::new();
+        for (worker_id, worker) in &mut self.workers {
+            if matches!(worker.state, WorkerLifecycleState::Failed) && worker.lease.is_none() {
+                continue;
+            }
+            let run_id = worker.lease.as_ref().map(|lease| lease.run_id.clone());
+            worker.state = WorkerLifecycleState::Failed;
+            worker.lease = None;
+            events.push(WorkerLifecycleEvent {
+                worker_id: worker_id.clone(),
+                state: WorkerLifecycleState::Failed,
+                run_id,
+                reason_code: reason_code.clone(),
+                timestamp_unix_ms: now_unix_ms,
+            });
+        }
+        for event in &events {
+            self.push_recent_event(event.clone());
+        }
+        events
+    }
+
+    pub fn reverify_worker(
+        &mut self,
+        worker_id: &str,
+        policy: &WorkerFleetPolicy,
+        now_unix_ms: i64,
+    ) -> Result<WorkerLifecycleEvent, WorkerLifecycleError> {
+        let worker = self
+            .workers
+            .get_mut(worker_id)
+            .ok_or_else(|| WorkerLifecycleError::UnknownWorker(worker_id.to_owned()))?;
+        if worker.lease.is_some() {
+            return Err(WorkerLifecycleError::LeaseAlreadyActive(worker_id.to_owned()));
+        }
+        worker.attestation.validate(&policy.attestation, now_unix_ms)?;
+        worker.state = WorkerLifecycleState::Registered;
+        let event = WorkerLifecycleEvent {
+            worker_id: worker_id.to_owned(),
+            state: WorkerLifecycleState::Registered,
+            run_id: None,
+            reason_code: "worker.reverified_by_operator".to_owned(),
+            timestamp_unix_ms: now_unix_ms,
+        };
+        self.push_recent_event(event.clone());
+        Ok(event)
+    }
+
+    pub fn force_cleanup_worker(
+        &mut self,
+        worker_id: &str,
+        cleanup: WorkerCleanupReport,
+        now_unix_ms: i64,
+    ) -> Result<WorkerCleanupOutcome, WorkerLifecycleError> {
+        self.finalize_work(worker_id, cleanup, now_unix_ms)
+    }
+
     pub fn reap_expired_workers(&mut self, now_unix_ms: i64) -> Vec<WorkerLifecycleEvent> {
         let mut events = Vec::new();
         for (worker_id, worker) in &mut self.workers {
@@ -412,6 +502,18 @@ impl WorkerFleetManager {
         while self.recent_events.len() > MAX_RECENT_LIFECYCLE_EVENTS {
             self.recent_events.pop_back();
         }
+    }
+}
+
+fn normalize_operator_reason_code(raw: &str, fallback: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return fallback.to_owned();
+    }
+    if trimmed.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
+        trimmed.to_owned()
+    } else {
+        fallback.to_owned()
     }
 }
 
@@ -709,5 +811,85 @@ mod tests {
             .assign_work("worker-g", lease_request("run-7", 500), &policy, 3_100)
             .expect_err("failed worker must stay fail closed");
         assert!(matches!(error, WorkerLifecycleError::WorkerFailClosed(_)));
+    }
+
+    #[test]
+    fn operator_quarantine_and_drain_fail_closed() {
+        let mut manager = WorkerFleetManager::default();
+        let policy = WorkerFleetPolicy::default();
+        manager.register_worker(attestation("worker-h"), &policy, 2_000).unwrap();
+        manager.assign_work("worker-h", lease_request("run-8", 500), &policy, 2_500).unwrap();
+
+        let quarantine = manager
+            .quarantine_worker("worker-h", "worker.operator.quarantine", 2_750)
+            .expect("operator quarantine should be recorded");
+        assert_eq!(quarantine.state, WorkerLifecycleState::Failed);
+        assert_eq!(quarantine.run_id.as_deref(), Some("run-8"));
+        assert_eq!(manager.snapshot().failed_closed_workers, 1);
+
+        manager.register_worker(attestation("worker-i"), &policy, 2_800).unwrap();
+        let drain = manager.quarantine_all_workers("worker.operator.drain", 3_000);
+        assert_eq!(drain.len(), 1);
+        assert_eq!(drain[0].reason_code, "worker.operator.drain");
+        assert_eq!(manager.snapshot().failed_closed_workers, 2);
+    }
+
+    #[test]
+    fn operator_reverify_requires_fresh_attestation_and_no_active_lease() {
+        let mut manager = WorkerFleetManager::default();
+        let policy = WorkerFleetPolicy::default();
+        manager.register_worker(attestation("worker-j"), &policy, 2_000).unwrap();
+        manager.quarantine_worker("worker-j", "worker.operator.quarantine", 2_100).unwrap();
+
+        let event = manager
+            .reverify_worker("worker-j", &policy, 2_200)
+            .expect("fresh attestation should restore the worker to registered");
+        assert_eq!(event.state, WorkerLifecycleState::Registered);
+        assert_eq!(event.reason_code, "worker.reverified_by_operator");
+        manager.assign_work("worker-j", lease_request("run-9", 500), &policy, 2_500).unwrap();
+
+        let error = manager
+            .reverify_worker("worker-j", &policy, 2_600)
+            .expect_err("active lease must not be reverified in place");
+        assert!(matches!(error, WorkerLifecycleError::LeaseAlreadyActive(_)));
+    }
+
+    #[test]
+    fn force_cleanup_promotes_only_verified_cleanup_reports() {
+        let mut manager = WorkerFleetManager::default();
+        let policy = WorkerFleetPolicy::default();
+        manager.register_worker(attestation("worker-k"), &policy, 2_000).unwrap();
+        manager.assign_work("worker-k", lease_request("run-10", 500), &policy, 2_500).unwrap();
+
+        let failed = manager
+            .force_cleanup_worker(
+                "worker-k",
+                WorkerCleanupReport {
+                    removed_workspace_scope: true,
+                    removed_artifacts: false,
+                    removed_logs: true,
+                    failure_reason: Some("operator could not remove artifact".to_owned()),
+                },
+                2_700,
+            )
+            .expect("cleanup report should be recorded");
+        assert!(!failed.cleanup_succeeded);
+        assert_eq!(failed.event.state, WorkerLifecycleState::Failed);
+
+        let recovered = manager
+            .force_cleanup_worker(
+                "worker-k",
+                WorkerCleanupReport {
+                    removed_workspace_scope: true,
+                    removed_artifacts: true,
+                    removed_logs: true,
+                    failure_reason: None,
+                },
+                2_900,
+            )
+            .expect("verified cleanup should be accepted");
+        assert!(recovered.cleanup_succeeded);
+        assert_eq!(recovered.event.state, WorkerLifecycleState::Completed);
+        assert_eq!(manager.snapshot().failed_closed_workers, 0);
     }
 }

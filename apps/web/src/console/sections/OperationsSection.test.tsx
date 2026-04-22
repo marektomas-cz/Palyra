@@ -27,6 +27,42 @@ describe("OperationsSection", () => {
               model_provider: { state: "ok", provider: "deterministic" },
               auth_profiles: { state: "ok", profiles: [] },
               browserd: { state: "disabled", engine_mode: "headless_chrome" },
+              networked_workers: {
+                state: "degraded",
+                mode: "preview_only",
+                metrics: {
+                  registered_workers: 1,
+                  attested_workers: 1,
+                  active_leases: 1,
+                  orphaned_workers: 1,
+                  failed_closed_workers: 0,
+                  orphan_rate_bps: 5000,
+                  lease_failures: 1,
+                  transport_failures: 0,
+                  fallback_to_local_rate_bps: 0,
+                },
+                recent_events: [
+                  {
+                    worker_id: "worker-test-01",
+                    state: "orphaned",
+                    reason_code: "worker.ttl_expired",
+                    timestamp_unix_ms: 1700000000000,
+                  },
+                ],
+                recovery: {
+                  recommended_actions: ["Run force cleanup for orphaned workers."],
+                  gate_criteria: ["orphaned_workers == 0"],
+                },
+                actions: [
+                  {
+                    id: "reap_expired",
+                    scope: "fleet",
+                    label: "Reap expired leases",
+                    method: "POST",
+                    api_path: "/console/v1/networked-workers/reap-expired",
+                  },
+                ],
+              },
               observability: {
                 config_ref_health: {
                   state: "degraded",
@@ -68,6 +104,8 @@ describe("OperationsSection", () => {
     expect(screen.getByRole("heading", { name: "Diagnostics" })).toBeInTheDocument();
     expect(screen.getByText("0 active alerts")).toBeInTheDocument();
     expect(screen.getAllByText("Config ref health").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Networked workers").length).toBeGreaterThan(0);
+    expect(screen.getByText("worker.ttl_expired")).toBeInTheDocument();
     expect(
       screen.getAllByText("Restart the daemon to refresh this config ref in the running runtime.")
         .length,
