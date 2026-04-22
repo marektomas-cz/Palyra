@@ -43,9 +43,8 @@ use crate::provider_leases::{
     ProviderLeasePreviewSnapshot,
 };
 use crate::retrieval::{
-    score_memory_candidates, score_workspace_candidates, ExternalRetrievalDriftReport,
-    ExternalRetrievalIndexerOutcome, ExternalRetrievalReconciliationOutcome,
-    ExternalRetrievalRuntime, RetrievalBackend, RetrievalBackendSnapshot, RetrievalRuntimeConfig,
+    score_memory_candidates, score_workspace_candidates, ExternalRetrievalRuntime,
+    RetrievalBackend, RetrievalBackendSnapshot, RetrievalRuntimeConfig,
 };
 use crate::self_healing::{
     IncidentDomain, RemediationAttemptStatus, RuntimeIncidentHistoryEntry,
@@ -70,6 +69,8 @@ use palyra_workerd::{
 };
 use std::path::PathBuf;
 use tokio::sync::Notify;
+
+mod external_retrieval;
 
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeConfigSnapshot {
@@ -6689,55 +6690,6 @@ impl GatewayRuntimeState {
             self.clear_memory_search_cache();
         }
         Ok(outcome)
-    }
-
-    #[allow(clippy::result_large_err)]
-    pub async fn run_external_retrieval_indexer(
-        self: &Arc<Self>,
-        batch_size: usize,
-    ) -> Result<ExternalRetrievalIndexerOutcome, Status> {
-        let state = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            state
-                .external_retrieval_index
-                .run_indexer(&state.journal_store, batch_size, 1, current_unix_ms())
-                .map_err(|error| map_memory_store_error("run external retrieval indexer", error))
-        })
-        .await
-        .map_err(|_| Status::internal("external retrieval indexer worker panicked"))?
-    }
-
-    #[allow(clippy::result_large_err)]
-    pub async fn external_retrieval_drift_report(
-        self: &Arc<Self>,
-    ) -> Result<ExternalRetrievalDriftReport, Status> {
-        let state = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            state
-                .external_retrieval_index
-                .detect_drift(&state.journal_store, current_unix_ms())
-                .map_err(|error| map_memory_store_error("detect external retrieval drift", error))
-        })
-        .await
-        .map_err(|_| Status::internal("external retrieval drift worker panicked"))?
-    }
-
-    #[allow(clippy::result_large_err)]
-    pub async fn reconcile_external_retrieval_index(
-        self: &Arc<Self>,
-        batch_size: usize,
-    ) -> Result<ExternalRetrievalReconciliationOutcome, Status> {
-        let state = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            state
-                .external_retrieval_index
-                .reconcile(&state.journal_store, batch_size, current_unix_ms())
-                .map_err(|error| {
-                    map_memory_store_error("reconcile external retrieval index", error)
-                })
-        })
-        .await
-        .map_err(|_| Status::internal("external retrieval reconciliation worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

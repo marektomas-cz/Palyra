@@ -931,11 +931,11 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/console/v1/memory/index", post(console::memory::console_memory_index_handler))
         .route(
             "/console/v1/memory/index/drift",
-            get(console::memory::console_memory_index_drift_handler),
+            get(console::memory_external_index::console_memory_index_drift_handler),
         )
         .route(
             "/console/v1/memory/index/reconcile",
-            post(console::memory::console_memory_index_reconcile_handler),
+            post(console::memory_external_index::console_memory_index_reconcile_handler),
         )
         .route("/console/v1/memory/search", get(console::memory::console_memory_search_handler))
         .route(
