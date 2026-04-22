@@ -263,6 +263,61 @@ fn setup_wizard_quickstart_supports_minimax_api_key() -> Result<()> {
 }
 
 #[test]
+fn setup_wizard_reuse_backfills_admin_defaults() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(config_path.as_path(), "version = 1\n")
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "setup",
+            "--wizard",
+            "--mode",
+            "local",
+            "--path",
+            &config_path_string,
+            "--flow",
+            "quickstart",
+            "--non-interactive",
+            "--accept-risk",
+            "--auth-method",
+            "api-key",
+            "--api-key-env",
+            "OPENAI_API_KEY",
+            "--skip-channels",
+            "--skip-skills",
+            "--skip-health",
+        ],
+        &[("OPENAI_API_KEY", "sk-test-setup")],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "setup wizard reuse should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+
+    assert!(
+        written.contains("require_auth = true"),
+        "expected reused config to enable admin auth: {written}"
+    );
+    assert!(
+        written.contains("auth_token = "),
+        "expected reused config to contain an admin token: {written}"
+    );
+    assert!(
+        written.contains("bound_principal = \"admin:local\""),
+        "expected reused config to contain the local admin principal: {written}"
+    );
+    Ok(())
+}
+
+#[test]
 fn onboarding_manual_flow_writes_public_tls_config() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("manual").join("palyra.toml");

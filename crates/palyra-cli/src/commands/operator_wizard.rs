@@ -1622,6 +1622,8 @@ fn apply_onboarding_plan(
         )?
     };
 
+    ensure_onboarding_admin_defaults(&mut document, plan)?;
+
     if let Some(workspace_root) = plan.workspace_root.as_ref() {
         set_value_at_path(
             &mut document,
@@ -1790,6 +1792,27 @@ fn apply_onboarding_plan(
 
     let target = resolve_dashboard_access_target(Some(context.config_path.display().to_string()))?;
     Ok(target.url)
+}
+
+fn ensure_onboarding_admin_defaults(
+    document: &mut toml::Value,
+    plan: &OnboardingMutationPlan,
+) -> Result<()> {
+    if get_bool_value_at_path(document, "admin.require_auth")?.is_none() {
+        set_value_at_path(document, "admin.require_auth", toml::Value::Boolean(true))?;
+    }
+    if get_string_value_at_path(document, "admin.auth_token")?.is_none() {
+        let admin_token = plan.admin_token.clone().unwrap_or_else(generate_admin_token);
+        set_value_at_path(document, "admin.auth_token", toml::Value::String(admin_token))?;
+    }
+    if get_string_value_at_path(document, "admin.bound_principal")?.is_none() {
+        set_value_at_path(
+            document,
+            "admin.bound_principal",
+            toml::Value::String(DEFAULT_ADMIN_BOUND_PRINCIPAL.to_owned()),
+        )?;
+    }
+    Ok(())
 }
 
 fn run_post_apply_health_check(
