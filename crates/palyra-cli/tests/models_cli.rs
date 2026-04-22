@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 use tempfile::TempDir;
 
 fn run_cli(workdir: &TempDir, args: &[&str]) -> Result<Output> {
@@ -449,6 +450,85 @@ api_key = "sk-secret-token"
     assert!(
         !stdout.contains("sk-secret-token"),
         "provider failure output must redact bearer material: {stdout}"
+    );
+    server.finish()?;
+    Ok(())
+}
+
+#[test]
+fn models_test_connection_falls_back_to_registry_when_discovery_is_unsupported() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let state_root = workdir.path().join("state");
+    fs::create_dir_all(&state_root)
+        .with_context(|| format!("failed to create {}", state_root.display()))?;
+    let server = MockProviderServer::spawn(vec![MockProviderResponse {
+        status_line: "404 Not Found",
+        body: r#"{"error":"not found"}"#,
+        expected_header: Some("authorization: Bearer sk-minimax-test".to_owned()),
+    }])?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+
+[[model_provider.providers]]
+provider_id = "minimax-primary"
+kind = "anthropic"
+auth_provider_kind = "minimax"
+base_url = "{base_url}"
+api_key = "sk-minimax-test"
+
+[[model_provider.models]]
+model_id = "MiniMax-M2.7"
+provider_id = "minimax-primary"
+role = "chat"
+enabled = true
+"#,
+            base_url = server.base_url
+        ),
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let state_root_string = state_root.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "--state-root",
+            &state_root_string,
+            "models",
+            "test-connection",
+            "--path",
+            &config_path_string,
+            "--refresh",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "models test-connection should return a structured fallback payload: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
+    let payload: Value = serde_json::from_str(stdout.as_str()).context("stdout was not JSON")?;
+    let provider = payload
+        .pointer("/providers/0")
+        .context("test-connection output should include the provider")?;
+
+    assert_eq!(provider.get("state").and_then(Value::as_str), Some("discovery_unsupported"));
+    assert_eq!(provider.get("discovery_source").and_then(Value::as_str), Some("registry_fallback"));
+    assert_eq!(
+        provider
+            .get("discovered_model_ids")
+            .and_then(Value::as_array)
+            .and_then(|models| models.first())
+            .and_then(Value::as_str),
+        Some("MiniMax-M2.7")
     );
     server.finish()?;
     Ok(())
