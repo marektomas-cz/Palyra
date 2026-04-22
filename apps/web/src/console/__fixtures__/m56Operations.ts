@@ -1,4 +1,4 @@
-import { controlPlaneContract } from "./m56ControlPlane";
+import { controlPlaneContract } from "./controlPlaneFixtures";
 
 export function configInspectFixture(
   documentToml = 'version = 1\n[model_provider]\nauth_profile_id = "openai-default"\n',

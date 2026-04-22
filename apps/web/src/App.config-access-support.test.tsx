@@ -15,7 +15,7 @@ import {
   pairingSummaryFixture,
   supportBundleJobFixture,
   supportBundleJobsFixture,
-} from "./console/__fixtures__/m56ControlPlane";
+} from "./console/__fixtures__/controlPlaneFixtures";
 import {
   configInspectFixture,
   configMutationFixture,

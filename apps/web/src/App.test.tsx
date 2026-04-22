@@ -7,7 +7,7 @@ import {
   capabilityCatalogFixture,
   deploymentPostureFixture,
   supportBundleJobsFixture,
-} from "./console/__fixtures__/m56ControlPlane";
+} from "./console/__fixtures__/controlPlaneFixtures";
 
 afterEach(() => {
   cleanup();

@@ -568,7 +568,9 @@ export function diagnosticsFixture() {
       ],
       recovery: {
         orphan_classification: "recoverable_requires_force_cleanup",
-        recommended_actions: ["Run force cleanup for orphaned workers, then re-verify their attestation."],
+        recommended_actions: [
+          "Run force cleanup for orphaned workers, then re-verify their attestation.",
+        ],
         gate_criteria: ["orphaned_workers == 0", "fallback_to_local_rate_bps == 0"],
       },
       actions: [

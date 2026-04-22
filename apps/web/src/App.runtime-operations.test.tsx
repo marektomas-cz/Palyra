@@ -8,7 +8,7 @@ import {
   deploymentPostureFixture,
   diagnosticsFixture,
   supportBundleJobsFixture,
-} from "./console/__fixtures__/m56ControlPlane";
+} from "./console/__fixtures__/controlPlaneFixtures";
 import {
   builderCandidateCreateFixture,
   browserDownloadsFixture,
