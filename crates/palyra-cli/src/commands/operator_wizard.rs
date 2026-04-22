@@ -22,6 +22,9 @@ const DEFAULT_TEXT_MODEL: &str = "gpt-4o-mini";
 const DEFAULT_EMBEDDINGS_MODEL: &str = "text-embedding-3-small";
 const DEFAULT_EMBEDDINGS_DIMS: u32 = 1536;
 const DEFAULT_ANTHROPIC_TEXT_MODEL: &str = "claude-3-5-sonnet-latest";
+const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimax.io/anthropic";
+const DEFAULT_MINIMAX_TEXT_MODEL: &str = "MiniMax-M2.7";
+const MINIMAX_AUTH_PROVIDER_KIND: &str = "minimax";
 
 #[derive(Debug, Clone)]
 pub(crate) struct OnboardingWizardRequest {
@@ -1134,6 +1137,11 @@ fn populate_quickstart_plan(
                 Some("use Anthropic as the primary provider for chat workloads"),
             ),
             choice(
+                "minimax_api_key",
+                "MiniMax API Key",
+                Some("use MiniMax M2.7 through the Anthropic-compatible endpoint"),
+            ),
+            choice(
                 "skip",
                 "Skip for Now",
                 Some("leave model auth unset and continue with warnings"),
@@ -1142,17 +1150,13 @@ fn populate_quickstart_plan(
         Some("api_key".to_owned()),
     ))?;
     plan.auth_method = auth_method.clone();
-    if auth_method == "api_key" || auth_method == "anthropic_api_key" {
+    if auth_method_requires_api_key(auth_method.as_str()) {
         let api_key_label = api_key_field_label(auth_method.as_str());
         let api_key = wizard.text(
             text_step(
                 "model_provider_api_key",
                 api_key_label,
-                if auth_method == "anthropic_api_key" {
-                    "Enter the Anthropic API key that should be written to the local vault."
-                } else {
-                    "Enter the OpenAI-compatible API key that should be written to the local vault."
-                },
+                api_key_prompt_message(auth_method.as_str()),
                 None,
                 None,
                 true,
@@ -1211,6 +1215,11 @@ fn populate_manual_plan(
                 Some("store the Anthropic key in the vault and switch the config to Anthropic"),
             ),
             choice(
+                "minimax_api_key",
+                "MiniMax API Key",
+                Some("store the MiniMax key in the vault and use MiniMax M2.7"),
+            ),
+            choice(
                 "existing_config",
                 "Reuse Current",
                 Some("keep the existing credential source if one is already configured"),
@@ -1224,17 +1233,13 @@ fn populate_manual_plan(
         Some("api_key".to_owned()),
     ))?;
     plan.auth_method = auth_method.clone();
-    if auth_method == "api_key" || auth_method == "anthropic_api_key" {
+    if auth_method_requires_api_key(auth_method.as_str()) {
         let api_key_label = api_key_field_label(auth_method.as_str());
         let api_key = wizard.text(
             text_step(
                 "model_provider_api_key",
                 api_key_label,
-                if auth_method == "anthropic_api_key" {
-                    "Enter the Anthropic API key that should be stored in the local vault."
-                } else {
-                    "Enter the OpenAI-compatible API key that should be stored in the local vault."
-                },
+                api_key_prompt_message(auth_method.as_str()),
                 None,
                 None,
                 true,
@@ -2085,11 +2090,7 @@ fn apply_auth_method_choice(
                     text_step(
                         "model_provider_api_key",
                         api_key_label,
-                        if auth_method == "anthropic_api_key" {
-                            "Enter the Anthropic API key that should be stored in the local vault."
-                        } else {
-                            "Enter the OpenAI-compatible API key that should be stored in the local vault."
-                        },
+                        api_key_prompt_message(auth_method),
                         None,
                         None,
                         true,
@@ -2507,6 +2508,7 @@ fn clear_model_provider_auth(document: &mut toml::Value) -> Result<()> {
     unset_value_at_path(document, "model_provider.anthropic_api_key")?;
     unset_value_at_path(document, "model_provider.anthropic_api_key_vault_ref")?;
     unset_value_at_path(document, "model_provider.auth_profile_id")?;
+    unset_value_at_path(document, "model_provider.auth_provider_kind")?;
     Ok(())
 }
 
@@ -2533,6 +2535,38 @@ fn apply_model_provider_api_key(
                 document,
                 "model_provider.anthropic_model",
                 toml::Value::String(DEFAULT_ANTHROPIC_TEXT_MODEL.to_owned()),
+            )?;
+            unset_value_at_path(document, "model_provider.openai_base_url")?;
+            unset_value_at_path(document, "model_provider.openai_model")?;
+            unset_value_at_path(document, "model_provider.openai_embeddings_model")?;
+            unset_value_at_path(document, "model_provider.openai_embeddings_dims")?;
+            set_value_at_path(
+                document,
+                "model_provider.anthropic_api_key_vault_ref",
+                toml::Value::String(vault_ref),
+            )?;
+        }
+        "minimax_api_key" => {
+            let vault_ref = store_secret_in_vault("global", "minimax_api_key", api_key)?;
+            set_value_at_path(
+                document,
+                "model_provider.kind",
+                toml::Value::String("anthropic".to_owned()),
+            )?;
+            set_value_at_path(
+                document,
+                "model_provider.auth_provider_kind",
+                toml::Value::String(MINIMAX_AUTH_PROVIDER_KIND.to_owned()),
+            )?;
+            set_value_at_path(
+                document,
+                "model_provider.anthropic_base_url",
+                toml::Value::String(DEFAULT_MINIMAX_BASE_URL.to_owned()),
+            )?;
+            set_value_at_path(
+                document,
+                "model_provider.anthropic_model",
+                toml::Value::String(DEFAULT_MINIMAX_TEXT_MODEL.to_owned()),
             )?;
             unset_value_at_path(document, "model_provider.openai_base_url")?;
             unset_value_at_path(document, "model_provider.openai_model")?;
@@ -3168,11 +3202,20 @@ fn current_auth_method(document: &toml::Value) -> String {
     {
         return "existing_config".to_owned();
     }
+    let auth_provider_kind =
+        get_string_value_at_path(document, "model_provider.auth_provider_kind").ok().flatten();
     if get_string_value_at_path(document, "model_provider.anthropic_api_key_vault_ref")
         .ok()
         .flatten()
         .is_some()
     {
+        if provider_kind == "anthropic"
+            && auth_provider_kind
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case(MINIMAX_AUTH_PROVIDER_KIND))
+        {
+            return "minimax_api_key".to_owned();
+        }
         return if provider_kind == "anthropic" {
             "anthropic_api_key".to_owned()
         } else {
@@ -3190,6 +3233,13 @@ fn current_auth_method(document: &toml::Value) -> String {
             "existing_config".to_owned()
         };
     }
+    if provider_kind == "anthropic"
+        && auth_provider_kind
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case(MINIMAX_AUTH_PROVIDER_KIND))
+    {
+        return "minimax_api_key".to_owned();
+    }
     if provider_kind == "anthropic" {
         "anthropic_api_key".to_owned()
     } else {
@@ -3201,16 +3251,32 @@ fn auth_method_value(value: OnboardingAuthMethodArg) -> String {
     match value {
         OnboardingAuthMethodArg::ApiKey => "api_key",
         OnboardingAuthMethodArg::AnthropicApiKey => "anthropic_api_key",
+        OnboardingAuthMethodArg::MinimaxApiKey => "minimax_api_key",
         OnboardingAuthMethodArg::Skip => "skip",
         OnboardingAuthMethodArg::ExistingConfig => "existing_config",
     }
     .to_owned()
 }
 
+fn auth_method_requires_api_key(auth_method: &str) -> bool {
+    matches!(auth_method, "api_key" | "anthropic_api_key" | "minimax_api_key")
+}
+
 fn api_key_field_label(auth_method: &str) -> &'static str {
     match auth_method {
         "anthropic_api_key" => "Anthropic API Key",
+        "minimax_api_key" => "MiniMax API Key",
         _ => "OpenAI API Key",
+    }
+}
+
+fn api_key_prompt_message(auth_method: &str) -> &'static str {
+    match auth_method {
+        "anthropic_api_key" => {
+            "Enter the Anthropic API key that should be stored in the local vault."
+        }
+        "minimax_api_key" => "Enter the MiniMax API key that should be stored in the local vault.",
+        _ => "Enter the OpenAI-compatible API key that should be stored in the local vault.",
     }
 }
 

@@ -13,6 +13,7 @@ pub enum OnboardingFlowArg {
 pub enum OnboardingAuthMethodArg {
     ApiKey,
     AnthropicApiKey,
+    MinimaxApiKey,
     Skip,
     ExistingConfig,
 }

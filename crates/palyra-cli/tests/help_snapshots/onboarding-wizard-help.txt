@@ -16,7 +16,7 @@ Options:
       --workspace-root <WORKSPACE_ROOT>
 
       --auth-method <AUTH_METHOD>
-          [possible values: api-key, anthropic-api-key, skip, existing-config]
+          [possible values: api-key, anthropic-api-key, minimax-api-key, skip, existing-config]
       --api-key-env <API_KEY_ENV>
 
       --api-key-stdin

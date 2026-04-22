@@ -207,6 +207,62 @@ fn setup_wizard_quickstart_supports_anthropic_api_key() -> Result<()> {
 }
 
 #[test]
+fn setup_wizard_quickstart_supports_minimax_api_key() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("config").join("palyra.toml");
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli(
+        &workdir,
+        &[
+            "setup",
+            "--wizard",
+            "--mode",
+            "local",
+            "--path",
+            &config_path_string,
+            "--force",
+            "--flow",
+            "quickstart",
+            "--non-interactive",
+            "--accept-risk",
+            "--auth-method",
+            "minimax-api-key",
+            "--api-key-env",
+            "MINIMAX_API_KEY",
+            "--skip-channels",
+            "--skip-skills",
+            "--skip-health",
+        ],
+        &[("MINIMAX_API_KEY", "sk-minimax-test-setup")],
+    )?;
+    assert!(
+        output.status.success(),
+        "MiniMax quickstart should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    assert!(written.contains("kind = \"anthropic\""), "expected Anthropic-compatible provider");
+    assert!(
+        written.contains("auth_provider_kind = \"minimax\""),
+        "expected MiniMax auth provider kind"
+    );
+    assert!(
+        written.contains("anthropic_base_url = \"https://api.minimax.io/anthropic\""),
+        "expected MiniMax Anthropic-compatible endpoint"
+    );
+    assert!(
+        written.contains("anthropic_model = \"MiniMax-M2.7\""),
+        "expected MiniMax default model"
+    );
+    assert!(
+        written.contains("anthropic_api_key_vault_ref = \"global/minimax_api_key\""),
+        "expected vault-backed MiniMax auth in onboarding config"
+    );
+    Ok(())
+}
+
+#[test]
 fn onboarding_manual_flow_writes_public_tls_config() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("manual").join("palyra.toml");
