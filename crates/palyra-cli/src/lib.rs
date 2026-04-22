@@ -6847,6 +6847,7 @@ fn validate_daemon_compatible_document(document: &toml::Value) -> Result<()> {
         toml::to_string(document).context("failed to serialize daemon config document")?;
     let parsed: RootFileConfig =
         toml::from_str(&content).context("invalid daemon config schema")?;
+    validate_model_provider_secret_sources(&parsed)?;
     let bind_addr = parsed
         .daemon
         .as_ref()
@@ -6889,6 +6890,47 @@ fn validate_daemon_compatible_document(document: &toml::Value) -> Result<()> {
             .context("invalid gateway QUIC bind address or port")?;
     }
 
+    Ok(())
+}
+
+fn validate_model_provider_secret_sources(parsed: &RootFileConfig) -> Result<()> {
+    let Some(model_provider) = parsed.model_provider.as_ref() else {
+        return Ok(());
+    };
+
+    validate_secret_source_exclusivity(
+        "model_provider.openai_api_key",
+        config_string_present(model_provider.openai_api_key.as_deref()),
+        model_provider.openai_api_key_secret_ref.is_some(),
+        config_string_present(model_provider.openai_api_key_vault_ref.as_deref()),
+    )?;
+    validate_secret_source_exclusivity(
+        "model_provider.anthropic_api_key",
+        config_string_present(model_provider.anthropic_api_key.as_deref()),
+        model_provider.anthropic_api_key_secret_ref.is_some(),
+        config_string_present(model_provider.anthropic_api_key_vault_ref.as_deref()),
+    )
+}
+
+fn config_string_present(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| !raw.trim().is_empty())
+}
+
+fn validate_secret_source_exclusivity(
+    field_name: &str,
+    inline_present: bool,
+    secret_ref_present: bool,
+    legacy_vault_ref_present: bool,
+) -> Result<()> {
+    if inline_present && secret_ref_present {
+        anyhow::bail!("{field_name} cannot set both inline value and *_secret_ref");
+    }
+    if inline_present && legacy_vault_ref_present {
+        anyhow::bail!("{field_name} cannot set both inline value and legacy vault_ref");
+    }
+    if secret_ref_present && legacy_vault_ref_present {
+        anyhow::bail!("{field_name} cannot set both *_secret_ref and legacy vault_ref");
+    }
     Ok(())
 }
 

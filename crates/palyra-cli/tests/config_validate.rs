@@ -127,6 +127,40 @@ fn config_validate_with_explicit_path_rejects_invalid_bind_address() -> Result<(
 }
 
 #[test]
+fn config_validate_with_explicit_path_rejects_model_provider_secret_conflict() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("conflicting-model-secret.toml");
+    fs::write(
+        &config_path,
+        r#"
+[model_provider]
+kind = "openai_compatible"
+openai_base_url = "https://api.openai.com/v1"
+openai_model = "gpt-4o-mini"
+openai_api_key_vault_ref = "global/openai_api_key"
+
+[model_provider.openai_api_key_secret_ref]
+kind = "env"
+variable = "PALYRA_OPENAI_API_KEY"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    let output =
+        run_cli(&workdir, &["config", "validate", "--path", "conflicting-model-secret.toml"])?;
+
+    assert!(!output.status.success(), "config with two secret sources must fail");
+    let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;
+    assert!(
+        stderr.contains(
+            "model_provider.openai_api_key cannot set both *_secret_ref and legacy vault_ref"
+        ),
+        "unexpected stderr output: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_validate_with_explicit_path_rejects_invalid_gateway_grpc_bind_address() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("invalid-gateway-grpc-bind.toml");
