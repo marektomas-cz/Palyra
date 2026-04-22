@@ -20,6 +20,7 @@
     "media",
     "memory",
     "model_provider",
+    "networked_workers",
     "objectives",
     "observability",
     "plugins",
