@@ -648,7 +648,6 @@ export function diagnosticsFixture() {
         },
         runtime_support: {
           queue_state: {
-            support_bundle_jobs_by_state: { succeeded: 1 },
             session_queue_policy: { mode: "preview_only", max_depth: 8 },
           },
           pruning_explain: {
