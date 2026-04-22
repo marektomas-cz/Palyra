@@ -176,7 +176,7 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
             );
             std::io::stdout().flush().context("stdout flush failed")
         }
-        DaemonCommand::JournalRecent { url, token, principal, device_id, channel, limit } => {
+        DaemonCommand::JournalRecent { url, token, principal, device_id, channel, limit, json } => {
             let connection = root_context()?.resolve_http_connection(
                 app::ConnectionOverrides {
                     daemon_url: url,
@@ -206,6 +206,21 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
                 .context("daemon journal recent endpoint returned non-success status")?
                 .json()
                 .context("failed to parse daemon journal recent payload")?;
+
+            if output::preferred_json(json) {
+                output::print_json_pretty(
+                    &response,
+                    "failed to encode daemon journal recent output as JSON",
+                )?;
+                return std::io::stdout().flush().context("stdout flush failed");
+            }
+            if output::preferred_ndjson(json, false) {
+                output::print_json_line(
+                    &response,
+                    "failed to encode daemon journal recent output as NDJSON",
+                )?;
+                return std::io::stdout().flush().context("stdout flush failed");
+            }
 
             println!(
                 "journal.total_events={} hash_chain_enabled={} returned_events={}",

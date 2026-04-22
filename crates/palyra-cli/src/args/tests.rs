@@ -3885,6 +3885,7 @@ fn parse_daemon_journal_recent_with_limit() {
         "cli",
         "--limit",
         "25",
+        "--json",
     ]);
     assert_eq!(
         parsed.command,
@@ -3896,6 +3897,7 @@ fn parse_daemon_journal_recent_with_limit() {
                 device_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
                 channel: Some("cli".to_owned()),
                 limit: Some(25),
+                json: true,
             }
         }
     );

@@ -126,6 +126,8 @@ pub enum DaemonCommand {
         channel: Option<String>,
         #[arg(long)]
         limit: Option<usize>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     JournalVacuum {
         #[arg(long)]
