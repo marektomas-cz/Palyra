@@ -4584,7 +4584,7 @@ fn resolve_daemon_journal_db_path(db_path_override: Option<String>) -> Result<Pa
         return Ok(PathBuf::from(trimmed));
     }
 
-    if let Some(config_path) = find_default_config_path() {
+    if let Some(config_path) = effective_config_path() {
         let config_path = PathBuf::from(config_path);
         let (document, _) =
             load_document_from_existing_path(config_path.as_path()).with_context(|| {
@@ -4611,11 +4611,17 @@ fn resolve_daemon_journal_db_path(db_path_override: Option<String>) -> Result<Pa
         }
     }
 
+    if let Some(context) = app::current_root_context() {
+        return Ok(context.state_root().join(DEFAULT_JOURNAL_DB_PATH));
+    }
+
     if let Some(installed_journal_path) = discover_installed_journal_db_path()? {
         return Ok(installed_journal_path);
     }
 
-    Ok(PathBuf::from(DEFAULT_JOURNAL_DB_PATH))
+    Ok(app::resolve_cli_state_root(None)
+        .map(|state_root| state_root.join(DEFAULT_JOURNAL_DB_PATH))
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_JOURNAL_DB_PATH)))
 }
 
 fn resolve_config_relative_path(config_path: &Path, raw_path: &str) -> PathBuf {
@@ -9812,12 +9818,56 @@ mod doctor_check_tests {
 mod journal_path_tests {
     use super::{
         discover_installed_journal_db_path_from_binary, resolve_config_relative_path,
-        DEFAULT_JOURNAL_DB_PATH,
+        resolve_daemon_journal_db_path, DEFAULT_JOURNAL_DB_PATH,
     };
     use crate::support::lifecycle::InstallMetadata;
     use anyhow::Result;
-    use std::fs;
+    use std::{env, ffi::OsString, fs};
     use tempfile::tempdir;
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = env::var_os(key);
+            // SAFETY: this test module serializes environment mutation with the app test lock.
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = env::var_os(key);
+            // SAFETY: this test module serializes environment mutation with the app test lock.
+            unsafe {
+                env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => {
+                    // SAFETY: this test module serializes environment mutation with the app test lock.
+                    unsafe {
+                        env::set_var(self.key, value);
+                    }
+                }
+                None => {
+                    // SAFETY: this test module serializes environment mutation with the app test lock.
+                    unsafe {
+                        env::remove_var(self.key);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn relative_configured_journal_path_resolves_against_config_directory() -> Result<()> {
@@ -9828,6 +9878,35 @@ mod journal_path_tests {
         let resolved = resolve_config_relative_path(config_path.as_path(), "data/journal.sqlite3");
 
         assert_eq!(resolved, config_dir.join("data").join("journal.sqlite3"));
+        Ok(())
+    }
+
+    #[test]
+    fn journal_path_uses_active_root_context_state_root() -> Result<()> {
+        let _guard = crate::app::test_env_lock_for_tests().lock().expect("env lock");
+        crate::app::clear_root_context_for_tests();
+        let tempdir = tempdir()?;
+        let state_root = tempdir.path().join("state-root");
+        let config_home = tempdir.path().join("xdg-config");
+        let home = tempdir.path().join("home");
+        let local_app_data = tempdir.path().join("localappdata");
+        let app_data = tempdir.path().join("appdata");
+        let _xdg_config_home = ScopedEnvVar::set("XDG_CONFIG_HOME", config_home.as_path());
+        let _home = ScopedEnvVar::set("HOME", home.as_path());
+        let _local_app_data = ScopedEnvVar::set("LOCALAPPDATA", local_app_data.as_path());
+        let _app_data = ScopedEnvVar::set("APPDATA", app_data.as_path());
+        let _palyra_config = ScopedEnvVar::unset("PALYRA_CONFIG");
+        let _journal_env = ScopedEnvVar::unset("PALYRA_JOURNAL_DB_PATH");
+
+        crate::app::install_root_context(crate::args::RootOptions {
+            state_root: Some(state_root.display().to_string()),
+            ..crate::args::RootOptions::default()
+        })?;
+
+        let resolved = resolve_daemon_journal_db_path(None)?;
+
+        assert_eq!(resolved, state_root.join(DEFAULT_JOURNAL_DB_PATH));
+        crate::app::clear_root_context_for_tests();
         Ok(())
     }
 
