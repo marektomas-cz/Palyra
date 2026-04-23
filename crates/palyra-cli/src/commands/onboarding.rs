@@ -143,11 +143,11 @@ fn load_onboarding_document(path: Option<String>) -> Result<(toml::Value, String
         return Ok((document, resolved));
     }
 
-    if let Some(default_path) = find_default_config_path() {
-        let path_ref = Path::new(&default_path);
+    if let Some(active_path) = effective_config_path() {
+        let path_ref = Path::new(&active_path);
         let (document, _) = load_document_from_existing_path(path_ref)
             .with_context(|| format!("failed to parse {}", path_ref.display()))?;
-        return Ok((document, default_path));
+        return Ok((document, active_path));
     }
 
     let (document, _) =
@@ -690,5 +690,50 @@ fn onboarding_action_kind_label(kind: control_plane::OnboardingActionKind) -> &'
 fn cli_contract_descriptor() -> control_plane::ContractDescriptor {
     control_plane::ContractDescriptor {
         contract_version: control_plane::CONTROL_PLANE_CONTRACT_VERSION.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use anyhow::Result;
+    use tempfile::tempdir;
+
+    use super::load_onboarding_document;
+    use crate::{
+        app,
+        args::RootOptions,
+    };
+
+    #[test]
+    fn onboarding_status_uses_active_root_context_config_path() -> Result<()> {
+        let _guard = app::test_env_lock_for_tests().lock().expect("env lock");
+        app::clear_root_context_for_tests();
+
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state-root");
+        fs::create_dir_all(&state_root)?;
+        let config_path = temp.path().join("portable").join("palyra.toml");
+        fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        fs::write(
+            &config_path,
+            r#"
+[model_provider]
+kind = "anthropic"
+"#,
+        )?;
+
+        let _context = app::install_root_context(RootOptions {
+            config_path: Some(config_path.display().to_string()),
+            state_root: Some(state_root.display().to_string()),
+            ..RootOptions::default()
+        })?;
+
+        let (_document, resolved_path) = load_onboarding_document(None)?;
+        assert_eq!(resolved_path, config_path.display().to_string());
+
+        app::clear_root_context_for_tests();
+        Ok(())
     }
 }
