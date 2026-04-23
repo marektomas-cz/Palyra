@@ -887,6 +887,9 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
     let skills = build_default_skills_inventory_snapshot();
     let config_ref_health = collect_doctor_config_ref_health_snapshot(admin_payload.as_ref());
     let mut checks = checks.to_vec();
+    if let Some(connectivity_check) = build_doctor_connectivity_check(&connectivity) {
+        checks.push(connectivity_check);
+    }
     if let Some(config_ref_check) = build_doctor_config_ref_health_check(config_ref_health.as_ref())
     {
         checks.push(config_ref_check);
@@ -928,6 +931,19 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
         deployment,
         config_ref_health,
     })
+}
+
+fn build_doctor_connectivity_check(
+    connectivity: &DoctorConnectivitySnapshot,
+) -> Option<DoctorCheck> {
+    if connectivity.http.ok && connectivity.grpc.ok {
+        return None;
+    }
+    Some(DoctorCheck::blocking(
+        "gateway_runtime_reachable",
+        false,
+        &["palyra gateway run", "palyra health", "palyra logs --lines 50"],
+    ))
 }
 
 fn collect_doctor_config_snapshot() -> DoctorConfigSnapshot {

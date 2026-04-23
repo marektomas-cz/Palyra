@@ -112,3 +112,45 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
     );
     Ok(())
 }
+
+#[test]
+fn doctor_text_surfaces_gateway_runtime_connectivity_as_blocking() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("local-palyra.toml");
+    fs::write(
+        config_path.as_path(),
+        r#"
+version = 1
+
+[admin]
+require_auth = false
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli(&workdir, &["--config", &config_path_string, "doctor"])?;
+
+    assert!(
+        output.status.success(),
+        "doctor should succeed without --strict even when runtime is down: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not UTF-8")?;
+
+    assert!(
+        stdout.contains(
+            "doctor.check key=gateway_runtime_reachable ok=false required=true severity=blocking"
+        ),
+        "doctor text output should surface gateway connectivity as a blocking check: {stdout}"
+    );
+    assert!(
+        stdout.contains("doctor.connectivity http_ok=false grpc_ok=false"),
+        "doctor text output should emit connectivity probe state: {stdout}"
+    );
+    assert!(
+        stdout.contains("doctor.next_step=palyra gateway run"),
+        "doctor next steps should point to the immediate runtime start path: {stdout}"
+    );
+    Ok(())
+}

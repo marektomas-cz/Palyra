@@ -2459,6 +2459,7 @@ fn build_default_next_steps(report: &DoctorReport) -> Vec<String> {
         .filter(|check| check.severity == DoctorSeverity::Blocking && !check.ok)
         .count();
     if blocking_checks > 0 || !report.connectivity.http.ok || !report.connectivity.grpc.ok {
+        next_steps.push("palyra gateway run".to_owned());
         next_steps.push("palyra health".to_owned());
         next_steps.push("palyra logs --lines 50".to_owned());
     }
@@ -2516,6 +2517,21 @@ fn render_doctor_text(execution: &DoctorExecutionReport) {
         info_checks.len(),
         execution.diagnostics.summary.required_checks_failed
     );
+    println!(
+        "doctor.connectivity http_ok={} grpc_ok={} admin_ok={}",
+        execution.diagnostics.connectivity.http.ok,
+        execution.diagnostics.connectivity.grpc.ok,
+        execution.diagnostics.connectivity.admin.ok
+    );
+    if let Some(message) = execution.diagnostics.connectivity.http.message.as_deref() {
+        println!("doctor.connectivity.http_message={message}");
+    }
+    if let Some(message) = execution.diagnostics.connectivity.grpc.message.as_deref() {
+        println!("doctor.connectivity.grpc_message={message}");
+    }
+    if let Some(message) = execution.diagnostics.connectivity.admin.message.as_deref() {
+        println!("doctor.connectivity.admin_message={message}");
+    }
     if let Some(config_ref_health) = execution.diagnostics.config_ref_health.as_ref() {
         let state = config_ref_health.get("state").and_then(JsonValue::as_str).unwrap_or("unknown");
         let severity =
