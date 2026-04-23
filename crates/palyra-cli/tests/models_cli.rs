@@ -361,6 +361,10 @@ enabled = true
         "test-connection should include discovered models: {first_stdout}"
     );
     assert!(
+        first_stdout.contains("\"live_discovery_verified\": true"),
+        "live test-connection should mark discovery as verified: {first_stdout}"
+    );
+    assert!(
         first_stdout.contains("\"cache_status\": \"miss\""),
         "first live probe should miss cache: {first_stdout}"
     );
@@ -520,15 +524,30 @@ enabled = true
         .pointer("/providers/0")
         .context("test-connection output should include the provider")?;
 
-    assert_eq!(provider.get("state").and_then(Value::as_str), Some("discovery_unsupported"));
+    assert_eq!(provider.get("state").and_then(Value::as_str), Some("verification_incomplete"));
+    assert_eq!(provider.get("live_discovery_verified").and_then(Value::as_bool), Some(false));
     assert_eq!(provider.get("discovery_source").and_then(Value::as_str), Some("registry_fallback"));
     assert_eq!(
         provider
             .get("discovered_model_ids")
             .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        provider
+            .get("configured_model_ids")
+            .and_then(Value::as_array)
             .and_then(|models| models.first())
             .and_then(Value::as_str),
         Some("MiniMax-M2.7")
+    );
+    assert!(
+        provider
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("not verifying model usability")),
+        "fallback message should call out the incomplete verification: {payload}"
     );
     server.finish()?;
     Ok(())

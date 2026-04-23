@@ -117,6 +117,7 @@ pub(crate) struct ProviderConnectionCheckPayload {
     pub(crate) message: String,
     pub(crate) checked_at_unix_ms: i64,
     pub(crate) cache_status: String,
+    pub(crate) live_discovery_verified: bool,
     pub(crate) discovery_source: String,
     pub(crate) discovered_model_ids: Vec<String>,
     pub(crate) configured_model_ids: Vec<String>,
@@ -354,11 +355,27 @@ fn emit_models_connection(payload: &ModelsConnectionPayload, json_output: bool) 
                 provider.discovered_model_ids.len(),
                 provider.message
             );
+            println!(
+                "models.{}.provider_status id={} live_discovery_verified={} registry_fallback_used={} configured_models={}",
+                payload.mode,
+                provider.provider_id,
+                provider.live_discovery_verified,
+                provider.discovery_source == "registry_fallback",
+                provider.configured_model_ids.len()
+            );
             for model_id in &provider.discovered_model_ids {
                 println!(
                     "models.{}.model provider_id={} id={} source={}",
                     payload.mode, provider.provider_id, model_id, provider.discovery_source
                 );
+            }
+            if provider.discovery_source == "registry_fallback" {
+                for model_id in &provider.configured_model_ids {
+                    println!(
+                        "models.{}.registry_model provider_id={} id={} source=registry_fallback",
+                        payload.mode, provider.provider_id, model_id
+                    );
+                }
             }
         }
     }
@@ -591,8 +608,14 @@ fn run_provider_checks(
         }
 
         let ttl_ms = provider_check_ttl_ms(&overview, discover);
-        let payload =
-            probe_provider(&target, timeout_ms, now_unix_ms, &mut auth_registry, &mut vault);
+        let payload = probe_provider(
+            &target,
+            timeout_ms,
+            now_unix_ms,
+            discover,
+            &mut auth_registry,
+            &mut vault,
+        );
         write_cached_provider_check(&mut cache, cache_key, payload.clone(), ttl_ms, now_unix_ms);
         providers.push(payload);
     }
@@ -1362,6 +1385,7 @@ fn probe_provider(
     target: &ProbeableProvider,
     timeout_ms: u64,
     now_unix_ms: i64,
+    discover: bool,
     auth_registry: &mut Option<AuthProfileRegistry>,
     vault: &mut Option<palyra_vault::Vault>,
 ) -> ProviderConnectionCheckPayload {
@@ -1375,6 +1399,7 @@ fn probe_provider(
         message: "provider has not been checked yet".to_owned(),
         checked_at_unix_ms: now_unix_ms,
         cache_status: "miss".to_owned(),
+        live_discovery_verified: false,
         discovery_source: "live".to_owned(),
         discovered_model_ids: Vec::new(),
         configured_model_ids: target.configured_model_ids.clone(),
@@ -1390,7 +1415,6 @@ fn probe_provider(
         payload.message =
             "deterministic provider does not expose a remote models endpoint".to_owned();
         payload.discovery_source = "registry".to_owned();
-        payload.discovered_model_ids = target.configured_model_ids.clone();
         return payload;
     }
     let Some(base_url) = target.endpoint_base_url.as_deref() else {
@@ -1465,35 +1489,56 @@ fn probe_provider(
             let status = response.status();
             let body = response.text().unwrap_or_default();
             if status.is_success() {
-                let discovered = parse_discovered_model_ids(body.as_str())
-                    .unwrap_or_else(|_| target.configured_model_ids.clone());
-                payload.discovered_model_ids = discovered;
-                payload.discovery_source =
-                    if payload.discovered_model_ids == target.configured_model_ids {
-                        "registry_fallback".to_owned()
-                    } else {
-                        "live".to_owned()
-                    };
-                payload.state = if payload.discovered_model_ids.is_empty() {
-                    "partial".to_owned()
-                } else {
-                    "ok".to_owned()
-                };
-                payload.message = if payload.discovered_model_ids.is_empty() {
-                    "provider connection succeeded but model discovery returned no ids".to_owned()
-                } else {
-                    format!(
-                        "provider connection succeeded and discovered {} model(s)",
-                        payload.discovered_model_ids.len()
-                    )
-                };
+                match parse_discovered_model_ids(body.as_str()) {
+                    Ok(discovered) => {
+                        payload.live_discovery_verified = true;
+                        payload.discovery_source = "live".to_owned();
+                        payload.discovered_model_ids = discovered;
+                        payload.state = if payload.discovered_model_ids.is_empty() {
+                            "partial".to_owned()
+                        } else {
+                            "ok".to_owned()
+                        };
+                        payload.message = if payload.discovered_model_ids.is_empty() {
+                            "provider connection succeeded but model discovery returned no ids"
+                                .to_owned()
+                        } else {
+                            format!(
+                                "provider connection succeeded and discovered {} model(s)",
+                                payload.discovered_model_ids.len()
+                            )
+                        };
+                    }
+                    Err(_) => {
+                        payload.discovery_source = "registry_fallback".to_owned();
+                        payload.state = if discover {
+                            "discovery_parse_failed".to_owned()
+                        } else {
+                            "verification_incomplete".to_owned()
+                        };
+                        payload.message = if discover {
+                            "provider connection succeeded but discovery response could not be parsed; using configured model registry for reference only"
+                                .to_owned()
+                        } else {
+                            "provider connection succeeded but live model discovery could not be parsed; using configured model registry for reference only and not verifying model usability"
+                                .to_owned()
+                        };
+                    }
+                }
             } else if status.as_u16() == 404 && !target.configured_model_ids.is_empty() {
-                payload.state = "discovery_unsupported".to_owned();
                 payload.discovery_source = "registry_fallback".to_owned();
-                payload.discovered_model_ids = target.configured_model_ids.clone();
-                payload.message =
-                    "provider returned HTTP 404 for model discovery; using configured model registry"
-                        .to_owned();
+                payload.state = if discover {
+                    "discovery_unsupported".to_owned()
+                } else {
+                    "verification_incomplete".to_owned()
+                };
+                payload.message = if discover {
+                    "provider returned HTTP 404 for model discovery; using configured model registry for reference only"
+                        .to_owned()
+                } else {
+                    "provider returned HTTP 404 for model discovery; using configured model registry for reference only and not verifying model usability"
+                        .to_owned()
+                };
             } else {
                 payload.state = classify_provider_failure(status.as_u16());
                 payload.message = sanitize_provider_error(body.as_str(), status.as_u16());
