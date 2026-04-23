@@ -621,10 +621,8 @@ mod tests {
     #[test]
     fn interactive_backend_consumes_prefilled_answers_before_prompting() {
         let mut answers = BTreeMap::new();
-        answers.insert(
-            "workspace".to_owned(),
-            WizardValue::SensitiveText("sk-prefilled".to_owned()),
-        );
+        answers
+            .insert("workspace".to_owned(), WizardValue::SensitiveText("sk-prefilled".to_owned()));
         let mut backend = InteractiveWizardBackend::with_answers(answers);
         let mut wizard = WizardSession::new(&mut backend);
         let value = wizard

@@ -4098,10 +4098,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
 }
 
 fn emit_acp_event_ndjson(event: &common_v1::RunStreamEvent) -> Result<()> {
-    output::print_json_line(
-        &agent_event_json_value(event),
-        "failed to serialize ACP NDJSON event",
-    )
+    output::print_json_line(&agent_event_json_value(event), "failed to serialize ACP NDJSON event")
 }
 
 fn is_terminal_stream_status(kind: i32) -> bool {

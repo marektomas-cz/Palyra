@@ -1529,8 +1529,7 @@ fn ensure_safe_profile_state_root_removal(path: &Path) -> Result<()> {
         .map(|context| context.cli_state_root().to_path_buf())
         .unwrap_or(app::resolve_cli_state_root(None)?);
     let cli_state_root = crate::support::lifecycle::canonicalize_lossy(cli_state_root.as_path())?;
-    if !crate::support::lifecycle::path_starts_with(canonical.as_path(), cli_state_root.as_path())
-    {
+    if !crate::support::lifecycle::path_starts_with(canonical.as_path(), cli_state_root.as_path()) {
         anyhow::bail!(
             "refusing to remove state root outside the CLI state root namespace: {}",
             canonical.display()
@@ -1609,8 +1608,7 @@ mod tests {
     use super::{
         collect_secret_references, decrypt_profile_bundle, default_environment, default_risk_level,
         encrypt_profile_bundle, ensure_safe_profile_state_root_removal, profile_mode_label,
-        PortableProfileConfig,
-        ProfilePortabilityBundle, ProfileSecretReference,
+        PortableProfileConfig, ProfilePortabilityBundle, ProfileSecretReference,
     };
     use crate::{
         app,

@@ -1009,15 +1009,18 @@ channel = "staging"
         let profile_config_literal = profile_config.display().to_string().replace('\\', "\\\\");
         fs::create_dir_all(profile_config.parent().expect("profile config parent"))?;
         fs::create_dir_all(env_config.parent().expect("env config parent"))?;
-        fs::write(&profile_path, format!(
-            r#"
+        fs::write(
+            &profile_path,
+            format!(
+                r#"
 version = 1
 default_profile = "installed"
 [profiles.installed]
 config_path = "{}"
 "#,
-            profile_config_literal
-        ))?;
+                profile_config_literal
+            ),
+        )?;
         fs::write(
             &profile_config,
             r#"
@@ -1059,15 +1062,18 @@ port = 9222
             profile_state_root.display().to_string().replace('\\', "\\\\");
         fs::create_dir_all(&profile_state_root)?;
         fs::create_dir_all(&env_state_root)?;
-        fs::write(&profile_path, format!(
-            r#"
+        fs::write(
+            &profile_path,
+            format!(
+                r#"
 version = 1
 default_profile = "installed"
 [profiles.installed]
 state_root = "{}"
 "#,
-            profile_state_root_literal
-        ))?;
+                profile_state_root_literal
+            ),
+        )?;
         env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
         env::set_var("PALYRA_STATE_ROOT", &env_state_root);
 

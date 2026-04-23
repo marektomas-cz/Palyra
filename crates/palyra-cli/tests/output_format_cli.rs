@@ -44,8 +44,9 @@ fn parse_stdout_json(output: Output, label: &str) -> Result<Value> {
         "{label} should succeed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("{label} should emit valid JSON: {}", String::from_utf8_lossy(&output.stdout)))
+    serde_json::from_slice(&output.stdout).with_context(|| {
+        format!("{label} should emit valid JSON: {}", String::from_utf8_lossy(&output.stdout))
+    })
 }
 
 #[test]
@@ -64,14 +65,7 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     let validate = parse_stdout_json(
         run_cli(
             &workdir,
-            &[
-                "--output-format",
-                "json",
-                "config",
-                "validate",
-                "--path",
-                config_path.as_str(),
-            ],
+            &["--output-format", "json", "config", "validate", "--path", config_path.as_str()],
         )?,
         "config validate --output-format json",
     )?;
@@ -80,14 +74,7 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     let config_list = parse_stdout_json(
         run_cli(
             &workdir,
-            &[
-                "--output-format",
-                "json",
-                "config",
-                "list",
-                "--path",
-                config_path.as_str(),
-            ],
+            &["--output-format", "json", "config", "list", "--path", config_path.as_str()],
         )?,
         "config list --output-format json",
     )?;
@@ -97,10 +84,7 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     );
 
     let docs_search = parse_stdout_json(
-        run_cli(
-            &workdir,
-            &["--output-format", "json", "docs", "search", "gateway"],
-        )?,
+        run_cli(&workdir, &["--output-format", "json", "docs", "search", "gateway"])?,
         "docs search --output-format json",
     )?;
     assert!(docs_search.is_array(), "docs search should emit a JSON array: {docs_search}");

@@ -701,16 +701,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        build_onboarding_steps,
-        collect_onboarding_signals,
-        load_onboarding_document,
-        OnboardingSignals,
-        OnboardingVariant,
+        build_onboarding_steps, collect_onboarding_signals, load_onboarding_document,
+        OnboardingSignals, OnboardingVariant,
     };
-    use crate::{
-        app,
-        args::RootOptions,
-    };
+    use crate::{app, args::RootOptions};
 
     #[test]
     fn onboarding_status_uses_active_root_context_config_path() -> Result<()> {
