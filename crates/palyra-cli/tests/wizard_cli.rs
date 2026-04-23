@@ -598,6 +598,68 @@ fn configure_gateway_emits_section_diff_and_rotates_backup() -> Result<()> {
 }
 
 #[test]
+fn configure_auth_model_accepts_api_key_from_stdin() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("configure").join("palyra.toml");
+    seed_quickstart_config(&workdir, &config_path)?;
+
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let secret_bytes = b"sk-configure-stdin-secret\n";
+    let output = run_cli_with_stdin(
+        &workdir,
+        &[
+            "configure",
+            "--path",
+            &config_path_string,
+            "--section",
+            "auth-model",
+            "--non-interactive",
+            "--accept-risk",
+            "--auth-method",
+            "api-key",
+            "--api-key-stdin",
+            "--json",
+        ],
+        &[],
+        Some(secret_bytes),
+    )?;
+    assert!(
+        output.status.success(),
+        "configure auth-model should accept stdin secret: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).context("configure stdout should be JSON")?;
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("complete"));
+    assert!(
+        payload
+            .get("unchanged_sections")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("auth-model"))),
+        "expected auth-model section to complete even when only the stored secret value changes: {payload}"
+    );
+
+    let written = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    assert!(
+        written.contains("openai_api_key_vault_ref = \"global/openai_api_key\""),
+        "expected vault-backed OpenAI auth after configure"
+    );
+
+    let revealed =
+        run_cli(&workdir, &["secrets", "get", "global", "openai_api_key", "--reveal"], &[])?;
+    assert!(
+        revealed.status.success(),
+        "secrets get --reveal should succeed after configure auth-model: {}",
+        String::from_utf8_lossy(&revealed.stderr)
+    );
+    let revealed_secret =
+        String::from_utf8(revealed.stdout).context("revealed secret should be valid UTF-8")?;
+    assert_eq!(revealed_secret.trim_end(), "sk-configure-stdin-secret");
+    Ok(())
+}
+
+#[test]
 fn profile_lifecycle_create_and_setup_attach_profile_paths() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let create = run_cli(

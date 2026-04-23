@@ -476,9 +476,6 @@ pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()
                     &mut wizard,
                     &mut document,
                     auth_method.as_str(),
-                    request.api_key_env.clone(),
-                    request.api_key_stdin,
-                    request.api_key_prompt,
                     &mut warnings,
                 )?;
             }
@@ -2085,9 +2082,6 @@ fn apply_auth_method_choice(
     wizard: &mut WizardSession<'_, dyn WizardBackend>,
     document: &mut toml::Value,
     auth_method: &str,
-    api_key_env: Option<String>,
-    api_key_stdin: bool,
-    api_key_prompt: bool,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
     match auth_method {
@@ -2101,26 +2095,17 @@ fn apply_auth_method_choice(
         "existing_config" => {}
         _ => {
             let api_key_label = api_key_field_label(auth_method);
-            let explicit_secret = load_secret_input_optional(
-                api_key_env,
-                api_key_stdin,
-                api_key_prompt,
-                format!("{api_key_label}: ").as_str(),
+            let api_key = wizard.text(
+                text_step(
+                    "model_provider_api_key",
+                    api_key_label,
+                    api_key_prompt_message(auth_method),
+                    None,
+                    None,
+                    true,
+                ),
+                |value| validate_non_empty_text(value, api_key_label),
             )?;
-            let api_key = match explicit_secret {
-                Some(value) => value,
-                None => wizard.text(
-                    text_step(
-                        "model_provider_api_key",
-                        api_key_label,
-                        api_key_prompt_message(auth_method),
-                        None,
-                        None,
-                        true,
-                    ),
-                    |value| validate_non_empty_text(value, api_key_label),
-                )?,
-            };
             apply_model_provider_api_key(document, auth_method, api_key.as_str())?;
         }
     }
