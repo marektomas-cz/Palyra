@@ -209,7 +209,7 @@ fn collect_onboarding_signals(
     };
 
     Ok(OnboardingSignals {
-        config_exists: config_path != "defaults",
+        config_exists: config_path != "defaults" && Path::new(&config_path).exists(),
         config_path,
         workspace_root_configured: get_string_at_path(
             document,
@@ -702,6 +702,7 @@ mod tests {
 
     use super::{
         build_onboarding_steps,
+        collect_onboarding_signals,
         load_onboarding_document,
         OnboardingSignals,
         OnboardingVariant,
@@ -765,5 +766,21 @@ kind = "anthropic"
         let config_step = steps.iter().find(|step| step.step_id == "config").expect("config step");
         let action = config_step.action.as_ref().expect("config step action");
         assert_eq!(action.target, "palyra config list --path C:/portable/palyra.toml");
+    }
+
+    #[test]
+    fn onboarding_signals_require_existing_config_file_for_config_ready() -> Result<()> {
+        let temp = tempdir()?;
+        let missing_config = temp.path().join("missing").join("palyra.toml");
+        let document = toml::Value::Table(Default::default());
+
+        let signals = collect_onboarding_signals(
+            &document,
+            missing_config.display().to_string(),
+            OnboardingVariant::Quickstart,
+        )?;
+
+        assert!(!signals.config_exists);
+        Ok(())
     }
 }
