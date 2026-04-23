@@ -563,7 +563,7 @@ fn load_local_security_config_snapshot(
 ) -> Result<LocalSecurityConfigSnapshot> {
     let resolved = match path {
         Some(path) => resolve_config_path(Some(path), false)?,
-        None => match find_default_config_path() {
+        None => match effective_config_path() {
             Some(path) => path,
             None => {
                 return Ok(LocalSecurityConfigSnapshot {
@@ -654,6 +654,7 @@ fn load_local_security_config_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::args::RootOptions;
     use crate::commands::secrets::SecretAuditSummary;
 
     fn minimal_doctor() -> DoctorReport {
@@ -896,6 +897,43 @@ mod tests {
             !findings.iter().any(|finding| finding.code == "model_provider_missing_auth"),
             "security audit should not flag missing auth when Anthropic-compatible vault auth is configured"
         );
+    }
+
+    #[test]
+    fn local_security_snapshot_uses_active_root_config_path() -> Result<()> {
+        let _guard = app::test_env_lock_for_tests().lock().expect("env lock");
+        app::clear_root_context_for_tests();
+
+        let temp = tempfile::tempdir()?;
+        let config_path = temp.path().join("harness").join("palyra.toml");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        std::fs::write(
+            config_path.as_path(),
+            r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "https://api.minimax.io/anthropic"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key_vault_ref = "global/minimax_api_key"
+"#,
+        )?;
+        let state_root = temp.path().join("state");
+        let _context = app::install_root_context(RootOptions {
+            config_path: Some(config_path.display().to_string()),
+            state_root: Some(state_root.display().to_string()),
+            ..RootOptions::default()
+        })?;
+
+        let snapshot = load_local_security_config_snapshot(None)?;
+
+        assert_eq!(snapshot.provider_kind, "anthropic");
+        assert_eq!(snapshot.anthropic_api_key_vault_ref.as_deref(), Some("global/minimax_api_key"));
+        assert_eq!(missing_model_auth_kind(&snapshot), None);
+
+        app::clear_root_context_for_tests();
+        Ok(())
     }
 
     #[test]
