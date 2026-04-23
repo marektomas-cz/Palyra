@@ -498,7 +498,7 @@ pub(crate) async fn run_sessions_async(
                 parameter_delta_json,
             })?;
             let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
-            let _resolved = stream_agent_events_async(&mut client, request, |event| {
+            let outcome = stream_agent_events_async(&mut client, request, |event| {
                 if json {
                     emit_acp_event_ndjson(event)
                 } else {
@@ -506,6 +506,7 @@ pub(crate) async fn run_sessions_async(
                 }
             })
             .await?;
+            outcome.ensure_success()?;
         }
         SessionsCommand::Branch { session_id, session_label, json: _ } => {
             let context = connect_sessions_admin_console(&connection).await?;

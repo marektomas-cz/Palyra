@@ -3464,7 +3464,7 @@ fn execute_agent_stream(
             let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
             if json_output {
                 let mut events = Vec::new();
-                let _resolved = stream_agent_events_async(&mut client, request, |event| {
+                let outcome = stream_agent_events_async(&mut client, request, |event| {
                     events.push(agent_event_json_value(event));
                     Ok(())
                 })
@@ -3473,8 +3473,9 @@ fn execute_agent_stream(
                     &json!({ "events": events }),
                     "failed to encode agent stream as JSON",
                 )?;
+                outcome.ensure_success()?;
             } else {
-                let _resolved = stream_agent_events_async(&mut client, request, |event| {
+                let outcome = stream_agent_events_async(&mut client, request, |event| {
                     if ndjson {
                         emit_acp_event_ndjson(event)
                     } else {
@@ -3482,6 +3483,7 @@ fn execute_agent_stream(
                     }
                 })
                 .await?;
+                outcome.ensure_success()?;
             }
             Result::<()>::Ok(())
         })
@@ -3493,8 +3495,9 @@ fn run_agent_stream_as_acp(connection: AgentConnection, request: AgentRunInput) 
     runtime
         .block_on(async {
             let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
-            let _resolved =
+            let outcome =
                 stream_agent_events_async(&mut client, request, emit_acp_event_ndjson).await?;
+            outcome.ensure_success()?;
             Result::<()>::Ok(())
         })
         .context("ACP shim stream execution failed")
@@ -3504,7 +3507,7 @@ async fn stream_agent_events_async<F>(
     client: &mut client::runtime::GatewayRuntimeClient,
     request: AgentRunInput,
     mut emit_event: F,
-) -> Result<ResolvedAgentRunInput>
+) -> Result<AgentStreamOutcome>
 where
     F: FnMut(&common_v1::RunStreamEvent) -> Result<()>,
 {
@@ -3512,12 +3515,18 @@ where
     let session_id = session_summary_reference(&resolved.session)?;
     let mut stream = client.open_run_stream(build_resolved_run_stream_request(&resolved)?).await?;
     let mut request_stream_closed = false;
+    let mut failed_message = None::<String>;
     while let Some(event) = stream.next_event().await? {
         let reached_terminal_status = matches!(
             event.body.as_ref(),
             Some(common_v1::run_stream_event::Body::Status(status))
                 if is_terminal_stream_status(status.kind)
         );
+        if let Some(common_v1::run_stream_event::Body::Status(status)) = event.body.as_ref() {
+            if status.kind == common_v1::stream_status::StatusKind::Failed as i32 {
+                failed_message = Some(sanitize_agent_failure_message(status.message.as_str()));
+            }
+        }
         if !request_stream_closed && run_stream_can_close_request_side(&event) {
             stream.close_request_stream().await?;
             request_stream_closed = true;
@@ -3547,7 +3556,7 @@ where
             break;
         }
     }
-    Ok(resolved)
+    Ok(AgentStreamOutcome { failed_message })
 }
 
 fn run_acp_shim_from_stdin(
@@ -3893,7 +3902,7 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 "agent.status run_id={} kind={} message={}",
                 run_id,
                 stream_status_kind_to_text(status.kind),
-                redacted_presence_for_output(!status.message.trim().is_empty())
+                agent_status_message_text(status)
             );
         }
         Some(common_v1::run_stream_event::Body::ToolProposal(proposal)) => {
@@ -3982,6 +3991,89 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
     Ok(())
 }
 
+fn agent_status_message_text(status: &common_v1::StreamStatus) -> String {
+    if status.kind == common_v1::stream_status::StatusKind::Failed as i32 {
+        return quoted_text_field(sanitize_agent_failure_message(status.message.as_str()).as_str());
+    }
+    redacted_presence_for_output(!status.message.trim().is_empty())
+}
+
+fn agent_status_message_json(status: &common_v1::StreamStatus) -> Value {
+    if status.kind == common_v1::stream_status::StatusKind::Failed as i32 {
+        return Value::String(sanitize_agent_failure_message(status.message.as_str()));
+    }
+    redacted_presence_json_value(!status.message.trim().is_empty())
+}
+
+fn sanitize_agent_failure_message(message: &str) -> String {
+    let sanitized = sanitize_diagnostic_error(message).trim().to_owned();
+    if sanitized.is_empty() {
+        "run failed".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn quoted_text_field(value: &str) -> String {
+    let escaped = value.replace('"', "'").replace(['\r', '\n'], " ");
+    format!("\"{escaped}\"")
+}
+
+#[cfg(test)]
+mod agent_stream_output_tests {
+    use super::*;
+
+    fn status(
+        kind: common_v1::stream_status::StatusKind,
+        message: &str,
+    ) -> common_v1::StreamStatus {
+        common_v1::StreamStatus { kind: kind as i32, message: message.to_owned() }
+    }
+
+    #[test]
+    fn failed_status_output_preserves_safe_actionable_message() {
+        let failed = status(
+            common_v1::stream_status::StatusKind::Failed,
+            "model_provider_missing_auth: provider has no credential",
+        );
+
+        assert_eq!(
+            agent_status_message_text(&failed),
+            "\"model_provider_missing_auth: provider has no credential\""
+        );
+        assert_eq!(
+            agent_status_message_json(&failed),
+            Value::String("model_provider_missing_auth: provider has no credential".to_owned())
+        );
+    }
+
+    #[test]
+    fn non_failed_status_output_keeps_presence_redaction() {
+        let accepted = status(
+            common_v1::stream_status::StatusKind::Accepted,
+            "accepted session=01ARZ3NDEKTSV4RRFFQ69G5FAV principal=user:local",
+        );
+
+        assert_eq!(agent_status_message_text(&accepted), REDACTED);
+        assert_eq!(agent_status_message_json(&accepted), Value::String(REDACTED.to_owned()));
+    }
+
+    #[test]
+    fn failed_stream_outcome_is_command_error() {
+        let outcome = AgentStreamOutcome {
+            failed_message: Some(
+                "model_provider_missing_auth: provider has no credential".to_owned(),
+            ),
+        };
+
+        let error = outcome.ensure_success().expect_err("failed run must fail the command");
+        assert!(
+            error.to_string().contains("model_provider_missing_auth"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
 fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Value {
     let run_id = redacted_presence_for_output(event.run_id.is_some());
     match event.body.as_ref() {
@@ -3995,7 +4087,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "type": "run.status",
             "run_id": run_id,
             "kind": stream_status_kind_to_text(status.kind),
-            "message": redacted_presence_json_value(!status.message.trim().is_empty()),
+            "message": agent_status_message_json(status),
         }),
         Some(common_v1::run_stream_event::Body::ToolProposal(proposal)) => json!({
             "type": "tool.proposal",
@@ -4243,6 +4335,19 @@ struct AgentRunInput {
 struct ResolvedAgentRunInput {
     session: gateway_v1::SessionSummary,
     request: AgentRunInput,
+}
+
+struct AgentStreamOutcome {
+    failed_message: Option<String>,
+}
+
+impl AgentStreamOutcome {
+    fn ensure_success(&self) -> Result<()> {
+        if let Some(message) = self.failed_message.as_ref() {
+            anyhow::bail!("agent run failed: {message}");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
