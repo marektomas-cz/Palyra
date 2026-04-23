@@ -279,6 +279,55 @@ fn setup_wizard_quickstart_supports_anthropic_api_key() -> Result<()> {
 }
 
 #[test]
+fn setup_wizard_text_summary_surfaces_gateway_start_guidance() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("config").join("palyra.toml");
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli(
+        &workdir,
+        &[
+            "setup",
+            "--wizard",
+            "--mode",
+            "local",
+            "--path",
+            &config_path_string,
+            "--force",
+            "--flow",
+            "quickstart",
+            "--non-interactive",
+            "--accept-risk",
+            "--auth-method",
+            "api-key",
+            "--api-key-env",
+            "OPENAI_API_KEY",
+            "--skip-channels",
+            "--skip-skills",
+        ],
+        &[("OPENAI_API_KEY", "sk-test-runtime-guidance")],
+    )?;
+    assert!(
+        output.status.success(),
+        "setup wizard should succeed in text mode: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout should be valid UTF-8")?;
+    assert!(
+        stdout.contains("onboarding.warning="),
+        "text summary should emit concrete warnings instead of only a count: {stdout}"
+    );
+    assert!(
+        stdout.contains("palyra gateway run"),
+        "text summary should point to the immediate runtime start command: {stdout}"
+    );
+    assert!(
+        stdout.contains("palyra gateway install --start"),
+        "text summary should mention the persistent service install path: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
 fn setup_wizard_quickstart_supports_minimax_api_key() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("config").join("palyra.toml");

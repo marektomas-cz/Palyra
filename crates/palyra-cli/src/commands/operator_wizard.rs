@@ -1077,8 +1077,17 @@ fn execute_onboarding_flow(
             );
             ServiceInstallMode::GuidanceOnly
         }
-        _ => ServiceInstallMode::NotNow,
+        _ => {
+            if !matches!(flow, WizardFlowKind::Remote) {
+                plan.warnings.push(
+                    "local runtime startup was deferred; run `palyra gateway run` now, or `palyra gateway install --start` to register a persistent background service."
+                        .to_owned(),
+                );
+            }
+            ServiceInstallMode::NotNow
+        }
     };
+    dedupe_strings(&mut plan.warnings);
 
     let run_health_checks = wizard.confirm(confirm_step(
         "run_health_checks",
@@ -1977,6 +1986,9 @@ fn emit_onboarding_summary(summary: &OnboardingSummary, json_output: bool) -> Re
         );
         if !summary.warnings.is_empty() {
             println!("onboarding.warning_count={}", summary.warnings.len());
+            for warning in &summary.warnings {
+                println!("onboarding.warning={warning}");
+            }
         }
     }
     std::io::stdout().flush().context("stdout flush failed")
