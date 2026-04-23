@@ -999,14 +999,18 @@ channel = "staging"
     }
 
     #[test]
-    fn env_config_path_overrides_default_profile_config_path() -> Result<()> {
+    fn env_overrides_default_profile_config_path_and_state_root() -> Result<()> {
         let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
         clear_env();
         let temp = tempdir()?;
         let profile_path = temp.path().join("profiles.toml");
         let profile_config = temp.path().join("profile").join("palyra.toml");
         let env_config = temp.path().join("installed").join("palyra.toml");
+        let profile_state_root = temp.path().join("profile-state");
+        let env_state_root = temp.path().join("installed-state");
         let profile_config_literal = profile_config.display().to_string().replace('\\', "\\\\");
+        let profile_state_root_literal =
+            profile_state_root.display().to_string().replace('\\', "\\\\");
         fs::create_dir_all(profile_config.parent().expect("profile config parent"))?;
         fs::create_dir_all(env_config.parent().expect("env config parent"))?;
         fs::write(
@@ -1017,8 +1021,9 @@ version = 1
 default_profile = "installed"
 [profiles.installed]
 config_path = "{}"
+state_root = "{}"
 "#,
-                profile_config_literal
+                profile_config_literal, profile_state_root_literal
             ),
         )?;
         fs::write(
@@ -1039,48 +1044,16 @@ port = 9222
         )?;
         env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
         env::set_var("PALYRA_CONFIG", &env_config);
-
-        let context =
-            build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
-
-        assert_eq!(context.config_path(), Some(env_config.as_path()));
-        let http = context
-            .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
-        assert_eq!(http.base_url, "http://127.0.0.1:9222");
-        Ok(())
-    }
-
-    #[test]
-    fn env_state_root_overrides_default_profile_state_root() -> Result<()> {
-        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
-        clear_env();
-        let temp = tempdir()?;
-        let profile_path = temp.path().join("profiles.toml");
-        let profile_state_root = temp.path().join("profile-state");
-        let env_state_root = temp.path().join("installed-state");
-        let profile_state_root_literal =
-            profile_state_root.display().to_string().replace('\\', "\\\\");
-        fs::create_dir_all(&profile_state_root)?;
-        fs::create_dir_all(&env_state_root)?;
-        fs::write(
-            &profile_path,
-            format!(
-                r#"
-version = 1
-default_profile = "installed"
-[profiles.installed]
-state_root = "{}"
-"#,
-                profile_state_root_literal
-            ),
-        )?;
-        env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
         env::set_var("PALYRA_STATE_ROOT", &env_state_root);
 
         let context =
             build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
 
+        assert_eq!(context.config_path(), Some(env_config.as_path()));
         assert_eq!(context.state_root(), env_state_root.as_path());
+        let http = context
+            .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+        assert_eq!(http.base_url, "http://127.0.0.1:9222");
         Ok(())
     }
 
