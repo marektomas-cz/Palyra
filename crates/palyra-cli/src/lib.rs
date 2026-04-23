@@ -4741,14 +4741,12 @@ fn resolve_daemon_journal_db_path(db_path_override: Option<String>) -> Result<Pa
     }
 
     let installed_journal_path = discover_installed_journal_db_path()?;
-
     if let Some(context) = app::current_root_context() {
         return Ok(select_preferred_journal_db_path(
             context.state_root().join(DEFAULT_JOURNAL_DB_PATH),
             installed_journal_path,
         ));
     }
-
     if let Some(installed_journal_path) = installed_journal_path {
         return Ok(installed_journal_path);
     }
