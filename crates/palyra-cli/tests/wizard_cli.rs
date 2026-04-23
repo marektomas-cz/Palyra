@@ -6,6 +6,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use palyra_vault::{
+    BackendPreference as VaultBackendPreference, Vault, VaultConfig as VaultConfigOptions,
+    VaultScope,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -22,6 +26,29 @@ fn configure_cli_env(command: &mut Command, workdir: &TempDir) {
 
 fn run_cli(workdir: &TempDir, args: &[&str], envs: &[(&str, &str)]) -> Result<Output> {
     run_cli_with_stdin(workdir, args, envs, None)
+}
+
+fn run_cli_without_explicit_vault_dir(
+    workdir: &TempDir,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<Output> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyra"));
+    command.current_dir(workdir.path()).args(args);
+    command
+        .env("PALYRA_STATE_ROOT", workdir.path().join("state-root"))
+        .env_remove("PALYRA_VAULT_DIR")
+        .env("PALYRA_VAULT_BACKEND", "encrypted_file")
+        .env("XDG_STATE_HOME", workdir.path().join("xdg-state"))
+        .env("HOME", workdir.path().join("home"))
+        .env("LOCALAPPDATA", workdir.path().join("localappdata"))
+        .env("APPDATA", workdir.path().join("appdata"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().with_context(|| format!("failed to execute palyra {}", args.join(" ")))
 }
 
 fn run_cli_with_stdin(
@@ -259,6 +286,60 @@ fn setup_wizard_quickstart_supports_minimax_api_key() -> Result<()> {
         written.contains("anthropic_api_key_vault_ref = \"global/minimax_api_key\""),
         "expected vault-backed MiniMax auth in onboarding config"
     );
+    Ok(())
+}
+
+#[test]
+fn setup_wizard_stores_minimax_secret_in_state_root_vault_by_default() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("config").join("palyra.toml");
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli_without_explicit_vault_dir(
+        &workdir,
+        &[
+            "setup",
+            "--wizard",
+            "--mode",
+            "local",
+            "--path",
+            &config_path_string,
+            "--force",
+            "--flow",
+            "quickstart",
+            "--non-interactive",
+            "--accept-risk",
+            "--auth-method",
+            "minimax-api-key",
+            "--api-key-env",
+            "MINIMAX_API_KEY",
+            "--skip-channels",
+            "--skip-skills",
+            "--skip-health",
+        ],
+        &[("MINIMAX_API_KEY", "sk-minimax-state-root")],
+    )?;
+    assert!(
+        output.status.success(),
+        "MiniMax quickstart should succeed without PALYRA_VAULT_DIR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let state_root = workdir.path().join("state-root");
+    let scope = "global"
+        .parse::<VaultScope>()
+        .context("failed to parse global vault scope")?;
+    let vault = Vault::open_with_config(VaultConfigOptions {
+        root: Some(state_root.join("vault")),
+        identity_store_root: Some(state_root.join("identity")),
+        backend_preference: VaultBackendPreference::EncryptedFile,
+        ..VaultConfigOptions::default()
+    })
+    .context("failed to open state-root vault")?;
+    let secret = vault
+        .get_secret(&scope, "minimax_api_key")
+        .context("state-root vault should contain the MiniMax secret")?;
+    let secret = String::from_utf8(secret).context("vault secret should be valid UTF-8")?;
+    assert_eq!(secret, "sk-minimax-state-root");
     Ok(())
 }
 

@@ -6818,9 +6818,20 @@ fn create_optional_directory_symlink(target: &str, link: &Path) -> Result<bool> 
 }
 
 fn open_cli_vault() -> Result<Vault> {
-    let identity_store_root =
-        default_identity_store_root().context("failed to resolve default identity store root")?;
-    let vault_root = env::var("PALYRA_VAULT_DIR").ok().map(PathBuf::from);
+    let identity_store_root = resolve_cli_identity_store_root()?;
+    let vault_root = match env::var("PALYRA_VAULT_DIR") {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("PALYRA_VAULT_DIR must not be empty");
+            }
+            Some(PathBuf::from(trimmed))
+        }
+        Err(std::env::VarError::NotPresent) => Some(resolve_cli_vault_root()?),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("PALYRA_VAULT_DIR must contain valid UTF-8")
+        }
+    };
     let backend_preference = parse_cli_vault_backend_preference()?;
     Vault::open_with_config(VaultConfigOptions {
         root: vault_root,
@@ -6996,11 +7007,25 @@ fn effective_config_path() -> Option<String> {
     find_default_config_path()
 }
 
+fn resolve_cli_identity_store_root() -> Result<PathBuf> {
+    if let Some(context) = app::current_root_context() {
+        return Ok(context.state_root().join("identity"));
+    }
+    Ok(app::resolve_cli_state_root(None)?.join("identity"))
+}
+
+fn resolve_cli_vault_root() -> Result<PathBuf> {
+    if let Some(context) = app::current_root_context() {
+        return Ok(context.state_root().join("vault"));
+    }
+    Ok(app::resolve_cli_state_root(None)?.join("vault"))
+}
+
 fn resolve_identity_store_root(store_dir: Option<String>) -> Result<PathBuf> {
     if let Some(path) = store_dir {
         return Ok(PathBuf::from(path));
     }
-    default_identity_store_root().context("failed to resolve default identity store root")
+    resolve_cli_identity_store_root()
 }
 
 fn build_identity_store(store_root: &Path) -> Result<Arc<dyn SecretStore>> {
