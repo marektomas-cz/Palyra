@@ -340,8 +340,7 @@ fn build_windows_task_install_error(
     wrapper_path: &Path,
     output: &Output,
 ) -> anyhow::Error {
-    let status =
-        output.status.code().map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_owned());
+    let status = output.status.code().map_or_else(|| "unknown".into(), |value| value.to_string());
     let detail = summarize_command_output(output).unwrap_or_else(|| "none".to_owned());
     anyhow!(
         "failed to {operation} Windows scheduled task {task_name} (wrapper: {}): schtasks exited with status {status}; {detail}. Use `palyra gateway run` for a foreground runtime, or remove the conflicting scheduled task / fix the current user-task permissions and retry `palyra gateway install --start`.",
@@ -896,8 +895,7 @@ mod tests {
             stderr: b"ERROR: P\xc5\x99\xc3\xadstup byl odep\xc5\x99en.".to_vec(),
         };
 
-        let summary =
-            summarize_command_output(&output).expect("summary should include command output");
+        let summary = summarize_command_output(&output).expect("summary should include output");
         assert!(summary.contains("stdout: ERROR:"));
         assert!(summary.contains("stderr: ERROR:"));
     }
