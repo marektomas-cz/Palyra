@@ -211,13 +211,13 @@ fn build_security_findings(
         });
     }
 
-    if let Some(provider_kind) = missing_model_provider_auth_kind(local_config) {
+    if let Some(provider_kind) = missing_model_auth_kind(local_config) {
         findings.push(SecurityFinding {
             severity: "blocking".to_owned(),
             code: "model_provider_missing_auth".to_owned(),
             component: "model_provider".to_owned(),
-            message: missing_model_provider_auth_message(provider_kind),
-            remediation: missing_model_provider_auth_remediation(provider_kind),
+            message: missing_model_auth_message(provider_kind),
+            remediation: missing_model_auth_remediation(provider_kind),
         });
     }
 
@@ -397,9 +397,7 @@ fn build_security_findings(
     findings
 }
 
-fn missing_model_provider_auth_kind(
-    local_config: &LocalSecurityConfigSnapshot,
-) -> Option<&'static str> {
+fn missing_model_auth_kind(local_config: &LocalSecurityConfigSnapshot) -> Option<&'static str> {
     let effective_provider_kind = local_config
         .effective_provider_kind
         .as_deref()
@@ -439,7 +437,7 @@ fn model_provider_auth_configured(
     }
 }
 
-fn missing_model_provider_auth_message(provider_kind: &str) -> String {
+fn missing_model_auth_message(provider_kind: &str) -> String {
     match provider_kind {
         "anthropic" => {
             "Anthropic-compatible model provider is configured without any auth source.".to_owned()
@@ -448,7 +446,7 @@ fn missing_model_provider_auth_message(provider_kind: &str) -> String {
     }
 }
 
-fn missing_model_provider_auth_remediation(provider_kind: &str) -> String {
+fn missing_model_auth_remediation(provider_kind: &str) -> String {
     match provider_kind {
         "anthropic" => {
             "Configure Anthropic-compatible auth with `palyra configure --section auth-model` or select a default auth profile before relying on the runtime."

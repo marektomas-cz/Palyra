@@ -1073,7 +1073,7 @@ fn collect_doctor_connectivity_snapshot(
     }
 
     if let Some(client) = http_client.as_ref() {
-        match resolve_doctor_admin_connection(daemon_url.as_str()) {
+        match doctor_admin_connection(daemon_url.as_str()) {
             Ok(Some(connection)) => match fetch_admin_status_payload(
                 client,
                 connection.base_url.as_str(),
@@ -1122,7 +1122,7 @@ fn collect_doctor_connectivity_snapshot(
     )
 }
 
-fn resolve_doctor_admin_connection(daemon_url: &str) -> Result<Option<app::HttpConnection>> {
+fn doctor_admin_connection(daemon_url: &str) -> Result<Option<app::HttpConnection>> {
     if let Some(context) = app::current_root_context() {
         return context
             .resolve_http_connection(
@@ -1131,15 +1131,13 @@ fn resolve_doctor_admin_connection(daemon_url: &str) -> Result<Option<app::HttpC
             )
             .map(Some);
     }
-
-    let token = env::var("PALYRA_ADMIN_TOKEN")
+    let Some(token) = env::var("PALYRA_ADMIN_TOKEN")
         .ok()
         .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let Some(token) = token else {
+        .filter(|value| !value.is_empty())
+    else {
         return Ok(None);
     };
-
     Ok(Some(app::HttpConnection {
         base_url: daemon_url.trim().to_owned(),
         token: Some(token),
