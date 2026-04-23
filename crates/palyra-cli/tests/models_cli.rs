@@ -293,6 +293,52 @@ enabled = true
 }
 
 #[test]
+fn models_list_preserves_minimax_identity_for_legacy_anthropic_configs() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "https://api.minimax.io/anthropic"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key_vault_ref = "global/minimax_api_key"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let output = run_cli(&workdir, &["models", "list", "--path", &config_path_string, "--json"])?;
+    assert!(
+        output.status.success(),
+        "models list should succeed for legacy minimax config: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
+    let payload: Value = serde_json::from_str(stdout.as_str()).context("stdout was not JSON")?;
+
+    assert_eq!(
+        payload.pointer("/providers/0/provider_id").and_then(Value::as_str),
+        Some("minimax-primary"),
+        "legacy minimax configs should expose a minimax provider id: {payload}"
+    );
+    assert_eq!(
+        payload.pointer("/providers/0/display_name").and_then(Value::as_str),
+        Some("MiniMax"),
+        "legacy minimax configs should expose the provider display name: {payload}"
+    );
+    assert_eq!(
+        payload.pointer("/registry_models/0/provider_id").and_then(Value::as_str),
+        Some("minimax-primary"),
+        "legacy minimax configs should keep registry models attached to the minimax provider: {payload}"
+    );
+    Ok(())
+}
+
+#[test]
 fn models_test_connection_discovers_live_models_with_cache() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let state_root = workdir.path().join("state");

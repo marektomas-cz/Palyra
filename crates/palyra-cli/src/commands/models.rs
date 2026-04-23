@@ -940,7 +940,9 @@ fn build_probeable_providers(overview: &ModelsOverview) -> Result<Vec<ProbeableP
             .collect());
     }
 
-    let provider_id = legacy_provider_id(provider_kind.as_str()).to_owned();
+    let provider_id =
+        legacy_provider_id(provider_kind.as_str(), model_provider.auth_provider_kind.as_deref())
+            .to_owned();
     Ok(vec![ProbeableProvider {
         provider_id: provider_id.clone(),
         kind: provider_kind.clone(),
@@ -1103,10 +1105,14 @@ fn registry_views_from_config(
 
 fn legacy_provider_entries(config: &FileModelProviderConfig) -> Vec<RegistryProviderEntry> {
     let kind = config.kind.clone().unwrap_or_else(|| DETERMINISTIC_PROVIDER_KIND.to_owned());
-    let provider_id = legacy_provider_id(kind.as_str()).to_owned();
+    let provider_id =
+        legacy_provider_id(kind.as_str(), config.auth_provider_kind.as_deref()).to_owned();
     vec![RegistryProviderEntry {
         provider_id,
-        display_name: Some(kind.replace('_', " ")),
+        display_name: Some(
+            legacy_provider_display_name(kind.as_str(), config.auth_provider_kind.as_deref())
+                .to_owned(),
+        ),
         kind,
         base_url: config.openai_base_url.clone().or_else(|| config.anthropic_base_url.clone()),
         enabled: true,
@@ -1138,7 +1144,8 @@ fn legacy_provider_entries(config: &FileModelProviderConfig) -> Vec<RegistryProv
 
 fn legacy_model_entries(config: &FileModelProviderConfig) -> Vec<RegistryModelEntry> {
     let kind = config.kind.clone().unwrap_or_else(|| DETERMINISTIC_PROVIDER_KIND.to_owned());
-    let provider_id = legacy_provider_id(kind.as_str()).to_owned();
+    let provider_id =
+        legacy_provider_id(kind.as_str(), config.auth_provider_kind.as_deref()).to_owned();
     let mut models = Vec::new();
     if let Some(model_id) = config
         .openai_model
@@ -1205,11 +1212,32 @@ fn legacy_registry_model(
     }
 }
 
-fn legacy_provider_id(provider_kind: &str) -> &'static str {
-    match provider_kind {
-        OPENAI_COMPATIBLE_PROVIDER_KIND => "openai-primary",
-        ANTHROPIC_PROVIDER_KIND => "anthropic-primary",
+fn legacy_provider_id(provider_kind: &str, auth_provider_kind: Option<&str>) -> &'static str {
+    match (provider_kind, auth_provider_kind) {
+        (ANTHROPIC_PROVIDER_KIND, Some(auth_provider_kind))
+            if auth_provider_kind.eq_ignore_ascii_case(MINIMAX_AUTH_PROVIDER_KIND) =>
+        {
+            "minimax-primary"
+        }
+        (OPENAI_COMPATIBLE_PROVIDER_KIND, _) => "openai-primary",
+        (ANTHROPIC_PROVIDER_KIND, _) => "anthropic-primary",
         _ => "deterministic-primary",
+    }
+}
+
+fn legacy_provider_display_name(
+    provider_kind: &str,
+    auth_provider_kind: Option<&str>,
+) -> &'static str {
+    match (provider_kind, auth_provider_kind) {
+        (ANTHROPIC_PROVIDER_KIND, Some(auth_provider_kind))
+            if auth_provider_kind.eq_ignore_ascii_case(MINIMAX_AUTH_PROVIDER_KIND) =>
+        {
+            "MiniMax"
+        }
+        (OPENAI_COMPATIBLE_PROVIDER_KIND, _) => "OpenAI-compatible",
+        (ANTHROPIC_PROVIDER_KIND, _) => "Anthropic",
+        _ => "Deterministic",
     }
 }
 
