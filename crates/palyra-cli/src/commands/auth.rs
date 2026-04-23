@@ -48,6 +48,7 @@ pub(crate) async fn run_auth_profiles_async(
             agent_id,
             json,
         } => {
+            let json = output::preferred_json(json);
             let mut request = Request::new(auth_v1::ListAuthProfilesRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 after_profile_id: after.unwrap_or_default(),
@@ -95,6 +96,7 @@ pub(crate) async fn run_auth_profiles_async(
             }
         }
         AuthProfilesCommand::Show { profile_id, json } => {
+            let json = output::preferred_json(json);
             let mut request = Request::new(auth_v1::GetAuthProfileRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 profile_id,
@@ -137,6 +139,7 @@ pub(crate) async fn run_auth_profiles_async(
             expires_at_unix_ms,
             json,
         } => {
+            let json = output::preferred_json(json);
             let provider_message = auth_v1::AuthProvider {
                 kind: auth_provider_arg_to_proto(provider),
                 custom_name: provider_name.unwrap_or_default(),
@@ -206,6 +209,7 @@ pub(crate) async fn run_auth_profiles_async(
             }
         }
         AuthProfilesCommand::Delete { profile_id, json } => {
+            let json = output::preferred_json(json);
             let mut request = Request::new(auth_v1::DeleteAuthProfileRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 profile_id,
@@ -226,6 +230,7 @@ pub(crate) async fn run_auth_profiles_async(
             }
         }
         AuthProfilesCommand::Health { agent_id, include_profiles, json } => {
+            let json = output::preferred_json(json);
             let mut request = Request::new(auth_v1::GetAuthHealthRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 agent_id: agent_id.unwrap_or_default(),

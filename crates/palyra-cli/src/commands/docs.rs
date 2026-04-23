@@ -6,7 +6,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
-use crate::DocsCommand;
+use crate::{output, DocsCommand};
 
 const HELP_SOURCE_DIR: &str = "crates/palyra-cli/tests/help_snapshots";
 const HELP_BUNDLED_DIR: &str = "docs/help_snapshots";
@@ -80,7 +80,7 @@ pub(crate) fn run_docs(command: DocsCommand) -> Result<()> {
 }
 
 fn emit_docs_list(index: &[IndexedDoc], json: bool) -> Result<()> {
-    if json {
+    if output::preferred_json(json) {
         let payload = index
             .iter()
             .map(|entry| IndexedDocSummary {
@@ -136,7 +136,7 @@ fn emit_docs_search(index: &[IndexedDoc], query: &str, limit: usize, json: bool)
         bail!("no committed docs/help matched query `{query}`");
     }
 
-    if json {
+    if output::preferred_json(json) {
         serde_json::to_writer_pretty(std::io::stdout(), &results)
             .context("failed to serialize docs search JSON")?;
         println!();
@@ -154,7 +154,7 @@ fn emit_docs_search(index: &[IndexedDoc], query: &str, limit: usize, json: bool)
 
 fn emit_docs_show(index: &[IndexedDoc], requested: &str, json: bool) -> Result<()> {
     let entry = resolve_requested_doc(index, requested)?;
-    if json {
+    if output::preferred_json(json) {
         let payload = ShowResult {
             slug: entry.slug.as_str(),
             title: entry.title.as_str(),

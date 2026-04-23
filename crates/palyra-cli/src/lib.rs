@@ -3456,18 +3456,33 @@ fn execute_agent_stream(
     request: AgentRunInput,
     ndjson: bool,
 ) -> Result<()> {
+    let ndjson = output::preferred_ndjson(false, ndjson);
+    let json_output = !ndjson && output::preferred_json(false);
     let runtime = build_runtime()?;
     runtime
         .block_on(async {
             let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
-            let _resolved = stream_agent_events_async(&mut client, request, |event| {
-                if ndjson {
-                    emit_acp_event_ndjson(event)
-                } else {
-                    emit_agent_event_text(event)
-                }
-            })
-            .await?;
+            if json_output {
+                let mut events = Vec::new();
+                let _resolved = stream_agent_events_async(&mut client, request, |event| {
+                    events.push(agent_event_json_value(event));
+                    Ok(())
+                })
+                .await?;
+                output::print_json_pretty(
+                    &json!({ "events": events }),
+                    "failed to encode agent stream as JSON",
+                )?;
+            } else {
+                let _resolved = stream_agent_events_async(&mut client, request, |event| {
+                    if ndjson {
+                        emit_acp_event_ndjson(event)
+                    } else {
+                        emit_agent_event_text(event)
+                    }
+                })
+                .await?;
+            }
             Result::<()>::Ok(())
         })
         .context("agent stream execution failed")
@@ -3967,9 +3982,9 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
     Ok(())
 }
 
-fn emit_acp_event_ndjson(event: &common_v1::RunStreamEvent) -> Result<()> {
+fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Value {
     let run_id = redacted_presence_for_output(event.run_id.is_some());
-    let payload = match event.body.as_ref() {
+    match event.body.as_ref() {
         Some(common_v1::run_stream_event::Body::ModelToken(token)) => json!({
             "type": "model.token",
             "run_id": run_id,
@@ -4079,12 +4094,14 @@ fn emit_acp_event_ndjson(event: &common_v1::RunStreamEvent) -> Result<()> {
             "type": "unknown",
             "run_id": run_id,
         }),
-    };
-    println!(
-        "{}",
-        serde_json::to_string(&payload).context("failed to serialize ACP NDJSON event")?
-    );
-    Ok(())
+    }
+}
+
+fn emit_acp_event_ndjson(event: &common_v1::RunStreamEvent) -> Result<()> {
+    output::print_json_line(
+        &agent_event_json_value(event),
+        "failed to serialize ACP NDJSON event",
+    )
 }
 
 fn is_terminal_stream_status(kind: i32) -> bool {

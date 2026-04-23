@@ -46,12 +46,22 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             std::io::stdout().flush().context("stdout flush failed")
         }
         ConfigCommand::Validate { path } => {
+            let json = output::preferred_json(false);
             let path = match path {
                 Some(explicit) => resolve_config_path(Some(explicit), true)?,
                 None => {
                     if let Some(found) = effective_config_path() {
                         found
                     } else {
+                        if json {
+                            return output::print_json_pretty(
+                                &json!({
+                                    "status": "valid",
+                                    "source": "defaults",
+                                }),
+                                "failed to encode config validation as JSON",
+                            );
+                        }
                         println!("config=valid source=defaults");
                         return std::io::stdout().flush().context("stdout flush failed");
                     }
@@ -62,6 +72,17 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
                 .with_context(|| format!("failed to parse {path}"))?;
             validate_daemon_compatible_document(&document)
                 .with_context(|| format!("failed to parse {path}"))?;
+            if json {
+                return output::print_json_pretty(
+                    &json!({
+                        "status": "valid",
+                        "source": path,
+                        "version": migration.target_version,
+                        "migrated": migration.migrated,
+                    }),
+                    "failed to encode config validation as JSON",
+                );
+            }
             println!(
                 "config=valid source={path} version={} migrated={}",
                 migration.target_version, migration.migrated
@@ -69,11 +90,22 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             std::io::stdout().flush().context("stdout flush failed")
         }
         ConfigCommand::List { path, show_secrets } => {
+            let json = output::preferred_json(false);
             let path = resolve_config_path(path, true)?;
             let (mut document, _) = load_document_from_existing_path(Path::new(&path))
                 .with_context(|| format!("failed to parse {path}"))?;
             if !show_secrets {
                 redact_secret_config_values(&mut document);
+            }
+            if json {
+                return output::print_json_pretty(
+                    &json!({
+                        "source": path,
+                        "show_secrets": show_secrets,
+                        "document": document,
+                    }),
+                    "failed to encode config list as JSON",
+                );
             }
             let rendered =
                 toml::to_string_pretty(&document).context("failed to serialize config document")?;

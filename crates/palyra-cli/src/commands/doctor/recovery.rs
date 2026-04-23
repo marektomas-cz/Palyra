@@ -256,7 +256,7 @@ enum DoctorRepairKind {
 
 pub(crate) fn run_doctor(request: DoctorCommandRequest) -> Result<()> {
     let execution = build_doctor_execution(&request)?;
-    if request.json {
+    if output::preferred_json(request.json) {
         let encoded = serde_json::to_string_pretty(&execution)
             .context("failed to serialize doctor execution report")?;
         println!("{encoded}");
