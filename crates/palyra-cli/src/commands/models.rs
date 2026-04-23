@@ -1487,18 +1487,16 @@ fn probe_provider(
                         payload.discovered_model_ids.len()
                     )
                 };
+            } else if status.as_u16() == 404 && !target.configured_model_ids.is_empty() {
+                payload.state = "discovery_unsupported".to_owned();
+                payload.discovery_source = "registry_fallback".to_owned();
+                payload.discovered_model_ids = target.configured_model_ids.clone();
+                payload.message =
+                    "provider returned HTTP 404 for model discovery; using configured model registry"
+                        .to_owned();
             } else {
-                if status.as_u16() == 404 && !target.configured_model_ids.is_empty() {
-                    payload.state = "discovery_unsupported".to_owned();
-                    payload.discovery_source = "registry_fallback".to_owned();
-                    payload.discovered_model_ids = target.configured_model_ids.clone();
-                    payload.message =
-                        "provider returned HTTP 404 for model discovery; using configured model registry"
-                            .to_owned();
-                } else {
-                    payload.state = classify_provider_failure(status.as_u16());
-                    payload.message = sanitize_provider_error(body.as_str(), status.as_u16());
-                }
+                payload.state = classify_provider_failure(status.as_u16());
+                payload.message = sanitize_provider_error(body.as_str(), status.as_u16());
             }
         }
         Err(error) => {
