@@ -34,6 +34,7 @@ glib = "0.18.5"
 
 [patch.crates-io]
 glib = { path = "third_party/glib-0.18.5-patched" }
+phf_generator = { path = "third_party/phf-generator-0.8.0-patched" }
 
 [profile.release]
 panic = "abort"
