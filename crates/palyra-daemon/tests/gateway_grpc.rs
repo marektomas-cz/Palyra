@@ -6295,9 +6295,42 @@ async fn grpc_run_stream_executes_sandbox_process_runner_within_workspace_scope(
                     if result.success {
                         let output = serde_json::from_slice::<Value>(&result.output_json)
                             .context("sandbox tool result output_json should be valid JSON")?;
-                        assert_eq!(output.get("exit_code").and_then(Value::as_i64), Some(0));
+                        assert_eq!(
+                            output.get("visibility").and_then(Value::as_str),
+                            Some("redacted_preview")
+                        );
+                        let artifact = output.get("artifact").and_then(Value::as_object).context(
+                            "sandbox process result should expose a durable artifact ref",
+                        )?;
+                        assert_eq!(
+                            artifact.get("tool_name").and_then(Value::as_str),
+                            Some("palyra.process.run")
+                        );
+                        assert_eq!(
+                            artifact.get("sensitivity").and_then(Value::as_str),
+                            Some("stdout_stderr")
+                        );
                         assert!(
-                            output
+                            artifact.get("artifact_id").and_then(Value::as_str).is_some(),
+                            "sandbox process artifact ref should include an artifact id"
+                        );
+                        assert!(
+                            artifact.get("digest_sha256").and_then(Value::as_str).is_some(),
+                            "sandbox process artifact ref should include a digest"
+                        );
+                        let summary_json = output
+                            .get("summary")
+                            .and_then(Value::as_str)
+                            .context(
+                                "sandbox process model-visible output should include a summary",
+                            )
+                            .and_then(|summary| {
+                                serde_json::from_str::<Value>(summary)
+                                    .context("sandbox process summary should be valid JSON")
+                            })?;
+                        assert_eq!(summary_json.get("exit_code").and_then(Value::as_i64), Some(0));
+                        assert!(
+                            summary_json
                                 .get("stdout")
                                 .and_then(Value::as_str)
                                 .map(|stdout| !stdout.trim().is_empty())
