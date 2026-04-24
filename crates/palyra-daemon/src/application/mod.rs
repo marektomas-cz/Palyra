@@ -1,6 +1,7 @@
 pub mod approvals;
 pub mod auth;
 pub mod channels;
+pub mod context_compression;
 pub mod context_engine;
 pub mod context_references;
 pub mod delivery_arbitration;

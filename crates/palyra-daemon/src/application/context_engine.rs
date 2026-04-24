@@ -8,12 +8,13 @@ use palyra_safety::{
     transform_text_for_prompt, SafetyAction, SafetyContentKind, SafetySourceKind, TrustLabel,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tonic::Status;
 use tracing::warn;
 
 use crate::{
     application::{
+        context_compression::{shrink_json_value, JsonShrinkConfig},
         context_references::{render_context_reference_block, ContextReferencePreviewEnvelope},
         learning::render_preference_prompt_context,
         provider_input::{
@@ -107,6 +108,8 @@ pub(crate) struct ContextEngineSegmentExplain {
     pub(crate) kind: ContextSegmentKind,
     pub(crate) label: String,
     pub(crate) estimated_tokens: u64,
+    pub(crate) include_reason: String,
+    pub(crate) redaction_status: String,
     pub(crate) stable: bool,
     pub(crate) protected: bool,
     pub(crate) trust_label: TrustLabel,
@@ -114,6 +117,8 @@ pub(crate) struct ContextEngineSegmentExplain {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) safety_findings: Vec<String>,
     pub(crate) group_id: Option<String>,
+    #[serde(default)]
+    pub(crate) source_refs: Vec<String>,
     pub(crate) preview: String,
 }
 
@@ -123,6 +128,18 @@ pub(crate) struct ContextEngineDroppedSegmentExplain {
     pub(crate) label: String,
     pub(crate) estimated_tokens: u64,
     pub(crate) reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PromptAssemblyStepExplain {
+    pub(crate) step: String,
+    pub(crate) label: String,
+    pub(crate) included: bool,
+    pub(crate) token_estimate: u64,
+    pub(crate) include_reason: String,
+    pub(crate) redaction_status: String,
+    #[serde(default)]
+    pub(crate) source_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,6 +181,7 @@ pub(crate) struct ContextEngineExplain {
     pub(crate) budget: ContextEngineBudgetExplain,
     pub(crate) cache: ContextEngineCacheExplain,
     pub(crate) summary_quality: Option<SummaryQualityGateExplain>,
+    pub(crate) assembly_steps: Vec<PromptAssemblyStepExplain>,
     pub(crate) selected_segments: Vec<ContextEngineSegmentExplain>,
     pub(crate) dropped_segments: Vec<ContextEngineDroppedSegmentExplain>,
 }
@@ -645,6 +663,34 @@ fn assemble_segments(
         )
     });
 
+    let selected_segment_explain = selected
+        .iter()
+        .map(|entry| {
+            let preview =
+                explain_preview_text(entry.segment.content.as_str(), SEGMENT_PREVIEW_CHARS);
+            ContextEngineSegmentExplain {
+                kind: entry.segment.kind,
+                label: entry.segment.label.clone(),
+                estimated_tokens: entry.segment.estimated_tokens,
+                include_reason: include_reason_for_segment(&entry.segment),
+                redaction_status: preview.redaction_status,
+                stable: entry.segment.stable,
+                protected: entry.segment.protected,
+                trust_label: entry.segment.trust_label,
+                safety_action: entry.segment.safety_action,
+                safety_findings: entry.segment.safety_findings.clone(),
+                group_id: entry.segment.group_id.clone(),
+                source_refs: source_refs_for_segment(&entry.segment),
+                preview: preview.text,
+            }
+        })
+        .collect::<Vec<_>>();
+    let assembly_steps = build_prompt_assembly_steps(
+        selected.as_slice(),
+        dropped.as_slice(),
+        selected_segment_explain.as_slice(),
+    );
+
     AssembledPrompt {
         prompt_text,
         explain: ContextEngineExplain {
@@ -668,21 +714,8 @@ fn assemble_segments(
                 trust_scope,
             },
             summary_quality,
-            selected_segments: selected
-                .iter()
-                .map(|entry| ContextEngineSegmentExplain {
-                    kind: entry.segment.kind,
-                    label: entry.segment.label.clone(),
-                    estimated_tokens: entry.segment.estimated_tokens,
-                    stable: entry.segment.stable,
-                    protected: entry.segment.protected,
-                    trust_label: entry.segment.trust_label,
-                    safety_action: entry.segment.safety_action,
-                    safety_findings: entry.segment.safety_findings.clone(),
-                    group_id: entry.segment.group_id.clone(),
-                    preview: preview_text(entry.segment.content.as_str(), SEGMENT_PREVIEW_CHARS),
-                })
-                .collect(),
+            assembly_steps,
+            selected_segments: selected_segment_explain,
             dropped_segments: dropped,
         },
     }
@@ -1066,6 +1099,124 @@ fn clean_segment_content(raw: String) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+#[derive(Debug, Clone)]
+struct ExplainPreview {
+    text: String,
+    redaction_status: String,
+}
+
+fn build_prompt_assembly_steps(
+    selected: &[IndexedContextSegment],
+    dropped: &[ContextEngineDroppedSegmentExplain],
+    selected_explain: &[ContextEngineSegmentExplain],
+) -> Vec<PromptAssemblyStepExplain> {
+    let mut steps = selected
+        .iter()
+        .zip(selected_explain.iter())
+        .map(|(entry, explain)| PromptAssemblyStepExplain {
+            step: assembly_step_for_kind(entry.segment.kind).to_owned(),
+            label: entry.segment.label.clone(),
+            included: true,
+            token_estimate: entry.segment.estimated_tokens,
+            include_reason: explain.include_reason.clone(),
+            redaction_status: explain.redaction_status.clone(),
+            source_refs: explain.source_refs.clone(),
+        })
+        .collect::<Vec<_>>();
+    steps.extend(dropped.iter().map(|entry| PromptAssemblyStepExplain {
+        step: assembly_step_for_kind(entry.kind).to_owned(),
+        label: entry.label.clone(),
+        included: false,
+        token_estimate: entry.estimated_tokens,
+        include_reason: entry.reason.clone(),
+        redaction_status: "metadata_only".to_owned(),
+        source_refs: vec![format!("segment:{}:{}", entry.kind.as_str(), entry.label)],
+    }));
+    steps
+}
+
+fn include_reason_for_segment(segment: &ContextSegment) -> String {
+    if segment.protected {
+        "protected_active_context".to_owned()
+    } else if segment.stable {
+        "stable_context_prefix".to_owned()
+    } else if segment.trust_label != TrustLabel::TrustedLocal {
+        "included_with_trust_annotation".to_owned()
+    } else {
+        "selected_by_prompt_assembly_budget".to_owned()
+    }
+}
+
+fn source_refs_for_segment(segment: &ContextSegment) -> Vec<String> {
+    let mut refs = vec![format!("segment:{}:{}", segment.kind.as_str(), segment.label)];
+    if let Some(group_id) = segment.group_id.as_deref() {
+        refs.push(format!("group:{group_id}"));
+    }
+    refs
+}
+
+fn assembly_step_for_kind(kind: ContextSegmentKind) -> &'static str {
+    match kind {
+        ContextSegmentKind::PreferenceContext | ContextSegmentKind::ProjectContext => {
+            "policy_system"
+        }
+        ContextSegmentKind::SessionCompactionSummary | ContextSegmentKind::CheckpointSummary => {
+            "session_state"
+        }
+        ContextSegmentKind::ContextReferences => "active_task",
+        ContextSegmentKind::MemoryRecall => "memory",
+        ContextSegmentKind::ToolExchange => "tool_previews",
+        ContextSegmentKind::AttachmentRecall => "artifact_refs",
+        ContextSegmentKind::ExplicitRecall | ContextSegmentKind::SessionTail => {
+            "historical_context"
+        }
+        ContextSegmentKind::UserInput => "user_turn",
+    }
+}
+
+fn explain_preview_text(raw: &str, max_chars: usize) -> ExplainPreview {
+    let normalized = raw.replace(['\r', '\n'], " ");
+    let trimmed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (candidate, shrunk) = shrink_json_preview_if_possible(trimmed.as_str());
+    let redacted = redact_explain_preview(candidate.as_str());
+    let redaction_status = if redacted != candidate {
+        "redacted"
+    } else if shrunk {
+        "json_shrunk"
+    } else {
+        "clean"
+    };
+    ExplainPreview {
+        text: preview_text(redacted.as_str(), max_chars),
+        redaction_status: redaction_status.to_owned(),
+    }
+}
+
+fn shrink_json_preview_if_possible(raw: &str) -> (String, bool) {
+    let trimmed = raw.trim();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return (raw.to_owned(), false);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return (raw.to_owned(), false);
+    };
+    let outcome = shrink_json_value(&value, JsonShrinkConfig::default());
+    let rendered = serde_json::to_string(&outcome.value).unwrap_or_else(|_| raw.to_owned());
+    (rendered, outcome.truncated)
+}
+
+fn redact_explain_preview(raw: &str) -> String {
+    let payload = json!({ "preview": raw }).to_string();
+    let redacted = match crate::journal::redact_payload_json(payload.as_bytes()) {
+        Ok(value) => value,
+        Err(_) => return raw.to_owned(),
+    };
+    serde_json::from_str::<Value>(redacted.as_str())
+        .ok()
+        .and_then(|value| value.get("preview").and_then(Value::as_str).map(ToOwned::to_owned))
+        .unwrap_or_else(|| raw.to_owned())
+}
+
 fn preview_text(raw: &str, max_chars: usize) -> String {
     let normalized = raw.replace(['\r', '\n'], " ");
     let trimmed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1134,6 +1285,20 @@ mod tests {
             safety_action,
             safety_findings.iter().map(|value| (*value).to_owned()).collect(),
         )
+    }
+
+    fn segment_with_content(
+        kind: ContextSegmentKind,
+        label: &str,
+        content: String,
+        estimated_tokens: u64,
+        priority: u8,
+        protected: bool,
+    ) -> ContextSegment {
+        let mut segment =
+            ContextSegment::trusted(kind, label, content, priority, false, protected, None);
+        segment.estimated_tokens = estimated_tokens;
+        segment
     }
 
     #[test]
@@ -1293,44 +1458,135 @@ mod tests {
                     "trust_scope": "mixed"
                 },
                 "summary_quality": null,
+                "assembly_steps": [
+                    {
+                        "step": "policy_system",
+                        "label": "stable policy",
+                        "included": true,
+                        "token_estimate": 64,
+                        "include_reason": "protected_active_context",
+                        "redaction_status": "clean",
+                        "source_refs": ["segment:preference_context:stable policy"]
+                    },
+                    {
+                        "step": "active_task",
+                        "label": "focused files",
+                        "included": true,
+                        "token_estimate": 48,
+                        "include_reason": "protected_active_context",
+                        "redaction_status": "clean",
+                        "source_refs": ["segment:context_references:focused files"]
+                    },
+                    {
+                        "step": "user_turn",
+                        "label": "ship it",
+                        "included": true,
+                        "token_estimate": 24,
+                        "include_reason": "protected_active_context",
+                        "redaction_status": "clean",
+                        "source_refs": ["segment:user_input:ship it"]
+                    }
+                ],
                 "selected_segments": [
                     {
                         "kind": "preference_context",
                         "label": "stable policy",
                         "estimated_tokens": 64,
+                        "include_reason": "protected_active_context",
+                        "redaction_status": "clean",
                         "stable": true,
                         "protected": true,
                         "trust_label": "trusted_local",
                         "safety_action": "allow",
                         "group_id": null,
+                        "source_refs": ["segment:preference_context:stable policy"],
                         "preview": "stable policy"
                     },
                     {
                         "kind": "context_references",
                         "label": "focused files",
                         "estimated_tokens": 48,
+                        "include_reason": "protected_active_context",
+                        "redaction_status": "clean",
                         "stable": false,
                         "protected": true,
                         "trust_label": "external_untrusted",
                         "safety_action": "annotate",
                         "safety_findings": ["prompt_injection.ignore_previous_instructions"],
                         "group_id": null,
+                        "source_refs": ["segment:context_references:focused files"],
                         "preview": "focused files"
                     },
                     {
                         "kind": "user_input",
                         "label": "ship it",
                         "estimated_tokens": 24,
+                        "include_reason": "protected_active_context",
+                        "redaction_status": "clean",
                         "stable": false,
                         "protected": true,
                         "trust_label": "trusted_local",
                         "safety_action": "allow",
                         "group_id": null,
+                        "source_refs": ["segment:user_input:ship it"],
                         "preview": "ship it"
                     }
                 ],
                 "dropped_segments": []
             })
+        );
+    }
+
+    #[test]
+    fn explain_preview_redacts_secret_values_after_json_shrink() {
+        let secret_json = serde_json::json!({
+            "api_key": "sk-test-secret-token",
+            "items": (0..20).map(|index| serde_json::json!({"index": index, "body": "x".repeat(64)})).collect::<Vec<_>>()
+        })
+        .to_string();
+        let assembled = assemble_segments(
+            &[
+                segment_with_content(
+                    ContextSegmentKind::MemoryRecall,
+                    "memory json",
+                    secret_json,
+                    512,
+                    80,
+                    false,
+                ),
+                segment(ContextSegmentKind::UserInput, "question", 24, 100, false, true, None),
+            ],
+            ContextEngineStrategy::CostAware,
+            ProviderContextBudget {
+                max_context_tokens: 4_096,
+                reserved_completion_tokens: 768,
+                reserved_tool_result_tokens: 256,
+                provider_overhead_tokens: 128,
+                provider_cache_supported: false,
+            },
+            &RequestContext {
+                principal: "user:ops".to_owned(),
+                device_id: "device".to_owned(),
+                channel: Some("cli".to_owned()),
+            },
+            "session-redaction",
+            None,
+        );
+
+        let memory_segment = assembled
+            .explain
+            .selected_segments
+            .iter()
+            .find(|segment| segment.label == "memory json")
+            .expect("memory JSON segment should be selected");
+        assert_eq!(memory_segment.redaction_status, "redacted");
+        assert!(
+            !memory_segment.preview.contains("sk-test-secret-token"),
+            "prompt explain preview must not leak raw provider-style secrets"
+        );
+        assert!(
+            memory_segment.preview.contains("<redacted>"),
+            "redacted previews should show the redaction marker"
         );
     }
 

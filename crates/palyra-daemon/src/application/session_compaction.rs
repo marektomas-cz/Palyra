@@ -1,7 +1,9 @@
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::{
+    collections::hash_map::DefaultHasher,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    hash::{Hash, Hasher},
     sync::Arc,
 };
 
@@ -35,6 +37,7 @@ const SESSION_COMPACTION_MIN_CONDENSED_EVENTS: usize = 4;
 const SESSION_COMPACTION_MAX_SUMMARY_LINES: usize = 8;
 const SESSION_COMPACTION_PREVIEW_LEN: usize = 220;
 const SESSION_COMPACTION_MAX_CANDIDATES: usize = 18;
+const SESSION_COMPACTION_DEFAULT_COOLDOWN_MS: i64 = 5 * 60 * 1_000;
 const AUTO_WRITE_CONFIDENCE_THRESHOLD: f64 = 0.82;
 const CURATED_WORKSPACE_DOC_LIMIT: usize = 64;
 const SENSITIVE_CANDIDATE_PATTERNS: &[&str] = &[
@@ -89,6 +92,8 @@ pub(crate) struct SessionCompactionPlan {
     pub(crate) estimated_output_tokens: u64,
     pub(crate) source_records_json: String,
     pub(crate) summary_json: String,
+    pub(crate) active_task_summary: SessionActiveTaskSummary,
+    pub(crate) checkpoint_metadata: SessionCompactionCheckpointMetadata,
     pub(crate) candidates: Vec<SessionCompactionCandidate>,
     pub(crate) checkpoint_preview: SessionCompactionCheckpointPreview,
 }
@@ -117,6 +122,8 @@ impl SessionCompactionPlan {
                 .count(),
             "summary_text": self.summary_text,
             "summary_preview": self.summary_preview,
+            "active_task_summary": self.active_task_summary,
+            "checkpoint_metadata": self.checkpoint_metadata,
             "source_records": serde_json::from_str::<Value>(self.source_records_json.as_str())
                 .unwrap_or_else(|_| json!({ "records": [] })),
             "summary": serde_json::from_str::<Value>(self.summary_json.as_str())
@@ -188,6 +195,48 @@ pub(crate) struct SessionCompactionCheckpointPreview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SessionActiveTaskSummary {
+    pub active_goal: String,
+    #[serde(default)]
+    pub open_decisions: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub recent_steps: Vec<String>,
+    #[serde(default)]
+    pub historical_notes: Vec<String>,
+}
+
+impl SessionActiveTaskSummary {
+    fn render(&self) -> String {
+        let mut sections = Vec::new();
+        sections.push(format!("Active goal: {}", self.active_goal));
+        sections.push(render_summary_list("Open decisions", self.open_decisions.as_slice()));
+        sections.push(render_summary_list("Constraints", self.constraints.as_slice()));
+        sections.push(render_summary_list("Recent steps", self.recent_steps.as_slice()));
+        sections.push(render_summary_list("Historical notes", self.historical_notes.as_slice()));
+        sections.join("\n")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SessionCompactionCheckpointMetadata {
+    pub reason: String,
+    pub strategy: String,
+    pub mode: String,
+    pub input_token_budget: u64,
+    pub output_token_budget: u64,
+    pub estimated_input_tokens: u64,
+    pub estimated_output_tokens: u64,
+    pub pre_transcript_ref: String,
+    pub post_summary_ref: String,
+    pub checkpoint_kind: String,
+    pub compaction_count_before: usize,
+    pub cooldown_ms: i64,
+    pub abnormal_churn: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SessionCompactionQualityGateMetrics {
     pub decision_count: usize,
     pub next_action_count: usize,
@@ -255,11 +304,43 @@ struct CompactionSummaryJsonInput<'a> {
     session: &'a OrchestratorSessionRecord,
     eligible: bool,
     blocked_reason: Option<&'a str>,
+    active_task_summary: &'a SessionActiveTaskSummary,
+    checkpoint_metadata: &'a SessionCompactionCheckpointMetadata,
     candidates: &'a [SessionCompactionCandidate],
     writes: &'a [SessionCompactionWritePreview],
     checkpoint_preview: &'a SessionCompactionCheckpointPreview,
     lifecycle_state: &'a str,
     review_candidate_count: usize,
+}
+
+pub(crate) struct SessionContextCompressionInput<'a> {
+    pub(crate) session: &'a OrchestratorSessionRecord,
+    pub(crate) transcript: &'a [OrchestratorSessionTranscriptRecord],
+    pub(crate) pins: &'a [OrchestratorSessionPinRecord],
+    pub(crate) workspace_documents: &'a [WorkspaceDocumentRecord],
+    pub(crate) trigger_reason: Option<&'a str>,
+    pub(crate) trigger_policy: Option<&'a str>,
+    pub(crate) mode: &'a str,
+    pub(crate) previous_compaction_count: usize,
+}
+
+pub(crate) trait ContextCompressor {
+    fn strategy(&self) -> &'static str;
+    fn compress(&self, input: SessionContextCompressionInput<'_>) -> SessionCompactionPlan;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DeterministicSessionContextCompressor;
+
+impl ContextCompressor for DeterministicSessionContextCompressor {
+    fn strategy(&self) -> &'static str {
+        SESSION_COMPACTION_STRATEGY
+    }
+
+    fn compress(&self, input: SessionContextCompressionInput<'_>) -> SessionCompactionPlan {
+        debug_assert_eq!(self.strategy(), SESSION_COMPACTION_STRATEGY);
+        build_session_compaction_plan_with_metadata(input)
+    }
 }
 
 pub(crate) async fn preview_session_compaction(
@@ -270,14 +351,20 @@ pub(crate) async fn preview_session_compaction(
 ) -> Result<SessionCompactionPlan, Status> {
     let (transcript, pins, workspace_documents) =
         load_session_compaction_inputs(runtime_state, session).await?;
-    Ok(build_session_compaction_plan(
+    let previous_compaction_count = runtime_state
+        .list_orchestrator_compaction_artifacts(session.session_id.clone())
+        .await?
+        .len();
+    Ok(DeterministicSessionContextCompressor.compress(SessionContextCompressionInput {
         session,
-        transcript.as_slice(),
-        pins.as_slice(),
-        workspace_documents.as_slice(),
+        transcript: transcript.as_slice(),
+        pins: pins.as_slice(),
+        workspace_documents: workspace_documents.as_slice(),
         trigger_reason,
         trigger_policy,
-    ))
+        mode: "preview",
+        previous_compaction_count,
+    }))
 }
 
 #[allow(clippy::result_large_err)]
@@ -286,14 +373,21 @@ pub(crate) async fn apply_session_compaction(
 ) -> Result<SessionCompactionExecution, Status> {
     let (transcript, pins, workspace_documents) =
         load_session_compaction_inputs(request.runtime_state, request.session).await?;
-    let plan = build_session_compaction_plan(
-        request.session,
-        transcript.as_slice(),
-        pins.as_slice(),
-        workspace_documents.as_slice(),
-        request.trigger_reason,
-        request.trigger_policy,
-    );
+    let previous_compaction_count = request
+        .runtime_state
+        .list_orchestrator_compaction_artifacts(request.session.session_id.clone())
+        .await?
+        .len();
+    let plan = DeterministicSessionContextCompressor.compress(SessionContextCompressionInput {
+        session: request.session,
+        transcript: transcript.as_slice(),
+        pins: pins.as_slice(),
+        workspace_documents: workspace_documents.as_slice(),
+        trigger_reason: request.trigger_reason,
+        trigger_policy: request.trigger_policy,
+        mode: request.mode,
+        previous_compaction_count,
+    });
     if !plan.eligible {
         let message = plan.blocked_reason.clone().unwrap_or_else(|| {
             "session does not currently have enough older transcript material to compact".to_owned()
@@ -425,6 +519,8 @@ pub(crate) async fn apply_session_compaction(
                 session: request.session,
                 eligible: plan.eligible,
                 blocked_reason: plan.blocked_reason.as_deref(),
+                active_task_summary: &plan.active_task_summary,
+                checkpoint_metadata: &plan.checkpoint_metadata,
                 candidates: plan.candidates.as_slice(),
                 writes: applied_writes.as_slice(),
                 checkpoint_preview: &plan.checkpoint_preview,
@@ -466,6 +562,27 @@ pub(crate) fn build_session_compaction_plan(
     trigger_reason: Option<&str>,
     trigger_policy: Option<&str>,
 ) -> SessionCompactionPlan {
+    build_session_compaction_plan_with_metadata(SessionContextCompressionInput {
+        session,
+        transcript,
+        pins,
+        workspace_documents,
+        trigger_reason,
+        trigger_policy,
+        mode: "manual",
+        previous_compaction_count: 0,
+    })
+}
+
+fn build_session_compaction_plan_with_metadata(
+    input: SessionContextCompressionInput<'_>,
+) -> SessionCompactionPlan {
+    let session = input.session;
+    let transcript = input.transcript;
+    let pins = input.pins;
+    let workspace_documents = input.workspace_documents;
+    let trigger_reason_input = input.trigger_reason;
+    let trigger_policy_input = input.trigger_policy;
     let pin_keys =
         pins.iter().map(|pin| (pin.run_id.clone(), pin.tape_seq)).collect::<HashSet<_>>();
     let extracted = transcript
@@ -559,9 +676,16 @@ pub(crate) fn build_session_compaction_plan(
         .count();
     let review_candidate_count =
         candidates.iter().filter(|candidate| candidate.disposition == "review_required").count();
+    let active_task_summary = build_active_task_summary(
+        session,
+        protected_records.as_slice(),
+        condensed_records.as_slice(),
+        candidates.as_slice(),
+    );
     let summary_text = build_summary_text(
         session,
         blocked_reason.as_deref(),
+        &active_task_summary,
         summary_lines.as_slice(),
         omitted_event_count,
         candidate_count,
@@ -583,11 +707,23 @@ pub(crate) fn build_session_compaction_plan(
     let estimated_output_tokens = estimate_token_count(summary_text.as_str())
         .saturating_add(protected_tokens)
         .saturating_add(planner_tokens);
+    let checkpoint_metadata = build_checkpoint_metadata(
+        session,
+        trigger_reason_input,
+        input.mode,
+        input.previous_compaction_count,
+        source_event_count,
+        protected_event_count,
+        condensed_event_count,
+        estimated_input_tokens,
+        estimated_output_tokens,
+        summary_text.as_str(),
+    );
     let checkpoint_preview = SessionCompactionCheckpointPreview {
         name: "Compaction checkpoint".to_owned(),
         note: format!(
             "{} compaction anchor for session {}.",
-            trigger_reason.unwrap_or("Automatic"),
+            trigger_reason_input.unwrap_or("Automatic"),
             session.session_id
         ),
         workspace_paths: write_previews.iter().map(|write| write.target_path.clone()).collect(),
@@ -596,6 +732,8 @@ pub(crate) fn build_session_compaction_plan(
         session,
         eligible,
         blocked_reason: blocked_reason.as_deref(),
+        active_task_summary: &active_task_summary,
+        checkpoint_metadata: &checkpoint_metadata,
         candidates: candidates.as_slice(),
         writes: write_previews.as_slice(),
         checkpoint_preview: &checkpoint_preview,
@@ -607,13 +745,15 @@ pub(crate) fn build_session_compaction_plan(
         "protected": protected_records.iter().map(compaction_record_json).collect::<Vec<_>>(),
     })
     .to_string();
-    let trigger_reason = trigger_reason
+    let trigger_reason = trigger_reason_input
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("operator_requested_compaction")
         .to_owned();
-    let trigger_policy =
-        trigger_policy.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+    let trigger_policy = trigger_policy_input
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let trigger_inputs_json = json!({
         "source_event_count": source_event_count,
         "protected_event_count": protected_event_count,
@@ -623,6 +763,7 @@ pub(crate) fn build_session_compaction_plan(
         "candidate_count": candidate_count,
         "review_candidate_count": review_candidate_count,
         "blocked_reason": blocked_reason,
+        "checkpoint_metadata": checkpoint_metadata,
     })
     .to_string();
 
@@ -642,6 +783,8 @@ pub(crate) fn build_session_compaction_plan(
         estimated_output_tokens,
         source_records_json,
         summary_json,
+        active_task_summary,
+        checkpoint_metadata,
         candidates,
         checkpoint_preview,
     }
@@ -688,6 +831,7 @@ async fn load_session_compaction_inputs(
 fn build_summary_text(
     session: &OrchestratorSessionRecord,
     blocked_reason: Option<&str>,
+    active_task_summary: &SessionActiveTaskSummary,
     summary_lines: &[String],
     omitted_event_count: u64,
     candidate_count: usize,
@@ -697,6 +841,10 @@ fn build_summary_text(
     if let Some(blocked_reason) = blocked_reason {
         sections.push(format!("Compaction is blocked: {blocked_reason}."));
     }
+    sections.push(format!(
+        "<active_task_summary>\n{}\n</active_task_summary>",
+        active_task_summary.render()
+    ));
     if summary_lines.is_empty() {
         sections.push(format!(
             "No eligible older transcript range was found for session {}.",
@@ -725,6 +873,147 @@ fn build_summary_text(
         );
     }
     sections.join("\n\n")
+}
+
+fn build_active_task_summary(
+    session: &OrchestratorSessionRecord,
+    protected_records: &[SessionCompactionRecordSnapshot],
+    condensed_records: &[SessionCompactionRecordSnapshot],
+    candidates: &[SessionCompactionCandidate],
+) -> SessionActiveTaskSummary {
+    let active_goal = candidates
+        .iter()
+        .find(|candidate| candidate.category == "current_focus")
+        .map(|candidate| candidate.content.clone())
+        .or_else(|| {
+            protected_records
+                .iter()
+                .rev()
+                .find(|record| !record.text.trim().is_empty())
+                .map(|record| truncate_console_text(record.text.as_str(), 180))
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "Continue session {} without treating old context as a new request.",
+                session.session_id
+            )
+        });
+    let open_decisions = candidates
+        .iter()
+        .filter(|candidate| matches!(candidate.category.as_str(), "open_loop" | "decision"))
+        .take(4)
+        .map(|candidate| truncate_console_text(candidate.content.as_str(), 160))
+        .collect::<Vec<_>>();
+    let constraints = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.category == "durable_fact"
+                || candidate.content.to_ascii_lowercase().contains("must")
+        })
+        .take(4)
+        .map(|candidate| truncate_console_text(candidate.content.as_str(), 160))
+        .collect::<Vec<_>>();
+    let recent_steps = protected_records
+        .iter()
+        .rev()
+        .take(4)
+        .map(|record| {
+            format!(
+                "{}: {}",
+                compaction_event_label(record.event_type.as_str()),
+                truncate_console_text(record.text.as_str(), 140)
+            )
+        })
+        .collect::<Vec<_>>();
+    let historical_notes = condensed_records
+        .iter()
+        .take(4)
+        .map(|record| {
+            format!(
+                "{}: {}",
+                compaction_event_label(record.event_type.as_str()),
+                truncate_console_text(record.text.as_str(), 140)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    SessionActiveTaskSummary {
+        active_goal,
+        open_decisions,
+        constraints,
+        recent_steps,
+        historical_notes,
+    }
+}
+
+fn render_summary_list(label: &str, items: &[String]) -> String {
+    if items.is_empty() {
+        return format!("{label}: none");
+    }
+    format!(
+        "{label}:\n{}",
+        items.iter().map(|item| format!("- {item}")).collect::<Vec<_>>().join("\n")
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_checkpoint_metadata(
+    session: &OrchestratorSessionRecord,
+    trigger_reason: Option<&str>,
+    mode: &str,
+    previous_compaction_count: usize,
+    source_event_count: u64,
+    protected_event_count: u64,
+    condensed_event_count: u64,
+    estimated_input_tokens: u64,
+    estimated_output_tokens: u64,
+    summary_text: &str,
+) -> SessionCompactionCheckpointMetadata {
+    let reason = trigger_reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("operator_requested_compaction")
+        .to_owned();
+    let pre_transcript_ref = if source_event_count == 0 {
+        format!("session:{}:transcript:empty", session.session_id)
+    } else {
+        format!(
+            "session:{}:transcript:events=0..{};protected={};condensed={}",
+            session.session_id,
+            source_event_count.saturating_sub(1),
+            protected_event_count,
+            condensed_event_count
+        )
+    };
+    let mut hasher = DefaultHasher::new();
+    session.session_id.hash(&mut hasher);
+    summary_text.hash(&mut hasher);
+    let post_summary_ref = format!(
+        "session:{}:compaction_summary:{}:{:016x}",
+        session.session_id,
+        SESSION_COMPACTION_VERSION,
+        hasher.finish()
+    );
+
+    SessionCompactionCheckpointMetadata {
+        reason,
+        strategy: SESSION_COMPACTION_STRATEGY.to_owned(),
+        mode: mode.to_owned(),
+        input_token_budget: estimated_input_tokens,
+        output_token_budget: estimated_output_tokens,
+        estimated_input_tokens,
+        estimated_output_tokens,
+        pre_transcript_ref,
+        post_summary_ref,
+        checkpoint_kind: if mode == "automatic" {
+            "provider_budget_checkpoint".to_owned()
+        } else {
+            "manual_checkpoint".to_owned()
+        },
+        compaction_count_before: previous_compaction_count,
+        cooldown_ms: SESSION_COMPACTION_DEFAULT_COOLDOWN_MS,
+        abnormal_churn: previous_compaction_count >= 3,
+    }
 }
 
 fn build_continuity_candidates(
@@ -858,6 +1147,8 @@ fn build_compaction_summary_json(input: CompactionSummaryJsonInput<'_>) -> Strin
         "eligible": input.eligible,
         "blocked_reason": input.blocked_reason,
         "lifecycle_state": input.lifecycle_state,
+        "active_task_summary": input.active_task_summary,
+        "checkpoint_metadata": input.checkpoint_metadata,
         "planner": {
             "candidate_count": input.candidates.len(),
             "review_candidate_count": input.review_candidate_count,
