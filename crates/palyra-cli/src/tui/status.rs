@@ -385,11 +385,8 @@ impl App {
                 connection_posture_label(self.runtime.connection().grpc_url.as_str()),
             ),
             format!(
-                "Profile {} · Env {} · Risk {} · Strict {} · Tools {} · Thinking {} · Verbose {} · Shell {}",
-                profile.as_ref().map(|value| value.label.as_str()).unwrap_or("none"),
-                profile.as_ref().map(|value| value.environment.as_str()).unwrap_or("none"),
-                profile.as_ref().map(|value| value.risk_level.as_str()).unwrap_or("none"),
-                profile.as_ref().map(|value| if value.strict_mode { "on" } else { "off" }).unwrap_or("off"),
+                "{} · Tools {} · Thinking {} · Verbose {} · Shell {}",
+                profile_header_summary(profile.as_ref()),
                 self.show_tools,
                 self.show_thinking,
                 self.show_verbose,

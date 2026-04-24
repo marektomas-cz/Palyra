@@ -48,8 +48,11 @@ pub(super) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let bottom = rows[1];
     let banner = rows[2];
     let connection_line = Line::from(vec![
-        Span::styled("Gateway ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(app.runtime.connection().grpc_url.as_str()),
+        Span::styled(
+            "Gateway gRPC ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(display_gateway_grpc_endpoint(app.runtime.connection().grpc_url.as_str())),
         Span::raw("  "),
         Span::styled("Session ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::raw(display_session_identity(&app.session)),
@@ -64,41 +67,7 @@ pub(super) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Span::styled("Status ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
         Span::raw(sanitize_terminal_text(app.status_line.as_str())),
     ]);
-    let profile_line = if let Some(profile) = profile {
-        Line::from(vec![
-            Span::styled(
-                "Profile ",
-                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(profile.label),
-            Span::raw("  "),
-            Span::styled(
-                "Env ",
-                Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(profile.environment),
-            Span::raw("  "),
-            Span::styled(
-                "Risk ",
-                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(profile.risk_level),
-            Span::raw("  "),
-            Span::styled(
-                "Strict ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(if profile.strict_mode { "on" } else { "off" }),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(
-                "Profile ",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("none"),
-        ])
-    };
+    let profile_line = Line::from(profile_header_summary(profile.as_ref()));
     frame.render_widget(Paragraph::new(connection_line), top);
     frame.render_widget(Paragraph::new(status_line), bottom);
     frame.render_widget(Paragraph::new(profile_line), banner);
@@ -373,6 +342,41 @@ pub(super) fn connection_posture_label(grpc_url: &str) -> &'static str {
     }
 }
 
+pub(super) fn display_gateway_grpc_endpoint(grpc_url: &str) -> String {
+    let sanitized = sanitize_terminal_text(grpc_url);
+    let Ok(parsed) = reqwest::Url::parse(sanitized.as_str()) else {
+        return sanitized;
+    };
+    let Some(host) = parsed.host_str() else {
+        return sanitized;
+    };
+    let host_label = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    parsed.port_or_known_default().map(|port| format!("{host_label}:{port}")).unwrap_or(host_label)
+}
+
+pub(super) fn profile_header_summary(profile: Option<&app::ActiveProfileContext>) -> String {
+    let (label, environment, risk_level, strict_mode) = match profile {
+        Some(profile) => (
+            sanitize_terminal_text(profile.label.as_str()),
+            sanitize_terminal_text(profile.environment.as_str()),
+            sanitize_terminal_text(profile.risk_level.as_str()),
+            profile.strict_mode,
+        ),
+        None => ("direct".to_owned(), "local".to_owned(), "standard".to_owned(), false),
+    };
+    format!(
+        "Profile {}  Env {}  Risk {}  Strict {}",
+        label,
+        environment,
+        risk_level,
+        if strict_mode { "on" } else { "off" }
+    )
+}
+
 pub(super) fn fit_segments_to_width(width: usize, segments: Vec<String>) -> String {
     let mut line = String::new();
     for segment in segments.into_iter().filter(|segment| !segment.trim().is_empty()) {
@@ -386,5 +390,27 @@ pub(super) fn fit_segments_to_width(width: usize, segments: Vec<String>) -> Stri
         String::new()
     } else {
         line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_gateway_grpc_endpoint, profile_header_summary};
+
+    #[test]
+    fn display_gateway_grpc_endpoint_uses_endpoint_without_scheme() {
+        assert_eq!(display_gateway_grpc_endpoint("http://127.0.0.1:7443"), "127.0.0.1:7443");
+        assert_eq!(
+            display_gateway_grpc_endpoint("https://gateway.example.test"),
+            "gateway.example.test:443"
+        );
+        assert_eq!(display_gateway_grpc_endpoint("http://[::1]:7443"), "[::1]:7443");
+    }
+
+    #[test]
+    fn profile_header_summary_uses_direct_fallback_without_none_label() {
+        let summary = profile_header_summary(None);
+        assert_eq!(summary, "Profile direct  Env local  Risk standard  Strict off");
+        assert!(!summary.contains("none"));
     }
 }
