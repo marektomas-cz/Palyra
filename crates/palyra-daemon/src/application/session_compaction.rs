@@ -554,6 +554,7 @@ pub(crate) async fn apply_session_compaction(
     Ok(SessionCompactionExecution { plan, artifact, checkpoint, writes: applied_writes })
 }
 
+#[cfg(test)]
 pub(crate) fn build_session_compaction_plan(
     session: &OrchestratorSessionRecord,
     transcript: &[OrchestratorSessionTranscriptRecord],

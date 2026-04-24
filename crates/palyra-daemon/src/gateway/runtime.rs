@@ -2731,6 +2731,7 @@ impl GatewayRuntimeState {
         })
     }
 
+    #[cfg(test)]
     #[allow(clippy::result_large_err)]
     pub async fn execute_model_provider(
         self: &Arc<Self>,
