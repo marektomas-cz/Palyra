@@ -163,6 +163,7 @@ pub(crate) const MEMORY_SEARCH_TOOL_NAME: &str = "palyra.memory.search";
 pub(crate) const MEMORY_RECALL_TOOL_NAME: &str = "palyra.memory.recall";
 pub(crate) const ROUTINES_QUERY_TOOL_NAME: &str = "palyra.routines.query";
 pub(crate) const ROUTINES_CONTROL_TOOL_NAME: &str = "palyra.routines.control";
+pub(crate) const ARTIFACT_READ_TOOL_NAME: &str = "palyra.artifact.read";
 pub(crate) const WORKSPACE_PATCH_TOOL_NAME: &str = "palyra.fs.apply_patch";
 pub(crate) const PROCESS_RUNNER_TOOL_NAME: &str = "palyra.process.run";
 pub(crate) const HTTP_FETCH_TOOL_NAME: &str = "palyra.http.fetch";
@@ -537,6 +538,14 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
             runtime_state,
             context,
             tool_name,
+            proposal_id,
+            input_json,
+        )
+        .await
+    } else if tool_name == ARTIFACT_READ_TOOL_NAME {
+        crate::application::tool_runtime::artifacts::execute_artifact_read_tool(
+            runtime_state,
+            context,
             proposal_id,
             input_json,
         )

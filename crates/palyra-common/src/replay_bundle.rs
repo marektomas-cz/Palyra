@@ -10,6 +10,7 @@ use crate::{
         is_sensitive_key, redact_auth_error, redact_header, redact_url,
         redact_url_segments_in_text, REDACTED,
     },
+    runtime_contracts::{IdempotencyRecordSnapshot, RunLifecycleTransitionRecord},
     versioned_json::{parse_versioned_json, VersionedJsonFormat},
 };
 
@@ -38,6 +39,8 @@ pub struct ReplayBundle {
     pub queue_decisions: Vec<ReplayDecisionRecord>,
     pub auxiliary_tasks: Vec<ReplayDecisionRecord>,
     pub flow_events: Vec<ReplayDecisionRecord>,
+    pub lifecycle_transitions: Vec<RunLifecycleTransitionRecord>,
+    pub idempotency_records: Vec<IdempotencyRecordSnapshot>,
     pub artifact_refs: Vec<ReplayArtifactRef>,
     pub expected: ReplayExpectedOutputs,
     pub redaction: ReplayRedactionReport,
@@ -164,6 +167,8 @@ pub struct ReplayExpectedOutputs {
     pub http_exchange_count: usize,
     pub auxiliary_task_count: usize,
     pub flow_event_count: usize,
+    pub lifecycle_transition_count: usize,
+    pub idempotency_record_count: usize,
     pub artifact_ref_count: usize,
 }
 
@@ -209,7 +214,18 @@ pub struct ReplayBundleBuildInput {
     pub run: ReplayRunSnapshot,
     pub config_snapshot: Value,
     pub tape_events: Vec<ReplayTapeEvent>,
+    pub lifecycle_transitions: Vec<RunLifecycleTransitionRecord>,
+    pub idempotency_records: Vec<IdempotencyRecordSnapshot>,
     pub artifact_refs: Vec<ReplayArtifactRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReplayCaptureCounts {
+    artifact_refs: usize,
+    auxiliary_tasks: usize,
+    flow_events: usize,
+    lifecycle_transitions: usize,
+    idempotency_records: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -372,14 +388,22 @@ pub fn build_replay_bundle(input: ReplayBundleBuildInput) -> Result<ReplayBundle
     let queue_decisions = extract_decision_records(&tape_events, "queue");
     let auxiliary_tasks = extract_decision_records(&tape_events, "auxiliary");
     let flow_events = extract_decision_records(&tape_events, "flow");
+    let lifecycle_transitions =
+        normalize_lifecycle_transitions(input.lifecycle_transitions, &mut normalizer)?;
+    let idempotency_records =
+        normalize_idempotency_records(input.idempotency_records, &mut normalizer)?;
     let expected = expected_outputs_from_capture(
         &tape_events,
         &tool_exchanges,
         &approvals,
         &http_exchanges,
-        input.artifact_refs.len(),
-        auxiliary_tasks.len(),
-        flow_events.len(),
+        ReplayCaptureCounts {
+            artifact_refs: input.artifact_refs.len(),
+            auxiliary_tasks: auxiliary_tasks.len(),
+            flow_events: flow_events.len(),
+            lifecycle_transitions: lifecycle_transitions.len(),
+            idempotency_records: idempotency_records.len(),
+        },
     );
 
     let mut capture = input.capture;
@@ -409,6 +433,8 @@ pub fn build_replay_bundle(input: ReplayBundleBuildInput) -> Result<ReplayBundle
         queue_decisions,
         auxiliary_tasks,
         flow_events,
+        lifecycle_transitions,
+        idempotency_records,
         artifact_refs: input.artifact_refs,
         expected,
         redaction: normalizer.redaction,
@@ -481,9 +507,13 @@ pub fn replay_bundle_offline(bundle: &ReplayBundle) -> ReplayRunReport {
         &bundle.tool_exchanges,
         &bundle.approvals,
         &bundle.http_exchanges,
-        bundle.artifact_refs.len(),
-        bundle.auxiliary_tasks.len(),
-        bundle.flow_events.len(),
+        ReplayCaptureCounts {
+            artifact_refs: bundle.artifact_refs.len(),
+            auxiliary_tasks: bundle.auxiliary_tasks.len(),
+            flow_events: bundle.flow_events.len(),
+            lifecycle_transitions: bundle.lifecycle_transitions.len(),
+            idempotency_records: bundle.idempotency_records.len(),
+        },
     );
     let mut diffs = Vec::new();
     compare_usize(
@@ -543,6 +573,20 @@ pub fn replay_bundle_offline(bundle: &ReplayBundle) -> ReplayRunReport {
         "$.expected.artifact_ref_count",
         bundle.expected.artifact_ref_count,
         actual_expected.artifact_ref_count,
+        &mut diffs,
+    );
+    compare_usize(
+        "lifecycle",
+        "$.expected.lifecycle_transition_count",
+        bundle.expected.lifecycle_transition_count,
+        actual_expected.lifecycle_transition_count,
+        &mut diffs,
+    );
+    compare_usize(
+        "idempotency",
+        "$.expected.idempotency_record_count",
+        bundle.expected.idempotency_record_count,
+        actual_expected.idempotency_record_count,
         &mut diffs,
     );
 
@@ -833,14 +877,64 @@ fn extract_decision_records(
         .collect()
 }
 
+fn normalize_lifecycle_transitions(
+    transitions: Vec<RunLifecycleTransitionRecord>,
+    normalizer: &mut ReplayNormalizer,
+) -> Result<Vec<RunLifecycleTransitionRecord>> {
+    let mut normalized: Vec<RunLifecycleTransitionRecord> = Vec::with_capacity(transitions.len());
+    for (index, transition) in transitions.into_iter().enumerate() {
+        let mut value = serde_json::to_value(&transition)
+            .context("failed to encode lifecycle transition for replay normalization")?;
+        normalizer.normalize_value(
+            &mut value,
+            format!("$.lifecycle_transitions[{index}]").as_str(),
+            Some("run_lifecycle_transition"),
+        );
+        normalized.push(
+            serde_json::from_value(value)
+                .context("failed to decode normalized lifecycle transition")?,
+        );
+    }
+    normalized.sort_by(|left, right| {
+        left.occurred_at_unix_ms
+            .cmp(&right.occurred_at_unix_ms)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+    Ok(normalized)
+}
+
+fn normalize_idempotency_records(
+    records: Vec<IdempotencyRecordSnapshot>,
+    normalizer: &mut ReplayNormalizer,
+) -> Result<Vec<IdempotencyRecordSnapshot>> {
+    let mut normalized: Vec<IdempotencyRecordSnapshot> = Vec::with_capacity(records.len());
+    for (index, record) in records.into_iter().enumerate() {
+        let mut value = serde_json::to_value(&record)
+            .context("failed to encode idempotency record for replay normalization")?;
+        normalizer.normalize_value(
+            &mut value,
+            format!("$.idempotency_records[{index}]").as_str(),
+            Some("idempotency_record"),
+        );
+        normalized.push(
+            serde_json::from_value(value)
+                .context("failed to decode normalized idempotency record")?,
+        );
+    }
+    normalized.sort_by(|left, right| {
+        left.first_seen_at_unix_ms
+            .cmp(&right.first_seen_at_unix_ms)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    Ok(normalized)
+}
+
 fn expected_outputs_from_capture(
     tape_events: &[ReplayTapeEvent],
     tool_exchanges: &[ReplayToolExchange],
     approvals: &[ReplayApprovalExchange],
     http_exchanges: &[ReplayHttpExchange],
-    artifact_ref_count: usize,
-    auxiliary_task_count: usize,
-    flow_event_count: usize,
+    counts: ReplayCaptureCounts,
 ) -> ReplayExpectedOutputs {
     let final_answer = tape_events
         .iter()
@@ -862,9 +956,11 @@ fn expected_outputs_from_capture(
             .filter_map(expected_approval_decision)
             .collect::<Vec<_>>(),
         http_exchange_count: http_exchanges.len(),
-        auxiliary_task_count,
-        flow_event_count,
-        artifact_ref_count,
+        auxiliary_task_count: counts.auxiliary_tasks,
+        flow_event_count: counts.flow_events,
+        lifecycle_transition_count: counts.lifecycle_transitions,
+        idempotency_record_count: counts.idempotency_records,
+        artifact_ref_count: counts.artifact_refs,
     }
 }
 
@@ -1242,6 +1338,8 @@ mod tests {
                     payload: json!({ "token": "done", "is_final": true }),
                 },
             ],
+            lifecycle_transitions: Vec::new(),
+            idempotency_records: Vec::new(),
             artifact_refs: Vec::new(),
         }
     }

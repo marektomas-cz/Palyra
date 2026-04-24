@@ -3,12 +3,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+use palyra_common::{
+    redaction::{is_sensitive_key, redact_auth_error, redact_url_segments_in_text, REDACTED},
+    runtime_contracts::{
+        ArtifactRetentionPolicy, ToolResultSensitivity, ToolResultVisibility, ToolTurnBudget,
+    },
+};
+use serde_json::{json, Map, Value};
 use tokio::{
     sync::mpsc,
     time::{interval, timeout, MissedTickBehavior},
 };
 use tonic::{Status, Streaming};
 use tracing::info;
+use ulid::Ulid;
 
 use crate::{
     application::approvals::{
@@ -29,9 +37,9 @@ use crate::{
         GatewayRuntimeState, RunStreamToolExecutionOutcome, ToolApprovalOutcome,
         ToolRuntimeExecutionContext, TOOL_APPROVAL_RESPONSE_TIMEOUT,
     },
-    journal::{ApprovalCreateRequest, ApprovalResolveRequest},
+    journal::{ApprovalCreateRequest, ApprovalResolveRequest, ToolResultArtifactCreateRequest},
     orchestrator::RunStateMachine,
-    tool_protocol::denied_execution_outcome,
+    tool_protocol::{denied_execution_outcome, tool_metadata, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
 };
 
@@ -527,6 +535,22 @@ async fn execute_run_stream_tool_proposal(
     } else {
         denied_execution_outcome(proposal_id, tool_name, input_json, decision.reason.as_str())
     };
+    let execution_outcome = project_tool_result_for_model(
+        runtime_state,
+        ToolRuntimeExecutionContext {
+            principal: request_context.principal.as_str(),
+            device_id: request_context.device_id.as_str(),
+            channel: request_context.channel.as_deref(),
+            session_id: resolved_session_id,
+            run_id,
+            execution_backend: backend_selection.resolution.resolved,
+            backend_reason_code: backend_selection.resolution.reason_code.as_str(),
+        },
+        proposal_id,
+        tool_name,
+        execution_outcome,
+    )
+    .await?;
 
     send_tool_result_with_tape(
         sender,
@@ -574,4 +598,151 @@ async fn execute_run_stream_tool_proposal(
     )
     .await;
     Ok(RunStreamToolExecutionOutcome::Completed)
+}
+
+async fn project_tool_result_for_model(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    proposal_id: &str,
+    tool_name: &str,
+    outcome: ToolExecutionOutcome,
+) -> Result<ToolExecutionOutcome, Status> {
+    if !outcome.success {
+        return Ok(outcome);
+    }
+
+    let budget = ToolTurnBudget::default();
+    let metadata = tool_metadata(tool_name);
+    let default_sensitive = metadata.is_some_and(|metadata| metadata.default_sensitive);
+    let should_spill =
+        default_sensitive || outcome.output_json.len() > budget.max_model_inline_bytes;
+    if !should_spill {
+        return Ok(outcome);
+    }
+
+    let sensitivity = tool_result_sensitivity(tool_name, default_sensitive);
+    let preview = redacted_tool_result_preview(
+        outcome.output_json.as_slice(),
+        budget.max_artifact_preview_bytes,
+    );
+    let artifact = runtime_state
+        .create_tool_result_artifact(ToolResultArtifactCreateRequest {
+            artifact_id: Ulid::new().to_string(),
+            session_id: context.session_id.to_owned(),
+            run_id: context.run_id.to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            tool_name: tool_name.to_owned(),
+            mime_type: "application/json".to_owned(),
+            sensitivity,
+            retention: ArtifactRetentionPolicy::keep(),
+            redacted_preview: preview.clone(),
+            content: outcome.output_json.clone(),
+        })
+        .await?;
+
+    let summary = summarize_tool_result_for_model(
+        outcome.output_json.as_slice(),
+        budget.max_model_summary_bytes,
+    );
+    let visibility = if default_sensitive {
+        ToolResultVisibility::RedactedPreview
+    } else {
+        ToolResultVisibility::ModelSummary
+    };
+    let saved_model_visible_bytes =
+        outcome.output_json.len().saturating_sub(summary.len()).try_into().unwrap_or(u64::MAX);
+    let projected = json!({
+        "schema_version": 1,
+        "visibility": visibility.as_str(),
+        "summary": summary,
+        "redacted_preview": preview,
+        "artifact": artifact,
+        "budget": {
+            "max_model_inline_bytes": budget.max_model_inline_bytes,
+            "max_model_summary_bytes": budget.max_model_summary_bytes,
+            "max_artifact_preview_bytes": budget.max_artifact_preview_bytes,
+        },
+        "metrics": {
+            "spilled_artifacts": 1,
+            "saved_model_visible_bytes": saved_model_visible_bytes,
+        }
+    });
+    let mut projected_outcome = outcome;
+    projected_outcome.output_json = serde_json::to_vec(&projected).map_err(|error| {
+        Status::internal(format!("failed to serialize projected tool result: {error}"))
+    })?;
+    Ok(projected_outcome)
+}
+
+fn tool_result_sensitivity(tool_name: &str, default_sensitive: bool) -> ToolResultSensitivity {
+    if tool_name == crate::gateway::PROCESS_RUNNER_TOOL_NAME {
+        ToolResultSensitivity::StdoutStderr
+    } else if tool_name == crate::gateway::HTTP_FETCH_TOOL_NAME
+        || tool_name.starts_with("palyra.browser.")
+        || tool_name == "palyra.plugin.run"
+    {
+        ToolResultSensitivity::ProviderRawPayload
+    } else if tool_name == crate::gateway::WORKSPACE_PATCH_TOOL_NAME {
+        ToolResultSensitivity::InternalPath
+    } else if default_sensitive {
+        ToolResultSensitivity::ApprovalRiskData
+    } else {
+        ToolResultSensitivity::Public
+    }
+}
+
+fn summarize_tool_result_for_model(output_json: &[u8], max_bytes: usize) -> String {
+    let preview = redacted_tool_result_preview(output_json, max_bytes);
+    if preview.len() <= max_bytes {
+        preview
+    } else {
+        truncate_utf8(preview.as_str(), max_bytes)
+    }
+}
+
+fn redacted_tool_result_preview(output_json: &[u8], max_bytes: usize) -> String {
+    let redacted = serde_json::from_slice::<Value>(output_json)
+        .map(|mut value| {
+            redact_sensitive_json_value(&mut value);
+            serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.to_owned())
+        })
+        .unwrap_or_else(|_| String::from_utf8_lossy(output_json).to_string());
+    let redacted = redact_auth_error(redact_url_segments_in_text(redacted.as_str()).as_str());
+    truncate_utf8(redacted.as_str(), max_bytes)
+}
+
+fn redact_sensitive_json_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => redact_sensitive_json_object(map),
+        Value::Array(values) => {
+            for value in values {
+                redact_sensitive_json_value(value);
+            }
+        }
+        Value::String(text) => {
+            *text = redact_auth_error(redact_url_segments_in_text(text).as_str());
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn redact_sensitive_json_object(map: &mut Map<String, Value>) {
+    for (key, value) in map.iter_mut() {
+        if is_sensitive_key(key.as_str()) {
+            *value = Value::String(REDACTED.to_owned());
+        } else {
+            redact_sensitive_json_value(value);
+        }
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    value
+        .char_indices()
+        .take_while(|(index, ch)| index.saturating_add(ch.len_utf8()) <= max_bytes)
+        .map(|(_, ch)| ch)
+        .collect()
 }

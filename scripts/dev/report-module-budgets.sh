@@ -27,7 +27,9 @@ declare -a warn_files=()
 declare -a critical_files=()
 declare -a large_entrypoints=()
 declare -a touched_budget_regressions=()
+declare -a allowlisted_touched_budget_regressions=()
 declare -a touched_entrypoint_regressions=()
+declare -a allowlisted_touched_entrypoint_regressions=()
 declare -a new_oversized_files=()
 declare -A discord_counts=(
   ["apps"]=0
@@ -187,13 +189,23 @@ while IFS= read -r path; do
   fi
 
   if (( delta > 0 && current_lines >= warn_threshold )); then
-    touched_budget_regressions+=("$(format_regression_row "${delta}" "${previous_lines}" "${current_lines}" "${path}")")
+    regression_row="$(format_regression_row "${delta}" "${previous_lines}" "${current_lines}" "${path}")"
+    if is_allowlisted "${path}"; then
+      allowlisted_touched_budget_regressions+=("${regression_row}")
+    else
+      touched_budget_regressions+=("${regression_row}")
+    fi
   fi
 
   case "${path}" in
     */main.rs|*/lib.rs)
       if (( delta > 0 && current_lines >= entrypoint_threshold )); then
-        touched_entrypoint_regressions+=("$(format_regression_row "${delta}" "${previous_lines}" "${current_lines}" "${path}")")
+        regression_row="$(format_regression_row "${delta}" "${previous_lines}" "${current_lines}" "${path}")"
+        if is_allowlisted "${path}"; then
+          allowlisted_touched_entrypoint_regressions+=("${regression_row}")
+        else
+          touched_entrypoint_regressions+=("${regression_row}")
+        fi
       fi
       ;;
   esac
@@ -232,7 +244,7 @@ else
 fi
 echo
 
-echo "Touched files that grew while already over budget:"
+echo "Touched files that grew while already over budget (not allowlisted):"
 if (( ${#touched_budget_regressions[@]} == 0 )); then
   echo "  none"
 else
@@ -240,11 +252,27 @@ else
 fi
 echo
 
-echo "Touched entrypoints that grew while already over budget:"
+echo "Allowlisted touched files that grew while already over budget:"
+if (( ${#allowlisted_touched_budget_regressions[@]} == 0 )); then
+  echo "  none"
+else
+  printf '%s\n' "${allowlisted_touched_budget_regressions[@]}" | sort -nr | sed 's/^/  /'
+fi
+echo
+
+echo "Touched entrypoints that grew while already over budget (not allowlisted):"
 if (( ${#touched_entrypoint_regressions[@]} == 0 )); then
   echo "  none"
 else
   printf '%s\n' "${touched_entrypoint_regressions[@]}" | sort -nr | sed 's/^/  /'
+fi
+echo
+
+echo "Allowlisted touched entrypoints that grew while already over budget:"
+if (( ${#allowlisted_touched_entrypoint_regressions[@]} == 0 )); then
+  echo "  none"
+else
+  printf '%s\n' "${allowlisted_touched_entrypoint_regressions[@]}" | sort -nr | sed 's/^/  /'
 fi
 echo
 

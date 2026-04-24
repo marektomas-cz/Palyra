@@ -7,7 +7,8 @@ use crate::agents::{
 use crate::application::auth::map_auth_profile_error;
 use crate::journal::{
     FlowBundleRecord, FlowCreateRequest, FlowListFilter, FlowRecord, FlowStepRecord,
-    FlowStepUpdateRequest, FlowTransitionRequest, LearningCandidateCreateRequest,
+    FlowStepUpdateRequest, FlowTransitionRequest, IdempotencyBeginRequest,
+    IdempotencyCompleteRequest, IdempotencyFailRequest, LearningCandidateCreateRequest,
     LearningCandidateHistoryRecord, LearningCandidateListFilter, LearningCandidateRecord,
     LearningCandidateReviewRequest, LearningPreferenceListFilter, LearningPreferenceRecord,
     LearningPreferenceUpsertRequest, MemoryEmbeddingsStatus, MemoryItemRecord,
@@ -27,8 +28,9 @@ use crate::journal::{
     RecallArtifactListFilter, RecallArtifactRecord, RetrievalBranchDiagnostics,
     SessionProjectContextStateCopyRequest, SessionProjectContextStateRecord,
     SessionProjectContextStateUpsertRequest, SessionSearchOutcome, SessionSearchRequest,
-    WorkspaceBootstrapOutcome, WorkspaceBootstrapRequest, WorkspaceCheckpointCreateRequest,
-    WorkspaceCheckpointFilePayload, WorkspaceCheckpointFileRecord, WorkspaceCheckpointListFilter,
+    ToolResultArtifactCreateRequest, ToolResultArtifactReadRequest, WorkspaceBootstrapOutcome,
+    WorkspaceBootstrapRequest, WorkspaceCheckpointCreateRequest, WorkspaceCheckpointFilePayload,
+    WorkspaceCheckpointFileRecord, WorkspaceCheckpointListFilter,
     WorkspaceCheckpointPairLinkRequest, WorkspaceCheckpointRecord,
     WorkspaceCheckpointRestoreMarkRequest, WorkspaceDocumentDeleteRequest,
     WorkspaceDocumentListFilter, WorkspaceDocumentMoveRequest, WorkspaceDocumentRecord,
@@ -60,6 +62,10 @@ use crate::tool_posture::{
 use crate::usage_governance::SmartRoutingRuntimeConfig;
 use palyra_auth::AuthHealthReport;
 use palyra_common::replay_bundle::ReplayBundle;
+use palyra_common::runtime_contracts::{
+    ArtifactReadResponse, IdempotencyReplayDecision, RunLifecyclePhase, StableErrorEnvelope,
+    ToolResultArtifactRef,
+};
 use palyra_common::runtime_preview::{
     RuntimeDecisionActor, RuntimeDecisionActorKind, RuntimeDecisionPayload,
 };
@@ -121,6 +127,20 @@ pub struct ListPrincipalOrchestratorSessionsRequest {
     pub include_archived: bool,
     pub requested_limit: Option<usize>,
     pub search_query: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorRunWaitRequest {
+    pub run_id: String,
+    pub timeout: Duration,
+    pub poll_interval: Duration,
+    pub return_on_waiting: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestratorRunWaitOutcome {
+    pub snapshot: OrchestratorRunStatusSnapshot,
+    pub canonical_state: RunLifecyclePhase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -418,6 +438,7 @@ pub struct GatewayRuntimeState {
     pub(crate) tool_posture_registry: ToolPostureRegistry,
     pub(crate) routines_runtime: RwLock<Option<RoutinesRuntimeConfig>>,
     pub(crate) vault_rate_limit: Mutex<HashMap<String, VaultRateLimitEntry>>,
+    pub(crate) orchestrator_run_notify: Arc<Notify>,
     canvas_records: Mutex<HashMap<String, CanvasRecord>>,
     canvas_signing_secret: [u8; 32],
     agent_registry: AgentRegistry,
@@ -1025,6 +1046,44 @@ fn elapsed_millis(started_at: Instant) -> u64 {
     u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+fn orchestrator_run_start_payload_sha256(
+    request: &OrchestratorRunStartRequest,
+) -> Result<String, Status> {
+    let payload = json!({
+        "run_id": request.run_id,
+        "session_id": request.session_id,
+        "origin_kind": request.origin_kind,
+        "origin_run_id": request.origin_run_id,
+        "triggered_by_principal": request.triggered_by_principal,
+        "parameter_delta_json": request.parameter_delta_json,
+    });
+    let encoded = serde_json::to_vec(&payload).map_err(|error| {
+        Status::internal(format!("failed to encode run start payload: {error}"))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(encoded.as_slice());
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn stable_error_from_journal(code: &str, error: &JournalError) -> StableErrorEnvelope {
+    StableErrorEnvelope::new(
+        code,
+        error.to_string(),
+        "inspect the journal error and retry only after the underlying state is corrected",
+    )
+}
+
+fn canonical_phase_from_snapshot(
+    snapshot: &OrchestratorRunStatusSnapshot,
+) -> Result<RunLifecyclePhase, Status> {
+    RunLifecyclePhase::parse(snapshot.state.as_str()).ok_or_else(|| {
+        Status::failed_precondition(format!(
+            "orchestrator run {} has unknown lifecycle state {}",
+            snapshot.run_id, snapshot.state
+        ))
+    })
+}
+
 impl GatewayRuntimeState {
     fn cached_memory_search_expires_at(hits: &[MemorySearchHit]) -> Option<i64> {
         hits.iter().filter_map(|hit| hit.item.ttl_unix_ms).min()
@@ -1213,6 +1272,7 @@ impl GatewayRuntimeState {
             tool_posture_registry,
             routines_runtime: RwLock::new(None),
             vault_rate_limit: Mutex::new(HashMap::new()),
+            orchestrator_run_notify: Arc::new(Notify::new()),
             canvas_records: Mutex::new(recovered_canvas_records),
             canvas_signing_secret: generate_canvas_signing_secret(),
             agent_registry,
@@ -3479,10 +3539,59 @@ impl GatewayRuntimeState {
     fn start_orchestrator_run_blocking(
         &self,
         request: &OrchestratorRunStartRequest,
-    ) -> Result<(), Status> {
-        self.journal_store
-            .start_orchestrator_run(request)
-            .map_err(|error| map_orchestrator_store_error("start orchestrator run", error))
+    ) -> Result<bool, Status> {
+        let idempotency_key = format!("run:start:{}", request.run_id);
+        let payload_sha256 = orchestrator_run_start_payload_sha256(request)?;
+        let begin = self
+            .journal_store
+            .begin_idempotency_operation(&IdempotencyBeginRequest {
+                key: idempotency_key.clone(),
+                scope: "orchestrator_run".to_owned(),
+                operation_kind: "start_orchestrator_run".to_owned(),
+                payload_sha256,
+                expires_at_unix_ms: Some(
+                    current_unix_ms().saturating_add(24_i64 * 60 * 60 * 1_000),
+                ),
+            })
+            .map_err(|error| map_orchestrator_store_error("begin idempotent run start", error))?;
+
+        match begin.decision {
+            IdempotencyReplayDecision::CompletedReplayResult => return Ok(false),
+            IdempotencyReplayDecision::ConflictingPayload => {
+                return Err(Status::already_exists(format!(
+                    "conflicting idempotent start request for run {}",
+                    request.run_id
+                )));
+            }
+            IdempotencyReplayDecision::SamePayloadRetry
+            | IdempotencyReplayDecision::Reserved
+            | IdempotencyReplayDecision::ExpiredRetry => {}
+        }
+
+        match self.journal_store.start_orchestrator_run(request) {
+            Ok(()) => {
+                self.complete_run_start_idempotency(idempotency_key.as_str(), request)?;
+                Ok(true)
+            }
+            Err(JournalError::DuplicateRunId { .. })
+                if matches!(
+                    begin.decision,
+                    IdempotencyReplayDecision::SamePayloadRetry
+                        | IdempotencyReplayDecision::Reserved
+                        | IdempotencyReplayDecision::ExpiredRetry
+                ) =>
+            {
+                self.complete_run_start_idempotency(idempotency_key.as_str(), request)?;
+                Ok(false)
+            }
+            Err(error) => {
+                let _ = self.journal_store.fail_idempotency_operation(&IdempotencyFailRequest {
+                    key: idempotency_key,
+                    error: stable_error_from_journal("run_start_failed", &error),
+                });
+                Err(map_orchestrator_store_error("start orchestrator run", error))
+            }
+        }
     }
 
     #[allow(clippy::result_large_err)]
@@ -3491,11 +3600,35 @@ impl GatewayRuntimeState {
         request: OrchestratorRunStartRequest,
     ) -> Result<(), Status> {
         let state = Arc::clone(self);
-        tokio::task::spawn_blocking(move || state.start_orchestrator_run_blocking(&request))
-            .await
-            .map_err(|_| Status::internal("orchestrator run worker panicked"))??;
-        self.counters.orchestrator_runs_started.fetch_add(1, Ordering::Relaxed);
+        let inserted =
+            tokio::task::spawn_blocking(move || state.start_orchestrator_run_blocking(&request))
+                .await
+                .map_err(|_| Status::internal("orchestrator run worker panicked"))??;
+        if inserted {
+            self.counters.orchestrator_runs_started.fetch_add(1, Ordering::Relaxed);
+        }
+        self.orchestrator_run_notify.notify_waiters();
         Ok(())
+    }
+
+    fn complete_run_start_idempotency(
+        &self,
+        idempotency_key: &str,
+        request: &OrchestratorRunStartRequest,
+    ) -> Result<(), Status> {
+        let result_json = json!({
+            "run_id": request.run_id,
+            "session_id": request.session_id,
+            "state": RunLifecyclePhase::Queued.as_str(),
+        })
+        .to_string();
+        self.journal_store
+            .complete_idempotency_operation(&IdempotencyCompleteRequest {
+                key: idempotency_key.to_owned(),
+                result_json,
+            })
+            .map(|_| ())
+            .map_err(|error| map_orchestrator_store_error("complete idempotent run start", error))
     }
 
     #[allow(clippy::result_large_err)]
@@ -3556,6 +3689,7 @@ impl GatewayRuntimeState {
         } else if state == RunLifecycleState::Cancelled {
             self.counters.orchestrator_runs_cancelled.fetch_add(1, Ordering::Relaxed);
         }
+        self.orchestrator_run_notify.notify_waiters();
         Ok(())
     }
 
@@ -3885,6 +4019,80 @@ impl GatewayRuntimeState {
         })
         .await
         .map_err(|_| Status::internal("orchestrator snapshot worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn wait_for_orchestrator_run(
+        self: &Arc<Self>,
+        request: OrchestratorRunWaitRequest,
+    ) -> Result<OrchestratorRunWaitOutcome, Status> {
+        let poll_interval = request.poll_interval.max(Duration::from_millis(25));
+        let wait = async {
+            loop {
+                let snapshot = self
+                    .orchestrator_run_status_snapshot(request.run_id.clone())
+                    .await?
+                    .ok_or_else(|| {
+                        Status::not_found(format!("orchestrator run not found: {}", request.run_id))
+                    })?;
+                let canonical_state = canonical_phase_from_snapshot(&snapshot)?;
+                if canonical_state.is_terminal()
+                    || (request.return_on_waiting && canonical_state.is_waiting())
+                {
+                    return Ok(OrchestratorRunWaitOutcome { snapshot, canonical_state });
+                }
+                let notified = self.orchestrator_run_notify.notified();
+                let _ = tokio::time::timeout(poll_interval, notified).await;
+            }
+        };
+        tokio::time::timeout(request.timeout, wait).await.map_err(|_| {
+            Status::deadline_exceeded(format!(
+                "timed out waiting for orchestrator run {}",
+                request.run_id
+            ))
+        })?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn create_tool_result_artifact_blocking(
+        &self,
+        request: &ToolResultArtifactCreateRequest,
+    ) -> Result<ToolResultArtifactRef, Status> {
+        self.journal_store
+            .create_tool_result_artifact(request)
+            .map_err(|error| map_orchestrator_store_error("create tool result artifact", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn create_tool_result_artifact(
+        self: &Arc<Self>,
+        request: ToolResultArtifactCreateRequest,
+    ) -> Result<ToolResultArtifactRef, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.create_tool_result_artifact_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("tool result artifact create worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn read_tool_result_artifact_blocking(
+        &self,
+        request: &ToolResultArtifactReadRequest,
+    ) -> Result<ArtifactReadResponse, Status> {
+        self.journal_store
+            .read_tool_result_artifact(request)
+            .map_err(|error| map_orchestrator_store_error("read tool result artifact", error))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn read_tool_result_artifact(
+        self: &Arc<Self>,
+        request: ToolResultArtifactReadRequest,
+    ) -> Result<ArtifactReadResponse, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || state.read_tool_result_artifact_blocking(&request))
+            .await
+            .map_err(|_| Status::internal("tool result artifact read worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

@@ -10,6 +10,12 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use palyra_a2ui::{apply_patch_document, parse_patch_document};
+use palyra_common::runtime_contracts::{
+    ArtifactReadResponse, ArtifactRetentionPolicy, IdempotencyOperationState,
+    IdempotencyRecordSnapshot, IdempotencyReplayDecision, RunLifecyclePhase,
+    RunLifecycleTransitionRecord, RuntimeActorKind, RuntimeActorRef, StableErrorEnvelope,
+    ToolResultArtifactRef, ToolResultSensitivity, ToolResultVisibility,
+};
 use rusqlite::{params, params_from_iter, Connection, ErrorCode, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1468,6 +1474,76 @@ pub struct OrchestratorRunStatusSnapshot {
     pub tape_events: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunLifecycleEventAppendRequest {
+    pub event_id: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub from_state: Option<RunLifecyclePhase>,
+    pub to_state: RunLifecyclePhase,
+    pub actor: RuntimeActorRef,
+    pub correlation_id: String,
+    pub parent_run_id: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub reason: String,
+    pub payload_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyBeginRequest {
+    pub key: String,
+    pub scope: String,
+    pub operation_kind: String,
+    pub payload_sha256: String,
+    pub expires_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyCompleteRequest {
+    pub key: String,
+    pub result_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyFailRequest {
+    pub key: String,
+    pub error: StableErrorEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyBeginOutcome {
+    pub decision: IdempotencyReplayDecision,
+    pub record: Option<IdempotencyRecordSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultArtifactCreateRequest {
+    pub artifact_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub proposal_id: String,
+    pub tool_name: String,
+    pub mime_type: String,
+    pub sensitivity: ToolResultSensitivity,
+    pub retention: ArtifactRetentionPolicy,
+    pub redacted_preview: String,
+    pub content: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultArtifactReadRequest {
+    pub artifact_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub principal: String,
+    pub device_id: String,
+    pub channel: Option<String>,
+    pub expected_digest_sha256: Option<String>,
+    pub offset_bytes: u64,
+    pub max_bytes: usize,
+    pub text_preview: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OrchestratorRunMetadataUpdateRequest {
     pub run_id: String,
@@ -2837,6 +2913,16 @@ pub enum JournalError {
     DuplicateMemoryId { memory_id: String },
     #[error("recall artifact already exists: {artifact_id}")]
     DuplicateRecallArtifactId { artifact_id: String },
+    #[error("tool result artifact already exists: {artifact_id}")]
+    DuplicateToolResultArtifactId { artifact_id: String },
+    #[error("tool result artifact not found: {artifact_id}")]
+    ToolResultArtifactNotFound { artifact_id: String },
+    #[error("tool result artifact digest mismatch for {artifact_id}")]
+    ToolResultArtifactDigestMismatch { artifact_id: String },
+    #[error("tool result artifact scope mismatch for {artifact_id}")]
+    ToolResultArtifactScopeMismatch { artifact_id: String },
+    #[error("tool result artifact is not readable: {artifact_id}: {reason}")]
+    ToolResultArtifactReadDenied { artifact_id: String, reason: String },
     #[error("canvas state already exists for canvas {canvas_id} at version {state_version}")]
     DuplicateCanvasStateVersion { canvas_id: String, state_version: u64 },
     #[error("cron job not found: {job_id}")]
@@ -4195,6 +4281,117 @@ const MIGRATIONS: &[Migration] = &[
             END;
         "#,
     },
+    Migration {
+        version: 30,
+        name: "phase_one_runtime_invariants",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS run_lifecycle_events (
+                event_ulid TEXT PRIMARY KEY,
+                run_ulid TEXT NOT NULL,
+                session_ulid TEXT NOT NULL,
+                from_state TEXT,
+                to_state TEXT NOT NULL,
+                actor_kind TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                correlation_id TEXT NOT NULL,
+                parent_run_ulid TEXT,
+                idempotency_key TEXT,
+                reason TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(run_ulid) REFERENCES orchestrator_runs(run_ulid),
+                FOREIGN KEY(session_ulid) REFERENCES orchestrator_sessions(session_ulid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_lifecycle_events_run_time
+                ON run_lifecycle_events(run_ulid, created_at_unix_ms ASC);
+            CREATE INDEX IF NOT EXISTS idx_run_lifecycle_events_correlation
+                ON run_lifecycle_events(correlation_id, created_at_unix_ms ASC);
+            CREATE TRIGGER IF NOT EXISTS trg_run_lifecycle_events_prevent_update
+            BEFORE UPDATE ON run_lifecycle_events
+            BEGIN
+                SELECT RAISE(ABORT, 'run_lifecycle_events is append-only');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_run_lifecycle_events_prevent_delete
+            BEFORE DELETE ON run_lifecycle_events
+            BEGIN
+                SELECT RAISE(ABORT, 'run_lifecycle_events is append-only');
+            END;
+
+            CREATE TABLE IF NOT EXISTS idempotency_records (
+                idempotency_key TEXT PRIMARY KEY,
+                scope TEXT NOT NULL,
+                operation_kind TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL,
+                result_json TEXT,
+                error_json TEXT,
+                first_seen_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                expires_at_unix_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_idempotency_records_scope
+                ON idempotency_records(scope, operation_kind, updated_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_idempotency_records_state
+                ON idempotency_records(state, updated_at_unix_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS tool_result_artifacts (
+                artifact_ulid TEXT PRIMARY KEY,
+                session_ulid TEXT NOT NULL,
+                run_ulid TEXT NOT NULL,
+                proposal_ulid TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                digest_sha256 TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                sensitivity TEXT NOT NULL,
+                retention_json TEXT NOT NULL,
+                storage_backend TEXT NOT NULL,
+                content_bytes BLOB NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                redacted_preview TEXT NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL,
+                expires_at_unix_ms INTEGER,
+                legal_hold INTEGER NOT NULL DEFAULT 0,
+                purge_requested INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(session_ulid) REFERENCES orchestrator_sessions(session_ulid),
+                FOREIGN KEY(run_ulid) REFERENCES orchestrator_runs(run_ulid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_result_artifacts_run
+                ON tool_result_artifacts(run_ulid, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_tool_result_artifacts_session
+                ON tool_result_artifacts(session_ulid, created_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_tool_result_artifacts_expiry
+                ON tool_result_artifacts(expires_at_unix_ms, legal_hold, purge_requested);
+
+            CREATE TABLE IF NOT EXISTS tool_result_artifact_reads (
+                read_ulid TEXT PRIMARY KEY,
+                artifact_ulid TEXT NOT NULL,
+                session_ulid TEXT NOT NULL,
+                run_ulid TEXT NOT NULL,
+                principal TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                channel TEXT,
+                offset_bytes INTEGER NOT NULL,
+                requested_bytes INTEGER NOT NULL,
+                returned_bytes INTEGER NOT NULL,
+                denied INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(artifact_ulid) REFERENCES tool_result_artifacts(artifact_ulid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_result_artifact_reads_artifact
+                ON tool_result_artifact_reads(artifact_ulid, created_at_unix_ms DESC);
+            CREATE TRIGGER IF NOT EXISTS trg_tool_result_artifact_reads_prevent_update
+            BEFORE UPDATE ON tool_result_artifact_reads
+            BEGIN
+                SELECT RAISE(ABORT, 'tool_result_artifact_reads is append-only');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_tool_result_artifact_reads_prevent_delete
+            BEFORE DELETE ON tool_result_artifact_reads
+            BEGIN
+                SELECT RAISE(ABORT, 'tool_result_artifact_reads is append-only');
+            END;
+        "#,
+    },
 ];
 
 fn serialize_json_field<T: Serialize>(
@@ -4218,6 +4415,298 @@ fn parse_optional_json_column<T: DeserializeOwned>(
             Box::new(std::io::Error::other(format!("failed to decode {field}: {error}"))),
         )
     })
+}
+
+fn canonical_run_lifecycle_phase(state: RunLifecycleState) -> RunLifecyclePhase {
+    match state {
+        RunLifecycleState::Pending | RunLifecycleState::Accepted => RunLifecyclePhase::Queued,
+        RunLifecycleState::InProgress => RunLifecyclePhase::Running,
+        RunLifecycleState::Done => RunLifecyclePhase::Completed,
+        RunLifecycleState::Failed => RunLifecyclePhase::Failed,
+        RunLifecycleState::Cancelled => RunLifecyclePhase::Aborted,
+    }
+}
+
+fn append_run_lifecycle_event_tx(
+    connection: &Connection,
+    request: &RunLifecycleEventAppendRequest,
+    now: i64,
+) -> Result<(), JournalError> {
+    let (payload_json, _) = sanitize_payload(request.payload_json.as_bytes())?;
+    connection.execute(
+        r#"
+            INSERT INTO run_lifecycle_events (
+                event_ulid,
+                run_ulid,
+                session_ulid,
+                from_state,
+                to_state,
+                actor_kind,
+                actor_id,
+                correlation_id,
+                parent_run_ulid,
+                idempotency_key,
+                reason,
+                payload_json,
+                created_at_unix_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#,
+        params![
+            request.event_id,
+            request.run_id,
+            request.session_id,
+            request.from_state.map(RunLifecyclePhase::as_str),
+            request.to_state.as_str(),
+            request.actor.kind.as_str(),
+            request.actor.id,
+            request.correlation_id,
+            request.parent_run_id,
+            request.idempotency_key,
+            request.reason,
+            payload_json,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn hydrate_run_lifecycle_record(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RunLifecycleTransitionRecord> {
+    let from_state: Option<String> = row.get(3)?;
+    let to_state: String = row.get(4)?;
+    let actor_kind: String = row.get(5)?;
+    Ok(RunLifecycleTransitionRecord {
+        schema_version: 1,
+        event_id: row.get(0)?,
+        run_id: row.get(1)?,
+        session_id: row.get(2)?,
+        from_state: from_state.as_deref().and_then(RunLifecyclePhase::parse),
+        to_state: RunLifecyclePhase::parse(to_state.as_str()).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(format!("unknown run lifecycle state: {to_state}"))),
+            )
+        })?,
+        actor: RuntimeActorRef {
+            kind: RuntimeActorKind::parse(actor_kind.as_str()).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(format!(
+                        "unknown runtime actor kind: {actor_kind}"
+                    ))),
+                )
+            })?,
+            id: row.get(6)?,
+        },
+        correlation_id: row.get(7)?,
+        parent_run_id: row.get(8)?,
+        idempotency_key: row.get(9)?,
+        reason: row.get(10)?,
+        occurred_at_unix_ms: row.get(11)?,
+    })
+}
+
+fn load_idempotency_record(
+    connection: &Connection,
+    key: &str,
+) -> Result<Option<IdempotencyRecordSnapshot>, JournalError> {
+    connection
+        .query_row(
+            r#"
+                SELECT
+                    idempotency_key,
+                    scope,
+                    operation_kind,
+                    payload_sha256,
+                    state,
+                    result_json,
+                    error_json,
+                    first_seen_at_unix_ms,
+                    updated_at_unix_ms,
+                    expires_at_unix_ms
+                FROM idempotency_records
+                WHERE idempotency_key = ?1
+            "#,
+            params![key],
+            hydrate_idempotency_record,
+        )
+        .optional()
+        .map_err(JournalError::from)
+}
+
+fn hydrate_idempotency_record(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<IdempotencyRecordSnapshot> {
+    let raw_state: String = row.get(4)?;
+    let raw_error: Option<String> = row.get(6)?;
+    Ok(IdempotencyRecordSnapshot {
+        key: row.get(0)?,
+        scope: row.get(1)?,
+        operation_kind: row.get(2)?,
+        payload_sha256: row.get(3)?,
+        state: IdempotencyOperationState::parse(raw_state.as_str()).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(format!("unknown idempotency state: {raw_state}"))),
+            )
+        })?,
+        result_json: row.get(5)?,
+        error: raw_error
+            .as_deref()
+            .map(serde_json::from_str::<StableErrorEnvelope>)
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        first_seen_at_unix_ms: row.get(7)?,
+        updated_at_unix_ms: row.get(8)?,
+        expires_at_unix_ms: row.get(9)?,
+    })
+}
+
+fn load_tool_result_artifact(
+    connection: &Connection,
+    artifact_id: &str,
+) -> Result<Option<StoredToolResultArtifact>, JournalError> {
+    connection
+        .query_row(
+            r#"
+                SELECT
+                    artifact_ulid,
+                    digest_sha256,
+                    mime_type,
+                    size_bytes,
+                    sensitivity,
+                    retention_json,
+                    proposal_ulid,
+                    tool_name,
+                    run_ulid,
+                    session_ulid,
+                    storage_backend,
+                    redacted_preview,
+                    created_at_unix_ms,
+                    content_bytes,
+                    expires_at_unix_ms,
+                    legal_hold,
+                    purge_requested
+                FROM tool_result_artifacts
+                WHERE artifact_ulid = ?1
+            "#,
+            params![artifact_id],
+            hydrate_tool_result_artifact,
+        )
+        .optional()
+        .map_err(JournalError::from)
+}
+
+fn hydrate_tool_result_artifact(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredToolResultArtifact> {
+    let raw_sensitivity: String = row.get(4)?;
+    let raw_retention: String = row.get(5)?;
+    let size_bytes: i64 = row.get(3)?;
+    let content: Vec<u8> = row.get(13)?;
+    let expires_at: Option<i64> = row.get(14)?;
+    let legal_hold = row.get::<_, i64>(15)? == 1;
+    let purge_requested = row.get::<_, i64>(16)? == 1;
+    let artifact = ToolResultArtifactRef {
+        artifact_id: row.get(0)?,
+        digest_sha256: row.get(1)?,
+        mime_type: row.get(2)?,
+        size_bytes: size_bytes.max(0) as u64,
+        sensitivity: ToolResultSensitivity::parse(raw_sensitivity.as_str()).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(format!(
+                    "unknown tool result sensitivity: {raw_sensitivity}"
+                ))),
+            )
+        })?,
+        retention: serde_json::from_str::<ArtifactRetentionPolicy>(raw_retention.as_str())
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        origin_tool_call_id: row.get(6)?,
+        tool_name: row.get(7)?,
+        run_id: row.get(8)?,
+        session_id: row.get(9)?,
+        storage_backend: row.get(10)?,
+        redacted_preview: row.get(11)?,
+        created_at_unix_ms: row.get(12)?,
+    };
+    Ok(StoredToolResultArtifact {
+        artifact,
+        content,
+        expires_at_unix_ms: expires_at,
+        legal_hold,
+        purge_requested,
+    })
+}
+
+struct StoredToolResultArtifact {
+    artifact: ToolResultArtifactRef,
+    content: Vec<u8>,
+    expires_at_unix_ms: Option<i64>,
+    legal_hold: bool,
+    purge_requested: bool,
+}
+
+fn record_tool_result_artifact_read(
+    connection: &Connection,
+    request: &ToolResultArtifactReadRequest,
+    returned_bytes: u64,
+    denied: bool,
+    reason: &str,
+    now: i64,
+) -> Result<(), JournalError> {
+    connection.execute(
+        r#"
+            INSERT INTO tool_result_artifact_reads (
+                read_ulid,
+                artifact_ulid,
+                session_ulid,
+                run_ulid,
+                principal,
+                device_id,
+                channel,
+                offset_bytes,
+                requested_bytes,
+                returned_bytes,
+                denied,
+                reason,
+                created_at_unix_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#,
+        params![
+            Ulid::new().to_string(),
+            request.artifact_id,
+            request.session_id,
+            request.run_id,
+            request.principal,
+            request.device_id,
+            request.channel,
+            i64::try_from(request.offset_bytes).unwrap_or(i64::MAX),
+            i64::try_from(request.max_bytes).unwrap_or(i64::MAX),
+            i64::try_from(returned_bytes).unwrap_or(i64::MAX),
+            if denied { 1_i64 } else { 0_i64 },
+            reason,
+            now,
+        ],
+    )?;
+    Ok(())
 }
 
 fn parse_json_column<T: DeserializeOwned>(raw: String, field: &'static str) -> rusqlite::Result<T> {
@@ -5649,9 +6138,10 @@ impl JournalStore {
                     last_error,
                     origin_kind,
                     origin_run_ulid,
+                    parent_run_ulid,
                     triggered_by_principal,
                     parameter_delta_json
-                ) VALUES (?1, ?2, ?3, 0, NULL, ?4, ?4, NULL, ?4, 0, 0, 0, NULL, ?5, ?6, ?7, ?8)
+                ) VALUES (?1, ?2, ?3, 0, NULL, ?4, ?4, NULL, ?4, 0, 0, 0, NULL, ?5, ?6, ?7, ?8, ?9)
             "#,
             params![
                 request.run_id,
@@ -5659,6 +6149,7 @@ impl JournalStore {
                 RunLifecycleState::Accepted.as_str(),
                 now,
                 request.origin_kind,
+                request.origin_run_id,
                 request.origin_run_id,
                 request.triggered_by_principal,
                 request.parameter_delta_json,
@@ -5674,6 +6165,32 @@ impl JournalStore {
                         WHERE session_ulid = ?1
                     "#,
                     params![request.session_id, now, request.run_id],
+                )?;
+                append_run_lifecycle_event_tx(
+                    &guard,
+                    &RunLifecycleEventAppendRequest {
+                        event_id: Ulid::new().to_string(),
+                        run_id: request.run_id.clone(),
+                        session_id: request.session_id.clone(),
+                        from_state: None,
+                        to_state: RunLifecyclePhase::Queued,
+                        actor: RuntimeActorRef {
+                            kind: request
+                                .triggered_by_principal
+                                .as_ref()
+                                .map_or(RuntimeActorKind::System, |_| RuntimeActorKind::Principal),
+                            id: request
+                                .triggered_by_principal
+                                .clone()
+                                .unwrap_or_else(|| "system".to_owned()),
+                        },
+                        correlation_id: request.run_id.clone(),
+                        parent_run_id: request.origin_run_id.clone(),
+                        idempotency_key: Some(format!("run:start:{}", request.run_id)),
+                        reason: "run.accepted".to_owned(),
+                        payload_json: "{}".to_owned(),
+                    },
+                    now,
                 )?;
                 Ok(())
             }
@@ -5760,6 +6277,26 @@ impl JournalStore {
         let now = current_unix_ms()?;
         let completed_at = if state.is_terminal() { Some(now) } else { None };
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let previous = guard
+            .query_row(
+                r#"
+                    SELECT state, session_ulid, parent_run_ulid
+                    FROM orchestrator_runs
+                    WHERE run_ulid = ?1
+                "#,
+                params![run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((previous_state, session_id, parent_run_id)) = previous else {
+            return Err(JournalError::RunNotFound { run_id: run_id.to_owned() });
+        };
         let updated = guard.execute(
             r#"
                 UPDATE orchestrator_runs
@@ -5775,6 +6312,29 @@ impl JournalStore {
         if updated == 0 {
             return Err(JournalError::RunNotFound { run_id: run_id.to_owned() });
         }
+        append_run_lifecycle_event_tx(
+            &guard,
+            &RunLifecycleEventAppendRequest {
+                event_id: Ulid::new().to_string(),
+                run_id: run_id.to_owned(),
+                session_id,
+                from_state: RunLifecyclePhase::parse(previous_state.as_str()),
+                to_state: canonical_run_lifecycle_phase(state),
+                actor: RuntimeActorRef { kind: RuntimeActorKind::System, id: "system".to_owned() },
+                correlation_id: run_id.to_owned(),
+                parent_run_id,
+                idempotency_key: None,
+                reason: error_message
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("run.state.{}", state.as_str())),
+                payload_json: json!({
+                    "legacy_state": state.as_str(),
+                    "error": error_message,
+                })
+                .to_string(),
+            },
+            now,
+        )?;
         Ok(())
     }
 
@@ -5911,6 +6471,429 @@ impl JournalStore {
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         let limit = limit.max(1);
         load_orchestrator_tape_page(&guard, run_id, after_seq, limit)
+    }
+
+    pub fn list_run_lifecycle_events(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<RunLifecycleTransitionRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    event_ulid,
+                    run_ulid,
+                    session_ulid,
+                    from_state,
+                    to_state,
+                    actor_kind,
+                    actor_id,
+                    correlation_id,
+                    parent_run_ulid,
+                    idempotency_key,
+                    reason,
+                    created_at_unix_ms
+                FROM run_lifecycle_events
+                WHERE run_ulid = ?1
+                ORDER BY created_at_unix_ms ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![run_id], hydrate_run_lifecycle_record)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn begin_idempotency_operation(
+        &self,
+        request: &IdempotencyBeginRequest,
+    ) -> Result<IdempotencyBeginOutcome, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let existing = load_idempotency_record(&guard, request.key.as_str())?;
+        let Some(existing) = existing else {
+            guard.execute(
+                r#"
+                    INSERT INTO idempotency_records (
+                        idempotency_key,
+                        scope,
+                        operation_kind,
+                        payload_sha256,
+                        state,
+                        result_json,
+                        error_json,
+                        first_seen_at_unix_ms,
+                        updated_at_unix_ms,
+                        expires_at_unix_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?6, ?7)
+                "#,
+                params![
+                    request.key,
+                    request.scope,
+                    request.operation_kind,
+                    request.payload_sha256,
+                    IdempotencyOperationState::Started.as_str(),
+                    now,
+                    request.expires_at_unix_ms,
+                ],
+            )?;
+            return Ok(IdempotencyBeginOutcome {
+                decision: IdempotencyReplayDecision::Reserved,
+                record: load_idempotency_record(&guard, request.key.as_str())?,
+            });
+        };
+
+        if existing.payload_sha256 != request.payload_sha256
+            || existing.scope != request.scope
+            || existing.operation_kind != request.operation_kind
+        {
+            return Ok(IdempotencyBeginOutcome {
+                decision: IdempotencyReplayDecision::ConflictingPayload,
+                record: Some(existing),
+            });
+        }
+
+        if existing.expires_at_unix_ms.is_some_and(|expires_at| expires_at <= now)
+            && existing.state != IdempotencyOperationState::Completed
+        {
+            guard.execute(
+                r#"
+                    UPDATE idempotency_records
+                    SET
+                        state = ?2,
+                        result_json = NULL,
+                        error_json = NULL,
+                        first_seen_at_unix_ms = ?3,
+                        updated_at_unix_ms = ?3,
+                        expires_at_unix_ms = ?4
+                    WHERE idempotency_key = ?1
+                "#,
+                params![
+                    request.key,
+                    IdempotencyOperationState::Started.as_str(),
+                    now,
+                    request.expires_at_unix_ms,
+                ],
+            )?;
+            return Ok(IdempotencyBeginOutcome {
+                decision: IdempotencyReplayDecision::ExpiredRetry,
+                record: load_idempotency_record(&guard, request.key.as_str())?,
+            });
+        }
+
+        let decision = if existing.state == IdempotencyOperationState::Completed {
+            IdempotencyReplayDecision::CompletedReplayResult
+        } else {
+            IdempotencyReplayDecision::SamePayloadRetry
+        };
+        Ok(IdempotencyBeginOutcome { decision, record: Some(existing) })
+    }
+
+    pub fn complete_idempotency_operation(
+        &self,
+        request: &IdempotencyCompleteRequest,
+    ) -> Result<IdempotencyRecordSnapshot, JournalError> {
+        if request.result_json.len() > self.config.max_payload_bytes {
+            return Err(JournalError::PayloadTooLarge {
+                payload_kind: "idempotency_result",
+                actual_bytes: request.result_json.len(),
+                max_bytes: self.config.max_payload_bytes,
+            });
+        }
+        let (result_json, _) = sanitize_payload(request.result_json.as_bytes())?;
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let updated = guard.execute(
+            r#"
+                UPDATE idempotency_records
+                SET
+                    state = ?2,
+                    result_json = ?3,
+                    error_json = NULL,
+                    updated_at_unix_ms = ?4
+                WHERE idempotency_key = ?1
+            "#,
+            params![request.key, IdempotencyOperationState::Completed.as_str(), result_json, now,],
+        )?;
+        if updated == 0 {
+            return Err(JournalError::InvalidArgument(format!(
+                "idempotency key not found: {}",
+                request.key
+            )));
+        }
+        load_idempotency_record(&guard, request.key.as_str())?.ok_or_else(|| {
+            JournalError::InvalidArgument(format!("idempotency key not found: {}", request.key))
+        })
+    }
+
+    pub fn fail_idempotency_operation(
+        &self,
+        request: &IdempotencyFailRequest,
+    ) -> Result<IdempotencyRecordSnapshot, JournalError> {
+        let error_json = serialize_json_field(&request.error, "idempotency_error")?;
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let updated = guard.execute(
+            r#"
+                UPDATE idempotency_records
+                SET
+                    state = ?2,
+                    result_json = NULL,
+                    error_json = ?3,
+                    updated_at_unix_ms = ?4
+                WHERE idempotency_key = ?1
+            "#,
+            params![request.key, IdempotencyOperationState::Failed.as_str(), error_json, now],
+        )?;
+        if updated == 0 {
+            return Err(JournalError::InvalidArgument(format!(
+                "idempotency key not found: {}",
+                request.key
+            )));
+        }
+        load_idempotency_record(&guard, request.key.as_str())?.ok_or_else(|| {
+            JournalError::InvalidArgument(format!("idempotency key not found: {}", request.key))
+        })
+    }
+
+    pub fn list_idempotency_records_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<IdempotencyRecordSnapshot>, JournalError> {
+        let run_pattern = format!("%{run_id}%");
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    idempotency_key,
+                    scope,
+                    operation_kind,
+                    payload_sha256,
+                    state,
+                    result_json,
+                    error_json,
+                    first_seen_at_unix_ms,
+                    updated_at_unix_ms,
+                    expires_at_unix_ms
+                FROM idempotency_records
+                WHERE idempotency_key LIKE ?1
+                   OR result_json LIKE ?1
+                   OR error_json LIKE ?1
+                ORDER BY first_seen_at_unix_ms ASC, idempotency_key ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![run_pattern], hydrate_idempotency_record)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn create_tool_result_artifact(
+        &self,
+        request: &ToolResultArtifactCreateRequest,
+    ) -> Result<ToolResultArtifactRef, JournalError> {
+        let content_len = request.content.len();
+        if content_len > self.config.max_payload_bytes {
+            return Err(JournalError::PayloadTooLarge {
+                payload_kind: "tool_result_artifact",
+                actual_bytes: content_len,
+                max_bytes: self.config.max_payload_bytes,
+            });
+        }
+        let now = current_unix_ms()?;
+        let digest = sha256_hex(request.content.as_slice());
+        let retention_json = serialize_json_field(&request.retention, "retention_json")?;
+        let size_bytes = u64::try_from(content_len).unwrap_or(u64::MAX);
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        match guard.execute(
+            r#"
+                INSERT INTO tool_result_artifacts (
+                    artifact_ulid,
+                    session_ulid,
+                    run_ulid,
+                    proposal_ulid,
+                    tool_name,
+                    digest_sha256,
+                    mime_type,
+                    sensitivity,
+                    retention_json,
+                    storage_backend,
+                    content_bytes,
+                    size_bytes,
+                    redacted_preview,
+                    created_at_unix_ms,
+                    expires_at_unix_ms,
+                    legal_hold,
+                    purge_requested
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'sqlite_local', ?10, ?11, ?12, ?13, ?14, ?15, 0)
+            "#,
+            params![
+                request.artifact_id,
+                request.session_id,
+                request.run_id,
+                request.proposal_id,
+                request.tool_name,
+                digest,
+                request.mime_type,
+                request.sensitivity.as_str(),
+                retention_json,
+                request.content.as_slice(),
+                size_bytes as i64,
+                request.redacted_preview,
+                now,
+                request.retention.expires_at_unix_ms,
+                if request.retention.legal_hold { 1_i64 } else { 0_i64 },
+            ],
+        ) {
+            Ok(_) => Ok(ToolResultArtifactRef {
+                artifact_id: request.artifact_id.clone(),
+                digest_sha256: digest,
+                mime_type: request.mime_type.clone(),
+                size_bytes,
+                sensitivity: request.sensitivity,
+                retention: request.retention.clone(),
+                origin_tool_call_id: request.proposal_id.clone(),
+                tool_name: request.tool_name.clone(),
+                run_id: request.run_id.clone(),
+                session_id: request.session_id.clone(),
+                storage_backend: "sqlite_local".to_owned(),
+                redacted_preview: request.redacted_preview.clone(),
+                created_at_unix_ms: now,
+            }),
+            Err(rusqlite::Error::SqliteFailure(error, message))
+                if error.code == ErrorCode::ConstraintViolation
+                    && (error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+                        || error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                        || message
+                            .as_deref()
+                            .map(|value| value.contains("tool_result_artifacts"))
+                            .unwrap_or(false)) =>
+            {
+                Err(JournalError::DuplicateToolResultArtifactId {
+                    artifact_id: request.artifact_id.clone(),
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn list_tool_result_artifacts_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ToolResultArtifactRef>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    artifact_ulid,
+                    digest_sha256,
+                    mime_type,
+                    size_bytes,
+                    sensitivity,
+                    retention_json,
+                    proposal_ulid,
+                    tool_name,
+                    run_ulid,
+                    session_ulid,
+                    storage_backend,
+                    redacted_preview,
+                    created_at_unix_ms,
+                    content_bytes,
+                    expires_at_unix_ms,
+                    legal_hold,
+                    purge_requested
+                FROM tool_result_artifacts
+                WHERE run_ulid = ?1
+                ORDER BY created_at_unix_ms ASC, artifact_ulid ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![run_id], hydrate_tool_result_artifact)?;
+        let mut artifacts = Vec::new();
+        for row in rows {
+            artifacts.push(row?.artifact);
+        }
+        Ok(artifacts)
+    }
+
+    pub fn read_tool_result_artifact(
+        &self,
+        request: &ToolResultArtifactReadRequest,
+    ) -> Result<ArtifactReadResponse, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let Some(stored) = load_tool_result_artifact(&guard, request.artifact_id.as_str())? else {
+            record_tool_result_artifact_read(&guard, request, 0, true, "not_found", now)?;
+            return Err(JournalError::ToolResultArtifactNotFound {
+                artifact_id: request.artifact_id.clone(),
+            });
+        };
+        let StoredToolResultArtifact {
+            artifact,
+            content,
+            expires_at_unix_ms,
+            legal_hold,
+            purge_requested,
+        } = stored;
+
+        let deny_reason = if artifact.session_id != request.session_id
+            || artifact.run_id != request.run_id
+        {
+            Some("scope_mismatch")
+        } else if request
+            .expected_digest_sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &artifact.digest_sha256)
+            || sha256_hex(content.as_slice()) != artifact.digest_sha256
+        {
+            Some("digest_mismatch")
+        } else if purge_requested {
+            Some("purge_requested")
+        } else if !legal_hold && expires_at_unix_ms.is_some_and(|expires_at| expires_at <= now) {
+            Some("expired")
+        } else if artifact.sensitivity.requires_full_read_gate() {
+            Some("sensitive_full_read_denied")
+        } else {
+            None
+        };
+
+        if let Some(reason) = deny_reason {
+            record_tool_result_artifact_read(&guard, request, 0, true, reason, now)?;
+            return match reason {
+                "scope_mismatch" => Err(JournalError::ToolResultArtifactScopeMismatch {
+                    artifact_id: request.artifact_id.clone(),
+                }),
+                "digest_mismatch" => Err(JournalError::ToolResultArtifactDigestMismatch {
+                    artifact_id: request.artifact_id.clone(),
+                }),
+                other => Err(JournalError::ToolResultArtifactReadDenied {
+                    artifact_id: request.artifact_id.clone(),
+                    reason: other.to_owned(),
+                }),
+            };
+        }
+
+        let offset = usize::try_from(request.offset_bytes).unwrap_or(usize::MAX);
+        let start = offset.min(content.len());
+        let max_bytes = request.max_bytes.max(1);
+        let end = start.saturating_add(max_bytes).min(content.len());
+        let slice = &content[start..end];
+        let returned_bytes = u64::try_from(slice.len()).unwrap_or(u64::MAX);
+        record_tool_result_artifact_read(&guard, request, returned_bytes, false, "ok", now)?;
+        let text = request.text_preview.then(|| String::from_utf8_lossy(slice).to_string());
+        Ok(ArtifactReadResponse {
+            artifact,
+            offset_bytes: request.offset_bytes,
+            returned_bytes,
+            eof: end >= content.len(),
+            visibility: ToolResultVisibility::ModelSummary,
+            bytes_base64: (!request.text_preview)
+                .then(|| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, slice)),
+            text,
+        })
     }
 
     pub fn orchestrator_run_status_snapshot(
@@ -16696,6 +17679,10 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
+    use palyra_common::runtime_contracts::{
+        ArtifactRetentionPolicy, IdempotencyOperationState, IdempotencyReplayDecision,
+        RunLifecyclePhase, ToolResultSensitivity,
+    };
     use rusqlite::{params, Connection};
     use serde_json::json;
 
@@ -16711,14 +17698,15 @@ mod tests {
         ApprovalsListFilter, CanvasStateTransitionRequest, CronConcurrencyPolicy,
         CronJobCreateRequest, CronJobsListFilter, CronMisfirePolicy, CronRetryPolicy,
         CronRunFinalizeRequest, CronRunStartRequest, CronRunStatus, CronRunsListFilter,
-        CronScheduleType, JournalAppendRequest, JournalConfig, JournalError, JournalStore,
-        MemoryEmbeddingProvider, MemoryItemCreateRequest, MemoryItemsListFilter,
-        MemoryMaintenanceRequest, MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest,
-        MemorySource, OrchestratorCancelRequest, OrchestratorRunStartRequest,
-        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
-        RecallArtifactCreateRequest, RecallArtifactListFilter, SessionSearchRequest,
-        SkillExecutionStatus, SkillStatusUpsertRequest, WorkspaceBootstrapRequest,
-        WorkspaceDocumentDeleteRequest, WorkspaceDocumentMoveRequest,
+        CronScheduleType, IdempotencyBeginRequest, IdempotencyCompleteRequest,
+        JournalAppendRequest, JournalConfig, JournalError, JournalStore, MemoryEmbeddingProvider,
+        MemoryItemCreateRequest, MemoryItemsListFilter, MemoryMaintenanceRequest,
+        MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest, MemorySource,
+        OrchestratorCancelRequest, OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
+        OrchestratorTapeAppendRequest, OrchestratorUsageDelta, RecallArtifactCreateRequest,
+        RecallArtifactListFilter, SessionSearchRequest, SkillExecutionStatus,
+        SkillStatusUpsertRequest, ToolResultArtifactCreateRequest, ToolResultArtifactReadRequest,
+        WorkspaceBootstrapRequest, WorkspaceDocumentDeleteRequest, WorkspaceDocumentMoveRequest,
         WorkspaceDocumentWriteRequest, WorkspaceSearchRequest, CURRENT_MEMORY_EMBEDDING_VERSION,
         MEMORY_RETENTION_DAY_MS, MIGRATIONS, RECALL_ARTIFACT_KIND_PREVIEW,
         RECALL_ARTIFACT_KIND_SESSION_SEARCH,
@@ -17031,6 +18019,216 @@ mod tests {
                 migration.version
             );
         }
+    }
+
+    #[test]
+    fn phase_one_run_lifecycle_and_idempotency_records_survive_reopen() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path.clone(), false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5P01";
+        let run_id = "01ARZ3NDEKTSV4RRFFQ69G5P02";
+        store
+            .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+                session_id: session_id.to_owned(),
+                session_key: "session:phase-one".to_owned(),
+                session_label: Some("Phase one".to_owned()),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+            })
+            .expect("session should be created");
+
+        store
+            .start_orchestrator_run(&OrchestratorRunStartRequest {
+                run_id: run_id.to_owned(),
+                session_id: session_id.to_owned(),
+                origin_kind: "run_stream".to_owned(),
+                origin_run_id: None,
+                triggered_by_principal: Some("user:ops".to_owned()),
+                parameter_delta_json: None,
+            })
+            .expect("run should start");
+        store
+            .update_orchestrator_run_state(run_id, RunLifecycleState::InProgress, None)
+            .expect("run should transition to in progress");
+        store
+            .update_orchestrator_run_state(run_id, RunLifecycleState::Done, None)
+            .expect("run should complete");
+
+        let transitions =
+            store.list_run_lifecycle_events(run_id).expect("lifecycle should be readable");
+        assert_eq!(transitions.len(), 3);
+        assert_eq!(transitions[0].to_state, RunLifecyclePhase::Queued);
+        assert_eq!(
+            transitions[0].idempotency_key.as_deref(),
+            Some("run:start:01ARZ3NDEKTSV4RRFFQ69G5P02")
+        );
+        assert_eq!(transitions[2].to_state, RunLifecyclePhase::Completed);
+
+        let key = format!("run:start:{run_id}");
+        let begin = store
+            .begin_idempotency_operation(&IdempotencyBeginRequest {
+                key: key.clone(),
+                scope: "orchestrator_run".to_owned(),
+                operation_kind: "start_orchestrator_run".to_owned(),
+                payload_sha256: "sha256:phase-one".to_owned(),
+                expires_at_unix_ms: None,
+            })
+            .expect("idempotency reservation should succeed");
+        assert_eq!(begin.decision, IdempotencyReplayDecision::Reserved);
+        store
+            .complete_idempotency_operation(&IdempotencyCompleteRequest {
+                key: key.clone(),
+                result_json: json!({ "run_id": run_id }).to_string(),
+            })
+            .expect("idempotency should complete");
+
+        let reopened = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should reopen");
+        let replay = reopened
+            .begin_idempotency_operation(&IdempotencyBeginRequest {
+                key,
+                scope: "orchestrator_run".to_owned(),
+                operation_kind: "start_orchestrator_run".to_owned(),
+                payload_sha256: "sha256:phase-one".to_owned(),
+                expires_at_unix_ms: None,
+            })
+            .expect("idempotency record should survive restart");
+        assert_eq!(replay.decision, IdempotencyReplayDecision::CompletedReplayResult);
+        assert_eq!(
+            replay.record.expect("record should exist").state,
+            IdempotencyOperationState::Completed
+        );
+    }
+
+    #[test]
+    fn phase_one_tool_result_artifacts_enforce_scope_digest_and_sensitivity() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5P11";
+        let run_id = "01ARZ3NDEKTSV4RRFFQ69G5P12";
+        store
+            .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+                session_id: session_id.to_owned(),
+                session_key: "session:artifact".to_owned(),
+                session_label: Some("Artifact".to_owned()),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+            })
+            .expect("session should be created");
+        store
+            .start_orchestrator_run(&OrchestratorRunStartRequest {
+                run_id: run_id.to_owned(),
+                session_id: session_id.to_owned(),
+                origin_kind: "run_stream".to_owned(),
+                origin_run_id: None,
+                triggered_by_principal: Some("user:ops".to_owned()),
+                parameter_delta_json: None,
+            })
+            .expect("run should start");
+
+        let artifact = store
+            .create_tool_result_artifact(&ToolResultArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5P13".to_owned(),
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                proposal_id: "01ARZ3NDEKTSV4RRFFQ69G5P14".to_owned(),
+                tool_name: "palyra.echo".to_owned(),
+                mime_type: "application/json".to_owned(),
+                sensitivity: ToolResultSensitivity::Public,
+                retention: ArtifactRetentionPolicy::keep(),
+                redacted_preview: "{\"ok\":true}".to_owned(),
+                content: br#"{"ok":true,"value":"hello"}"#.to_vec(),
+            })
+            .expect("artifact should be stored");
+        assert_eq!(artifact.size_bytes, 27);
+
+        let read = store
+            .read_tool_result_artifact(&ToolResultArtifactReadRequest {
+                artifact_id: artifact.artifact_id.clone(),
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+                expected_digest_sha256: Some(artifact.digest_sha256.clone()),
+                offset_bytes: 0,
+                max_bytes: 9,
+                text_preview: true,
+            })
+            .expect("artifact should be readable");
+        assert_eq!(read.text.as_deref(), Some("{\"ok\":tru"));
+        assert!(!read.eof);
+
+        let digest_error = store
+            .read_tool_result_artifact(&ToolResultArtifactReadRequest {
+                artifact_id: artifact.artifact_id.clone(),
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+                expected_digest_sha256: Some("wrong".to_owned()),
+                offset_bytes: 0,
+                max_bytes: 9,
+                text_preview: true,
+            })
+            .expect_err("digest mismatch should fail closed");
+        assert!(matches!(digest_error, JournalError::ToolResultArtifactDigestMismatch { .. }));
+
+        let scope_error = store
+            .read_tool_result_artifact(&ToolResultArtifactReadRequest {
+                artifact_id: artifact.artifact_id.clone(),
+                session_id: session_id.to_owned(),
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5P15".to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+                expected_digest_sha256: Some(artifact.digest_sha256.clone()),
+                offset_bytes: 0,
+                max_bytes: 9,
+                text_preview: true,
+            })
+            .expect_err("foreign run scope should fail closed");
+        assert!(matches!(scope_error, JournalError::ToolResultArtifactScopeMismatch { .. }));
+
+        let secret = store
+            .create_tool_result_artifact(&ToolResultArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5P16".to_owned(),
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                proposal_id: "01ARZ3NDEKTSV4RRFFQ69G5P17".to_owned(),
+                tool_name: "palyra.http.fetch".to_owned(),
+                mime_type: "application/json".to_owned(),
+                sensitivity: ToolResultSensitivity::Secret,
+                retention: ArtifactRetentionPolicy::keep(),
+                redacted_preview: "{\"token\":\"<redacted>\"}".to_owned(),
+                content: br#"{"token":"raw"}"#.to_vec(),
+            })
+            .expect("secret artifact should be stored");
+        let secret_read = store
+            .read_tool_result_artifact(&ToolResultArtifactReadRequest {
+                artifact_id: secret.artifact_id,
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+                expected_digest_sha256: None,
+                offset_bytes: 0,
+                max_bytes: 9,
+                text_preview: true,
+            })
+            .expect_err("sensitive artifact full read should require an explicit gate");
+        assert!(matches!(secret_read, JournalError::ToolResultArtifactReadDenied { .. }));
+
+        let artifacts = store
+            .list_tool_result_artifacts_for_run(run_id)
+            .expect("artifact refs should be listable for replay");
+        assert_eq!(artifacts.len(), 2);
     }
 
     #[test]

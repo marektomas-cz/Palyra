@@ -49,6 +49,7 @@ pub enum ToolCapability {
     Network,
     SecretsRead,
     FilesystemWrite,
+    ArtifactsRead,
 }
 
 impl ToolCapability {
@@ -59,6 +60,7 @@ impl ToolCapability {
             Self::Network => "network",
             Self::SecretsRead => "secrets_read",
             Self::FilesystemWrite => "filesystem_write",
+            Self::ArtifactsRead => "artifacts_read",
         }
     }
 }
@@ -134,6 +136,7 @@ const EMPTY_TOOL_CAPABILITIES: &[ToolCapability] = &[];
 const PROCESS_RUNNER_CAPABILITIES: &[ToolCapability] = &[ToolCapability::ProcessExec];
 const WORKSPACE_PATCH_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemWrite];
 const NETWORK_TOOL_CAPABILITIES: &[ToolCapability] = &[ToolCapability::Network];
+const ARTIFACT_READ_CAPABILITIES: &[ToolCapability] = &[ToolCapability::ArtifactsRead];
 const WASM_PLUGIN_CAPABILITIES: &[ToolCapability] =
     &[ToolCapability::Network, ToolCapability::SecretsRead, ToolCapability::FilesystemWrite];
 const TOOL_INPUT_TOO_LARGE_ERROR_CODE: &str = "quota/tool_input_too_large";
@@ -147,6 +150,7 @@ const MAX_HTTP_FETCH_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES: usize = 256 * 1024;
 const MAX_BROWSER_TOOL_INPUT_BYTES: usize = 128 * 1024;
+const MAX_ARTIFACT_READ_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WASM_PLUGIN_TOOL_INPUT_BYTES: usize = 448 * 1024;
 const SENSITIVE_CAPABILITY_POLICY_NAMES: &[&str] =
     &["process_exec", "network", "secrets_read", "filesystem_write"];
@@ -298,6 +302,10 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.routines.control" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
         }
+        "palyra.artifact.read" => Some(ToolMetadata {
+            capabilities: ARTIFACT_READ_CAPABILITIES,
+            default_sensitive: false,
+        }),
         "palyra.http.fetch" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
@@ -628,6 +636,14 @@ async fn run_allowlisted_tool(
             executor: "routines_runtime".to_owned(),
             sandbox_enforcement: "none".to_owned(),
         },
+        "palyra.artifact.read" => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: "palyra.artifact.read requires gateway artifact runtime context".to_owned(),
+            timed_out: false,
+            executor: "gateway_artifacts".to_owned(),
+            sandbox_enforcement: "artifact_scope".to_owned(),
+        },
         "palyra.http.fetch" => ToolExecutionRawResult {
             success: false,
             output_json: b"{}".to_vec(),
@@ -696,6 +712,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.memory.recall"
             | "palyra.routines.query"
             | "palyra.routines.control"
+            | "palyra.artifact.read"
             | "palyra.http.fetch"
             | "palyra.process.run"
             | "palyra.fs.apply_patch"
@@ -739,6 +756,8 @@ fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
         "gateway_runtime".to_owned()
     } else if matches!(tool_name, "palyra.routines.query" | "palyra.routines.control") {
         "routines_runtime".to_owned()
+    } else if tool_name == "palyra.artifact.read" {
+        "gateway_artifacts".to_owned()
     } else if tool_name == "palyra.plugin.run" {
         "sandbox_tier_a".to_owned()
     } else {
@@ -754,6 +773,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.memory.recall" => MAX_MEMORY_RECALL_TOOL_INPUT_BYTES,
         "palyra.routines.query" => MAX_ROUTINES_QUERY_TOOL_INPUT_BYTES,
         "palyra.routines.control" => MAX_ROUTINES_CONTROL_TOOL_INPUT_BYTES,
+        "palyra.artifact.read" => MAX_ARTIFACT_READ_TOOL_INPUT_BYTES,
         "palyra.http.fetch" => MAX_HTTP_FETCH_TOOL_INPUT_BYTES,
         "palyra.process.run" => MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES,
         "palyra.fs.apply_patch" => MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES,
@@ -794,6 +814,8 @@ fn sandbox_enforcement_for_tool(config: &ToolCallConfig, tool_name: &str) -> Str
         "ssrf_guard".to_owned()
     } else if tool_name.starts_with("palyra.browser.") {
         "browser_service".to_owned()
+    } else if tool_name == "palyra.artifact.read" {
+        "artifact_scope".to_owned()
     } else {
         "none".to_owned()
     }
@@ -1006,8 +1028,9 @@ fn current_unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_tool_call, denied_execution_outcome, execute_tool_call, tool_policy_snapshot,
-        tool_requires_approval, ToolCallConfig, ToolRequestContext,
+        decide_tool_call, denied_execution_outcome, execute_tool_call, tool_metadata,
+        tool_policy_snapshot, tool_requires_approval, ToolCallConfig, ToolCapability,
+        ToolRequestContext,
     };
     use crate::sandbox_runner::{
         EgressEnforcementMode, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
@@ -1281,6 +1304,7 @@ mod tests {
         assert!(!tool_requires_approval("palyra.memory.search"));
         assert!(!tool_requires_approval("palyra.memory.recall"));
         assert!(!tool_requires_approval("palyra.routines.query"));
+        assert!(!tool_requires_approval("palyra.artifact.read"));
         assert!(tool_requires_approval("palyra.routines.control"));
         assert!(tool_requires_approval("palyra.http.fetch"));
         assert!(tool_requires_approval("palyra.process.run"));
@@ -1312,6 +1336,14 @@ mod tests {
             tool_requires_approval("custom.unknown"),
             "unknown tools should default to approval-required"
         );
+    }
+
+    #[test]
+    fn artifact_read_tool_exposes_artifact_capability_without_default_approval() {
+        let metadata = tool_metadata("palyra.artifact.read").expect("artifact read metadata");
+        assert_eq!(metadata.capabilities, &[ToolCapability::ArtifactsRead]);
+        assert!(!metadata.default_sensitive);
+        assert!(!tool_requires_approval("palyra.artifact.read"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

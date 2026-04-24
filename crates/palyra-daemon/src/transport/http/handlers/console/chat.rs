@@ -1060,12 +1060,13 @@ pub(crate) async fn console_chat_run_status_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(run_id): Path<String>,
+    Query(query): Query<ConsoleChatRunStatusQuery>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
     validate_canonical_id(run_id.as_str()).map_err(|_| {
         runtime_status_response(tonic::Status::invalid_argument("run_id must be a canonical ULID"))
     })?;
-    let run = state
+    let mut run = state
         .runtime
         .orchestrator_run_status_snapshot(run_id.clone())
         .await
@@ -1080,11 +1081,43 @@ pub(crate) async fn console_chat_run_status_handler(
             "chat run does not belong to the authenticated console session context",
         )));
     }
+    let wait_result = if query.wait {
+        let timeout_ms = query.timeout_ms.unwrap_or(30_000).clamp(25, 120_000);
+        let outcome = state
+            .runtime
+            .wait_for_orchestrator_run(crate::gateway::OrchestratorRunWaitRequest {
+                run_id: run_id.clone(),
+                timeout: std::time::Duration::from_millis(timeout_ms),
+                poll_interval: std::time::Duration::from_millis(250),
+                return_on_waiting: query.return_on_waiting,
+            })
+            .await
+            .map_err(runtime_status_response)?;
+        run = outcome.snapshot;
+        Some(json!({
+            "waited": true,
+            "timeout_ms": timeout_ms,
+            "canonical_state": outcome.canonical_state.as_str(),
+        }))
+    } else {
+        None
+    };
     let lineage = load_console_run_lineage(&state, &session.context, &run).await?;
     Ok(Json(json!({
         "run": run,
         "lineage": lineage,
+        "run_wait": wait_result,
     })))
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub(crate) struct ConsoleChatRunStatusQuery {
+    #[serde(default)]
+    wait: bool,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    return_on_waiting: bool,
 }
 
 pub(crate) async fn console_chat_run_events_handler(

@@ -1,3 +1,4 @@
+pub(crate) mod artifacts;
 pub(crate) mod browser;
 pub(crate) mod http_fetch;
 pub(crate) mod memory;

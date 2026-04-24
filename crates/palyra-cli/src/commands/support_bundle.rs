@@ -1,4 +1,8 @@
 use crate::{output::support_bundle as support_bundle_output, *};
+use palyra_common::runtime_contracts::{
+    IdempotencyOperationState, IdempotencyRecordSnapshot, RunLifecyclePhase,
+    RunLifecycleTransitionRecord, RuntimeActorKind, RuntimeActorRef, StableErrorEnvelope,
+};
 
 pub(crate) fn run_support_bundle(command: SupportBundleCommand) -> Result<()> {
     match command {
@@ -179,6 +183,9 @@ fn build_replay_bundle_from_journal(
     let run = read_replay_journal_run(&connection, run_id)?
         .with_context(|| format!("orchestrator run not found: {run_id}"))?;
     let tape_events = read_replay_journal_tape(&connection, run_id, max_events)?;
+    let lifecycle_transitions = read_replay_lifecycle_transitions(&connection, run_id)?;
+    let idempotency_records = read_replay_idempotency_records(&connection, run_id)?;
+    let artifact_refs = read_replay_tool_result_artifact_refs(&connection, run_id)?;
     let truncated = tape_events.len() > max_events;
     let tape_events = tape_events.into_iter().take(max_events).collect::<Vec<_>>();
     let mut config_snapshot = json!({
@@ -244,7 +251,9 @@ fn build_replay_bundle_from_journal(
         },
         config_snapshot,
         tape_events,
-        artifact_refs: Vec::<ReplayArtifactRef>::new(),
+        lifecycle_transitions,
+        idempotency_records,
+        artifact_refs,
     })
 }
 
@@ -362,6 +371,191 @@ fn read_replay_journal_tape(
         events.push(row.context("failed to read replay tape event")?);
     }
     Ok(events)
+}
+
+fn read_replay_lifecycle_transitions(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Vec<RunLifecycleTransitionRecord>> {
+    if !sqlite_table_exists(connection, "run_lifecycle_events")? {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            r#"
+                SELECT
+                    event_ulid,
+                    run_ulid,
+                    session_ulid,
+                    from_state,
+                    to_state,
+                    actor_kind,
+                    actor_id,
+                    correlation_id,
+                    parent_run_ulid,
+                    idempotency_key,
+                    reason,
+                    created_at_unix_ms
+                FROM run_lifecycle_events
+                WHERE run_ulid = ?1
+                ORDER BY created_at_unix_ms ASC, event_ulid ASC
+            "#,
+        )
+        .context("failed to prepare replay lifecycle query")?;
+    let rows = statement.query_map(rusqlite::params![run_id], |row| {
+        let from_state: Option<String> = row.get(3)?;
+        let to_state: String = row.get(4)?;
+        let actor_kind: String = row.get(5)?;
+        let to_state = RunLifecyclePhase::parse(to_state.as_str()).ok_or_else(|| {
+            rusqlite::Error::InvalidColumnType(
+                4,
+                "to_state".to_owned(),
+                rusqlite::types::Type::Text,
+            )
+        })?;
+        let actor_kind = RuntimeActorKind::parse(actor_kind.as_str()).ok_or_else(|| {
+            rusqlite::Error::InvalidColumnType(
+                5,
+                "actor_kind".to_owned(),
+                rusqlite::types::Type::Text,
+            )
+        })?;
+        Ok(RunLifecycleTransitionRecord {
+            schema_version: 1,
+            event_id: row.get(0)?,
+            run_id: row.get(1)?,
+            session_id: row.get(2)?,
+            from_state: from_state.as_deref().and_then(RunLifecyclePhase::parse),
+            to_state,
+            actor: RuntimeActorRef { kind: actor_kind, id: row.get(6)? },
+            correlation_id: row.get(7)?,
+            parent_run_id: row.get(8)?,
+            idempotency_key: row.get(9)?,
+            reason: row.get(10)?,
+            occurred_at_unix_ms: row.get(11)?,
+        })
+    })?;
+    let mut transitions = Vec::new();
+    for row in rows {
+        transitions.push(row.context("failed to read replay lifecycle transition")?);
+    }
+    Ok(transitions)
+}
+
+fn read_replay_idempotency_records(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Vec<IdempotencyRecordSnapshot>> {
+    if !sqlite_table_exists(connection, "idempotency_records")? {
+        return Ok(Vec::new());
+    }
+    let run_pattern = format!("%{run_id}%");
+    let mut statement = connection
+        .prepare(
+            r#"
+                SELECT
+                    idempotency_key,
+                    scope,
+                    operation_kind,
+                    payload_sha256,
+                    state,
+                    result_json,
+                    error_json,
+                    first_seen_at_unix_ms,
+                    updated_at_unix_ms,
+                    expires_at_unix_ms
+                FROM idempotency_records
+                WHERE idempotency_key LIKE ?1
+                   OR result_json LIKE ?1
+                   OR error_json LIKE ?1
+                ORDER BY first_seen_at_unix_ms ASC, idempotency_key ASC
+            "#,
+        )
+        .context("failed to prepare replay idempotency query")?;
+    let rows = statement.query_map(rusqlite::params![run_pattern], |row| {
+        let state: String = row.get(4)?;
+        let error_json: Option<String> = row.get(6)?;
+        let state = IdempotencyOperationState::parse(state.as_str()).ok_or_else(|| {
+            rusqlite::Error::InvalidColumnType(4, "state".to_owned(), rusqlite::types::Type::Text)
+        })?;
+        let error = error_json
+            .as_deref()
+            .map(serde_json::from_str::<StableErrorEnvelope>)
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+        Ok(IdempotencyRecordSnapshot {
+            key: row.get(0)?,
+            scope: row.get(1)?,
+            operation_kind: row.get(2)?,
+            payload_sha256: row.get(3)?,
+            state,
+            result_json: row.get(5)?,
+            error,
+            first_seen_at_unix_ms: row.get(7)?,
+            updated_at_unix_ms: row.get(8)?,
+            expires_at_unix_ms: row.get(9)?,
+        })
+    })?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.context("failed to read replay idempotency record")?);
+    }
+    Ok(records)
+}
+
+fn read_replay_tool_result_artifact_refs(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Vec<ReplayArtifactRef>> {
+    if !sqlite_table_exists(connection, "tool_result_artifacts")? {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            r#"
+                SELECT artifact_ulid, storage_backend, digest_sha256, size_bytes
+                FROM tool_result_artifacts
+                WHERE run_ulid = ?1
+                ORDER BY created_at_unix_ms ASC, artifact_ulid ASC
+            "#,
+        )
+        .context("failed to prepare replay artifact ref query")?;
+    let rows = statement.query_map(rusqlite::params![run_id], |row| {
+        let artifact_id: String = row.get(0)?;
+        let storage_backend: String = row.get(1)?;
+        let size_bytes: i64 = row.get(3)?;
+        Ok(ReplayArtifactRef {
+            artifact_id: artifact_id.clone(),
+            kind: "tool_result".to_owned(),
+            reference: format!("tool-result-artifact://{storage_backend}/{artifact_id}"),
+            sha256: row.get(2)?,
+            size_bytes: Some(size_bytes.max(0) as u64),
+        })
+    })?;
+    let mut refs = Vec::new();
+    for row in rows {
+        refs.push(row.context("failed to read replay artifact ref")?);
+    }
+    Ok(refs)
+}
+
+fn sqlite_table_exists(connection: &Connection, table_name: &str) -> Result<bool> {
+    let exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+            rusqlite::params![table_name],
+            |_| Ok(()),
+        )
+        .optional()
+        .with_context(|| format!("failed to inspect sqlite table {table_name}"))?
+        .is_some();
+    Ok(exists)
 }
 
 fn extract_replay_user_input(parameter_delta_json: Option<&str>) -> Option<Value> {

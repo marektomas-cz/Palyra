@@ -243,6 +243,7 @@ fn backend_capability_label(capability: ToolCapability) -> &'static str {
         ToolCapability::Network => "network",
         ToolCapability::SecretsRead => "secrets_read",
         ToolCapability::FilesystemWrite => "filesystem_write",
+        ToolCapability::ArtifactsRead => "artifacts_read",
     }
 }
 

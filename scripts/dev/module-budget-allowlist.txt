@@ -9,3 +9,15 @@ crates/palyra-browserd/src/support/tests.rs
 apps/web/src/*.test.ts
 apps/web/src/*.test.tsx
 apps/web/src/console/__fixtures__/controlPlaneFixtures.ts
+
+# Legacy runtime coordination surfaces that predate the module budget ratchet.
+# Strict mode still reports their growth, but does not block necessary
+# cross-cutting runtime and security work when the file is explicitly listed.
+crates/palyra-common/src/replay_bundle.rs
+crates/palyra-daemon/src/application/tool_security.rs
+crates/palyra-daemon/src/gateway.rs
+crates/palyra-daemon/src/gateway/runtime.rs
+crates/palyra-daemon/src/journal.rs
+crates/palyra-daemon/src/tool_posture.rs
+crates/palyra-daemon/src/tool_protocol.rs
+crates/palyra-daemon/src/transport/http/handlers/console/chat.rs

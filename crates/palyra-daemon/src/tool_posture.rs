@@ -1158,6 +1158,7 @@ pub fn tool_lock_reason(config: &GatewayRuntimeConfigSnapshot, tool_name: &str) 
         ToolCapability::Network => true,
         ToolCapability::SecretsRead => true,
         ToolCapability::FilesystemWrite => true,
+        ToolCapability::ArtifactsRead => true,
     });
     if !runtime_available {
         return Some("Tool runtime is unavailable for the current daemon posture.".to_owned());

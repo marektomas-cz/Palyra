@@ -39,6 +39,27 @@ pub(crate) fn map_orchestrator_store_error(operation: &str, error: JournalError)
             "flow revision conflict for {flow_id}: expected {expected_revision}, found {actual_revision}"
         )),
         JournalError::InvalidArgument(message) => Status::invalid_argument(message),
+        JournalError::DuplicateToolResultArtifactId { artifact_id } => {
+            Status::already_exists(format!("tool result artifact already exists: {artifact_id}"))
+        }
+        JournalError::ToolResultArtifactNotFound { artifact_id } => {
+            Status::not_found(format!("tool result artifact not found: {artifact_id}"))
+        }
+        JournalError::ToolResultArtifactDigestMismatch { artifact_id } => {
+            Status::failed_precondition(format!(
+                "tool result artifact digest mismatch: {artifact_id}"
+            ))
+        }
+        JournalError::ToolResultArtifactScopeMismatch { artifact_id } => {
+            Status::permission_denied(format!(
+                "tool result artifact is outside the current run/session scope: {artifact_id}"
+            ))
+        }
+        JournalError::ToolResultArtifactReadDenied { artifact_id, reason } => {
+            Status::permission_denied(format!(
+                "tool result artifact read denied for {artifact_id}: {reason}"
+            ))
+        }
         other => Status::internal(format!("{operation} failed: {other}")),
     }
 }

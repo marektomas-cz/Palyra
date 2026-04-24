@@ -76,6 +76,293 @@ macro_rules! runtime_contract_enum {
 }
 
 runtime_contract_enum! {
+    /// Canonical run lifecycle states shared by daemon, CLI/API, replay, and future realtime/ACP
+    /// adapters. These are the public states; individual transports may still keep legacy labels
+    /// internally and map them through this type at the boundary.
+    pub enum RunLifecyclePhase {
+        Queued => "queued" | "pending" | "accepted",
+        Running => "running" | "in_progress" | "streaming",
+        WaitingForApproval => "waiting_for_approval" | "approval_wait" | "awaiting_approval" | "waiting",
+        Paused => "paused",
+        Completed => "completed" | "done" | "succeeded",
+        Failed => "failed",
+        Aborted => "aborted" | "cancelled" | "canceled",
+        Expired => "expired" | "timed_out" | "timeout"
+    }
+}
+
+impl RunLifecyclePhase {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Aborted | Self::Expired)
+    }
+
+    #[must_use]
+    pub const fn is_waiting(self) -> bool {
+        matches!(self, Self::WaitingForApproval | Self::Paused)
+    }
+}
+
+runtime_contract_enum! {
+    /// Stable actor kind names for runtime audit records.
+    pub enum RuntimeActorKind {
+        System => "system",
+        Principal => "principal" | "user",
+        Agent => "agent",
+        Connector => "connector",
+        Scheduler => "scheduler",
+        Worker => "worker",
+        Policy => "policy",
+        Replay => "replay"
+    }
+}
+
+runtime_contract_enum! {
+    /// Stable operation state for global idempotency records.
+    pub enum IdempotencyOperationState {
+        Started => "started" | "in_progress",
+        Completed => "completed" | "succeeded",
+        Failed => "failed",
+        Expired => "expired"
+    }
+}
+
+impl IdempotencyOperationState {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Expired)
+    }
+}
+
+runtime_contract_enum! {
+    /// Result of checking a global idempotency key before a side effect is executed.
+    pub enum IdempotencyReplayDecision {
+        Reserved => "reserved",
+        SamePayloadRetry => "same_payload_retry",
+        CompletedReplayResult => "completed_replay_result",
+        ConflictingPayload => "conflicting_payload",
+        ExpiredRetry => "expired_retry"
+    }
+}
+
+runtime_contract_enum! {
+    /// How a tool result may be exposed after policy, sensitivity, and budget checks.
+    pub enum ToolResultVisibility {
+        ModelInline => "model_inline",
+        ModelSummary => "model_summary",
+        AuditArtifact => "audit_artifact",
+        RedactedPreview => "redacted_preview"
+    }
+}
+
+runtime_contract_enum! {
+    /// Sensitivity taxonomy for durable tool result artifacts.
+    pub enum ToolResultSensitivity {
+        Public => "public",
+        InternalPath => "internal_path",
+        StdoutStderr => "stdout_stderr",
+        PersonalData => "personal_data",
+        Secret => "secret",
+        ProviderRawPayload => "provider_raw_payload",
+        ApprovalRiskData => "approval_risk_data"
+    }
+}
+
+impl ToolResultSensitivity {
+    #[must_use]
+    pub const fn requires_full_read_gate(self) -> bool {
+        matches!(
+            self,
+            Self::PersonalData | Self::Secret | Self::ProviderRawPayload | Self::ApprovalRiskData
+        )
+    }
+}
+
+runtime_contract_enum! {
+    /// Retention class for durable tool result artifacts.
+    pub enum ArtifactRetentionDisposition {
+        Keep => "keep",
+        ExpireAfter => "expire_after",
+        PurgeOnRequest => "purge_on_request",
+        AuditLegalHold => "audit_legal_hold"
+    }
+}
+
+/// Stable error envelope used by runtime contracts instead of leaking internal debug strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StableErrorEnvelope {
+    pub code: String,
+    pub message: String,
+    pub recovery_hint: String,
+}
+
+impl StableErrorEnvelope {
+    #[must_use]
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        recovery_hint: impl Into<String>,
+    ) -> Self {
+        Self { code: code.into(), message: message.into(), recovery_hint: recovery_hint.into() }
+    }
+}
+
+/// Audit-visible identity of the actor that caused a runtime transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeActorRef {
+    pub kind: RuntimeActorKind,
+    pub id: String,
+}
+
+/// Canonical audit record for run lifecycle transitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunLifecycleTransitionRecord {
+    pub schema_version: u32,
+    pub event_id: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub from_state: Option<RunLifecyclePhase>,
+    pub to_state: RunLifecyclePhase,
+    pub actor: RuntimeActorRef,
+    pub correlation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    pub reason: String,
+    pub occurred_at_unix_ms: i64,
+}
+
+/// Public snapshot of a global idempotency record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdempotencyRecordSnapshot {
+    pub key: String,
+    pub scope: String,
+    pub operation_kind: String,
+    pub payload_sha256: String,
+    pub state: IdempotencyOperationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<StableErrorEnvelope>,
+    pub first_seen_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at_unix_ms: Option<i64>,
+}
+
+/// Result returned by the runtime before a side-effecting operation is executed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdempotencyCheckOutcome {
+    pub decision: IdempotencyReplayDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<IdempotencyRecordSnapshot>,
+}
+
+/// Retention policy attached to a tool result artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRetentionPolicy {
+    pub disposition: ArtifactRetentionDisposition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at_unix_ms: Option<i64>,
+    pub legal_hold: bool,
+}
+
+impl ArtifactRetentionPolicy {
+    #[must_use]
+    pub const fn keep() -> Self {
+        Self {
+            disposition: ArtifactRetentionDisposition::Keep,
+            expires_at_unix_ms: None,
+            legal_hold: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn audit_legal_hold() -> Self {
+        Self {
+            disposition: ArtifactRetentionDisposition::AuditLegalHold,
+            expires_at_unix_ms: None,
+            legal_hold: true,
+        }
+    }
+}
+
+/// Durable reference to a full audit-visible tool result payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultArtifactRef {
+    pub artifact_id: String,
+    pub digest_sha256: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sensitivity: ToolResultSensitivity,
+    pub retention: ArtifactRetentionPolicy,
+    pub origin_tool_call_id: String,
+    pub tool_name: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub storage_backend: String,
+    pub redacted_preview: String,
+    pub created_at_unix_ms: i64,
+}
+
+/// Request contract for `palyra.artifact.read`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReadRequest {
+    pub artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_digest_sha256: Option<String>,
+    #[serde(default)]
+    pub offset_bytes: u64,
+    #[serde(default)]
+    pub max_bytes: u64,
+    #[serde(default)]
+    pub text_preview: bool,
+}
+
+/// Response contract for `palyra.artifact.read`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactReadResponse {
+    pub artifact: ToolResultArtifactRef,
+    pub offset_bytes: u64,
+    pub returned_bytes: u64,
+    pub eof: bool,
+    pub visibility: ToolResultVisibility,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// Per-turn budget settings used before putting tool output back into the model context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolTurnBudget {
+    pub max_model_inline_bytes: usize,
+    pub max_model_summary_bytes: usize,
+    pub max_artifact_preview_bytes: usize,
+    pub max_artifact_read_bytes: usize,
+}
+
+impl Default for ToolTurnBudget {
+    fn default() -> Self {
+        Self {
+            max_model_inline_bytes: 8 * 1024,
+            max_model_summary_bytes: 2 * 1024,
+            max_artifact_preview_bytes: 1_024,
+            max_artifact_read_bytes: 16 * 1024,
+        }
+    }
+}
+
+/// Observability counters for model-visible budget projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ToolResultBudgetMetrics {
+    pub spilled_artifacts: u64,
+    pub rejected_payloads: u64,
+    pub saved_model_visible_bytes: u64,
+}
+
+runtime_contract_enum! {
     /// Canonical queue runtime modes used by queue orchestration surfaces.
     pub enum QueueMode {
         Followup => "followup" | "follow_up",
@@ -259,8 +546,10 @@ runtime_contract_enum! {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuxiliaryTaskKind, AuxiliaryTaskState, DeliveryPolicy, FlowState, FlowStepState,
-        PruningPolicyClass, QueueDecision, QueueMode, QueuedInputState, WorkerLifecycleState,
+        ArtifactRetentionDisposition, ArtifactRetentionPolicy, AuxiliaryTaskKind,
+        AuxiliaryTaskState, DeliveryPolicy, FlowState, FlowStepState, IdempotencyReplayDecision,
+        PruningPolicyClass, QueueDecision, QueueMode, QueuedInputState, RunLifecyclePhase,
+        ToolResultSensitivity, ToolResultVisibility, ToolTurnBudget, WorkerLifecycleState,
     };
 
     #[test]
@@ -302,5 +591,35 @@ mod tests {
         assert_eq!(AuxiliaryTaskKind::Vision.as_str(), "vision");
         assert_eq!(AuxiliaryTaskKind::PostRunReflection.as_str(), "post_run_reflection");
         assert_eq!(DeliveryPolicy::PreferTerminalDescendant.as_str(), "prefer_terminal_descendant");
+    }
+
+    #[test]
+    fn phase_one_runtime_contracts_parse_legacy_aliases_to_canonical_names() {
+        assert_eq!(RunLifecyclePhase::parse("accepted"), Some(RunLifecyclePhase::Queued));
+        assert_eq!(RunLifecyclePhase::parse("in_progress"), Some(RunLifecyclePhase::Running));
+        assert_eq!(RunLifecyclePhase::parse("done"), Some(RunLifecyclePhase::Completed));
+        assert_eq!(RunLifecyclePhase::parse("cancelled"), Some(RunLifecyclePhase::Aborted));
+        assert!(RunLifecyclePhase::Completed.is_terminal());
+        assert!(RunLifecyclePhase::WaitingForApproval.is_waiting());
+        assert_eq!(ToolResultVisibility::AuditArtifact.as_str(), "audit_artifact");
+        assert_eq!(IdempotencyReplayDecision::ConflictingPayload.as_str(), "conflicting_payload");
+    }
+
+    #[test]
+    fn artifact_contracts_capture_sensitivity_retention_and_budget_defaults() {
+        assert!(ToolResultSensitivity::Secret.requires_full_read_gate());
+        assert!(!ToolResultSensitivity::StdoutStderr.requires_full_read_gate());
+
+        let keep = ArtifactRetentionPolicy::keep();
+        assert_eq!(keep.disposition, ArtifactRetentionDisposition::Keep);
+        assert!(!keep.legal_hold);
+
+        let hold = ArtifactRetentionPolicy::audit_legal_hold();
+        assert_eq!(hold.disposition, ArtifactRetentionDisposition::AuditLegalHold);
+        assert!(hold.legal_hold);
+
+        let budget = ToolTurnBudget::default();
+        assert!(budget.max_model_inline_bytes > budget.max_model_summary_bytes);
+        assert!(budget.max_artifact_read_bytes >= budget.max_model_inline_bytes);
     }
 }

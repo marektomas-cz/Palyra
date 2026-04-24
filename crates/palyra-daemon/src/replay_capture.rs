@@ -3,6 +3,7 @@ use palyra_common::replay_bundle::{
     build_replay_bundle, ReplayArtifactRef, ReplayBundle, ReplayBundleBuildInput,
     ReplayCaptureMetadata, ReplayRunSnapshot, ReplaySource, ReplayTapeEvent,
 };
+use palyra_common::runtime_contracts::ToolResultArtifactRef;
 use serde_json::{json, Value};
 
 use crate::{
@@ -43,6 +44,25 @@ pub(crate) fn capture_incident_replay_bundle(
             ReplayTapeEvent { seq: record.seq, event_type: record.event_type, payload }
         })
         .collect::<Vec<_>>();
+    let lifecycle_transitions = request
+        .journal_store
+        .list_run_lifecycle_events(request.run_id)
+        .with_context(|| format!("failed to load lifecycle transitions for {}", request.run_id))?;
+    let idempotency_records = request
+        .journal_store
+        .list_idempotency_records_for_run(request.run_id)
+        .with_context(|| format!("failed to load idempotency records for {}", request.run_id))?;
+    let mut artifact_refs = replay_artifact_refs(&run);
+    artifact_refs.extend(
+        request
+            .journal_store
+            .list_tool_result_artifacts_for_run(request.run_id)
+            .with_context(|| {
+                format!("failed to load tool result artifacts for {}", request.run_id)
+            })?
+            .iter()
+            .map(replay_tool_result_artifact_ref),
+    );
 
     build_replay_bundle(ReplayBundleBuildInput {
         generated_at_unix_ms: request.generated_at_unix_ms,
@@ -84,7 +104,9 @@ pub(crate) fn capture_incident_replay_bundle(
         run: replay_run_snapshot(&run),
         config_snapshot: replay_config_snapshot(request.replay_capture, request.feature_rollouts),
         tape_events,
-        artifact_refs: replay_artifact_refs(&run),
+        lifecycle_transitions,
+        idempotency_records,
+        artifact_refs,
     })
 }
 
@@ -169,6 +191,19 @@ fn replay_artifact_refs(run: &OrchestratorRunStatusSnapshot) -> Vec<ReplayArtifa
         });
     }
     refs
+}
+
+fn replay_tool_result_artifact_ref(artifact: &ToolResultArtifactRef) -> ReplayArtifactRef {
+    ReplayArtifactRef {
+        artifact_id: artifact.artifact_id.clone(),
+        kind: "tool_result".to_owned(),
+        reference: format!(
+            "tool-result-artifact://{}/{}",
+            artifact.storage_backend, artifact.artifact_id
+        ),
+        sha256: Some(artifact.digest_sha256.clone()),
+        size_bytes: Some(artifact.size_bytes),
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
