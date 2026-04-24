@@ -154,6 +154,54 @@ fn secrets_get_missing_key_fails_with_not_found_error() -> Result<()> {
 }
 
 #[test]
+fn secrets_explain_accepts_vault_reference_from_list() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let secret_value = b"minimax-secret-value";
+
+    let set_output = run_cli_with_stdin(
+        &workdir,
+        &["secrets", "set", "global", "minimax_api_key", "--value-stdin"],
+        secret_value,
+    )?;
+    assert!(
+        set_output.status.success(),
+        "secrets set should succeed: {}",
+        String::from_utf8_lossy(&set_output.stderr)
+    );
+
+    let explain_output =
+        run_cli(&workdir, &["secrets", "explain", "global/minimax_api_key", "--json"])?;
+    assert!(
+        explain_output.status.success(),
+        "secrets explain should accept vault refs from secrets list: {}",
+        String::from_utf8_lossy(&explain_output.stderr)
+    );
+    let explain_stdout =
+        String::from_utf8(explain_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        explain_stdout.contains("\"kind\": \"vault_secret\""),
+        "vault ref explain output should identify local vault secrets: {explain_stdout}"
+    );
+    assert!(
+        explain_stdout.contains("\"reference\": \"global/minimax_api_key\""),
+        "vault ref explain output should include the requested reference: {explain_stdout}"
+    );
+    assert!(
+        explain_stdout.contains("\"status\": \"stored\""),
+        "vault ref explain output should report readable stored secrets: {explain_stdout}"
+    );
+    assert!(
+        explain_stdout.contains("\"configured\": false"),
+        "unreferenced vault secrets should be explained instead of rejected: {explain_stdout}"
+    );
+    assert!(
+        !explain_stdout.contains("minimax-secret-value"),
+        "secrets explain must not reveal raw secret values: {explain_stdout}"
+    );
+    Ok(())
+}
+
+#[test]
 fn secrets_configure_openai_api_key_updates_config_and_audit() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = bootstrap_local_config(&workdir)?;

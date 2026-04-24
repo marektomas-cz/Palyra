@@ -51,6 +51,32 @@ struct SecretsApplyMode {
     affected_components: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct VaultSecretExplainEnvelope {
+    kind: String,
+    reference: String,
+    scope: String,
+    key: String,
+    status: String,
+    backend: String,
+    value_bytes: u32,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    configured: bool,
+    configured_references: Vec<VaultSecretConfiguredReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_usage_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct VaultSecretConfiguredReference {
+    component: String,
+    reference_kind: String,
+    status: String,
+}
+
 #[derive(Debug, Clone)]
 struct SecretReferenceCandidate {
     component: String,
@@ -231,9 +257,7 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
             Ok(())
         }
         SecretsCommand::Inventory { json } => run_configured_secret_inventory(json),
-        SecretsCommand::Explain { secret_id, json } => {
-            run_configured_secret_explain(secret_id.as_str(), json)
-        }
+        SecretsCommand::Explain { secret_id, json } => run_secret_explain(secret_id.as_str(), json),
         SecretsCommand::Plan { path, json } => run_runtime_secret_plan(path, json),
         SecretsCommand::Configure { command } => run_secrets_configure(command),
     }
@@ -851,6 +875,92 @@ fn run_configured_secret_inventory(json: bool) -> Result<()> {
     output::print_text_line(
         "Sensitive configuration details are redacted in text output; use --json for structured output",
     )?;
+    Ok(())
+}
+
+fn run_secret_explain(secret_id: &str, json: bool) -> Result<()> {
+    if secret_id.contains('/') {
+        let vault_ref = VaultRef::parse(secret_id)
+            .with_context(|| format!("invalid vault secret reference `{secret_id}`"))?;
+        return run_vault_secret_explain(&vault_ref, json);
+    }
+    run_configured_secret_explain(secret_id, json)
+}
+
+fn run_vault_secret_explain(vault_ref: &VaultRef, json: bool) -> Result<()> {
+    let vault = open_cli_vault().context("failed to initialize vault runtime")?;
+    let reference = format!("{}/{}", vault_ref.scope, vault_ref.key);
+    let metadata = vault
+        .list_secrets(&vault_ref.scope)
+        .with_context(|| format!("failed to list secrets for scope={}", vault_ref.scope))?
+        .into_iter()
+        .find(|entry| entry.key == vault_ref.key)
+        .with_context(|| {
+            format!("secret reference {reference} was not found in the local vault")
+        })?;
+    let (status, value_bytes, last_error) = match vault.get_secret(&vault_ref.scope, &vault_ref.key)
+    {
+        Ok(value) if value.is_empty() => ("empty".to_owned(), 0, None),
+        Ok(value) => ("stored".to_owned(), u32::try_from(value.len()).unwrap_or(u32::MAX), None),
+        Err(error) => (
+            "unreadable".to_owned(),
+            u32::try_from(metadata.value_bytes).unwrap_or(u32::MAX),
+            Some(sanitize_secret_error(error.to_string().as_str())),
+        ),
+    };
+    let (configured_references, config_usage_error) = match build_secrets_audit_payload(None, true)
+    {
+        Ok(audit) => (
+            audit
+                .references
+                .into_iter()
+                .filter(|entry| entry.scope == vault_ref.scope.to_string())
+                .filter(|entry| entry.key == vault_ref.key)
+                .map(|entry| VaultSecretConfiguredReference {
+                    component: entry.component,
+                    reference_kind: entry.reference_kind,
+                    status: entry.status,
+                })
+                .collect::<Vec<_>>(),
+            None,
+        ),
+        Err(error) => (Vec::new(), Some(sanitize_secret_error(error.to_string().as_str()))),
+    };
+    let envelope = VaultSecretExplainEnvelope {
+        kind: "vault_secret".to_owned(),
+        reference: reference.clone(),
+        scope: vault_ref.scope.to_string(),
+        key: vault_ref.key.clone(),
+        status,
+        backend: vault.backend_kind().as_str().to_owned(),
+        value_bytes,
+        created_at_unix_ms: metadata.created_at_unix_ms,
+        updated_at_unix_ms: metadata.updated_at_unix_ms,
+        configured: !configured_references.is_empty(),
+        configured_references,
+        config_usage_error,
+        last_error,
+    };
+    if output::preferred_json(json) {
+        output::print_json_pretty(&envelope, "failed to encode vault secret detail")?;
+        return Ok(());
+    }
+    output::print_text_line(
+        format!(
+            "secret.explain reference={} status={} configured={} backend={} value_bytes={}",
+            envelope.reference,
+            envelope.status,
+            envelope.configured,
+            envelope.backend,
+            envelope.value_bytes
+        )
+        .as_str(),
+    )?;
+    if envelope.config_usage_error.is_some() {
+        output::print_text_line(
+            "secret.explain config_usage=unknown use --json for sanitized diagnostic detail",
+        )?;
+    }
     Ok(())
 }
 
