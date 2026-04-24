@@ -144,28 +144,23 @@ struct ConnectionEnvironment {
 }
 
 static ROOT_CONTEXT: OnceLock<Mutex<Option<RootCommandContext>>> = OnceLock::new();
-
 fn context_cell() -> &'static Mutex<Option<RootCommandContext>> {
     ROOT_CONTEXT.get_or_init(|| Mutex::new(None))
 }
-
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) enum ExplicitConfigPathPolicy {
     #[default]
     RequireExisting,
     AllowMissingForBootstrap,
 }
-
 #[cfg(test)]
 pub(crate) fn test_env_lock_for_tests() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
-
 pub(crate) fn install_root_context(root: RootOptions) -> Result<RootCommandContext> {
     install_root_context_with_policy(root, ExplicitConfigPathPolicy::RequireExisting)
 }
-
 pub(crate) fn install_root_context_with_policy(
     root: RootOptions,
     explicit_config_path_policy: ExplicitConfigPathPolicy,
@@ -183,6 +178,7 @@ pub(crate) fn current_root_context() -> Option<RootCommandContext> {
 
 #[cfg(test)]
 pub(crate) fn clear_root_context_for_tests() {
+    [CLI_PROFILE_ENV, CLI_PROFILES_PATH_ENV].into_iter().for_each(|key| env::remove_var(key));
     if let Ok(mut guard) = context_cell().lock() {
         *guard = None;
     }
@@ -915,7 +911,6 @@ mod tests {
     use palyra_common::IdentityStorePathError;
     use std::{env, fs};
     use tempfile::tempdir;
-
     fn clear_env() {
         for key in [
             "PALYRA_STATE_ROOT",

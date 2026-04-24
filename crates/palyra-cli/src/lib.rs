@@ -8565,10 +8565,10 @@ remote_base_url = "https://dashboard.example.com/"
 "#,
         )
         .expect("fixture config should be written");
-        let _config = ScopedEnvVar::set("PALYRA_CONFIG", config_path.to_string_lossy().as_ref());
 
         let target =
-            resolve_dashboard_access_target(None).expect("dashboard access target should resolve");
+            resolve_dashboard_access_target(Some(config_path.to_string_lossy().into_owned()))
+                .expect("dashboard access target should resolve");
         assert_eq!(target.url, "https://dashboard.example.com/");
         assert_eq!(target.mode, DashboardAccessMode::Remote);
         assert_eq!(target.source, DashboardAccessSource::ConfigRemoteUrl);
@@ -8590,10 +8590,10 @@ port = 9191
 "#,
         )
         .expect("fixture config should be written");
-        let _config = ScopedEnvVar::set("PALYRA_CONFIG", config_path.to_string_lossy().as_ref());
 
         let target =
-            resolve_dashboard_access_target(None).expect("dashboard access target should resolve");
+            resolve_dashboard_access_target(Some(config_path.to_string_lossy().into_owned()))
+                .expect("dashboard access target should resolve");
         assert_eq!(target.url, "http://127.0.0.1:9191/");
         assert_eq!(target.mode, DashboardAccessMode::Local);
         assert_eq!(target.source, DashboardAccessSource::ConfigDaemonBind);
@@ -8615,10 +8615,10 @@ pinned_gateway_ca_fingerprint_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 "#,
         )
         .expect("fixture config should be written");
-        let _config = ScopedEnvVar::set("PALYRA_CONFIG", config_path.to_string_lossy().as_ref());
 
-        let error = resolve_dashboard_access_target(None)
-            .expect_err("ambiguous pin configuration must be rejected");
+        let error =
+            resolve_dashboard_access_target(Some(config_path.to_string_lossy().into_owned()))
+                .expect_err("ambiguous pin configuration must be rejected");
         assert!(error.to_string().contains("pins are ambiguous"));
     }
 
