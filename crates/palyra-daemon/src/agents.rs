@@ -740,11 +740,14 @@ fn normalize_document(
             let mut resolved = Vec::new();
             for root in &agent.workspace_roots {
                 let parsed = parse_path_literal(root.as_str(), "workspace_root")?;
+                let parsed_absolute = parsed.is_absolute();
                 let candidate =
-                    if parsed.is_absolute() { parsed } else { canonical_agent_dir.join(parsed) };
+                    if parsed_absolute { parsed } else { canonical_agent_dir.join(parsed) };
                 let canonical_workspace =
                     ensure_canonical_dir(candidate.as_path(), "workspace_root")?;
-                if !canonical_workspace.starts_with(canonical_agent_dir.as_path()) {
+                if !parsed_absolute
+                    && !canonical_workspace.starts_with(canonical_agent_dir.as_path())
+                {
                     return Err(AgentRegistryError::WorkspaceRootEscape(
                         canonical_workspace.to_string_lossy().into_owned(),
                     ));
@@ -943,7 +946,8 @@ fn resolve_workspace_roots(
     let mut seen = HashSet::new();
     for raw in raw_values {
         let parsed = parse_path_literal(raw.as_str(), "workspace_root")?;
-        let candidate = if parsed.is_absolute() {
+        let parsed_absolute = parsed.is_absolute();
+        let candidate = if parsed_absolute {
             if !allow_absolute_paths {
                 return Err(AgentRegistryError::InvalidPath {
                     field: "workspace_root",
@@ -955,7 +959,7 @@ fn resolve_workspace_roots(
             agent_dir.join(parsed)
         };
         let canonical = ensure_canonical_dir(candidate.as_path(), "workspace_root")?;
-        if !canonical.starts_with(agent_dir) {
+        if !parsed_absolute && !canonical.starts_with(agent_dir) {
             return Err(AgentRegistryError::WorkspaceRootEscape(
                 canonical.to_string_lossy().into_owned(),
             ));
@@ -1165,6 +1169,68 @@ mod tests {
             allow_absolute_paths: false,
         });
         assert!(matches!(duplicate, Err(AgentRegistryError::AgentDirCollision(_))));
+    }
+
+    #[test]
+    fn create_agent_allows_explicit_absolute_workspace_root_outside_agent_dir() {
+        let temp = tempdir().expect("tempdir should be created");
+        let identity_root = temp.path().join("state").join("identity");
+        let registry =
+            AgentRegistry::open(identity_root.as_path()).expect("registry should initialize");
+        let workspace = temp.path().join("checkout");
+        fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+
+        let outcome = registry
+            .create_agent(AgentCreateRequest {
+                agent_id: "main".to_owned(),
+                display_name: "Main".to_owned(),
+                agent_dir: None,
+                workspace_roots: vec![workspace.to_string_lossy().into_owned()],
+                default_model_profile: None,
+                execution_backend_preference: None,
+                default_tool_allowlist: Vec::new(),
+                default_skill_allowlist: Vec::new(),
+                set_default: true,
+                allow_absolute_paths: true,
+            })
+            .expect("explicit absolute workspace should be accepted");
+        let canonical_workspace =
+            fs::canonicalize(workspace.as_path()).expect("workspace should canonicalize");
+        let canonical_workspace = canonical_workspace.to_string_lossy().into_owned();
+
+        assert_eq!(outcome.agent.workspace_roots, vec![canonical_workspace.clone()]);
+
+        drop(registry);
+        let reopened =
+            AgentRegistry::open(identity_root.as_path()).expect("registry should reopen");
+        let page = reopened.list_agents(None, Some(10)).expect("list should succeed");
+        assert_eq!(page.agents[0].workspace_roots, vec![canonical_workspace]);
+    }
+
+    #[test]
+    fn create_agent_rejects_absolute_workspace_root_without_flag() {
+        let temp = tempdir().expect("tempdir should be created");
+        let registry = AgentRegistry::open(temp.path().join("identity").as_path())
+            .expect("registry should initialize");
+        let workspace = temp.path().join("checkout");
+
+        let result = registry.create_agent(AgentCreateRequest {
+            agent_id: "main".to_owned(),
+            display_name: "Main".to_owned(),
+            agent_dir: None,
+            workspace_roots: vec![workspace.to_string_lossy().into_owned()],
+            default_model_profile: None,
+            execution_backend_preference: None,
+            default_tool_allowlist: Vec::new(),
+            default_skill_allowlist: Vec::new(),
+            set_default: true,
+            allow_absolute_paths: false,
+        });
+
+        assert!(matches!(
+            result,
+            Err(AgentRegistryError::InvalidPath { field: "workspace_root", .. })
+        ));
     }
 
     #[test]
