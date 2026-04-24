@@ -1798,12 +1798,25 @@ fn apply_onboarding_plan(
             log_dir: None,
             start_now: true,
         };
-        support::service::install_gateway_service(&request)
-            .context("failed to install gateway service from onboarding wizard")?;
+        if let Err(error) = support::service::install_gateway_service(&request)
+            .context("failed to install gateway service from onboarding wizard")
+        {
+            record_service_install_failure(plan, &error);
+        }
     }
 
     let target = resolve_dashboard_access_target(Some(context.config_path.display().to_string()))?;
     Ok(target.url)
+}
+
+fn record_service_install_failure(plan: &mut OnboardingMutationPlan, error: &anyhow::Error) {
+    plan.service_install_mode = ServiceInstallMode::GuidanceOnly;
+    plan.risk_events.push("service_install_deferred_after_failure".to_owned());
+    plan.warnings.push(format!(
+        "background gateway service install failed and was deferred: {error:#}. Run `palyra gateway run` for an immediate foreground runtime, or retry `palyra gateway install --start` after fixing service permissions."
+    ));
+    dedupe_strings(&mut plan.risk_events);
+    dedupe_strings(&mut plan.warnings);
 }
 
 fn ensure_onboarding_admin_defaults(
@@ -3534,6 +3547,32 @@ mod tests {
         let action =
             resolve_existing_config_action(&mut wizard, true, path.as_path()).expect("action");
         assert_eq!(action, Some(ExistingConfigAction::Overwrite));
+    }
+
+    #[test]
+    fn service_install_failure_is_deferred_instead_of_failing_onboarding() {
+        let mut plan = OnboardingMutationPlan {
+            service_install_mode: ServiceInstallMode::InstallNow,
+            risk_events: vec!["service_install_requested".to_owned()],
+            ..Default::default()
+        };
+
+        record_service_install_failure(&mut plan, &anyhow::anyhow!("scheduled task denied"));
+
+        assert_eq!(plan.service_install_mode, ServiceInstallMode::GuidanceOnly);
+        assert!(plan
+            .risk_events
+            .iter()
+            .any(|event| event == "service_install_deferred_after_failure"));
+        assert!(
+            plan.warnings.iter().any(|warning| {
+                warning.contains("background gateway service install failed")
+                    && warning.contains("palyra gateway run")
+                    && warning.contains("palyra gateway install --start")
+            }),
+            "expected actionable service install warning: {:?}",
+            plan.warnings
+        );
     }
 
     #[test]
