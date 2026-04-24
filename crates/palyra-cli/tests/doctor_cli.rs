@@ -37,8 +37,7 @@ fn spawn_doctor_http_server(admin_token: &str) -> Result<(String, thread::JoinHa
     listener.set_nonblocking(true).context("failed to mark doctor test server as non-blocking")?;
     let expected_auth = format!("authorization: bearer {}", admin_token.to_ascii_lowercase());
     let handle = thread::spawn(move || -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut saw_admin_probe = false;
+        let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             let (mut stream, _) = match listener.accept() {
                 Ok(connection) => connection,
@@ -53,14 +52,14 @@ fn spawn_doctor_http_server(admin_token: &str) -> Result<(String, thread::JoinHa
                 stream.read(&mut buffer).context("failed to read doctor test request")?;
             let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
             let request_lower = request.to_ascii_lowercase();
+            let is_admin_probe = request.starts_with("GET /admin/v1/status ");
             let (status_line, body) = if request.starts_with("GET /healthz ") {
                 (
                     "200 OK",
                     r#"{"service":"palyrad","status":"ok","version":"0.1.0","git_hash":"deadbeef","build_profile":"test","uptime_seconds":1}"#,
                 )
-            } else if request.starts_with("GET /admin/v1/status ") {
-                saw_admin_probe = true;
-                assert!(
+            } else if is_admin_probe {
+                anyhow::ensure!(
                     request_lower.contains(expected_auth.as_str()),
                     "doctor admin probe should send configured admin bearer token: {request}"
                 );
@@ -78,12 +77,13 @@ fn spawn_doctor_http_server(admin_token: &str) -> Result<(String, thread::JoinHa
             stream
                 .write_all(response.as_bytes())
                 .context("failed to write doctor test response")?;
+            if is_admin_probe {
+                return Ok(());
+            }
         }
-        assert!(
-            saw_admin_probe,
-            "doctor should request /admin/v1/status when config resolves admin auth"
-        );
-        Ok(())
+        anyhow::bail!(
+            "doctor should request /admin/v1/status when config resolves admin auth within 60s"
+        )
     });
     Ok((format!("http://{address}"), handle))
 }
