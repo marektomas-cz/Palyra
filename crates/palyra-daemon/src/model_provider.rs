@@ -437,7 +437,11 @@ fn legacy_registry_from_config(config: &ModelProviderConfig) -> ModelProviderReg
                         .auth_profile_provider_kind
                         .unwrap_or(ModelProviderAuthProviderKind::Anthropic),
                 ),
-                capability_defaults_for_kind(config.kind, ProviderModelRole::Chat),
+                capability_defaults_for_provider(
+                    config.kind,
+                    ProviderModelRole::Chat,
+                    config.auth_profile_provider_kind,
+                ),
             ),
         };
     let mut registry = ModelProviderRegistryConfig {
@@ -714,6 +718,27 @@ fn capability_defaults_for_kind(
             metadata_source: ProviderMetadataSource::Static.as_str().to_owned(),
         },
     }
+}
+
+fn capability_defaults_for_provider(
+    kind: ModelProviderKind,
+    role: ProviderModelRole,
+    auth_provider_kind: Option<ModelProviderAuthProviderKind>,
+) -> ProviderCapabilitiesSnapshot {
+    let mut capabilities = capability_defaults_for_kind(kind, role);
+    if kind == ModelProviderKind::Anthropic
+        && role == ProviderModelRole::Chat
+        && auth_provider_kind == Some(ModelProviderAuthProviderKind::Minimax)
+    {
+        capabilities.vision = false;
+        capabilities
+            .known_limitations
+            .push("vision unsupported by MiniMax Anthropic-compatible chat".to_owned());
+        capabilities
+            .recommended_use_cases
+            .retain(|use_case| !use_case.to_ascii_lowercase().contains("vision"));
+    }
+    capabilities
 }
 
 fn empty_health_probe_snapshot(
@@ -2426,7 +2451,16 @@ impl ModelProvider for RegistryBackedModelProvider {
                 }),
             model_id: default_model_id.clone(),
             capabilities: default_model.map(|model| model.capabilities.clone()).unwrap_or_else(
-                || capability_defaults_for_kind(self.config.kind, ProviderModelRole::Chat),
+                || {
+                    let auth_provider_kind = default_provider_entry
+                        .and_then(|provider| provider.auth_profile_provider_kind)
+                        .or(self.config.auth_profile_provider_kind);
+                    capability_defaults_for_provider(
+                        self.config.kind,
+                        ProviderModelRole::Chat,
+                        auth_provider_kind,
+                    )
+                },
             ),
             openai_base_url: default_provider_entry
                 .filter(|provider| provider.kind == ModelProviderKind::OpenAiCompatible)
@@ -4999,6 +5033,35 @@ mod tests {
             "MiniMax Anthropic-compatible transport must not use Anthropic x-api-key auth"
         );
         handle.join().expect("minimax scripted server thread should exit");
+    }
+
+    #[test]
+    fn minimax_legacy_registry_does_not_advertise_vision() {
+        let config = ModelProviderConfig {
+            kind: ModelProviderKind::Anthropic,
+            anthropic_base_url: "https://api.minimax.io/anthropic".to_owned(),
+            anthropic_model: "MiniMax-M2.7".to_owned(),
+            anthropic_api_key: Some("minimax-secret".to_owned()),
+            auth_profile_provider_kind: Some(ModelProviderAuthProviderKind::Minimax),
+            ..ModelProviderConfig::default()
+        };
+
+        let provider = build_model_provider(&config).expect("minimax provider should build");
+        let snapshot = provider.status_snapshot();
+
+        assert!(!snapshot.capabilities.vision);
+        let model = snapshot
+            .registry
+            .models
+            .iter()
+            .find(|model| model.model_id == "MiniMax-M2.7")
+            .expect("minimax registry model should be present");
+        assert!(!model.capabilities.vision);
+        assert!(model
+            .capabilities
+            .known_limitations
+            .iter()
+            .any(|limitation| limitation.contains("vision unsupported")));
     }
 
     #[tokio::test(flavor = "multi_thread")]

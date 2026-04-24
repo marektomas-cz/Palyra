@@ -1203,7 +1203,13 @@ fn legacy_model_entries(config: &FileModelProviderConfig) -> Vec<RegistryModelEn
         .or_else(|| config.anthropic_model.clone())
         .or_else(|| Some("deterministic".to_owned()))
     {
-        models.push(legacy_registry_model(model_id, provider_id.to_owned(), "chat", kind.as_str()));
+        models.push(legacy_registry_model(
+            model_id,
+            provider_id.to_owned(),
+            "chat",
+            kind.as_str(),
+            config.auth_provider_kind.as_deref(),
+        ));
     }
     if let Some(model_id) = config.openai_embeddings_model.clone() {
         models.push(legacy_registry_model(
@@ -1211,6 +1217,7 @@ fn legacy_model_entries(config: &FileModelProviderConfig) -> Vec<RegistryModelEn
             provider_id.to_owned(),
             "embeddings",
             OPENAI_COMPATIBLE_PROVIDER_KIND,
+            None,
         ));
     }
     models
@@ -1221,8 +1228,13 @@ fn legacy_registry_model(
     provider_id: String,
     role: &str,
     provider_kind: &str,
+    auth_provider_kind: Option<&str>,
 ) -> RegistryModelEntry {
     let is_chat = role == "chat";
+    let is_minimax_chat = is_chat
+        && provider_kind == ANTHROPIC_PROVIDER_KIND
+        && auth_provider_kind
+            .is_some_and(|kind| kind.eq_ignore_ascii_case(MINIMAX_AUTH_PROVIDER_KIND));
     RegistryModelEntry {
         model_id,
         provider_id,
@@ -1232,7 +1244,7 @@ fn legacy_registry_model(
         operator_override: false,
         tool_calls: is_chat,
         json_mode: is_chat && provider_kind != DETERMINISTIC_PROVIDER_KIND,
-        vision: is_chat && provider_kind != DETERMINISTIC_PROVIDER_KIND,
+        vision: is_chat && provider_kind != DETERMINISTIC_PROVIDER_KIND && !is_minimax_chat,
         audio_transcribe: is_chat && provider_kind == OPENAI_COMPATIBLE_PROVIDER_KIND,
         embeddings: role == "embeddings",
         max_context_tokens: if provider_kind == DETERMINISTIC_PROVIDER_KIND {
@@ -1257,7 +1269,11 @@ fn legacy_registry_model(
         } else {
             vec!["general chat".to_owned()]
         },
-        known_limitations: Vec::new(),
+        known_limitations: if is_minimax_chat {
+            vec!["vision unsupported by MiniMax Anthropic-compatible chat".to_owned()]
+        } else {
+            Vec::new()
+        },
         source: "legacy",
     }
 }

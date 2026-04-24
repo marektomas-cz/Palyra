@@ -335,6 +335,11 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
         Some("minimax-primary"),
         "legacy minimax configs should keep registry models attached to the minimax provider: {payload}"
     );
+    assert_eq!(
+        payload.pointer("/registry_models/0/vision").and_then(Value::as_bool),
+        Some(false),
+        "legacy minimax configs should not advertise unsupported vision capability: {payload}"
+    );
     Ok(())
 }
 

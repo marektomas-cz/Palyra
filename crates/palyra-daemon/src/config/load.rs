@@ -2556,6 +2556,26 @@ fn provider_capability_defaults(
     }
 }
 
+fn provider_capability_defaults_for_entry(
+    provider: &ProviderRegistryEntryConfig,
+    role: ProviderModelRole,
+) -> ProviderCapabilitiesSnapshot {
+    let mut defaults = provider_capability_defaults(provider.kind, role);
+    if provider.kind == ModelProviderKind::Anthropic
+        && role == ProviderModelRole::Chat
+        && provider.auth_profile_provider_kind == Some(ModelProviderAuthProviderKind::Minimax)
+    {
+        defaults.vision = false;
+        defaults
+            .known_limitations
+            .push("vision unsupported by MiniMax Anthropic-compatible chat".to_owned());
+        defaults
+            .recommended_use_cases
+            .retain(|use_case| !use_case.to_ascii_lowercase().contains("vision"));
+    }
+    defaults
+}
+
 fn parse_model_provider_registry_entry(
     raw: palyra_common::daemon_config_schema::FileModelProviderRegistryEntry,
     index: usize,
@@ -2734,11 +2754,8 @@ fn parse_model_provider_registry_model(
         raw.role.unwrap_or_else(|| "chat".to_owned()).as_str(),
         format!("{source_name}.role").as_str(),
     )?;
-    let provider_kind = providers
-        .iter()
-        .find(|entry| entry.provider_id == provider_id)
-        .map(|entry| entry.kind)
-        .ok_or_else(|| {
+    let provider =
+        providers.iter().find(|entry| entry.provider_id == provider_id).ok_or_else(|| {
             anyhow::anyhow!("{source_name}.provider_id references unknown provider '{provider_id}'")
         })?;
     let metadata_source = if let Some(value) = raw.metadata_source {
@@ -2750,7 +2767,7 @@ fn parse_model_provider_registry_model(
         ProviderMetadataSource::Static
     };
     let operator_override = raw.operator_override.unwrap_or(false);
-    let defaults = provider_capability_defaults(provider_kind, role);
+    let defaults = provider_capability_defaults_for_entry(provider, role);
     let cost_tier = if let Some(value) = raw.cost_tier {
         parse_provider_cost_tier(value.as_str(), format!("{source_name}.cost_tier").as_str())?
             .as_str()
@@ -4885,6 +4902,64 @@ openai_api_key_vault_ref = "global/openai_api_key"
         assert_eq!(model.capabilities.max_context_tokens, Some(200_000));
         assert_eq!(model.capabilities.cost_tier, "premium");
         assert_eq!(model.capabilities.metadata_source, "static");
+    }
+
+    #[test]
+    fn parse_model_provider_registry_model_disables_minimax_vision_by_default() {
+        let providers = vec![parse_model_provider_registry_entry(
+            FileModelProviderRegistryEntry {
+                provider_id: Some("minimax-primary".to_owned()),
+                display_name: Some("MiniMax".to_owned()),
+                kind: Some("anthropic".to_owned()),
+                base_url: Some("https://api.minimax.io/anthropic".to_owned()),
+                allow_private_base_url: Some(false),
+                enabled: Some(true),
+                auth_profile_id: None,
+                auth_provider_kind: Some("minimax".to_owned()),
+                api_key: None,
+                api_key_secret_ref: None,
+                api_key_vault_ref: None,
+                request_timeout_ms: None,
+                max_retries: None,
+                retry_backoff_ms: None,
+                circuit_breaker_failure_threshold: None,
+                circuit_breaker_cooldown_ms: None,
+            },
+            0,
+            &ModelProviderConfig::default(),
+        )
+        .expect("provider entry should parse")];
+
+        let model = parse_model_provider_registry_model(
+            FileModelProviderRegistryModel {
+                model_id: Some("MiniMax-M2.7".to_owned()),
+                provider_id: Some("minimax-primary".to_owned()),
+                role: Some("chat".to_owned()),
+                enabled: Some(true),
+                metadata_source: None,
+                operator_override: None,
+                tool_calls: None,
+                json_mode: None,
+                vision: None,
+                audio_transcribe: None,
+                embeddings: None,
+                max_context_tokens: None,
+                cost_tier: None,
+                latency_tier: None,
+                recommended_use_cases: None,
+                known_limitations: None,
+            },
+            0,
+            &providers,
+        )
+        .expect("model entry should parse");
+
+        assert!(!model.capabilities.vision);
+        assert!(model
+            .capabilities
+            .known_limitations
+            .iter()
+            .any(|limitation| limitation.contains("vision unsupported")));
     }
 
     #[test]
