@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use ulid::Ulid;
+use validation::{normalize_scope_strings, normalize_state_root};
 
 use crate::unix_ms_now;
 
@@ -30,7 +31,6 @@ const ACP_BINDINGS_INDEX_FORMAT: VersionedJsonFormat =
     VersionedJsonFormat::new("ACP bindings index", ACP_BINDINGS_LAYOUT_VERSION);
 const MAX_TEXT_BYTES: usize = 512;
 const MAX_CONFIG_BYTES: usize = 16 * 1024;
-const MAX_ACP_SCOPE_COUNT: usize = 128;
 const RATE_LIMIT_WINDOW_MS: i64 = 60_000;
 const RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 120;
 
@@ -821,31 +821,6 @@ fn create_state_dir(root: &Path) -> AcpRuntimeResult<()> {
     })
 }
 
-fn normalize_state_root(root: &Path) -> AcpRuntimeResult<PathBuf> {
-    if root.as_os_str().is_empty() {
-        return Err(AcpRuntimeError::InvalidField {
-            field: "state_root",
-            message: "ACP state root cannot be empty".to_owned(),
-        });
-    }
-    if root.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
-        return Err(AcpRuntimeError::InvalidField {
-            field: "state_root",
-            message: "ACP state root cannot contain parent directory traversal components"
-                .to_owned(),
-        });
-    }
-    if root.is_absolute() {
-        return Ok(root.to_path_buf());
-    }
-    let current_dir = std::env::current_dir().map_err(|source| AcpRuntimeError::Io {
-        operation: "resolve_current_dir",
-        path: root.to_path_buf(),
-        source,
-    })?;
-    Ok(current_dir.join(root))
-}
-
 fn load_index(path: &Path) -> AcpRuntimeResult<AcpBindingsIndex> {
     if !path.exists() {
         return Ok(AcpBindingsIndex::default());
@@ -1013,22 +988,6 @@ fn normalize_binding_component(raw: &str, field: &'static str) -> AcpRuntimeResu
     Ok(value)
 }
 
-fn normalize_scope_strings(scopes: Vec<String>) -> AcpRuntimeResult<Vec<String>> {
-    if scopes.len() > MAX_ACP_SCOPE_COUNT {
-        return Err(AcpRuntimeError::InvalidField {
-            field: "scopes",
-            message: format!("scope list exceeds {MAX_ACP_SCOPE_COUNT} entries"),
-        });
-    }
-    let mut normalized = Vec::new();
-    for scope in scopes {
-        normalized.push(normalize_text(scope.as_str(), "scope", 128)?);
-    }
-    normalized.sort();
-    normalized.dedup();
-    Ok(normalized)
-}
-
 fn sorted_scopes(mut scopes: Vec<AcpScope>) -> Vec<AcpScope> {
     scopes.sort();
     scopes.dedup();
@@ -1183,3 +1142,4 @@ fn build_repair_plan(index: &AcpBindingsIndex, dry_run: bool) -> BindingRepairPl
 
 #[cfg(test)]
 mod tests;
+mod validation;

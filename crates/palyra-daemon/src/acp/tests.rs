@@ -113,8 +113,7 @@ fn config_rejects_secret_bearing_keys() {
 fn conversation_binding_rejects_excessive_scope_count() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let runtime = AcpRuntime::open(tempdir.path().join("acp")).expect("runtime should open");
-    let scopes =
-        (0..=MAX_ACP_SCOPE_COUNT).map(|index| format!("scope-{index}")).collect::<Vec<_>>();
+    let scopes = (0..=128).map(|index| format!("scope-{index}")).collect::<Vec<_>>();
 
     let error = runtime
         .upsert_conversation_binding(ConversationBindingUpsert {
