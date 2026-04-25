@@ -47,6 +47,9 @@ fn spawn_doctor_http_server(admin_token: &str) -> Result<(String, thread::JoinHa
                 }
                 Err(error) => return Err(error).context("failed to accept doctor test request"),
             };
+            stream
+                .set_nonblocking(false)
+                .context("failed to restore blocking mode for doctor test request")?;
             let mut buffer = [0_u8; 4096];
             let bytes_read =
                 stream.read(&mut buffer).context("failed to read doctor test request")?;
