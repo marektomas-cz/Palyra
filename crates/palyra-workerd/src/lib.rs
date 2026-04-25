@@ -1189,8 +1189,10 @@ mod tests {
     #[test]
     fn capability_matching_requires_worker_self_report_and_policy_trust() {
         let mut manager = WorkerFleetManager::default();
-        let mut policy = WorkerFleetPolicy::default();
-        policy.trusted_capabilities = vec!["tool:palyra.sleep".to_owned()];
+        let policy = WorkerFleetPolicy {
+            trusted_capabilities: vec!["tool:palyra.sleep".to_owned()],
+            ..WorkerFleetPolicy::default()
+        };
         let mut attestation = attestation("worker-l");
         attestation.supported_capabilities = vec!["tool:palyra.sleep".to_owned()];
         manager.register_worker(attestation, &policy, 2_000).unwrap();
@@ -1208,9 +1210,11 @@ mod tests {
     #[test]
     fn stale_heartbeat_marks_worker_offline_and_clears_active_lease() {
         let mut manager = WorkerFleetManager::default();
-        let mut policy =
-            WorkerFleetPolicy { heartbeat_timeout_ms: 100, ..WorkerFleetPolicy::default() };
-        policy.trusted_capabilities = vec!["tool:palyra.echo".to_owned()];
+        let policy = WorkerFleetPolicy {
+            heartbeat_timeout_ms: 100,
+            trusted_capabilities: vec!["tool:palyra.echo".to_owned()],
+            ..WorkerFleetPolicy::default()
+        };
         manager.register_worker(attestation("worker-m"), &policy, 2_000).unwrap();
         manager.assign_work("worker-m", lease_request("run-12", 500), &policy, 2_050).unwrap();
 
