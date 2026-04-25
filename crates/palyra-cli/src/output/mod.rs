@@ -1,6 +1,7 @@
 use std::{io::Write, process::ExitCode};
 
 use anyhow::{Context, Result};
+use palyra_common::redaction::{redact_auth_error, redact_url_segments_in_text};
 use serde::Serialize;
 
 use crate::{app, args::OutputFormatArg};
@@ -63,10 +64,15 @@ where
 }
 
 pub(crate) fn print_text_line(line: &str) -> Result<()> {
+    let line = sanitize_text_output_line(line);
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(line.as_bytes()).context("stdout write failed")?;
     stdout.write_all(b"\n").context("stdout write failed")?;
     Ok(())
+}
+
+fn sanitize_text_output_line(line: &str) -> String {
+    redact_auth_error(redact_url_segments_in_text(line).as_str())
 }
 
 pub(crate) fn preferred_json(explicit_json: bool) -> bool {
@@ -98,7 +104,7 @@ pub(crate) fn emit_error(error: &anyhow::Error) -> Result<CliExitCode> {
     let log_level =
         context.as_ref().map(|value| format!("{:?}", value.log_level()).to_ascii_lowercase());
     let no_color = context.as_ref().map(|value| value.no_color());
-    let message = format!("{error:#}");
+    let message = sanitize_text_output_line(format!("{error:#}").as_str());
     let format =
         context.as_ref().map(|value| value.output_format()).unwrap_or(OutputFormatArg::Text);
 
@@ -241,5 +247,17 @@ mod tests {
             classify_error(&anyhow!("run_id must be a canonical ULID")),
             CliExitCode::Validation
         );
+    }
+
+    #[test]
+    fn text_output_sanitizer_redacts_auth_material() {
+        let sanitized = sanitize_text_output_line(
+            "request failed https://example.test/callback?access_token=secret Authorization: Bearer abc",
+        );
+
+        assert!(sanitized.contains("access_token=<redacted>"));
+        assert!(sanitized.contains("Bearer <redacted>"));
+        assert!(!sanitized.contains("access_token=secret"));
+        assert!(!sanitized.contains("Bearer abc"));
     }
 }

@@ -42,6 +42,17 @@ fn session_binding_survives_restart_and_marks_permissions_stale() {
 }
 
 #[test]
+fn runtime_rejects_state_root_with_parent_traversal_components() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let unsafe_root = tempdir.path().join("state").join("..").join("escape");
+
+    let error = AcpRuntime::open(unsafe_root)
+        .expect_err("runtime state root must reject parent traversal components");
+
+    assert_eq!(error.stable_code(), "acp/invalid_field");
+}
+
+#[test]
 fn reconnect_returns_pending_prompt_within_grace_window() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let runtime = AcpRuntime::open(tempdir.path().join("acp")).expect("runtime should open");
@@ -95,6 +106,32 @@ fn config_rejects_secret_bearing_keys() {
             cursor: AcpCursor::default(),
         })
         .expect_err("secret-bearing config should be rejected");
+    assert_eq!(error.stable_code(), "acp/invalid_field");
+}
+
+#[test]
+fn conversation_binding_rejects_excessive_scope_count() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let runtime = AcpRuntime::open(tempdir.path().join("acp")).expect("runtime should open");
+    let scopes =
+        (0..=MAX_ACP_SCOPE_COUNT).map(|index| format!("scope-{index}")).collect::<Vec<_>>();
+
+    let error = runtime
+        .upsert_conversation_binding(ConversationBindingUpsert {
+            connector_kind: "acp".to_owned(),
+            external_identity: "user-a".to_owned(),
+            external_conversation_id: "thread-1".to_owned(),
+            palyra_session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            owner_principal: "operator".to_owned(),
+            device_id: "desktop".to_owned(),
+            channel: None,
+            scopes,
+            sensitivity: ConversationBindingSensitivity::Internal,
+            delivery_cursor: AcpCursor::default(),
+            last_event_id: None,
+        })
+        .expect_err("oversized scope list must be rejected before normalization");
+
     assert_eq!(error.stable_code(), "acp/invalid_field");
 }
 

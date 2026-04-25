@@ -38,8 +38,7 @@ pub(crate) fn normalize_vault_root_path(raw: PathBuf) -> Result<PathBuf, VaultEr
         })?;
         current_dir.join(raw)
     };
-    validate_no_parent_components(normalized.as_path(), "vault root path")?;
-    Ok(normalized)
+    normalize_path_components(normalized.as_path(), "vault root path")
 }
 
 pub(crate) fn canonicalize_existing_dir(
@@ -59,15 +58,32 @@ pub(crate) fn validate_no_parent_components(
     path: &Path,
     label: &'static str,
 ) -> Result<(), VaultError> {
+    normalize_path_components(path, label).map(|_| ())
+}
+
+fn normalize_path_components(path: &Path, label: &'static str) -> Result<PathBuf, VaultError> {
     if path.as_os_str().is_empty() {
         return Err(VaultError::Io(format!("{label} cannot be empty")));
     }
-    if path.components().any(|component| matches!(component, Component::ParentDir)) {
-        return Err(VaultError::Io(format!(
-            "{label} cannot contain parent directory traversal components"
-        )));
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                return Err(VaultError::Io(format!(
+                    "{label} cannot contain parent directory traversal components"
+                )));
+            }
+            Component::CurDir => {}
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir | Component::Normal(_) => normalized.push(component.as_os_str()),
+        }
     }
-    Ok(())
+
+    if normalized.as_os_str().is_empty() {
+        return Err(VaultError::Io(format!("{label} cannot resolve to the current directory")));
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn ensure_path_within_root(
@@ -84,11 +100,11 @@ pub(crate) fn ensure_path_within_root(
 }
 
 pub fn ensure_owner_only_dir(path: &Path) -> Result<(), VaultError> {
-    validate_no_parent_components(path, "owner-only directory path")?;
-    fs::create_dir_all(path).map_err(|error| {
-        VaultError::Io(format!("failed to create directory {}: {error}", path.display()))
+    let normalized = normalize_path_components(path, "owner-only directory path")?;
+    fs::create_dir_all(normalized.as_path()).map_err(|error| {
+        VaultError::Io(format!("failed to create directory {}: {error}", normalized.display()))
     })?;
-    let canonical = canonicalize_existing_dir(path, "owner-only directory path")?;
+    let canonical = canonicalize_existing_dir(normalized.as_path(), "owner-only directory path")?;
     #[cfg(windows)]
     {
         let owner_sid = current_user_sid()?;

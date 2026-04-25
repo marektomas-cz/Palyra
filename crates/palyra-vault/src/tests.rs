@@ -434,6 +434,17 @@ fn windows_owner_only_helpers_apply_acl_to_dir_and_file() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn owner_only_dir_rejects_parent_traversal_components() {
+    let temp = tempdir().expect("temporary test directory should be created");
+    let unsafe_path = temp.path().join("vault").join("..").join("escape");
+
+    let error = ensure_owner_only_dir(unsafe_path.as_path())
+        .expect_err("owner-only directory path must reject parent traversal");
+
+    assert!(error.to_string().contains("parent directory traversal"), "unexpected error: {error}");
+}
+
 #[cfg(unix)]
 #[test]
 fn encrypted_file_backend_enforces_owner_only_permissions() -> Result<()> {

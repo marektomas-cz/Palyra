@@ -196,19 +196,19 @@ mod tests {
         prelude::{FromDer, X509Certificate},
     };
 
-    use super::CertificateAuthority;
+    use super::{CertificateAuthority, IssuedCertificate};
 
     #[test]
     fn issued_certificate_validity_matches_requested_window() {
         let mut ca = CertificateAuthority::new("Palyra Test CA").expect("CA should initialize");
         let validity = Duration::from_secs(3_600);
 
-        let issued = ca
+        let IssuedCertificate { certificate_pem, expires_at_unix_ms, .. } = ca
             .issue_client_certificate("01ARZ3NDEKTSV4RRFFQ69G5FAV", validity)
             .expect("certificate issuance should succeed");
 
-        let (_, pem) = parse_x509_pem(issued.certificate_pem.as_bytes())
-            .expect("certificate PEM should parse");
+        let (_, pem) =
+            parse_x509_pem(certificate_pem.as_bytes()).expect("certificate PEM should parse");
         let (_, cert) =
             X509Certificate::from_der(&pem.contents).expect("certificate DER should parse");
 
@@ -220,7 +220,7 @@ mod tests {
             "expected validity around 3600s, got {validity_seconds}s"
         );
 
-        let metadata_not_after = (issued.expires_at_unix_ms / 1_000) as i64;
+        let metadata_not_after = (expires_at_unix_ms / 1_000) as i64;
         assert!(
             (metadata_not_after - not_after).abs() <= 2,
             "metadata expires_at_unix_ms ({metadata_not_after}) should align with x509 not_after ({not_after})"
