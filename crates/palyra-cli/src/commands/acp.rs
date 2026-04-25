@@ -21,19 +21,27 @@ pub(crate) fn run_legacy_agent_acp_shim(command: AcpShimArgs) -> Result<()> {
 fn run_acp_bridge(command: AcpBridgeArgs) -> Result<()> {
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for ACP command"))?;
-    let connection = root_context.resolve_grpc_connection(
-        app::ConnectionOverrides {
-            grpc_url: command.connection.grpc_url,
-            token: command.connection.token,
-            principal: command.connection.principal,
-            device_id: command.connection.device_id,
-            channel: command.connection.channel,
-            daemon_url: None,
-        },
-        app::ConnectionDefaults::USER,
-    )?;
+    let grpc_overrides = app::ConnectionOverrides {
+        grpc_url: command.connection.grpc_url,
+        token: command.connection.token,
+        principal: command.connection.principal,
+        device_id: command.connection.device_id,
+        channel: command.connection.channel,
+        daemon_url: None,
+    };
+    let connection = root_context
+        .resolve_grpc_connection(grpc_overrides.clone(), app::ConnectionDefaults::USER)?;
+    let control_plane_overrides = app::ConnectionOverrides {
+        daemon_url: None,
+        grpc_url: None,
+        token: connection.token.clone(),
+        principal: Some(connection.principal.clone()),
+        device_id: Some(connection.device_id.clone()),
+        channel: Some(connection.channel.clone()),
+    };
     acp_bridge::run_agent_acp_bridge(
         connection,
+        control_plane_overrides,
         command.allow_sensitive_tools,
         acp_bridge::AcpSessionDefaults {
             session_key: command.session_defaults.session_key,

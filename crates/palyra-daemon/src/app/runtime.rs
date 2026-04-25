@@ -14,6 +14,7 @@ use super::state::{
 };
 use crate::{
     access_control::AccessRegistry,
+    acp::AcpRuntime,
     channels,
     config::{BrowserServiceConfig, LoadedConfig},
     gateway::{self, GatewayAuthConfig, GatewayRuntimeState},
@@ -26,6 +27,7 @@ use palyra_identity::IdentityManager;
 use palyra_vault::Vault;
 
 pub(crate) struct AppStateBuildContext {
+    pub(crate) acp_runtime: Arc<AcpRuntime>,
     pub(crate) runtime: Arc<GatewayRuntimeState>,
     pub(crate) node_runtime: Arc<NodeRuntimeState>,
     pub(crate) identity_manager: Arc<Mutex<IdentityManager>>,
@@ -51,6 +53,7 @@ pub(crate) fn build_app_state(
     AppState {
         started_at: Instant::now(),
         loaded_config: Arc::new(Mutex::new(loaded.clone())),
+        acp_runtime: context.acp_runtime,
         runtime: context.runtime,
         node_runtime: context.node_runtime,
         identity_manager: context.identity_manager,

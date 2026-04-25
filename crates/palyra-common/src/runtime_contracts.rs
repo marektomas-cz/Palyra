@@ -594,6 +594,298 @@ pub struct RealtimeCommandResultEnvelope {
     pub replayed: bool,
 }
 
+pub const ACP_PROTOCOL_MIN_VERSION: u32 = 1;
+pub const ACP_PROTOCOL_MAX_VERSION: u32 = 1;
+pub const ACP_DEFAULT_REPLAY_MAX_EVENTS: usize = 200;
+pub const ACP_DEFAULT_DISCONNECT_GRACE_MS: i64 = 10 * 60 * 1_000;
+
+runtime_contract_enum! {
+    /// Transport that carried an ACP request into the daemon-backed bridge.
+    pub enum AcpTransportKind {
+        Stdio => "stdio",
+        Http => "http",
+        Websocket => "websocket"
+    }
+}
+
+runtime_contract_enum! {
+    /// Authorization scopes negotiated by daemon-level ACP clients.
+    pub enum AcpScope {
+        SessionsRead => "sessions:read",
+        SessionsWrite => "sessions:write",
+        RunsRead => "runs:read",
+        RunsWrite => "runs:write",
+        ApprovalsRead => "approvals:read",
+        ApprovalsWrite => "approvals:write",
+        BindingsRead => "bindings:read",
+        BindingsWrite => "bindings:write",
+        EventsRead => "events:read",
+        EventsSensitive => "events:sensitive"
+    }
+}
+
+runtime_contract_enum! {
+    /// Feature capabilities advertised and enforced by daemon-level ACP.
+    pub enum AcpCapability {
+        SessionList => "session_list",
+        SessionLoad => "session_load",
+        SessionNew => "session_new",
+        SessionReplay => "session_replay",
+        RunControl => "run_control",
+        ApprovalBridge => "approval_bridge",
+        PendingPrompts => "pending_prompts",
+        SessionConfig => "session_config",
+        SessionFork => "session_fork",
+        SessionCompact => "session_compact",
+        SessionExplain => "session_explain",
+        ConversationBindings => "conversation_bindings",
+        BindingRepair => "binding_repair",
+        SensitiveReplay => "sensitive_replay"
+    }
+}
+
+runtime_contract_enum! {
+    /// Stable command names for the ACP control plane.
+    pub enum AcpCommand {
+        SessionList => "session.list",
+        SessionLoad => "session.load",
+        SessionNew => "session.new",
+        SessionReplay => "session.replay",
+        SessionResume => "session.resume",
+        SessionFork => "session.fork",
+        SessionCompactPreview => "session.compact.preview",
+        SessionCompactApply => "session.compact.apply",
+        SessionExplain => "session.explain",
+        SessionModeSet => "session.mode.set",
+        SessionConfigSet => "session.config.set",
+        RunCreate => "run.create",
+        RunAbort => "run.abort",
+        ApprovalList => "approval.list",
+        ApprovalRequest => "approval.request",
+        ApprovalDecide => "approval.decide",
+        BindingList => "binding.list",
+        BindingUpsert => "binding.upsert",
+        BindingGet => "binding.get",
+        BindingDetach => "binding.detach",
+        BindingRepairPlan => "binding.repair.plan",
+        BindingRepairApply => "binding.repair.apply",
+        BindingExplain => "binding.explain",
+        Reconnect => "reconnect"
+    }
+}
+
+runtime_contract_enum! {
+    /// ACP-facing session execution mode. Mode changes are policy-visible and auditable.
+    pub enum AcpSessionMode {
+        Normal => "normal",
+        Planning => "planning",
+        Review => "review",
+        ReadOnly => "read_only"
+    }
+}
+
+runtime_contract_enum! {
+    /// ACP permission bridge outcome after mapping through Palyra approvals.
+    pub enum AcpPermissionDecision {
+        Allow => "allow",
+        Deny => "deny",
+        Timeout => "timeout",
+        Error => "error"
+    }
+}
+
+runtime_contract_enum! {
+    /// Sensitivity label for connector-independent conversation bindings.
+    pub enum ConversationBindingSensitivity {
+        Public => "public",
+        Internal => "internal",
+        Sensitive => "sensitive"
+    }
+}
+
+runtime_contract_enum! {
+    /// Conflict state for reverse indexes between external conversations and Palyra sessions.
+    pub enum ConversationBindingConflictState {
+        None => "none",
+        DuplicateExternalIdentity => "duplicate_external_identity",
+        DuplicateSession => "duplicate_session",
+        Detached => "detached"
+    }
+}
+
+/// Supported ACP protocol range advertised in compatibility responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpProtocolVersionRange {
+    pub min: u32,
+    pub max: u32,
+}
+
+impl Default for AcpProtocolVersionRange {
+    fn default() -> Self {
+        Self { min: ACP_PROTOCOL_MIN_VERSION, max: ACP_PROTOCOL_MAX_VERSION }
+    }
+}
+
+impl AcpProtocolVersionRange {
+    #[must_use]
+    pub const fn contains(self, protocol_version: u32) -> bool {
+        protocol_version >= self.min && protocol_version <= self.max
+    }
+}
+
+/// Cursor supplied by ACP clients when reconnecting or replaying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AcpCursor {
+    pub sequence: u64,
+}
+
+/// Authenticated daemon-side context for an ACP client request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpClientContext {
+    pub protocol_version: u32,
+    pub client_id: String,
+    pub transport: AcpTransportKind,
+    pub owner_principal: String,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<AcpScope>,
+    #[serde(default)]
+    pub capabilities: Vec<AcpCapability>,
+}
+
+/// Durable mapping between an ACP client session and a Palyra orchestrator session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpSessionBindingRecord {
+    pub schema_version: u32,
+    pub binding_id: String,
+    pub acp_client_id: String,
+    pub acp_session_id: String,
+    pub palyra_session_id: String,
+    pub session_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<String>,
+    pub owner_principal: String,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<AcpScope>,
+    #[serde(default)]
+    pub capabilities: Vec<AcpCapability>,
+    pub mode: AcpSessionMode,
+    #[serde(default)]
+    pub config: Value,
+    pub cursor: AcpCursor,
+    pub last_seen_at_unix_ms: i64,
+    pub protocol_version: u32,
+    pub stale_permissions: bool,
+}
+
+/// Pending prompt or approval retained during ACP disconnect grace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpPendingPromptRecord {
+    pub prompt_id: String,
+    pub acp_client_id: String,
+    pub acp_session_id: String,
+    pub palyra_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub prompt_kind: String,
+    pub redacted_summary: String,
+    pub created_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+/// Canonical connector-independent binding from an external conversation to a Palyra session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationBindingRecord {
+    pub schema_version: u32,
+    pub binding_id: String,
+    pub connector_kind: String,
+    pub external_identity: String,
+    pub external_conversation_id: String,
+    pub palyra_session_id: String,
+    pub owner_principal: String,
+    pub device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub sensitivity: ConversationBindingSensitivity,
+    pub delivery_cursor: AcpCursor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_id: Option<String>,
+    pub conflict_state: ConversationBindingConflictState,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+/// ACP command frame accepted by the daemon bridge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpCommandEnvelope {
+    pub request_id: String,
+    pub command: AcpCommand,
+    #[serde(default)]
+    pub params: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<u64>,
+}
+
+/// Stable ACP result envelope that mirrors command-router error semantics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpCommandResultEnvelope {
+    pub request_id: String,
+    pub command: AcpCommand,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<StableErrorEnvelope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    pub replayed: bool,
+}
+
+/// Replay budget applied before ACP transcript events leave the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpReplayCap {
+    pub max_events: usize,
+    pub max_payload_bytes: usize,
+    pub include_sensitive: bool,
+}
+
+impl Default for AcpReplayCap {
+    fn default() -> Self {
+        Self {
+            max_events: ACP_DEFAULT_REPLAY_MAX_EVENTS,
+            max_payload_bytes: 64 * 1024,
+            include_sensitive: false,
+        }
+    }
+}
+
+/// ACP compatibility error envelope with protocol-range metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpErrorEnvelope {
+    pub error: StableErrorEnvelope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_protocol_versions: Option<AcpProtocolVersionRange>,
+}
+
 /// Schema lookup record for runtime config control-plane clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeConfigSchemaField {
@@ -803,14 +1095,16 @@ runtime_contract_enum! {
 #[cfg(test)]
 mod tests {
     use super::{
+        AcpCapability, AcpClientContext, AcpCommand, AcpCommandEnvelope, AcpProtocolVersionRange,
+        AcpScope, AcpSessionBindingRecord, AcpSessionMode, AcpTransportKind,
         ArtifactRetentionDisposition, ArtifactRetentionPolicy, AuxiliaryTaskKind,
         AuxiliaryTaskState, DeliveryPolicy, FlowState, FlowStepState, IdempotencyReplayDecision,
         PruningPolicyClass, QueueDecision, QueueMode, QueuedInputState, RealtimeCapability,
         RealtimeCommand, RealtimeCommandEnvelope, RealtimeEventSensitivity, RealtimeEventTopic,
         RealtimeHandshakeRequest, RealtimeProtocolVersionRange, RealtimeRole, RealtimeScope,
         RealtimeSubscription, RunLifecyclePhase, ToolResultSensitivity, ToolResultVisibility,
-        ToolTurnBudget, WorkerLifecycleState, REALTIME_PROTOCOL_MAX_VERSION,
-        REALTIME_PROTOCOL_MIN_VERSION,
+        ToolTurnBudget, WorkerLifecycleState, ACP_PROTOCOL_MAX_VERSION, ACP_PROTOCOL_MIN_VERSION,
+        REALTIME_PROTOCOL_MAX_VERSION, REALTIME_PROTOCOL_MIN_VERSION,
     };
     use serde_json::json;
 
@@ -950,5 +1244,83 @@ mod tests {
             "requested_commands": []
         });
         assert!(serde_json::from_value::<RealtimeHandshakeRequest>(unknown_capability).is_err());
+    }
+
+    #[test]
+    fn acp_contracts_use_stable_wire_names() {
+        assert_eq!(AcpTransportKind::Stdio.as_str(), "stdio");
+        assert_eq!(AcpScope::SessionsRead.as_str(), "sessions:read");
+        assert_eq!(AcpCapability::ApprovalBridge.as_str(), "approval_bridge");
+        assert_eq!(AcpCommand::BindingRepairApply.as_str(), "binding.repair.apply");
+        assert_eq!(AcpSessionMode::ReadOnly.as_str(), "read_only");
+        assert!(AcpProtocolVersionRange::default().contains(ACP_PROTOCOL_MIN_VERSION));
+        assert!(AcpProtocolVersionRange::default().contains(ACP_PROTOCOL_MAX_VERSION));
+    }
+
+    #[test]
+    fn acp_context_and_command_frames_reject_unknown_contract_values() {
+        let context = AcpClientContext {
+            protocol_version: 1,
+            client_id: "zed-extension".to_owned(),
+            transport: AcpTransportKind::Stdio,
+            owner_principal: "operator".to_owned(),
+            device_id: "desktop".to_owned(),
+            channel: None,
+            scopes: vec![AcpScope::SessionsRead, AcpScope::ApprovalsWrite],
+            capabilities: vec![AcpCapability::SessionReplay],
+        };
+        let serialized = serde_json::to_value(&context).expect("context should serialize");
+        assert_eq!(serialized["scopes"], json!(["sessions:read", "approvals:write"]));
+        assert_eq!(serialized["capabilities"], json!(["session_replay"]));
+
+        let command = AcpCommandEnvelope {
+            request_id: "req-1".to_owned(),
+            command: AcpCommand::SessionReplay,
+            params: json!({ "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV" }),
+            idempotency_key: None,
+            expected_version: None,
+        };
+        let decoded: AcpCommandEnvelope =
+            serde_json::from_value(serde_json::to_value(command).unwrap()).unwrap();
+        assert_eq!(decoded.command, AcpCommand::SessionReplay);
+
+        let unknown_scope = json!({
+            "protocol_version": 1,
+            "client_id": "zed-extension",
+            "transport": "stdio",
+            "owner_principal": "operator",
+            "device_id": "desktop",
+            "scopes": ["sessions:read", "unknown:scope"],
+            "capabilities": []
+        });
+        assert!(serde_json::from_value::<AcpClientContext>(unknown_scope).is_err());
+    }
+
+    #[test]
+    fn acp_binding_record_persists_cursor_mode_and_stale_permissions() {
+        let binding = AcpSessionBindingRecord {
+            schema_version: 1,
+            binding_id: "acpbind_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            acp_client_id: "zed-extension".to_owned(),
+            acp_session_id: "acp-session-a".to_owned(),
+            palyra_session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            session_key: "cwd:C:/repo".to_owned(),
+            session_label: Some("Repo".to_owned()),
+            owner_principal: "operator".to_owned(),
+            device_id: "desktop".to_owned(),
+            channel: None,
+            scopes: vec![AcpScope::SessionsRead],
+            capabilities: vec![AcpCapability::SessionLoad],
+            mode: AcpSessionMode::Review,
+            config: json!({ "model_profile": "default" }),
+            cursor: Default::default(),
+            last_seen_at_unix_ms: 1,
+            protocol_version: 1,
+            stale_permissions: true,
+        };
+        let serialized = serde_json::to_value(&binding).expect("binding should serialize");
+        assert_eq!(serialized["mode"], "review");
+        assert_eq!(serialized["stale_permissions"], true);
+        assert_eq!(serialized["cursor"]["sequence"], 0);
     }
 }

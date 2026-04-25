@@ -1,4 +1,5 @@
 pub(crate) mod access;
+pub(crate) mod acp;
 pub(crate) mod agents;
 pub(crate) mod approvals;
 pub(crate) mod audit;

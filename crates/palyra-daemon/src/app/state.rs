@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, Notify};
 use crate::gateway::proto::palyra::common::v1 as common_v1;
 use crate::{
     access_control::AccessRegistry,
+    acp::AcpRuntime,
     channels,
     config::LoadedConfig,
     cron::CronTimezoneMode,
@@ -33,6 +34,7 @@ use crate::{
 pub(crate) struct AppState {
     pub(crate) started_at: Instant,
     pub(crate) loaded_config: Arc<Mutex<LoadedConfig>>,
+    pub(crate) acp_runtime: Arc<AcpRuntime>,
     pub(crate) runtime: Arc<GatewayRuntimeState>,
     pub(crate) node_runtime: Arc<NodeRuntimeState>,
     pub(crate) identity_manager: Arc<Mutex<IdentityManager>>,

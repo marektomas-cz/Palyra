@@ -7,12 +7,13 @@ use std::{
 use agent_client_protocol::{self as acp, Client as _};
 use anyhow::{Context, Result};
 use futures::io::AllowStdIo;
+use palyra_control_plane::ControlPlaneClient;
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
 
 use crate::{
-    build_agent_run_input, build_run_stream_request, build_runtime,
-    client::runtime::GatewayRuntimeClient,
+    app, build_agent_run_input, build_run_stream_request, build_runtime,
+    client::{control_plane, runtime::GatewayRuntimeClient},
     proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
     AgentConnection, AgentRunInputArgs, SessionResolveInput,
 };
@@ -33,6 +34,76 @@ struct SessionBinding {
     session_key: String,
     session_label: Option<String>,
     cwd: PathBuf,
+}
+
+#[derive(Clone)]
+struct AcpDaemonControl {
+    client: Arc<TokioMutex<ControlPlaneClient>>,
+    principal: String,
+    device_id: String,
+    channel: Option<String>,
+}
+
+impl AcpDaemonControl {
+    async fn command(&self, command: &str, params: Value) -> acp::Result<Value> {
+        let payload = json!({
+            "client": {
+                "protocol_version": 1,
+                "client_id": "palyra-cli-acp",
+                "transport": "stdio",
+                "owner_principal": self.principal.clone(),
+                "device_id": self.device_id.clone(),
+                "channel": self.channel.clone(),
+                "scopes": [
+                    "sessions:read",
+                    "sessions:write",
+                    "runs:read",
+                    "runs:write",
+                    "approvals:read",
+                    "approvals:write",
+                    "bindings:read",
+                    "bindings:write",
+                    "events:read",
+                    "events:sensitive"
+                ],
+                "capabilities": [
+                    "session_list",
+                    "session_load",
+                    "session_new",
+                    "session_replay",
+                    "run_control",
+                    "approval_bridge",
+                    "pending_prompts",
+                    "session_config",
+                    "session_fork",
+                    "session_compact",
+                    "session_explain",
+                    "conversation_bindings",
+                    "binding_repair",
+                    "sensitive_replay"
+                ]
+            },
+            "command": {
+                "request_id": format!("acp_req_{}", ulid::Ulid::new()),
+                "command": command,
+                "params": params,
+                "idempotency_key": format!("acp_idem_{}", ulid::Ulid::new())
+            }
+        });
+        let client = self.client.lock().await;
+        let response =
+            client.post_json_value("console/v1/acp/command", &payload).await.map_err(|error| {
+                acp::Error::new(-32603, format!("daemon ACP control-plane request failed: {error}"))
+            })?;
+        if response.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Ok(response.get("result").cloned().unwrap_or_else(|| json!({})));
+        }
+        let error = response.get("error").cloned().unwrap_or_else(|| json!({}));
+        let code = error.get("code").and_then(Value::as_str).unwrap_or("acp/daemon_error");
+        let message =
+            error.get("message").and_then(Value::as_str).unwrap_or("daemon ACP command failed");
+        Err(acp::Error::new(-32603, format!("{code}: {message}")))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -89,6 +160,7 @@ enum ClientBridgeRequest {
 #[derive(Clone)]
 struct PalyraAcpAgent {
     connection: AgentConnection,
+    daemon: Option<AcpDaemonControl>,
     allow_sensitive_tools: bool,
     session_defaults: AcpSessionDefaults,
     state: Arc<Mutex<BridgeState>>,
@@ -115,6 +187,7 @@ pub(crate) struct AcpSessionDefaults {
 impl PalyraAcpAgent {
     fn new(
         connection: AgentConnection,
+        daemon: Option<AcpDaemonControl>,
         allow_sensitive_tools: bool,
         session_defaults: AcpSessionDefaults,
         state: Arc<Mutex<BridgeState>>,
@@ -123,6 +196,7 @@ impl PalyraAcpAgent {
     ) -> Self {
         Self {
             connection,
+            daemon,
             allow_sensitive_tools,
             session_defaults,
             state,
@@ -301,6 +375,28 @@ impl PalyraAcpAgent {
         })
     }
 
+    async fn persist_daemon_binding(
+        &self,
+        acp_session_id: &str,
+        binding: &SessionBinding,
+        config: Value,
+    ) -> acp::Result<()> {
+        let Some(daemon) = &self.daemon else {
+            return Ok(());
+        };
+        daemon
+            .command(
+                "session.load",
+                json!({
+                    "session_id": binding.gateway_session_id_ulid.clone(),
+                    "acp_session_id": acp_session_id,
+                    "config": config,
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn ensure_binding_for_acp_session(
         &self,
         acp_session_id: &acp::SessionId,
@@ -336,8 +432,38 @@ impl PalyraAcpAgent {
                 overrides.reset_session.unwrap_or(self.session_defaults.reset_session),
             )
             .await?;
+        self.persist_daemon_binding(
+            session_id_value.as_str(),
+            &binding,
+            json!({
+                "session_key": binding.session_key.clone(),
+                "session_label": binding.session_label.clone(),
+                "source": "prompt",
+            }),
+        )
+        .await?;
         self.lock_state()?.remember_binding(session_id_value.as_str(), binding.clone());
         Ok(binding)
+    }
+
+    async fn list_daemon_sessions(
+        &self,
+        cursor: Option<String>,
+    ) -> acp::Result<Option<acp::ListSessionsResponse>> {
+        let Some(daemon) = &self.daemon else {
+            return Ok(None);
+        };
+        let response = daemon
+            .command(
+                "session.list",
+                json!({
+                    "after_session_key": cursor,
+                    "limit": 100,
+                    "include_archived": false,
+                }),
+            )
+            .await?;
+        Ok(Some(map_daemon_sessions_response(response, &self.default_cwd)))
     }
 
     async fn list_gateway_sessions(
@@ -573,6 +699,16 @@ impl acp::Agent for PalyraAcpAgent {
             .await?;
         binding.cwd = arguments.cwd;
 
+        self.persist_daemon_binding(
+            binding.session_key.as_str(),
+            &binding,
+            json!({
+                "session_key": binding.session_key.clone(),
+                "session_label": binding.session_label.clone(),
+                "source": "new_session",
+            }),
+        )
+        .await?;
         self.lock_state()?.remember_binding(binding.session_key.as_str(), binding.clone());
 
         Ok(acp::NewSessionResponse::new(acp::SessionId::new(binding.session_key)))
@@ -596,6 +732,16 @@ impl acp::Agent for PalyraAcpAgent {
             .await?;
         binding.cwd = arguments.cwd;
 
+        self.persist_daemon_binding(
+            arguments.session_id.0.as_ref(),
+            &binding,
+            json!({
+                "session_key": binding.session_key.clone(),
+                "session_label": binding.session_label.clone(),
+                "source": "load_session",
+            }),
+        )
+        .await?;
         self.lock_state()?.remember_binding(arguments.session_id.0.as_ref(), binding);
         Ok(acp::LoadSessionResponse::new())
     }
@@ -610,15 +756,42 @@ impl acp::Agent for PalyraAcpAgent {
 
     async fn set_session_mode(
         &self,
-        _arguments: acp::SetSessionModeRequest,
+        arguments: acp::SetSessionModeRequest,
     ) -> acp::Result<acp::SetSessionModeResponse> {
+        if let Some(daemon) = &self.daemon {
+            daemon
+                .command(
+                    "session.mode.set",
+                    json!({
+                        "acp_session_id": arguments.session_id.0.as_ref(),
+                        "mode": arguments.mode_id.0.as_ref(),
+                    }),
+                )
+                .await?;
+        }
         Ok(acp::SetSessionModeResponse::new())
     }
 
     async fn set_session_config_option(
         &self,
-        _arguments: acp::SetSessionConfigOptionRequest,
+        arguments: acp::SetSessionConfigOptionRequest,
     ) -> acp::Result<acp::SetSessionConfigOptionResponse> {
+        if let Some(daemon) = &self.daemon {
+            let mut config = serde_json::Map::new();
+            config.insert(
+                arguments.config_id.0.as_ref().to_owned(),
+                Value::String(arguments.value.0.as_ref().to_owned()),
+            );
+            daemon
+                .command(
+                    "session.config.set",
+                    json!({
+                        "acp_session_id": arguments.session_id.0.as_ref(),
+                        "config": Value::Object(config),
+                    }),
+                )
+                .await?;
+        }
         Ok(acp::SetSessionConfigOptionResponse::new(Vec::new()))
     }
 
@@ -626,6 +799,9 @@ impl acp::Agent for PalyraAcpAgent {
         &self,
         arguments: acp::ListSessionsRequest,
     ) -> acp::Result<acp::ListSessionsResponse> {
+        if let Some(response) = self.list_daemon_sessions(arguments.cursor.clone()).await? {
+            return Ok(response);
+        }
         let response = self.list_gateway_sessions(arguments.cursor).await?;
         let state = self.lock_state()?;
         Ok(map_list_sessions_response(response, &state, &self.default_cwd))
@@ -634,6 +810,7 @@ impl acp::Agent for PalyraAcpAgent {
 
 pub fn run_agent_acp_bridge(
     connection: AgentConnection,
+    control_plane_overrides: app::ConnectionOverrides,
     allow_sensitive_tools: bool,
     session_defaults: AcpSessionDefaults,
 ) -> Result<()> {
@@ -646,8 +823,20 @@ pub fn run_agent_acp_bridge(
                     mpsc::unbounded_channel::<ClientBridgeRequest>();
                 let state = Arc::new(Mutex::new(BridgeState::default()));
                 let default_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let daemon_context = control_plane::connect_admin_console(control_plane_overrides)
+                    .await
+                    .context(
+                        "failed to connect daemon ACP control-plane; ensure palyrad is running and ACP is enabled",
+                    )?;
+                let daemon = AcpDaemonControl {
+                    client: Arc::new(TokioMutex::new(daemon_context.client)),
+                    principal: connection.principal.clone(),
+                    device_id: connection.device_id.clone(),
+                    channel: Some(connection.channel.clone()),
+                };
                 let bridge = PalyraAcpAgent::new(
                     connection,
+                    Some(daemon),
                     allow_sensitive_tools,
                     session_defaults,
                     state,
@@ -843,6 +1032,33 @@ fn map_list_sessions_response(
         .next_cursor(non_empty(Some(response.next_after_session_key)))
 }
 
+fn map_daemon_sessions_response(response: Value, default_cwd: &Path) -> acp::ListSessionsResponse {
+    let sessions = response
+        .get("sessions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|session| {
+            let session_key = session
+                .get("session_key")
+                .and_then(Value::as_str)
+                .or_else(|| session.get("session_id").and_then(Value::as_str))
+                .unwrap_or("session")
+                .to_owned();
+            let title = session
+                .get("session_label")
+                .and_then(Value::as_str)
+                .or_else(|| session.get("title").and_then(Value::as_str))
+                .map(ToOwned::to_owned);
+            acp::SessionInfo::new(acp::SessionId::new(session_key), default_cwd.to_path_buf())
+                .title(title)
+        })
+        .collect::<Vec<_>>();
+    acp::ListSessionsResponse::new(sessions).next_cursor(
+        response.get("next_after_session_key").and_then(Value::as_str).map(ToOwned::to_owned),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_tool_approval_stream_request(
     session_id_ulid: &str,
@@ -925,6 +1141,7 @@ mod tests {
                 channel: "cli".to_owned(),
                 trace_id: "cli:test".to_owned(),
             },
+            None,
             false,
             AcpSessionDefaults::default(),
             Arc::new(Mutex::new(BridgeState::default())),

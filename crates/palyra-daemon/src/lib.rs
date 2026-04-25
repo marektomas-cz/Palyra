@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 mod access_control;
+mod acp;
 mod agents;
 pub mod app;
 pub mod application;
@@ -1976,6 +1977,10 @@ pub async fn run() -> Result<()> {
         .context("failed to initialize agent registry state")?;
     let runtime_state_root = resolve_runtime_state_root(identity_runtime.store_root.as_path())
         .context("failed to resolve webhook registry state root")?;
+    let acp_runtime = Arc::new(
+        acp::AcpRuntime::open(acp::acp_root_from_state_root(runtime_state_root.as_path()))
+            .context("failed to initialize ACP runtime state")?,
+    );
     let webhook_registry = Arc::new(
         webhooks::WebhookRegistry::open(runtime_state_root.as_path())
             .context("failed to initialize webhook registry state")?,
@@ -2414,6 +2419,7 @@ pub async fn run() -> Result<()> {
         dangerous_remote_bind_ack_env,
         configured_secrets,
         AppStateBuildContext {
+            acp_runtime: Arc::clone(&acp_runtime),
             runtime: runtime.clone(),
             node_runtime: Arc::clone(&node_runtime),
             identity_manager: Arc::clone(&identity_runtime.manager),

@@ -209,6 +209,30 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/access/shares",
             post(console::access::console_access_share_upsert_handler),
         )
+        .route("/console/v1/acp/status", get(console::acp::console_acp_status_handler))
+        .route("/console/v1/acp/command", post(console::acp::console_acp_command_handler))
+        .route(
+            "/console/v1/bindings",
+            get(console::acp::console_bindings_list_handler)
+                .post(console::acp::console_binding_upsert_handler),
+        )
+        .route("/console/v1/bindings/{binding_id}", get(console::acp::console_binding_get_handler))
+        .route(
+            "/console/v1/bindings/{binding_id}/detach",
+            post(console::acp::console_binding_detach_handler),
+        )
+        .route(
+            "/console/v1/bindings/repair/plan",
+            post(console::acp::console_bindings_repair_plan_handler),
+        )
+        .route(
+            "/console/v1/bindings/repair/apply",
+            post(console::acp::console_bindings_repair_apply_handler),
+        )
+        .route(
+            "/console/v1/bindings/{binding_id}/explain",
+            get(console::acp::console_binding_explain_handler),
+        )
         .route("/console/v1/auth/login", post(console::auth::console_login_handler))
         .route("/console/v1/auth/logout", post(console::auth::console_logout_handler))
         .route("/console/v1/auth/session", get(console::auth::console_session_handler))
