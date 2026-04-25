@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -87,6 +87,59 @@ pub enum ConnectorAdapterError {
     Backend(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorAdapterSdkOperation {
+    Inbound,
+    Outbound,
+    Binding,
+    RateLimit,
+    ErrorMapping,
+}
+
+impl ConnectorAdapterSdkOperation {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+            Self::Binding => "binding",
+            Self::RateLimit => "rate_limit",
+            Self::ErrorMapping => "error_mapping",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorAdapterSdkDescriptor {
+    pub schema_version: u32,
+    pub kind: ConnectorKind,
+    pub operations: Vec<ConnectorAdapterSdkOperation>,
+    pub binding_contract: String,
+    pub delivery_receipt_contract: String,
+    pub error_contract: String,
+}
+
+impl ConnectorAdapterSdkDescriptor {
+    #[must_use]
+    pub fn for_kind(kind: ConnectorKind) -> Self {
+        Self {
+            schema_version: 1,
+            kind,
+            operations: vec![
+                ConnectorAdapterSdkOperation::Inbound,
+                ConnectorAdapterSdkOperation::Outbound,
+                ConnectorAdapterSdkOperation::Binding,
+                ConnectorAdapterSdkOperation::RateLimit,
+                ConnectorAdapterSdkOperation::ErrorMapping,
+            ],
+            binding_contract: "conversation_binding_record".to_owned(),
+            delivery_receipt_contract: "ack_nack_unknown_v1".to_owned(),
+            error_contract: "connector_adapter_error_v1".to_owned(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait ConnectorRouter: Send + Sync {
     async fn route_inbound(
@@ -99,6 +152,10 @@ pub trait ConnectorRouter: Send + Sync {
 #[async_trait]
 pub trait ConnectorAdapter: Send + Sync {
     fn kind(&self) -> ConnectorKind;
+
+    fn sdk_descriptor(&self) -> ConnectorAdapterSdkDescriptor {
+        ConnectorAdapterSdkDescriptor::for_kind(self.kind())
+    }
 
     fn availability(&self) -> ConnectorAvailability {
         provider_availability(self.kind())

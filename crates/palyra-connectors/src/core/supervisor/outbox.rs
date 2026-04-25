@@ -1,7 +1,9 @@
 use serde_json::json;
 
 use super::super::{
-    protocol::{ConnectorLiveness, ConnectorReadiness, DeliveryOutcome, RetryClass},
+    protocol::{
+        ConnectorLiveness, ConnectorReadiness, DeliveryOutcome, DeliveryReceipt, RetryClass,
+    },
     storage::OutboxEntryRecord,
 };
 use super::types::{classify_permanent_failure, retry_class_label, DispatchResult};
@@ -139,6 +141,7 @@ impl ConnectorSupervisor {
         delivery: DeliveryOutcome,
         now_unix_ms: i64,
     ) -> Result<DispatchResult, ConnectorSupervisorError> {
+        let receipt = DeliveryReceipt::from_outcome(&entry.payload, &delivery);
         match delivery {
             DeliveryOutcome::Delivered { native_message_id } => {
                 self.store.mark_outbox_delivered(
@@ -156,6 +159,7 @@ impl ConnectorSupervisor {
                     Some(&json!({
                         "envelope_id": entry.envelope_id,
                         "native_message_id": native_message_id,
+                        "receipt": receipt,
                     })),
                     now_unix_ms,
                 )?;
@@ -181,6 +185,7 @@ impl ConnectorSupervisor {
                             "attempts": attempts,
                             "reason": reason,
                             "retry_class": retry_class_label(class),
+                            "receipt": receipt,
                         })),
                         now_unix_ms,
                     )?;
@@ -223,6 +228,7 @@ impl ConnectorSupervisor {
                         "next_attempt_unix_ms": next_attempt_unix_ms,
                         "reason": reason,
                         "retry_class": retry_class_label(class),
+                        "receipt": receipt,
                     })),
                     now_unix_ms,
                 )?;
@@ -251,6 +257,7 @@ impl ConnectorSupervisor {
                     Some(&json!({
                         "envelope_id": entry.envelope_id,
                         "reason": reason,
+                        "receipt": receipt,
                     })),
                     now_unix_ms,
                 )?;

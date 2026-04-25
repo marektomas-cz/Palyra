@@ -16,15 +16,16 @@ pub use protocol::{
     ConnectorMessageReadResult, ConnectorMessageRecord, ConnectorMessageSearchRequest,
     ConnectorMessageSearchResult, ConnectorOperationPreflight, ConnectorQueueDepth,
     ConnectorReadiness, ConnectorRiskLevel, ConnectorStatusSnapshot, DeliveryOutcome,
-    InboundMessageEvent, OutboundA2uiUpdate, OutboundAttachment, OutboundMessageRequest,
-    RetryClass, RouteInboundResult, RoutedOutboundMessage,
+    DeliveryReceipt, DeliveryReceiptState, InboundMessageEvent, OutboundA2uiUpdate,
+    OutboundAttachment, OutboundMessageRequest, RetryClass, RouteInboundResult,
+    RoutedOutboundMessage,
 };
 pub use storage::{
     ConnectorEventRecord, ConnectorInstanceRecord, ConnectorQueueSnapshot, ConnectorStore,
     ConnectorStoreError, DeadLetterRecord, OutboxEnqueueOutcome, OutboxEntryRecord,
 };
 pub use supervisor::{
-    ConnectorAdapter, ConnectorAdapterError, ConnectorRouter, ConnectorRouterError,
-    ConnectorSupervisor, ConnectorSupervisorConfig, ConnectorSupervisorError, DrainOutcome,
-    InboundIngestOutcome,
+    ConnectorAdapter, ConnectorAdapterError, ConnectorAdapterSdkDescriptor,
+    ConnectorAdapterSdkOperation, ConnectorRouter, ConnectorRouterError, ConnectorSupervisor,
+    ConnectorSupervisorConfig, ConnectorSupervisorError, DrainOutcome, InboundIngestOutcome,
 };

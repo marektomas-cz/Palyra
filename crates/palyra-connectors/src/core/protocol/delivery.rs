@@ -134,6 +134,11 @@ pub struct OutboundMessageRequest {
 }
 
 impl OutboundMessageRequest {
+    #[must_use]
+    pub fn delivery_idempotency_key(&self) -> String {
+        format!("{}:{}", self.connector_id, self.envelope_id)
+    }
+
     pub fn validate(&self, max_text_bytes: usize) -> Result<(), ProtocolError> {
         validate_non_empty_identifier(
             self.envelope_id.as_str(),
@@ -187,12 +192,79 @@ pub enum RetryClass {
     ConnectorRestarting,
 }
 
+impl RetryClass {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimit => "rate_limit",
+            Self::TransientNetwork => "transient_network",
+            Self::ConnectorRestarting => "connector_restarting",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryOutcome {
     Delivered { native_message_id: String },
     Retry { class: RetryClass, reason: String, retry_after_ms: Option<u64> },
     PermanentFailure { reason: String },
+}
+
+impl DeliveryOutcome {
+    #[must_use]
+    pub fn to_receipt(&self, request: &OutboundMessageRequest) -> DeliveryReceipt {
+        DeliveryReceipt::from_outcome(request, self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryReceiptState {
+    Ack,
+    Nack,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryReceipt {
+    pub state: DeliveryReceiptState,
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl DeliveryReceipt {
+    #[must_use]
+    pub fn from_outcome(request: &OutboundMessageRequest, outcome: &DeliveryOutcome) -> Self {
+        match outcome {
+            DeliveryOutcome::Delivered { native_message_id } => Self {
+                state: DeliveryReceiptState::Ack,
+                idempotency_key: request.delivery_idempotency_key(),
+                external_message_id: Some(native_message_id.clone()),
+                retry_after_ms: None,
+                reason: None,
+            },
+            DeliveryOutcome::Retry { class, reason, retry_after_ms } => Self {
+                state: DeliveryReceiptState::Unknown,
+                idempotency_key: request.delivery_idempotency_key(),
+                external_message_id: None,
+                retry_after_ms: *retry_after_ms,
+                reason: Some(format!("{}: {reason}", class.as_str())),
+            },
+            DeliveryOutcome::PermanentFailure { reason } => Self {
+                state: DeliveryReceiptState::Nack,
+                idempotency_key: request.delivery_idempotency_key(),
+                external_message_id: None,
+                retry_after_ms: None,
+                reason: Some(reason.clone()),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

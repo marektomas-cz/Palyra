@@ -8,16 +8,18 @@ use std::{
 
 use async_trait::async_trait;
 use palyra_connectors::{
-    AttachmentKind, AttachmentRef, ConnectorAdapter, ConnectorAdapterError, ConnectorApprovalMode,
-    ConnectorAvailability, ConnectorConversationTarget, ConnectorInstanceSpec, ConnectorKind,
-    ConnectorMessageDeleteRequest, ConnectorMessageEditRequest, ConnectorMessageLocator,
-    ConnectorMessageMutationDiff, ConnectorMessageMutationResult, ConnectorMessageMutationStatus,
-    ConnectorMessageReactionRecord, ConnectorMessageReactionRequest, ConnectorMessageReadRequest,
-    ConnectorMessageReadResult, ConnectorMessageRecord, ConnectorMessageSearchRequest,
-    ConnectorMessageSearchResult, ConnectorOperationPreflight, ConnectorRiskLevel, ConnectorRouter,
+    AttachmentKind, AttachmentRef, ConnectorAdapter, ConnectorAdapterError,
+    ConnectorAdapterSdkOperation, ConnectorApprovalMode, ConnectorAvailability,
+    ConnectorConversationTarget, ConnectorInstanceRecord, ConnectorInstanceSpec, ConnectorKind,
+    ConnectorLiveness, ConnectorMessageDeleteRequest, ConnectorMessageEditRequest,
+    ConnectorMessageLocator, ConnectorMessageMutationDiff, ConnectorMessageMutationResult,
+    ConnectorMessageMutationStatus, ConnectorMessageReactionRecord,
+    ConnectorMessageReactionRequest, ConnectorMessageReadRequest, ConnectorMessageReadResult,
+    ConnectorMessageRecord, ConnectorMessageSearchRequest, ConnectorMessageSearchResult,
+    ConnectorOperationPreflight, ConnectorReadiness, ConnectorRiskLevel, ConnectorRouter,
     ConnectorRouterError, ConnectorStore, ConnectorSupervisor, ConnectorSupervisorConfig,
-    DeliveryOutcome, InboundMessageEvent, OutboundMessageRequest, RetryClass, RouteInboundResult,
-    RoutedOutboundMessage,
+    DeliveryOutcome, DeliveryReceiptState, InboundMessageEvent, OutboundMessageRequest, RetryClass,
+    RouteInboundResult, RoutedOutboundMessage,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -150,6 +152,12 @@ impl ConnectorAdapter for MockConnectorServer {
                 class: RetryClass::ConnectorRestarting,
                 reason: "simulated connector restart during outbound send".to_owned(),
                 retry_after_ms: Some(1),
+            });
+        }
+
+        if request.text.contains("[nack]") {
+            return Ok(DeliveryOutcome::PermanentFailure {
+                reason: "simulated permanent delivery nack from connector mock server".to_owned(),
             });
         }
 
@@ -644,6 +652,85 @@ async fn simulator_harness_replay_matches_golden_snapshot() {
     };
     let actual = serde_json::to_value(summary).expect("simulation summary should serialize");
     assert_or_refresh_expected_fixture(Path::new(EXPECTED_FIXTURE_PATH), &actual);
+}
+
+#[tokio::test]
+async fn simulator_harness_covers_duplicate_inbound_delivery_nack_and_sdk_descriptor() {
+    let (_tempdir, supervisor, connector_server) = open_harness();
+    supervisor.register_connector(&sample_spec()).expect("register should succeed");
+
+    let descriptor = connector_server.sdk_descriptor();
+    assert_eq!(descriptor.binding_contract, "conversation_binding_record");
+    assert!(descriptor.operations.contains(&ConnectorAdapterSdkOperation::Inbound));
+    assert!(descriptor.operations.contains(&ConnectorAdapterSdkOperation::Outbound));
+    assert!(descriptor.operations.contains(&ConnectorAdapterSdkOperation::Binding));
+    assert!(descriptor.operations.contains(&ConnectorAdapterSdkOperation::RateLimit));
+    assert!(descriptor.operations.contains(&ConnectorAdapterSdkOperation::ErrorMapping));
+
+    let fixture = InboundFixture {
+        envelope_id: "env-duplicate".to_owned(),
+        conversation_id: "conv-duplicate".to_owned(),
+        sender_id: "user-duplicate".to_owned(),
+        body: "duplicate inbound smoke".to_owned(),
+        is_direct_message: true,
+        requested_broadcast: false,
+    };
+    let duplicate_event = fixture_to_event(fixture);
+    let accepted = supervisor
+        .ingest_inbound(duplicate_event.clone())
+        .await
+        .expect("first duplicate fixture should ingest");
+    assert!(accepted.accepted);
+    assert!(!accepted.duplicate);
+    let duplicate = supervisor
+        .ingest_inbound(duplicate_event)
+        .await
+        .expect("second duplicate fixture should be handled");
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.enqueued_outbound, 0);
+
+    let instance = ConnectorInstanceRecord {
+        connector_id: "echo:default".to_owned(),
+        kind: ConnectorKind::Echo,
+        principal: "channel:echo:default".to_owned(),
+        auth_profile_ref: None,
+        token_vault_ref: None,
+        egress_allowlist: Vec::new(),
+        enabled: true,
+        readiness: ConnectorReadiness::Ready,
+        liveness: ConnectorLiveness::Running,
+        restart_count: 0,
+        last_error: None,
+        last_inbound_unix_ms: None,
+        last_outbound_unix_ms: None,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+    };
+    let nack_request = OutboundMessageRequest {
+        envelope_id: "env-nack:0".to_owned(),
+        connector_id: "echo:default".to_owned(),
+        conversation_id: "conv-nack".to_owned(),
+        reply_thread_id: Some("thread-renamed".to_owned()),
+        in_reply_to_message_id: None,
+        text: "force permanent delivery failure [nack]".to_owned(),
+        broadcast: false,
+        auto_ack_text: None,
+        auto_reaction: None,
+        attachments: Vec::new(),
+        structured_json: None,
+        a2ui_update: None,
+        timeout_ms: 1_000,
+        max_payload_bytes: 8_192,
+    };
+    let nack = connector_server
+        .send_outbound(&instance, &nack_request)
+        .await
+        .expect("nack simulator send should return a typed outcome");
+    assert!(matches!(nack, DeliveryOutcome::PermanentFailure { .. }));
+    let receipt = nack.to_receipt(&nack_request);
+    assert_eq!(receipt.state, DeliveryReceiptState::Nack);
+    assert_eq!(receipt.idempotency_key, "echo:default:env-nack:0");
+    assert!(receipt.reason.as_deref().is_some_and(|reason| reason.contains("permanent")));
 }
 
 #[tokio::test]

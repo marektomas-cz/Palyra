@@ -694,6 +694,83 @@ async fn collect_typed_contract_host_adapters(state: &AppState) -> Result<Value,
                 "approval_gate",
             ],
         },
+        "run_lifecycle_hook": {
+            "adapter": "runtime.run_lifecycle_hook",
+            "phases": [
+                "before_run",
+                "before_tool",
+                "after_tool",
+                "before_delivery",
+                "after_run",
+            ],
+            "capability_posture": "minimal",
+            "terminal_decision_rules": "daemon_resolved",
+        },
+        "compaction_provider": {
+            "adapter": "application.compaction_provider",
+            "stable_extension_boundary": [
+                "summary_candidate",
+                "token_budget",
+                "redaction_preservation",
+            ],
+        },
+        "diagnostics_provider": {
+            "adapter": "operator.diagnostics_provider",
+            "redaction_required": true,
+            "stable_extension_boundary": [
+                "snapshot_projection",
+                "safe_identifier_fields",
+            ],
+        },
+        "policy_signal_provider": {
+            "adapter": "policy.signal_provider",
+            "decision_authority": "signals_only",
+            "stable_extension_boundary": [
+                "risk_score",
+                "policy_label",
+                "explainable_signal",
+            ],
+        },
+        "channel_binding_provider": {
+            "adapter": "channels.binding_provider",
+            "operations": [
+                "discover",
+                "validate",
+                "repair_hint",
+                "explain",
+            ],
+            "durable_write_authority": "daemon_runtime",
+        },
+        "delivery_adapter": {
+            "adapter": "channels.delivery_adapter",
+            "receipt_states": [
+                "ack",
+                "nack",
+                "unknown",
+            ],
+            "decision_authority": "delivery_only",
+        },
+        "scheduler_task_provider": {
+            "adapter": "runtime.scheduler_task_provider",
+            "wake_gate_authority": "daemon_runtime",
+            "default_posture": "disabled_until_bound",
+        },
+        "model_auth_provider": {
+            "adapter": "auth.model_auth_provider",
+            "secret_material_posture": "credential_handles_only",
+            "default_posture": "disabled_until_bound",
+        },
+        "connector_adapter": {
+            "adapter": "connectors.adapter_sdk",
+            "operations": [
+                "inbound",
+                "outbound",
+                "binding",
+                "rate_limit",
+                "error_mapping",
+            ],
+            "binding_authority": "conversation_binding_record",
+        },
     }))
 }
 

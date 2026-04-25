@@ -16,8 +16,9 @@ mod types;
 mod tests;
 
 pub use types::{
-    ConnectorAdapter, ConnectorAdapterError, ConnectorRouter, ConnectorRouterError,
-    ConnectorSupervisorConfig, ConnectorSupervisorError, DrainOutcome, InboundIngestOutcome,
+    ConnectorAdapter, ConnectorAdapterError, ConnectorAdapterSdkDescriptor,
+    ConnectorAdapterSdkOperation, ConnectorRouter, ConnectorRouterError, ConnectorSupervisorConfig,
+    ConnectorSupervisorError, DrainOutcome, InboundIngestOutcome,
 };
 
 pub struct ConnectorSupervisor {

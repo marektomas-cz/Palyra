@@ -12,8 +12,8 @@ pub use capabilities::{
 };
 pub use delivery::{
     ConnectorInstanceSpec, ConnectorQueueDepth, ConnectorStatusSnapshot, DeliveryOutcome,
-    InboundMessageEvent, OutboundMessageRequest, RetryClass, RouteInboundResult,
-    RoutedOutboundMessage,
+    DeliveryReceipt, DeliveryReceiptState, InboundMessageEvent, OutboundMessageRequest, RetryClass,
+    RouteInboundResult, RoutedOutboundMessage,
 };
 pub use kinds::{ConnectorAvailability, ConnectorKind, ConnectorLiveness, ConnectorReadiness};
 pub use messages::{
@@ -28,8 +28,9 @@ pub use messages::{
 mod tests {
     use super::validation::ProtocolError;
     use super::{
-        AttachmentKind, AttachmentRef, ConnectorInstanceSpec, ConnectorKind, InboundMessageEvent,
-        OutboundA2uiUpdate, OutboundMessageRequest,
+        AttachmentKind, AttachmentRef, ConnectorInstanceSpec, ConnectorKind, DeliveryOutcome,
+        DeliveryReceiptState, InboundMessageEvent, OutboundA2uiUpdate, OutboundMessageRequest,
+        RetryClass,
     };
 
     #[test]
@@ -250,5 +251,50 @@ mod tests {
                 reason: "value is not valid JSON",
             })
         );
+    }
+
+    #[test]
+    fn delivery_outcomes_convert_to_ack_nack_unknown_receipts() {
+        let request = valid_outbound_request();
+
+        let ack = DeliveryOutcome::Delivered { native_message_id: "native-1".to_owned() }
+            .to_receipt(&request);
+        assert_eq!(ack.state, DeliveryReceiptState::Ack);
+        assert_eq!(ack.external_message_id.as_deref(), Some("native-1"));
+        assert_eq!(ack.idempotency_key, "echo:default:env-1:0");
+
+        let unknown = DeliveryOutcome::Retry {
+            class: RetryClass::RateLimit,
+            reason: "retry later".to_owned(),
+            retry_after_ms: Some(250),
+        }
+        .to_receipt(&request);
+        assert_eq!(unknown.state, DeliveryReceiptState::Unknown);
+        assert_eq!(unknown.retry_after_ms, Some(250));
+        assert!(unknown.reason.as_deref().is_some_and(|reason| reason.contains("rate_limit")));
+
+        let nack = DeliveryOutcome::PermanentFailure { reason: "message rejected".to_owned() }
+            .to_receipt(&request);
+        assert_eq!(nack.state, DeliveryReceiptState::Nack);
+        assert_eq!(nack.reason.as_deref(), Some("message rejected"));
+    }
+
+    fn valid_outbound_request() -> OutboundMessageRequest {
+        OutboundMessageRequest {
+            envelope_id: "env-1:0".to_owned(),
+            connector_id: "echo:default".to_owned(),
+            conversation_id: "c1".to_owned(),
+            reply_thread_id: None,
+            in_reply_to_message_id: None,
+            text: "ok".to_owned(),
+            broadcast: false,
+            auto_ack_text: None,
+            auto_reaction: None,
+            attachments: Vec::new(),
+            structured_json: None,
+            a2ui_update: None,
+            timeout_ms: 1_000,
+            max_payload_bytes: 8_192,
+        }
     }
 }

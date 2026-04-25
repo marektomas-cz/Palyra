@@ -1166,31 +1166,95 @@ pub(crate) fn negotiate_plugin_typed_contracts(
 }
 
 fn supported_plugin_contract_adapters() -> Vec<TypedPluginContractAdapterSupport> {
-    let capability_classes = vec![
+    let data_capability_classes = vec![
         TypedPluginCapabilityClass::HttpHosts,
         TypedPluginCapabilityClass::Secrets,
         TypedPluginCapabilityClass::StoragePrefixes,
     ];
+    let channel_capability_classes = vec![TypedPluginCapabilityClass::Channels];
+    let storage_capability_classes = vec![TypedPluginCapabilityClass::StoragePrefixes];
+    let secret_capability_classes = vec![TypedPluginCapabilityClass::Secrets];
+    let connector_capability_classes = vec![
+        TypedPluginCapabilityClass::HttpHosts,
+        TypedPluginCapabilityClass::Secrets,
+        TypedPluginCapabilityClass::StoragePrefixes,
+        TypedPluginCapabilityClass::Channels,
+    ];
     vec![
-        TypedPluginContractAdapterSupport {
-            kind: TypedPluginContractKind::MemoryProvider,
-            adapter: "journal.memory_embedding_provider".to_owned(),
-            supported_versions: vec![1],
-            allowed_capability_classes: capability_classes.clone(),
-        },
-        TypedPluginContractAdapterSupport {
-            kind: TypedPluginContractKind::ContextEngine,
-            adapter: "application.context_engine".to_owned(),
-            supported_versions: vec![1],
-            allowed_capability_classes: capability_classes.clone(),
-        },
-        TypedPluginContractAdapterSupport {
-            kind: TypedPluginContractKind::RoutingStrategy,
-            adapter: "usage_governance.routing".to_owned(),
-            supported_versions: vec![1],
-            allowed_capability_classes: capability_classes,
-        },
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::MemoryProvider,
+            "journal.memory_embedding_provider",
+            data_capability_classes.clone(),
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::ContextEngine,
+            "application.context_engine",
+            data_capability_classes.clone(),
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::RoutingStrategy,
+            "usage_governance.routing",
+            data_capability_classes.clone(),
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::RunLifecycleHook,
+            "runtime.run_lifecycle_hook",
+            Vec::new(),
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::CompactionProvider,
+            "application.compaction_provider",
+            data_capability_classes,
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::DiagnosticsProvider,
+            "operator.diagnostics_provider",
+            storage_capability_classes.clone(),
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::PolicySignalProvider,
+            "policy.signal_provider",
+            Vec::new(),
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::ChannelBindingProvider,
+            "channels.binding_provider",
+            channel_capability_classes.clone(),
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::DeliveryAdapter,
+            "channels.delivery_adapter",
+            channel_capability_classes,
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::SchedulerTaskProvider,
+            "runtime.scheduler_task_provider",
+            storage_capability_classes,
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::ModelAuthProvider,
+            "auth.model_auth_provider",
+            secret_capability_classes,
+        ),
+        plugin_contract_adapter_support(
+            TypedPluginContractKind::ConnectorAdapter,
+            "connectors.adapter_sdk",
+            connector_capability_classes,
+        ),
     ]
+}
+
+fn plugin_contract_adapter_support(
+    kind: TypedPluginContractKind,
+    adapter: &'static str,
+    allowed_capability_classes: Vec<TypedPluginCapabilityClass>,
+) -> TypedPluginContractAdapterSupport {
+    TypedPluginContractAdapterSupport {
+        kind,
+        adapter: adapter.to_owned(),
+        supported_versions: vec![1],
+        allowed_capability_classes,
+    }
 }
 
 fn plugin_capability_classes(
@@ -1232,7 +1296,10 @@ pub(crate) fn plugin_capability_profile_from_manifest(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+    };
 
     use palyra_skills::parse_manifest_toml;
     use serde_json::Value;
@@ -1240,7 +1307,8 @@ mod tests {
 
     use super::{
         build_plugin_capability_diff, inspect_plugin_filesystem_safety, load_plugin_bindings_index,
-        plugin_bindings_index_path, redact_plugin_config_values, save_plugin_bindings_index,
+        negotiate_plugin_typed_contracts, plugin_bindings_index_path, redact_plugin_config_values,
+        save_plugin_bindings_index, supported_plugin_contract_adapters,
         validate_plugin_config_instance, PluginBindingRecord, PluginBindingsIndex,
         PluginCapabilityDiffCache, PluginCapabilityDiffCategory, PluginCapabilityDiffEntry,
         PluginCapabilityProfile, PluginConfigInstance, PluginConfigInstanceRef,
@@ -1248,7 +1316,11 @@ mod tests {
         PluginDiscoveryState, PluginFilesystemSafetySnapshot, PLUGIN_BINDINGS_LAYOUT_VERSION,
     };
     use crate::wasm_plugin_runner::WasmPluginRunnerPolicy;
-    use palyra_plugins_runtime::TypedPluginContractNegotiationReport;
+    use palyra_plugins_runtime::{TypedPluginContractNegotiationReport, TypedPluginContractStatus};
+    use palyra_plugins_sdk::{
+        all_typed_plugin_contract_kinds, TypedPluginCapabilityClass,
+        TypedPluginContractDeclaration, TypedPluginContractKind,
+    };
 
     #[test]
     fn load_plugin_bindings_index_migrates_legacy_metadata() {
@@ -1402,6 +1474,79 @@ mod tests {
             "save should refresh the index updated_at timestamp"
         );
         assert_eq!(loaded.entries, expected.entries);
+    }
+
+    #[test]
+    fn typed_plugin_host_adapters_cover_phase_seven_contracts() {
+        let adapters = supported_plugin_contract_adapters();
+        let adapter_kinds = adapters.iter().map(|adapter| adapter.kind).collect::<BTreeSet<_>>();
+        for kind in all_typed_plugin_contract_kinds() {
+            assert!(adapter_kinds.contains(&kind), "missing adapter for {}", kind.as_str());
+        }
+
+        let lifecycle = adapters
+            .iter()
+            .find(|adapter| adapter.kind == TypedPluginContractKind::RunLifecycleHook)
+            .expect("run lifecycle hook adapter must be present");
+        assert!(lifecycle.allowed_capability_classes.is_empty());
+
+        let delivery = adapters
+            .iter()
+            .find(|adapter| adapter.kind == TypedPluginContractKind::DeliveryAdapter)
+            .expect("delivery adapter must be present");
+        assert_eq!(delivery.allowed_capability_classes, vec![TypedPluginCapabilityClass::Channels]);
+
+        let model_auth = adapters
+            .iter()
+            .find(|adapter| adapter.kind == TypedPluginContractKind::ModelAuthProvider)
+            .expect("model auth adapter must be present");
+        assert_eq!(
+            model_auth.allowed_capability_classes,
+            vec![TypedPluginCapabilityClass::Secrets]
+        );
+    }
+
+    #[test]
+    fn typed_plugin_negotiation_accepts_delivery_adapter_channel_capability() {
+        let mut manifest =
+            plugin_manifest_with_operator_config(minimal_operator_config_properties());
+        manifest.operator.plugin.contracts = vec![TypedPluginContractDeclaration {
+            kind: TypedPluginContractKind::DeliveryAdapter,
+            version: 1,
+        }];
+        let report = negotiate_plugin_typed_contracts(
+            &manifest,
+            &PluginCapabilityProfile {
+                channels: vec!["discord".to_owned()],
+                ..PluginCapabilityProfile::default()
+            },
+        );
+        assert!(report.ready, "delivery adapter with channels should negotiate: {report:?}");
+        assert_eq!(report.entries[0].status, TypedPluginContractStatus::Accepted);
+        assert_eq!(report.entries[0].adapter.as_deref(), Some("channels.delivery_adapter"));
+    }
+
+    #[test]
+    fn typed_plugin_negotiation_rejects_lifecycle_hooks_with_capability_grants() {
+        let mut manifest =
+            plugin_manifest_with_operator_config(minimal_operator_config_properties());
+        manifest.operator.plugin.contracts = vec![TypedPluginContractDeclaration {
+            kind: TypedPluginContractKind::RunLifecycleHook,
+            version: 1,
+        }];
+        let report = negotiate_plugin_typed_contracts(
+            &manifest,
+            &PluginCapabilityProfile {
+                http_hosts: vec!["api.example.com".to_owned()],
+                ..PluginCapabilityProfile::default()
+            },
+        );
+        assert!(!report.ready, "lifecycle hook must stay minimal-capability");
+        assert_eq!(report.entries[0].status, TypedPluginContractStatus::Rejected);
+        assert!(report.entries[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("does not allow capability classes http_hosts")));
     }
 
     #[test]
@@ -1717,5 +1862,20 @@ required = ["api_base_url", "api_token"]
         );
         parse_manifest_toml(manifest_toml.trim())
             .expect("plugin test manifest with operator config should parse")
+    }
+
+    fn minimal_operator_config_properties() -> &'static str {
+        r#"
+[operator.config.properties.api_base_url]
+type = "string"
+title = "API base URL"
+default = "https://api.example.com"
+
+[operator.config.properties.api_token]
+type = "string"
+title = "API token"
+default = "test-token"
+redacted = true
+"#
     }
 }
