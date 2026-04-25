@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palyra_common::{build_metadata, CANONICAL_PROTOCOL_MAJOR};
-use palyra_plugins_sdk::TypedPluginContractKind;
+use palyra_plugins_sdk::{typed_plugin_contract_descriptor, TypedPluginContractKind};
 use serde_json::Value;
 
 use crate::artifact::normalize_artifact_path;
@@ -64,6 +64,17 @@ fn validate_manifest(manifest: &SkillManifest) -> Result<(), SkillPackagingError
     normalize_skill_id(manifest.skill_id.as_str())?;
     parse_semver(manifest.version.as_str(), "version")?;
     parse_semver(manifest.compat.min_palyra_version.as_str(), "compat.min_palyra_version")?;
+    if let Some(max_version) = manifest.compat.max_palyra_version.as_deref() {
+        let min =
+            parse_semver(manifest.compat.min_palyra_version.as_str(), "compat.min_palyra_version")?;
+        let max = parse_semver(max_version, "compat.max_palyra_version")?;
+        if max < min {
+            return Err(SkillPackagingError::ManifestValidation(
+                "compat.max_palyra_version must be greater than or equal to compat.min_palyra_version"
+                    .to_owned(),
+            ));
+        }
+    }
     if manifest.name.trim().is_empty() {
         return Err(SkillPackagingError::ManifestValidation("name cannot be empty".to_owned()));
     }
@@ -172,6 +183,15 @@ pub(crate) fn assert_runtime_compatibility(
             requested: compat.min_palyra_version.clone(),
             current: current_raw,
         });
+    }
+    if let Some(max_version) = compat.max_palyra_version.as_deref() {
+        let supported_max = parse_semver(max_version, "compat.max_palyra_version")?;
+        if current > supported_max {
+            return Err(SkillPackagingError::RuntimeVersionAboveSupportedMaximum {
+                supported_max: max_version.to_owned(),
+                current: current_raw,
+            });
+        }
     }
     Ok(())
 }
@@ -528,6 +548,13 @@ fn validate_plugin_contract_declarations(
             return Err(SkillPackagingError::ManifestValidation(format!(
                 "operator.plugin.contracts '{}' must use a non-zero version",
                 contract.kind.as_str()
+            )));
+        }
+        if typed_plugin_contract_descriptor(contract.kind, contract.version).is_none() {
+            return Err(SkillPackagingError::ManifestValidation(format!(
+                "operator.plugin.contracts '{}' version {} is not supported by this SDK ABI",
+                contract.kind.as_str(),
+                contract.version
             )));
         }
         if !kinds.insert(contract.kind) {

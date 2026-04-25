@@ -19,6 +19,9 @@ interface host-capabilities {
 }
 
 interface runtime {
+  /// Returns the SDK ABI marker independent from the package version.
+  sdk-abi-version: func() -> string;
+
   /// Returns a static runtime compatibility marker.
   plugin-hello: func() -> string;
 

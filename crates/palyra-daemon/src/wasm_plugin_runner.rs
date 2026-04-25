@@ -827,6 +827,7 @@ mod tests {
                 compat: SkillCompat {
                     required_protocol_major: 1,
                     min_palyra_version: "0.1.0".to_owned(),
+                    max_palyra_version: None,
                 },
                 integrity: SkillIntegrity::default(),
                 operator: palyra_skills::SkillOperatorMetadata::default(),

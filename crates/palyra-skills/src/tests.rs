@@ -324,12 +324,12 @@ fn manifest_rejects_operator_plugin_default_tool_that_is_not_declared() {
 #[test]
 fn manifest_accepts_typed_plugin_contract_declarations() {
     let manifest = format!(
-        "{}\n\n[[operator.plugin.contracts]]\nkind = \"memory_provider\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"context_engine\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"routing_strategy\"\nversion = 1\n",
+        "{}\n\n[[operator.plugin.contracts]]\nkind = \"memory_provider\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"context_engine\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"routing_strategy\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"run_lifecycle_hook\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"delivery_adapter\"\nversion = 1\n\n[[operator.plugin.contracts]]\nkind = \"connector_adapter\"\nversion = 1\n",
         sample_manifest()
     );
     let parsed =
         parse_manifest_toml(manifest.as_str()).expect("typed plugin contracts should validate");
-    assert_eq!(parsed.operator.plugin.contracts.len(), 3);
+    assert_eq!(parsed.operator.plugin.contracts.len(), 6);
 }
 
 #[test]
@@ -356,6 +356,34 @@ fn manifest_rejects_zero_version_typed_plugin_contracts() {
         .expect_err("zero-version typed plugin contract must fail");
     assert!(
         matches!(error, SkillPackagingError::ManifestValidation(ref message) if message.contains("non-zero version")),
+        "unexpected validation error: {error:?}"
+    );
+}
+
+#[test]
+fn manifest_rejects_unsupported_typed_plugin_contract_versions() {
+    let manifest = format!(
+        "{}\n\n[[operator.plugin.contracts]]\nkind = \"run_lifecycle_hook\"\nversion = 99\n",
+        sample_manifest()
+    );
+    let error = parse_manifest_toml(manifest.as_str())
+        .expect_err("unsupported typed plugin contract version must fail");
+    assert!(
+        matches!(error, SkillPackagingError::ManifestValidation(ref message) if message.contains("not supported by this SDK ABI")),
+        "unexpected validation error: {error:?}"
+    );
+}
+
+#[test]
+fn manifest_rejects_runtime_maximum_below_minimum() {
+    let manifest = sample_manifest().replace(
+        "min_palyra_version = \"0.1.0\"",
+        "min_palyra_version = \"2.0.0\"\nmax_palyra_version = \"1.9.0\"",
+    );
+    let error =
+        parse_manifest_toml(manifest.as_str()).expect_err("invalid runtime range must fail");
+    assert!(
+        matches!(error, SkillPackagingError::ManifestValidation(ref message) if message.contains("max_palyra_version")),
         "unexpected validation error: {error:?}"
     );
 }

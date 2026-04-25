@@ -1087,6 +1087,7 @@ fn build_builder_skill_manifest(
         compat: SkillCompat {
             required_protocol_major: palyra_common::CANONICAL_PROTOCOL_MAJOR,
             min_palyra_version: build_metadata().version.to_owned(),
+            max_palyra_version: None,
         },
         integrity: SkillIntegrity::default(),
         builder: Some(palyra_skills::SkillBuilderMetadata {

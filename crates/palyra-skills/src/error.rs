@@ -38,6 +38,8 @@ pub enum SkillPackagingError {
     UnsupportedProtocolMajor { requested: u32, current: u32 },
     #[error("requested min runtime version {requested} is higher than current {current}")]
     UnsupportedRuntimeVersion { requested: String, current: String },
+    #[error("current runtime version {current} is higher than supported maximum {supported_max}")]
+    RuntimeVersionAboveSupportedMaximum { supported_max: String, current: String },
     #[error("I/O failed: {0}")]
     Io(String),
     #[error("zip handling failed: {0}")]

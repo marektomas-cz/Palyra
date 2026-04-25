@@ -137,6 +137,8 @@ pub struct SkillCompat {
     pub required_protocol_major: u32,
     #[serde(alias = "min_runtime_version")]
     pub min_palyra_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_palyra_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
