@@ -4351,6 +4351,7 @@ async fn record_session_queue_operator_event(
         .map_err(runtime_status_response)
 }
 
+#[allow(clippy::result_large_err)]
 fn normalize_priority_lane(raw: Option<String>) -> Result<String, Response> {
     let lane = raw.and_then(trim_to_option).unwrap_or_else(|| "operator_priority".to_owned());
     if lane.len() > 32
