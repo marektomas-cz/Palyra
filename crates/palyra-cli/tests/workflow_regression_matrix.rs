@@ -462,36 +462,28 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
         [19_u8; 32],
     )?;
     let signature_state_artifact_string = signature_state_artifact.display().to_string();
-    let signature_state_payload = assert_json_success(
-        run_cli(
-            &workdir,
-            &[
-                "plugins",
-                "install",
-                "acme.echo_signature_state",
-                "--artifact",
-                signature_state_artifact_string.as_str(),
-                "--allow-untrusted",
-                "--json",
-            ],
-            &cli_env,
-        )?,
-        "plugins install signature state override",
+    let signature_state_output = run_cli(
+        &workdir,
+        &[
+            "plugins",
+            "install",
+            "acme.echo_signature_state",
+            "--artifact",
+            signature_state_artifact_string.as_str(),
+            "--allow-untrusted",
+            "--json",
+        ],
+        &cli_env,
     )?;
-    assert_eq!(
-        signature_state_payload
-            .get("installed_skill")
-            .and_then(|value| value.get("trust_decision"))
-            .and_then(Value::as_str),
-        Some("untrusted_override")
+    assert!(
+        !signature_state_output.status.success(),
+        "signature state override should fail closed after the acme publisher key is pinned"
     );
-    assert_eq!(
-        signature_state_payload
-            .get("check")
-            .and_then(|value| value.get("discovery"))
-            .and_then(|value| value.get("state"))
-            .and_then(Value::as_str),
-        Some("signature_failed")
+    let signature_state_stderr = String::from_utf8_lossy(&signature_state_output.stderr);
+    assert!(
+        signature_state_stderr.contains("skill artifact security audit failed")
+            && signature_state_stderr.contains("TOFU pinned key mismatch for 'acme'"),
+        "signature override failure should explain the pinned-key mismatch: {signature_state_stderr}"
     );
 
     let typed_contracts_artifact = artifacts_dir.join("echo-typed-contracts.palyra-skill");
@@ -649,24 +641,18 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
         run_cli(&workdir, &["plugins", "discover", "--json"], &cli_env)?,
         "plugins discover",
     )?;
-    assert_eq!(discover_payload.get("count").and_then(Value::as_u64), Some(5));
+    assert_eq!(discover_payload.get("count").and_then(Value::as_u64), Some(4));
     let discover_entries = discover_payload
         .get("entries")
         .and_then(Value::as_array)
         .context("plugins discover should return entries")?;
-    assert_eq!(discover_entries.len(), 5);
+    assert_eq!(discover_entries.len(), 4);
     assert!(
-        discover_entries.iter().any(|entry| {
+        discover_entries.iter().all(|entry| {
             entry.get("binding").and_then(|value| value.get("plugin_id")).and_then(Value::as_str)
-                == Some("acme.echo_signature_state")
-                && entry
-                    .get("check")
-                    .and_then(|value| value.get("discovery"))
-                    .and_then(|value| value.get("state"))
-                    .and_then(Value::as_str)
-                    == Some("signature_failed")
+                != Some("acme.echo_signature_state")
         }),
-        "plugins discover should include signature failure state"
+        "plugins discover should not include the rejected signature override binding"
     );
     assert!(
         discover_entries.iter().any(|entry| {
@@ -734,9 +720,9 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
         run_cli(&workdir, &["plugins", "doctor", "--json"], &cli_env)?,
         "plugins doctor",
     )?;
-    assert_eq!(doctor_payload.get("total").and_then(Value::as_u64), Some(5));
+    assert_eq!(doctor_payload.get("total").and_then(Value::as_u64), Some(4));
     assert_eq!(doctor_payload.get("ready").and_then(Value::as_u64), Some(0));
-    assert_eq!(doctor_payload.get("unhealthy").and_then(Value::as_u64), Some(5));
+    assert_eq!(doctor_payload.get("unhealthy").and_then(Value::as_u64), Some(4));
     let doctor_plugins = doctor_payload
         .get("plugins")
         .and_then(Value::as_array)
@@ -749,11 +735,10 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
         "plugins doctor should summarize invalid config state"
     );
     assert!(
-        doctor_plugins.iter().any(|plugin| {
-            plugin.get("plugin_id").and_then(Value::as_str) == Some("acme.echo_signature_state")
-                && plugin.get("discovery").and_then(Value::as_str) == Some("signature_failed")
+        doctor_plugins.iter().all(|plugin| {
+            plugin.get("plugin_id").and_then(Value::as_str) != Some("acme.echo_signature_state")
         }),
-        "plugins doctor should summarize signature failure state"
+        "plugins doctor should omit the rejected signature override binding"
     );
     assert!(
         doctor_plugins.iter().any(|plugin| {
