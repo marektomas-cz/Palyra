@@ -105,6 +105,87 @@ impl RunLifecyclePhase {
 }
 
 runtime_contract_enum! {
+    /// Sandboxed hook phases where a plugin can observe a run and return a typed decision.
+    pub enum RunLifecycleHookPhase {
+        BeforeRun => "before_run" | "run:before_run",
+        BeforeTool => "before_tool" | "run:before_tool",
+        AfterTool => "after_tool" | "run:after_tool",
+        BeforeDelivery => "before_delivery" | "run:before_delivery",
+        AfterRun => "after_run" | "run:after_run"
+    }
+}
+
+impl RunLifecycleHookPhase {
+    #[must_use]
+    pub fn event_name(self) -> &'static str {
+        match self {
+            Self::BeforeRun => "run:before_run",
+            Self::BeforeTool => "run:before_tool",
+            Self::AfterTool => "run:after_tool",
+            Self::BeforeDelivery => "run:before_delivery",
+            Self::AfterRun => "run:after_run",
+        }
+    }
+
+    #[must_use]
+    pub fn parse_hook_event(raw: &str) -> Option<Self> {
+        Self::parse(raw.trim().to_ascii_lowercase().as_str())
+    }
+}
+
+runtime_contract_enum! {
+    /// Decision returned by a run lifecycle hook after sandboxed execution.
+    pub enum RunLifecycleHookDecisionKind {
+        Continue => "continue",
+        Annotate => "annotate",
+        RequestApproval => "request_approval",
+        Block => "block",
+        TransformPreview => "transform_preview",
+        FailRun => "fail_run"
+    }
+}
+
+impl RunLifecycleHookDecisionKind {
+    #[must_use]
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::Continue => 10,
+            Self::Annotate => 20,
+            Self::TransformPreview => 30,
+            Self::RequestApproval => 40,
+            Self::Block => 50,
+            Self::FailRun => 60,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::RequestApproval | Self::Block | Self::FailRun)
+    }
+
+    #[must_use]
+    pub const fn is_allowed_in_phase(self, phase: RunLifecycleHookPhase) -> bool {
+        match self {
+            Self::Continue | Self::Annotate => true,
+            Self::RequestApproval | Self::Block => matches!(
+                phase,
+                RunLifecycleHookPhase::BeforeRun
+                    | RunLifecycleHookPhase::BeforeTool
+                    | RunLifecycleHookPhase::BeforeDelivery
+            ),
+            Self::TransformPreview => matches!(phase, RunLifecycleHookPhase::BeforeDelivery),
+            Self::FailRun => matches!(
+                phase,
+                RunLifecycleHookPhase::BeforeRun
+                    | RunLifecycleHookPhase::BeforeTool
+                    | RunLifecycleHookPhase::AfterTool
+                    | RunLifecycleHookPhase::BeforeDelivery
+            ),
+        }
+    }
+}
+
+runtime_contract_enum! {
     /// Stable actor kind names for runtime audit records.
     pub enum RuntimeActorKind {
         System => "system",
@@ -232,6 +313,143 @@ pub struct RunLifecycleTransitionRecord {
     pub idempotency_key: Option<String>,
     pub reason: String,
     pub occurred_at_unix_ms: i64,
+}
+
+/// Typed decision emitted by one sandboxed run lifecycle hook invocation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunLifecycleHookDecision {
+    pub schema_version: u32,
+    pub phase: RunLifecycleHookPhase,
+    pub kind: RunLifecycleHookDecisionKind,
+    pub hook_id: String,
+    pub plugin_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub annotations: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transformed_preview: Option<Value>,
+}
+
+impl RunLifecycleHookDecision {
+    #[must_use]
+    pub fn new(
+        phase: RunLifecycleHookPhase,
+        kind: RunLifecycleHookDecisionKind,
+        hook_id: impl Into<String>,
+        plugin_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            phase,
+            kind,
+            hook_id: hook_id.into(),
+            plugin_id: plugin_id.into(),
+            reason: None,
+            annotations: Value::Object(Default::default()),
+            transformed_preview: None,
+        }
+    }
+}
+
+/// Deterministic aggregate of all decisions returned for a lifecycle phase.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunLifecycleHookResolution {
+    pub schema_version: u32,
+    pub phase: RunLifecycleHookPhase,
+    pub selected: RunLifecycleHookDecision,
+    pub candidates: Vec<RunLifecycleHookDecision>,
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    pub terminal: bool,
+}
+
+/// Validation failure for lifecycle hook decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunLifecycleHookDecisionError {
+    pub code: String,
+    pub message: String,
+}
+
+impl RunLifecycleHookDecisionError {
+    #[must_use]
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self { code: code.into(), message: message.into() }
+    }
+}
+
+/// Resolves sandboxed lifecycle hook decisions with deterministic terminal precedence.
+pub fn resolve_run_lifecycle_hook_decisions(
+    phase: RunLifecycleHookPhase,
+    mut decisions: Vec<RunLifecycleHookDecision>,
+) -> Result<RunLifecycleHookResolution, RunLifecycleHookDecisionError> {
+    for decision in &decisions {
+        if decision.phase != phase {
+            return Err(RunLifecycleHookDecisionError::new(
+                "phase_mismatch",
+                format!(
+                    "hook decision for {} cannot be resolved in {}",
+                    decision.phase.as_str(),
+                    phase.as_str()
+                ),
+            ));
+        }
+        if !decision.kind.is_allowed_in_phase(phase) {
+            return Err(RunLifecycleHookDecisionError::new(
+                "decision_not_allowed_in_phase",
+                format!("{} is not allowed during {}", decision.kind.as_str(), phase.as_str()),
+            ));
+        }
+    }
+
+    if decisions.is_empty() {
+        decisions.push(RunLifecycleHookDecision::new(
+            phase,
+            RunLifecycleHookDecisionKind::Continue,
+            "runtime",
+            "runtime",
+        ));
+    }
+
+    decisions.sort_by(|left, right| {
+        right
+            .kind
+            .priority()
+            .cmp(&left.kind.priority())
+            .then_with(|| left.hook_id.cmp(&right.hook_id))
+            .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+    });
+    let selected = decisions[0].clone();
+    let conflicts = decisions
+        .iter()
+        .skip(1)
+        .filter(|decision| {
+            selected.kind.is_terminal()
+                || decision.kind.is_terminal()
+                || matches!(
+                    selected.kind,
+                    RunLifecycleHookDecisionKind::TransformPreview
+                        | RunLifecycleHookDecisionKind::Annotate
+                )
+                || matches!(
+                    decision.kind,
+                    RunLifecycleHookDecisionKind::TransformPreview
+                        | RunLifecycleHookDecisionKind::Annotate
+                )
+        })
+        .map(|decision| {
+            format!("{}:{}:{}", decision.hook_id, decision.plugin_id, decision.kind.as_str())
+        })
+        .collect::<Vec<_>>();
+
+    Ok(RunLifecycleHookResolution {
+        schema_version: 1,
+        phase,
+        terminal: selected.kind.is_terminal(),
+        selected,
+        candidates: decisions,
+        conflicts,
+    })
 }
 
 /// Public snapshot of a global idempotency record.
@@ -1108,7 +1326,8 @@ mod tests {
         PruningPolicyClass, QueueDecision, QueueMode, QueuedInputState, RealtimeCapability,
         RealtimeCommand, RealtimeCommandEnvelope, RealtimeEventSensitivity, RealtimeEventTopic,
         RealtimeHandshakeRequest, RealtimeProtocolVersionRange, RealtimeRole, RealtimeScope,
-        RealtimeSubscription, RunLifecyclePhase, ToolResultSensitivity, ToolResultVisibility,
+        RealtimeSubscription, RunLifecycleHookDecision, RunLifecycleHookDecisionKind,
+        RunLifecycleHookPhase, RunLifecyclePhase, ToolResultSensitivity, ToolResultVisibility,
         ToolTurnBudget, WorkerLifecycleState, ACP_PROTOCOL_MAX_VERSION, ACP_PROTOCOL_MIN_VERSION,
         REALTIME_PROTOCOL_MAX_VERSION, REALTIME_PROTOCOL_MIN_VERSION,
     };
@@ -1165,6 +1384,66 @@ mod tests {
         assert!(RunLifecyclePhase::WaitingForApproval.is_waiting());
         assert_eq!(ToolResultVisibility::AuditArtifact.as_str(), "audit_artifact");
         assert_eq!(IdempotencyReplayDecision::ConflictingPayload.as_str(), "conflicting_payload");
+    }
+
+    #[test]
+    fn lifecycle_hook_events_and_decisions_use_stable_rules() {
+        assert_eq!(
+            RunLifecycleHookPhase::parse_hook_event("run:before_tool"),
+            Some(RunLifecycleHookPhase::BeforeTool)
+        );
+        assert_eq!(RunLifecycleHookPhase::BeforeDelivery.event_name(), "run:before_delivery");
+        assert!(RunLifecycleHookDecisionKind::TransformPreview
+            .is_allowed_in_phase(RunLifecycleHookPhase::BeforeDelivery));
+        assert!(!RunLifecycleHookDecisionKind::TransformPreview
+            .is_allowed_in_phase(RunLifecycleHookPhase::AfterRun));
+        assert!(!RunLifecycleHookDecisionKind::FailRun
+            .is_allowed_in_phase(RunLifecycleHookPhase::AfterRun));
+    }
+
+    #[test]
+    fn lifecycle_hook_resolution_prefers_terminal_decisions() {
+        let phase = RunLifecycleHookPhase::BeforeTool;
+        let decisions = vec![
+            RunLifecycleHookDecision::new(
+                phase,
+                RunLifecycleHookDecisionKind::Annotate,
+                "audit-note",
+                "annotator",
+            ),
+            RunLifecycleHookDecision::new(
+                phase,
+                RunLifecycleHookDecisionKind::RequestApproval,
+                "approval-gate",
+                "approver",
+            ),
+            RunLifecycleHookDecision::new(
+                phase,
+                RunLifecycleHookDecisionKind::Block,
+                "policy-gate",
+                "policy",
+            ),
+        ];
+        let resolution = super::resolve_run_lifecycle_hook_decisions(phase, decisions)
+            .expect("valid decisions should resolve");
+        assert_eq!(resolution.selected.kind, RunLifecycleHookDecisionKind::Block);
+        assert!(resolution.terminal);
+        assert_eq!(resolution.candidates.len(), 3);
+        assert_eq!(resolution.conflicts.len(), 2);
+    }
+
+    #[test]
+    fn lifecycle_hook_resolution_rejects_invalid_terminal_phase() {
+        let phase = RunLifecycleHookPhase::AfterRun;
+        let decisions = vec![RunLifecycleHookDecision::new(
+            phase,
+            RunLifecycleHookDecisionKind::FailRun,
+            "late-fail",
+            "plugin",
+        )];
+        let error = super::resolve_run_lifecycle_hook_decisions(phase, decisions)
+            .expect_err("after_run must not accept terminal decisions");
+        assert_eq!(error.code, "decision_not_allowed_in_phase");
     }
 
     #[test]

@@ -1,8 +1,14 @@
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
-use palyra_common::versioned_json::{
-    migrate_updated_at_metadata_v0_to_v1, parse_versioned_json, VersionedJsonFormat,
+use palyra_common::{
+    runtime_contracts::{
+        resolve_run_lifecycle_hook_decisions, RunLifecycleHookDecision,
+        RunLifecycleHookDecisionKind, RunLifecycleHookPhase,
+    },
+    versioned_json::{
+        migrate_updated_at_metadata_v0_to_v1, parse_versioned_json, VersionedJsonFormat,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -25,6 +31,12 @@ const HOOK_JOURNAL_POLL_INTERVAL_MS: u64 = 1_000;
 const HOOK_JOURNAL_SNAPSHOT_LIMIT: usize = 128;
 const HOOK_BINDINGS_INDEX_FORMAT: VersionedJsonFormat =
     VersionedJsonFormat::new("hook bindings index", HOOK_BINDINGS_LAYOUT_VERSION);
+const LIFECYCLE_HOOK_EXIT_CONTINUE: i64 = 0;
+const LIFECYCLE_HOOK_EXIT_ANNOTATE: i64 = 10;
+const LIFECYCLE_HOOK_EXIT_REQUEST_APPROVAL: i64 = 20;
+const LIFECYCLE_HOOK_EXIT_BLOCK: i64 = 30;
+const LIFECYCLE_HOOK_EXIT_TRANSFORM_PREVIEW: i64 = 40;
+const LIFECYCLE_HOOK_EXIT_FAIL_RUN: i64 = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +98,11 @@ pub(crate) enum HookEventKind {
     SkillEnabled,
     SkillQuarantined,
     SkillDisabled,
+    RunBeforeRun,
+    RunBeforeTool,
+    RunAfterTool,
+    RunBeforeDelivery,
+    RunAfterRun,
 }
 
 impl HookEventKind {
@@ -95,6 +112,11 @@ impl HookEventKind {
             Self::SkillEnabled => "skill:enabled",
             Self::SkillQuarantined => "skill:quarantined",
             Self::SkillDisabled => "skill:disabled",
+            Self::RunBeforeRun => RunLifecycleHookPhase::BeforeRun.event_name(),
+            Self::RunBeforeTool => RunLifecycleHookPhase::BeforeTool.event_name(),
+            Self::RunAfterTool => RunLifecycleHookPhase::AfterTool.event_name(),
+            Self::RunBeforeDelivery => RunLifecycleHookPhase::BeforeDelivery.event_name(),
+            Self::RunAfterRun => RunLifecycleHookPhase::AfterRun.event_name(),
         }
     }
 }
@@ -233,12 +255,26 @@ pub(crate) fn delete_hook_binding(
 }
 
 pub(crate) fn normalize_hook_event(raw: &str) -> Result<&'static str> {
-    match raw.trim().to_ascii_lowercase().as_str() {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if let Some(phase) = RunLifecycleHookPhase::parse_hook_event(normalized.as_str()) {
+        return Ok(hook_event_kind_for_lifecycle_phase(phase).as_str());
+    }
+    match normalized.as_str() {
         "gateway:startup" => Ok(HookEventKind::GatewayStartup.as_str()),
         "skill:enabled" => Ok(HookEventKind::SkillEnabled.as_str()),
         "skill:quarantined" => Ok(HookEventKind::SkillQuarantined.as_str()),
         "skill:disabled" => Ok(HookEventKind::SkillDisabled.as_str()),
         other => bail!("unsupported hook event '{other}'"),
+    }
+}
+
+fn hook_event_kind_for_lifecycle_phase(phase: RunLifecycleHookPhase) -> HookEventKind {
+    match phase {
+        RunLifecycleHookPhase::BeforeRun => HookEventKind::RunBeforeRun,
+        RunLifecycleHookPhase::BeforeTool => HookEventKind::RunBeforeTool,
+        RunLifecycleHookPhase::AfterTool => HookEventKind::RunAfterTool,
+        RunLifecycleHookPhase::BeforeDelivery => HookEventKind::RunBeforeDelivery,
+        RunLifecycleHookPhase::AfterRun => HookEventKind::RunAfterRun,
     }
 }
 
@@ -314,11 +350,13 @@ pub(crate) async fn dispatch_named_event(
     event: &str,
     event_payload: Value,
 ) -> Result<Vec<HookDispatchOutcome>> {
+    let lifecycle_phase = RunLifecycleHookPhase::parse_hook_event(event);
     let hooks_root = resolve_hooks_root()?;
     let hooks_index = load_hook_bindings_index(hooks_root.as_path())?;
     let plugins_root = resolve_plugins_root()?;
     let plugins_index = load_plugin_bindings_index(plugins_root.as_path())?;
     let mut outcomes = Vec::new();
+    let mut lifecycle_decisions = Vec::new();
 
     for hook in
         hooks_index.entries.into_iter().filter(|entry| entry.enabled && entry.event == event)
@@ -439,15 +477,53 @@ pub(crate) async fn dispatch_named_event(
             continue;
         }
 
-        match run_resolved_wasm_plugin(
-            policy,
-            &resolved,
-            plugin.capability_profile.to_requested_capabilities(),
-            execution_timeout,
-        ) {
+        let requested_capabilities = if lifecycle_phase.is_some() {
+            crate::wasm_plugin_runner::WasmPluginRequestedCapabilities::default()
+        } else {
+            plugin.capability_profile.to_requested_capabilities()
+        };
+        match run_resolved_wasm_plugin(policy, &resolved, requested_capabilities, execution_timeout)
+        {
             Ok(success) => {
-                let output_json = serde_json::from_slice::<Value>(success.output_json.as_slice())
-                    .unwrap_or_else(|_| json!({}));
+                let mut output_json =
+                    serde_json::from_slice::<Value>(success.output_json.as_slice())
+                        .unwrap_or_else(|_| json!({}));
+                if let Some(phase) = lifecycle_phase {
+                    let decision =
+                        lifecycle_decision_from_wasm_output(phase, &hook, &plugin, &output_json);
+                    if !decision.kind.is_allowed_in_phase(phase) {
+                        let message = format!(
+                            "{} is not allowed during {}",
+                            decision.kind.as_str(),
+                            phase.as_str()
+                        );
+                        record_hook_event(
+                            Arc::clone(&runtime),
+                            "hook.failed",
+                            &hook,
+                            Some(&plugin),
+                            json!({
+                                "event": event,
+                                "skill_id": resolved.skill_id,
+                                "skill_version": resolved.skill_version,
+                                "reason": message,
+                                "decision": decision,
+                                "event_payload": event_payload,
+                            }),
+                        )
+                        .await;
+                        outcomes.push(HookDispatchOutcome {
+                            hook,
+                            plugin,
+                            success: false,
+                            error: Some(message),
+                            output_json: json!({}),
+                        });
+                        continue;
+                    }
+                    output_json = attach_lifecycle_decision(output_json, &decision);
+                    lifecycle_decisions.push(decision);
+                }
                 record_hook_event(
                     Arc::clone(&runtime),
                     "hook.dispatched",
@@ -499,6 +575,27 @@ pub(crate) async fn dispatch_named_event(
         }
     }
 
+    if let Some(phase) = lifecycle_phase {
+        let resolution = resolve_run_lifecycle_hook_decisions(phase, lifecycle_decisions)
+            .map_err(|error| anyhow!("invalid lifecycle hook decision: {}", error.message))?;
+        if let Some(selected_outcome) =
+            outcomes.iter().find(|outcome| outcome.hook.hook_id == resolution.selected.hook_id)
+        {
+            record_hook_event(
+                Arc::clone(&runtime),
+                "hook.decision",
+                &selected_outcome.hook,
+                Some(&selected_outcome.plugin),
+                json!({
+                    "event": event,
+                    "resolution": resolution,
+                    "event_payload": event_payload,
+                }),
+            )
+            .await;
+        }
+    }
+
     Ok(outcomes)
 }
 
@@ -512,6 +609,57 @@ fn hook_event_from_journal(event: JournalEventRecord) -> Option<(&'static str, V
         _ => return None,
     };
     Some((mapped, payload))
+}
+
+fn lifecycle_decision_from_wasm_output(
+    phase: RunLifecycleHookPhase,
+    hook: &HookBindingRecord,
+    plugin: &PluginBindingRecord,
+    output_json: &Value,
+) -> RunLifecycleHookDecision {
+    let exit_code = output_json.get("exit_code").and_then(Value::as_i64).unwrap_or_default();
+    let kind = lifecycle_decision_kind_from_exit_code(exit_code);
+    let mut decision =
+        RunLifecycleHookDecision::new(phase, kind, hook.hook_id.clone(), plugin.plugin_id.clone());
+    decision.reason = Some(format!("plugin exit code {exit_code}"));
+    decision.annotations = json!({
+        "exit_code": exit_code,
+        "entrypoint": output_json.get("entrypoint").cloned(),
+        "duration_ms": output_json.get("duration_ms").cloned(),
+    });
+    if kind == RunLifecycleHookDecisionKind::TransformPreview {
+        decision.transformed_preview = output_json
+            .get("transform_preview")
+            .cloned()
+            .or_else(|| output_json.get("preview").cloned());
+    }
+    decision
+}
+
+fn lifecycle_decision_kind_from_exit_code(exit_code: i64) -> RunLifecycleHookDecisionKind {
+    match exit_code {
+        LIFECYCLE_HOOK_EXIT_CONTINUE => RunLifecycleHookDecisionKind::Continue,
+        LIFECYCLE_HOOK_EXIT_ANNOTATE => RunLifecycleHookDecisionKind::Annotate,
+        LIFECYCLE_HOOK_EXIT_REQUEST_APPROVAL => RunLifecycleHookDecisionKind::RequestApproval,
+        LIFECYCLE_HOOK_EXIT_BLOCK => RunLifecycleHookDecisionKind::Block,
+        LIFECYCLE_HOOK_EXIT_TRANSFORM_PREVIEW => RunLifecycleHookDecisionKind::TransformPreview,
+        code if code >= LIFECYCLE_HOOK_EXIT_FAIL_RUN || code < 0 => {
+            RunLifecycleHookDecisionKind::FailRun
+        }
+        _ => RunLifecycleHookDecisionKind::Annotate,
+    }
+}
+
+fn attach_lifecycle_decision(mut output_json: Value, decision: &RunLifecycleHookDecision) -> Value {
+    let decision_json = serde_json::to_value(decision).unwrap_or_else(|_| json!({}));
+    if let Value::Object(ref mut object) = output_json {
+        object.insert("lifecycle_decision".to_owned(), decision_json);
+        return output_json;
+    }
+    json!({
+        "output": output_json,
+        "lifecycle_decision": decision_json,
+    })
 }
 
 async fn record_hook_event(
@@ -573,9 +721,15 @@ fn normalize_hook_operator_metadata(mut operator: HookOperatorMetadata) -> HookO
 mod tests {
     use std::fs;
 
+    use palyra_common::runtime_contracts::{RunLifecycleHookDecisionKind, RunLifecycleHookPhase};
+    use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{hook_bindings_index_path, load_hook_bindings_index, HOOK_BINDINGS_LAYOUT_VERSION};
+    use super::{
+        attach_lifecycle_decision, hook_bindings_index_path,
+        lifecycle_decision_kind_from_exit_code, load_hook_bindings_index, normalize_hook_event,
+        HOOK_BINDINGS_LAYOUT_VERSION,
+    };
 
     #[test]
     fn load_hook_bindings_index_migrates_legacy_metadata() {
@@ -588,5 +742,53 @@ mod tests {
         assert_eq!(index.schema_version, HOOK_BINDINGS_LAYOUT_VERSION);
         assert_eq!(index.updated_at_unix_ms, 0);
         assert!(index.entries.is_empty());
+    }
+
+    #[test]
+    fn normalize_hook_event_accepts_run_lifecycle_aliases() {
+        assert_eq!(
+            normalize_hook_event("before_run").expect("before_run alias should normalize"),
+            RunLifecycleHookPhase::BeforeRun.event_name()
+        );
+        assert_eq!(
+            normalize_hook_event("run:before_delivery")
+                .expect("canonical lifecycle event should normalize"),
+            "run:before_delivery"
+        );
+    }
+
+    #[test]
+    fn lifecycle_exit_codes_map_to_typed_decisions() {
+        assert_eq!(
+            lifecycle_decision_kind_from_exit_code(0),
+            RunLifecycleHookDecisionKind::Continue
+        );
+        assert_eq!(
+            lifecycle_decision_kind_from_exit_code(20),
+            RunLifecycleHookDecisionKind::RequestApproval
+        );
+        assert_eq!(
+            lifecycle_decision_kind_from_exit_code(50),
+            RunLifecycleHookDecisionKind::FailRun
+        );
+        assert_eq!(
+            lifecycle_decision_kind_from_exit_code(-1),
+            RunLifecycleHookDecisionKind::FailRun
+        );
+    }
+
+    #[test]
+    fn lifecycle_decision_is_attached_to_plugin_output() {
+        let decision = palyra_common::runtime_contracts::RunLifecycleHookDecision::new(
+            RunLifecycleHookPhase::BeforeTool,
+            RunLifecycleHookDecisionKind::Block,
+            "hook.policy",
+            "plugin.policy",
+        );
+        let output = attach_lifecycle_decision(json!({"exit_code": 30}), &decision);
+        assert_eq!(
+            output.pointer("/lifecycle_decision/kind").and_then(serde_json::Value::as_str),
+            Some("block")
+        );
     }
 }
