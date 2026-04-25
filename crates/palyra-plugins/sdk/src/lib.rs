@@ -128,6 +128,19 @@ pub enum TypedPluginContractLifecyclePhase {
     Audit,
 }
 
+impl TypedPluginContractLifecyclePhase {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Discover => "discover",
+            Self::Negotiate => "negotiate",
+            Self::Bind => "bind",
+            Self::Invoke => "invoke",
+            Self::Audit => "audit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TypedPluginContractOperation {
@@ -181,6 +194,25 @@ pub struct TypedPluginContractDeclaration {
     pub kind: TypedPluginContractKind,
     #[serde(default = "default_typed_plugin_contract_version")]
     pub version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SdkContractSimulationFixture {
+    pub name: String,
+    pub expected_accepted: bool,
+    pub declarations: Vec<TypedPluginContractDeclaration>,
+    #[serde(default)]
+    pub requested_capability_classes: Vec<TypedPluginCapabilityClass>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SdkContractSimulationReport {
+    pub fixture_name: String,
+    pub accepted: bool,
+    pub supported_contract_count: usize,
+    pub rejected_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -574,6 +606,92 @@ pub fn typed_plugin_contract_descriptor(
     Some(descriptor)
 }
 
+/// Runs a typed-contract fixture against the SDK's simulated host negotiation rules.
+#[must_use]
+pub fn simulate_sdk_contract_fixture(
+    fixture: &SdkContractSimulationFixture,
+) -> SdkContractSimulationReport {
+    let mut rejected_reasons = Vec::new();
+    if fixture.name.trim().is_empty() {
+        rejected_reasons.push("fixture name cannot be empty".to_owned());
+    }
+    if fixture.declarations.is_empty() {
+        rejected_reasons.push("fixture must declare at least one typed contract".to_owned());
+    }
+
+    let mut supported_contract_count = 0_usize;
+    let mut allowed_capability_classes = Vec::<TypedPluginCapabilityClass>::new();
+    for declaration in &fixture.declarations {
+        let Some(descriptor) =
+            typed_plugin_contract_descriptor(declaration.kind, declaration.version)
+        else {
+            rejected_reasons.push(format!(
+                "{}@{} is not supported by SDK ABI {}",
+                declaration.kind.as_str(),
+                declaration.version,
+                SDK_ABI_MAJOR
+            ));
+            continue;
+        };
+        supported_contract_count += 1;
+        for capability in descriptor.allowed_capability_classes {
+            if !allowed_capability_classes.contains(&capability) {
+                allowed_capability_classes.push(capability);
+            }
+        }
+    }
+
+    for requested in &fixture.requested_capability_classes {
+        if !allowed_capability_classes.contains(requested) {
+            rejected_reasons.push(format!(
+                "capability class '{}' is not allowed by declared typed contracts",
+                requested.as_str()
+            ));
+        }
+    }
+
+    SdkContractSimulationReport {
+        fixture_name: fixture.name.clone(),
+        accepted: rejected_reasons.is_empty(),
+        supported_contract_count,
+        rejected_reasons,
+    }
+}
+
+/// Returns built-in good and bad fixtures used by SDK contract tests.
+#[must_use]
+pub fn built_in_sdk_contract_fixtures() -> Vec<SdkContractSimulationFixture> {
+    vec![
+        SdkContractSimulationFixture {
+            name: "good.delivery_adapter.channel_only".to_owned(),
+            expected_accepted: true,
+            declarations: vec![TypedPluginContractDeclaration {
+                kind: TypedPluginContractKind::DeliveryAdapter,
+                version: DEFAULT_TYPED_PLUGIN_CONTRACT_VERSION,
+            }],
+            requested_capability_classes: vec![TypedPluginCapabilityClass::Channels],
+        },
+        SdkContractSimulationFixture {
+            name: "bad.run_lifecycle_hook.secret_capability".to_owned(),
+            expected_accepted: false,
+            declarations: vec![TypedPluginContractDeclaration {
+                kind: TypedPluginContractKind::RunLifecycleHook,
+                version: DEFAULT_TYPED_PLUGIN_CONTRACT_VERSION,
+            }],
+            requested_capability_classes: vec![TypedPluginCapabilityClass::Secrets],
+        },
+        SdkContractSimulationFixture {
+            name: "bad.connector_adapter.incompatible_abi".to_owned(),
+            expected_accepted: false,
+            declarations: vec![TypedPluginContractDeclaration {
+                kind: TypedPluginContractKind::ConnectorAdapter,
+                version: DEFAULT_TYPED_PLUGIN_CONTRACT_VERSION + 1,
+            }],
+            requested_capability_classes: vec![TypedPluginCapabilityClass::Channels],
+        },
+    ]
+}
+
 /// Returns the full set of built-in typed plugin contracts supported by the host.
 #[must_use]
 pub fn supported_typed_plugin_contracts() -> Vec<TypedPluginContractDescriptor> {
@@ -638,15 +756,16 @@ fn build_descriptor(
 #[cfg(test)]
 mod tests {
     use super::{
-        all_typed_plugin_contract_kinds, default_typed_plugin_contract_version,
-        sdk_abi_compatibility, sdk_abi_version, supported_typed_plugin_contracts,
+        all_typed_plugin_contract_kinds, built_in_sdk_contract_fixtures,
+        default_typed_plugin_contract_version, sdk_abi_compatibility, sdk_abi_version,
+        simulate_sdk_contract_fixture, supported_typed_plugin_contracts,
         typed_plugin_contract_descriptor, wit_package_id, wit_source, TypedPluginCapabilityClass,
-        TypedPluginContractKind, TypedPluginContractOperation, HOST_CAPABILITIES_IMPORT_MODULE,
-        HOST_CAPABILITY_CHANNEL_COUNT_FN, HOST_CAPABILITY_CHANNEL_HANDLE_FN,
-        HOST_CAPABILITY_HTTP_COUNT_FN, HOST_CAPABILITY_HTTP_HANDLE_FN,
-        HOST_CAPABILITY_SECRET_COUNT_FN, HOST_CAPABILITY_SECRET_HANDLE_FN,
-        HOST_CAPABILITY_STORAGE_COUNT_FN, HOST_CAPABILITY_STORAGE_HANDLE_FN, SDK_ABI_MAJOR,
-        WIT_WORLD_NAME,
+        TypedPluginContractDescriptor, TypedPluginContractKind, TypedPluginContractOperation,
+        HOST_CAPABILITIES_IMPORT_MODULE, HOST_CAPABILITY_CHANNEL_COUNT_FN,
+        HOST_CAPABILITY_CHANNEL_HANDLE_FN, HOST_CAPABILITY_HTTP_COUNT_FN,
+        HOST_CAPABILITY_HTTP_HANDLE_FN, HOST_CAPABILITY_SECRET_COUNT_FN,
+        HOST_CAPABILITY_SECRET_HANDLE_FN, HOST_CAPABILITY_STORAGE_COUNT_FN,
+        HOST_CAPABILITY_STORAGE_HANDLE_FN, SDK_ABI_MAJOR, WIT_WORLD_NAME,
     };
 
     #[test]
@@ -709,5 +828,94 @@ mod tests {
             typed_plugin_contract_descriptor(TypedPluginContractKind::MemoryProvider, 99).is_none()
         );
         assert_eq!(default_typed_plugin_contract_version(), 1);
+    }
+
+    #[test]
+    fn sdk_contract_simulator_accepts_good_fixture_and_rejects_bad_fixtures() {
+        for fixture in built_in_sdk_contract_fixtures() {
+            let report = simulate_sdk_contract_fixture(&fixture);
+            assert_eq!(
+                report.accepted, fixture.expected_accepted,
+                "fixture '{}' produced unexpected report: {:?}",
+                fixture.name, report
+            );
+            if fixture.expected_accepted {
+                assert!(report.rejected_reasons.is_empty());
+            } else {
+                assert!(
+                    !report.rejected_reasons.is_empty(),
+                    "bad fixture should explain why negotiation failed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_contract_abi_fingerprint_matches_golden() {
+        const EXPECTED_TYPED_CONTRACT_ABI_FINGERPRINT: u64 = 0xf789_73f0_e89b_94ec;
+        let snapshot = typed_contract_abi_snapshot();
+        assert_eq!(
+            stable_fingerprint(snapshot.as_str()),
+            EXPECTED_TYPED_CONTRACT_ABI_FINGERPRINT,
+            "typed contract ABI snapshot changed:\n{snapshot}"
+        );
+    }
+
+    fn typed_contract_abi_snapshot() -> String {
+        let mut lines = vec![format!(
+            "package={}|abi={}|range={}..{}",
+            wit_package_id(),
+            sdk_abi_version(),
+            sdk_abi_compatibility().min_abi_major,
+            sdk_abi_compatibility().max_abi_major
+        )];
+        for descriptor in supported_typed_plugin_contracts() {
+            lines.push(descriptor_abi_line(&descriptor));
+        }
+        lines.join("\n")
+    }
+
+    fn descriptor_abi_line(descriptor: &TypedPluginContractDescriptor) -> String {
+        format!(
+            "{}|v{}|abi{}|timeout{}|sensitivity={}|input={}|output={}|lifecycle={}|ops={}|caps={}|errors={}|redacted={}|audit={}|obs={}",
+            descriptor.kind.as_str(),
+            descriptor.version,
+            descriptor.sdk_abi_major,
+            descriptor.default_timeout_ms,
+            descriptor.sensitivity.as_str(),
+            descriptor.input_schema,
+            descriptor.output_schema,
+            descriptor
+                .lifecycle
+                .iter()
+                .map(|phase| phase.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            descriptor
+                .operations
+                .iter()
+                .map(|operation| operation.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            descriptor
+                .allowed_capability_classes
+                .iter()
+                .map(|capability| capability.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            descriptor.error_codes.join(","),
+            descriptor.redacted_fields.join(","),
+            descriptor.audit_hooks.join(","),
+            descriptor.observability_hooks.join(",")
+        )
+    }
+
+    fn stable_fingerprint(input: &str) -> u64 {
+        const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+        input
+            .as_bytes()
+            .iter()
+            .fold(FNV_OFFSET_BASIS, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME))
     }
 }

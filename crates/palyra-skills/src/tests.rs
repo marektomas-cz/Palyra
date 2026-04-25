@@ -433,6 +433,20 @@ fn verify_fails_if_sbom_missing() {
 }
 
 #[test]
+fn package_guardrails_reject_artifact_without_manifest() {
+    let output = build_signed_skill_artifact(sample_request()).expect("artifact should build");
+    let mut entries = super::decode_zip(output.artifact_bytes.as_slice()).expect("zip decode");
+    entries.remove(SKILL_MANIFEST_PATH);
+    let rebuilt = super::encode_zip(entries.iter()).expect("zip encode");
+
+    let error = inspect_skill_artifact(rebuilt.as_slice()).expect_err("inspect should fail");
+    assert!(
+        matches!(error, SkillPackagingError::MissingArtifactEntry(ref path) if path == SKILL_MANIFEST_PATH),
+        "missing manifest should be a stable package guardrail error: {error:?}"
+    );
+}
+
+#[test]
 fn verify_detects_tamper() {
     let output = build_signed_skill_artifact(sample_request()).expect("artifact should build");
     let mut entries = super::decode_zip(output.artifact_bytes.as_slice()).expect("zip decode");
@@ -644,7 +658,11 @@ fn audit_quarantines_when_module_size_exceeds_policy_limit() {
         vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
     );
     let mut trust_store = SkillTrustStore::default();
-    let policy = SkillSecurityAuditPolicy { max_module_bytes: 4, max_exported_functions: 16 };
+    let policy = SkillSecurityAuditPolicy {
+        max_module_bytes: 4,
+        max_exported_functions: 16,
+        ..SkillSecurityAuditPolicy::default()
+    };
     let report = audit_skill_artifact_security(
         artifact.artifact_bytes.as_slice(),
         &mut trust_store,
@@ -695,6 +713,31 @@ fn audit_quarantines_wasi_filesystem_import_without_manifest_filesystem_capabili
 }
 
 #[test]
+fn audit_quarantines_forbidden_device_capability_by_default() {
+    let manifest =
+        sample_manifest().replace("device_capabilities = []", "device_capabilities = [\"camera\"]");
+    let artifact =
+        build_artifact_for_audit(manifest, vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let mut trust_store = SkillTrustStore::default();
+    let report = audit_skill_artifact_security(
+        artifact.artifact_bytes.as_slice(),
+        &mut trust_store,
+        true,
+        &SkillSecurityAuditPolicy::default(),
+    )
+    .expect("audit should return report");
+
+    assert!(report.should_quarantine, "device capability should require quarantine");
+    assert!(
+        report.checks.iter().any(|check| {
+            check.check_id == "forbidden_device_capabilities"
+                && check.status == SkillAuditCheckStatus::Fail
+        }),
+        "audit should include forbidden device capability failure"
+    );
+}
+
+#[test]
 fn audit_quarantines_module_export_count_over_limit() {
     let module_wat = r#"
             (module
@@ -705,8 +748,11 @@ fn audit_quarantines_module_export_count_over_limit() {
         "#;
     let artifact = build_artifact_for_audit(sample_manifest(), module_wat.as_bytes().to_vec());
     let mut trust_store = SkillTrustStore::default();
-    let policy =
-        SkillSecurityAuditPolicy { max_module_bytes: 64 * 1024, max_exported_functions: 1 };
+    let policy = SkillSecurityAuditPolicy {
+        max_module_bytes: 64 * 1024,
+        max_exported_functions: 1,
+        ..SkillSecurityAuditPolicy::default()
+    };
     let report = audit_skill_artifact_security(
         artifact.artifact_bytes.as_slice(),
         &mut trust_store,

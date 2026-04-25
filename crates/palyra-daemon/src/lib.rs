@@ -168,9 +168,10 @@ use palyra_policy::{
 };
 use palyra_skills::{
     audit_skill_artifact_security, inspect_skill_artifact, verify_skill_artifact,
-    SkillCapabilities, SkillCompat, SkillEntrypoints, SkillFilesystemCapabilities, SkillIntegrity,
-    SkillManifest, SkillQuotaConfig, SkillSecurityAuditPolicy, SkillToolEntrypoint, SkillToolRisk,
-    SkillTrustStore, SKILL_MANIFEST_VERSION,
+    SkillAuditCheckStatus, SkillCapabilities, SkillCompat, SkillEntrypoints,
+    SkillFilesystemCapabilities, SkillIntegrity, SkillManifest, SkillQuotaConfig,
+    SkillSecurityAuditPolicy, SkillToolEntrypoint, SkillToolRisk, SkillTrustStore,
+    SKILL_MANIFEST_VERSION,
 };
 use palyra_vault::{
     SecretResolutionStatus, SecretResolveErrorKind, SecretResolver, Vault,
@@ -1751,6 +1752,10 @@ struct InstalledSkillRecord {
     source: InstalledSkillSource,
     #[serde(default)]
     missing_secrets: Vec<MissingSkillSecret>,
+    #[serde(default)]
+    security_scan: InstalledSkillSecuritySnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_snapshot: Option<InstalledSkillRollbackSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1758,6 +1763,52 @@ struct InstalledSkillRecord {
 struct InstalledSkillSource {
     kind: String,
     reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct InstalledSkillSecuritySnapshot {
+    schema_version: u32,
+    accepted: bool,
+    passed: bool,
+    should_quarantine: bool,
+    generated_at_unix_ms: i64,
+    payload_sha256: String,
+    trust_decision: String,
+    check_count: usize,
+    failed_checks: Vec<String>,
+    warning_checks: Vec<String>,
+    quarantine_reasons: Vec<String>,
+    policy: SkillSecurityAuditPolicy,
+}
+
+impl Default for InstalledSkillSecuritySnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            accepted: false,
+            passed: false,
+            should_quarantine: true,
+            generated_at_unix_ms: 0,
+            payload_sha256: String::new(),
+            trust_decision: "unknown".to_owned(),
+            check_count: 0,
+            failed_checks: Vec::new(),
+            warning_checks: Vec::new(),
+            quarantine_reasons: Vec::new(),
+            policy: SkillSecurityAuditPolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct InstalledSkillRollbackSnapshot {
+    schema_version: u32,
+    previous_version: String,
+    previous_artifact_sha256: String,
+    previous_payload_sha256: String,
+    captured_at_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

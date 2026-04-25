@@ -3,7 +3,10 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::anyhow;
-use palyra_skills::{verify_skill_artifact, SkillTrustStore};
+use palyra_skills::{
+    audit_skill_artifact_security, SkillAuditCheckStatus, SkillSecurityAuditPolicy,
+    SkillSecurityAuditReport, SkillTrustStore,
+};
 
 use crate::{
     hooks::{hooks_for_plugin, load_hook_bindings_index, resolve_hooks_root},
@@ -950,23 +953,33 @@ fn install_skill_artifact_for_plugin_binding(
     })?;
     let trust_store_path = resolve_skills_trust_store_path(skills_root.as_path());
     let mut trust_store = load_trust_store_for_plugins(trust_store_path.as_path())?;
-    let verification =
-        match verify_skill_artifact(artifact_bytes.as_slice(), &mut trust_store, allow_tofu) {
-            Ok(report) => Some(report),
-            Err(error) if allow_untrusted => {
-                tracing::warn!(
-                    error = %error,
-                    artifact_path = %artifact_path.display(),
-                    "plugin install-or-bind proceeding with allow_untrusted override"
-                );
-                None
-            }
-            Err(error) => {
-                return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
-                    "skill artifact verification failed: {error}"
-                ))));
-            }
+    if allow_untrusted {
+        tracing::warn!(
+            artifact_path = %artifact_path.display(),
+            "plugin install-or-bind allow_untrusted override does not bypass security audit"
+        );
+    }
+    let audit_report = audit_skill_artifact_security(
+        artifact_bytes.as_slice(),
+        &mut trust_store,
+        allow_tofu,
+        &SkillSecurityAuditPolicy::default(),
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::invalid_argument(format!(
+            "skill artifact security audit failed: {error}"
+        )))
+    })?;
+    if audit_report.should_quarantine {
+        let reason = if audit_report.quarantine_reasons.is_empty() {
+            "skill artifact security audit requested quarantine".to_owned()
+        } else {
+            audit_report.quarantine_reasons.join(" | ")
         };
+        return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+            "skill artifact security audit failed: {reason}"
+        ))));
+    }
     save_trust_store_for_plugins(trust_store_path.as_path(), &trust_store)?;
 
     let skill_id = inspection.manifest.skill_id.clone();
@@ -989,41 +1002,89 @@ fn install_skill_artifact_for_plugin_binding(
     })?;
 
     let mut index = load_installed_skills_index(skills_root.as_path())?;
+    let previous_current = index
+        .entries
+        .iter()
+        .find(|entry| entry.skill_id == skill_id && entry.current && entry.version != version)
+        .cloned();
     index.entries.retain(|entry| !(entry.skill_id == skill_id && entry.version == version));
     for entry in &mut index.entries {
         if entry.skill_id == skill_id {
             entry.current = false;
         }
     }
+    let installed_at_unix_ms = unix_ms_now().map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to read system clock: {error}"
+        )))
+    })?;
     let record = InstalledSkillRecord {
         skill_id: skill_id.clone(),
         version: version.clone(),
         publisher: inspection.manifest.publisher.clone(),
         current: true,
-        installed_at_unix_ms: unix_ms_now().map_err(|error| {
-            runtime_status_response(tonic::Status::internal(format!(
-                "failed to read system clock: {error}"
-            )))
-        })?,
+        installed_at_unix_ms,
         artifact_sha256: sha256_hex(artifact_bytes.as_slice()),
-        payload_sha256: verification
-            .as_ref()
-            .map(|report| report.payload_sha256.clone())
-            .unwrap_or_else(|| inspection.payload_sha256.clone()),
+        payload_sha256: audit_report.payload_sha256.clone(),
         signature_key_id: inspection.signature.key_id.clone(),
-        trust_decision: verification
-            .as_ref()
-            .map(|report| trust_decision_label(report.trust_decision))
-            .unwrap_or_else(|| "untrusted_override".to_owned()),
+        trust_decision: trust_decision_label(audit_report.trust_decision),
         source: InstalledSkillSource {
             kind: "managed_artifact".to_owned(),
             reference: artifact_path.to_string_lossy().into_owned(),
         },
         missing_secrets: Vec::new(),
+        security_scan: installed_skill_security_snapshot(&audit_report),
+        rollback_snapshot: previous_current
+            .as_ref()
+            .map(|entry| installed_skill_rollback_snapshot(entry, installed_at_unix_ms)),
     };
     index.entries.push(record.clone());
     save_installed_skills_index(skills_root.as_path(), &index)?;
     Ok(record)
+}
+
+fn installed_skill_security_snapshot(
+    report: &SkillSecurityAuditReport,
+) -> InstalledSkillSecuritySnapshot {
+    InstalledSkillSecuritySnapshot {
+        schema_version: 1,
+        accepted: report.accepted,
+        passed: report.passed,
+        should_quarantine: report.should_quarantine,
+        generated_at_unix_ms: report.generated_at_unix_ms,
+        payload_sha256: report.payload_sha256.clone(),
+        trust_decision: trust_decision_label(report.trust_decision),
+        check_count: report.checks.len(),
+        failed_checks: audit_check_ids_by_status(report, SkillAuditCheckStatus::Fail),
+        warning_checks: audit_check_ids_by_status(report, SkillAuditCheckStatus::Warn),
+        quarantine_reasons: report.quarantine_reasons.clone(),
+        policy: report.policy.clone(),
+    }
+}
+
+fn audit_check_ids_by_status(
+    report: &SkillSecurityAuditReport,
+    status: SkillAuditCheckStatus,
+) -> Vec<String> {
+    report
+        .checks
+        .iter()
+        .filter(|check| check.status == status)
+        .map(|check| check.check_id.clone())
+        .collect()
+}
+
+fn installed_skill_rollback_snapshot(
+    previous: &InstalledSkillRecord,
+    captured_at_unix_ms: i64,
+) -> InstalledSkillRollbackSnapshot {
+    InstalledSkillRollbackSnapshot {
+        schema_version: 1,
+        previous_version: previous.version.clone(),
+        previous_artifact_sha256: previous.artifact_sha256.clone(),
+        previous_payload_sha256: previous.payload_sha256.clone(),
+        captured_at_unix_ms,
+    }
 }
 
 fn load_trust_store_for_plugins(path: &FsPath) -> Result<SkillTrustStore, Response> {

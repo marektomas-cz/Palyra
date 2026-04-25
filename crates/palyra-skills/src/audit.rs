@@ -4,8 +4,8 @@ use wasmtime::{Engine, ExternType, Module};
 use crate::artifact::now_unix_ms;
 use crate::error::SkillPackagingError;
 use crate::models::{
-    SkillAuditCheckStatus, SkillAuditSeverity, SkillSecurityAuditCheck, SkillSecurityAuditPolicy,
-    SkillSecurityAuditReport, SkillTrustStore,
+    SkillAuditCheckStatus, SkillAuditSeverity, SkillManifest, SkillSecurityAuditCheck,
+    SkillSecurityAuditPolicy, SkillSecurityAuditReport, SkillTrustStore,
 };
 use crate::verify::{inspect_skill_artifact, verify_skill_artifact};
 
@@ -48,6 +48,12 @@ pub fn audit_skill_artifact_security(
             })),
         });
     }
+    audit_manifest_capability_guardrails(
+        &inspected.manifest,
+        policy,
+        &mut checks,
+        &mut quarantine_reasons,
+    );
 
     let module_paths = inspected
         .entries
@@ -221,6 +227,98 @@ pub fn audit_skill_artifact_security(
         quarantine_reasons,
         vulnerability_scan,
     })
+}
+
+fn audit_manifest_capability_guardrails(
+    manifest: &SkillManifest,
+    policy: &SkillSecurityAuditPolicy,
+    checks: &mut Vec<SkillSecurityAuditCheck>,
+    quarantine_reasons: &mut Vec<String>,
+) {
+    checks.push(pass_audit_check(
+        "manifest_filesystem_scopes",
+        format!(
+            "manifest declares {} filesystem read root(s) and {} write root(s)",
+            manifest.capabilities.filesystem.read_roots.len(),
+            manifest.capabilities.filesystem.write_roots.len()
+        ),
+        Some(json!({
+            "read_roots": &manifest.capabilities.filesystem.read_roots,
+            "write_roots": &manifest.capabilities.filesystem.write_roots,
+        })),
+    ));
+    checks.push(pass_audit_check(
+        "manifest_http_egress_scopes",
+        format!(
+            "manifest declares {} http egress host(s)",
+            manifest.capabilities.http_egress_allowlist.len()
+        ),
+        Some(json!({ "hosts": &manifest.capabilities.http_egress_allowlist })),
+    ));
+    checks.push(pass_audit_check(
+        "manifest_secret_scopes",
+        format!("manifest declares {} secret scope(s)", manifest.capabilities.secrets.len()),
+        Some(json!({
+            "scopes": manifest
+                .capabilities
+                .secrets
+                .iter()
+                .map(|scope| scope.scope.as_str())
+                .collect::<Vec<_>>(),
+        })),
+    ));
+
+    if !manifest.capabilities.device_capabilities.is_empty() && !policy.allow_device_capabilities {
+        push_fail_check(
+            checks,
+            quarantine_reasons,
+            "forbidden_device_capabilities",
+            "manifest declares device capabilities, which are not grantable by the sandboxed plugin runtime",
+            Some(json!({ "device_capabilities": &manifest.capabilities.device_capabilities })),
+        );
+    } else {
+        checks.push(pass_audit_check(
+            "forbidden_device_capabilities",
+            "manifest does not declare forbidden device capabilities",
+            Some(json!({
+                "device_capabilities": &manifest.capabilities.device_capabilities,
+                "allow_device_capabilities": policy.allow_device_capabilities,
+            })),
+        ));
+    }
+
+    let wildcard_opt_ins = wildcard_opt_in_names(manifest);
+    if !wildcard_opt_ins.is_empty() && !policy.allow_wildcard_capabilities {
+        push_fail_check(
+            checks,
+            quarantine_reasons,
+            "forbidden_wildcard_capabilities",
+            "manifest enables wildcard capabilities, which require an explicit audit policy override",
+            Some(json!({ "wildcard_opt_ins": wildcard_opt_ins })),
+        );
+    } else {
+        checks.push(pass_audit_check(
+            "forbidden_wildcard_capabilities",
+            "manifest wildcard capability posture is allowed by audit policy",
+            Some(json!({
+                "wildcard_opt_ins": wildcard_opt_ins,
+                "allow_wildcard_capabilities": policy.allow_wildcard_capabilities,
+            })),
+        ));
+    }
+}
+
+fn wildcard_opt_in_names(manifest: &SkillManifest) -> Vec<&'static str> {
+    [
+        (manifest.capabilities.wildcard_opt_in.filesystem, "filesystem"),
+        (manifest.capabilities.wildcard_opt_in.http_egress, "http_egress"),
+        (manifest.capabilities.wildcard_opt_in.secrets, "secrets"),
+        (manifest.capabilities.wildcard_opt_in.device, "device"),
+        (manifest.capabilities.wildcard_opt_in.node, "node"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, name)| enabled.then_some(name))
+    .collect()
 }
 
 fn module_imports_wasi_filesystem(module: &Module) -> bool {

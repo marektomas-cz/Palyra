@@ -1019,6 +1019,21 @@ mod tests {
     }
 
     #[test]
+    fn run_wasm_plugin_reports_trap_as_runtime_failure() {
+        let policy = test_policy();
+        let input = serde_json::json!({
+            "module_wat": "(module (func (export \"run\") (result i32) unreachable))"
+        });
+        let input_json = serde_json::to_vec(&input).expect("input JSON should serialize");
+
+        let error = run_wasm_plugin(&policy, input_json.as_slice(), Duration::from_secs(2))
+            .expect_err("trapping plugin should fail without crashing the runtime");
+
+        assert_eq!(error.kind, WasmPluginRunErrorKind::RuntimeFailure);
+        assert!(error.message.contains("execution failed"));
+    }
+
+    #[test]
     fn run_wasm_plugin_rejects_dot_only_host_entries() {
         let policy = test_policy();
         let input = serde_json::json!({

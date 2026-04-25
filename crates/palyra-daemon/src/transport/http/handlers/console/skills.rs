@@ -267,23 +267,33 @@ pub(crate) async fn console_skills_install_handler(
     let trust_store_path = resolve_skills_trust_store_path(skills_root.as_path());
     let mut trust_store = load_trust_store(trust_store_path.as_path())?;
     let allow_tofu = payload.allow_tofu.unwrap_or(true);
-    let verification =
-        match verify_skill_artifact(artifact_bytes.as_slice(), &mut trust_store, allow_tofu) {
-            Ok(report) => Some(report),
-            Err(error) if payload.allow_untrusted.unwrap_or(false) => {
-                tracing::warn!(
-                    error = %error,
-                    artifact_path = %artifact_path.display(),
-                    "console skill install proceeding with allow_untrusted override"
-                );
-                None
-            }
-            Err(error) => {
-                return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
-                    "skill artifact verification failed: {error}"
-                ))));
-            }
+    if payload.allow_untrusted.unwrap_or(false) {
+        tracing::warn!(
+            artifact_path = %artifact_path.display(),
+            "console skill install allow_untrusted override does not bypass security audit"
+        );
+    }
+    let audit_report = audit_skill_artifact_security(
+        artifact_bytes.as_slice(),
+        &mut trust_store,
+        allow_tofu,
+        &SkillSecurityAuditPolicy::default(),
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::invalid_argument(format!(
+            "skill artifact security audit failed: {error}"
+        )))
+    })?;
+    if audit_report.should_quarantine {
+        let reason = if audit_report.quarantine_reasons.is_empty() {
+            "skill artifact security audit requested quarantine".to_owned()
+        } else {
+            audit_report.quarantine_reasons.join(" | ")
         };
+        return Err(runtime_status_response(tonic::Status::invalid_argument(format!(
+            "skill artifact security audit failed: {reason}"
+        ))));
+    }
     save_trust_store(trust_store_path.as_path(), &trust_store)?;
 
     let skill_id = inspection.manifest.skill_id.clone();
@@ -306,37 +316,70 @@ pub(crate) async fn console_skills_install_handler(
     })?;
 
     let mut index = load_installed_skills_index(skills_root.as_path())?;
+    let previous_current = index
+        .entries
+        .iter()
+        .find(|entry| entry.skill_id == skill_id && entry.current && entry.version != version)
+        .cloned();
     index.entries.retain(|entry| !(entry.skill_id == skill_id && entry.version == version));
     for entry in &mut index.entries {
         if entry.skill_id == skill_id {
             entry.current = false;
         }
     }
+    let installed_at_unix_ms = unix_ms_now().map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to read system clock: {error}"
+        )))
+    })?;
+    let payload_sha256 = audit_report.payload_sha256.clone();
+    let trust_decision = trust_decision_label(audit_report.trust_decision);
     let record = InstalledSkillRecord {
         skill_id: skill_id.clone(),
         version: version.clone(),
         publisher: inspection.manifest.publisher.clone(),
         current: true,
-        installed_at_unix_ms: unix_ms_now().map_err(|error| {
-            runtime_status_response(tonic::Status::internal(format!(
-                "failed to read system clock: {error}"
-            )))
-        })?,
+        installed_at_unix_ms,
         artifact_sha256: sha256_hex(artifact_bytes.as_slice()),
-        payload_sha256: verification
-            .as_ref()
-            .map(|report| report.payload_sha256.clone())
-            .unwrap_or_else(|| inspection.payload_sha256.clone()),
+        payload_sha256: payload_sha256.clone(),
         signature_key_id: inspection.signature.key_id.clone(),
-        trust_decision: verification
-            .as_ref()
-            .map(|report| trust_decision_label(report.trust_decision))
-            .unwrap_or_else(|| "untrusted_override".to_owned()),
+        trust_decision: trust_decision.clone(),
         source: InstalledSkillSource {
             kind: "managed_artifact".to_owned(),
             reference: artifact_path.to_string_lossy().into_owned(),
         },
         missing_secrets: Vec::new(),
+        security_scan: InstalledSkillSecuritySnapshot {
+            schema_version: 1,
+            accepted: audit_report.accepted,
+            passed: audit_report.passed,
+            should_quarantine: audit_report.should_quarantine,
+            generated_at_unix_ms: audit_report.generated_at_unix_ms,
+            payload_sha256: payload_sha256.clone(),
+            trust_decision,
+            check_count: audit_report.checks.len(),
+            failed_checks: audit_report
+                .checks
+                .iter()
+                .filter(|check| check.status == SkillAuditCheckStatus::Fail)
+                .map(|check| check.check_id.clone())
+                .collect(),
+            warning_checks: audit_report
+                .checks
+                .iter()
+                .filter(|check| check.status == SkillAuditCheckStatus::Warn)
+                .map(|check| check.check_id.clone())
+                .collect(),
+            quarantine_reasons: audit_report.quarantine_reasons.clone(),
+            policy: audit_report.policy.clone(),
+        },
+        rollback_snapshot: previous_current.as_ref().map(|entry| InstalledSkillRollbackSnapshot {
+            schema_version: 1,
+            previous_version: entry.version.clone(),
+            previous_artifact_sha256: entry.artifact_sha256.clone(),
+            previous_payload_sha256: entry.payload_sha256.clone(),
+            captured_at_unix_ms: installed_at_unix_ms,
+        }),
     };
     index.entries.push(record.clone());
     save_installed_skills_index(skills_root.as_path(), &index)?;

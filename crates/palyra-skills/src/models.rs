@@ -415,8 +415,22 @@ pub struct SkillSecurityAuditCheck {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SkillSecurityAuditPolicy {
+    #[serde(default = "default_skill_audit_max_module_bytes")]
     pub max_module_bytes: u64,
+    #[serde(default = "default_skill_audit_max_exported_functions")]
     pub max_exported_functions: usize,
+    #[serde(default)]
+    pub allow_device_capabilities: bool,
+    #[serde(default)]
+    pub allow_wildcard_capabilities: bool,
+}
+
+fn default_skill_audit_max_module_bytes() -> u64 {
+    DEFAULT_SKILL_AUDIT_MAX_MODULE_BYTES
+}
+
+fn default_skill_audit_max_exported_functions() -> usize {
+    DEFAULT_SKILL_AUDIT_MAX_EXPORTED_FUNCTIONS
 }
 
 impl Default for SkillSecurityAuditPolicy {
@@ -424,6 +438,8 @@ impl Default for SkillSecurityAuditPolicy {
         Self {
             max_module_bytes: DEFAULT_SKILL_AUDIT_MAX_MODULE_BYTES,
             max_exported_functions: DEFAULT_SKILL_AUDIT_MAX_EXPORTED_FUNCTIONS,
+            allow_device_capabilities: false,
+            allow_wildcard_capabilities: false,
         }
     }
 }

@@ -3746,6 +3746,71 @@ allowed_channels = []
         Some(true),
         "plugin capability diff should stay valid when the binding matches the manifest/profile"
     );
+    assert_eq!(
+        bound_plugin.pointer("/installed_skill/security_scan/passed").and_then(Value::as_bool),
+        Some(true),
+        "plugin install should persist a passing security scan snapshot"
+    );
+    assert!(
+        bound_plugin
+            .pointer("/installed_skill/security_scan/check_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        "plugin install should persist security scan check coverage"
+    );
+    assert!(
+        bound_plugin.pointer("/installed_skill/rollback_snapshot").is_none()
+            || bound_plugin
+                .pointer("/installed_skill/rollback_snapshot")
+                .is_some_and(Value::is_null),
+        "first install should not create a rollback snapshot"
+    );
+
+    let upgraded_artifact_path = unique_temp_skill_artifact_path();
+    fs::write(
+        &upgraded_artifact_path,
+        build_test_skill_artifact("acme.hook_skill", "1.1.0")
+            .context("failed to build upgraded signed test skill artifact")?,
+    )
+    .with_context(|| {
+        format!("failed to write upgraded test skill artifact {}", upgraded_artifact_path.display())
+    })?;
+    let upgraded_plugin = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/plugins/install-or-bind"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&json!({
+            "plugin_id": "acme-hook-plugin",
+            "artifact_path": upgraded_artifact_path,
+            "module_path": "modules/module.wasm",
+            "entrypoint": "run",
+            "enabled": true
+        }))
+        .send()
+        .context("failed to bind upgraded plugin from signed skill artifact")?
+        .error_for_status()
+        .context("upgraded plugin install-or-bind returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse upgraded plugin bind response json")?;
+    assert_eq!(
+        upgraded_plugin.pointer("/installed_skill/version").and_then(Value::as_str),
+        Some("1.1.0"),
+        "upgraded plugin install should persist the new current skill version"
+    );
+    assert_eq!(
+        upgraded_plugin
+            .pointer("/installed_skill/rollback_snapshot/previous_version")
+            .and_then(Value::as_str),
+        Some("1.0.0"),
+        "plugin upgrade should capture a rollback point to the previous current version"
+    );
+    assert!(
+        upgraded_plugin
+            .pointer("/installed_skill/rollback_snapshot/previous_payload_sha256")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| !hash.is_empty()),
+        "rollback snapshot should persist the previous payload digest"
+    );
 
     let listed_plugins = client
         .get(format!("http://127.0.0.1:{admin_port}/console/v1/plugins"))
