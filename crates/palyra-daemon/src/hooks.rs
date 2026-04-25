@@ -643,7 +643,7 @@ fn lifecycle_decision_kind_from_exit_code(exit_code: i64) -> RunLifecycleHookDec
         LIFECYCLE_HOOK_EXIT_REQUEST_APPROVAL => RunLifecycleHookDecisionKind::RequestApproval,
         LIFECYCLE_HOOK_EXIT_BLOCK => RunLifecycleHookDecisionKind::Block,
         LIFECYCLE_HOOK_EXIT_TRANSFORM_PREVIEW => RunLifecycleHookDecisionKind::TransformPreview,
-        code if code >= LIFECYCLE_HOOK_EXIT_FAIL_RUN || code < 0 => {
+        code if !(0..LIFECYCLE_HOOK_EXIT_FAIL_RUN).contains(&code) => {
             RunLifecycleHookDecisionKind::FailRun
         }
         _ => RunLifecycleHookDecisionKind::Annotate,
