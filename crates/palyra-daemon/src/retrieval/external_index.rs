@@ -16,7 +16,7 @@ const DEFAULT_EXTERNAL_RECONCILIATION_SUCCESS_RATE_BPS: u32 = 9_500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ExternalRetrievalScaleSloSnapshot {
-    pub(crate) freshness_lag_ms: u64,
+    pub(crate) freshness_lag_ms: Option<u64>,
     pub(crate) freshness_target_ms: u64,
     pub(crate) freshness_ok: bool,
     pub(crate) query_latency_p95_ms: u64,
@@ -34,7 +34,7 @@ pub(crate) struct ExternalRetrievalScaleSloSnapshot {
 impl Default for ExternalRetrievalScaleSloSnapshot {
     fn default() -> Self {
         Self {
-            freshness_lag_ms: u64::MAX,
+            freshness_lag_ms: None,
             freshness_target_ms: DEFAULT_EXTERNAL_INDEX_FRESHNESS_SLO_MS,
             freshness_ok: false,
             query_latency_p95_ms: 0,
@@ -75,7 +75,7 @@ pub(crate) struct ExternalRetrievalDriftReport {
     pub(crate) indexed_workspace_chunks: u64,
     pub(crate) journal_workspace_chunks: u64,
     pub(crate) workspace_chunk_drift: i64,
-    pub(crate) freshness_lag_ms: u64,
+    pub(crate) freshness_lag_ms: Option<u64>,
     pub(crate) drift_count: u64,
     pub(crate) reconciliation_required: bool,
 }
@@ -222,7 +222,7 @@ impl ExternalRetrievalRuntime {
         );
         guard.snapshot.indexed_memory_items = report.indexed_memory_items;
         guard.snapshot.indexed_workspace_chunks = report.indexed_workspace_chunks;
-        guard.snapshot.freshness_lag_ms = Some(report.freshness_lag_ms);
+        guard.snapshot.freshness_lag_ms = report.freshness_lag_ms;
         guard.snapshot.drift_count = report.drift_count;
         guard.snapshot.pending_reconciliation_count = report.drift_count;
         if report.reconciliation_required {
@@ -347,10 +347,9 @@ fn external_drift_report(
     let drift_count = journal_memory_items
         .saturating_sub(indexed_memory_items)
         .saturating_add(journal_workspace_chunks.saturating_sub(indexed_workspace_chunks));
-    let freshness_lag_ms = snapshot.journal_watermark_unix_ms.map_or_else(
-        || if drift_count == 0 { 0 } else { u64::MAX },
-        |watermark| checked_at_unix_ms.saturating_sub(watermark).max(0) as u64,
-    );
+    let freshness_lag_ms = snapshot
+        .journal_watermark_unix_ms
+        .map(|watermark| checked_at_unix_ms.saturating_sub(watermark).max(0) as u64);
     ExternalRetrievalDriftReport {
         checked_at_unix_ms,
         indexed_memory_items,
@@ -371,7 +370,7 @@ fn signed_drift(journal_total: u64, indexed_total: u64) -> i64 {
 }
 
 fn recompute_external_slos(state: &mut ExternalRetrievalRuntimeState) {
-    let freshness_lag_ms = state.snapshot.freshness_lag_ms.unwrap_or(u64::MAX);
+    let freshness_lag_ms = state.snapshot.freshness_lag_ms;
     let query_latency_p95_ms = percentile_95(&state.query_latency_samples_ms);
     let degraded_fallback_rate_bps =
         rate_bps(state.degraded_fallbacks, state.search_attempts, state.snapshot.state);
@@ -380,7 +379,8 @@ fn recompute_external_slos(state: &mut ExternalRetrievalRuntimeState) {
         state.reconciliation_attempts,
         &state.snapshot,
     );
-    let freshness_ok = freshness_lag_ms <= DEFAULT_EXTERNAL_INDEX_FRESHNESS_SLO_MS;
+    let freshness_ok =
+        freshness_lag_ms.is_some_and(|lag| lag <= DEFAULT_EXTERNAL_INDEX_FRESHNESS_SLO_MS);
     let query_latency_ok = query_latency_p95_ms <= DEFAULT_EXTERNAL_QUERY_LATENCY_SLO_MS;
     let degraded_fallback_ok =
         degraded_fallback_rate_bps <= DEFAULT_EXTERNAL_DEGRADED_FALLBACK_RATE_BPS;
@@ -493,6 +493,10 @@ mod tests {
             .expect("drift detection should read journal counts");
         assert!(drift.reconciliation_required);
         assert_eq!(drift.memory_drift, 1);
+        assert_eq!(drift.freshness_lag_ms, None);
+        let drift_snapshot = external_index.snapshot();
+        assert_eq!(drift_snapshot.freshness_lag_ms, None);
+        assert_eq!(drift_snapshot.scale_slos.freshness_lag_ms, None);
 
         let indexer = external_index
             .run_indexer(&store, 64, 1, 2_000)
@@ -504,6 +508,7 @@ mod tests {
         let snapshot = external_index.snapshot();
         assert_eq!(snapshot.state, RetrievalBackendState::Ready);
         assert_eq!(snapshot.scale_slos.preview_gate_state, "preview_ready");
+        assert_eq!(snapshot.scale_slos.freshness_lag_ms, Some(0));
         assert!(snapshot.scale_slos.freshness_ok);
         assert!(snapshot.scale_slos.reconciliation_success_ok);
 

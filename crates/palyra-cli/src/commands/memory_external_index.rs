@@ -89,7 +89,10 @@ pub(crate) fn print_external_drift_line(label: &str, drift: &Value) {
     let memory_drift = drift.get("memory_drift").and_then(Value::as_i64).unwrap_or(0);
     let workspace_chunk_drift =
         drift.get("workspace_chunk_drift").and_then(Value::as_i64).unwrap_or(0);
-    let freshness_lag_ms = drift.get("freshness_lag_ms").and_then(Value::as_u64).unwrap_or(0);
+    let freshness_lag_ms = drift
+        .get("freshness_lag_ms")
+        .and_then(Value::as_u64)
+        .map_or("unknown".to_owned(), |value| value.to_string());
     let reconciliation_required =
         drift.get("reconciliation_required").and_then(Value::as_bool).unwrap_or(false);
     println!(
