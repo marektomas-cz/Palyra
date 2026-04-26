@@ -468,7 +468,7 @@ fn browser_permissions_policy_action(command: &BrowserPermissionsCommand) -> &'s
 
 fn ensure_browser_cli_policy_enabled(action: &str) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
-    ensure_browser_service_enabled(&resolved.policy, action)
+    ensure_browser_service_enabled(&resolved.policy, action, resolved.config_path.as_deref())
 }
 
 async fn run_browser_status(
@@ -515,7 +515,7 @@ async fn run_browser_start(
     wait_ms: u64,
 ) -> Result<()> {
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
-    ensure_browser_service_enabled(&resolved.policy, "start")?;
+    ensure_browser_service_enabled(&resolved.policy, "start", resolved.config_path.as_deref())?;
     if fetch_browser_health(resolved.connection.health_base_url.as_str()).await.is_ok() {
         let metadata = read_browser_service_metadata()?;
         let payload = BrowserLifecyclePayload {
@@ -2398,13 +2398,37 @@ fn resolve_browser_config(
     })
 }
 
-fn ensure_browser_service_enabled(policy: &BrowserPolicySnapshot, action: &str) -> Result<()> {
+fn ensure_browser_service_enabled(
+    policy: &BrowserPolicySnapshot,
+    action: &str,
+    config_path: Option<&str>,
+) -> Result<()> {
     if policy.configured_enabled {
         return Ok(());
     }
+    let enable_command = browser_service_enable_command(config_path);
     anyhow::bail!(
-        "browser service is disabled (tool_call.browser_service.enabled=false); enable it before running `palyra browser {action}`"
+        "browser service is disabled (tool_call.browser_service.enabled=false); enable it with `{enable_command}`, then rerun `palyra browser {action}`"
     );
+}
+
+fn browser_service_enable_command(config_path: Option<&str>) -> String {
+    let mut command = "palyra config set".to_owned();
+    if let Some(path) = config_path.and_then(normalize_optional_text) {
+        command.push_str(" --path ");
+        command.push_str(&quote_cli_argument(path));
+    }
+    command.push_str(" --key tool_call.browser_service.enabled --value true");
+    command
+}
+
+fn quote_cli_argument(value: &str) -> String {
+    if value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':' | '/' | '\\')
+    }) {
+        return value.to_owned();
+    }
+    format!("\"{}\"", value.replace('"', "\\\""))
 }
 
 fn current_config_path() -> Option<PathBuf> {
@@ -3155,7 +3179,8 @@ fn proto_console_severity_text(value: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_command_policy_action, ensure_browser_service_enabled, BrowserPolicySnapshot,
+        browser_command_policy_action, browser_service_enable_command,
+        ensure_browser_service_enabled, BrowserPolicySnapshot,
     };
     use crate::args::BrowserCommand;
 
@@ -3175,21 +3200,47 @@ mod tests {
 
     #[test]
     fn browser_start_fails_closed_when_service_is_disabled() {
-        let error = ensure_browser_service_enabled(&disabled_policy(), "start")
+        let error = ensure_browser_service_enabled(&disabled_policy(), "start", None)
             .expect_err("disabled browser service should block start");
         assert!(
             error.to_string().contains("tool_call.browser_service.enabled=false"),
             "disabled-service error should explain the policy gate: {error}"
         );
+        assert!(
+            error
+                .to_string()
+                .contains("palyra config set --key tool_call.browser_service.enabled --value true"),
+            "disabled-service error should include an exact enable command: {error}"
+        );
+    }
+
+    #[test]
+    fn browser_enable_command_includes_config_path_when_available() {
+        let command = browser_service_enable_command(Some(r"C:\Palyra\palyra.toml"));
+
+        assert_eq!(
+            command,
+            r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.enabled --value true"
+        );
     }
 
     #[test]
     fn browser_actions_fail_closed_when_service_is_disabled() {
-        let error = ensure_browser_service_enabled(&disabled_policy(), "navigate")
-            .expect_err("disabled browser service should block navigation");
+        let error = ensure_browser_service_enabled(
+            &disabled_policy(),
+            "navigate",
+            Some(r"C:\Palyra\palyra.toml"),
+        )
+        .expect_err("disabled browser service should block navigation");
         assert!(
             error.to_string().contains("palyra browser navigate"),
             "disabled-service error should name the blocked browser action: {error}"
+        );
+        assert!(
+            error.to_string().contains(
+                r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.enabled --value true"
+            ),
+            "disabled-service error should include a config-specific enable command: {error}"
         );
     }
 
@@ -3211,7 +3262,7 @@ mod tests {
     fn browser_start_allows_enabled_policy() {
         let mut policy = disabled_policy();
         policy.configured_enabled = true;
-        ensure_browser_service_enabled(&policy, "start")
+        ensure_browser_service_enabled(&policy, "start", None)
             .expect("enabled browser service should allow start");
     }
 }
