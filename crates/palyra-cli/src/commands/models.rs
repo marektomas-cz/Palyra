@@ -476,12 +476,19 @@ fn append_catalog_entries(
     configured: Option<&str>,
     preferred: Option<&str>,
 ) {
+    let has_configured_model = configured.is_some();
     for model in catalog {
+        let is_configured = configured.is_some_and(|value| value == *model);
+        let is_preferred = if has_configured_model {
+            is_configured
+        } else {
+            preferred.is_some_and(|value| value == *model)
+        };
         target_entries.push(ModelCatalogEntry {
             target,
             id: (*model).to_owned(),
-            configured: configured.is_some_and(|value| value == *model),
-            preferred: preferred.is_some_and(|value| value == *model),
+            configured: is_configured,
+            preferred: is_preferred,
             source: "curated",
         });
     }
@@ -499,7 +506,7 @@ fn append_ad_hoc_entry(
         target,
         id: configured.to_owned(),
         configured: true,
-        preferred: false,
+        preferred: true,
         source: "configured",
     });
 }
@@ -1719,8 +1726,11 @@ fn probe_provider(
                 }
             } else if status.as_u16() == 404 && !target.configured_model_ids.is_empty() {
                 payload.discovery_source = "registry_fallback".to_owned();
-                payload.state =
-                    if discover { "discovery_unsupported".to_owned() } else { "ok".to_owned() };
+                payload.state = if discover {
+                    "discovery_unsupported".to_owned()
+                } else {
+                    "verification_incomplete".to_owned()
+                };
                 payload.message = if discover {
                     "provider returned HTTP 404 for model discovery; using configured model registry for reference only"
                         .to_owned()

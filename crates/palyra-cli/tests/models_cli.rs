@@ -345,6 +345,39 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
         Some(false),
         "legacy minimax configs should not advertise unsupported vision capability: {payload}"
     );
+    let text_models = payload
+        .get("models")
+        .and_then(Value::as_array)
+        .context("models list should include catalog entries")?;
+    let minimax_entry = text_models
+        .iter()
+        .find(|entry| {
+            entry.get("target").and_then(Value::as_str) == Some("text")
+                && entry.get("id").and_then(Value::as_str) == Some("MiniMax-M2.7")
+        })
+        .context("configured MiniMax model should appear in models list")?;
+    assert_eq!(
+        minimax_entry.get("configured").and_then(Value::as_bool),
+        Some(true),
+        "configured MiniMax model should be marked configured: {payload}"
+    );
+    assert_eq!(
+        minimax_entry.get("preferred").and_then(Value::as_bool),
+        Some(true),
+        "configured MiniMax model should be marked as the effective preferred chat model: {payload}"
+    );
+    let openai_entry = text_models
+        .iter()
+        .find(|entry| {
+            entry.get("target").and_then(Value::as_str) == Some("text")
+                && entry.get("id").and_then(Value::as_str) == Some("gpt-4o-mini")
+        })
+        .context("curated OpenAI model should remain listed")?;
+    assert_eq!(
+        openai_entry.get("preferred").and_then(Value::as_bool),
+        Some(false),
+        "unconfigured OpenAI curated model should not be marked preferred: {payload}"
+    );
     Ok(())
 }
 
@@ -726,7 +759,7 @@ enabled = true
         .pointer("/providers/0")
         .context("test-connection output should include the provider")?;
 
-    assert_eq!(provider.get("state").and_then(Value::as_str), Some("ok"));
+    assert_eq!(provider.get("state").and_then(Value::as_str), Some("verification_incomplete"));
     assert_eq!(provider.get("live_discovery_verified").and_then(Value::as_bool), Some(false));
     assert_eq!(provider.get("discovery_source").and_then(Value::as_str), Some("registry_fallback"));
     assert_eq!(
