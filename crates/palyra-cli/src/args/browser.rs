@@ -367,6 +367,8 @@ pub enum BrowserProfilesCommand {
     List {
         #[arg(long)]
         principal: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Create a browser profile")]
     Create {

@@ -17,6 +17,8 @@ pub enum ConfigCommand {
     Validate {
         #[arg(long)]
         path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(visible_alias = "show")]
     List {
@@ -24,6 +26,8 @@ pub enum ConfigCommand {
         path: Option<String>,
         #[arg(long, default_value_t = false)]
         show_secrets: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Get {
         #[arg(long)]

@@ -2,7 +2,7 @@ use crate::*;
 
 pub(crate) fn run_policy(command: PolicyCommand) -> Result<()> {
     match command {
-        PolicyCommand::Explain { principal, action, resource } => {
+        PolicyCommand::Explain { principal, action, resource, json } => {
             let request = PolicyRequest { principal, action, resource };
             let evaluation = evaluate_with_config(&request, &PolicyEvaluationConfig::default())
                 .context("failed to evaluate policy with Cedar engine")?;
@@ -17,7 +17,7 @@ pub(crate) fn run_policy(command: PolicyCommand) -> Result<()> {
                     ("deny_by_default", true, reason.as_str())
                 }
             };
-            if output::preferred_json(false) {
+            if output::preferred_json(json) {
                 return output::print_json_pretty(
                     &json!({
                         "decision": decision,
@@ -48,7 +48,7 @@ pub(crate) fn run_policy(command: PolicyCommand) -> Result<()> {
                     "failed to encode policy explain output as JSON",
                 );
             }
-            if output::preferred_ndjson(false, false) {
+            if output::preferred_ndjson(json, false) {
                 output::print_json_line(
                     &json!({
                         "decision": decision,

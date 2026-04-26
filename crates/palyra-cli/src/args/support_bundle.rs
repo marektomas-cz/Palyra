@@ -11,6 +11,8 @@ pub enum SupportBundleCommand {
         journal_hash_limit: usize,
         #[arg(long, default_value_t = 64)]
         error_limit: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     ReplayExport {
         #[arg(long)]

@@ -45,8 +45,8 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             }
             std::io::stdout().flush().context("stdout flush failed")
         }
-        ConfigCommand::Validate { path } => {
-            let json = output::preferred_json(false);
+        ConfigCommand::Validate { path, json } => {
+            let json = output::preferred_json(json);
             let path = match path {
                 Some(explicit) => resolve_config_path(Some(explicit), true)?,
                 None => {
@@ -89,8 +89,8 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             );
             std::io::stdout().flush().context("stdout flush failed")
         }
-        ConfigCommand::List { path, show_secrets } => {
-            let json = output::preferred_json(false);
+        ConfigCommand::List { path, show_secrets, json } => {
+            let json = output::preferred_json(json);
             let path = resolve_config_path(path, true)?;
             let (mut document, _) = load_document_from_existing_path(Path::new(&path))
                 .with_context(|| format!("failed to parse {path}"))?;

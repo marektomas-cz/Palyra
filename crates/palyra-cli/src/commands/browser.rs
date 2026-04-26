@@ -930,7 +930,7 @@ async fn run_browser_profiles_command(command: BrowserProfilesCommand) -> Result
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
     match command {
-        BrowserProfilesCommand::List { principal } => {
+        BrowserProfilesCommand::List { principal, json } => {
             let envelope = context
                 .client
                 .list_browser_profiles(&control_plane::BrowserProfilesQuery { principal })
@@ -958,7 +958,12 @@ async fn run_browser_profiles_command(command: BrowserProfilesCommand) -> Result
                     .as_str(),
                 );
             }
-            emit_browser_value(&value, text, "failed to encode browser profiles list output")
+            emit_browser_value_with_json(
+                &value,
+                text,
+                "failed to encode browser profiles list output",
+                json,
+            )
         }
         BrowserProfilesCommand::Create {
             principal,

@@ -27,6 +27,8 @@ pub enum BackupCommand {
         include_support_bundle: bool,
         #[arg(long, default_value_t = false)]
         force: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Verify {
         #[arg(long)]

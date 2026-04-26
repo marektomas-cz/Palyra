@@ -4,8 +4,9 @@ pub(crate) fn emit_export(
     output_path: &Path,
     encoded_bytes: usize,
     bundle: &SupportBundle,
+    json: bool,
 ) -> Result<()> {
-    if output::preferred_json(false) {
+    if output::preferred_json(json) {
         return output::print_json_pretty(
             &json!({
                 "path": output_path.display().to_string(),

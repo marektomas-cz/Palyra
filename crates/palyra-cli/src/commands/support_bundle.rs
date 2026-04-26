@@ -6,9 +6,13 @@ use palyra_common::runtime_contracts::{
 
 pub(crate) fn run_support_bundle(command: SupportBundleCommand) -> Result<()> {
     match command {
-        SupportBundleCommand::Export { output, max_bytes, journal_hash_limit, error_limit } => {
-            run_support_bundle_export(output, max_bytes, journal_hash_limit, error_limit)
-        }
+        SupportBundleCommand::Export {
+            output,
+            max_bytes,
+            journal_hash_limit,
+            error_limit,
+            json,
+        } => run_support_bundle_export(output, max_bytes, journal_hash_limit, error_limit, json),
         SupportBundleCommand::ReplayExport { run_id, output, journal_db, max_events } => {
             run_replay_export(run_id, output, journal_db, max_events)
         }
@@ -29,6 +33,7 @@ fn run_support_bundle_export(
     max_bytes: usize,
     journal_hash_limit: usize,
     error_limit: usize,
+    json: bool,
 ) -> Result<()> {
     if max_bytes < 2_048 {
         anyhow::bail!("support-bundle max-bytes must be at least 2048");
@@ -75,7 +80,7 @@ fn run_support_bundle_export(
     }
     fs::write(output_path.as_path(), encoded.as_slice())
         .with_context(|| format!("failed to write support bundle {}", output_path.display()))?;
-    support_bundle_output::emit_export(&output_path, encoded.len(), &bundle)
+    support_bundle_output::emit_export(&output_path, encoded.len(), &bundle, json)
 }
 
 fn run_replay_export(

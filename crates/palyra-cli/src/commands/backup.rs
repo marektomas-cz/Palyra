@@ -72,6 +72,7 @@ pub(crate) fn run_backup(command: BackupCommand) -> Result<()> {
             include_workspace,
             include_support_bundle,
             force,
+            json,
         } => run_backup_create(
             output,
             config_path,
@@ -81,6 +82,7 @@ pub(crate) fn run_backup(command: BackupCommand) -> Result<()> {
             include_workspace,
             include_support_bundle,
             force,
+            json,
         ),
         BackupCommand::Verify { archive } => run_backup_verify(archive),
     }
@@ -96,6 +98,7 @@ fn run_backup_create(
     include_workspace: bool,
     include_support_bundle: bool,
     force: bool,
+    json: bool,
 ) -> Result<()> {
     let context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for backup command"))?;
@@ -216,7 +219,7 @@ fn run_backup_create(
             "Use `palyra support-bundle export` before destructive recovery if runtime health is degraded.".to_owned(),
         ],
     };
-    emit_backup_create_report(&report)
+    emit_backup_create_report(&report, json)
 }
 
 fn run_backup_verify(archive: String) -> Result<()> {
@@ -483,10 +486,10 @@ fn read_backup_manifest(archive: &mut ZipArchive<fs::File>) -> Result<BackupMani
         .context("failed to parse backup manifest")
 }
 
-fn emit_backup_create_report(report: &BackupCreateReport) -> Result<()> {
+fn emit_backup_create_report(report: &BackupCreateReport, json: bool) -> Result<()> {
     let context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for backup command"))?;
-    if context.prefers_json() {
+    if json || context.prefers_json() {
         return output::print_json_pretty(report, "failed to encode backup output as JSON");
     }
     if context.prefers_ndjson() {

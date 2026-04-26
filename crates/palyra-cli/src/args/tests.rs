@@ -6,19 +6,19 @@ use super::{
     ApprovalExportFormatArg, ApprovalResolveDecisionArg, ApprovalSubjectTypeArg, ApprovalsCommand,
     AuthAccessCommand, AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand,
     AuthProviderArg, AuthScopeArg, BackupCommand, BackupComponentArg, BrowserCommand,
-    BrowserPermissionsCommand, BrowserSessionCommand, ChannelProviderArg, ChannelResolveEntityArg,
-    ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell,
-    ConfigCommand, ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg,
-    CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand, DevicesCommand, DocsCommand,
-    FlowStateArg, FlowsCommand, GatewayBindProfileArg, HooksCommand, InitModeArg,
-    InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand, MemoryLearningCommand,
-    MemoryScopeArg, MemorySourceArg, MessageCommand, ModelsCommand, NodeCommand, NodesCommand,
-    ObjectiveKindArg, ObjectivePriorityArg, ObjectiveScheduleTypeArg, ObjectiveUpsertCommandArgs,
-    ObjectivesCommand, OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg,
-    PairingClientKindArg, PairingCommand, PairingMethodArg, PairingStateArg, PatchCommand,
-    PluginsCommand, PolicyCommand, ProfileCommand, ProfileExportModeArg, ProfileModeArg,
-    ProfileRiskLevelArg, ProtocolCommand, RemoteVerificationModeArg, ResetCommand, ResetScopeArg,
-    RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutineExecutionPostureArg,
+    BrowserPermissionsCommand, BrowserProfilesCommand, BrowserSessionCommand, ChannelProviderArg,
+    ChannelResolveEntityArg, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli,
+    Command, CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand,
+    CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
+    DevicesCommand, DocsCommand, FlowStateArg, FlowsCommand, GatewayBindProfileArg, HooksCommand,
+    InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
+    MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, MessageCommand, ModelsCommand,
+    NodeCommand, NodesCommand, ObjectiveKindArg, ObjectivePriorityArg, ObjectiveScheduleTypeArg,
+    ObjectiveUpsertCommandArgs, ObjectivesCommand, OnboardingAuthMethodArg, OnboardingCommand,
+    OnboardingFlowArg, PairingClientKindArg, PairingCommand, PairingMethodArg, PairingStateArg,
+    PatchCommand, PluginsCommand, PolicyCommand, ProfileCommand, ProfileExportModeArg,
+    ProfileModeArg, ProfileRiskLevelArg, ProtocolCommand, RemoteVerificationModeArg, ResetCommand,
+    ResetScopeArg, RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutineExecutionPostureArg,
     RoutinePreviewTimezoneArg, RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg,
     RoutineUpsertCommand, RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
     SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
@@ -290,6 +290,7 @@ fn parse_backup_create_with_explicit_components() {
         "--include-workspace",
         "--include-support-bundle",
         "--force",
+        "--json",
     ]);
     assert_eq!(
         parsed.command,
@@ -303,6 +304,7 @@ fn parse_backup_create_with_explicit_components() {
                 include_workspace: true,
                 include_support_bundle: true,
                 force: true,
+                json: true,
             }
         }
     );
@@ -3291,6 +3293,30 @@ fn parse_browser_status_json_flag() {
 }
 
 #[test]
+fn parse_browser_profiles_list_json_flag() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "browser",
+        "profiles",
+        "list",
+        "--principal",
+        "user:browser",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Profiles {
+                command: BrowserProfilesCommand::List {
+                    principal: Some("user:browser".to_owned()),
+                    json: true,
+                },
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_browser_session_create() {
     let parsed = Cli::parse_from([
         "palyra",
@@ -3848,6 +3874,7 @@ fn parse_support_bundle_export_with_overrides() {
         "48",
         "--error-limit",
         "20",
+        "--json",
     ]);
     assert_eq!(
         parsed.command,
@@ -3857,6 +3884,7 @@ fn parse_support_bundle_export_with_overrides() {
                 max_bytes: 131_072,
                 journal_hash_limit: 48,
                 error_limit: 20,
+                json: true,
             },
         }
     );
@@ -4195,6 +4223,7 @@ fn parse_policy_explain() {
         "tool.execute",
         "--resource",
         "tool:filesystem",
+        "--json",
     ]);
     assert_eq!(
         parsed.command,
@@ -4203,6 +4232,7 @@ fn parse_policy_explain() {
                 principal: "user:test".to_owned(),
                 action: "tool.execute".to_owned(),
                 resource: "tool:filesystem".to_owned(),
+                json: true,
             }
         }
     );
@@ -4275,11 +4305,15 @@ fn parse_patch_apply_from_stdin() {
 
 #[test]
 fn parse_config_validate_with_path() {
-    let parsed = Cli::parse_from(["palyra", "config", "validate", "--path", "custom.toml"]);
+    let parsed =
+        Cli::parse_from(["palyra", "config", "validate", "--path", "custom.toml", "--json"]);
     assert_eq!(
         parsed.command,
         Command::Config {
-            command: Some(ConfigCommand::Validate { path: Some("custom.toml".to_owned()) })
+            command: Some(ConfigCommand::Validate {
+                path: Some("custom.toml".to_owned()),
+                json: true,
+            })
         }
     );
 }
@@ -4359,14 +4393,22 @@ fn parse_config_get_with_show_secrets() {
 
 #[test]
 fn parse_config_list_with_show_secrets() {
-    let parsed =
-        Cli::parse_from(["palyra", "config", "list", "--path", "custom.toml", "--show-secrets"]);
+    let parsed = Cli::parse_from([
+        "palyra",
+        "config",
+        "list",
+        "--path",
+        "custom.toml",
+        "--show-secrets",
+        "--json",
+    ]);
     assert_eq!(
         parsed.command,
         Command::Config {
             command: Some(ConfigCommand::List {
                 path: Some("custom.toml".to_owned()),
                 show_secrets: true,
+                json: true,
             })
         }
     );

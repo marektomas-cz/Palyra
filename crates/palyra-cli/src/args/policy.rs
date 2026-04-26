@@ -9,5 +9,7 @@ pub enum PolicyCommand {
         action: String,
         #[arg(long, default_value = "tool:shell")]
         resource: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }

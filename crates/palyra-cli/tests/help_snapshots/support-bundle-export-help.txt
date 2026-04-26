@@ -5,6 +5,7 @@ Options:
       --max-bytes <MAX_BYTES>                    [default: 524288]
       --journal-hash-limit <JOURNAL_HASH_LIMIT>  [default: 64]
       --error-limit <ERROR_LIMIT>                [default: 64]
+      --json
   -h, --help                                     Print help
 
 Global Options:

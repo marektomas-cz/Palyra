@@ -3,6 +3,7 @@ Usage: palyra config list [OPTIONS]
 Options:
       --path <PATH>
       --show-secrets
+      --json
   -h, --help          Print help
 
 Global Options:
