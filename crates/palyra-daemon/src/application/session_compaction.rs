@@ -643,7 +643,13 @@ fn build_session_compaction_plan_with_metadata(
         condensed_records.push(record.clone());
     }
 
-    let blocked_reason = detect_compaction_blocked_reason(transcript);
+    let blocked_reason = detect_compaction_blocked_reason(transcript).or_else(|| {
+        if condensed_records.len() < SESSION_COMPACTION_MIN_CONDENSED_EVENTS {
+            Some("not_enough_history".to_owned())
+        } else {
+            None
+        }
+    });
     let mut candidates =
         build_continuity_candidates(condensed_records.as_slice(), workspace_documents);
     let mut write_previews =
@@ -1976,6 +1982,35 @@ mod tests {
         );
         assert!(!plan.eligible);
         assert_eq!(plan.blocked_reason.as_deref(), Some("an approval interaction is still open"));
+    }
+
+    #[test]
+    fn compaction_plan_reports_not_enough_history_when_preview_is_blocked() {
+        let transcript = vec![
+            transcript_record(0, "message.received", r#"{"text":"Short context one."}"#),
+            transcript_record(1, "message.replied", r#"{"reply_text":"Short context two."}"#),
+        ];
+        let plan = build_session_compaction_plan(
+            &session_record(),
+            transcript.as_slice(),
+            &[],
+            &[],
+            Some("test_compaction"),
+            Some("test_policy"),
+        );
+        let summary = serde_json::from_str::<serde_json::Value>(plan.summary_json.as_str())
+            .expect("summary JSON should decode");
+
+        assert!(!plan.eligible);
+        assert_eq!(plan.blocked_reason.as_deref(), Some("not_enough_history"));
+        assert_eq!(
+            summary.pointer("/blocked_reason").and_then(serde_json::Value::as_str),
+            Some("not_enough_history")
+        );
+        assert_eq!(
+            summary.pointer("/lifecycle_state").and_then(serde_json::Value::as_str),
+            Some("preview_blocked")
+        );
     }
 
     #[test]
