@@ -1,6 +1,8 @@
 use std::{
     fs,
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use palyra_control_plane as control_plane;
@@ -10,6 +12,7 @@ use serde_json::{json, Value};
 use crate::*;
 
 const CLI_FIRST_SUCCESS_MARKER_RELATIVE_PATH: &str = "onboarding/first-success.json";
+const GATEWAY_RUNTIME_CONNECT_TIMEOUT_MS: u64 = 350;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OnboardingVariant {
@@ -58,6 +61,8 @@ struct OnboardingSignals {
     provider_health_message: String,
     model_discovery_ready: bool,
     model_discovery_message: String,
+    gateway_runtime_reachable: bool,
+    gateway_runtime_message: String,
     default_agent_configured: bool,
     default_agent_message: String,
     workspace_root: Option<String>,
@@ -231,6 +236,7 @@ fn collect_onboarding_signals(
     } else {
         "no chat model is selected in the config yet".to_owned()
     };
+    let (gateway_runtime_reachable, gateway_runtime_message) = gateway_runtime_status();
     let (default_agent_configured, default_agent_message) = default_agent_status()?;
 
     Ok(OnboardingSignals {
@@ -251,6 +257,8 @@ fn collect_onboarding_signals(
         provider_health_message,
         model_discovery_ready,
         model_discovery_message,
+        gateway_runtime_reachable,
+        gateway_runtime_message,
         default_agent_configured,
         default_agent_message,
         workspace_root: get_string_at_path(document, "tool_call.process_runner.workspace_root"),
@@ -405,6 +413,24 @@ fn build_onboarding_steps(
             "Default agent",
             signals.default_agent_message.clone(),
             Some(run_cli_action("Inspect agents", "palyra agents list".to_owned())),
+        )
+    } else if !signals.gateway_runtime_reachable {
+        actionable_step(
+            "agent_identity",
+            "Default agent",
+            format!(
+                "{} Start the gateway before creating the default agent; agent creation uses the gRPC runtime API.",
+                signals.default_agent_message
+            ),
+            control_plane::OnboardingStepStatus::Blocked,
+            Some(run_cli_action("Start gateway", "palyra gateway run".to_owned())),
+            StepPresentation::required(Some("gateway_not_running".to_owned())).with_blocked(
+                Some(blocked_reason(
+                    "gateway_not_running",
+                    signals.gateway_runtime_message.as_str(),
+                    "Start the gateway with `palyra gateway run` or `palyra gateway install --start`, then rerun onboarding status and create the default agent.",
+                )),
+            ),
         )
     } else {
         actionable_step(
@@ -729,6 +755,71 @@ fn default_agent_status() -> Result<(bool, String)> {
     }
 }
 
+fn gateway_runtime_status() -> (bool, String) {
+    let Some(context) = app::current_root_context() else {
+        return (
+            false,
+            "CLI root context is unavailable; start the gateway with `palyra gateway run` after setup"
+                .to_owned(),
+        );
+    };
+    let connection = match context
+        .resolve_grpc_connection(app::ConnectionOverrides::default(), app::ConnectionDefaults::USER)
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            return (
+                false,
+                format!(
+                    "failed to resolve gateway gRPC endpoint: {}",
+                    sanitize_diagnostic_error(error.to_string().as_str())
+                ),
+            );
+        }
+    };
+    match tcp_url_reachable(
+        connection.grpc_url.as_str(),
+        Duration::from_millis(GATEWAY_RUNTIME_CONNECT_TIMEOUT_MS),
+    ) {
+        Ok(()) => (true, format!("gateway gRPC endpoint {} is reachable", connection.grpc_url)),
+        Err(error) => (
+            false,
+            format!(
+                "gateway gRPC endpoint {} is not reachable: {}",
+                connection.grpc_url,
+                sanitize_diagnostic_error(error.to_string().as_str())
+            ),
+        ),
+    }
+}
+
+fn tcp_url_reachable(raw_url: &str, timeout: Duration) -> Result<()> {
+    let url = reqwest::Url::parse(raw_url)
+        .with_context(|| format!("gateway gRPC URL is invalid: {raw_url}"))?;
+    let host = url.host_str().ok_or_else(|| anyhow!("gateway gRPC URL must include a host"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("gateway gRPC URL must include a port"))?;
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve gateway gRPC endpoint {host}:{port}"))?;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error)
+            .with_context(|| format!("failed to connect gateway gRPC endpoint {host}:{port}"));
+    }
+    anyhow::bail!("gateway gRPC endpoint {host}:{port} resolved no socket addresses")
+}
+
 fn done_step(
     step_id: &str,
     title: &str,
@@ -969,6 +1060,8 @@ kind = "anthropic"
                 provider_health_message: "configured".to_owned(),
                 model_discovery_ready: true,
                 model_discovery_message: "ready".to_owned(),
+                gateway_runtime_reachable: true,
+                gateway_runtime_message: "reachable".to_owned(),
                 default_agent_configured: false,
                 default_agent_message: "agent registry does not define a default agent".to_owned(),
                 workspace_root: Some("C:/portable".to_owned()),
@@ -999,6 +1092,8 @@ kind = "anthropic"
                 provider_health_message: "configured".to_owned(),
                 model_discovery_ready: true,
                 model_discovery_message: "model selection is present".to_owned(),
+                gateway_runtime_reachable: true,
+                gateway_runtime_message: "reachable".to_owned(),
                 default_agent_configured: true,
                 default_agent_message: "default agent `local-default` is configured".to_owned(),
                 workspace_root: Some("C:/portable".to_owned()),
@@ -1019,6 +1114,47 @@ kind = "anthropic"
         assert_eq!(
             derive_posture_status(&steps, onboarding_prerequisites_ready(&steps), false),
             control_plane::OnboardingPostureState::Blocked
+        );
+    }
+
+    #[test]
+    fn default_agent_step_starts_gateway_before_daemon_backed_create() {
+        let steps = build_onboarding_steps(
+            OnboardingVariant::Quickstart,
+            &OnboardingSignals {
+                config_exists: true,
+                config_path: "C:/portable/palyra.toml".to_owned(),
+                workspace_root_configured: true,
+                remote_base_url_configured: false,
+                remote_verification_mode: None,
+                remote_posture_safe: true,
+                deployment_warning: None,
+                provider_auth_configured: true,
+                provider_model_selected: true,
+                provider_health_state: "configured".to_owned(),
+                provider_health_message: "configured".to_owned(),
+                model_discovery_ready: true,
+                model_discovery_message: "ready".to_owned(),
+                gateway_runtime_reachable: false,
+                gateway_runtime_message:
+                    "gateway gRPC endpoint http://127.0.0.1:7443 is not reachable".to_owned(),
+                default_agent_configured: false,
+                default_agent_message: "agent registry does not define a default agent".to_owned(),
+                workspace_root: Some("C:/portable".to_owned()),
+                chat_model: Some("MiniMax-M2.7".to_owned()),
+                first_success_completed: false,
+            },
+        );
+        let agent_step =
+            steps.iter().find(|step| step.step_id == "agent_identity").expect("agent step");
+        let action = agent_step.action.as_ref().expect("agent step action");
+
+        assert_eq!(agent_step.status, control_plane::OnboardingStepStatus::Blocked);
+        assert_eq!(action.target, "palyra gateway run");
+        assert_eq!(agent_step.verification_state.as_deref(), Some("gateway_not_running"));
+        assert_eq!(
+            agent_step.blocked.as_ref().map(|blocked| blocked.code.as_str()),
+            Some("gateway_not_running")
         );
     }
 
