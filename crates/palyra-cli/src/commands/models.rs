@@ -28,6 +28,10 @@ const CURATED_EMBEDDING_MODELS: &[&str] = &["text-embedding-3-small", "text-embe
 pub(crate) struct ModelsStatusPayload {
     pub(crate) path: String,
     pub(crate) provider_kind: String,
+    pub(crate) provider_id: String,
+    pub(crate) provider_display_name: String,
+    pub(crate) protocol_compatibility: String,
+    pub(crate) auth_provider_kind: Option<String>,
     pub(crate) openai_base_url: Option<String>,
     pub(crate) text_model: Option<String>,
     pub(crate) embeddings_model: Option<String>,
@@ -59,6 +63,7 @@ pub(crate) struct RegistryProviderEntry {
     pub(crate) provider_id: String,
     pub(crate) display_name: Option<String>,
     pub(crate) kind: String,
+    pub(crate) protocol_compatibility: String,
     pub(crate) base_url: Option<String>,
     pub(crate) enabled: bool,
     pub(crate) auth_profile_id: Option<String>,
@@ -139,6 +144,9 @@ pub(crate) struct ModelsExplainCandidatePayload {
     pub(crate) order: usize,
     pub(crate) provider_id: String,
     pub(crate) provider_kind: String,
+    pub(crate) provider_display_name: String,
+    pub(crate) protocol_compatibility: String,
+    pub(crate) auth_provider_kind: Option<String>,
     pub(crate) model_id: String,
     pub(crate) role: String,
     pub(crate) selected: bool,
@@ -205,8 +213,12 @@ pub(crate) fn run_models(command: ModelsCommand) -> Result<()> {
                 output::print_json_pretty(&payload, "failed to encode models list as JSON")?;
             } else {
                 println!(
-                    "models.list provider_kind={} text_model={} embeddings_model={} auth_profile_id={} registry_providers={} registry_models={} registry_valid={}",
+                    "models.list provider_id={} provider_display_name={} provider_kind={} protocol_compatibility={} auth_provider_kind={} text_model={} embeddings_model={} auth_profile_id={} registry_providers={} registry_models={} registry_valid={}",
+                    payload.status.provider_id,
+                    payload.status.provider_display_name,
                     payload.status.provider_kind,
+                    payload.status.protocol_compatibility,
+                    payload.status.auth_provider_kind.as_deref().unwrap_or("none"),
                     payload.status.text_model.as_deref().unwrap_or("none"),
                     payload.status.embeddings_model.as_deref().unwrap_or("none"),
                     payload.status.auth_profile_id.as_deref().unwrap_or("none"),
@@ -216,9 +228,12 @@ pub(crate) fn run_models(command: ModelsCommand) -> Result<()> {
                 );
                 for entry in payload.providers {
                     println!(
-                        "models.provider id={} kind={} enabled={} auth_profile_id={} api_key_configured={} source={}",
+                        "models.provider id={} display_name={} kind={} protocol_compatibility={} auth_provider_kind={} enabled={} auth_profile_id={} api_key_configured={} source={}",
                         entry.provider_id,
+                        entry.display_name.as_deref().unwrap_or("none"),
                         entry.kind,
+                        entry.protocol_compatibility,
+                        entry.auth_provider_kind.as_deref().unwrap_or("none"),
                         entry.enabled,
                         entry.auth_profile_id.as_deref().unwrap_or("none"),
                         entry.api_key_configured,
@@ -275,9 +290,13 @@ fn emit_models_status(payload: &ModelsStatusPayload, json_output: bool) -> Resul
         output::print_json_pretty(payload, "failed to encode models status as JSON")?;
     } else {
         println!(
-            "models.status path={} provider_kind={} text_model={} embeddings_model={} auth_profile_id={} api_key_configured={} migrated={}",
+            "models.status path={} provider_id={} provider_display_name={} provider_kind={} protocol_compatibility={} auth_provider_kind={} text_model={} embeddings_model={} auth_profile_id={} api_key_configured={} migrated={}",
             payload.path,
+            payload.provider_id,
+            payload.provider_display_name,
             payload.provider_kind,
+            payload.protocol_compatibility,
+            payload.auth_provider_kind.as_deref().unwrap_or("none"),
             payload.text_model.as_deref().unwrap_or("none"),
             payload.embeddings_model.as_deref().unwrap_or("none"),
             payload.auth_profile_id.as_deref().unwrap_or("none"),
@@ -402,10 +421,13 @@ fn emit_models_explain(payload: &ModelsExplainPayload, json_output: bool) -> Res
         }
         for candidate in &payload.candidates {
             println!(
-                "models.explain.candidate order={} provider_id={} provider_kind={} model_id={} selected={} reason={}",
+                "models.explain.candidate order={} provider_id={} provider_display_name={} provider_kind={} protocol_compatibility={} auth_provider_kind={} model_id={} selected={} reason={}",
                 candidate.order,
                 candidate.provider_id,
+                candidate.provider_display_name,
                 candidate.provider_kind,
+                candidate.protocol_compatibility,
+                candidate.auth_provider_kind.as_deref().unwrap_or("none"),
                 candidate.model_id,
                 candidate.selected,
                 candidate.reason
@@ -700,6 +722,20 @@ fn explain_models_routing(
         .iter()
         .map(|provider| (provider.provider_id.clone(), provider.kind.clone()))
         .collect::<BTreeMap<_, _>>();
+    let provider_identity_by_id = overview
+        .providers
+        .iter()
+        .map(|provider| {
+            (
+                provider.provider_id.clone(),
+                (
+                    provider_display_name(provider),
+                    provider.protocol_compatibility.clone(),
+                    provider.auth_provider_kind.clone(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let requested = requested_model_id
         .clone()
         .or_else(|| overview.status.default_chat_model_id.clone())
@@ -795,6 +831,17 @@ fn explain_models_routing(
             .get(primary.provider_id.as_str())
             .cloned()
             .unwrap_or_else(|| "unknown".to_owned()),
+        provider_display_name: provider_identity_by_id
+            .get(primary.provider_id.as_str())
+            .map(|(display_name, _, _)| display_name.clone())
+            .unwrap_or_else(|| "Unknown".to_owned()),
+        protocol_compatibility: provider_identity_by_id
+            .get(primary.provider_id.as_str())
+            .map(|(_, compatibility, _)| compatibility.clone())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        auth_provider_kind: provider_identity_by_id
+            .get(primary.provider_id.as_str())
+            .and_then(|(_, _, auth_provider_kind)| auth_provider_kind.clone()),
         model_id: primary.model_id.clone(),
         role: primary.role.clone(),
         selected: true,
@@ -822,6 +869,17 @@ fn explain_models_routing(
                         .get(candidate.provider_id.as_str())
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_owned()),
+                    provider_display_name: provider_identity_by_id
+                        .get(candidate.provider_id.as_str())
+                        .map(|(display_name, _, _)| display_name.clone())
+                        .unwrap_or_else(|| "Unknown".to_owned()),
+                    protocol_compatibility: provider_identity_by_id
+                        .get(candidate.provider_id.as_str())
+                        .map(|(_, compatibility, _)| compatibility.clone())
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    auth_provider_kind: provider_identity_by_id
+                        .get(candidate.provider_id.as_str())
+                        .and_then(|(_, _, auth_provider_kind)| auth_provider_kind.clone()),
                     model_id: candidate.model_id.clone(),
                     role: candidate.role.clone(),
                     selected: false,
@@ -881,6 +939,23 @@ fn load_models_overview(path: Option<String>) -> Result<ModelsOverview> {
         .clone()
         .or_else(|| model_provider.openai_embeddings_model.clone());
     let embeddings_dims = model_provider.openai_embeddings_dims;
+    let provider_id = default_provider_id(models.as_slice(), &model_provider)
+        .map(str::to_owned)
+        .or_else(|| providers.first().map(|entry| entry.provider_id.clone()))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let provider_entry = providers.iter().find(|entry| entry.provider_id == provider_id);
+    let provider_kind_for_status =
+        provider_entry.map(|entry| entry.kind.clone()).unwrap_or_else(|| provider_kind.clone());
+    let provider_display_name = provider_entry.map(provider_display_name).unwrap_or_else(|| {
+        provider_display_name_from_kind(provider_kind_for_status.as_str()).to_owned()
+    });
+    let protocol_compatibility =
+        provider_entry.map(|entry| entry.protocol_compatibility.clone()).unwrap_or_else(|| {
+            protocol_compatibility_for_kind(provider_kind_for_status.as_str()).to_owned()
+        });
+    let auth_provider_kind = provider_entry
+        .and_then(|entry| entry.auth_provider_kind.clone())
+        .or_else(|| model_provider.auth_provider_kind.clone());
     let auth_profile_id = model_provider.auth_profile_id.clone().or_else(|| {
         providers
             .iter()
@@ -911,7 +986,11 @@ fn load_models_overview(path: Option<String>) -> Result<ModelsOverview> {
     Ok(ModelsOverview {
         status: ModelsStatusPayload {
             path,
-            provider_kind,
+            provider_kind: provider_kind_for_status,
+            provider_id,
+            provider_display_name,
+            protocol_compatibility,
+            auth_provider_kind,
             openai_base_url,
             text_model,
             embeddings_model,
@@ -1091,30 +1170,35 @@ fn registry_views_from_config(
         .map(|entries| {
             entries
                 .iter()
-                .map(|entry| RegistryProviderEntry {
-                    provider_id: entry.provider_id.clone().unwrap_or_default(),
-                    display_name: entry.display_name.clone(),
-                    kind: entry.kind.clone().unwrap_or_else(|| {
+                .map(|entry| {
+                    let kind = entry.kind.clone().unwrap_or_else(|| {
                         config
                             .kind
                             .clone()
                             .unwrap_or_else(|| DETERMINISTIC_PROVIDER_KIND.to_owned())
-                    }),
-                    base_url: entry.base_url.clone(),
-                    enabled: entry.enabled.unwrap_or(true),
-                    auth_profile_id: entry.auth_profile_id.clone(),
-                    auth_provider_kind: entry.auth_provider_kind.clone(),
-                    api_key_configured: entry
-                        .api_key
-                        .as_deref()
-                        .filter(|value| !value.trim().is_empty())
-                        .is_some()
-                        || entry
-                            .api_key_vault_ref
+                    });
+                    RegistryProviderEntry {
+                        provider_id: entry.provider_id.clone().unwrap_or_default(),
+                        display_name: entry.display_name.clone(),
+                        protocol_compatibility: protocol_compatibility_for_kind(kind.as_str())
+                            .to_owned(),
+                        kind,
+                        base_url: entry.base_url.clone(),
+                        enabled: entry.enabled.unwrap_or(true),
+                        auth_profile_id: entry.auth_profile_id.clone(),
+                        auth_provider_kind: entry.auth_provider_kind.clone(),
+                        api_key_configured: entry
+                            .api_key
                             .as_deref()
                             .filter(|value| !value.trim().is_empty())
-                            .is_some(),
-                    source: "registry",
+                            .is_some()
+                            || entry
+                                .api_key_vault_ref
+                                .as_deref()
+                                .filter(|value| !value.trim().is_empty())
+                                .is_some(),
+                        source: "registry",
+                    }
                 })
                 .collect::<Vec<_>>()
         })
@@ -1163,6 +1247,7 @@ fn legacy_provider_entries(config: &FileModelProviderConfig) -> Vec<RegistryProv
     vec![RegistryProviderEntry {
         provider_id: provider_id.to_owned(),
         display_name: Some(display_name.to_owned()),
+        protocol_compatibility: protocol_compatibility_for_kind(kind.as_str()).to_owned(),
         kind,
         base_url: config.openai_base_url.clone().or_else(|| config.anthropic_base_url.clone()),
         enabled: true,
@@ -1292,6 +1377,31 @@ fn legacy_provider_identity(
         OPENAI_COMPATIBLE_PROVIDER_KIND => ("openai-primary", "OpenAI-compatible"),
         ANTHROPIC_PROVIDER_KIND => ("anthropic-primary", "Anthropic"),
         _ => ("deterministic-primary", "Deterministic"),
+    }
+}
+
+fn provider_display_name(provider: &RegistryProviderEntry) -> String {
+    provider
+        .display_name
+        .clone()
+        .unwrap_or_else(|| provider_display_name_from_kind(provider.kind.as_str()).to_owned())
+}
+
+fn provider_display_name_from_kind(provider_kind: &str) -> &'static str {
+    match provider_kind {
+        OPENAI_COMPATIBLE_PROVIDER_KIND => "OpenAI-compatible",
+        ANTHROPIC_PROVIDER_KIND => "Anthropic-compatible",
+        DETERMINISTIC_PROVIDER_KIND => "Deterministic",
+        _ => "Unknown",
+    }
+}
+
+fn protocol_compatibility_for_kind(provider_kind: &str) -> &'static str {
+    match provider_kind {
+        OPENAI_COMPATIBLE_PROVIDER_KIND => "openai_compatible",
+        ANTHROPIC_PROVIDER_KIND => "anthropic_compatible",
+        DETERMINISTIC_PROVIDER_KIND => "deterministic",
+        _ => "unknown",
     }
 }
 

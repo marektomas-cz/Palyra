@@ -331,6 +331,11 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
         "legacy minimax configs should expose the provider display name: {payload}"
     );
     assert_eq!(
+        payload.pointer("/providers/0/protocol_compatibility").and_then(Value::as_str),
+        Some("anthropic_compatible"),
+        "legacy minimax configs should identify the protocol compatibility layer: {payload}"
+    );
+    assert_eq!(
         payload.pointer("/registry_models/0/provider_id").and_then(Value::as_str),
         Some("minimax-primary"),
         "legacy minimax configs should keep registry models attached to the minimax provider: {payload}"
@@ -339,6 +344,91 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
         payload.pointer("/registry_models/0/vision").and_then(Value::as_bool),
         Some(false),
         "legacy minimax configs should not advertise unsupported vision capability: {payload}"
+    );
+    Ok(())
+}
+
+#[test]
+fn models_status_and_explain_distinguish_minimax_vendor_from_anthropic_protocol() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "https://api.minimax.io/anthropic"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key_vault_ref = "global/minimax_api_key"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let status_output =
+        run_cli(&workdir, &["models", "status", "--path", &config_path_string, "--json"])?;
+    assert!(
+        status_output.status.success(),
+        "models status should succeed for legacy minimax config: {}",
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let status_stdout =
+        String::from_utf8(status_output.stdout).context("stdout was not valid UTF-8")?;
+    let status_payload: Value =
+        serde_json::from_str(status_stdout.as_str()).context("status stdout was not JSON")?;
+    assert_eq!(
+        status_payload.get("provider_kind").and_then(Value::as_str),
+        Some("anthropic"),
+        "status should preserve the protocol-backed provider kind for compatibility: {status_payload}"
+    );
+    assert_eq!(
+        status_payload.get("provider_id").and_then(Value::as_str),
+        Some("minimax-primary"),
+        "status should expose the MiniMax provider id: {status_payload}"
+    );
+    assert_eq!(
+        status_payload.get("provider_display_name").and_then(Value::as_str),
+        Some("MiniMax"),
+        "status should expose the MiniMax display name: {status_payload}"
+    );
+    assert_eq!(
+        status_payload.get("protocol_compatibility").and_then(Value::as_str),
+        Some("anthropic_compatible"),
+        "status should expose the protocol compatibility layer separately: {status_payload}"
+    );
+    assert_eq!(
+        status_payload.get("auth_provider_kind").and_then(Value::as_str),
+        Some("minimax"),
+        "status should expose the MiniMax auth provider selection: {status_payload}"
+    );
+
+    let explain_output =
+        run_cli(&workdir, &["models", "explain", "--path", &config_path_string, "--json"])?;
+    assert!(
+        explain_output.status.success(),
+        "models explain should succeed for legacy minimax config: {}",
+        String::from_utf8_lossy(&explain_output.stderr)
+    );
+    let explain_stdout =
+        String::from_utf8(explain_output.stdout).context("stdout was not valid UTF-8")?;
+    let explain_payload: Value =
+        serde_json::from_str(explain_stdout.as_str()).context("explain stdout was not JSON")?;
+    assert_eq!(
+        explain_payload.pointer("/candidates/0/provider_display_name").and_then(Value::as_str),
+        Some("MiniMax"),
+        "explain should expose the MiniMax provider display name: {explain_payload}"
+    );
+    assert_eq!(
+        explain_payload.pointer("/candidates/0/protocol_compatibility").and_then(Value::as_str),
+        Some("anthropic_compatible"),
+        "explain should expose the protocol compatibility layer separately: {explain_payload}"
+    );
+    assert_eq!(
+        explain_payload.pointer("/candidates/0/auth_provider_kind").and_then(Value::as_str),
+        Some("minimax"),
+        "explain should expose the MiniMax auth provider selection: {explain_payload}"
     );
     Ok(())
 }
