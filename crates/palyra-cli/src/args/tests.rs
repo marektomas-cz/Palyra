@@ -2961,6 +2961,40 @@ fn parse_channels_discord_health_refresh() {
 }
 
 #[test]
+fn parse_channels_health_refresh_requires_connector_or_provider_selector() {
+    let missing_selector = Cli::try_parse_from(["palyra", "channels", "health-refresh", "--json"]);
+    assert!(missing_selector.is_err(), "health-refresh must require a connector selector");
+
+    let parsed = Cli::parse_from([
+        "palyra",
+        "channels",
+        "health-refresh",
+        "--provider",
+        "discord",
+        "--account-id",
+        "ops",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Channels {
+            command: ChannelsCommand::HealthRefresh {
+                connector_id: None,
+                provider: Some(ChannelProviderArg::Discord),
+                account_id: Some("ops".to_owned()),
+                verify_channel_id: None,
+                url: None,
+                token: None,
+                principal: "user:local".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: None,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_channels_pairings_with_provider_selector() {
     let parsed = Cli::parse_from([
         "palyra",

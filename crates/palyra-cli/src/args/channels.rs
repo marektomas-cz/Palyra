@@ -1,4 +1,4 @@
-use clap::{Subcommand, ValueEnum};
+use clap::{ArgGroup, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ChannelProviderArg {
@@ -479,6 +479,7 @@ pub enum ChannelsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(group(ArgGroup::new("selector").required(true).args(["connector_id", "provider"])))]
     HealthRefresh {
         connector_id: Option<String>,
         #[arg(long, value_enum)]
