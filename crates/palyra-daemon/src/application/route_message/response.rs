@@ -158,7 +158,7 @@ pub(crate) async fn process_route_provider_response(
         }
     }
     if reply_text.trim().is_empty() && !summary_tokens.is_empty() {
-        reply_text = summary_tokens.join(" ");
+        reply_text = summary_tokens.concat();
     }
     if reply_text.trim().is_empty() {
         reply_text = "ack".to_owned();

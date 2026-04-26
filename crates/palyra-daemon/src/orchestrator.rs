@@ -110,10 +110,46 @@ pub fn estimate_token_count(input: &str) -> u64 {
 
 #[must_use]
 pub fn split_model_tokens(input: &str, max_tokens: usize) -> Vec<String> {
-    if max_tokens == 0 {
+    if max_tokens == 0 || input.trim().is_empty() {
         return Vec::new();
     }
-    input.split_whitespace().take(max_tokens).map(ToOwned::to_owned).collect()
+
+    let mut tokens = Vec::new();
+    let mut pending_whitespace = String::new();
+    let mut current_token = String::new();
+    let mut truncated = false;
+
+    for ch in input.chars() {
+        if ch.is_whitespace() {
+            if current_token.is_empty() {
+                pending_whitespace.push(ch);
+            } else {
+                tokens.push(std::mem::take(&mut current_token));
+                pending_whitespace.push(ch);
+            }
+            continue;
+        }
+
+        if current_token.is_empty() {
+            if tokens.len() >= max_tokens {
+                truncated = true;
+                break;
+            }
+            current_token.push_str(pending_whitespace.as_str());
+            pending_whitespace.clear();
+        }
+        current_token.push(ch);
+    }
+
+    if !current_token.is_empty() && tokens.len() < max_tokens {
+        tokens.push(current_token);
+    } else if !pending_whitespace.is_empty() && !tokens.is_empty() && !truncated {
+        if let Some(last) = tokens.last_mut() {
+            last.push_str(pending_whitespace.as_str());
+        }
+    }
+
+    tokens
 }
 
 #[must_use]
@@ -166,7 +202,29 @@ mod tests {
     fn token_helpers_are_deterministic_and_bounded() {
         let input = "alpha beta gamma delta";
         assert_eq!(estimate_token_count(input), 4);
-        assert_eq!(split_model_tokens(input, 2), vec!["alpha".to_owned(), "beta".to_owned()]);
+        let tokens = split_model_tokens(input, 2);
+        assert_eq!(tokens, vec!["alpha".to_owned(), " beta".to_owned()]);
+        assert_eq!(tokens.concat(), "alpha beta");
+    }
+
+    #[test]
+    fn split_model_tokens_preserves_stream_spacing() {
+        let input = "Hello! How can I help today?\nNext line.";
+        let tokens = split_model_tokens(input, 16);
+        assert_eq!(tokens.concat(), input);
+        assert_eq!(
+            tokens,
+            vec![
+                "Hello!".to_owned(),
+                " How".to_owned(),
+                " can".to_owned(),
+                " I".to_owned(),
+                " help".to_owned(),
+                " today?".to_owned(),
+                "\nNext".to_owned(),
+                " line.".to_owned(),
+            ]
+        );
     }
 
     #[test]

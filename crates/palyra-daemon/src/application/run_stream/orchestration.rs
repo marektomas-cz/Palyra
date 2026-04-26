@@ -548,7 +548,7 @@ async fn process_run_stream_provider_response(
             return Ok(RunStreamProviderResponseOutcome::Cancelled);
         }
     };
-    let reply_text = summary_tokens.join(" ");
+    let reply_text = summary_tokens.concat();
 
     if provider_response.completion_tokens > 0 {
         runtime_state

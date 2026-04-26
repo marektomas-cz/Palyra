@@ -9,7 +9,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use crossterm::{
-    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -3410,6 +3410,9 @@ impl App {
 }
 
 async fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    if !should_handle_key_event(key) {
+        return Ok(false);
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
         return Ok(true);
     }
@@ -3425,6 +3428,19 @@ async fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         Mode::Chat => handle_chat_key(app, key).await?,
     }
     Ok(false)
+}
+
+fn should_handle_key_event(key: KeyEvent) -> bool {
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+}
+
+fn is_text_input_modifier(modifiers: KeyModifiers) -> bool {
+    let command_modifiers = KeyModifiers::CONTROL
+        | KeyModifiers::ALT
+        | KeyModifiers::SUPER
+        | KeyModifiers::HYPER
+        | KeyModifiers::META;
+    !modifiers.intersects(command_modifiers)
 }
 
 async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -3525,7 +3541,9 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             app.composer.select_all();
         }
-        KeyCode::Char(ch) if matches!(app.focus, Focus::Input) && key.modifiers.is_empty() => {
+        KeyCode::Char(ch)
+            if matches!(app.focus, Focus::Input) && is_text_input_modifier(key.modifiers) =>
+        {
             app.composer.insert_text(ch.to_string().as_str());
             app.sync_composer_after_edit();
         }
@@ -3734,12 +3752,13 @@ async fn handle_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_session_identity, parse_toggle, parse_tui_objective_create_spec,
-        parse_tui_objective_kind, quick_control_reset_requested, sanitize_terminal_text, App,
-        Focus, Mode, SessionRuntimeSnapshot, TuiComposer, TuiLocale, TuiSlashEntityCatalog,
-        TuiUxMetrics,
+        display_session_identity, handle_key, parse_toggle, parse_tui_objective_create_spec,
+        parse_tui_objective_kind, quick_control_reset_requested, sanitize_terminal_text,
+        should_handle_key_event, App, Focus, Mode, SessionRuntimeSnapshot, TuiComposer, TuiLocale,
+        TuiSlashEntityCatalog, TuiUxMetrics,
     };
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::collections::BTreeMap;
 
     fn test_app() -> App {
@@ -3885,6 +3904,46 @@ mod tests {
         assert_eq!(app.transcript.len(), 1);
         assert_eq!(app.transcript[0].title, "Approval requested: shell<ESC>[31m");
         assert_eq!(app.transcript[0].body, "run<U+0007> dangerous\ncommand");
+    }
+
+    #[test]
+    fn key_event_filter_ignores_release_events() {
+        assert!(should_handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        )));
+        assert!(should_handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::empty(),
+            KeyEventKind::Repeat,
+        )));
+        assert!(!should_handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::empty(),
+            KeyEventKind::Release,
+        )));
+    }
+
+    #[tokio::test]
+    async fn composer_accepts_shift_text_once_and_ignores_release() {
+        let mut app = test_app();
+
+        let release =
+            KeyEvent::new_with_kind(KeyCode::Char('R'), KeyModifiers::SHIFT, KeyEventKind::Release);
+        assert!(!handle_key(&mut app, release).await.expect("release key should be accepted"));
+        assert_eq!(app.composer.text(), "");
+
+        let press =
+            KeyEvent::new_with_kind(KeyCode::Char('R'), KeyModifiers::SHIFT, KeyEventKind::Press);
+        assert!(!handle_key(&mut app, press).await.expect("press key should be accepted"));
+        let repeated_release =
+            KeyEvent::new_with_kind(KeyCode::Char('R'), KeyModifiers::SHIFT, KeyEventKind::Release);
+        assert!(!handle_key(&mut app, repeated_release)
+            .await
+            .expect("release key should remain ignored"));
+
+        assert_eq!(app.composer.text(), "R");
     }
 
     #[test]
