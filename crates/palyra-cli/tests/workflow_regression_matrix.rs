@@ -85,7 +85,11 @@ fn local_remote_and_lifecycle_workflows_are_regression_tested() -> Result<()> {
         &[("OPENAI_API_KEY", "sk-test-workflow")],
     )?;
     let setup_payload = assert_json_success(setup_output, "setup wizard")?;
-    assert_eq!(setup_payload.get("status").and_then(Value::as_str), Some("complete"));
+    assert_eq!(setup_payload.get("status").and_then(Value::as_str), Some("next_step_required"));
+    assert_eq!(
+        setup_payload.get("recommended_step_id").and_then(Value::as_str),
+        Some("onboarding_status")
+    );
     assert_eq!(setup_payload.get("flow").and_then(Value::as_str), Some("quickstart"));
     assert!(local_config.exists(), "setup wizard should create local config");
 

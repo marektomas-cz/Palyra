@@ -459,7 +459,11 @@ fn onboarding_wizard_writes_config_file() -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
-    assert!(stdout.contains("onboarding.status=complete"), "unexpected output: {stdout}");
+    assert!(
+        stdout.contains("onboarding.status=configured_runtime_start_required"),
+        "unexpected output: {stdout}"
+    );
+    assert!(stdout.contains("onboarding.next_step=agent_identity"), "unexpected output: {stdout}");
     let written = std::fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read written config {}", config_path.display()))?;
     assert!(written.contains("version = 1"), "expected config version marker");

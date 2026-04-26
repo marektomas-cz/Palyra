@@ -162,7 +162,11 @@ fn setup_wizard_quickstart_emits_json_summary() -> Result<()> {
     );
     let payload: Value =
         serde_json::from_slice(&output.stdout).context("setup wizard stdout should be JSON")?;
-    assert_eq!(payload.get("status").and_then(Value::as_str), Some("complete"));
+    assert_eq!(
+        payload.get("status").and_then(Value::as_str),
+        Some("configured_runtime_start_required")
+    );
+    assert_eq!(payload.get("recommended_step_id").and_then(Value::as_str), Some("agent_identity"));
     assert_eq!(payload.get("flow").and_then(Value::as_str), Some("quickstart"));
     assert_eq!(
         payload.get("config_path").and_then(Value::as_str),
@@ -615,7 +619,11 @@ fn onboarding_remote_flow_emits_json_summary_and_persists_pins() -> Result<()> {
     );
     let payload: Value = serde_json::from_slice(&output.stdout)
         .context("remote onboarding stdout should be JSON")?;
-    assert_eq!(payload.get("status").and_then(Value::as_str), Some("complete"));
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("next_step_required"));
+    assert_eq!(
+        payload.get("recommended_step_id").and_then(Value::as_str),
+        Some("onboarding_status")
+    );
     assert_eq!(payload.get("flow").and_then(Value::as_str), Some("remote"));
     assert_eq!(payload.get("remote_verification").and_then(Value::as_str), Some("server_cert"));
     assert!(

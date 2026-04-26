@@ -192,7 +192,11 @@ fn installed_binary_runs_noninteractive_setup_and_configure_flows() -> Result<()
         )?,
         "palyra setup wizard",
     )?;
-    assert_eq!(setup_payload.get("status").and_then(Value::as_str), Some("complete"));
+    assert_eq!(setup_payload.get("status").and_then(Value::as_str), Some("next_step_required"));
+    assert_eq!(
+        setup_payload.get("recommended_step_id").and_then(Value::as_str),
+        Some("onboarding_status")
+    );
     assert!(local_config.is_file(), "setup should create {}", local_config.display());
 
     let remote_payload = assert_json_success(

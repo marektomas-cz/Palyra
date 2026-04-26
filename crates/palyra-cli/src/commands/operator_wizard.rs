@@ -221,6 +221,8 @@ struct OnboardingSummary {
     service_install_mode: ServiceInstallMode,
     remote_verification: Option<String>,
     ssh_target: Option<String>,
+    recommended_step_id: Option<&'static str>,
+    next_step: Option<&'static str>,
     skills: SkillsInventorySnapshot,
 }
 
@@ -290,8 +292,10 @@ pub(crate) fn run_onboarding_wizard(request: OnboardingWizardRequest) -> Result<
         run_post_apply_health_check(flow, &apply_context, &plan)?
     };
     plan.health_status = health_report.status;
+    let (status, recommended_step_id, next_step) =
+        onboarding_summary_next_step(flow, plan.service_install_mode, plan.health_status);
     let summary = OnboardingSummary {
-        status: "complete",
+        status,
         flow: plan.flow,
         deployment_profile: plan.deployment_profile.as_str().to_owned(),
         deployment_mode: plan.deployment_mode,
@@ -308,6 +312,8 @@ pub(crate) fn run_onboarding_wizard(request: OnboardingWizardRequest) -> Result<
         service_install_mode: plan.service_install_mode,
         remote_verification: plan.remote_verification,
         ssh_target: plan.ssh_target,
+        recommended_step_id,
+        next_step,
         skills: build_default_skills_inventory_snapshot(),
     };
     emit_onboarding_summary(&summary, output::preferred_json(request.options.json))
@@ -1971,6 +1977,36 @@ fn run_post_apply_health_check(
     }
 }
 
+fn onboarding_summary_next_step(
+    flow: WizardFlowKind,
+    service_install_mode: ServiceInstallMode,
+    health_status: HealthStatus,
+) -> (&'static str, Option<&'static str>, Option<&'static str>) {
+    if matches!(health_status, HealthStatus::ManualFollowUpRequired | HealthStatus::Skipped) {
+        return (
+            "next_step_required",
+            Some("onboarding_status"),
+            Some("Run `palyra onboarding status --json` to inspect the current blocker before starting the first agent run."),
+        );
+    }
+
+    if !matches!(flow, WizardFlowKind::Remote)
+        && !matches!(service_install_mode, ServiceInstallMode::InstallNow)
+    {
+        return (
+            "configured_runtime_start_required",
+            Some("agent_identity"),
+            Some("Start the gateway with `palyra gateway run` or `palyra gateway install --start`, then rerun `palyra onboarding status` and create the default agent."),
+        );
+    }
+
+    (
+        "next_step_required",
+        Some("agent_identity"),
+        Some("Run `palyra onboarding status --json` and complete the default-agent step before treating onboarding as finished."),
+    )
+}
+
 fn emit_onboarding_summary(summary: &OnboardingSummary, json_output: bool) -> Result<()> {
     if json_output {
         output::print_json_pretty(summary, "failed to encode onboarding summary as JSON")?;
@@ -1999,6 +2035,12 @@ fn emit_onboarding_summary(summary: &OnboardingSummary, json_output: bool) -> Re
             summary.skills.quarantined_total,
             summary.skills.runtime_unknown_total
         );
+        if let Some(step_id) = summary.recommended_step_id {
+            println!("onboarding.next_step={step_id}");
+        }
+        if let Some(next_step) = summary.next_step {
+            println!("onboarding.next_step_hint={next_step}");
+        }
         println!(
             "onboarding.risk_events={}",
             if summary.risk_events.is_empty() {
