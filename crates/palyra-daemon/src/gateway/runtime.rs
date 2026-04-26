@@ -3395,6 +3395,7 @@ impl GatewayRuntimeState {
         self: &Arc<Self>,
         request: AgentCreateRequest,
     ) -> Result<AgentCreateOutcome, Status> {
+        let request = self.create_agent_request_with_runtime_defaults(request);
         let state = Arc::clone(self);
         let result = tokio::task::spawn_blocking(move || state.create_agent_blocking(&request))
             .await
@@ -3407,6 +3408,31 @@ impl GatewayRuntimeState {
             self.counters.agent_mutations.fetch_add(1, Ordering::Relaxed);
         }
         result
+    }
+
+    fn create_agent_request_with_runtime_defaults(
+        &self,
+        mut request: AgentCreateRequest,
+    ) -> AgentCreateRequest {
+        if request
+            .default_model_profile
+            .as_deref()
+            .and_then(normalize_optional_agent_model_profile)
+            .is_none()
+        {
+            request.default_model_profile = self.default_agent_model_profile();
+        }
+        request
+    }
+
+    fn default_agent_model_profile(&self) -> Option<String> {
+        let snapshot = self.model_provider.status_snapshot();
+        select_default_agent_model_profile(
+            snapshot.registry.default_chat_model_id.as_deref(),
+            snapshot.model_id.as_deref(),
+            snapshot.openai_model.as_deref(),
+            snapshot.anthropic_model.as_deref(),
+        )
     }
 
     #[allow(clippy::result_large_err)]
@@ -7395,5 +7421,54 @@ impl GatewayRuntimeState {
 
     pub fn record_cron_trigger_fired(&self) {
         self.counters.cron_triggers_fired.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn select_default_agent_model_profile(
+    registry_default_chat_model_id: Option<&str>,
+    active_model_id: Option<&str>,
+    openai_model: Option<&str>,
+    anthropic_model: Option<&str>,
+) -> Option<String> {
+    [registry_default_chat_model_id, active_model_id, openai_model, anthropic_model]
+        .into_iter()
+        .find_map(|value| value.and_then(normalize_optional_agent_model_profile))
+}
+
+fn normalize_optional_agent_model_profile(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_default_agent_model_profile;
+
+    #[test]
+    fn default_agent_model_profile_prefers_registry_default_model() {
+        let selected = select_default_agent_model_profile(
+            Some("MiniMax-M2.7"),
+            Some("gpt-4o-mini"),
+            Some("gpt-4o-mini"),
+            Some("claude-3-5-sonnet-latest"),
+        );
+
+        assert_eq!(selected.as_deref(), Some("MiniMax-M2.7"));
+    }
+
+    #[test]
+    fn default_agent_model_profile_uses_active_model_when_registry_default_is_blank() {
+        let selected = select_default_agent_model_profile(
+            Some("   "),
+            Some("MiniMax-M2.7"),
+            Some("gpt-4o-mini"),
+            Some("claude-3-5-sonnet-latest"),
+        );
+
+        assert_eq!(selected.as_deref(), Some("MiniMax-M2.7"));
     }
 }
