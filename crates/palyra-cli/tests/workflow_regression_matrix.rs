@@ -922,13 +922,18 @@ fn browser_channels_and_session_workflows_are_regression_tested() -> Result<()> 
         session_create_payload.get("persistence_enabled").and_then(Value::as_bool),
         Some(false)
     );
-    let redacted_session_id = session_create_payload
+    let created_session_id = session_create_payload
         .get("session_id")
         .and_then(Value::as_str)
-        .context("browser session create should return redacted session_id text")?;
-    assert!(redacted_session_id.starts_with("session-"));
+        .context("browser session create should return a canonical session_id")?;
+    assert_eq!(
+        created_session_id.len(),
+        26,
+        "browser session create should return a reusable canonical ULID"
+    );
     let session_id =
         latest_browser_session_id(browser_endpoint.as_str(), BROWSER_AUTH_TOKEN, "user:ops")?;
+    assert_eq!(created_session_id, session_id);
 
     let session_list_after = run_cli_json(
         &workdir,

@@ -1822,7 +1822,7 @@ async fn run_browser_console(session_id: String, output: Option<String>) -> Resu
         anyhow::bail!("browser console lookup failed: {}", empty_as_dash(response.error.as_str()));
     }
     let mut value = json!({
-        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "session_id": browser_identifier_json_value(Some(session_id.as_str())),
         "entries": response.entries.iter().map(console_entry_value).collect::<Vec<_>>(),
         "truncated": response.truncated,
         "page_diagnostics": response.page_diagnostics.as_ref().map(page_diagnostics_value).unwrap_or(Value::Null),
@@ -1871,7 +1871,7 @@ async fn run_browser_pdf(session_id: String, output: Option<String>) -> Result<(
         Some(response.pdf_bytes.as_slice()),
     )?;
     let mut value = json!({
-        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "session_id": browser_identifier_json_value(Some(session_id.as_str())),
         "success": response.success,
         "mime_type": response.mime_type,
         "size_bytes": response.size_bytes,
@@ -1912,7 +1912,7 @@ async fn run_browser_press(session_id: String, key: String) -> Result<()> {
         .context("failed to press browser key")?
         .into_inner();
     let value = json!({
-        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "session_id": browser_identifier_json_value(Some(session_id.as_str())),
         "success": response.success,
         "key": response.key,
         "error": response.error,
@@ -1952,7 +1952,7 @@ async fn run_browser_select(session_id: String, selector: String, value: String)
         .context("failed to select browser option")?
         .into_inner();
     let payload = json!({
-        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "session_id": browser_identifier_json_value(Some(session_id.as_str())),
         "success": response.success,
         "selector": selector,
         "selected_value": response.selected_value,
@@ -1993,7 +1993,7 @@ async fn run_browser_highlight(session_id: String, selector: String) -> Result<(
         .context("failed to highlight browser selector")?
         .into_inner();
     let payload = json!({
-        "session_id": redacted_browser_identifier_json_value(Some(session_id.as_str()), "session"),
+        "session_id": browser_identifier_json_value(Some(session_id.as_str())),
         "success": response.success,
         "selector": response.selector,
         "error": response.error,
@@ -2322,7 +2322,7 @@ async fn inspect_browser_session(
         "visible_text_truncated": response.visible_text_truncated,
         "page_diagnostics": response.page_diagnostics.as_ref().map(page_diagnostics_value).unwrap_or(Value::Null),
         "error": response.error,
-        "session_id": redacted_browser_identifier_json_value(Some(session_id), "session"),
+        "session_id": browser_identifier_json_value(Some(session_id)),
     }))
 }
 
@@ -2720,16 +2720,8 @@ fn emit_browser_value_with_json(
 ) -> Result<()> {
     let mode = if json { BrowserOutputMode::Json } else { browser_output_mode() };
     match mode {
-        BrowserOutputMode::Json => {
-            let mut redacted = value.clone();
-            redact_browser_output_value(&mut redacted, None);
-            output::print_json_pretty(&redacted, error_context)
-        }
-        BrowserOutputMode::Ndjson => {
-            let mut redacted = value.clone();
-            redact_browser_output_value(&mut redacted, None);
-            output::print_json_line(&redacted, error_context)
-        }
+        BrowserOutputMode::Json => output::print_json_pretty(value, error_context),
+        BrowserOutputMode::Ndjson => output::print_json_line(value, error_context),
         BrowserOutputMode::Text => {
             print!("{text}");
             if !text.ends_with('\n') {
@@ -2943,10 +2935,10 @@ fn redacted_browser_identifier_text(value: Option<&str>, kind: &'static str) -> 
         .unwrap_or_else(|| "-".to_owned())
 }
 
-fn redacted_browser_identifier_json_value(value: Option<&str>, kind: &'static str) -> Value {
+fn browser_identifier_json_value(value: Option<&str>) -> Value {
     value
         .filter(|candidate| !candidate.trim().is_empty())
-        .map(|candidate| Value::String(browser_identifier_scope(kind, candidate)))
+        .map(|candidate| Value::String(candidate.to_owned()))
         .unwrap_or(Value::Null)
 }
 
@@ -2984,12 +2976,8 @@ fn redact_browser_output_value(value: &mut Value, key_context: Option<&str>) {
     }
 }
 
-fn canonical_id_text(value: Option<&common_v1::CanonicalId>, kind: &'static str) -> String {
-    if value.is_some() {
-        format!("{kind}:redacted")
-    } else {
-        "-".to_owned()
-    }
+fn canonical_id_json_value(value: Option<&common_v1::CanonicalId>) -> Value {
+    value.map(|entry| Value::String(entry.ulid.clone())).unwrap_or(Value::Null)
 }
 
 fn empty_as_dash(value: &str) -> &str {
@@ -3054,7 +3042,7 @@ fn permission_setting_text(value: Option<control_plane::BrowserPermissionSetting
 
 fn session_summary_value(summary: &browser_v1::BrowserSessionSummary) -> Value {
     json!({
-        "session_id": canonical_id_text(summary.session_id.as_ref(), "session"),
+        "session_id": canonical_id_json_value(summary.session_id.as_ref()),
         "principal": summary.principal,
         "channel": summary.channel,
         "created_at_unix_ms": summary.created_at_unix_ms,
@@ -3065,7 +3053,7 @@ fn session_summary_value(summary: &browser_v1::BrowserSessionSummary) -> Value {
         "action_count": summary.action_count,
         "action_log_entries": summary.action_log_entries,
         "tab_count": summary.tab_count,
-        "active_tab_id": canonical_id_text(summary.active_tab_id.as_ref(), "tab"),
+        "active_tab_id": canonical_id_json_value(summary.active_tab_id.as_ref()),
         "active_tab_url": summary.active_tab_url,
         "active_tab_title": summary.active_tab_title,
         "allow_private_targets": summary.allow_private_targets,
@@ -3073,11 +3061,7 @@ fn session_summary_value(summary: &browser_v1::BrowserSessionSummary) -> Value {
         "persistence_enabled": summary.persistence_enabled,
         "persistence_id": summary.persistence_id,
         "state_restored": summary.state_restored,
-        "profile_id": if summary.profile_id.is_some() {
-            Value::String(canonical_id_text(summary.profile_id.as_ref(), "profile"))
-        } else {
-            Value::Null
-        },
+        "profile_id": canonical_id_json_value(summary.profile_id.as_ref()),
         "private_profile": summary.private_profile,
         "action_allowed_domains": summary.action_allowed_domains,
         "permissions": summary.permissions.as_ref().map(session_permissions_value).unwrap_or(Value::Null),
@@ -3131,7 +3115,7 @@ fn proto_permission_setting_text(value: i32) -> &'static str {
 
 fn browser_tab_value(tab: &browser_v1::BrowserTab) -> Value {
     json!({
-        "tab_id": canonical_id_text(tab.tab_id.as_ref(), "tab"),
+        "tab_id": canonical_id_json_value(tab.tab_id.as_ref()),
         "url": tab.url,
         "title": tab.title,
         "active": tab.active,
@@ -3229,7 +3213,7 @@ fn download_artifact_proto_value(value: &browser_v1::DownloadArtifact) -> Value 
         "session_id": value
             .session_id
             .as_ref()
-            .map(|entry| redacted_browser_identifier_json_value(Some(entry.ulid.as_str()), "session"))
+            .map(|entry| browser_identifier_json_value(Some(entry.ulid.as_str())))
             .unwrap_or(Value::Null),
         "profile_id": value.profile_id.as_ref().map(|entry| entry.ulid.clone()),
         "source_url": value.source_url,
@@ -3257,10 +3241,12 @@ fn proto_console_severity_text(value: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_command_policy_action, browser_service_enable_command, browser_status_warnings,
-        ensure_browser_service_enabled, BrowserControlPlaneSnapshot, BrowserPolicySnapshot,
+        browser_command_policy_action, browser_identifier_json_value,
+        browser_service_enable_command, browser_status_warnings, ensure_browser_service_enabled,
+        session_summary_value, BrowserControlPlaneSnapshot, BrowserPolicySnapshot,
     };
-    use crate::args::BrowserCommand;
+    use crate::{args::BrowserCommand, browser_v1, common_v1};
+    use serde_json::Value;
 
     fn disabled_policy() -> BrowserPolicySnapshot {
         BrowserPolicySnapshot {
@@ -3350,6 +3336,26 @@ mod tests {
         policy.configured_enabled = true;
         ensure_browser_service_enabled(&policy, "start", None)
             .expect("enabled browser service should allow start");
+    }
+
+    #[test]
+    fn browser_identifier_json_values_remain_reusable() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+        assert_eq!(browser_identifier_json_value(Some(session_id)).as_str(), Some(session_id));
+    }
+
+    #[test]
+    fn browser_session_summary_preserves_canonical_session_id() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let summary = browser_v1::BrowserSessionSummary {
+            session_id: Some(common_v1::CanonicalId { ulid: session_id.to_owned() }),
+            ..Default::default()
+        };
+
+        let value = session_summary_value(&summary);
+
+        assert_eq!(value.get("session_id").and_then(Value::as_str), Some(session_id));
     }
 
     #[test]
