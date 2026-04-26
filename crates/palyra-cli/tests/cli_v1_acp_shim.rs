@@ -260,7 +260,7 @@ fn agent_acp_shim_emits_ndjson_events() -> Result<()> {
     assert!(saw_done, "acp-shim stream should include done status line: {stdout}");
     assert!(saw_token, "acp-shim stream should include at least one token line: {stdout}");
     assert!(
-        tokens.join(" ").contains("hello from ndjson"),
+        tokens.concat().contains("hello from ndjson"),
         "acp-shim stream should keep literal token text in NDJSON output: {stdout}"
     );
     Ok(())
@@ -323,7 +323,7 @@ fn top_level_acp_shim_emits_ndjson_events() -> Result<()> {
     assert!(saw_done, "acp shim stream should include done status line: {stdout}");
     assert!(saw_token, "acp shim stream should include at least one token line: {stdout}");
     assert!(
-        tokens.join(" ").contains("hello from top-level ndjson"),
+        tokens.concat().contains("hello from top-level ndjson"),
         "top-level acp shim should keep literal token text in NDJSON output: {stdout}"
     );
     Ok(())
