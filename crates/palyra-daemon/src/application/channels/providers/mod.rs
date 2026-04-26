@@ -28,6 +28,19 @@ pub(crate) fn build_channel_provider_operations_payload(
     }
 }
 
+pub(crate) fn channel_provider_static_auth_failure(
+    state: &AppState,
+    connector_id: &str,
+    connector: &palyra_connectors::ConnectorStatusSnapshot,
+) -> Option<String> {
+    match connector.kind {
+        palyra_connectors::ConnectorKind::Discord => {
+            discord::resolve_discord_connector_token(state, connector_id).err()
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn build_channel_provider_health_refresh_payload(
     state: &AppState,

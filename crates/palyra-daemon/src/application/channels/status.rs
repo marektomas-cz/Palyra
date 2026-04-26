@@ -4,7 +4,7 @@ use crate::{
     app::state::AppState,
     application::channels::providers::{
         build_channel_provider_health_refresh_payload, build_channel_provider_operations_payload,
-        discord, find_matching_message,
+        channel_provider_static_auth_failure, find_matching_message,
     },
     *,
 };
@@ -34,10 +34,8 @@ pub(crate) fn build_channel_status_payload(
             recent_dead_letters.as_slice(),
         ),
     });
-    if connector.kind == palyra_connectors::ConnectorKind::Discord {
-        if let Err(message) = discord::resolve_discord_connector_token(state, connector_id) {
-            apply_channel_auth_failure_surface(&mut payload, message.as_str());
-        }
+    if let Some(message) = channel_provider_static_auth_failure(state, connector_id, &connector) {
+        apply_channel_auth_failure_surface(&mut payload, message.as_str());
     }
     Ok(payload)
 }
