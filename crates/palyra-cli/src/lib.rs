@@ -5042,16 +5042,27 @@ fn resolve_installed_journal_db_path_from_metadata(
         return install_candidate;
     }
 
-    if let Some(state_root) =
-        metadata.state_root.as_deref().and_then(normalize_optional_text).map(PathBuf::from)
-    {
-        let state_candidate = state_root.join(DEFAULT_JOURNAL_DB_PATH);
+    let state_candidate = metadata
+        .state_root
+        .as_deref()
+        .and_then(normalize_optional_text)
+        .map(PathBuf::from)
+        .map(|state_root| state_root.join(DEFAULT_JOURNAL_DB_PATH));
+    if let Some(state_candidate) = state_candidate.as_ref() {
         if state_candidate.is_file() {
-            return state_candidate;
+            return state_candidate.clone();
         }
     }
 
-    install_candidate
+    let sibling_workspace_candidate =
+        install_root.parent().map(|workspace_root| workspace_root.join(DEFAULT_JOURNAL_DB_PATH));
+    if let Some(sibling_workspace_candidate) = sibling_workspace_candidate.as_ref() {
+        if sibling_workspace_candidate.is_file() {
+            return sibling_workspace_candidate.clone();
+        }
+    }
+
+    state_candidate.or(sibling_workspace_candidate).unwrap_or(install_candidate)
 }
 
 fn ensure_journal_db_exists(db_path: &Path) -> Result<()> {
@@ -10408,6 +10419,48 @@ mod journal_path_tests {
             },
         )?
         .expect("install metadata next to install root should resolve journal path");
+
+        assert_eq!(resolved, journal_path);
+        Ok(())
+    }
+
+    #[test]
+    fn installed_journal_path_discovers_clean_desktop_workspace_data_root() -> Result<()> {
+        let tempdir = tempdir()?;
+        let workspace_root = tempdir.path();
+        let install_root = workspace_root.join("install");
+        let state_root = workspace_root.join("state");
+        let binary_path = install_root.join(if cfg!(windows) { "palyra.exe" } else { "palyra" });
+        let journal_path = workspace_root.join(DEFAULT_JOURNAL_DB_PATH);
+
+        fs::create_dir_all(install_root.as_path())?;
+        fs::create_dir_all(state_root.as_path())?;
+        fs::create_dir_all(journal_path.parent().expect("journal parent should exist"))?;
+        fs::write(binary_path.as_path(), [])?;
+        fs::write(journal_path.as_path(), [])?;
+
+        let metadata = InstallMetadata {
+            schema_version: Some(2),
+            artifact_kind: Some("desktop".to_owned()),
+            installed_at_utc: None,
+            archive_path: None,
+            install_root: Some(install_root.display().to_string()),
+            config_path: Some(state_root.join("config").join("palyra.toml").display().to_string()),
+            state_root: Some(state_root.display().to_string()),
+            cli_exposure: None,
+        };
+
+        let resolved = discover_installed_journal_db_path_from_binary(
+            binary_path.as_path(),
+            |candidate_root| {
+                if candidate_root == install_root.as_path() {
+                    Ok(Some(metadata.clone()))
+                } else {
+                    Ok(None)
+                }
+            },
+        )?
+        .expect("install metadata should resolve clean desktop workspace journal path");
 
         assert_eq!(resolved, journal_path);
         Ok(())
