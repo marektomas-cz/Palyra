@@ -133,7 +133,7 @@ impl ConversationBindingRecord {
     #[must_use]
     pub fn active(&self, now_unix_ms: i64) -> bool {
         self.state.is_active()
-            && self.expires_at_unix_ms.map_or(true, |expires_at| expires_at > now_unix_ms)
+            && self.expires_at_unix_ms.is_none_or(|expires_at| expires_at > now_unix_ms)
     }
 
     #[must_use]
@@ -544,16 +544,16 @@ impl ConversationBindingStore {
                 filter
                     .channel
                     .as_deref()
-                    .map_or(true, |channel| record.channel.eq_ignore_ascii_case(channel))
+                    .is_none_or(|channel| record.channel.eq_ignore_ascii_case(channel))
             })
             .filter(|record| {
-                filter.principal.as_deref().map_or(true, |principal| record.principal == principal)
+                filter.principal.as_deref().is_none_or(|principal| record.principal == principal)
             })
             .filter(|record| {
                 filter
                     .session_id
                     .as_deref()
-                    .map_or(true, |session_id| record.session_id == session_id)
+                    .is_none_or(|session_id| record.session_id == session_id)
             })
             .cloned()
             .collect::<Vec<_>>();

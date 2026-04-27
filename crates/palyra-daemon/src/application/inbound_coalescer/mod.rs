@@ -261,9 +261,8 @@ impl InboundCoalescer {
         })?;
         let ready_keys = guard
             .iter()
-            .filter_map(|(key, bucket)| {
-                (now_unix_ms >= bucket.ready_at_unix_ms).then(|| key.clone())
-            })
+            .filter(|(_, bucket)| now_unix_ms >= bucket.ready_at_unix_ms)
+            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         let mut decisions = Vec::with_capacity(ready_keys.len());
         for key in ready_keys {
