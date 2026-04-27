@@ -54,7 +54,7 @@ pub enum ToolCapability {
 
 impl ToolCapability {
     #[must_use]
-    const fn policy_name(self) -> &'static str {
+    pub(crate) const fn policy_name(self) -> &'static str {
         match self {
             Self::ProcessExec => "process_exec",
             Self::Network => "network",

@@ -16,10 +16,16 @@ use crate::{
     application::provider_input::{
         prepare_model_provider_input, MemoryPromptFailureMode, PrepareModelProviderInputRequest,
     },
+    application::tool_registry::{
+        build_model_visible_tool_catalog_snapshot, snapshot_to_provider_request_value,
+        tool_catalog_tape_payload, ModelVisibleToolCatalogSnapshot, ToolCatalogBuildRequest,
+        ToolExposureSurface,
+    },
     delegation::DelegationSnapshot,
     gateway::{
-        canonical_id, ingest_memory_best_effort, non_empty, record_message_router_journal_event,
-        security_requests_json_mode, truncate_with_ellipsis, GatewayRuntimeState,
+        canonical_id, current_unix_ms, ingest_memory_best_effort, non_empty,
+        record_message_router_journal_event, security_requests_json_mode, truncate_with_ellipsis,
+        GatewayRuntimeState,
     },
     journal::{
         MemorySource, OrchestratorCancelRequest, OrchestratorRunMetadataUpdateRequest,
@@ -30,6 +36,7 @@ use crate::{
     orchestrator::{is_cancel_command, RunLifecycleState, RunStateMachine, RunTransition},
     provider_leases::ProviderLeaseExecutionContext,
     self_healing::{WorkHeartbeatKind, WorkHeartbeatUpdate},
+    tool_protocol::ToolRequestContext,
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
     usage_governance::{
         plan_usage_routing, resolve_provider_binding_for_model, RoutingTaskClass,
@@ -221,6 +228,46 @@ async fn ensure_run_stream_in_progress(
     .await?;
     *in_progress_emitted = true;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_and_record_run_stream_tool_catalog_snapshot(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    session_id: &str,
+    run_id: &str,
+    provider_kind: &str,
+    provider_model_id: Option<&str>,
+    remaining_tool_budget: u32,
+    tape_seq: &mut i64,
+) -> Result<ModelVisibleToolCatalogSnapshot, Status> {
+    let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
+        config: &runtime_state.config.tool_call,
+        browser_service_enabled: runtime_state.config.browser_service.enabled,
+        request_context: &ToolRequestContext {
+            principal: request_context.principal.clone(),
+            device_id: Some(request_context.device_id.clone()),
+            channel: request_context.channel.clone(),
+            session_id: Some(session_id.to_owned()),
+            run_id: Some(run_id.to_owned()),
+            skill_id: None,
+        },
+        provider_kind,
+        provider_model_id,
+        surface: ToolExposureSurface::RunStream,
+        remaining_tool_budget,
+        created_at_unix_ms: current_unix_ms(),
+    });
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool_catalog_snapshot".to_owned(),
+            payload_json: tool_catalog_tape_payload(&snapshot),
+        })
+        .await?;
+    *tape_seq = (*tape_seq).saturating_add(1);
+    Ok(snapshot)
 }
 
 #[allow(clippy::result_large_err)]
@@ -429,7 +476,7 @@ pub(crate) async fn process_run_stream_message(
     } else {
         session_model_override
     };
-    let (lease_provider_id, _lease_provider_kind, lease_credential_id) =
+    let (lease_provider_id, lease_provider_kind, lease_credential_id) =
         provider_model_override.as_deref().map_or_else(
             || {
                 (
@@ -445,17 +492,31 @@ pub(crate) async fn process_run_stream_message(
                 )
             },
         );
+    let tool_catalog_snapshot = build_and_record_run_stream_tool_catalog_snapshot(
+        runtime_state,
+        request_context,
+        session_id_for_message.as_str(),
+        run_id.as_str(),
+        lease_provider_kind.as_str(),
+        provider_model_override.as_deref().or(Some(routing_decision.actual_model_id.as_str())),
+        *remaining_tool_budget,
+        tape_seq,
+    )
+    .await?;
+    let mut provider_request = ProviderRequest::from_input_text(
+        prepared_provider_input.provider_input_text,
+        json_mode_requested,
+        prepared_provider_input.vision_inputs,
+        provider_model_override,
+    );
+    provider_request.tool_catalog_snapshot =
+        Some(snapshot_to_provider_request_value(&tool_catalog_snapshot));
     let provider_response = match execute_run_stream_provider_request(
         sender,
         runtime_state,
         run_state,
         run_id.as_str(),
-        ProviderRequest::from_input_text(
-            prepared_provider_input.provider_input_text,
-            json_mode_requested,
-            prepared_provider_input.vision_inputs,
-            provider_model_override,
-        ),
+        provider_request,
         ProviderLeaseExecutionContext {
             provider_id: lease_provider_id,
             credential_id: lease_credential_id,
@@ -486,6 +547,7 @@ pub(crate) async fn process_run_stream_message(
         run_id.as_str(),
         session_id_for_message.as_str(),
         provider_response,
+        &tool_catalog_snapshot,
         remaining_tool_budget,
         tape_seq,
         model_token_tape_events,
@@ -515,6 +577,7 @@ async fn process_run_stream_provider_response(
     run_id: &str,
     session_id_for_message: &str,
     provider_response: ProviderResponse,
+    tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
     remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
     model_token_tape_events: &mut usize,
@@ -539,6 +602,7 @@ async fn process_run_stream_provider_response(
         session_id,
         run_id,
         provider_response.events,
+        tool_catalog_snapshot,
         remaining_tool_budget,
         tape_seq,
         model_token_tape_events,

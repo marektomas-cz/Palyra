@@ -8,6 +8,11 @@ use crate::{
         execution_gate::ToolProposalApprovalState,
         route_message::approval::resolve_route_tool_approval_outcome,
         run_stream::tape::{append_tool_decision_tape_event, append_tool_proposal_tape_event},
+        tool_registry::{
+            normalization_audit_tape_payload, rejection_tape_payload, tool_call_rejection_outcome,
+            validate_tool_call_against_catalog_snapshot, ModelVisibleToolCatalogSnapshot,
+            NormalizedToolCall, ToolArgumentNormalizationAudit, ToolCallRejection,
+        },
         tool_security::{
             evaluate_tool_proposal_security, record_tool_proposal_decision_audit_trail,
             resolve_tool_proposal_decision_for_context, ResolvedToolProposalDecision,
@@ -20,7 +25,7 @@ use crate::{
         ToolRuntimeExecutionContext,
     },
     journal::OrchestratorTapeAppendRequest,
-    tool_protocol::denied_execution_outcome,
+    tool_protocol::{denied_execution_outcome, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
 };
 
@@ -33,9 +38,44 @@ pub(crate) async fn process_route_tool_proposal_event(
     proposal_id: &str,
     tool_name: &str,
     input_json: &[u8],
+    tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
     remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<String, Status> {
+    let NormalizedToolCall { input_json: normalized_input_json, audit } =
+        match validate_tool_call_against_catalog_snapshot(
+            tool_catalog_snapshot,
+            tool_name,
+            input_json,
+        ) {
+            Ok(normalized) => normalized,
+            Err(rejection) => {
+                *remaining_tool_budget = (*remaining_tool_budget).saturating_sub(1);
+                return reject_route_tool_call(
+                    runtime_state,
+                    run_id,
+                    proposal_id,
+                    tool_name,
+                    input_json,
+                    rejection,
+                    tape_seq,
+                )
+                .await;
+            }
+        };
+    if !audit.steps.is_empty() {
+        append_route_tool_argument_normalization_tape_event(
+            runtime_state,
+            run_id,
+            tape_seq,
+            proposal_id,
+            tool_name,
+            &audit,
+        )
+        .await?;
+    }
+    let input_json = normalized_input_json.as_slice();
+
     let ToolProposalSecurityEvaluation {
         skill_context,
         skill_gate_decision,
@@ -201,4 +241,119 @@ pub(crate) async fn process_route_tool_proposal_event(
         "route_message_tool_result",
     )
     .await)
+}
+
+#[allow(clippy::result_large_err)]
+async fn append_route_tool_argument_normalization_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    proposal_id: &str,
+    tool_name: &str,
+    audit: &ToolArgumentNormalizationAudit,
+) -> Result<(), Status> {
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool.arguments.normalized".to_owned(),
+            payload_json: normalization_audit_tape_payload(proposal_id, tool_name, audit),
+        })
+        .await?;
+    *tape_seq = (*tape_seq).saturating_add(1);
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn reject_route_tool_call(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    proposal_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+    rejection: ToolCallRejection,
+    tape_seq: &mut i64,
+) -> Result<String, Status> {
+    runtime_state.record_tool_proposal();
+    append_tool_proposal_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        tool_name,
+        input_json,
+        false,
+    )
+    .await?;
+    let reason = format!("{}: {}", rejection.kind.as_str(), rejection.message);
+    append_tool_decision_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        "tool.decision",
+        proposal_id,
+        tool_name,
+        false,
+        reason.as_str(),
+        false,
+        true,
+    )
+    .await?;
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool.intake_rejected".to_owned(),
+            payload_json: rejection_tape_payload(proposal_id, &rejection),
+        })
+        .await?;
+    *tape_seq = (*tape_seq).saturating_add(1);
+
+    let execution_outcome = tool_call_rejection_outcome(proposal_id, input_json, &rejection);
+    append_route_tool_execution_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        tool_name,
+        &execution_outcome,
+    )
+    .await?;
+    Ok(format!("tool={tool_name} success=false error={reason}"))
+}
+
+#[allow(clippy::result_large_err)]
+async fn append_route_tool_execution_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    proposal_id: &str,
+    tool_name: &str,
+    execution_outcome: &ToolExecutionOutcome,
+) -> Result<(), Status> {
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool.executed".to_owned(),
+            payload_json: json!({
+                "proposal_id": proposal_id,
+                "tool_name": tool_name,
+                "success": execution_outcome.success,
+                "error": execution_outcome.error.clone(),
+                "attestation": {
+                    "attestation_id": execution_outcome.attestation.attestation_id.clone(),
+                    "execution_sha256": execution_outcome.attestation.execution_sha256.clone(),
+                    "executed_at_unix_ms": execution_outcome.attestation.executed_at_unix_ms,
+                    "timed_out": execution_outcome.attestation.timed_out,
+                    "executor": execution_outcome.attestation.executor.clone(),
+                    "sandbox_enforcement": execution_outcome.attestation.sandbox_enforcement.clone(),
+                }
+            })
+            .to_string(),
+        })
+        .await?;
+    *tape_seq = (*tape_seq).saturating_add(1);
+    Ok(())
 }

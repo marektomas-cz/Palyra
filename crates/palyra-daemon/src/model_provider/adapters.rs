@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use crate::application::tool_registry::{provider_tools_from_catalog_snapshot, ToolSchemaDialect};
+
 use super::{
     ProviderImageInput, ProviderMessage, ProviderMessageContentPart, ProviderMessageRole,
     ProviderRequest,
@@ -148,6 +150,14 @@ impl ProviderChatAdapter for OpenAiCompatibleChatAdapter {
             "messages": build_openai_messages(request),
             "stream": false,
         });
+        if let Some(snapshot) = request.tool_catalog_snapshot.as_ref() {
+            let tools =
+                provider_tools_from_catalog_snapshot(snapshot, ToolSchemaDialect::OpenAiCompatible);
+            if !tools.is_empty() {
+                body["tools"] = Value::Array(tools);
+                body["tool_choice"] = json!("auto");
+            }
+        }
         if request.json_mode {
             body["response_format"] = json!({"type":"json_object"});
         }
@@ -165,6 +175,13 @@ impl ProviderChatAdapter for AnthropicCompatibleChatAdapter {
             "max_tokens": 2048,
             "messages": messages,
         });
+        if let Some(snapshot) = request.tool_catalog_snapshot.as_ref() {
+            let tools =
+                provider_tools_from_catalog_snapshot(snapshot, ToolSchemaDialect::Anthropic);
+            if !tools.is_empty() {
+                body["tools"] = Value::Array(tools);
+            }
+        }
         let system = if request.json_mode {
             Some(system.map_or_else(
                 || "Return valid JSON only.".to_owned(),

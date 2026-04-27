@@ -14,12 +14,17 @@ use crate::{
             prepare_model_provider_input, MemoryPromptFailureMode, PrepareModelProviderInputRequest,
         },
         service_authorization::authorize_message_action,
+        tool_registry::{
+            build_model_visible_tool_catalog_snapshot, snapshot_to_provider_request_value,
+            tool_catalog_tape_payload, ModelVisibleToolCatalogSnapshot, ToolCatalogBuildRequest,
+            ToolExposureSurface,
+        },
     },
     channel_router::{
         InboundMessage as ChannelInboundMessage, RetryDisposition, RoutePlan as ChannelRoutePlan,
     },
     gateway::{
-        agent_resolution_source_label, ingest_memory_best_effort,
+        agent_resolution_source_label, current_unix_ms, ingest_memory_best_effort,
         record_message_router_journal_event, request_context_with_resolved_route_channel,
         truncate_with_ellipsis, GatewayRuntimeState,
     },
@@ -30,6 +35,7 @@ use crate::{
     model_provider::ProviderRequest,
     orchestrator::RunLifecycleState,
     provider_leases::ProviderLeaseExecutionContext,
+    tool_protocol::ToolRequestContext,
     transport::grpc::{
         auth::RequestContext,
         proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
@@ -40,6 +46,46 @@ use crate::{
 use super::response::{
     build_route_message_outputs, process_route_provider_response, RouteMessageOutputTemplate,
 };
+
+#[allow(clippy::too_many_arguments)]
+async fn build_and_record_route_tool_catalog_snapshot(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    session_id: &str,
+    run_id: &str,
+    provider_kind: &str,
+    provider_model_id: Option<&str>,
+    remaining_tool_budget: u32,
+    tape_seq: &mut i64,
+) -> Result<ModelVisibleToolCatalogSnapshot, Status> {
+    let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
+        config: &runtime_state.config.tool_call,
+        browser_service_enabled: runtime_state.config.browser_service.enabled,
+        request_context: &ToolRequestContext {
+            principal: request_context.principal.clone(),
+            device_id: Some(request_context.device_id.clone()),
+            channel: request_context.channel.clone(),
+            session_id: Some(session_id.to_owned()),
+            run_id: Some(run_id.to_owned()),
+            skill_id: None,
+        },
+        provider_kind,
+        provider_model_id,
+        surface: ToolExposureSurface::RouteMessage,
+        remaining_tool_budget,
+        created_at_unix_ms: current_unix_ms(),
+    });
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool_catalog_snapshot".to_owned(),
+            payload_json: tool_catalog_tape_payload(&snapshot),
+        })
+        .await?;
+    *tape_seq = (*tape_seq).saturating_add(1);
+    Ok(snapshot)
+}
 
 #[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
@@ -286,15 +332,30 @@ pub(crate) async fn handle_routed_route_message(
     })
     .await?;
 
+    let mut remaining_tool_budget = runtime_state.config.tool_call.max_calls_per_run;
+    let tool_catalog_snapshot = build_and_record_route_tool_catalog_snapshot(
+        runtime_state,
+        &route_request_context,
+        session_id.as_str(),
+        run_id.as_str(),
+        routing_decision.provider_kind.as_str(),
+        Some(routing_decision.actual_model_id.as_str()),
+        remaining_tool_budget,
+        &mut tape_seq,
+    )
+    .await?;
+    let mut provider_request = ProviderRequest::from_input_text(
+        prepared_provider_input.provider_input_text,
+        json_mode_requested,
+        prepared_provider_input.vision_inputs,
+        (routing_decision.mode == "enforced").then(|| routing_decision.actual_model_id.clone()),
+    );
+    provider_request.tool_catalog_snapshot =
+        Some(snapshot_to_provider_request_value(&tool_catalog_snapshot));
+
     let provider_response = runtime_state
         .execute_model_provider_with_lease(
-            ProviderRequest::from_input_text(
-                prepared_provider_input.provider_input_text,
-                json_mode_requested,
-                prepared_provider_input.vision_inputs,
-                (routing_decision.mode == "enforced")
-                    .then(|| routing_decision.actual_model_id.clone()),
-            ),
+            provider_request,
             ProviderLeaseExecutionContext {
                 provider_id: routing_decision.provider_id.clone(),
                 credential_id: routing_decision.credential_id.clone(),
@@ -384,13 +445,13 @@ pub(crate) async fn handle_routed_route_message(
         }
     };
 
-    let mut remaining_tool_budget = runtime_state.config.tool_call.max_calls_per_run;
     let route_provider_response = process_route_provider_response(
         runtime_state,
         &route_request_context,
         session_id.as_str(),
         run_id.as_str(),
         provider_response,
+        &tool_catalog_snapshot,
         json_mode_requested,
         plan.response_prefix.as_deref(),
         &mut remaining_tool_budget,

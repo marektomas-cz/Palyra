@@ -25,6 +25,12 @@ use crate::{
         resolve_cached_tool_approval_for_proposal,
     },
     application::execution_gate::ToolProposalApprovalState,
+    application::tool_registry::{
+        normalization_audit_tape_payload, projection_policy_for_tool, rejection_tape_payload,
+        tool_call_rejection_outcome, validate_tool_call_against_catalog_snapshot,
+        ModelVisibleToolCatalogSnapshot, NormalizedToolCall, ToolArgumentNormalizationAudit,
+        ToolCallRejection, ToolResultProjectionPolicy,
+    },
     application::tool_security::{
         approval_execution_context_for_backend_selection, evaluate_tool_proposal_security,
         record_tool_proposal_decision_audit_trail, resolve_tool_proposal_decision_for_context,
@@ -37,9 +43,12 @@ use crate::{
         GatewayRuntimeState, RunStreamToolExecutionOutcome, ToolApprovalOutcome,
         ToolRuntimeExecutionContext, TOOL_APPROVAL_RESPONSE_TIMEOUT,
     },
-    journal::{ApprovalCreateRequest, ApprovalResolveRequest, ToolResultArtifactCreateRequest},
+    journal::{
+        ApprovalCreateRequest, ApprovalResolveRequest, OrchestratorTapeAppendRequest,
+        ToolResultArtifactCreateRequest,
+    },
     orchestrator::RunStateMachine,
-    tool_protocol::{denied_execution_outcome, tool_metadata, ToolExecutionOutcome},
+    tool_protocol::{denied_execution_outcome, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
 };
 
@@ -75,9 +84,44 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
     proposal_id: &str,
     tool_name: &str,
     input_json: &[u8],
+    tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
     remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<RunStreamToolExecutionOutcome, Status> {
+    let NormalizedToolCall { input_json: normalized_input_json, audit } =
+        match validate_tool_call_against_catalog_snapshot(
+            tool_catalog_snapshot,
+            tool_name,
+            input_json,
+        ) {
+            Ok(normalized) => normalized,
+            Err(rejection) => {
+                *remaining_tool_budget = (*remaining_tool_budget).saturating_sub(1);
+                return reject_run_stream_tool_call(
+                    sender,
+                    runtime_state,
+                    run_id,
+                    proposal_id,
+                    tool_name,
+                    input_json,
+                    rejection,
+                    tape_seq,
+                )
+                .await;
+            }
+        };
+    if !audit.steps.is_empty() {
+        append_tool_argument_normalization_tape_event(
+            runtime_state,
+            run_id,
+            tape_seq,
+            proposal_id,
+            tool_name,
+            &audit,
+        )
+        .await?;
+    }
+
     let RunStreamToolProposalPreparation { decision, resolved_session_id, backend_selection } =
         prepare_run_stream_tool_proposal_execution(
             sender,
@@ -89,7 +133,7 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
             run_id,
             proposal_id,
             tool_name,
-            input_json,
+            normalized_input_json.as_slice(),
             remaining_tool_budget,
             tape_seq,
         )
@@ -103,13 +147,114 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
         run_id,
         proposal_id,
         tool_name,
-        input_json,
+        normalized_input_json.as_slice(),
         &decision,
         &backend_selection,
         resolved_session_id.as_str(),
         tape_seq,
     )
     .await
+}
+
+#[allow(clippy::result_large_err)]
+async fn append_tool_argument_normalization_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    proposal_id: &str,
+    tool_name: &str,
+    audit: &ToolArgumentNormalizationAudit,
+) -> Result<(), Status> {
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool.arguments.normalized".to_owned(),
+            payload_json: normalization_audit_tape_payload(proposal_id, tool_name, audit),
+        })
+        .await?;
+    *tape_seq = (*tape_seq).saturating_add(1);
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn reject_run_stream_tool_call(
+    sender: &mpsc::Sender<
+        Result<crate::transport::grpc::proto::palyra::common::v1::RunStreamEvent, Status>,
+    >,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    proposal_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+    rejection: ToolCallRejection,
+    tape_seq: &mut i64,
+) -> Result<RunStreamToolExecutionOutcome, Status> {
+    runtime_state.record_tool_proposal();
+    send_tool_proposal_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        tool_name,
+        input_json,
+        false,
+    )
+    .await?;
+    let reason = format!("{}: {}", rejection.kind.as_str(), rejection.message);
+    send_tool_decision_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        tool_name,
+        false,
+        reason.as_str(),
+        false,
+        true,
+    )
+    .await?;
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "tool.intake_rejected".to_owned(),
+            payload_json: rejection_tape_payload(proposal_id, &rejection),
+        })
+        .await?;
+    *tape_seq = (*tape_seq).saturating_add(1);
+
+    let execution_outcome = tool_call_rejection_outcome(proposal_id, input_json, &rejection);
+    send_tool_result_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        false,
+        execution_outcome.output_json.as_slice(),
+        execution_outcome.error.as_str(),
+    )
+    .await?;
+    send_tool_attestation_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        proposal_id,
+        execution_outcome.attestation.attestation_id.as_str(),
+        execution_outcome.attestation.execution_sha256.as_str(),
+        execution_outcome.attestation.executed_at_unix_ms,
+        execution_outcome.attestation.timed_out,
+        execution_outcome.attestation.executor.as_str(),
+        execution_outcome.attestation.sandbox_enforcement.as_str(),
+    )
+    .await?;
+    runtime_state.record_tool_attestation_emitted();
+    Ok(RunStreamToolExecutionOutcome::Completed)
 }
 
 #[allow(clippy::result_large_err)]
@@ -612,10 +757,16 @@ async fn project_tool_result_for_model(
     }
 
     let budget = ToolTurnBudget::default();
-    let metadata = tool_metadata(tool_name);
-    let default_sensitive = metadata.is_some_and(|metadata| metadata.default_sensitive);
-    let should_spill =
-        default_sensitive || outcome.output_json.len() > budget.max_model_inline_bytes;
+    let projection_policy = projection_policy_for_tool(tool_name);
+    let default_sensitive =
+        matches!(projection_policy, ToolResultProjectionPolicy::RedactedPreviewAndArtifact);
+    let should_spill = match projection_policy {
+        ToolResultProjectionPolicy::InlineUnlessLarge => {
+            outcome.output_json.len() > budget.max_model_inline_bytes
+        }
+        ToolResultProjectionPolicy::SummarizeAndArtifact => true,
+        ToolResultProjectionPolicy::RedactedPreviewAndArtifact => true,
+    };
     if !should_spill {
         return Ok(outcome);
     }
@@ -654,6 +805,7 @@ async fn project_tool_result_for_model(
     let projected = json!({
         "schema_version": 1,
         "visibility": visibility.as_str(),
+        "projection_policy": projection_policy.as_str(),
         "summary": summary,
         "redacted_preview": preview,
         "artifact": artifact,

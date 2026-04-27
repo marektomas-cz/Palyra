@@ -17,6 +17,7 @@ pub mod service_authorization;
 pub mod session_compaction;
 pub mod session_pruning;
 pub mod session_queue;
+pub mod tool_registry;
 pub mod tool_runtime;
 pub mod tool_security;
 pub mod workspace_observability;

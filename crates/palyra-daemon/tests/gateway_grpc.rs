@@ -8041,7 +8041,7 @@ async fn grpc_run_stream_persists_orchestrator_snapshot_and_matches_golden_tape(
             .get("tape_events")
             .and_then(Value::as_u64)
             .context("run snapshot missing tape_events")?,
-        expected_tape.as_array().context("golden tape must be a JSON array")?.len() as u64
+        expected_tape.as_array().context("golden tape must be a JSON array")?.len() as u64 + 1
     );
     assert!(
         run_snapshot.get("tape").is_none(),
@@ -8054,6 +8054,30 @@ async fn grpc_run_stream_persists_orchestrator_snapshot_and_matches_golden_tape(
         .get("events")
         .and_then(Value::as_array)
         .context("run tape snapshot missing events array")?;
+    let catalog_snapshot_event = tape_events
+        .iter()
+        .find(|event| {
+            event.get("event_type").and_then(Value::as_str) == Some("tool_catalog_snapshot")
+        })
+        .context("run tape snapshot should include provider-turn tool catalog snapshot")?;
+    let catalog_snapshot_payload = catalog_snapshot_event
+        .get("payload_json")
+        .and_then(Value::as_str)
+        .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+        .context("tool catalog snapshot payload_json should be valid JSON")?;
+    assert_eq!(
+        catalog_snapshot_payload.get("schema_version").and_then(Value::as_u64),
+        Some(1),
+        "tool catalog snapshot should carry schema version"
+    );
+    assert!(
+        catalog_snapshot_payload
+            .get("catalog_hash")
+            .and_then(Value::as_str)
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
+        "tool catalog snapshot should carry a catalog hash"
+    );
     let reply_event = tape_events
         .iter()
         .find(|event| event.get("event_type").and_then(Value::as_str) == Some("message.replied"))
@@ -8065,7 +8089,19 @@ async fn grpc_run_stream_persists_orchestrator_snapshot_and_matches_golden_tape(
             .context("message.replied tape event missing payload_json")?,
         r#"{"reply_text":"alpha beta gamma"}"#,
     );
-    assert_eq!(Value::Array(tape_events.clone()), expected_tape);
+    let comparable_tape_events = tape_events
+        .iter()
+        .filter(|event| {
+            event.get("event_type").and_then(Value::as_str) != Some("tool_catalog_snapshot")
+        })
+        .enumerate()
+        .map(|(index, event)| {
+            let mut event = event.clone();
+            event["seq"] = serde_json::json!(index);
+            event
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(Value::Array(comparable_tape_events), expected_tape);
     Ok(())
 }
 
