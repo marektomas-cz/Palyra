@@ -61,7 +61,7 @@ use crate::tool_posture::{
     ToolPostureRecommendationActionRequest, ToolPostureRegistry, ToolPostureScopeResetRequest,
 };
 use crate::usage_governance::SmartRoutingRuntimeConfig;
-use palyra_auth::AuthHealthReport;
+use palyra_auth::{AuthHealthReport, AuthProfileFailureKind};
 use palyra_common::replay_bundle::ReplayBundle;
 use palyra_common::runtime_contracts::{
     ArtifactReadResponse, IdempotencyReplayDecision, RunLifecyclePhase, StableErrorEnvelope,
@@ -75,7 +75,7 @@ use palyra_workerd::{
     WorkerFleetSnapshot, WorkerLease, WorkerLeaseRequest, WorkerLifecycleEvent,
 };
 use std::path::PathBuf;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 mod external_retrieval;
 
@@ -410,7 +410,7 @@ pub struct GatewayJournalConfigSnapshot {
 }
 
 #[rustfmt::skip]
-pub struct GatewayRuntimeDependencies { pub model_provider: Arc<dyn ModelProvider>, pub vault: Arc<Vault>, pub agent_registry: AgentRegistry, pub tool_posture_registry: ToolPostureRegistry, pub retrieval_backend: Arc<dyn RetrievalBackend>, pub external_retrieval_index: Arc<ExternalRetrievalRuntime>, pub conversation_bindings: ConversationBindingStore }
+pub struct GatewayRuntimeDependencies { pub model_provider: Arc<dyn ModelProvider>, pub vault: Arc<Vault>, pub auth_profile_registry: Option<Arc<AuthProfileRegistry>>, pub agent_registry: AgentRegistry, pub tool_posture_registry: ToolPostureRegistry, pub retrieval_backend: Arc<dyn RetrievalBackend>, pub external_retrieval_index: Arc<ExternalRetrievalRuntime>, pub conversation_bindings: ConversationBindingStore }
 
 #[derive(Clone)]
 pub(crate) struct RoutinesRuntimeConfig {
@@ -430,6 +430,7 @@ pub struct GatewayRuntimeState {
     pub(crate) journal_store: JournalStore,
     revoked_certificate_count: usize,
     model_provider: Arc<dyn ModelProvider>,
+    auth_profile_registry: Option<Arc<AuthProfileRegistry>>,
     pub(crate) vault: Arc<Vault>,
     pub(crate) memory_config: RwLock<MemoryRuntimeConfig>,
     pub(crate) retrieval_config: RwLock<RetrievalRuntimeConfig>,
@@ -814,6 +815,7 @@ pub struct AuthRuntimeState {
     registry: Arc<AuthProfileRegistry>,
     refresh_adapter: Arc<dyn OAuthRefreshAdapter>,
     refresh_metrics: Arc<AuthRefreshMetricsState>,
+    refresh_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
 impl AuthRuntimeState {
@@ -826,6 +828,7 @@ impl AuthRuntimeState {
             registry,
             refresh_adapter,
             refresh_metrics: Arc::new(AuthRefreshMetricsState::default()),
+            refresh_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -841,12 +844,19 @@ impl AuthRuntimeState {
         self.refresh_metrics.record_outcome(outcome);
     }
 
+    fn refresh_lock(&self, profile_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut guard = self.refresh_locks.lock().unwrap_or_else(|error| error.into_inner());
+        guard.entry(profile_id.to_owned()).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
+    }
+
     #[allow(clippy::result_large_err)]
     pub async fn refresh_oauth_profile(
         self: &Arc<Self>,
         profile_id: String,
         vault: Arc<Vault>,
     ) -> Result<OAuthRefreshOutcome, Status> {
+        let refresh_lock = self.refresh_lock(profile_id.as_str());
+        let _refresh_guard = refresh_lock.lock().await;
         let state = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let outcome = state
@@ -1055,6 +1065,38 @@ fn elapsed_millis(started_at: Instant) -> u64 {
     u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+fn auth_profile_id_from_credential_id(credential_id: &str) -> Option<&str> {
+    let mut parts = credential_id.splitn(3, ':');
+    let prefix = parts.next()?;
+    let provider_id = parts.next()?;
+    let profile_id = parts.next()?;
+    if prefix == "auth-profile" && !provider_id.is_empty() && !profile_id.is_empty() {
+        Some(profile_id)
+    } else {
+        None
+    }
+}
+
+fn auth_profile_failure_kind_for_provider_error(
+    error: &ProviderError,
+) -> Option<AuthProfileFailureKind> {
+    if matches!(error, ProviderError::MissingApiKey | ProviderError::MissingAnthropicApiKey) {
+        return Some(AuthProfileFailureKind::ConfigMissing);
+    }
+    let failure = error.failure_snapshot();
+    match failure.class.as_str() {
+        "auth_expired" => Some(AuthProfileFailureKind::RefreshDue),
+        "auth_invalid" | "permission_denied" => Some(AuthProfileFailureKind::AuthInvalid),
+        "quota_exceeded" => Some(AuthProfileFailureKind::Quota),
+        "rate_limited" => Some(AuthProfileFailureKind::RateLimit),
+        "network_unavailable"
+        | "provider_timeout"
+        | "transient_upstream"
+        | "malformed_response" => Some(AuthProfileFailureKind::Transient),
+        _ => None,
+    }
+}
+
 fn orchestrator_run_start_payload_sha256(
     request: &OrchestratorRunStartRequest,
 ) -> Result<String, Status> {
@@ -1116,7 +1158,7 @@ impl GatewayRuntimeState {
         let tool_posture_registry = ToolPostureRegistry::open(tool_posture_root.as_path())
             .expect("test tool posture registry should initialize");
         #[rustfmt::skip]
-        let dependencies = GatewayRuntimeDependencies { model_provider: default_provider, vault: default_vault, agent_registry, tool_posture_registry, retrieval_backend: Arc::new(crate::retrieval::JournalRetrievalBackend), external_retrieval_index: Arc::new(crate::retrieval::ExternalRetrievalRuntime::default()), conversation_bindings: ConversationBindingStore::open_temp() };
+        let dependencies = GatewayRuntimeDependencies { model_provider: default_provider, vault: default_vault, auth_profile_registry: None, agent_registry, tool_posture_registry, retrieval_backend: Arc::new(crate::retrieval::JournalRetrievalBackend), external_retrieval_index: Arc::new(crate::retrieval::ExternalRetrievalRuntime::default()), conversation_bindings: ConversationBindingStore::open_temp() };
         Self::new_with_provider(
             config,
             journal_config,
@@ -1134,7 +1176,7 @@ impl GatewayRuntimeState {
         dependencies: GatewayRuntimeDependencies,
     ) -> Result<Arc<Self>, JournalError> {
         #[rustfmt::skip]
-        let GatewayRuntimeDependencies { model_provider, vault, agent_registry, tool_posture_registry, retrieval_backend, external_retrieval_index, conversation_bindings } = dependencies;
+        let GatewayRuntimeDependencies { model_provider, vault, auth_profile_registry, agent_registry, tool_posture_registry, retrieval_backend, external_retrieval_index, conversation_bindings } = dependencies;
         let build = build_metadata();
         let existing_events = journal_store.total_events()? as u64;
         let canvas_snapshots =
@@ -1269,6 +1311,7 @@ impl GatewayRuntimeState {
             journal_store,
             revoked_certificate_count,
             model_provider,
+            auth_profile_registry,
             vault,
             memory_config: RwLock::new(MemoryRuntimeConfig::default()),
             retrieval_config: RwLock::new(RetrievalRuntimeConfig::default()),
@@ -2851,6 +2894,7 @@ impl GatewayRuntimeState {
                     reason: "provider call succeeded".to_owned(),
                     observed_at_unix_ms: current_unix_ms(),
                 });
+                self.record_auth_profile_success_for_lease(&lease_context);
                 if response.retry_count > 0 {
                     self.counters
                         .model_provider_retry_attempts
@@ -2870,9 +2914,56 @@ impl GatewayRuntimeState {
                         .model_provider_circuit_open_rejections
                         .fetch_add(1, Ordering::Relaxed);
                 }
+                self.record_auth_profile_failure_for_lease(&lease_context, &error);
                 self.record_provider_lease_feedback_for_error(&lease_context, &error);
                 Err(map_provider_error(error))
             }
+        }
+    }
+
+    fn record_auth_profile_success_for_lease(&self, lease_context: &ProviderLeaseExecutionContext) {
+        let Some(profile_id) =
+            auth_profile_id_from_credential_id(lease_context.credential_id.as_str())
+        else {
+            return;
+        };
+        let Some(registry) = self.auth_profile_registry.as_ref() else {
+            return;
+        };
+        if let Err(error) = registry.record_profile_success(profile_id) {
+            warn!(
+                profile_id,
+                provider_id = lease_context.provider_id.as_str(),
+                error = %error,
+                "failed to record auth profile provider success"
+            );
+        }
+    }
+
+    fn record_auth_profile_failure_for_lease(
+        &self,
+        lease_context: &ProviderLeaseExecutionContext,
+        error: &ProviderError,
+    ) {
+        let Some(profile_id) =
+            auth_profile_id_from_credential_id(lease_context.credential_id.as_str())
+        else {
+            return;
+        };
+        let Some(kind) = auth_profile_failure_kind_for_provider_error(error) else {
+            return;
+        };
+        let Some(registry) = self.auth_profile_registry.as_ref() else {
+            return;
+        };
+        if let Err(record_error) = registry.record_profile_failure(profile_id, kind) {
+            warn!(
+                profile_id,
+                provider_id = lease_context.provider_id.as_str(),
+                failure_kind = kind.as_str(),
+                error = %record_error,
+                "failed to record auth profile provider failure"
+            );
         }
     }
 

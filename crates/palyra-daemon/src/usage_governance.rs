@@ -1707,7 +1707,8 @@ mod tests {
         ProviderCapabilitiesSnapshot, ProviderCircuitBreakerSnapshot, ProviderDiscoverySnapshot,
         ProviderHealthProbeSnapshot, ProviderRegistryModelSnapshot,
         ProviderRegistryProviderSnapshot, ProviderRegistrySnapshot, ProviderResponseCacheSnapshot,
-        ProviderRetryPolicySnapshot, ProviderRuntimeMetricsSnapshot, ProviderStatusSnapshot,
+        ProviderRetryPolicySnapshot, ProviderRouteSelectionTrace, ProviderRuntimeMetricsSnapshot,
+        ProviderStatusSnapshot,
     };
     use crate::provider_leases::{LeasePreviewState, LeasePriority, ProviderLeasePreviewSnapshot};
 
@@ -1867,6 +1868,7 @@ mod tests {
                 credentials: Vec::new(),
                 models,
             },
+            route_selection: ProviderRouteSelectionTrace::empty(),
         }
     }
 
@@ -1936,6 +1938,11 @@ mod tests {
             background_waiters: 0,
             credential_state: None,
             reason: Some("shared_capacity_exhausted".to_owned()),
+            queue_position: Some(2),
+            wait_reason: Some("shared_capacity_exhausted".to_owned()),
+            priority_class: "foreground".to_owned(),
+            selected_provider_candidate: Some("openai:credential-openai".to_owned()),
+            timeout_ms: Some(500),
         }
     }
 
@@ -1951,6 +1958,11 @@ mod tests {
             background_waiters: 0,
             credential_state: None,
             reason: Some("foreground_waiters_present".to_owned()),
+            queue_position: Some(2),
+            wait_reason: Some("foreground_waiters_present".to_owned()),
+            priority_class: "background".to_owned(),
+            selected_provider_candidate: Some("openai:credential-openai".to_owned()),
+            timeout_ms: Some(250),
         }
     }
 

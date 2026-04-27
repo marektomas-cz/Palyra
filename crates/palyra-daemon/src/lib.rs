@@ -2232,6 +2232,7 @@ pub async fn run() -> Result<()> {
         gateway::GatewayRuntimeDependencies {
             model_provider,
             vault: Arc::clone(&vault),
+            auth_profile_registry: Some(Arc::clone(&auth_registry)),
             agent_registry,
             tool_posture_registry,
             retrieval_backend: Arc::new(ExternalDerivedRetrievalBackend::new(

@@ -1008,6 +1008,58 @@ fn credential_availability_state(
     }
 }
 
+fn provider_effective_health_state(
+    health: &ProviderHealthProbeSnapshot,
+    metrics: &ProviderRuntimeMetricsSnapshot,
+    circuit: &ProviderCircuitBreakerSnapshot,
+) -> &'static str {
+    if circuit.open {
+        return "cooling_down";
+    }
+    if let Some(last_error) = metrics.last_error.as_ref() {
+        return match last_error.class.as_str() {
+            "auth_invalid" | "auth_expired" | "permission_denied" | "quota_exceeded" => {
+                "unavailable"
+            }
+            "rate_limited"
+            | "network_unavailable"
+            | "provider_timeout"
+            | "transient_upstream"
+            | "malformed_response"
+            | "permanent_upstream" => "degraded",
+            _ => "degraded",
+        };
+    }
+    match health.state.as_str() {
+        "ok" | "static" => "healthy",
+        "missing_auth" => "unavailable",
+        "degraded" => "degraded",
+        "cooling_down" => "cooling_down",
+        "unavailable" => "unavailable",
+        _ => "unknown",
+    }
+}
+
+fn provider_route_reason(
+    selected: bool,
+    capability_state: &str,
+    health_state: &str,
+    failover_enabled: bool,
+) -> String {
+    if selected && capability_state == "eligible" && health_state != "unavailable" {
+        return "selected_default".to_owned();
+    }
+    if capability_state != "eligible" {
+        return capability_state.to_owned();
+    }
+    match health_state {
+        "cooling_down" => "circuit_open".to_owned(),
+        "unavailable" => "provider_unavailable".to_owned(),
+        _ if failover_enabled => "failover_candidate".to_owned(),
+        _ => "available_failover_disabled".to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderAttemptSummary {
     pub provider_id: String,
@@ -1725,6 +1777,46 @@ pub struct ProviderRegistrySnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderRouteCandidateTrace {
+    pub provider_id: String,
+    pub credential_id: String,
+    pub model_id: String,
+    pub role: String,
+    pub capability_state: String,
+    pub health_state: String,
+    pub selected: bool,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderRouteSelectionTrace {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model_id: Option<String>,
+    pub failover_enabled: bool,
+    pub generated_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<ProviderRouteCandidateTrace>,
+}
+
+impl ProviderRouteSelectionTrace {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            default_model_id: None,
+            failover_enabled: false,
+            generated_at_unix_ms: current_unix_ms().unwrap_or_default(),
+            selected_provider_id: None,
+            selected_model_id: None,
+            candidates: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProviderResponseCacheSnapshot {
     pub enabled: bool,
     pub entry_count: usize,
@@ -1766,6 +1858,7 @@ pub struct ProviderStatusSnapshot {
     pub health: ProviderHealthProbeSnapshot,
     pub discovery: ProviderDiscoverySnapshot,
     pub registry: ProviderRegistrySnapshot,
+    pub route_selection: ProviderRouteSelectionTrace,
 }
 
 pub trait ModelProvider: Send + Sync {
@@ -2256,6 +2349,110 @@ impl RegistryBackedModelProvider {
             })
             .collect()
     }
+
+    fn route_selection_trace(
+        &self,
+        statuses: &HashMap<String, ProviderStatusSnapshot>,
+        default_model_id: Option<&str>,
+    ) -> ProviderRouteSelectionTrace {
+        let selected_model = default_model_id.and_then(|model_id| self.models.get(model_id));
+        let selected_provider_id = selected_model.map(|model| model.provider_id.clone());
+        let mut candidates = self
+            .registry
+            .models
+            .iter()
+            .filter(|model| model.role == ProviderModelRole::Chat)
+            .map(|model| {
+                let provider = self.providers.get(model.provider_id.as_str());
+                let provider_entry = provider.map(|runtime| &runtime.entry);
+                let runtime_status = statuses.get(model.provider_id.as_str());
+                let circuit = runtime_status
+                    .map(|snapshot| snapshot.circuit_breaker.clone())
+                    .unwrap_or_else(|| {
+                        provider_entry.map_or(
+                            ProviderCircuitBreakerSnapshot {
+                                failure_threshold: self.config.circuit_breaker_failure_threshold,
+                                cooldown_ms: self.config.circuit_breaker_cooldown_ms,
+                                consecutive_failures: 0,
+                                open: false,
+                            },
+                            |entry| ProviderCircuitBreakerSnapshot {
+                                failure_threshold: entry.circuit_breaker_failure_threshold,
+                                cooldown_ms: entry.circuit_breaker_cooldown_ms,
+                                consecutive_failures: 0,
+                                open: false,
+                            },
+                        )
+                    });
+                let metrics = runtime_status
+                    .map(|snapshot| snapshot.runtime_metrics.clone())
+                    .unwrap_or_else(empty_runtime_metrics_snapshot);
+                let health =
+                    runtime_status.map(|snapshot| snapshot.health.clone()).unwrap_or_else(|| {
+                        empty_health_probe_snapshot(
+                            "unknown",
+                            "provider has not been probed yet",
+                            "registry",
+                        )
+                    });
+                let capability_state = if !model.enabled {
+                    "model_disabled"
+                } else if !provider_entry.is_some_and(|entry| entry.enabled) {
+                    "provider_disabled"
+                } else {
+                    "eligible"
+                };
+                let health_state =
+                    provider_effective_health_state(&health, &metrics, &circuit).to_owned();
+                let selected = default_model_id.is_some_and(|model_id| model_id == model.model_id);
+                ProviderRouteCandidateTrace {
+                    provider_id: model.provider_id.clone(),
+                    credential_id: provider_entry.map_or_else(
+                        || {
+                            normalized_provider_credential_id(
+                                model.provider_id.as_str(),
+                                None,
+                                None,
+                            )
+                        },
+                        |entry| {
+                            normalized_provider_credential_id(
+                                entry.provider_id.as_str(),
+                                entry.auth_profile_id.as_deref(),
+                                entry.credential_source,
+                            )
+                        },
+                    ),
+                    model_id: model.model_id.clone(),
+                    role: model.role.as_str().to_owned(),
+                    capability_state: capability_state.to_owned(),
+                    reason_code: provider_route_reason(
+                        selected,
+                        capability_state,
+                        health_state.as_str(),
+                        self.registry.failover_enabled,
+                    ),
+                    health_state,
+                    selected,
+                }
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .selected
+                .cmp(&left.selected)
+                .then_with(|| left.provider_id.cmp(&right.provider_id))
+                .then_with(|| left.model_id.cmp(&right.model_id))
+        });
+        ProviderRouteSelectionTrace {
+            default_model_id: default_model_id.map(str::to_owned),
+            failover_enabled: self.registry.failover_enabled,
+            generated_at_unix_ms: current_unix_ms().unwrap_or_default(),
+            selected_provider_id,
+            selected_model_id: selected_model.map(|model| model.model_id.clone()),
+            candidates,
+        }
+    }
 }
 
 impl ModelProvider for RegistryBackedModelProvider {
@@ -2542,6 +2739,7 @@ impl ModelProvider for RegistryBackedModelProvider {
                 capabilities: model.capabilities.clone(),
             })
             .collect::<Vec<_>>();
+        let route_selection = self.route_selection_trace(&statuses, default_model_id.as_deref());
 
         ProviderStatusSnapshot {
             kind: default_provider_entry
@@ -2648,6 +2846,7 @@ impl ModelProvider for RegistryBackedModelProvider {
                 credentials,
                 models,
             },
+            route_selection,
         }
     }
 }
@@ -3000,8 +3199,10 @@ impl ModelProvider for DeterministicProvider {
                 credentials: Vec::new(),
                 models: Vec::new(),
             },
+            route_selection: ProviderRouteSelectionTrace::empty(),
         };
         snapshot.registry = registry_snapshot_from_config(&self.config, &snapshot);
+        snapshot.route_selection = route_selection_from_status_snapshot(&snapshot);
         snapshot
     }
 }
@@ -4044,8 +4245,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 credentials: Vec::new(),
                 models: Vec::new(),
             },
+            route_selection: ProviderRouteSelectionTrace::empty(),
         };
         snapshot.registry = registry_snapshot_from_config(&self.config, &snapshot);
+        snapshot.route_selection = route_selection_from_status_snapshot(&snapshot);
         snapshot
     }
 }
@@ -4470,8 +4673,10 @@ impl ModelProvider for AnthropicProvider {
                 credentials: Vec::new(),
                 models: Vec::new(),
             },
+            route_selection: ProviderRouteSelectionTrace::empty(),
         };
         snapshot.registry = registry_snapshot_from_config(&self.config, &snapshot);
+        snapshot.route_selection = route_selection_from_status_snapshot(&snapshot);
         snapshot
     }
 }
@@ -4652,6 +4857,48 @@ fn elapsed_millis_since(started_at: Instant) -> u64 {
 
 fn current_unix_ms() -> Result<i64, std::time::SystemTimeError> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64)
+}
+
+fn route_selection_from_status_snapshot(
+    snapshot: &ProviderStatusSnapshot,
+) -> ProviderRouteSelectionTrace {
+    let health_state = provider_effective_health_state(
+        &snapshot.health,
+        &snapshot.runtime_metrics,
+        &snapshot.circuit_breaker,
+    )
+    .to_owned();
+    let model_id = snapshot.model_id.clone();
+    let candidate = model_id.as_ref().map(|model_id| {
+        let capability_state = if snapshot.api_key_configured || snapshot.kind == "deterministic" {
+            "eligible"
+        } else {
+            "provider_unconfigured"
+        };
+        ProviderRouteCandidateTrace {
+            provider_id: snapshot.provider_id.clone(),
+            credential_id: snapshot.credential_id.clone(),
+            model_id: model_id.clone(),
+            role: "chat".to_owned(),
+            capability_state: capability_state.to_owned(),
+            reason_code: provider_route_reason(
+                true,
+                capability_state,
+                health_state.as_str(),
+                snapshot.registry.failover_enabled,
+            ),
+            health_state: health_state.clone(),
+            selected: true,
+        }
+    });
+    ProviderRouteSelectionTrace {
+        default_model_id: model_id.clone(),
+        failover_enabled: snapshot.registry.failover_enabled,
+        generated_at_unix_ms: current_unix_ms().unwrap_or_default(),
+        selected_provider_id: Some(snapshot.provider_id.clone()),
+        selected_model_id: model_id,
+        candidates: candidate.into_iter().collect(),
+    }
 }
 
 pub(crate) fn sanitize_remote_error(body: &str) -> String {

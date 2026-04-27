@@ -1760,7 +1760,8 @@ mod tests {
         ProviderCapabilitiesSnapshot, ProviderCircuitBreakerSnapshot, ProviderDiscoverySnapshot,
         ProviderHealthProbeSnapshot, ProviderRegistryModelSnapshot,
         ProviderRegistryProviderSnapshot, ProviderRegistrySnapshot, ProviderResponseCacheSnapshot,
-        ProviderRetryPolicySnapshot, ProviderRuntimeMetricsSnapshot, ProviderStatusSnapshot,
+        ProviderRetryPolicySnapshot, ProviderRouteSelectionTrace, ProviderRuntimeMetricsSnapshot,
+        ProviderStatusSnapshot,
     };
     use crate::transport::grpc::auth::RequestContext;
     use palyra_safety::{SafetyAction, TrustLabel};
@@ -2005,6 +2006,7 @@ mod tests {
                     provider_registry_model("small", "anthropic", 8_192),
                 ],
             },
+            route_selection: ProviderRouteSelectionTrace::empty(),
         }
     }
 

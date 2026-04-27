@@ -42,6 +42,15 @@ pub(crate) struct ProviderLeasePreviewSnapshot {
     pub credential_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
+    pub priority_class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_provider_candidate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 impl ProviderLeasePreviewSnapshot {
@@ -57,8 +66,36 @@ impl ProviderLeasePreviewSnapshot {
             background_waiters: 0,
             credential_state: None,
             reason: None,
+            queue_position: None,
+            wait_reason: None,
+            priority_class: lease_priority_class(priority).to_owned(),
+            selected_provider_candidate: None,
+            timeout_ms: None,
         }
     }
+}
+
+fn lease_priority_class(priority: LeasePriority) -> &'static str {
+    match priority {
+        LeasePriority::Foreground => "foreground",
+        LeasePriority::Background => "background",
+    }
+}
+
+fn queue_position_for_preview(
+    state: LeasePreviewState,
+    priority: LeasePriority,
+    foreground_waiters: u16,
+    background_waiters: u16,
+) -> Option<u16> {
+    if state == LeasePreviewState::Ready {
+        return None;
+    }
+    let waiters_ahead = match priority {
+        LeasePriority::Foreground => foreground_waiters,
+        LeasePriority::Background => foreground_waiters.saturating_add(background_waiters),
+    };
+    Some(waiters_ahead.saturating_add(1))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -537,6 +574,7 @@ impl ProviderLeaseManagerInner {
             } else {
                 LeasePreviewState::Deferred
             };
+            let reason = format!("credential_feedback:{}", feedback.reason);
             return ProviderLeasePreviewSnapshot {
                 state: state_kind,
                 priority,
@@ -547,7 +585,17 @@ impl ProviderLeaseManagerInner {
                 foreground_waiters,
                 background_waiters,
                 credential_state: Some(feedback.state.clone()),
-                reason: Some(format!("credential_feedback:{}", feedback.reason)),
+                reason: Some(reason.clone()),
+                queue_position: queue_position_for_preview(
+                    state_kind,
+                    priority,
+                    foreground_waiters,
+                    background_waiters,
+                ),
+                wait_reason: Some(reason),
+                priority_class: lease_priority_class(priority).to_owned(),
+                selected_provider_candidate: Some(format!("{provider_id}:{credential_id}")),
+                timeout_ms: Some(max_wait_ms),
             };
         }
         let provider_reason =
@@ -583,6 +631,16 @@ impl ProviderLeaseManagerInner {
             background_waiters,
             credential_state: None,
             reason: reason.map(str::to_owned),
+            queue_position: queue_position_for_preview(
+                state_kind,
+                priority,
+                foreground_waiters,
+                background_waiters,
+            ),
+            wait_reason: reason.map(str::to_owned),
+            priority_class: lease_priority_class(priority).to_owned(),
+            selected_provider_candidate: Some(format!("{provider_id}:{credential_id}")),
+            timeout_ms: Some(max_wait_ms),
         }
     }
 
