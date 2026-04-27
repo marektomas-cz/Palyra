@@ -11,7 +11,8 @@ use crate::{
     application::{
         delivery_arbitration::resolve_delivery_policy,
         provider_input::{
-            prepare_model_provider_input, MemoryPromptFailureMode, PrepareModelProviderInputRequest,
+            build_provider_image_inputs, prepare_model_provider_input, MemoryPromptFailureMode,
+            PrepareModelProviderInputRequest,
         },
         service_authorization::authorize_message_action,
         tool_registry::{
@@ -32,7 +33,7 @@ use crate::{
         MemorySource, OrchestratorRunStartRequest, OrchestratorSessionResolveRequest,
         OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
     },
-    model_provider::ProviderRequest,
+    model_provider::{ProviderMessage, ProviderRequest},
     orchestrator::RunLifecycleState,
     provider_leases::ProviderLeaseExecutionContext,
     tool_protocol::ToolRequestContext,
@@ -294,28 +295,12 @@ pub(crate) async fn handle_routed_route_message(
         .await?;
     tape_seq = tape_seq.saturating_add(1);
 
-    let prepared_provider_input = prepare_model_provider_input(
-        runtime_state,
-        &route_request_context,
-        PrepareModelProviderInputRequest {
-            run_id: run_id.as_str(),
-            tape_seq: &mut tape_seq,
-            session_id: session_id.as_str(),
-            previous_run_id: previous_run_id_for_context.as_deref(),
-            parameter_delta_json: None,
-            input_text: input.text.as_str(),
-            attachments: content.attachments.as_slice(),
-            memory_ingest_reason: "route_message_user_input",
-            memory_prompt_failure_mode: MemoryPromptFailureMode::FallbackToRawInput {
-                warn_message: "route message memory auto-inject failed; falling back to raw input",
-            },
-            channel_for_log: plan.channel.as_str(),
-        },
-    )
-    .await?;
-
     let routing_scope_kind = if route_agent_id.is_some() { "agent" } else { "session" };
     let routing_scope_id = route_agent_id.as_deref().unwrap_or(session_id.as_str());
+    let provider_snapshot = runtime_state.model_provider_status_snapshot();
+    let routing_vision_inputs =
+        build_provider_image_inputs(content.attachments.as_slice(), &runtime_state.config.media)
+            .len();
     let routing_decision = plan_usage_routing(UsageRoutingPlanRequest {
         runtime_state,
         request_context: &route_request_context,
@@ -324,11 +309,11 @@ pub(crate) async fn handle_routed_route_message(
         parameter_delta_json: None,
         prompt_text: input.text.as_str(),
         json_mode: json_mode_requested,
-        vision_inputs: prepared_provider_input.vision_inputs.len(),
+        vision_inputs: routing_vision_inputs,
         scope_kind: routing_scope_kind,
         scope_id: routing_scope_id,
         task_class: RoutingTaskClass::PrimaryInteractive,
-        provider_snapshot: &runtime_state.model_provider_status_snapshot(),
+        provider_snapshot: &provider_snapshot,
     })
     .await?;
 
@@ -344,6 +329,28 @@ pub(crate) async fn handle_routed_route_message(
         &mut tape_seq,
     )
     .await?;
+    let prepared_provider_input = prepare_model_provider_input(
+        runtime_state,
+        &route_request_context,
+        PrepareModelProviderInputRequest {
+            run_id: run_id.as_str(),
+            tape_seq: &mut tape_seq,
+            session_id: session_id.as_str(),
+            previous_run_id: previous_run_id_for_context.as_deref(),
+            parameter_delta_json: None,
+            input_text: input.text.as_str(),
+            attachments: content.attachments.as_slice(),
+            provider_kind_hint: Some(routing_decision.provider_kind.as_str()),
+            provider_model_id_hint: Some(routing_decision.actual_model_id.as_str()),
+            tool_catalog_snapshot: Some(&tool_catalog_snapshot),
+            memory_ingest_reason: "route_message_user_input",
+            memory_prompt_failure_mode: MemoryPromptFailureMode::FallbackToRawInput {
+                warn_message: "route message memory auto-inject failed; falling back to raw input",
+            },
+            channel_for_log: plan.channel.as_str(),
+        },
+    )
+    .await?;
     let mut provider_request = ProviderRequest::from_input_text(
         prepared_provider_input.provider_input_text,
         json_mode_requested,
@@ -352,6 +359,14 @@ pub(crate) async fn handle_routed_route_message(
     );
     provider_request.tool_catalog_snapshot =
         Some(snapshot_to_provider_request_value(&tool_catalog_snapshot));
+    provider_request.instruction_hash = prepared_provider_input.instruction_hash.clone();
+    provider_request.context_trace_id = prepared_provider_input.context_trace_id.clone();
+    provider_request.budget_profile = prepared_provider_input.budget_profile.clone();
+    if !prepared_provider_input.provider_messages.is_empty() {
+        let mut messages = prepared_provider_input.provider_messages.clone();
+        messages.push(ProviderMessage::user_text(provider_request.input_text.clone()));
+        provider_request.messages = messages;
+    }
 
     let provider_response = runtime_state
         .execute_model_provider_with_lease(

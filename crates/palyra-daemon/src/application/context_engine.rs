@@ -1,8 +1,4 @@
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use palyra_safety::{
     transform_text_for_prompt, SafetyAction, SafetyContentKind, SafetySourceKind, TrustLabel,
@@ -16,6 +12,10 @@ use crate::{
     application::{
         context_compression::{shrink_json_value, JsonShrinkConfig},
         context_references::{render_context_reference_block, ContextReferencePreviewEnvelope},
+        instruction_compiler::{
+            CompiledInstructions, InstructionCompiler, InstructionCompilerInput,
+            InstructionTrustSummary,
+        },
         learning::render_preference_prompt_context,
         provider_input::{
             build_attachment_recall_prompt, build_explicit_recall_prompt,
@@ -28,12 +28,14 @@ use crate::{
             classify_pruning_task, context_engine_pruning_outcome, detect_pruning_risk,
             pruning_decision_from_config,
         },
+        tool_registry::{ModelVisibleToolCatalogSnapshot, ToolExposureSurface},
     },
     gateway::{ingest_memory_best_effort, GatewayRuntimeState},
     journal::{
         OrchestratorCheckpointRecord, OrchestratorCompactionArtifactRecord,
         OrchestratorTapeAppendRequest,
     },
+    model_provider::ProviderMessageRole,
     transport::grpc::auth::RequestContext,
 };
 
@@ -43,8 +45,12 @@ const MAX_RESERVED_COMPLETION_TOKENS: u64 = 2_048;
 const MIN_RESERVED_COMPLETION_TOKENS: u64 = 512;
 const RESERVED_TOOL_RESULT_TOKENS: u64 = 512;
 const PROVIDER_OVERHEAD_TOKENS: u64 = 192;
+const CONTEXT_BUDGET_SAFETY_MARGIN_TOKENS: u64 = 256;
+const TOOL_SCHEMA_BASE_OVERHEAD_TOKENS: u64 = 24;
+const TOOL_SCHEMA_PER_TOOL_OVERHEAD_TOKENS: u64 = 12;
 const SEGMENT_PREVIEW_CHARS: usize = 180;
-const CONTEXT_ENGINE_PLAN_EVENT: &str = "context.engine.plan";
+pub(crate) const CONTEXT_ENGINE_PLAN_EVENT: &str = "context.engine.plan";
+pub(crate) const CONTEXT_ASSEMBLY_TRACE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +77,8 @@ impl ContextEngineStrategy {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ContextSegmentKind {
+    SystemInstructions,
+    DeveloperInstructions,
     PreferenceContext,
     ProjectContext,
     SessionCompactionSummary,
@@ -88,6 +96,8 @@ impl ContextSegmentKind {
     #[allow(dead_code)]
     fn as_str(self) -> &'static str {
         match self {
+            Self::SystemInstructions => "system_instructions",
+            Self::DeveloperInstructions => "developer_instructions",
             Self::PreferenceContext => "preference_context",
             Self::ProjectContext => "project_context",
             Self::SessionCompactionSummary => "session_compaction_summary",
@@ -103,16 +113,32 @@ impl ContextSegmentKind {
     }
 }
 
+pub(crate) type ContextTrustLabel = TrustLabel;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ContextSourceKind {
+    System,
+    Developer,
+    User,
+    Workspace,
+    Memory,
+    Retrieval,
+    Attachment,
+    ToolResult,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ContextEngineSegmentExplain {
     pub(crate) kind: ContextSegmentKind,
+    pub(crate) source_kind: ContextSourceKind,
     pub(crate) label: String,
     pub(crate) estimated_tokens: u64,
     pub(crate) include_reason: String,
     pub(crate) redaction_status: String,
     pub(crate) stable: bool,
     pub(crate) protected: bool,
-    pub(crate) trust_label: TrustLabel,
+    pub(crate) trust_label: ContextTrustLabel,
     pub(crate) safety_action: SafetyAction,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) safety_findings: Vec<String>,
@@ -144,14 +170,22 @@ pub(crate) struct PromptAssemblyStepExplain {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ContextEngineBudgetExplain {
+    pub(crate) profile_id: String,
+    pub(crate) provider_id: String,
+    pub(crate) provider_kind: String,
     pub(crate) model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) failover_budget_model_id: Option<String>,
     pub(crate) max_context_tokens: u64,
     pub(crate) reserved_completion_tokens: u64,
     pub(crate) reserved_tool_result_tokens: u64,
     pub(crate) provider_overhead_tokens: u64,
+    pub(crate) safety_margin_tokens: u64,
+    pub(crate) tool_schema_overhead_tokens: u64,
     pub(crate) input_budget_tokens: u64,
     pub(crate) selected_tokens: u64,
     pub(crate) dropped_tokens: u64,
+    pub(crate) overflow_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,22 +209,39 @@ pub(crate) struct SummaryQualityGateExplain {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ContextEngineInstructionExplain {
+    pub(crate) version: u32,
+    pub(crate) hash: String,
+    pub(crate) provider_kind: String,
+    pub(crate) model_family: String,
+    pub(crate) surface: ToolExposureSurface,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ContextEngineExplain {
+    pub(crate) schema_version: u32,
+    pub(crate) trace_id: String,
     pub(crate) strategy: ContextEngineStrategy,
     pub(crate) rollout_enabled: bool,
     pub(crate) budget: ContextEngineBudgetExplain,
     pub(crate) cache: ContextEngineCacheExplain,
     pub(crate) summary_quality: Option<SummaryQualityGateExplain>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) instruction: Option<ContextEngineInstructionExplain>,
+    pub(crate) reason_codes: Vec<String>,
     pub(crate) assembly_steps: Vec<PromptAssemblyStepExplain>,
     pub(crate) selected_segments: Vec<ContextEngineSegmentExplain>,
     pub(crate) dropped_segments: Vec<ContextEngineDroppedSegmentExplain>,
 }
+
+pub(crate) type ContextAssemblyTrace = ContextEngineExplain;
 
 #[derive(Debug, Clone)]
 struct ContextSegment {
     kind: ContextSegmentKind,
     label: String,
     content: String,
+    provider_role: Option<ProviderMessageRole>,
     estimated_tokens: u64,
     priority: u8,
     stable: bool,
@@ -216,6 +267,7 @@ impl ContextSegment {
             label: label.into(),
             estimated_tokens: estimate_tokens(content.as_str()),
             content,
+            provider_role: None,
             priority,
             stable,
             protected,
@@ -239,24 +291,67 @@ impl ContextSegment {
         self.safety_findings = safety_findings;
         self
     }
+
+    fn instruction(
+        kind: ContextSegmentKind,
+        label: impl Into<String>,
+        content: String,
+        provider_role: ProviderMessageRole,
+        estimated_tokens: u64,
+    ) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            content,
+            provider_role: Some(provider_role),
+            estimated_tokens,
+            priority: 99,
+            stable: true,
+            protected: true,
+            group_id: Some("instruction_compiler:v1".to_owned()),
+            trust_label: TrustLabel::TrustedLocal,
+            safety_action: SafetyAction::Allow,
+            safety_findings: Vec::new(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ProviderBudgetProfile {
+    pub(crate) profile_id: String,
+    pub(crate) provider_id: String,
+    pub(crate) provider_kind: String,
+    pub(crate) model_id: String,
+    pub(crate) context_window_tokens: u64,
+    pub(crate) max_output_tokens: u64,
+    pub(crate) safety_margin_tokens: u64,
+    pub(crate) tool_schema_overhead_tokens: u64,
+    pub(crate) provider_cache_supported: bool,
+    pub(crate) failover_policy: String,
+    pub(crate) failover_budget_model_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct ProviderContextBudget {
+    profile: ProviderBudgetProfile,
     max_context_tokens: u64,
     reserved_completion_tokens: u64,
     reserved_tool_result_tokens: u64,
     provider_overhead_tokens: u64,
+    safety_margin_tokens: u64,
+    tool_schema_overhead_tokens: u64,
     provider_cache_supported: bool,
 }
 
 impl ProviderContextBudget {
-    fn input_budget_tokens(self) -> u64 {
+    fn input_budget_tokens(&self) -> u64 {
         self.max_context_tokens
             .saturating_sub(self.reserved_completion_tokens)
             .saturating_sub(self.reserved_tool_result_tokens)
             .saturating_sub(self.provider_overhead_tokens)
-            .max(1_024)
+            .saturating_sub(self.safety_margin_tokens)
+            .saturating_sub(self.tool_schema_overhead_tokens)
+            .max(1)
     }
 }
 
@@ -287,6 +382,9 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
         parameter_delta_json,
         input_text,
         attachments,
+        provider_kind_hint,
+        provider_model_id_hint,
+        tool_catalog_snapshot,
         memory_ingest_reason,
         memory_prompt_failure_mode,
         channel_for_log,
@@ -306,8 +404,12 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
     )
     .await;
 
-    let provider_budget =
-        resolve_provider_context_budget(&runtime_state.model_provider_status_snapshot(), None);
+    let provider_budget = resolve_provider_context_budget(
+        &runtime_state.model_provider_status_snapshot(),
+        provider_kind_hint,
+        provider_model_id_hint,
+        tool_catalog_snapshot,
+    );
     let vision_inputs = build_provider_image_inputs(attachments, &runtime_state.config.media);
     let mut segments = Vec::new();
 
@@ -333,16 +435,27 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
             .await?
             .and_then(clean_segment_content)
     {
+        let transformed = transform_text_for_prompt(
+            project_context_block.as_str(),
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
         push_segment(
             &mut segments,
             ContextSegment::trusted(
                 ContextSegmentKind::ProjectContext,
                 "project_context",
-                project_context_block,
+                transformed.transformed_text,
                 86,
                 true,
                 false,
                 None,
+            )
+            .with_safety(
+                transformed.scan.trust_label,
+                transformed.scan.recommended_action,
+                transformed.scan.finding_codes(),
             ),
         );
     }
@@ -353,7 +466,7 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
         run_id,
         tape_seq,
         session_id,
-        provider_budget,
+        provider_budget.clone(),
     )
     .await?;
     if let Some(segment) = compaction_decision.segment.clone() {
@@ -496,22 +609,46 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
         ),
     );
 
+    let compiled_instructions = InstructionCompiler.compile(InstructionCompilerInput {
+        provider_kind: provider_budget.profile.provider_kind.as_str(),
+        model_family: provider_budget.profile.model_id.as_str(),
+        surface: tool_catalog_snapshot
+            .map(|snapshot| snapshot.surface)
+            .unwrap_or(ToolExposureSurface::RunStream),
+        tool_catalog: tool_catalog_snapshot,
+        approval_mode: "policy_gate",
+        trust_summary: instruction_trust_summary(segments.as_slice()),
+    });
+    let mut ordered_segments = instruction_segments(&compiled_instructions);
+    ordered_segments.append(&mut segments);
+    segments = ordered_segments;
+
     let strategy = select_strategy(
         segments.as_slice(),
-        provider_budget,
+        provider_budget.clone(),
         compaction_decision.summary_quality.as_ref(),
         compaction_decision.checkpoint_summary_present,
     );
-    let assembled = assemble_segments(
+    let mut assembled = assemble_segments(
         segments.as_slice(),
         strategy,
-        provider_budget,
+        provider_budget.clone(),
         context,
         session_id,
         compaction_decision.summary_quality.clone(),
     );
+    assembled.explain.instruction = Some(ContextEngineInstructionExplain {
+        version: compiled_instructions.version,
+        hash: compiled_instructions.hash.clone(),
+        provider_kind: compiled_instructions.provider_kind.clone(),
+        model_family: compiled_instructions.model_family.clone(),
+        surface: compiled_instructions.surface,
+    });
 
     record_context_engine_plan(runtime_state, run_id, tape_seq, assembled.explain.clone()).await?;
+    if assembled.explain.budget.overflow_tokens > 0 {
+        return Err(Status::resource_exhausted("context_budget_exhausted"));
+    }
     let pruning_task_class = classify_pruning_task(memory_ingest_reason, parameter_delta_json);
     let pruning_risk_level = detect_pruning_risk(assembled.prompt_text.as_str());
     let pruning_decision = pruning_decision_from_config(
@@ -536,7 +673,14 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
         .await?;
     }
 
-    Ok(PreparedModelProviderInput { provider_input_text: assembled.prompt_text, vision_inputs })
+    Ok(PreparedModelProviderInput {
+        provider_input_text: assembled.prompt_text,
+        provider_messages: compiled_instructions.provider_messages(),
+        vision_inputs,
+        instruction_hash: Some(compiled_instructions.hash),
+        context_trace_id: Some(assembled.explain.trace_id),
+        budget_profile: Some(assembled.explain.budget.profile_id),
+    })
 }
 
 #[derive(Debug)]
@@ -625,6 +769,7 @@ fn assemble_segments(
     selected.sort_by_key(|entry| entry.order);
     let prompt_text = selected
         .iter()
+        .filter(|entry| entry.segment.provider_role.is_none())
         .map(|entry| entry.segment.content.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -637,16 +782,24 @@ fn assemble_segments(
     let stable_prefix_tokens =
         stable_prefix.iter().map(|segment| segment.estimated_tokens).sum::<u64>();
     let stable_prefix_hash = (!stable_prefix.is_empty()).then(|| {
-        let mut hasher = DefaultHasher::new();
-        strategy.hash(&mut hasher);
-        session_id.hash(&mut hasher);
-        context.principal.hash(&mut hasher);
-        context.channel.hash(&mut hasher);
-        for segment in &stable_prefix {
-            segment.kind.hash(&mut hasher);
-            segment.content.hash(&mut hasher);
-        }
-        format!("{:016x}", hasher.finish())
+        stable_sha256_json(&json!({
+            "schema_version": 1,
+            "strategy": strategy.as_str(),
+            "profile_id": budget.profile.profile_id.as_str(),
+            "session_id": session_id,
+            "principal": context.principal.as_str(),
+            "channel": context.channel.as_deref(),
+            "segments": stable_prefix.iter().map(|segment| {
+                json!({
+                    "kind": segment.kind.as_str(),
+                    "label": segment.label.as_str(),
+                    "content": segment.content.as_str(),
+                    "trust_label": segment.trust_label.as_str(),
+                    "safety_action": segment.safety_action.as_str(),
+                    "stable": segment.stable,
+                })
+            }).collect::<Vec<_>>(),
+        }))
     });
     let trust_scope =
         if selected.iter().any(|entry| entry.segment.trust_label != TrustLabel::TrustedLocal) {
@@ -666,10 +819,10 @@ fn assemble_segments(
     let selected_segment_explain = selected
         .iter()
         .map(|entry| {
-            let preview =
-                explain_preview_text(entry.segment.content.as_str(), SEGMENT_PREVIEW_CHARS);
+            let preview = explain_preview_for_segment(&entry.segment);
             ContextEngineSegmentExplain {
                 kind: entry.segment.kind,
+                source_kind: source_kind_for_segment(&entry.segment),
                 label: entry.segment.label.clone(),
                 estimated_tokens: entry.segment.estimated_tokens,
                 include_reason: include_reason_for_segment(&entry.segment),
@@ -690,21 +843,69 @@ fn assemble_segments(
         dropped.as_slice(),
         selected_segment_explain.as_slice(),
     );
+    let overflow_tokens = selected_tokens.saturating_sub(budget_tokens);
+    let trace_id = stable_sha256_json(&json!({
+        "schema_version": CONTEXT_ASSEMBLY_TRACE_SCHEMA_VERSION,
+        "session_id": session_id,
+        "profile_id": budget.profile.profile_id.as_str(),
+        "strategy": strategy.as_str(),
+        "selected": selected_segment_explain.iter().map(|segment| {
+            json!({
+                "kind": segment.kind.as_str(),
+                "source_kind": segment.source_kind,
+                "label": segment.label.as_str(),
+                "estimated_tokens": segment.estimated_tokens,
+                "stable": segment.stable,
+                "trust_label": segment.trust_label.as_str(),
+                "safety_action": segment.safety_action.as_str(),
+                "safety_findings": segment.safety_findings.as_slice(),
+            })
+        }).collect::<Vec<_>>(),
+        "dropped": dropped.iter().map(|segment| {
+            json!({
+                "kind": segment.kind.as_str(),
+                "label": segment.label.as_str(),
+                "estimated_tokens": segment.estimated_tokens,
+                "reason": segment.reason.as_str(),
+            })
+        }).collect::<Vec<_>>(),
+    }));
+    let mut reason_codes = context_assembly_reason_codes(
+        strategy,
+        selected_segment_explain.as_slice(),
+        dropped.as_slice(),
+        overflow_tokens,
+        summary_quality.as_ref(),
+    );
+    if budget.profile.failover_budget_model_id.is_some() {
+        reason_codes.push("failover_budget_constrained".to_owned());
+        reason_codes.sort();
+        reason_codes.dedup();
+    }
 
     AssembledPrompt {
         prompt_text,
         explain: ContextEngineExplain {
+            schema_version: CONTEXT_ASSEMBLY_TRACE_SCHEMA_VERSION,
+            trace_id: format!("ctx_{}", &trace_id[..16]),
             strategy,
             rollout_enabled: true,
             budget: ContextEngineBudgetExplain {
-                model_id: context_budget_model_id(session_id, budget),
+                profile_id: budget.profile.profile_id.clone(),
+                provider_id: budget.profile.provider_id.clone(),
+                provider_kind: budget.profile.provider_kind.clone(),
+                model_id: budget.profile.model_id.clone(),
+                failover_budget_model_id: budget.profile.failover_budget_model_id.clone(),
                 max_context_tokens: budget.max_context_tokens,
                 reserved_completion_tokens: budget.reserved_completion_tokens,
                 reserved_tool_result_tokens: budget.reserved_tool_result_tokens,
                 provider_overhead_tokens: budget.provider_overhead_tokens,
+                safety_margin_tokens: budget.safety_margin_tokens,
+                tool_schema_overhead_tokens: budget.tool_schema_overhead_tokens,
                 input_budget_tokens: budget_tokens,
                 selected_tokens,
                 dropped_tokens,
+                overflow_tokens,
             },
             cache: ContextEngineCacheExplain {
                 provider_cache_supported: budget.provider_cache_supported,
@@ -714,6 +915,8 @@ fn assemble_segments(
                 trust_scope,
             },
             summary_quality,
+            instruction: None,
+            reason_codes,
             assembly_steps,
             selected_segments: selected_segment_explain,
             dropped_segments: dropped,
@@ -721,13 +924,11 @@ fn assemble_segments(
     }
 }
 
-fn context_budget_model_id(session_id: &str, budget: ProviderContextBudget) -> String {
-    format!("{session_id}:{}", budget.max_context_tokens)
-}
-
 fn resolve_provider_context_budget(
     snapshot: &crate::model_provider::ProviderStatusSnapshot,
+    provider_kind_hint: Option<&str>,
     model_id_hint: Option<&str>,
+    tool_catalog_snapshot: Option<&ModelVisibleToolCatalogSnapshot>,
 ) -> ProviderContextBudget {
     let model_id = model_id_hint
         .map(str::trim)
@@ -735,29 +936,250 @@ fn resolve_provider_context_budget(
         .map(ToOwned::to_owned)
         .or_else(|| snapshot.registry.default_chat_model_id.clone())
         .or_else(|| snapshot.model_id.clone());
-    let max_context_tokens = model_id
-        .as_ref()
-        .and_then(|model_id| {
+    let model = model_id.as_ref().and_then(|model_id| {
+        snapshot.registry.models.iter().find(|model| model.model_id == *model_id && model.enabled)
+    });
+    let provider_id = model
+        .map(|model| model.provider_id.clone())
+        .unwrap_or_else(|| snapshot.provider_id.clone());
+    let provider_kind = provider_kind_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
             snapshot
                 .registry
-                .models
+                .providers
                 .iter()
-                .find(|model| model.model_id == *model_id && model.enabled)
-                .and_then(|model| model.capabilities.max_context_tokens)
+                .find(|provider| provider.provider_id == provider_id)
+                .map(|provider| provider.kind.clone())
         })
-        .or(snapshot.capabilities.max_context_tokens)
-        .map(u64::from)
-        .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS)
-        .max(MIN_CONTEXT_WINDOW_TOKENS);
+        .unwrap_or_else(|| snapshot.kind.clone());
+    let model_id = model_id.unwrap_or_else(|| "unknown".to_owned());
+    let selected_context_tokens = model_context_window_tokens(model, snapshot);
+    let failover_budget_constraint =
+        failover_context_budget_constraint(snapshot, model_id.as_str(), selected_context_tokens);
+    let max_context_tokens = failover_budget_constraint
+        .as_ref()
+        .map(|constraint| constraint.context_window_tokens)
+        .unwrap_or(selected_context_tokens);
+    let failover_budget_model_id =
+        failover_budget_constraint.as_ref().map(|constraint| constraint.model_id.clone());
     let reserved_completion_tokens = (max_context_tokens / 5)
         .clamp(MIN_RESERVED_COMPLETION_TOKENS, MAX_RESERVED_COMPLETION_TOKENS);
+    let tool_schema_overhead_tokens = estimate_tool_schema_overhead_tokens(tool_catalog_snapshot);
+    let provider_cache_supported = snapshot.registry.response_cache_enabled;
+    let failover_policy = if snapshot.registry.failover_enabled {
+        "registry_failover_enabled"
+    } else {
+        "registry_failover_disabled"
+    }
+    .to_owned();
+    let profile_payload = json!({
+        "schema_version": 1,
+        "provider_id": provider_id.as_str(),
+        "provider_kind": provider_kind.as_str(),
+        "model_id": model_id.as_str(),
+        "context_window_tokens": max_context_tokens,
+        "max_output_tokens": reserved_completion_tokens,
+        "safety_margin_tokens": CONTEXT_BUDGET_SAFETY_MARGIN_TOKENS,
+        "tool_schema_overhead_tokens": tool_schema_overhead_tokens,
+        "provider_cache_supported": provider_cache_supported,
+        "failover_policy": failover_policy.as_str(),
+        "failover_budget_model_id": failover_budget_model_id.as_deref(),
+    });
+    let profile_hash = stable_sha256_json(&profile_payload);
+    let profile = ProviderBudgetProfile {
+        profile_id: format!("budget_{}", &profile_hash[..16]),
+        provider_id,
+        provider_kind,
+        model_id,
+        context_window_tokens: max_context_tokens,
+        max_output_tokens: reserved_completion_tokens,
+        safety_margin_tokens: CONTEXT_BUDGET_SAFETY_MARGIN_TOKENS,
+        tool_schema_overhead_tokens,
+        provider_cache_supported,
+        failover_policy,
+        failover_budget_model_id,
+    };
     ProviderContextBudget {
+        profile,
         max_context_tokens,
         reserved_completion_tokens,
         reserved_tool_result_tokens: RESERVED_TOOL_RESULT_TOKENS,
         provider_overhead_tokens: PROVIDER_OVERHEAD_TOKENS,
-        provider_cache_supported: snapshot.registry.response_cache_enabled,
+        safety_margin_tokens: CONTEXT_BUDGET_SAFETY_MARGIN_TOKENS,
+        tool_schema_overhead_tokens,
+        provider_cache_supported,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FailoverBudgetConstraint {
+    model_id: String,
+    context_window_tokens: u64,
+}
+
+fn model_context_window_tokens(
+    model: Option<&crate::model_provider::ProviderRegistryModelSnapshot>,
+    snapshot: &crate::model_provider::ProviderStatusSnapshot,
+) -> u64 {
+    model
+        .and_then(|model| model.capabilities.max_context_tokens)
+        .or(snapshot.capabilities.max_context_tokens)
+        .map(u64::from)
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS)
+        .max(MIN_CONTEXT_WINDOW_TOKENS)
+}
+
+fn failover_context_budget_constraint(
+    snapshot: &crate::model_provider::ProviderStatusSnapshot,
+    selected_model_id: &str,
+    selected_context_tokens: u64,
+) -> Option<FailoverBudgetConstraint> {
+    if !snapshot.registry.failover_enabled {
+        return None;
+    }
+    let mut candidates = snapshot
+        .registry
+        .models
+        .iter()
+        .filter(|model| {
+            model.enabled
+                && model.role.eq_ignore_ascii_case("chat")
+                && registry_provider_enabled(snapshot, model.provider_id.as_str())
+        })
+        .map(|model| FailoverBudgetConstraint {
+            model_id: model.model_id.clone(),
+            context_window_tokens: model_context_window_tokens(Some(model), snapshot),
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() < 2 {
+        return None;
+    }
+    candidates.sort_by(|left, right| {
+        left.context_window_tokens
+            .cmp(&right.context_window_tokens)
+            .then_with(|| left.model_id.cmp(&right.model_id))
+    });
+    candidates.into_iter().find(|candidate| {
+        candidate.model_id != selected_model_id
+            && candidate.context_window_tokens < selected_context_tokens
+    })
+}
+
+fn registry_provider_enabled(
+    snapshot: &crate::model_provider::ProviderStatusSnapshot,
+    provider_id: &str,
+) -> bool {
+    match snapshot.registry.providers.iter().find(|provider| provider.provider_id == provider_id) {
+        Some(provider) => provider.enabled,
+        None => snapshot.registry.providers.is_empty() || snapshot.provider_id == provider_id,
+    }
+}
+
+fn estimate_tool_schema_overhead_tokens(
+    tool_catalog_snapshot: Option<&ModelVisibleToolCatalogSnapshot>,
+) -> u64 {
+    let Some(snapshot) = tool_catalog_snapshot else {
+        return 0;
+    };
+    if snapshot.tools.is_empty() {
+        return 0;
+    }
+    snapshot
+        .tools
+        .iter()
+        .map(|tool| {
+            let schema = tool.provider_schema.to_string();
+            estimate_tokens(tool.description.as_str())
+                .saturating_add(estimate_tokens(schema.as_str()))
+                .saturating_add(TOOL_SCHEMA_PER_TOOL_OVERHEAD_TOKENS)
+        })
+        .sum::<u64>()
+        .saturating_add(TOOL_SCHEMA_BASE_OVERHEAD_TOKENS)
+}
+
+fn stable_sha256_json(value: &Value) -> String {
+    let payload = serde_json::to_vec(value).unwrap_or_else(|_| b"null".to_vec());
+    crate::sha256_hex(payload.as_slice())
+}
+
+fn context_assembly_reason_codes(
+    strategy: ContextEngineStrategy,
+    selected: &[ContextEngineSegmentExplain],
+    dropped: &[ContextEngineDroppedSegmentExplain],
+    overflow_tokens: u64,
+    summary_quality: Option<&SummaryQualityGateExplain>,
+) -> Vec<String> {
+    let mut reasons = vec![format!("strategy_{}", strategy.as_str())];
+    if dropped.iter().any(|segment| segment.reason == "dropped_by_budget") {
+        reasons.push("budget_dropped_segment".to_owned());
+    }
+    if dropped.iter().any(|segment| segment.reason == "dropped_by_budget_group") {
+        reasons.push("budget_dropped_group".to_owned());
+    }
+    if overflow_tokens > 0 {
+        reasons.push("context_budget_exhausted".to_owned());
+    }
+    if selected.iter().any(|segment| segment.trust_label != TrustLabel::TrustedLocal) {
+        reasons.push("mixed_trust_context".to_owned());
+    }
+    if selected.iter().any(|segment| !segment.safety_findings.is_empty()) {
+        reasons.push("prompt_injection_signal_present".to_owned());
+    }
+    if let Some(summary_quality) = summary_quality {
+        reasons.push(format!("summary_quality_{}", summary_quality.verdict));
+        reasons.extend(summary_quality.reasons.iter().cloned());
+    }
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
+fn instruction_trust_summary(segments: &[ContextSegment]) -> InstructionTrustSummary {
+    if segments.is_empty() {
+        return InstructionTrustSummary::trusted();
+    }
+    let untrusted_blocks =
+        segments.iter().filter(|segment| segment.trust_label != TrustLabel::TrustedLocal).count();
+    let prompt_injection_finding_count = segments
+        .iter()
+        .flat_map(|segment| segment.safety_findings.iter())
+        .filter(|finding| finding.starts_with("prompt_injection."))
+        .count();
+    let highest_safety_action =
+        segments.iter().map(|segment| segment.safety_action).max().unwrap_or(SafetyAction::Allow);
+    InstructionTrustSummary {
+        selected_blocks: segments.len(),
+        untrusted_blocks,
+        mixed_trust: untrusted_blocks > 0,
+        highest_safety_action,
+        prompt_injection_finding_count,
+    }
+}
+
+fn instruction_segments(compiled: &CompiledInstructions) -> Vec<ContextSegment> {
+    compiled
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let kind = match segment.role {
+                ProviderMessageRole::System => ContextSegmentKind::SystemInstructions,
+                ProviderMessageRole::Developer => ContextSegmentKind::DeveloperInstructions,
+                ProviderMessageRole::User
+                | ProviderMessageRole::Assistant
+                | ProviderMessageRole::Tool => return None,
+            };
+            Some(ContextSegment::instruction(
+                kind,
+                segment.label.clone(),
+                segment.content.clone(),
+                segment.role,
+                segment.estimated_tokens,
+            ))
+        })
+        .collect()
 }
 
 fn select_strategy(
@@ -1071,7 +1493,7 @@ async fn record_context_engine_plan(
     runtime_state: &Arc<GatewayRuntimeState>,
     run_id: &str,
     tape_seq: &mut i64,
-    explain: ContextEngineExplain,
+    explain: ContextAssemblyTrace,
 ) -> Result<(), Status> {
     runtime_state
         .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
@@ -1083,8 +1505,67 @@ async fn record_context_engine_plan(
             })?,
         })
         .await?;
+    runtime_state.record_context_assembly_trace(context_assembly_diagnostics_payload(&explain));
     *tape_seq = tape_seq.saturating_add(1);
     Ok(())
+}
+
+fn context_assembly_diagnostics_payload(explain: &ContextAssemblyTrace) -> Value {
+    json!({
+        "schema_version": explain.schema_version,
+        "trace_id": explain.trace_id.as_str(),
+        "strategy": explain.strategy,
+        "reason_codes": explain.reason_codes.as_slice(),
+        "instruction": explain.instruction.as_ref().map(|instruction| json!({
+            "version": instruction.version,
+            "hash": instruction.hash.as_str(),
+            "provider_kind": instruction.provider_kind.as_str(),
+            "model_family": instruction.model_family.as_str(),
+            "surface": instruction.surface,
+        })),
+        "budget": {
+            "profile_id": explain.budget.profile_id.as_str(),
+            "provider_id": explain.budget.provider_id.as_str(),
+            "provider_kind": explain.budget.provider_kind.as_str(),
+            "model_id": explain.budget.model_id.as_str(),
+            "failover_budget_model_id": explain.budget.failover_budget_model_id.as_deref(),
+            "max_context_tokens": explain.budget.max_context_tokens,
+            "reserved_completion_tokens": explain.budget.reserved_completion_tokens,
+            "reserved_tool_result_tokens": explain.budget.reserved_tool_result_tokens,
+            "provider_overhead_tokens": explain.budget.provider_overhead_tokens,
+            "safety_margin_tokens": explain.budget.safety_margin_tokens,
+            "tool_schema_overhead_tokens": explain.budget.tool_schema_overhead_tokens,
+            "input_budget_tokens": explain.budget.input_budget_tokens,
+            "selected_tokens": explain.budget.selected_tokens,
+            "dropped_tokens": explain.budget.dropped_tokens,
+            "overflow_tokens": explain.budget.overflow_tokens,
+        },
+        "cache": {
+            "provider_cache_supported": explain.cache.provider_cache_supported,
+            "stable_prefix_hash": explain.cache.stable_prefix_hash.as_deref(),
+            "stable_prefix_tokens": explain.cache.stable_prefix_tokens,
+            "cache_scope_key": explain.cache.cache_scope_key.as_deref(),
+            "trust_scope": explain.cache.trust_scope.as_str(),
+        },
+        "selected_segments": explain.selected_segments.iter().map(|segment| json!({
+            "kind": segment.kind,
+            "source_kind": segment.source_kind,
+            "label": segment.label.as_str(),
+            "estimated_tokens": segment.estimated_tokens,
+            "redaction_status": segment.redaction_status.as_str(),
+            "trust_label": segment.trust_label.as_str(),
+            "safety_action": segment.safety_action.as_str(),
+            "safety_findings": segment.safety_findings.as_slice(),
+            "source_refs": segment.source_refs.as_slice(),
+            "preview": segment.preview.as_str(),
+        })).collect::<Vec<_>>(),
+        "dropped_segments": explain.dropped_segments.iter().map(|segment| json!({
+            "kind": segment.kind,
+            "label": segment.label.as_str(),
+            "estimated_tokens": segment.estimated_tokens,
+            "reason": segment.reason.as_str(),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn push_segment(segments: &mut Vec<ContextSegment>, segment: ContextSegment) {
@@ -1157,6 +1638,9 @@ fn source_refs_for_segment(segment: &ContextSegment) -> Vec<String> {
 
 fn assembly_step_for_kind(kind: ContextSegmentKind) -> &'static str {
     match kind {
+        ContextSegmentKind::SystemInstructions | ContextSegmentKind::DeveloperInstructions => {
+            "instruction_compiler"
+        }
         ContextSegmentKind::PreferenceContext | ContextSegmentKind::ProjectContext => {
             "policy_system"
         }
@@ -1172,6 +1656,35 @@ fn assembly_step_for_kind(kind: ContextSegmentKind) -> &'static str {
         }
         ContextSegmentKind::UserInput => "user_turn",
     }
+}
+
+fn source_kind_for_segment(segment: &ContextSegment) -> ContextSourceKind {
+    match segment.kind {
+        ContextSegmentKind::SystemInstructions => ContextSourceKind::System,
+        ContextSegmentKind::DeveloperInstructions | ContextSegmentKind::PreferenceContext => {
+            ContextSourceKind::Developer
+        }
+        ContextSegmentKind::ProjectContext => ContextSourceKind::Workspace,
+        ContextSegmentKind::MemoryRecall
+        | ContextSegmentKind::SessionCompactionSummary
+        | ContextSegmentKind::CheckpointSummary => ContextSourceKind::Memory,
+        ContextSegmentKind::ContextReferences
+        | ContextSegmentKind::ExplicitRecall
+        | ContextSegmentKind::SessionTail => ContextSourceKind::Retrieval,
+        ContextSegmentKind::AttachmentRecall => ContextSourceKind::Attachment,
+        ContextSegmentKind::ToolExchange => ContextSourceKind::ToolResult,
+        ContextSegmentKind::UserInput => ContextSourceKind::User,
+    }
+}
+
+fn explain_preview_for_segment(segment: &ContextSegment) -> ExplainPreview {
+    if segment.provider_role.is_some() {
+        return ExplainPreview {
+            text: "<instruction_redacted>".to_owned(),
+            redaction_status: "instruction_redacted".to_owned(),
+        };
+    }
+    explain_preview_text(segment.content.as_str(), SEGMENT_PREVIEW_CHARS)
 }
 
 fn explain_preview_text(raw: &str, max_chars: usize) -> ExplainPreview {
@@ -1239,8 +1752,15 @@ fn estimate_tokens(text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_segments, select_strategy, ContextEngineStrategy, ContextSegment,
-        ContextSegmentKind, ProviderContextBudget, SummaryQualityGateExplain,
+        assemble_segments, resolve_provider_context_budget, select_strategy, ContextEngineStrategy,
+        ContextSegment, ContextSegmentKind, ProviderBudgetProfile, ProviderContextBudget,
+        SummaryQualityGateExplain,
+    };
+    use crate::model_provider::{
+        ProviderCapabilitiesSnapshot, ProviderCircuitBreakerSnapshot, ProviderDiscoverySnapshot,
+        ProviderHealthProbeSnapshot, ProviderRegistryModelSnapshot,
+        ProviderRegistryProviderSnapshot, ProviderRegistrySnapshot, ProviderResponseCacheSnapshot,
+        ProviderRetryPolicySnapshot, ProviderRuntimeMetricsSnapshot, ProviderStatusSnapshot,
     };
     use crate::transport::grpc::auth::RequestContext;
     use palyra_safety::{SafetyAction, TrustLabel};
@@ -1301,6 +1821,224 @@ mod tests {
         segment
     }
 
+    fn budget(
+        max_context_tokens: u64,
+        reserved_completion_tokens: u64,
+        reserved_tool_result_tokens: u64,
+        provider_overhead_tokens: u64,
+        provider_cache_supported: bool,
+    ) -> ProviderContextBudget {
+        ProviderContextBudget {
+            profile: ProviderBudgetProfile {
+                profile_id: format!("budget_test_{max_context_tokens}"),
+                provider_id: "provider-test".to_owned(),
+                provider_kind: "deterministic".to_owned(),
+                model_id: "model-test".to_owned(),
+                context_window_tokens: max_context_tokens,
+                max_output_tokens: reserved_completion_tokens,
+                safety_margin_tokens: 0,
+                tool_schema_overhead_tokens: 0,
+                provider_cache_supported,
+                failover_policy: "test".to_owned(),
+                failover_budget_model_id: None,
+            },
+            max_context_tokens,
+            reserved_completion_tokens,
+            reserved_tool_result_tokens,
+            provider_overhead_tokens,
+            safety_margin_tokens: 0,
+            tool_schema_overhead_tokens: 0,
+            provider_cache_supported,
+        }
+    }
+
+    fn provider_capabilities(max_context_tokens: u32) -> ProviderCapabilitiesSnapshot {
+        ProviderCapabilitiesSnapshot {
+            streaming_tokens: true,
+            tool_calls: true,
+            json_mode: true,
+            vision: false,
+            audio_transcribe: false,
+            embeddings: false,
+            max_context_tokens: Some(max_context_tokens),
+            cost_tier: "standard".to_owned(),
+            latency_tier: "standard".to_owned(),
+            recommended_use_cases: Vec::new(),
+            known_limitations: Vec::new(),
+            operator_override: false,
+            metadata_source: "test".to_owned(),
+        }
+    }
+
+    fn provider_runtime_metrics() -> ProviderRuntimeMetricsSnapshot {
+        ProviderRuntimeMetricsSnapshot {
+            request_count: 0,
+            error_count: 0,
+            error_rate_bps: 0,
+            total_retry_attempts: 0,
+            total_prompt_tokens: 0,
+            total_completion_tokens: 0,
+            avg_prompt_tokens_per_run: 0,
+            avg_completion_tokens_per_run: 0,
+            last_latency_ms: 0,
+            avg_latency_ms: 0,
+            max_latency_ms: 0,
+            last_used_at_unix_ms: None,
+            last_success_at_unix_ms: None,
+            last_error_at_unix_ms: None,
+            last_error: None,
+        }
+    }
+
+    fn provider_registry_entry(provider_id: &str, kind: &str) -> ProviderRegistryProviderSnapshot {
+        ProviderRegistryProviderSnapshot {
+            provider_id: provider_id.to_owned(),
+            credential_id: format!("credential-{provider_id}"),
+            display_name: provider_id.to_owned(),
+            kind: kind.to_owned(),
+            enabled: true,
+            endpoint_base_url: None,
+            auth_profile_id: Some(format!("auth-{provider_id}")),
+            auth_profile_provider_kind: Some(kind.to_owned()),
+            credential_source: Some("auth_profile_api_key".to_owned()),
+            api_key_configured: true,
+            retry_policy: ProviderRetryPolicySnapshot { max_retries: 1, retry_backoff_ms: 25 },
+            circuit_breaker: ProviderCircuitBreakerSnapshot {
+                failure_threshold: 3,
+                cooldown_ms: 30_000,
+                consecutive_failures: 0,
+                open: false,
+            },
+            runtime_metrics: provider_runtime_metrics(),
+            health: ProviderHealthProbeSnapshot {
+                state: "ok".to_owned(),
+                message: "ok".to_owned(),
+                checked_at_unix_ms: Some(0),
+                latency_ms: Some(1),
+                source: "test".to_owned(),
+            },
+            discovery: ProviderDiscoverySnapshot {
+                status: "static".to_owned(),
+                checked_at_unix_ms: Some(0),
+                expires_at_unix_ms: None,
+                discovered_model_ids: Vec::new(),
+                source: "test".to_owned(),
+                message: None,
+            },
+        }
+    }
+
+    fn provider_registry_model(
+        model_id: &str,
+        provider_id: &str,
+        max_context_tokens: u32,
+    ) -> ProviderRegistryModelSnapshot {
+        ProviderRegistryModelSnapshot {
+            model_id: model_id.to_owned(),
+            provider_id: provider_id.to_owned(),
+            role: "chat".to_owned(),
+            enabled: true,
+            capabilities: provider_capabilities(max_context_tokens),
+        }
+    }
+
+    fn provider_snapshot_for_budget(failover_enabled: bool) -> ProviderStatusSnapshot {
+        let default_capabilities = provider_capabilities(128_000);
+        ProviderStatusSnapshot {
+            kind: "openai_compatible".to_owned(),
+            provider_id: "openai".to_owned(),
+            credential_id: "credential-openai".to_owned(),
+            model_id: Some("large".to_owned()),
+            capabilities: default_capabilities.clone(),
+            openai_base_url: Some("https://api.openai.test/v1".to_owned()),
+            anthropic_base_url: Some("https://api.anthropic.test".to_owned()),
+            openai_model: Some("large".to_owned()),
+            anthropic_model: None,
+            openai_embeddings_model: None,
+            openai_embeddings_dims: None,
+            auth_profile_id: Some("auth-openai".to_owned()),
+            auth_profile_provider_kind: Some("openai_compatible".to_owned()),
+            credential_source: Some("auth_profile_api_key".to_owned()),
+            api_key_configured: true,
+            retry_policy: ProviderRetryPolicySnapshot { max_retries: 1, retry_backoff_ms: 25 },
+            circuit_breaker: ProviderCircuitBreakerSnapshot {
+                failure_threshold: 3,
+                cooldown_ms: 30_000,
+                consecutive_failures: 0,
+                open: false,
+            },
+            runtime_metrics: provider_runtime_metrics(),
+            response_cache: ProviderResponseCacheSnapshot {
+                enabled: true,
+                entry_count: 0,
+                hit_count: 0,
+                miss_count: 0,
+            },
+            health: ProviderHealthProbeSnapshot {
+                state: "ok".to_owned(),
+                message: "ok".to_owned(),
+                checked_at_unix_ms: Some(0),
+                latency_ms: Some(1),
+                source: "test".to_owned(),
+            },
+            discovery: ProviderDiscoverySnapshot {
+                status: "static".to_owned(),
+                checked_at_unix_ms: Some(0),
+                expires_at_unix_ms: None,
+                discovered_model_ids: vec!["large".to_owned(), "small".to_owned()],
+                source: "test".to_owned(),
+                message: None,
+            },
+            registry: ProviderRegistrySnapshot {
+                default_chat_model_id: Some("large".to_owned()),
+                default_embeddings_model_id: None,
+                default_audio_transcription_model_id: None,
+                failover_enabled,
+                response_cache_enabled: true,
+                providers: vec![
+                    provider_registry_entry("openai", "openai_compatible"),
+                    provider_registry_entry("anthropic", "anthropic"),
+                ],
+                credentials: Vec::new(),
+                models: vec![
+                    provider_registry_model("large", "openai", 128_000),
+                    provider_registry_model("small", "anthropic", 8_192),
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn provider_budget_uses_smaller_failover_context_window_when_registry_can_fallback() {
+        let snapshot = provider_snapshot_for_budget(true);
+        let budget = resolve_provider_context_budget(
+            &snapshot,
+            Some("openai_compatible"),
+            Some("large"),
+            None,
+        );
+
+        assert_eq!(budget.profile.model_id, "large");
+        assert_eq!(budget.max_context_tokens, 8_192);
+        assert_eq!(budget.profile.failover_budget_model_id.as_deref(), Some("small"));
+        assert_eq!(budget.profile.failover_policy, "registry_failover_enabled");
+    }
+
+    #[test]
+    fn provider_budget_keeps_primary_context_window_when_failover_is_disabled() {
+        let snapshot = provider_snapshot_for_budget(false);
+        let budget = resolve_provider_context_budget(
+            &snapshot,
+            Some("openai_compatible"),
+            Some("large"),
+            None,
+        );
+
+        assert_eq!(budget.max_context_tokens, 128_000);
+        assert_eq!(budget.profile.failover_budget_model_id, None);
+        assert_eq!(budget.profile.failover_policy, "registry_failover_disabled");
+    }
+
     #[test]
     fn select_strategy_prefers_summarizing_when_budget_is_tight() {
         let strategy = select_strategy(
@@ -1313,13 +2051,7 @@ mod tests {
                 false,
                 None,
             )],
-            ProviderContextBudget {
-                max_context_tokens: 3_072,
-                reserved_completion_tokens: 512,
-                reserved_tool_result_tokens: 512,
-                provider_overhead_tokens: 192,
-                provider_cache_supported: true,
-            },
+            budget(3_072, 512, 512, 192, true),
             None,
             false,
         );
@@ -1338,13 +2070,7 @@ mod tests {
                 false,
                 None,
             )],
-            ProviderContextBudget {
-                max_context_tokens: 8_192,
-                reserved_completion_tokens: 1_024,
-                reserved_tool_result_tokens: 512,
-                provider_overhead_tokens: 192,
-                provider_cache_supported: false,
-            },
+            budget(8_192, 1_024, 512, 192, false),
             Some(&SummaryQualityGateExplain {
                 verdict: "fallback".to_owned(),
                 repeated_compaction_depth: 3,
@@ -1366,13 +2092,7 @@ mod tests {
                 segment(ContextSegmentKind::UserInput, "question", 220, 100, false, true, None),
             ],
             ContextEngineStrategy::CostAware,
-            ProviderContextBudget {
-                max_context_tokens: 1_024,
-                reserved_completion_tokens: 512,
-                reserved_tool_result_tokens: 128,
-                provider_overhead_tokens: 128,
-                provider_cache_supported: true,
-            },
+            budget(1_024, 512, 128, 128, true),
             &RequestContext {
                 principal: "user:ops".to_owned(),
                 device_id: "device".to_owned(),
@@ -1419,13 +2139,7 @@ mod tests {
                 segment(ContextSegmentKind::UserInput, "ship it", 24, 100, false, true, None),
             ],
             ContextEngineStrategy::ProviderAware,
-            ProviderContextBudget {
-                max_context_tokens: 4_096,
-                reserved_completion_tokens: 768,
-                reserved_tool_result_tokens: 256,
-                provider_overhead_tokens: 128,
-                provider_cache_supported: true,
-            },
+            budget(4_096, 768, 256, 128, true),
             &RequestContext {
                 principal: "user:ops".to_owned(),
                 device_id: "device".to_owned(),
@@ -1438,17 +2152,25 @@ mod tests {
         assert_eq!(
             actual,
             json!({
+                "schema_version": 1,
+                "trace_id": actual.pointer("/trace_id").cloned().expect("trace id should exist"),
                 "strategy": "provider_aware",
                 "rollout_enabled": true,
                 "budget": {
-                    "model_id": "session-1:4096",
+                    "profile_id": "budget_test_4096",
+                    "provider_id": "provider-test",
+                    "provider_kind": "deterministic",
+                    "model_id": "model-test",
                     "max_context_tokens": 4096,
                     "reserved_completion_tokens": 768,
                     "reserved_tool_result_tokens": 256,
                     "provider_overhead_tokens": 128,
+                    "safety_margin_tokens": 0,
+                    "tool_schema_overhead_tokens": 0,
                     "input_budget_tokens": 2944,
                     "selected_tokens": 136,
-                    "dropped_tokens": 0
+                    "dropped_tokens": 0,
+                    "overflow_tokens": 0
                 },
                 "cache": {
                     "provider_cache_supported": true,
@@ -1458,6 +2180,11 @@ mod tests {
                     "trust_scope": "mixed"
                 },
                 "summary_quality": null,
+                "reason_codes": [
+                    "mixed_trust_context",
+                    "prompt_injection_signal_present",
+                    "strategy_provider_aware"
+                ],
                 "assembly_steps": [
                     {
                         "step": "policy_system",
@@ -1490,6 +2217,7 @@ mod tests {
                 "selected_segments": [
                     {
                         "kind": "preference_context",
+                        "source_kind": "developer",
                         "label": "stable policy",
                         "estimated_tokens": 64,
                         "include_reason": "protected_active_context",
@@ -1504,6 +2232,7 @@ mod tests {
                     },
                     {
                         "kind": "context_references",
+                        "source_kind": "retrieval",
                         "label": "focused files",
                         "estimated_tokens": 48,
                         "include_reason": "protected_active_context",
@@ -1519,6 +2248,7 @@ mod tests {
                     },
                     {
                         "kind": "user_input",
+                        "source_kind": "user",
                         "label": "ship it",
                         "estimated_tokens": 24,
                         "include_reason": "protected_active_context",
@@ -1557,13 +2287,7 @@ mod tests {
                 segment(ContextSegmentKind::UserInput, "question", 24, 100, false, true, None),
             ],
             ContextEngineStrategy::CostAware,
-            ProviderContextBudget {
-                max_context_tokens: 4_096,
-                reserved_completion_tokens: 768,
-                reserved_tool_result_tokens: 256,
-                provider_overhead_tokens: 128,
-                provider_cache_supported: false,
-            },
+            budget(4_096, 768, 256, 128, false),
             &RequestContext {
                 principal: "user:ops".to_owned(),
                 device_id: "device".to_owned(),
@@ -1615,13 +2339,7 @@ mod tests {
                 segment(ContextSegmentKind::UserInput, "question", 220, 100, false, true, None),
             ],
             ContextEngineStrategy::CheckpointAware,
-            ProviderContextBudget {
-                max_context_tokens: 1_024,
-                reserved_completion_tokens: 512,
-                reserved_tool_result_tokens: 128,
-                provider_overhead_tokens: 128,
-                provider_cache_supported: false,
-            },
+            budget(1_024, 512, 128, 128, false),
             &RequestContext {
                 principal: "user:ops".to_owned(),
                 device_id: "device".to_owned(),

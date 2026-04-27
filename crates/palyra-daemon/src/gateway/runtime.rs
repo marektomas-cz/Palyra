@@ -436,6 +436,7 @@ pub struct GatewayRuntimeState {
     pub(crate) learning_config: RwLock<LearningRuntimeConfig>,
     pub(crate) memory_search_cache: Mutex<HashMap<String, CachedMemorySearchEntry>>,
     pub(crate) http_fetch_cache: Mutex<HashMap<String, CachedHttpFetchEntry>>,
+    recent_context_assembly_traces: Mutex<Vec<Value>>,
     tool_approval_cache: Mutex<HashMap<String, CachedToolApprovalDecision>>,
     worker_fleet: RwLock<WorkerFleetManager>,
     pub(crate) provider_leases: ProviderLeaseManager,
@@ -1270,6 +1271,7 @@ impl GatewayRuntimeState {
             learning_config: RwLock::new(LearningRuntimeConfig::default()),
             memory_search_cache: Mutex::new(HashMap::new()),
             http_fetch_cache: Mutex::new(HashMap::new()),
+            recent_context_assembly_traces: Mutex::new(Vec::new()),
             tool_approval_cache: Mutex::new(HashMap::new()),
             worker_fleet: RwLock::new(WorkerFleetManager::default()),
             provider_leases: ProviderLeaseManager::default(),
@@ -1407,6 +1409,31 @@ impl GatewayRuntimeState {
 
     pub(crate) fn record_memory_auto_inject_event(&self) {
         self.counters.memory_auto_inject_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_context_assembly_trace(&self, trace: Value) {
+        const MAX_RECENT_CONTEXT_ASSEMBLY_TRACES: usize = 16;
+
+        let mut traces = match self.recent_context_assembly_traces.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("context assembly trace buffer lock poisoned while recording trace");
+                poisoned.into_inner()
+            }
+        };
+        traces.insert(0, trace);
+        traces.truncate(MAX_RECENT_CONTEXT_ASSEMBLY_TRACES);
+    }
+
+    #[must_use]
+    pub(crate) fn context_assembly_traces_snapshot(&self) -> Vec<Value> {
+        match self.recent_context_assembly_traces.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                warn!("context assembly trace buffer lock poisoned while reading trace snapshot");
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     pub(crate) fn record_learning_reflection_scheduled(&self) {

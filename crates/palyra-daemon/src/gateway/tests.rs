@@ -1280,6 +1280,9 @@ async fn prepare_model_provider_input_collects_vision_inputs_for_image_attachmen
             parameter_delta_json: None,
             input_text: "summarize screenshot",
             attachments: attachments.as_slice(),
+            provider_kind_hint: None,
+            provider_model_id_hint: None,
+            tool_catalog_snapshot: None,
             memory_ingest_reason: "prepare_model_provider_input_test",
             memory_prompt_failure_mode: MemoryPromptFailureMode::Fail,
             channel_for_log: "cli",
@@ -1331,6 +1334,9 @@ async fn prepare_model_provider_input_supports_legacy_and_context_engine_flows()
             parameter_delta_json: None,
             input_text,
             attachments: &[],
+            provider_kind_hint: None,
+            provider_model_id_hint: None,
+            tool_catalog_snapshot: None,
             memory_ingest_reason: "prepare_model_provider_input_legacy_parity_test",
             memory_prompt_failure_mode: MemoryPromptFailureMode::Fail,
             channel_for_log: "cli",
@@ -1382,6 +1388,9 @@ async fn prepare_model_provider_input_supports_legacy_and_context_engine_flows()
             parameter_delta_json: None,
             input_text,
             attachments: &[],
+            provider_kind_hint: None,
+            provider_model_id_hint: None,
+            tool_catalog_snapshot: None,
             memory_ingest_reason: "prepare_model_provider_input_context_engine_test",
             memory_prompt_failure_mode: MemoryPromptFailureMode::Fail,
             channel_for_log: "cli",
@@ -1405,7 +1414,7 @@ async fn prepare_model_provider_input_supports_legacy_and_context_engine_flows()
     let payload: Value =
         serde_json::from_str(plan_event.payload_json.as_str()).expect("plan payload should decode");
     assert_eq!(payload.get("rollout_enabled").and_then(Value::as_bool), Some(true));
-    assert_eq!(payload.get("strategy").and_then(Value::as_str), Some("noop"));
+    assert_eq!(payload.get("strategy").and_then(Value::as_str), Some("provider_aware"));
     assert!(
         payload.get("selected_segments").and_then(Value::as_array).is_some_and(|segments| segments
             .iter()
@@ -1473,6 +1482,9 @@ async fn prepare_model_provider_input_fallback_mode_returns_raw_input_when_tape_
             parameter_delta_json: None,
             input_text: "rollback checklist",
             attachments: &[],
+            provider_kind_hint: None,
+            provider_model_id_hint: None,
+            tool_catalog_snapshot: None,
             memory_ingest_reason: "prepare_model_provider_input_fallback_test",
             memory_prompt_failure_mode: MemoryPromptFailureMode::FallbackToRawInput {
                 warn_message: "test fallback",
@@ -1529,6 +1541,9 @@ async fn prepare_model_provider_input_fail_mode_propagates_tape_append_error() {
             parameter_delta_json: None,
             input_text: "rollback checklist",
             attachments: &[],
+            provider_kind_hint: None,
+            provider_model_id_hint: None,
+            tool_catalog_snapshot: None,
             memory_ingest_reason: "prepare_model_provider_input_fail_test",
             memory_prompt_failure_mode: MemoryPromptFailureMode::Fail,
             channel_for_log: "cli",

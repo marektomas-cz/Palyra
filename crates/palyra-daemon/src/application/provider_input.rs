@@ -27,6 +27,7 @@ use crate::{
         apply_ephemeral_prompt_pruning, classify_pruning_task, detect_pruning_risk,
         pruning_decision_from_config, SessionPruningOutcome, SESSION_PRUNING_POLICY_ID,
     },
+    application::tool_registry::ModelVisibleToolCatalogSnapshot,
     gateway::{
         ingest_memory_best_effort, non_empty, truncate_with_ellipsis, GatewayRuntimeState,
         MAX_PREVIOUS_RUN_CONTEXT_ENTRY_CHARS, MAX_PREVIOUS_RUN_CONTEXT_TAPE_EVENTS,
@@ -55,7 +56,11 @@ const AUTO_SESSION_COMPACTION_COOLDOWN_MS: i64 = 5 * 60 * 1_000;
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedModelProviderInput {
     pub(crate) provider_input_text: String,
+    pub(crate) provider_messages: Vec<crate::model_provider::ProviderMessage>,
     pub(crate) vision_inputs: Vec<ProviderImageInput>,
+    pub(crate) instruction_hash: Option<String>,
+    pub(crate) context_trace_id: Option<String>,
+    pub(crate) budget_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +77,9 @@ pub(crate) struct PrepareModelProviderInputRequest<'a> {
     pub(crate) parameter_delta_json: Option<&'a str>,
     pub(crate) input_text: &'a str,
     pub(crate) attachments: &'a [common_v1::MessageAttachment],
+    pub(crate) provider_kind_hint: Option<&'a str>,
+    pub(crate) provider_model_id_hint: Option<&'a str>,
+    pub(crate) tool_catalog_snapshot: Option<&'a ModelVisibleToolCatalogSnapshot>,
     pub(crate) memory_ingest_reason: &'a str,
     pub(crate) memory_prompt_failure_mode: MemoryPromptFailureMode,
     pub(crate) channel_for_log: &'a str,
@@ -719,6 +727,9 @@ async fn prepare_model_provider_input_legacy(
         parameter_delta_json,
         input_text,
         attachments,
+        provider_kind_hint: _,
+        provider_model_id_hint: _,
+        tool_catalog_snapshot: _,
         memory_ingest_reason,
         memory_prompt_failure_mode,
         channel_for_log,
@@ -828,7 +839,11 @@ async fn prepare_model_provider_input_legacy(
         .await?;
         return Ok(PreparedModelProviderInput {
             provider_input_text,
+            provider_messages: Vec::new(),
             vision_inputs: build_provider_image_inputs(attachments, &runtime_state.config.media),
+            instruction_hash: None,
+            context_trace_id: None,
+            budget_profile: None,
         });
     }
     let provider_input_text = match build_context_reference_prompt(
@@ -899,7 +914,11 @@ async fn prepare_model_provider_input_legacy(
     .await?;
     Ok(PreparedModelProviderInput {
         provider_input_text,
+        provider_messages: Vec::new(),
         vision_inputs: build_provider_image_inputs(attachments, &runtime_state.config.media),
+        instruction_hash: None,
+        context_trace_id: None,
+        budget_profile: None,
     })
 }
 

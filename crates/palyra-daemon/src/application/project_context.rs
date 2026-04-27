@@ -377,12 +377,25 @@ fn build_project_context_preview(
     let mut entries = Vec::new();
 
     for candidate in candidate_directories {
-        for kind in ordered_project_context_kinds() {
-            let file_name = kind.display_name();
-            let path = candidate.directory_path.join(file_name);
+        for file_candidate in project_context_file_candidates(candidate.directory_path.as_path())? {
+            let path = candidate.directory_path.join(file_candidate.relative_path.as_path());
             if !path.is_file() {
                 continue;
             }
+            let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let canonical_root =
+                candidate.root.canonicalize().unwrap_or_else(|_| candidate.root.clone());
+            if !canonical_path.starts_with(canonical_root.as_path()) {
+                warnings.push(format!(
+                    "Skipped {} because it resolves outside the workspace boundary.",
+                    file_candidate.display_path
+                ));
+                continue;
+            }
+            let display_path = display_context_path(
+                candidate.relative_directory.as_str(),
+                file_candidate.display_path.as_str(),
+            );
             let raw = fs::read_to_string(path.as_path()).map_err(|error| {
                 Status::internal(format!(
                     "failed to read project context file {}: {error}",
@@ -403,7 +416,7 @@ fn build_project_context_preview(
             if was_truncated {
                 warnings.push(format!(
                     "Truncated {} because the project context preview reached its size budget.",
-                    display_context_path(candidate.relative_directory.as_str(), file_name)
+                    display_path
                 ));
             }
             total_chars = total_chars.saturating_add(truncated_text.len());
@@ -413,7 +426,7 @@ fn build_project_context_preview(
                     "{}\n{}\n{}",
                     candidate.root.to_string_lossy(),
                     candidate.relative_directory,
-                    file_name
+                    file_candidate.display_path
                 )
                 .as_bytes(),
             );
@@ -433,11 +446,11 @@ fn build_project_context_preview(
             entries.push(ProjectContextStackEntry {
                 entry_id,
                 order: entries.len() + 1,
-                path: display_context_path(candidate.relative_directory.as_str(), file_name),
+                path: display_path,
                 directory: candidate.relative_directory.clone(),
-                source_kind: kind.as_str().to_owned(),
-                source_label: kind.display_name().to_owned(),
-                precedence_label: kind.precedence_label().to_owned(),
+                source_kind: file_candidate.source_kind,
+                source_label: file_candidate.source_label,
+                precedence_label: file_candidate.precedence_label,
                 depth: candidate.depth,
                 root: candidate.depth == 0,
                 active,
@@ -724,6 +737,62 @@ fn ordered_project_context_kinds() -> Vec<ProjectContextFileKind> {
     kinds
 }
 
+#[derive(Debug, Clone)]
+struct ProjectContextFileCandidate {
+    relative_path: PathBuf,
+    display_path: String,
+    source_kind: String,
+    source_label: String,
+    precedence_label: String,
+}
+
+fn project_context_file_candidates(
+    directory_path: &Path,
+) -> Result<Vec<ProjectContextFileCandidate>, Status> {
+    let mut candidates = ordered_project_context_kinds()
+        .into_iter()
+        .map(|kind| ProjectContextFileCandidate {
+            relative_path: PathBuf::from(kind.display_name()),
+            display_path: kind.display_name().to_owned(),
+            source_kind: kind.as_str().to_owned(),
+            source_label: kind.display_name().to_owned(),
+            precedence_label: kind.precedence_label().to_owned(),
+        })
+        .collect::<Vec<_>>();
+
+    let scoped_context_dir = directory_path.join(".palyra").join("context");
+    if scoped_context_dir.is_dir() {
+        let mut scoped_files = fs::read_dir(scoped_context_dir.as_path())
+            .map_err(|error| {
+                Status::internal(format!(
+                    "failed to read scoped project context directory {}: {error}",
+                    scoped_context_dir.to_string_lossy()
+                ))
+            })?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let file_name = path.file_name()?.to_str()?.to_owned();
+                (path.is_file() && file_name.to_ascii_lowercase().ends_with(".md"))
+                    .then_some(file_name)
+            })
+            .collect::<Vec<_>>();
+        scoped_files.sort();
+        scoped_files.dedup();
+        candidates.extend(scoped_files.into_iter().map(|file_name| {
+            let display_path = format!(".palyra/context/{file_name}");
+            ProjectContextFileCandidate {
+                relative_path: PathBuf::from(".palyra").join("context").join(&file_name),
+                display_path: display_path.clone(),
+                source_kind: "palyra_context_md".to_owned(),
+                source_label: display_path,
+                precedence_label: "workspace_scoped".to_owned(),
+            }
+        }));
+    }
+    Ok(candidates)
+}
+
 fn evaluate_entry_status(
     disabled: bool,
     approved: bool,
@@ -863,11 +932,17 @@ async fn resolve_workspace_roots(
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_focus_paths_from_prompt, normalize_focus_path, render_project_context_prompt,
-        ProjectContextEntryStatus, ProjectContextFocusPath, ProjectContextPreviewEnvelope,
-        ProjectContextStackEntry,
+        build_project_context_preview, derive_focus_paths_from_prompt, normalize_focus_path,
+        render_project_context_prompt, ProjectContextEntryStatus, ProjectContextFocusPath,
+        ProjectContextPreviewEnvelope, ProjectContextStackEntry,
     };
     use palyra_common::project_context::ProjectContextRiskScan;
+    use std::{fs, path::PathBuf};
+    use ulid::Ulid;
+
+    fn temp_project_context_root() -> PathBuf {
+        std::env::temp_dir().join(format!("palyra-project-context-{}", Ulid::new()))
+    }
 
     #[test]
     fn derives_focus_paths_from_file_and_folder_references() {
@@ -962,5 +1037,36 @@ mod tests {
         assert!(prompt.contains("PALYRA.md"));
         assert!(!prompt.contains("disabled"));
         assert!(prompt.ends_with("Explain the issue."));
+    }
+
+    #[test]
+    fn preview_loads_scoped_palyra_context_markdown_inside_workspace() {
+        let root = temp_project_context_root();
+        let scoped_dir = root.join(".palyra").join("context");
+        fs::create_dir_all(scoped_dir.as_path()).expect("scoped context dir should be created");
+        fs::write(root.join("PALYRA.md"), "# Workspace\nRoot rules")
+            .expect("root project context should be written");
+        fs::write(scoped_dir.join("ops.md"), "# Ops\nScoped rules")
+            .expect("scoped project context should be written");
+
+        let preview =
+            build_project_context_preview(std::slice::from_ref(&root), &[], &[], &[], 1_700_000)
+                .expect("project context preview should build");
+
+        let source_kinds =
+            preview.entries.iter().map(|entry| entry.source_kind.as_str()).collect::<Vec<_>>();
+        assert!(source_kinds.contains(&"palyra_md"));
+        assert!(source_kinds.contains(&"palyra_context_md"));
+        let scoped_entry = preview
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == "palyra_context_md")
+            .expect("scoped .palyra/context markdown should be loaded");
+        assert_eq!(scoped_entry.path, ".palyra/context/ops.md");
+        assert_eq!(scoped_entry.precedence_label, "workspace_scoped");
+        assert!(scoped_entry.active);
+
+        fs::remove_dir_all(root.as_path())
+            .expect("temporary project context root should be removed");
     }
 }

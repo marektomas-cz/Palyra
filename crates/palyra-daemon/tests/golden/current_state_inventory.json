@@ -8,6 +8,7 @@
     "auth_profiles",
     "browserd",
     "canvas_experiments",
+    "context_engine",
     "contract",
     "delegation",
     "deployment",
@@ -697,7 +698,10 @@
       "enabled": false,
       "source": "default",
       "config_path": "feature_rollouts.context_engine",
-      "env_var": "PALYRA_EXPERIMENTAL_CONTEXT_ENGINE"
+      "env_var": "PALYRA_EXPERIMENTAL_CONTEXT_ENGINE",
+      "trace_schema_version": 1,
+      "trace_event_type": "context.engine.plan",
+      "instruction_compiler_version": 1
     },
     "execution_backend_remote_node": {
       "enabled": false,

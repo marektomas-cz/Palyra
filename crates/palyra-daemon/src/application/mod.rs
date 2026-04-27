@@ -6,6 +6,7 @@ pub mod context_engine;
 pub mod context_references;
 pub mod delivery_arbitration;
 pub mod execution_gate;
+pub mod instruction_compiler;
 pub mod learning;
 pub mod memory;
 pub mod project_context;

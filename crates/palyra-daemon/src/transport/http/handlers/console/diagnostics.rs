@@ -122,6 +122,7 @@ pub(crate) async fn console_diagnostics_handler(
         &media_payload,
     )
     .await?;
+    let context_engine_payload = collect_console_context_engine_diagnostics(&state);
     let generated_at_unix_ms = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
@@ -156,6 +157,7 @@ pub(crate) async fn console_diagnostics_handler(
             "telemetry": access_snapshot.telemetry,
         },
         "feature_rollouts": collect_console_feature_rollouts_diagnostics(&state),
+        "context_engine": context_engine_payload,
         "runtime_controls": runtime_controls_payload,
         "deployment": deployment_payload,
         "execution_backends": execution_backends_payload,
@@ -754,6 +756,9 @@ fn collect_console_feature_rollouts_diagnostics(state: &AppState) -> Value {
             "source": feature_rollouts.context_engine.source,
             "config_path": CONTEXT_ENGINE_ROLLOUT_CONFIG_PATH,
             "env_var": CONTEXT_ENGINE_ROLLOUT_ENV,
+            "trace_schema_version": application::context_engine::CONTEXT_ASSEMBLY_TRACE_SCHEMA_VERSION,
+            "trace_event_type": application::context_engine::CONTEXT_ENGINE_PLAN_EVENT,
+            "instruction_compiler_version": application::instruction_compiler::INSTRUCTION_COMPILER_VERSION,
         },
         "execution_backend_remote_node": {
             "enabled": feature_rollouts.execution_backend_remote_node.enabled,
@@ -833,6 +838,30 @@ fn collect_console_feature_rollouts_diagnostics(state: &AppState) -> Value {
             "config_path": NETWORKED_WORKERS_ROLLOUT_CONFIG_PATH,
             "env_var": NETWORKED_WORKERS_ROLLOUT_ENV,
         },
+    })
+}
+
+fn collect_console_context_engine_diagnostics(state: &AppState) -> Value {
+    let feature_rollout = &state.runtime.config.feature_rollouts.context_engine;
+    let mut recent_traces = state.runtime.context_assembly_traces_snapshot();
+    for trace in &mut recent_traces {
+        redact_console_diagnostics_value(trace, None);
+    }
+    let latest_trace_id = recent_traces
+        .first()
+        .and_then(|trace| trace.get("trace_id"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    json!({
+        "enabled": feature_rollout.enabled,
+        "source": feature_rollout.source,
+        "trace_schema_version": application::context_engine::CONTEXT_ASSEMBLY_TRACE_SCHEMA_VERSION,
+        "trace_event_type": application::context_engine::CONTEXT_ENGINE_PLAN_EVENT,
+        "instruction_compiler_version": application::instruction_compiler::INSTRUCTION_COMPILER_VERSION,
+        "diagnostics_source": "runtime_recent_context_assembly_trace_buffer",
+        "recent_trace_count": recent_traces.len(),
+        "latest_trace_id": latest_trace_id,
+        "recent_traces": recent_traces,
     })
 }
 

@@ -2123,50 +2123,23 @@ impl RegistryBackedModelProvider {
         request: &ProviderRequest,
         model: &ProviderModelEntryConfig,
     ) -> String {
-        let mut hasher = DefaultHasher::new();
-        model.provider_id.hash(&mut hasher);
-        model.model_id.hash(&mut hasher);
-        request.input_text.hash(&mut hasher);
-        request.json_mode.hash(&mut hasher);
-        request.model_override.hash(&mut hasher);
-        for message in &request.messages {
-            message.role.as_openai_role().hash(&mut hasher);
-            message.name.hash(&mut hasher);
-            message.tool_call_id.hash(&mut hasher);
-            for tool_call in &message.tool_calls {
-                tool_call.proposal_id.hash(&mut hasher);
-                tool_call.tool_name.hash(&mut hasher);
-                tool_call.input_json.to_string().hash(&mut hasher);
-            }
-            for part in &message.content {
-                match part {
-                    ProviderMessageContentPart::Text { text } => text.hash(&mut hasher),
-                    ProviderMessageContentPart::Image { image } => {
-                        image.mime_type.hash(&mut hasher);
-                        image.bytes_base64.hash(&mut hasher);
-                        image.file_name.hash(&mut hasher);
-                        image.width_px.hash(&mut hasher);
-                        image.height_px.hash(&mut hasher);
-                        image.artifact_id.hash(&mut hasher);
-                    }
-                }
-            }
-        }
-        if let Some(tool_catalog_snapshot) = &request.tool_catalog_snapshot {
-            tool_catalog_snapshot.to_string().hash(&mut hasher);
-        }
-        request.instruction_hash.hash(&mut hasher);
-        request.context_trace_id.hash(&mut hasher);
-        request.budget_profile.hash(&mut hasher);
-        for image in &request.vision_inputs {
-            image.mime_type.hash(&mut hasher);
-            image.bytes_base64.hash(&mut hasher);
-            image.file_name.hash(&mut hasher);
-            image.width_px.hash(&mut hasher);
-            image.height_px.hash(&mut hasher);
-            image.artifact_id.hash(&mut hasher);
-        }
-        format!("{:016x}", hasher.finish())
+        let payload = json!({
+            "schema_version": 1,
+            "provider_id": model.provider_id.as_str(),
+            "model_id": model.model_id.as_str(),
+            "input_text": request.input_text.as_str(),
+            "json_mode": request.json_mode,
+            "model_override": request.model_override.as_deref(),
+            "messages": &request.messages,
+            "tool_catalog_snapshot": request.tool_catalog_snapshot.as_ref(),
+            "instruction_hash": request.instruction_hash.as_deref(),
+            "context_trace_id": request.context_trace_id.as_deref(),
+            "budget_profile": request.budget_profile.as_deref(),
+            "vision_inputs": &request.vision_inputs,
+        });
+        crate::sha256_hex(
+            serde_json::to_vec(&payload).unwrap_or_else(|_| b"null".to_vec()).as_slice(),
+        )
     }
 
     fn lookup_cached_response(

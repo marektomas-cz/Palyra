@@ -15,7 +15,8 @@ use crate::{
         RunStreamToolResultForModel,
     },
     application::provider_input::{
-        prepare_model_provider_input, MemoryPromptFailureMode, PrepareModelProviderInputRequest,
+        build_provider_image_inputs, prepare_model_provider_input, MemoryPromptFailureMode,
+        PrepareModelProviderInputRequest,
     },
     application::tool_registry::{
         build_model_visible_tool_catalog_snapshot, snapshot_to_provider_request_value,
@@ -468,25 +469,6 @@ pub(crate) async fn process_run_stream_message(
         summary: format!("run {run_id} for session {session_id_for_message}"),
     });
 
-    let previous_run_id_for_context = previous_session_run_id.take();
-    let prepared_provider_input = prepare_model_provider_input(
-        runtime_state,
-        request_context,
-        PrepareModelProviderInputRequest {
-            run_id: run_id.as_str(),
-            tape_seq,
-            session_id: session_id_for_message.as_str(),
-            previous_run_id: previous_run_id_for_context.as_deref(),
-            parameter_delta_json: parameter_delta_json.as_deref(),
-            input_text: input_text.as_str(),
-            attachments: input_content.attachments.as_slice(),
-            memory_ingest_reason: "run_stream_user_input",
-            memory_prompt_failure_mode: MemoryPromptFailureMode::Fail,
-            channel_for_log: request_context.channel.as_deref().unwrap_or("n/a"),
-        },
-    )
-    .await?;
-
     if is_cancel_command(input_text.as_str()) {
         runtime_state
             .request_orchestrator_cancel(OrchestratorCancelRequest {
@@ -522,6 +504,12 @@ pub(crate) async fn process_run_stream_message(
     )
     .await?;
 
+    let provider_snapshot = runtime_state.model_provider_status_snapshot();
+    let routing_vision_inputs = build_provider_image_inputs(
+        input_content.attachments.as_slice(),
+        &runtime_state.config.media,
+    )
+    .len();
     let routing_decision = plan_usage_routing(UsageRoutingPlanRequest {
         runtime_state,
         request_context,
@@ -530,11 +518,11 @@ pub(crate) async fn process_run_stream_message(
         parameter_delta_json: parameter_delta_json.as_deref(),
         prompt_text: input_text.as_str(),
         json_mode: json_mode_requested,
-        vision_inputs: prepared_provider_input.vision_inputs.len(),
+        vision_inputs: routing_vision_inputs,
         scope_kind: "session",
         scope_id: session_id_for_message.as_str(),
         task_class: RoutingTaskClass::PrimaryInteractive,
-        provider_snapshot: &runtime_state.model_provider_status_snapshot(),
+        provider_snapshot: &provider_snapshot,
     })
     .await?;
 
@@ -561,19 +549,58 @@ pub(crate) async fn process_run_stream_message(
                     routing_decision.credential_id.clone(),
                 )
             },
-            |model_id| {
-                resolve_provider_binding_for_model(
-                    &runtime_state.model_provider_status_snapshot(),
-                    model_id,
-                )
-            },
+            |model_id| resolve_provider_binding_for_model(&provider_snapshot, model_id),
         );
-    let base_provider_request = ProviderRequest::from_input_text(
+    let mut first_turn_tool_catalog_snapshot = Some(
+        build_and_record_run_stream_tool_catalog_snapshot(
+            runtime_state,
+            request_context,
+            session_id_for_message.as_str(),
+            run_id.as_str(),
+            lease_provider_kind.as_str(),
+            provider_model_override.as_deref().or(Some(routing_decision.actual_model_id.as_str())),
+            *remaining_tool_budget,
+            tape_seq,
+        )
+        .await?,
+    );
+    let previous_run_id_for_context = previous_session_run_id.take();
+    let prepared_provider_input = prepare_model_provider_input(
+        runtime_state,
+        request_context,
+        PrepareModelProviderInputRequest {
+            run_id: run_id.as_str(),
+            tape_seq,
+            session_id: session_id_for_message.as_str(),
+            previous_run_id: previous_run_id_for_context.as_deref(),
+            parameter_delta_json: parameter_delta_json.as_deref(),
+            input_text: input_text.as_str(),
+            attachments: input_content.attachments.as_slice(),
+            provider_kind_hint: Some(lease_provider_kind.as_str()),
+            provider_model_id_hint: provider_model_override
+                .as_deref()
+                .or(Some(routing_decision.actual_model_id.as_str())),
+            tool_catalog_snapshot: first_turn_tool_catalog_snapshot.as_ref(),
+            memory_ingest_reason: "run_stream_user_input",
+            memory_prompt_failure_mode: MemoryPromptFailureMode::Fail,
+            channel_for_log: request_context.channel.as_deref().unwrap_or("n/a"),
+        },
+    )
+    .await?;
+    let mut base_provider_request = ProviderRequest::from_input_text(
         prepared_provider_input.provider_input_text,
         json_mode_requested,
         prepared_provider_input.vision_inputs,
         provider_model_override.clone(),
     );
+    base_provider_request.instruction_hash = prepared_provider_input.instruction_hash.clone();
+    base_provider_request.context_trace_id = prepared_provider_input.context_trace_id.clone();
+    base_provider_request.budget_profile = prepared_provider_input.budget_profile.clone();
+    if !prepared_provider_input.provider_messages.is_empty() {
+        let mut messages = prepared_provider_input.provider_messages.clone();
+        messages.push(ProviderMessage::user_text(base_provider_request.input_text.clone()));
+        base_provider_request.messages = messages;
+    }
     let mut loop_state = AgentRunLoopState::new(
         base_provider_request.effective_messages(),
         AgentRunLoopState::default_model_turn_budget(
@@ -626,17 +653,24 @@ pub(crate) async fn process_run_stream_message(
         )
         .await?;
 
-        let tool_catalog_snapshot = build_and_record_run_stream_tool_catalog_snapshot(
-            runtime_state,
-            request_context,
-            session_id_for_message.as_str(),
-            run_id.as_str(),
-            lease_provider_kind.as_str(),
-            provider_model_override.as_deref().or(Some(routing_decision.actual_model_id.as_str())),
-            loop_state.remaining_tool_calls(),
-            tape_seq,
-        )
-        .await?;
+        let tool_catalog_snapshot = if let Some(snapshot) = first_turn_tool_catalog_snapshot.take()
+        {
+            snapshot
+        } else {
+            build_and_record_run_stream_tool_catalog_snapshot(
+                runtime_state,
+                request_context,
+                session_id_for_message.as_str(),
+                run_id.as_str(),
+                lease_provider_kind.as_str(),
+                provider_model_override
+                    .as_deref()
+                    .or(Some(routing_decision.actual_model_id.as_str())),
+                loop_state.remaining_tool_calls(),
+                tape_seq,
+            )
+            .await?
+        };
         let mut provider_request = ProviderRequest::from_input_text(
             base_provider_request.input_text.clone(),
             base_provider_request.json_mode,
@@ -646,6 +680,9 @@ pub(crate) async fn process_run_stream_message(
         provider_request.messages = loop_state.messages();
         provider_request.tool_catalog_snapshot =
             Some(snapshot_to_provider_request_value(&tool_catalog_snapshot));
+        provider_request.instruction_hash = base_provider_request.instruction_hash.clone();
+        provider_request.context_trace_id = base_provider_request.context_trace_id.clone();
+        provider_request.budget_profile = base_provider_request.budget_profile.clone();
         let provider_response = match execute_run_stream_provider_request(
             sender,
             runtime_state,
