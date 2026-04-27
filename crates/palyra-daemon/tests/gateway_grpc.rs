@@ -4749,6 +4749,135 @@ async fn grpc_run_stream_refeeds_tool_result_and_continues_model_turn() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_run_stream_parallel_safe_tool_calls_refeed_in_provider_order() -> Result<()> {
+    let first_response = serde_json::json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "tool_calls": [
+                    {
+                        "id": "call_sleep_01",
+                        "type": "function",
+                        "function": {
+                            "name": "palyra.sleep",
+                            "arguments": "{\"duration_ms\":25}"
+                        }
+                    },
+                    {
+                        "id": "call_sleep_02",
+                        "type": "function",
+                        "function": {
+                            "name": "palyra.sleep",
+                            "arguments": "{\"duration_ms\":25}"
+                        }
+                    }
+                ]
+            }
+        }]
+    })
+    .to_string();
+    let second_response =
+        r#"{"choices":[{"finish_reason":"stop","message":{"content":"parallel tools complete"}}]}"#
+            .to_owned();
+    let (openai_base_url, request_bodies, request_count, server_handle) =
+        spawn_scripted_openai_server_with_request_capture(vec![
+            ScriptedOpenAiResponse::immediate(200, first_response),
+            ScriptedOpenAiResponse::immediate(200, second_response),
+        ])?;
+    let (child, admin_port, grpc_port, _journal_db_path) =
+        spawn_palyrad_with_openai_provider_and_tool_policy(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+            "palyra.sleep",
+            4,
+            1_000,
+        )?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let mut stream_request =
+        tonic::Request::new(tokio_stream::iter(vec![sample_run_stream_request_with_text(
+            "trigger parallel safe tools".to_owned(),
+        )]));
+    stream_request.metadata_mut().insert("authorization", format!("Bearer {ADMIN_TOKEN}").parse()?);
+    stream_request.metadata_mut().insert("x-palyra-principal", "user:ops".parse()?);
+    stream_request.metadata_mut().insert("x-palyra-device-id", DEVICE_ID.parse()?);
+    stream_request.metadata_mut().insert("x-palyra-channel", "cli".parse()?);
+
+    let mut response_stream =
+        client.run_stream(stream_request).await.context("failed to call RunStream")?.into_inner();
+    let mut tool_result_ids = Vec::new();
+    while let Some(event) = response_stream.next().await {
+        let event = event.context("failed to read RunStream event")?;
+        if let Some(common_v1::run_stream_event::Body::ToolResult(result)) = event.body {
+            if result.success {
+                if let Some(proposal_id) = result.proposal_id {
+                    tool_result_ids.push(proposal_id.ulid);
+                }
+            }
+        }
+    }
+
+    assert_eq!(tool_result_ids, vec!["call_sleep_01", "call_sleep_02"]);
+    assert_eq!(request_count.load(Ordering::Relaxed), 2);
+
+    let captured_request_bodies =
+        request_bodies.lock().expect("captured request bodies lock should not poison").clone();
+    assert_eq!(captured_request_bodies.len(), 2);
+    let second_request: Value = serde_json::from_str(captured_request_bodies[1].as_str())
+        .context("second provider request should be captured as JSON")?;
+    let messages =
+        second_request["messages"].as_array().context("second request should contain messages")?;
+    let tool_message_ids = messages
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| message["tool_call_id"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_message_ids,
+        vec!["call_sleep_01", "call_sleep_02"],
+        "tool result refeed messages must preserve provider tool_call order"
+    );
+
+    let tape_snapshot =
+        admin_get_json_async(admin_port, format!("/admin/v1/runs/{RUN_ID}/tape")).await?;
+    let events = tape_snapshot
+        .get("events")
+        .and_then(Value::as_array)
+        .context("run tape snapshot missing events")?;
+    let parallel_group_event = events
+        .iter()
+        .find(|event| {
+            event.get("event_type").and_then(Value::as_str) == Some("tool.parallel_group.started")
+        })
+        .context("run tape should include a parallel tool group event")?;
+    let payload_json = parallel_group_event
+        .get("payload_json")
+        .and_then(Value::as_str)
+        .context("parallel group event should include payload_json")?;
+    let payload: Value =
+        serde_json::from_str(payload_json).context("parallel group payload must be valid JSON")?;
+    assert_eq!(
+        payload.get("status").and_then(Value::as_str),
+        Some("started"),
+        "parallel group event should expose stable status"
+    );
+    assert_eq!(
+        payload.get("tools").and_then(Value::as_array).map(Vec::len),
+        Some(2),
+        "parallel group should include both read-only-safe tool calls"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_run_stream_policy_decision_journal_includes_execution_gate_report_when_rollout_enabled(
 ) -> Result<()> {
     let response_body =

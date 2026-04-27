@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,6 +13,7 @@ use palyra_common::{
 use serde_json::{json, Map, Value};
 use tokio::{
     sync::mpsc,
+    task::JoinSet,
     time::{interval, timeout, MissedTickBehavior},
 };
 use tonic::{Status, Streaming};
@@ -61,11 +63,69 @@ use super::{
     },
 };
 
+const MAX_PARALLEL_TOOL_CALLS_PER_GROUP: usize = 4;
+const TOOL_PARALLELISM_ENABLED_ENV: &str = "PALYRA_TOOL_PARALLELISM_ENABLED";
+
 #[derive(Debug, Clone)]
 pub(crate) struct RunStreamToolProposalPreparation {
     decision: crate::tool_protocol::ToolDecision,
     resolved_session_id: String,
     backend_selection: ToolProposalBackendSelection,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RunStreamPreparedToolExecution {
+    proposal_id: String,
+    tool_name: String,
+    input_json: Vec<u8>,
+    decision: crate::tool_protocol::ToolDecision,
+    resolved_session_id: String,
+    backend_selection: ToolProposalBackendSelection,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum RunStreamToolProposalPreparationOutcome {
+    Prepared(RunStreamPreparedToolExecution),
+    Completed(RunStreamToolExecutionOutcome),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum RunStreamPreparedToolExecutionBatchOutcome {
+    Completed(Vec<RunStreamToolExecutionOutcome>),
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolParallelism {
+    Never,
+    ReadOnlySafe,
+    PathScoped,
+    IdempotentNetwork,
+}
+
+impl ToolParallelism {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::ReadOnlySafe => "read_only_safe",
+            Self::PathScoped => "path_scoped",
+            Self::IdempotentNetwork => "idempotent_network",
+        }
+    }
+
+    const fn is_parallel_safe(self) -> bool {
+        !matches!(self, Self::Never)
+    }
+}
+
+#[derive(Debug)]
+enum ParallelToolExecutionTaskOutcome {
+    Completed {
+        order: usize,
+        prepared: RunStreamPreparedToolExecution,
+        outcome: ToolExecutionOutcome,
+    },
+    Cancelled,
 }
 
 #[allow(clippy::result_large_err)]
@@ -88,6 +148,58 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
     remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<RunStreamToolExecutionOutcome, Status> {
+    match prepare_run_stream_tool_proposal_event(
+        sender,
+        stream,
+        runtime_state,
+        request_context,
+        active_session_id,
+        session_id,
+        run_id,
+        proposal_id,
+        tool_name,
+        input_json,
+        tool_catalog_snapshot,
+        remaining_tool_budget,
+        tape_seq,
+    )
+    .await?
+    {
+        RunStreamToolProposalPreparationOutcome::Prepared(prepared) => {
+            execute_prepared_run_stream_tool_proposal(
+                sender,
+                runtime_state,
+                request_context,
+                run_state,
+                run_id,
+                prepared,
+                tape_seq,
+            )
+            .await
+        }
+        RunStreamToolProposalPreparationOutcome::Completed(outcome) => Ok(outcome),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_run_stream_tool_proposal_event(
+    sender: &mpsc::Sender<
+        Result<crate::transport::grpc::proto::palyra::common::v1::RunStreamEvent, Status>,
+    >,
+    stream: &mut Streaming<crate::transport::grpc::proto::palyra::common::v1::RunStreamRequest>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    active_session_id: Option<&str>,
+    session_id: &str,
+    run_id: &str,
+    proposal_id: &str,
+    tool_name: &str,
+    input_json: &[u8],
+    tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
+    remaining_tool_budget: &mut u32,
+    tape_seq: &mut i64,
+) -> Result<RunStreamToolProposalPreparationOutcome, Status> {
     let NormalizedToolCall { input_json: normalized_input_json, audit } =
         match validate_tool_call_against_catalog_snapshot(
             tool_catalog_snapshot,
@@ -97,7 +209,7 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
             Ok(normalized) => normalized,
             Err(rejection) => {
                 *remaining_tool_budget = (*remaining_tool_budget).saturating_sub(1);
-                return reject_run_stream_tool_call(
+                let outcome = reject_run_stream_tool_call(
                     sender,
                     runtime_state,
                     run_id,
@@ -107,7 +219,8 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
                     rejection,
                     tape_seq,
                 )
-                .await;
+                .await?;
+                return Ok(RunStreamToolProposalPreparationOutcome::Completed(outcome));
             }
         };
     if !audit.steps.is_empty() {
@@ -139,21 +252,14 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
         )
         .await?;
 
-    execute_run_stream_tool_proposal(
-        sender,
-        runtime_state,
-        request_context,
-        run_state,
-        run_id,
-        proposal_id,
-        tool_name,
-        normalized_input_json.as_slice(),
-        &decision,
-        &backend_selection,
-        resolved_session_id.as_str(),
-        tape_seq,
-    )
-    .await
+    Ok(RunStreamToolProposalPreparationOutcome::Prepared(RunStreamPreparedToolExecution {
+        proposal_id: proposal_id.to_owned(),
+        tool_name: tool_name.to_owned(),
+        input_json: normalized_input_json,
+        decision,
+        resolved_session_id,
+        backend_selection,
+    }))
 }
 
 #[allow(clippy::result_large_err)]
@@ -259,6 +365,383 @@ async fn reject_run_stream_tool_call(
         tool_name: tool_name.to_owned(),
         outcome: execution_outcome,
     })
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_prepared_run_stream_tool_proposals_ordered(
+    sender: &mpsc::Sender<
+        Result<crate::transport::grpc::proto::palyra::common::v1::RunStreamEvent, Status>,
+    >,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    run_state: &mut RunStateMachine,
+    run_id: &str,
+    prepared_tools: Vec<RunStreamPreparedToolExecution>,
+    tape_seq: &mut i64,
+) -> Result<RunStreamPreparedToolExecutionBatchOutcome, Status> {
+    let mut completed = Vec::new();
+    for group in split_parallel_tool_groups(prepared_tools) {
+        if group.can_run_parallel && group.tools.len() > 1 && run_stream_tool_parallelism_enabled()
+        {
+            match execute_parallel_prepared_tool_group(
+                sender,
+                runtime_state,
+                request_context,
+                run_state,
+                run_id,
+                group.tools,
+                tape_seq,
+            )
+            .await?
+            {
+                RunStreamPreparedToolExecutionBatchOutcome::Completed(mut outcomes) => {
+                    completed.append(&mut outcomes);
+                }
+                RunStreamPreparedToolExecutionBatchOutcome::Cancelled => {
+                    return Ok(RunStreamPreparedToolExecutionBatchOutcome::Cancelled);
+                }
+            }
+        } else {
+            for prepared in group.tools {
+                match execute_prepared_run_stream_tool_proposal(
+                    sender,
+                    runtime_state,
+                    request_context,
+                    run_state,
+                    run_id,
+                    prepared,
+                    tape_seq,
+                )
+                .await?
+                {
+                    RunStreamToolExecutionOutcome::Completed {
+                        proposal_id,
+                        tool_name,
+                        outcome,
+                    } => {
+                        completed.push(RunStreamToolExecutionOutcome::Completed {
+                            proposal_id,
+                            tool_name,
+                            outcome,
+                        });
+                    }
+                    RunStreamToolExecutionOutcome::Cancelled => {
+                        return Ok(RunStreamPreparedToolExecutionBatchOutcome::Cancelled);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(RunStreamPreparedToolExecutionBatchOutcome::Completed(completed))
+}
+
+#[derive(Debug)]
+struct PreparedToolExecutionGroup {
+    can_run_parallel: bool,
+    tools: Vec<RunStreamPreparedToolExecution>,
+}
+
+fn split_parallel_tool_groups(
+    prepared_tools: Vec<RunStreamPreparedToolExecution>,
+) -> Vec<PreparedToolExecutionGroup> {
+    let mut groups = Vec::new();
+    let mut parallel_tools = Vec::new();
+    let mut parallel_path_scopes = Vec::<String>::new();
+
+    for prepared in prepared_tools {
+        let parallelism =
+            classify_tool_parallelism(prepared.tool_name.as_str(), prepared.input_json.as_slice());
+        let path_scope =
+            path_scope_key(prepared.tool_name.as_str(), prepared.input_json.as_slice());
+        let has_path_conflict = matches!(parallelism, ToolParallelism::PathScoped)
+            && path_scope
+                .as_ref()
+                .map(|scope| parallel_path_scopes.iter().any(|existing| existing == scope))
+                .unwrap_or(true);
+        let can_run_parallel =
+            prepared.decision.allowed && parallelism.is_parallel_safe() && !has_path_conflict;
+        if can_run_parallel {
+            if let Some(scope) = path_scope {
+                parallel_path_scopes.push(scope);
+            }
+            parallel_tools.push(prepared);
+            if parallel_tools.len() == MAX_PARALLEL_TOOL_CALLS_PER_GROUP {
+                groups.push(PreparedToolExecutionGroup {
+                    can_run_parallel: true,
+                    tools: std::mem::take(&mut parallel_tools),
+                });
+                parallel_path_scopes.clear();
+            }
+            continue;
+        }
+
+        if !parallel_tools.is_empty() {
+            groups.push(PreparedToolExecutionGroup {
+                can_run_parallel: true,
+                tools: std::mem::take(&mut parallel_tools),
+            });
+            parallel_path_scopes.clear();
+        }
+        groups.push(PreparedToolExecutionGroup { can_run_parallel: false, tools: vec![prepared] });
+    }
+
+    if !parallel_tools.is_empty() {
+        groups.push(PreparedToolExecutionGroup { can_run_parallel: true, tools: parallel_tools });
+    }
+
+    groups
+}
+
+pub(crate) fn classify_tool_parallelism(tool_name: &str, input_json: &[u8]) -> ToolParallelism {
+    match tool_name {
+        "palyra.echo"
+        | "palyra.sleep"
+        | "palyra.memory.search"
+        | "palyra.memory.recall"
+        | "palyra.routines.query"
+        | "palyra.artifact.read"
+        | "palyra.browser.title"
+        | "palyra.browser.screenshot"
+        | "palyra.browser.pdf"
+        | "palyra.browser.observe"
+        | "palyra.browser.network_log"
+        | "palyra.browser.console_log"
+        | "palyra.browser.tabs.list"
+        | "palyra.browser.permissions.get" => ToolParallelism::ReadOnlySafe,
+        "palyra.http.fetch" if is_idempotent_http_fetch_input(input_json) => {
+            ToolParallelism::IdempotentNetwork
+        }
+        "palyra.process.run" => classify_process_runner_parallelism(input_json),
+        "palyra.fs.apply_patch" => ToolParallelism::Never,
+        _ => ToolParallelism::Never,
+    }
+}
+
+fn path_scope_key(tool_name: &str, input_json: &[u8]) -> Option<String> {
+    if tool_name != "palyra.process.run" {
+        return None;
+    }
+    let payload = serde_json::from_slice::<Value>(input_json).ok()?;
+    let command = payload.get("command")?.as_str()?;
+    let mut args = payload
+        .get("args")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|arg| arg.contains('/') || arg.contains('\\') || arg.starts_with('.'))
+        .map(|arg| arg.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    args.sort();
+    if args.is_empty() {
+        None
+    } else {
+        Some(format!("{command}:{}", args.join("|")))
+    }
+}
+
+fn is_idempotent_http_fetch_input(input_json: &[u8]) -> bool {
+    let Ok(payload) = serde_json::from_slice::<Value>(input_json) else {
+        return false;
+    };
+    let method =
+        payload.get("method").and_then(Value::as_str).unwrap_or("GET").trim().to_ascii_uppercase();
+    matches!(method.as_str(), "GET" | "HEAD")
+}
+
+fn classify_process_runner_parallelism(input_json: &[u8]) -> ToolParallelism {
+    let Ok(payload) = serde_json::from_slice::<Value>(input_json) else {
+        return ToolParallelism::Never;
+    };
+    let Some(command) = payload.get("command").and_then(Value::as_str) else {
+        return ToolParallelism::Never;
+    };
+    let read_only_commands = ["cat", "head", "tail", "ls", "pwd", "rg", "grep", "find", "wc"];
+    if read_only_commands.iter().any(|candidate| *candidate == command) {
+        ToolParallelism::PathScoped
+    } else {
+        ToolParallelism::Never
+    }
+}
+
+fn run_stream_tool_parallelism_enabled() -> bool {
+    std::env::var(TOOL_PARALLELISM_ENABLED_ENV)
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off" | "disabled"
+            )
+        })
+        .unwrap_or(true)
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn execute_parallel_prepared_tool_group(
+    sender: &mpsc::Sender<
+        Result<crate::transport::grpc::proto::palyra::common::v1::RunStreamEvent, Status>,
+    >,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    run_state: &mut RunStateMachine,
+    run_id: &str,
+    prepared_tools: Vec<RunStreamPreparedToolExecution>,
+    tape_seq: &mut i64,
+) -> Result<RunStreamPreparedToolExecutionBatchOutcome, Status> {
+    let group_id = Ulid::new().to_string();
+    append_tool_parallel_group_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        "tool.parallel_group.started",
+        group_id.as_str(),
+        "started",
+        prepared_tools.as_slice(),
+        None,
+    )
+    .await?;
+
+    let mut join_set = JoinSet::new();
+    for (order, prepared) in prepared_tools.into_iter().enumerate() {
+        let runtime_state = Arc::clone(runtime_state);
+        let request_context = request_context.clone();
+        let run_id = run_id.to_owned();
+        join_set.spawn(async move {
+            match execute_prepared_tool_runtime(
+                &runtime_state,
+                &request_context,
+                run_id.as_str(),
+                &prepared,
+            )
+            .await?
+            {
+                Some(outcome) => {
+                    Ok(ParallelToolExecutionTaskOutcome::Completed { order, prepared, outcome })
+                }
+                None => Ok(ParallelToolExecutionTaskOutcome::Cancelled),
+            }
+        });
+    }
+
+    let mut completed =
+        BTreeMap::<usize, (RunStreamPreparedToolExecution, ToolExecutionOutcome)>::new();
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok(ParallelToolExecutionTaskOutcome::Completed { order, prepared, outcome })) => {
+                completed.insert(order, (prepared, outcome));
+            }
+            Ok(Ok(ParallelToolExecutionTaskOutcome::Cancelled)) => {
+                join_set.abort_all();
+                append_tool_parallel_group_tape_event(
+                    runtime_state,
+                    run_id,
+                    tape_seq,
+                    "tool.parallel_group.cancelled",
+                    group_id.as_str(),
+                    "cancelled",
+                    &[],
+                    Some("cancel_requested"),
+                )
+                .await?;
+                transition_run_stream_to_cancelled(
+                    sender,
+                    runtime_state,
+                    run_state,
+                    run_id,
+                    tape_seq,
+                )
+                .await?;
+                return Ok(RunStreamPreparedToolExecutionBatchOutcome::Cancelled);
+            }
+            Ok(Err(error)) => {
+                join_set.abort_all();
+                return Err(error);
+            }
+            Err(error) => {
+                join_set.abort_all();
+                return Err(Status::internal(format!(
+                    "parallel tool execution task failed to join: {error}"
+                )));
+            }
+        }
+    }
+
+    let mut finalized = Vec::with_capacity(completed.len());
+    for (_, (prepared, execution_outcome)) in completed {
+        finalized.push(
+            finalize_prepared_tool_execution_outcome(
+                sender,
+                runtime_state,
+                request_context,
+                run_id,
+                &prepared,
+                execution_outcome,
+                tape_seq,
+            )
+            .await?,
+        );
+    }
+
+    append_tool_parallel_group_tape_event(
+        runtime_state,
+        run_id,
+        tape_seq,
+        "tool.parallel_group.completed",
+        group_id.as_str(),
+        "completed",
+        &[],
+        None,
+    )
+    .await?;
+    Ok(RunStreamPreparedToolExecutionBatchOutcome::Completed(finalized))
+}
+
+#[allow(clippy::result_large_err)]
+async fn append_tool_parallel_group_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    event_type: &str,
+    group_id: &str,
+    status: &str,
+    tools: &[RunStreamPreparedToolExecution],
+    reason: Option<&str>,
+) -> Result<(), Status> {
+    let tool_entries = tools
+        .iter()
+        .enumerate()
+        .map(|(order, prepared)| {
+            json!({
+                "order": order,
+                "proposal_id": prepared.proposal_id.as_str(),
+                "tool_name": prepared.tool_name.as_str(),
+                "parallelism": classify_tool_parallelism(
+                    prepared.tool_name.as_str(),
+                    prepared.input_json.as_slice()
+                ).as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: event_type.to_owned(),
+            payload_json: json!({
+                "schema_version": 1,
+                "group_id": group_id,
+                "status": status,
+                "max_parallelism": MAX_PARALLEL_TOOL_CALLS_PER_GROUP,
+                "tools": tool_entries,
+                "reason": reason,
+            })
+            .to_string(),
+        })
+        .await?;
+    *tape_seq = (*tape_seq).saturating_add(1);
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
@@ -596,7 +1079,7 @@ async fn resolve_run_stream_tool_approval_outcome(
 
 #[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
-async fn execute_run_stream_tool_proposal(
+async fn execute_prepared_run_stream_tool_proposal(
     sender: &mpsc::Sender<
         Result<crate::transport::grpc::proto::palyra::common::v1::RunStreamEvent, Status>,
     >,
@@ -604,99 +1087,140 @@ async fn execute_run_stream_tool_proposal(
     request_context: &RequestContext,
     run_state: &mut RunStateMachine,
     run_id: &str,
-    proposal_id: &str,
-    tool_name: &str,
-    input_json: &[u8],
-    decision: &crate::tool_protocol::ToolDecision,
-    backend_selection: &ToolProposalBackendSelection,
-    resolved_session_id: &str,
+    prepared: RunStreamPreparedToolExecution,
     tape_seq: &mut i64,
 ) -> Result<RunStreamToolExecutionOutcome, Status> {
-    let execution_outcome = if decision.allowed {
-        runtime_state.record_tool_execution_attempt();
-        let started_at = Instant::now();
-        let mut cancel_poll = interval(Duration::from_millis(100));
-        cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let must_drain_execution_after_cancel =
-            tool_cancellation_requires_execution_drain(tool_name);
-        let mut execution_future = Box::pin(execute_tool_with_runtime_dispatch(
-            runtime_state,
-            ToolRuntimeExecutionContext {
-                principal: request_context.principal.as_str(),
-                device_id: request_context.device_id.as_str(),
-                channel: request_context.channel.as_deref(),
-                session_id: resolved_session_id,
-                run_id,
-                execution_backend: backend_selection.resolution.resolved,
-                backend_reason_code: backend_selection.resolution.reason_code.as_str(),
-            },
-            proposal_id,
-            tool_name,
-            input_json,
-        ));
-        let mut cancel_requested_during_execution = false;
-        let outcome = loop {
-            tokio::select! {
-                result = &mut execution_future => {
-                    break result;
-                }
-                _ = cancel_poll.tick() => {
-                    match runtime_state.is_orchestrator_cancel_requested(run_id.to_owned()).await {
-                        Ok(true) => {
-                            if must_drain_execution_after_cancel {
-                                cancel_requested_during_execution = true;
-                                break execution_future.await;
-                            }
-                            transition_run_stream_to_cancelled(
-                                sender,
-                                runtime_state,
-                                run_state,
-                                run_id,
-                                tape_seq,
-                            )
-                            .await?;
-                            return Ok(RunStreamToolExecutionOutcome::Cancelled);
-                        }
-                        Ok(false) => {}
-                        Err(error) => return Err(error),
-                    }
-                }
+    let execution_outcome =
+        match execute_prepared_tool_runtime(runtime_state, request_context, run_id, &prepared)
+            .await?
+        {
+            Some(outcome) => outcome,
+            None => {
+                transition_run_stream_to_cancelled(
+                    sender,
+                    runtime_state,
+                    run_state,
+                    run_id,
+                    tape_seq,
+                )
+                .await?;
+                return Ok(RunStreamToolExecutionOutcome::Cancelled);
             }
         };
-        record_tool_execution_outcome_metrics(
-            runtime_state,
-            crate::gateway::ToolExecutionTraceContext {
-                run_id,
-                proposal_id,
-                tool_name,
-                execution_surface: "run_stream",
-            },
-            decision.allowed,
-            started_at,
-            &outcome,
-        );
-        if cancel_requested_during_execution {
-            transition_run_stream_to_cancelled(sender, runtime_state, run_state, run_id, tape_seq)
-                .await?;
-            return Ok(RunStreamToolExecutionOutcome::Cancelled);
+    finalize_prepared_tool_execution_outcome(
+        sender,
+        runtime_state,
+        request_context,
+        run_id,
+        &prepared,
+        execution_outcome,
+        tape_seq,
+    )
+    .await
+}
+
+#[allow(clippy::result_large_err)]
+async fn execute_prepared_tool_runtime(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    run_id: &str,
+    prepared: &RunStreamPreparedToolExecution,
+) -> Result<Option<ToolExecutionOutcome>, Status> {
+    if !prepared.decision.allowed {
+        return Ok(Some(denied_execution_outcome(
+            prepared.proposal_id.as_str(),
+            prepared.tool_name.as_str(),
+            prepared.input_json.as_slice(),
+            prepared.decision.reason.as_str(),
+        )));
+    }
+
+    runtime_state.record_tool_execution_attempt();
+    let started_at = Instant::now();
+    let mut cancel_poll = interval(Duration::from_millis(100));
+    cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let must_drain_execution_after_cancel =
+        tool_cancellation_requires_execution_drain(prepared.tool_name.as_str());
+    let mut execution_future = Box::pin(execute_tool_with_runtime_dispatch(
+        runtime_state,
+        ToolRuntimeExecutionContext {
+            principal: request_context.principal.as_str(),
+            device_id: request_context.device_id.as_str(),
+            channel: request_context.channel.as_deref(),
+            session_id: prepared.resolved_session_id.as_str(),
+            run_id,
+            execution_backend: prepared.backend_selection.resolution.resolved,
+            backend_reason_code: prepared.backend_selection.resolution.reason_code.as_str(),
+        },
+        prepared.proposal_id.as_str(),
+        prepared.tool_name.as_str(),
+        prepared.input_json.as_slice(),
+    ));
+    let mut cancel_requested_during_execution = false;
+    let outcome = loop {
+        tokio::select! {
+            result = &mut execution_future => {
+                break result;
+            }
+            _ = cancel_poll.tick() => {
+                match runtime_state.is_orchestrator_cancel_requested(run_id.to_owned()).await {
+                    Ok(true) => {
+                        if must_drain_execution_after_cancel {
+                            cancel_requested_during_execution = true;
+                            break execution_future.await;
+                        }
+                        return Ok(None);
+                    }
+                    Ok(false) => {}
+                    Err(error) => return Err(error),
+                }
+            }
         }
-        outcome
-    } else {
-        denied_execution_outcome(proposal_id, tool_name, input_json, decision.reason.as_str())
     };
+    record_tool_execution_outcome_metrics(
+        runtime_state,
+        crate::gateway::ToolExecutionTraceContext {
+            run_id,
+            proposal_id: prepared.proposal_id.as_str(),
+            tool_name: prepared.tool_name.as_str(),
+            execution_surface: "run_stream",
+        },
+        prepared.decision.allowed,
+        started_at,
+        &outcome,
+    );
+    if cancel_requested_during_execution {
+        return Ok(None);
+    }
+    Ok(Some(outcome))
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+async fn finalize_prepared_tool_execution_outcome(
+    sender: &mpsc::Sender<
+        Result<crate::transport::grpc::proto::palyra::common::v1::RunStreamEvent, Status>,
+    >,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    run_id: &str,
+    prepared: &RunStreamPreparedToolExecution,
+    execution_outcome: ToolExecutionOutcome,
+    tape_seq: &mut i64,
+) -> Result<RunStreamToolExecutionOutcome, Status> {
     let execution_outcome = project_tool_result_for_model(
         runtime_state,
         ToolRuntimeExecutionContext {
             principal: request_context.principal.as_str(),
             device_id: request_context.device_id.as_str(),
             channel: request_context.channel.as_deref(),
-            session_id: resolved_session_id,
+            session_id: prepared.resolved_session_id.as_str(),
             run_id,
-            execution_backend: backend_selection.resolution.resolved,
-            backend_reason_code: backend_selection.resolution.reason_code.as_str(),
+            execution_backend: prepared.backend_selection.resolution.resolved,
+            backend_reason_code: prepared.backend_selection.resolution.reason_code.as_str(),
         },
-        proposal_id,
-        tool_name,
+        prepared.proposal_id.as_str(),
+        prepared.tool_name.as_str(),
         execution_outcome,
     )
     .await?;
@@ -706,7 +1230,7 @@ async fn execute_run_stream_tool_proposal(
         runtime_state,
         run_id,
         tape_seq,
-        proposal_id,
+        prepared.proposal_id.as_str(),
         execution_outcome.success,
         execution_outcome.output_json.as_slice(),
         execution_outcome.error.as_str(),
@@ -718,7 +1242,7 @@ async fn execute_run_stream_tool_proposal(
         runtime_state,
         run_id,
         tape_seq,
-        proposal_id,
+        prepared.proposal_id.as_str(),
         execution_outcome.attestation.attestation_id.as_str(),
         execution_outcome.attestation.execution_sha256.as_str(),
         execution_outcome.attestation.executed_at_unix_ms,
@@ -735,20 +1259,20 @@ async fn execute_run_stream_tool_proposal(
             principal: request_context.principal.as_str(),
             device_id: request_context.device_id.as_str(),
             channel: request_context.channel.as_deref(),
-            session_id: resolved_session_id,
+            session_id: prepared.resolved_session_id.as_str(),
             run_id,
-            execution_backend: backend_selection.resolution.resolved,
-            backend_reason_code: backend_selection.resolution.reason_code.as_str(),
+            execution_backend: prepared.backend_selection.resolution.resolved,
+            backend_reason_code: prepared.backend_selection.resolution.reason_code.as_str(),
         },
-        tool_name,
-        decision.allowed,
+        prepared.tool_name.as_str(),
+        prepared.decision.allowed,
         &execution_outcome,
         "run_stream_tool_result",
     )
     .await;
     Ok(RunStreamToolExecutionOutcome::Completed {
-        proposal_id: proposal_id.to_owned(),
-        tool_name: tool_name.to_owned(),
+        proposal_id: prepared.proposal_id.clone(),
+        tool_name: prepared.tool_name.clone(),
         outcome: execution_outcome,
     })
 }
@@ -905,4 +1429,35 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
         .take_while(|(index, ch)| index.saturating_add(ch.len_utf8()) <= max_bytes)
         .map(|(_, ch)| ch)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_tool_parallelism, ToolParallelism};
+
+    #[test]
+    fn tool_parallelism_classifies_safe_and_unsafe_tools() {
+        assert_eq!(
+            classify_tool_parallelism("palyra.echo", br#"{"text":"hello"}"#),
+            ToolParallelism::ReadOnlySafe
+        );
+        assert_eq!(
+            classify_tool_parallelism(
+                "palyra.http.fetch",
+                br#"{"url":"https://example.test/status","method":"GET"}"#
+            ),
+            ToolParallelism::IdempotentNetwork
+        );
+        assert_eq!(
+            classify_tool_parallelism(
+                "palyra.http.fetch",
+                br#"{"url":"https://example.test/update","method":"POST"}"#
+            ),
+            ToolParallelism::Never
+        );
+        assert_eq!(
+            classify_tool_parallelism("palyra.fs.apply_patch", br#"{"patch":"..."}"#),
+            ToolParallelism::Never
+        );
+    }
 }
