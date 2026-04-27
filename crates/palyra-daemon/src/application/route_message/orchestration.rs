@@ -9,6 +9,9 @@ use ulid::Ulid;
 use crate::{
     agents::AgentResolveRequest,
     application::{
+        conversation_bindings::{
+            ConversationBindingCreateRequest, ConversationBindingKind, ConversationBindingLifecycle,
+        },
         delivery_arbitration::resolve_delivery_policy,
         provider_input::{
             build_provider_image_inputs, prepare_model_provider_input, MemoryPromptFailureMode,
@@ -105,6 +108,7 @@ pub(crate) async fn handle_routed_route_message(
     actor_gateway_device_id: &str,
     retry_attempt: u32,
 ) -> Result<gateway_v1::RouteMessageResponse, Status> {
+    let mut plan = plan.clone();
     let route_request_context =
         request_context_with_resolved_route_channel(request_context, plan.channel.as_str());
     let route_action = if plan.is_broadcast { "message.broadcast" } else { "message.reply" };
@@ -176,6 +180,37 @@ pub(crate) async fn handle_routed_route_message(
     let previous_run_id_for_context = resolved_session.session.last_run_id.clone();
     let session_id = resolved_session.session.session_id;
     let run_id = Ulid::new().to_string();
+    let binding_kind = if plan.reply_thread_id.as_deref().is_some_and(|value| !value.is_empty()) {
+        ConversationBindingKind::Thread
+    } else {
+        ConversationBindingKind::Main
+    };
+    let binding_outcome = runtime_state
+        .conversation_bindings
+        .create_or_touch(ConversationBindingCreateRequest {
+            binding_kind,
+            channel: plan.channel.clone(),
+            conversation_id: input.conversation_id.clone(),
+            thread_id: plan.reply_thread_id.clone(),
+            sender_identity: plan.sender_identity.clone(),
+            principal: route_request_context.principal.clone(),
+            session_id: session_id.clone(),
+            workspace_id: None,
+            policy_scope: policy_resource.clone(),
+            parent_binding_id: None,
+            lifecycle: ConversationBindingLifecycle::default(),
+            now_unix_ms: current_unix_ms(),
+        })
+        .map_err(|error| {
+            Status::internal(format!(
+                "conversation binding update failed: {}",
+                error.safe_message()
+            ))
+        })?;
+    plan.binding_id = Some(binding_outcome.record.binding_id.clone());
+    plan.binding_kind = Some(binding_outcome.record.binding_kind.as_str().to_owned());
+    plan.binding_expires_at_unix_ms = binding_outcome.record.expires_at_unix_ms;
+    plan.binding_reason = Some(binding_outcome.reason.clone());
     runtime_state
         .start_orchestrator_run(OrchestratorRunStartRequest {
             run_id: run_id.clone(),
@@ -189,6 +224,30 @@ pub(crate) async fn handle_routed_route_message(
     runtime_state
         .update_orchestrator_run_state(run_id.clone(), RunLifecycleState::InProgress, None)
         .await?;
+    let _ = record_message_router_journal_event(
+        runtime_state,
+        &route_request_context,
+        session_id.as_str(),
+        run_id.as_str(),
+        if binding_outcome.created {
+            "conversation.binding.created"
+        } else {
+            "conversation.binding.touched"
+        },
+        common_v1::journal_event::EventActor::System as i32,
+        json!({
+            "event": if binding_outcome.created {
+                "conversation.binding.created"
+            } else {
+                "conversation.binding.touched"
+            },
+            "binding": binding_outcome.record.safe_snapshot_json(),
+            "reason": binding_outcome.reason,
+            "route_key": plan.route_key.clone(),
+            "config_hash": route_config_hash,
+        }),
+    )
+    .await;
     runtime_state.record_channel_message_routed();
 
     let route_agent = match runtime_state
@@ -233,6 +292,10 @@ pub(crate) async fn handle_routed_route_message(
             "channel": input.channel.clone(),
             "session_key": plan.session_key.clone(),
             "route_key": plan.route_key.clone(),
+            "binding_id": plan.binding_id.clone(),
+            "binding_kind": plan.binding_kind.clone(),
+            "binding_expires_at_unix_ms": plan.binding_expires_at_unix_ms,
+            "binding_reason": plan.binding_reason.clone(),
             "json_mode_requested": json_mode_requested,
             "agent_id": route_agent_id.clone(),
             "agent_resolution_source": route_agent_resolution_source.clone(),
@@ -285,6 +348,9 @@ pub(crate) async fn handle_routed_route_message(
                 "text": input.text.clone(),
                 "channel": input.channel.clone(),
                 "route_key": plan.route_key.clone(),
+                "binding_id": plan.binding_id.clone(),
+                "binding_kind": plan.binding_kind.clone(),
+                "binding_expires_at_unix_ms": plan.binding_expires_at_unix_ms,
                 "json_mode_requested": json_mode_requested,
                 "attachments": route_attachment_metadata.clone(),
                 "agent_id": route_agent_id.clone(),
@@ -435,6 +501,8 @@ pub(crate) async fn handle_routed_route_message(
                     },
                     "queued_for_retry": matches!(retry_disposition, RetryDisposition::Queued),
                     "quarantined": matches!(retry_disposition, RetryDisposition::Quarantined),
+                    "binding_id": plan.binding_id.clone(),
+                    "binding_kind": plan.binding_kind.clone(),
                     "config_hash": route_config_hash,
                     "actor": {
                         "connector_channel": actor_connector,
@@ -508,6 +576,8 @@ pub(crate) async fn handle_routed_route_message(
                 "policy_action": "channel.send",
                 "queued_for_retry": false,
                 "quarantined": false,
+                "binding_id": plan.binding_id.clone(),
+                "binding_kind": plan.binding_kind.clone(),
                 "config_hash": route_config_hash,
                 "actor": {
                     "connector_channel": actor_connector,
@@ -585,6 +655,9 @@ pub(crate) async fn handle_routed_route_message(
                 "attachments": route_attachment_metadata.clone(),
                 "agent_id": route_agent_id.clone(),
                 "agent_resolution_source": route_agent_resolution_source.clone(),
+                "binding_id": plan.binding_id.clone(),
+                "binding_kind": plan.binding_kind.clone(),
+                "binding_expires_at_unix_ms": plan.binding_expires_at_unix_ms,
                 "delivery_policy": route_delivery_policy.snapshot_json(),
             })
             .to_string(),
@@ -610,6 +683,9 @@ pub(crate) async fn handle_routed_route_message(
             "run_id": run_id.clone(),
             "agent_id": route_agent_id.clone(),
             "agent_resolution_source": route_agent_resolution_source.clone(),
+            "binding_id": plan.binding_id.clone(),
+            "binding_kind": plan.binding_kind.clone(),
+            "binding_expires_at_unix_ms": plan.binding_expires_at_unix_ms,
             "broadcast": plan.is_broadcast,
             "queued_for_retry": false,
             "quarantined": false,
@@ -643,6 +719,9 @@ pub(crate) async fn handle_routed_route_message(
             "attachments": route_attachment_metadata,
             "agent_id": route_agent_id,
             "agent_resolution_source": route_agent_resolution_source,
+            "binding_id": plan.binding_id.clone(),
+            "binding_kind": plan.binding_kind.clone(),
+            "binding_expires_at_unix_ms": plan.binding_expires_at_unix_ms,
             "delivery_policy": route_delivery_policy.snapshot_json(),
             "config_hash": route_config_hash,
             "actor": {
@@ -654,6 +733,16 @@ pub(crate) async fn handle_routed_route_message(
     )
     .await;
 
+    if let Some(binding_id) = plan.binding_id.as_deref() {
+        if let Err(error) = runtime_state.conversation_bindings.touch(binding_id, current_unix_ms())
+        {
+            warn!(
+                binding_id,
+                status_message = %error.safe_message(),
+                "failed to touch conversation binding after channel reply"
+            );
+        }
+    }
     runtime_state.record_channel_message_replied();
     runtime_state.refresh_channel_router_queue_depth();
     let route_output_template = RouteMessageOutputTemplate {

@@ -2080,6 +2080,22 @@ pub async fn run() -> Result<()> {
         node_runtime::NodeRuntimeState::load(runtime_state_root.as_path())
             .context("failed to initialize node runtime state")?,
     );
+    let conversation_bindings = application::conversation_bindings::ConversationBindingStore::open(
+        runtime_state_root.join("conversation-bindings.json"),
+    )
+    .context("failed to initialize conversation binding state")?;
+    let conversation_binding_startup_report = conversation_bindings
+        .reconcile_on_startup(unix_ms_now().context("failed to read system clock")?)
+        .context("failed to reconcile conversation binding state")?;
+    if conversation_binding_startup_report.expired_count > 0
+        || conversation_binding_startup_report.conflict_count > 0
+    {
+        warn!(
+            expired_count = conversation_binding_startup_report.expired_count,
+            conflict_count = conversation_binding_startup_report.conflict_count,
+            "conversation binding startup reconcile found stale state"
+        );
+    }
     #[rustfmt::skip]
     let external_retrieval_index = Arc::new(ExternalRetrievalRuntime::default());
     let runtime = GatewayRuntimeState::new_with_provider(
@@ -2222,6 +2238,7 @@ pub async fn run() -> Result<()> {
                 external_retrieval_index.clone(),
             )),
             external_retrieval_index,
+            conversation_bindings,
         },
     )
     .context("failed to initialize gateway runtime state")?;

@@ -516,6 +516,89 @@ async fn grpc_route_message_channel_command_returns_scoped_status_without_provid
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_route_message_persists_conversation_binding_and_command_resolves_it() -> Result<()> {
+    let (openai_base_url, request_count, server_handle) =
+        spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(
+            200,
+            r#"{"choices":[{"message":{"content":"bound reply"}}]}"#.to_owned(),
+        )])?;
+    let (child, admin_port, grpc_port, journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_and_channel_router(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+    let mut create_route_agent = tonic::Request::new(gateway_v1::CreateAgentRequest {
+        v: 1,
+        agent_id: "route".to_owned(),
+        display_name: "Route".to_owned(),
+        agent_dir: String::new(),
+        workspace_roots: vec!["workspace".to_owned()],
+        default_model_profile: "gpt-4o-mini".to_owned(),
+        execution_backend_preference: String::new(),
+        default_tool_allowlist: vec!["palyra.echo".to_owned()],
+        default_skill_allowlist: vec!["acme.route".to_owned()],
+        set_default: true,
+        allow_absolute_paths: false,
+    });
+    authorize_metadata_with_principal(create_route_agent.metadata_mut(), "admin:ops")?;
+    client
+        .create_agent(create_route_agent)
+        .await
+        .context("failed to create route agent before conversation binding test")?;
+
+    let adapter = FakeChannelAdapter::default();
+    let routed = adapter.inject_message(&mut client, "hey @palyra bind this", false).await?;
+    let session_id = routed
+        .session_id
+        .as_ref()
+        .map(|value| value.ulid.clone())
+        .context("routed message should resolve a session")?;
+
+    let status = adapter.inject_message(&mut client, "/palyra status", false).await?;
+    let status_text = status
+        .outputs
+        .first()
+        .map(|output| output.text.as_str())
+        .context("status command should return a reply")?;
+    assert!(
+        status_text.contains("binding=cb_") && status_text.contains(session_id.as_str()),
+        "status command should resolve the persisted conversation binding: {status_text}"
+    );
+    assert_eq!(
+        request_count.load(Ordering::Relaxed),
+        1,
+        "binding status command should not call the provider"
+    );
+
+    let message_events = load_message_router_journal_events(&journal_db_path)?;
+    let created_binding_id = message_events
+        .iter()
+        .find(|payload| {
+            payload.get("event").and_then(Value::as_str) == Some("conversation.binding.created")
+        })
+        .and_then(|payload| payload.pointer("/binding/binding_id").and_then(Value::as_str))
+        .context("route flow should journal created conversation binding")?;
+    assert!(
+        message_events.iter().any(|payload| {
+            payload.get("event").and_then(Value::as_str) == Some("message.received")
+                && payload.get("binding_id").and_then(Value::as_str) == Some(created_binding_id)
+        }),
+        "message.received should include the binding id used for route explainability"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_route_message_honors_json_mode_security_label_for_provider_request() -> Result<()> {
     let (openai_base_url, request_bodies, request_count, server_handle) =
         spawn_scripted_openai_server_with_request_capture(vec![
@@ -8734,7 +8817,9 @@ fn load_message_router_journal_events(journal_db_path: &PathBuf) -> Result<Vec<V
         let payload: Value = serde_json::from_str(payload_json.as_str())
             .context("message router journal payload_json must be valid json")?;
         if payload.get("event").and_then(Value::as_str).is_some_and(|event| {
-            event.starts_with("message.") || event.starts_with("channel.command.")
+            event.starts_with("message.")
+                || event.starts_with("channel.command.")
+                || event.starts_with("conversation.binding.")
         }) {
             events.push(payload);
         }

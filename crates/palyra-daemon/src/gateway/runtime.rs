@@ -410,7 +410,7 @@ pub struct GatewayJournalConfigSnapshot {
 }
 
 #[rustfmt::skip]
-pub struct GatewayRuntimeDependencies { pub model_provider: Arc<dyn ModelProvider>, pub vault: Arc<Vault>, pub agent_registry: AgentRegistry, pub tool_posture_registry: ToolPostureRegistry, pub retrieval_backend: Arc<dyn RetrievalBackend>, pub external_retrieval_index: Arc<ExternalRetrievalRuntime> }
+pub struct GatewayRuntimeDependencies { pub model_provider: Arc<dyn ModelProvider>, pub vault: Arc<Vault>, pub agent_registry: AgentRegistry, pub tool_posture_registry: ToolPostureRegistry, pub retrieval_backend: Arc<dyn RetrievalBackend>, pub external_retrieval_index: Arc<ExternalRetrievalRuntime>, pub conversation_bindings: ConversationBindingStore }
 
 #[derive(Clone)]
 pub(crate) struct RoutinesRuntimeConfig {
@@ -450,6 +450,7 @@ pub struct GatewayRuntimeState {
     canvas_signing_secret: [u8; 32],
     agent_registry: AgentRegistry,
     pub(crate) channel_router: ChannelRouter,
+    pub(crate) conversation_bindings: ConversationBindingStore,
     pub(crate) observability: Arc<crate::observability::ObservabilityState>,
     pub(crate) self_healing: Arc<SelfHealingState>,
 }
@@ -1114,7 +1115,7 @@ impl GatewayRuntimeState {
         let tool_posture_registry = ToolPostureRegistry::open(tool_posture_root.as_path())
             .expect("test tool posture registry should initialize");
         #[rustfmt::skip]
-        let dependencies = GatewayRuntimeDependencies { model_provider: default_provider, vault: default_vault, agent_registry, tool_posture_registry, retrieval_backend: Arc::new(crate::retrieval::JournalRetrievalBackend), external_retrieval_index: Arc::new(crate::retrieval::ExternalRetrievalRuntime::default()) };
+        let dependencies = GatewayRuntimeDependencies { model_provider: default_provider, vault: default_vault, agent_registry, tool_posture_registry, retrieval_backend: Arc::new(crate::retrieval::JournalRetrievalBackend), external_retrieval_index: Arc::new(crate::retrieval::ExternalRetrievalRuntime::default()), conversation_bindings: ConversationBindingStore::open_temp() };
         Self::new_with_provider(
             config,
             journal_config,
@@ -1132,7 +1133,7 @@ impl GatewayRuntimeState {
         dependencies: GatewayRuntimeDependencies,
     ) -> Result<Arc<Self>, JournalError> {
         #[rustfmt::skip]
-        let GatewayRuntimeDependencies { model_provider, vault, agent_registry, tool_posture_registry, retrieval_backend, external_retrieval_index } = dependencies;
+        let GatewayRuntimeDependencies { model_provider, vault, agent_registry, tool_posture_registry, retrieval_backend, external_retrieval_index, conversation_bindings } = dependencies;
         let build = build_metadata();
         let existing_events = journal_store.total_events()? as u64;
         let canvas_snapshots =
@@ -1285,6 +1286,7 @@ impl GatewayRuntimeState {
             canvas_signing_secret: generate_canvas_signing_secret(),
             agent_registry,
             channel_router,
+            conversation_bindings,
             observability: Arc::new(crate::observability::ObservabilityState::default()),
             self_healing: Arc::new(SelfHealingState::new()),
         }))

@@ -47,6 +47,7 @@ use crate::{
         AgentCreateOutcome, AgentCreateRequest, AgentRecord, AgentRegistry, AgentRegistryError,
         AgentResolutionSource,
     },
+    application::conversation_bindings::ConversationBindingStore,
     channel_router::{
         ChannelPairingSnapshot, ChannelRouter, ChannelRouterConfig,
         InboundMessage as ChannelInboundMessage, PairingApprovalOutcome, PairingCodeRecord,

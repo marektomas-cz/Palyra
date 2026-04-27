@@ -19,6 +19,7 @@ use crate::{
             build_policy_denied_command_response, ChannelCommandParseOutcome,
             ChannelCommandRegistry, ChannelCommandRuntimeView, ChannelCommandScope,
         },
+        conversation_bindings::ConversationBindingResolveRequest,
         route_message::orchestration::handle_routed_route_message,
         run_stream::orchestration::{
             finalize_run_stream_after_provider_response, process_run_stream_message,
@@ -441,18 +442,32 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             principal: context.principal.clone(),
         };
         let command_registry = ChannelCommandRegistry::builtin();
+        let observed_at_unix_ms = crate::unix_ms_now().unwrap_or(0);
+        let binding_resolution =
+            self.state.conversation_bindings.resolve(ConversationBindingResolveRequest {
+                channel: input.channel.clone(),
+                conversation_id: input.conversation_id.clone(),
+                thread_id: input.adapter_thread_id.clone(),
+                sender_identity: input.sender_handle.clone(),
+                principal: context.principal.clone(),
+                now_unix_ms: observed_at_unix_ms,
+            });
+        let binding_error = binding_resolution.as_ref().err().map(|error| error.safe_message());
+        let binding_record = binding_resolution.ok().and_then(|resolution| resolution.record);
         let command_runtime = ChannelCommandRuntimeView {
             queue_depth: self.state.channel_router.queue_depth(),
             route_config_hash: route_config_hash.clone(),
             command_catalog_hash: command_registry.catalog_hash(),
-            binding_id: None,
-            binding_kind: None,
-            session_id: None,
+            binding_id: binding_record.as_ref().map(|record| record.binding_id.clone()),
+            binding_kind: binding_record
+                .as_ref()
+                .map(|record| record.binding_kind.as_str().to_owned()),
+            session_id: binding_record.as_ref().map(|record| record.session_id.clone()),
             run_id: None,
             pending_approval_count: 0,
             provider_wait_ms: None,
-            last_error: None,
-            observed_at_unix_ms: crate::unix_ms_now().unwrap_or(0),
+            last_error: binding_error,
+            observed_at_unix_ms,
         };
         match command_registry.parse_text(input.text.as_str()) {
             ChannelCommandParseOutcome::NotCommand => {}

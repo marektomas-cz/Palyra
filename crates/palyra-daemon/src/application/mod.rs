@@ -5,6 +5,7 @@ pub mod channels;
 pub mod context_compression;
 pub mod context_engine;
 pub mod context_references;
+pub mod conversation_bindings;
 pub mod delivery_arbitration;
 pub mod execution_gate;
 pub mod instruction_compiler;
