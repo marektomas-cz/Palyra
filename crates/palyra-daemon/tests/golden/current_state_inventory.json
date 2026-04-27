@@ -80,7 +80,9 @@
         "provider_auth"
       ],
       "contract_paths": [
-        "/console/v1/auth/health"
+        "/console/v1/auth/health",
+        "/console/v1/auth/doctor",
+        "/console/v1/auth/audit"
       ],
       "cli_handoff_commands": null
     },
@@ -138,7 +140,10 @@
         "secrets"
       ],
       "contract_paths": [
-        "/console/v1/auth/profiles"
+        "/console/v1/auth/profiles",
+        "/console/v1/auth/profiles/{profile_id}/cooldown/clear",
+        "/console/v1/auth/profile-order",
+        "/console/v1/auth/selection/explain"
       ],
       "cli_handoff_commands": null
     },
