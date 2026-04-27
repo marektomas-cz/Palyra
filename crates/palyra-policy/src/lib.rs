@@ -176,7 +176,14 @@ when {
     context.action == "channel.message.edit" ||
     context.action == "channel.message.delete" ||
     context.action == "channel.message.react_add" ||
-    context.action == "channel.message.react_remove"
+    context.action == "channel.message.react_remove" ||
+    context.action == "channel.command.status" ||
+    context.action == "channel.command.stop" ||
+    context.action == "channel.command.reset" ||
+    context.action == "channel.command.compact" ||
+    context.action == "channel.command.approve" ||
+    context.action == "channel.command.queue" ||
+    context.action == "channel.command.whoami"
 };
 
 @id("allow_attachment_metadata_actions")
@@ -446,6 +453,7 @@ fn decision_reason(
         if normalized_action.starts_with("message.")
             || normalized_action == "channel.send"
             || normalized_action.starts_with("channel.message.")
+            || normalized_action.starts_with("channel.command.")
         {
             return "message router action allowed by Cedar policy".to_owned();
         }
@@ -955,6 +963,24 @@ mod tests {
             evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
 
         assert_eq!(evaluation.decision, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn channel_command_action_is_explicitly_allowed() {
+        let request = PolicyRequest {
+            principal: "user:ops".to_owned(),
+            action: "channel.command.status".to_owned(),
+            resource: "channel:discord:default".to_owned(),
+        };
+
+        let evaluation =
+            evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
+
+        assert_eq!(evaluation.decision, PolicyDecision::Allow);
+        assert!(
+            evaluation.explanation.reason.contains("message router action allowed"),
+            "channel commands should share the message router policy surface"
+        );
     }
 
     #[test]

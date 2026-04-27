@@ -7,18 +7,19 @@ pub mod storage;
 pub mod supervisor;
 
 pub use protocol::{
-    AttachmentKind, AttachmentRef, ConnectorApprovalMode, ConnectorAvailability,
-    ConnectorCapabilitySet, ConnectorCapabilitySupport, ConnectorConversationTarget,
-    ConnectorInstanceSpec, ConnectorKind, ConnectorLiveness, ConnectorMessageCapabilitySet,
-    ConnectorMessageDeleteRequest, ConnectorMessageEditRequest, ConnectorMessageLocator,
-    ConnectorMessageMutationDiff, ConnectorMessageMutationResult, ConnectorMessageMutationStatus,
-    ConnectorMessageReactionRecord, ConnectorMessageReactionRequest, ConnectorMessageReadRequest,
-    ConnectorMessageReadResult, ConnectorMessageRecord, ConnectorMessageSearchRequest,
-    ConnectorMessageSearchResult, ConnectorOperationPreflight, ConnectorQueueDepth,
-    ConnectorReadiness, ConnectorRiskLevel, ConnectorStatusSnapshot, DeliveryOutcome,
-    DeliveryReceipt, DeliveryReceiptState, InboundMessageEvent, OutboundA2uiUpdate,
-    OutboundAttachment, OutboundMessageRequest, RetryClass, RouteInboundResult,
-    RoutedOutboundMessage,
+    AttachmentKind, AttachmentRef, ChannelCommandArgumentKind, ChannelCommandSyncState,
+    ChannelCommandSyncStatus, ChannelNativeCommandArgument, ChannelNativeCommandInvocationPayload,
+    ChannelNativeCommandSpec, ConnectorApprovalMode, ConnectorAvailability, ConnectorCapabilitySet,
+    ConnectorCapabilitySupport, ConnectorConversationTarget, ConnectorInstanceSpec, ConnectorKind,
+    ConnectorLiveness, ConnectorMessageCapabilitySet, ConnectorMessageDeleteRequest,
+    ConnectorMessageEditRequest, ConnectorMessageLocator, ConnectorMessageMutationDiff,
+    ConnectorMessageMutationResult, ConnectorMessageMutationStatus, ConnectorMessageReactionRecord,
+    ConnectorMessageReactionRequest, ConnectorMessageReadRequest, ConnectorMessageReadResult,
+    ConnectorMessageRecord, ConnectorMessageSearchRequest, ConnectorMessageSearchResult,
+    ConnectorOperationPreflight, ConnectorQueueDepth, ConnectorReadiness, ConnectorRiskLevel,
+    ConnectorStatusSnapshot, DeliveryOutcome, DeliveryReceipt, DeliveryReceiptState,
+    InboundMessageEvent, OutboundA2uiUpdate, OutboundAttachment, OutboundMessageRequest,
+    RetryClass, RouteInboundResult, RoutedOutboundMessage,
 };
 pub use storage::{
     ConnectorEventRecord, ConnectorInstanceRecord, ConnectorQueueSnapshot, ConnectorStore,

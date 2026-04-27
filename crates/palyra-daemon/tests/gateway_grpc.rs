@@ -463,6 +463,59 @@ async fn grpc_route_message_with_fake_adapter_emits_reply_and_journal_events() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_route_message_channel_command_returns_scoped_status_without_provider_call(
+) -> Result<()> {
+    let (openai_base_url, request_count, server_handle) = spawn_scripted_openai_server(Vec::new())?;
+    let (child, admin_port, grpc_port, journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_and_channel_router(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let adapter = FakeChannelAdapter::default();
+    let response = adapter.inject_message(&mut client, "/palyra status", false).await?;
+
+    assert!(response.accepted, "channel command should return an immediate response");
+    assert!(!response.queued_for_retry);
+    assert_eq!(response.decision_reason, "channel_command/status");
+    assert_eq!(response.route_key, "channel_command:cli");
+    assert!(
+        response.session_id.is_none() && response.run_id.is_none(),
+        "channel commands should not allocate route sessions or provider runs"
+    );
+    assert_eq!(
+        request_count.load(Ordering::Relaxed),
+        0,
+        "channel command should bypass provider routing"
+    );
+    let outbound =
+        response.outputs.first().cloned().context("command response should include a reply")?;
+    assert!(outbound.text.contains("status: channel=cli"));
+    assert_eq!(outbound.thread_id, "thread-1");
+    assert_eq!(outbound.in_reply_to_message_id, "msg-1");
+
+    let message_events = load_message_router_journal_events(&journal_db_path)?;
+    assert!(
+        message_events.iter().any(|payload| {
+            payload.get("event").and_then(Value::as_str) == Some("channel.command.evaluated")
+                && payload.get("command").and_then(Value::as_str) == Some("status")
+        }),
+        "command flow should persist an evaluated command event"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_route_message_honors_json_mode_security_label_for_provider_request() -> Result<()> {
     let (openai_base_url, request_bodies, request_count, server_handle) =
         spawn_scripted_openai_server_with_request_capture(vec![
@@ -8680,11 +8733,9 @@ fn load_message_router_journal_events(journal_db_path: &PathBuf) -> Result<Vec<V
             row.get(1).context("message router journal payload_json should be readable")?;
         let payload: Value = serde_json::from_str(payload_json.as_str())
             .context("message router journal payload_json must be valid json")?;
-        if payload
-            .get("event")
-            .and_then(Value::as_str)
-            .is_some_and(|event| event.starts_with("message."))
-        {
+        if payload.get("event").and_then(Value::as_str).is_some_and(|event| {
+            event.starts_with("message.") || event.starts_with("channel.command.")
+        }) {
             events.push(payload);
         }
     }

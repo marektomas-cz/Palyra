@@ -1,5 +1,6 @@
 mod attachments;
 mod capabilities;
+mod commands;
 mod delivery;
 mod kinds;
 mod messages;
@@ -9,6 +10,10 @@ pub use attachments::{AttachmentKind, AttachmentRef, OutboundA2uiUpdate, Outboun
 pub use capabilities::{
     ConnectorApprovalMode, ConnectorCapabilitySet, ConnectorCapabilitySupport,
     ConnectorMessageCapabilitySet, ConnectorOperationPreflight, ConnectorRiskLevel,
+};
+pub use commands::{
+    ChannelCommandArgumentKind, ChannelCommandSyncState, ChannelCommandSyncStatus,
+    ChannelNativeCommandArgument, ChannelNativeCommandInvocationPayload, ChannelNativeCommandSpec,
 };
 pub use delivery::{
     ConnectorInstanceSpec, ConnectorQueueDepth, ConnectorStatusSnapshot, DeliveryOutcome,
