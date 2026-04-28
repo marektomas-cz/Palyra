@@ -18,6 +18,9 @@ use tracing::warn;
 use ulid::Ulid;
 
 use crate::{
+    application::conversation_bindings::{
+        ConversationBindingCreateRequest, ConversationBindingKind, ConversationBindingLifecycle,
+    },
     application::{
         delivery_arbitration::{
             arbitrate_delivery, delivery_review_summary, merge_delivery_progress_updates,
@@ -28,8 +31,11 @@ use crate::{
     },
     auxiliary_executor::{execute_auxiliary_task, AuxiliaryExecutionRequest, AuxiliaryTaskType},
     delegation::{
-        DelegationExecutionMode, DelegationMergeApprovalSummary, DelegationMergeArtifactReference,
-        DelegationMergeFailureCategory, DelegationMergeProvenanceRecord, DelegationMergeResult,
+        build_delegated_run_graph, build_delegated_run_record, build_delegated_scope,
+        DelegatedReferenceInput, DelegatedRunRecordBuildRequest, DelegatedRunState,
+        DelegatedScopeBuildRequest, DelegationExecutionMode, DelegationMergeApprovalSummary,
+        DelegationMergeArtifactReference, DelegationMergeFailureCategory,
+        DelegationMergeProvenanceRecord, DelegationMergeResult, DelegationMergeStatus,
         DelegationMergeStrategy, DelegationMergeUsageSummary, DelegationSnapshot,
         DelegationToolTraceSummary,
     },
@@ -545,6 +551,39 @@ fn evaluate_delegation_scheduler_limits(
     let delegation = task.delegation.as_ref()?;
     let parent_run_id = task.parent_run_id.as_deref()?;
     let limits = &delegation.runtime_limits;
+    if delegated_lineage_has_cycle(all_tasks, parent_run_id) {
+        return Some(DelegationSchedulerDecision::Fail {
+            reason: "delegation_cycle",
+            message: format!(
+                "delegated child would create a parent-child cycle under parent run {parent_run_id}"
+            ),
+        });
+    }
+
+    let next_depth = delegated_lineage_depth(all_tasks, parent_run_id).saturating_add(1);
+    if next_depth > limits.max_depth {
+        return Some(DelegationSchedulerDecision::Fail {
+            reason: "max_depth",
+            message: format!(
+                "delegated child would exceed max_depth={} under parent run {}",
+                limits.max_depth, parent_run_id
+            ),
+        });
+    }
+
+    let root_parent_run_id = delegated_root_parent_run_id(all_tasks, parent_run_id);
+    let total_child_count =
+        delegated_total_child_count_for_root(all_tasks, task, root_parent_run_id.as_str());
+    if total_child_count > limits.max_total_children {
+        return Some(DelegationSchedulerDecision::Fail {
+            reason: "max_total_children",
+            message: format!(
+                "delegated graph would exceed max_total_children={} under root run {}",
+                limits.max_total_children, root_parent_run_id
+            ),
+        });
+    }
+
     let child_rank = delegated_child_rank_for_parent(all_tasks, task, parent_run_id);
     if child_rank > limits.max_children_per_parent {
         return Some(DelegationSchedulerDecision::Fail {
@@ -597,6 +636,95 @@ fn evaluate_delegation_scheduler_limits(
     }
 
     None
+}
+
+fn delegated_lineage_has_cycle(
+    all_tasks: &[OrchestratorBackgroundTaskRecord],
+    parent_run_id: &str,
+) -> bool {
+    let mut seen = Vec::<&str>::new();
+    let mut current = parent_run_id;
+    while let Some(parent_task) = delegated_task_for_child_run(all_tasks, current) {
+        let Some(next_parent) = parent_task.parent_run_id.as_deref() else {
+            return false;
+        };
+        if seen.contains(&next_parent) || next_parent == parent_run_id {
+            return true;
+        }
+        seen.push(next_parent);
+        current = next_parent;
+    }
+    false
+}
+
+fn delegated_lineage_depth(
+    all_tasks: &[OrchestratorBackgroundTaskRecord],
+    parent_run_id: &str,
+) -> u64 {
+    let mut depth = 0_u64;
+    let mut seen = Vec::<&str>::new();
+    let mut current = parent_run_id;
+    while let Some(parent_task) = delegated_task_for_child_run(all_tasks, current) {
+        let Some(next_parent) = parent_task.parent_run_id.as_deref() else {
+            break;
+        };
+        if seen.contains(&next_parent) {
+            break;
+        }
+        seen.push(next_parent);
+        depth = depth.saturating_add(1);
+        current = next_parent;
+    }
+    depth
+}
+
+fn delegated_root_parent_run_id(
+    all_tasks: &[OrchestratorBackgroundTaskRecord],
+    parent_run_id: &str,
+) -> String {
+    let mut root = parent_run_id.to_owned();
+    let mut seen = Vec::<String>::new();
+    while let Some(parent_task) = delegated_task_for_child_run(all_tasks, root.as_str()) {
+        let Some(next_parent) = parent_task.parent_run_id.as_deref() else {
+            break;
+        };
+        if seen.iter().any(|value| value == next_parent) {
+            break;
+        }
+        seen.push(next_parent.to_owned());
+        root = next_parent.to_owned();
+    }
+    root
+}
+
+fn delegated_task_for_child_run<'a>(
+    all_tasks: &'a [OrchestratorBackgroundTaskRecord],
+    child_run_id: &str,
+) -> Option<&'a OrchestratorBackgroundTaskRecord> {
+    all_tasks.iter().find(|candidate| {
+        candidate.delegation.is_some() && candidate.target_run_id.as_deref() == Some(child_run_id)
+    })
+}
+
+fn delegated_total_child_count_for_root(
+    all_tasks: &[OrchestratorBackgroundTaskRecord],
+    task: &OrchestratorBackgroundTaskRecord,
+    root_parent_run_id: &str,
+) -> u64 {
+    let count = all_tasks
+        .iter()
+        .filter(|candidate| {
+            let Some(candidate_parent) = candidate.parent_run_id.as_deref() else {
+                return false;
+            };
+            let candidate_root = delegated_root_parent_run_id(all_tasks, candidate_parent);
+            candidate.delegation.is_some()
+                && !is_terminal_task_state(candidate.state.as_str())
+                && task_precedes_or_equals(candidate, task)
+                && candidate_root == root_parent_run_id
+        })
+        .count();
+    u64::try_from(count).unwrap_or(u64::MAX)
 }
 
 fn delegated_child_rank_for_parent(
@@ -867,6 +995,7 @@ async fn run_background_task_stream(
         .into_inner();
 
     append_parent_spawned_event(runtime, task, run_id).await?;
+    create_delegated_child_binding(runtime, task, run_id).await?;
 
     let delivery_policy = resolve_delivery_policy(
         &runtime.config.delivery_arbitration,
@@ -1005,6 +1134,52 @@ async fn run_background_task_stream(
     }
 
     Err(Status::internal(format!("background run {run_id} finished without a persisted snapshot")))
+}
+
+async fn create_delegated_child_binding(
+    runtime: &Arc<GatewayRuntimeState>,
+    task: &OrchestratorBackgroundTaskRecord,
+    child_run_id: &str,
+) -> Result<(), Status> {
+    if task.delegation.is_none() {
+        return Ok(());
+    }
+    let Some(parent_run_id) = task.parent_run_id.as_deref() else {
+        return Ok(());
+    };
+    let now = crate::gateway::current_unix_ms();
+    let outcome = runtime
+        .conversation_bindings
+        .create_or_touch(ConversationBindingCreateRequest {
+            binding_kind: ConversationBindingKind::DelegatedRun,
+            channel: task.channel.clone().unwrap_or_else(|| DEFAULT_BACKGROUND_CHANNEL.to_owned()),
+            conversation_id: Some(task.session_id.clone()),
+            thread_id: Some(format!("delegation:{}", task.task_id)),
+            sender_identity: Some(format!("delegated-run:{child_run_id}")),
+            principal: task.owner_principal.clone(),
+            session_id: task.session_id.clone(),
+            workspace_id: None,
+            policy_scope: format!("delegation:{parent_run_id}"),
+            parent_binding_id: None,
+            lifecycle: ConversationBindingLifecycle::default(),
+            now_unix_ms: now,
+        })
+        .map_err(|error| Status::internal(error.safe_message()))?;
+
+    append_child_lifecycle_event(
+        runtime,
+        task,
+        Some(child_run_id),
+        "child_binding_created",
+        "running",
+        false,
+        json!({
+            "binding": outcome.record.safe_snapshot_json(),
+            "created": outcome.created,
+            "reason": outcome.reason,
+        }),
+    )
+    .await
 }
 
 async fn sync_parent_run_cancellation(
@@ -1217,11 +1392,91 @@ fn build_parameter_delta_bytes(task: &OrchestratorBackgroundTaskRecord) -> Resul
                     ))
                 })?,
             );
+            root.insert(
+                "delegation_scope".to_owned(),
+                build_task_delegated_scope(task, delegation)?.safe_snapshot_json(),
+            );
         }
     }
     serde_json::to_vec(&merged).map_err(|error| {
         Status::internal(format!("failed to encode background parameter_delta bytes: {error}"))
     })
+}
+
+fn task_objective(task: &OrchestratorBackgroundTaskRecord) -> String {
+    task.input_text
+        .as_deref()
+        .map(truncate_excerpt_512)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("Delegated task {} ({})", task.task_id, task.task_kind))
+}
+
+fn build_task_delegated_scope(
+    task: &OrchestratorBackgroundTaskRecord,
+    delegation: &DelegationSnapshot,
+) -> Result<crate::delegation::DelegatedRunScope, Status> {
+    let mut context_refs = Vec::new();
+    if let Some(parent_run_id) = task.parent_run_id.as_deref() {
+        context_refs.push(DelegatedReferenceInput {
+            ref_id: parent_run_id.to_owned(),
+            reason: "parent run summary and progress refs".to_owned(),
+            sensitivity: "internal".to_owned(),
+        });
+    }
+    let memory_refs =
+        if delegation.memory_scope == crate::delegation::DelegationMemoryScopeKind::None {
+            Vec::new()
+        } else {
+            vec![DelegatedReferenceInput {
+                ref_id: task.session_id.clone(),
+                reason: "delegated memory recall scope".to_owned(),
+                sensitivity: "internal".to_owned(),
+            }]
+        };
+
+    build_delegated_scope(DelegatedScopeBuildRequest {
+        objective: task_objective(task),
+        delegation: delegation.clone(),
+        parent_tool_allowlist: delegation.tool_allowlist.clone(),
+        parent_skill_allowlist: delegation.skill_allowlist.clone(),
+        context_refs,
+        memory_refs,
+        artifact_refs: Vec::new(),
+    })
+}
+
+fn build_task_delegated_record(
+    task: &OrchestratorBackgroundTaskRecord,
+    child_run_id: Option<&str>,
+    state: DelegatedRunState,
+    merge_status: DelegationMergeStatus,
+    event_type: &str,
+    event_reason: &str,
+) -> Result<crate::delegation::DelegatedRunRecord, Status> {
+    let Some(delegation) = task.delegation.as_ref() else {
+        return Err(Status::failed_precondition("delegated run record requires delegation"));
+    };
+    let Some(parent_run_id) = task.parent_run_id.as_deref() else {
+        return Err(Status::failed_precondition("delegated run record requires a parent run id"));
+    };
+    let scope = build_task_delegated_scope(task, delegation)?;
+    Ok(build_delegated_run_record(DelegatedRunRecordBuildRequest {
+        parent_run_id: parent_run_id.to_owned(),
+        child_run_id: child_run_id.map(ToOwned::to_owned),
+        task_id: Some(task.task_id.clone()),
+        objective: task_objective(task),
+        scope,
+        delegation: delegation.clone(),
+        state,
+        merge_status,
+        event_type: event_type.to_owned(),
+        event_reason: event_reason.to_owned(),
+        observed_at_unix_ms: crate::gateway::current_unix_ms(),
+    }))
+}
+
+fn truncate_excerpt_512(value: &str) -> String {
+    truncate_excerpt(value, 512)
 }
 
 fn extract_parameter_delta_value(payload_json: Option<&str>) -> Result<Option<Value>, Status> {
@@ -1750,6 +2005,17 @@ async fn append_parent_spawned_event(
     let Some(parent_run_id) = task.parent_run_id.as_deref() else {
         return Ok(());
     };
+    let delegated_run = build_task_delegated_record(
+        task,
+        Some(child_run_id),
+        DelegatedRunState::Running,
+        DelegationMergeStatus::NotReady,
+        "child_run_spawned",
+        "child run spawned through bounded delegation executor",
+    )?;
+    let graph_explain =
+        build_delegated_run_graph(parent_run_id.to_owned(), vec![delegated_run.clone()])
+            .explain_json();
     append_parent_tape_event(
         runtime,
         parent_run_id,
@@ -1759,6 +2025,8 @@ async fn append_parent_spawned_event(
             "child_run_id": child_run_id,
             "session_id": task.session_id,
             "delegation": task.delegation,
+            "delegated_run": delegated_run.safe_snapshot_json(),
+            "graph_explain": graph_explain,
         }),
     )
     .await?;
@@ -1772,6 +2040,7 @@ async fn append_parent_spawned_event(
         json!({
             "legacy_event_type": "child_run_spawned",
             "delegation": task.delegation,
+            "delegated_run": delegated_run.safe_snapshot_json(),
         }),
     )
     .await
@@ -1792,6 +2061,23 @@ async fn append_parent_merge_event(
         "cancelled" => "child_run_cancelled",
         _ => "child_run_merged",
     };
+    let merge_status = merge_status_for_result(run, merge_result);
+    let delegated_state = if run.state == "done" {
+        DelegatedRunState::Merged
+    } else {
+        DelegatedRunState::from_child_state(run.state.as_str())
+    };
+    let delegated_run = build_task_delegated_record(
+        task,
+        Some(run.run_id.as_str()),
+        delegated_state,
+        merge_status,
+        event_type,
+        "child output merge preview produced for parent context",
+    )?;
+    let graph_explain =
+        build_delegated_run_graph(parent_run_id.to_owned(), vec![delegated_run.clone()])
+            .explain_json();
     let (delivery_policy, delivery_decision) =
         evaluate_delivery_arbitration_for_merge(runtime, task, run, merge_result).await?;
     append_parent_tape_event(
@@ -1803,6 +2089,9 @@ async fn append_parent_merge_event(
             "child_run_id": run.run_id,
             "child_state": run.state,
             "merge_result": merge_result,
+            "merge_preview": merge_preview_json(run, merge_result),
+            "delegated_run": delegated_run.safe_snapshot_json(),
+            "graph_explain": graph_explain,
             "delivery_review": delivery_review_summary(&merge_result.approval_summary),
             "delivery_arbitration": delivery_decision.explain_json.clone(),
         }),
@@ -1826,6 +2115,8 @@ async fn append_parent_merge_event(
         json!({
             "legacy_event_type": event_type,
             "merge_result": merge_result,
+            "merge_preview": merge_preview_json(run, merge_result),
+            "delegated_run": delegated_run.safe_snapshot_json(),
             "delivery_review": delivery_review_summary(&merge_result.approval_summary),
             "delivery_arbitration": delivery_decision.explain_json.clone(),
         }),
@@ -1867,6 +2158,59 @@ async fn evaluate_delivery_arbitration_for_merge(
         observed_at_unix_ms: crate::gateway::current_unix_ms(),
     });
     Ok((policy, decision))
+}
+
+fn merge_status_for_result(
+    run: &crate::journal::OrchestratorRunStatusSnapshot,
+    merge_result: &DelegationMergeResult,
+) -> DelegationMergeStatus {
+    if run.state == "failed" {
+        return DelegationMergeStatus::Failed;
+    }
+    if merge_result.approval_summary.approval_denied {
+        return DelegationMergeStatus::Rejected;
+    }
+    if merge_result.approval_summary.approval_pending || merge_result.approval_required {
+        return DelegationMergeStatus::ApprovalRequired;
+    }
+    if run.state == "done" {
+        DelegationMergeStatus::Merged
+    } else {
+        DelegationMergeStatus::PreviewReady
+    }
+}
+
+fn merge_preview_json(
+    run: &crate::journal::OrchestratorRunStatusSnapshot,
+    merge_result: &DelegationMergeResult,
+) -> Value {
+    json!({
+        "child_run_id": run.run_id,
+        "child_state": run.state,
+        "summary": truncate_excerpt(merge_result.summary_text.as_str(), 600),
+        "evidence_refs": merge_result
+            .provenance
+            .iter()
+            .map(|record| json!({
+                "kind": record.kind,
+                "label": truncate_excerpt(record.label.as_str(), 160),
+                "child_run_id": record.child_run_id,
+                "requires_approval": record.requires_approval,
+            }))
+            .collect::<Vec<_>>(),
+        "changed_artifacts": merge_result
+            .artifact_references
+            .iter()
+            .map(|artifact| json!({
+                "artifact_id": artifact.artifact_id,
+                "artifact_kind": artifact.artifact_kind,
+                "label": truncate_excerpt(artifact.label.as_str(), 160),
+            }))
+            .collect::<Vec<_>>(),
+        "sensitivity": if merge_result.approval_required { "review_required" } else { "internal" },
+        "approval_required": merge_result.approval_required,
+        "warnings": merge_result.warnings,
+    })
 }
 
 async fn emit_delivery_arbitration_audit(
@@ -1960,6 +2304,21 @@ async fn append_child_lifecycle_event(
     let Some(parent_run_id) = task.parent_run_id.as_deref() else {
         return Ok(());
     };
+    let delegated_run = if task.delegation.is_some() {
+        Some(build_task_delegated_record(
+            task,
+            child_run_id,
+            DelegatedRunState::from_child_state(child_state),
+            DelegationMergeStatus::NotReady,
+            event_type,
+            child_state,
+        )?)
+    } else {
+        None
+    };
+    let graph_explain = delegated_run.as_ref().map(|record| {
+        build_delegated_run_graph(parent_run_id.to_owned(), vec![record.clone()]).explain_json()
+    });
     append_parent_tape_event(
         runtime,
         parent_run_id,
@@ -1971,6 +2330,8 @@ async fn append_child_lifecycle_event(
             "child_state": child_state,
             "user_visible": user_visible,
             "delegation": task.delegation,
+            "delegated_run": delegated_run.as_ref().map(|record| record.safe_snapshot_json()),
+            "graph_explain": graph_explain,
             "observed_at_unix_ms": crate::gateway::current_unix_ms(),
             "details": details,
         }),
@@ -2209,7 +2570,10 @@ mod tests {
         let limits = DelegationRuntimeLimits {
             max_concurrent_children: 1,
             max_children_per_parent: 8,
+            max_total_children: 16,
             max_parallel_groups: 2,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
             child_budget_override: None,
             child_timeout_ms: 60_000,
         };
@@ -2240,7 +2604,10 @@ mod tests {
         let limits = DelegationRuntimeLimits {
             max_concurrent_children: 4,
             max_children_per_parent: 1,
+            max_total_children: 16,
             max_parallel_groups: 2,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
             child_budget_override: None,
             child_timeout_ms: 60_000,
         };
@@ -2267,6 +2634,121 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_delegation_scheduler_limits_fails_depth_overflow() {
+        let limits = DelegationRuntimeLimits {
+            max_concurrent_children: 4,
+            max_children_per_parent: 8,
+            max_total_children: 16,
+            max_parallel_groups: 2,
+            max_depth: 1,
+            max_budget_share_bps: 10_000,
+            child_budget_override: None,
+            child_timeout_ms: 60_000,
+        };
+        let mut parent_child = sample_task(
+            "task-parent-child",
+            AuxiliaryTaskState::Running.as_str(),
+            10,
+            "group-a",
+            limits.clone(),
+        );
+        parent_child.parent_run_id = Some("root-run".to_owned());
+        parent_child.target_run_id = Some("parent-run".to_owned());
+        let current =
+            sample_task("task-nested", AuxiliaryTaskState::Queued.as_str(), 20, "group-b", limits);
+
+        let decision =
+            evaluate_delegation_scheduler_limits(&[parent_child, current.clone()], &current)
+                .expect("nested child should fail");
+        match decision {
+            DelegationSchedulerDecision::Fail { reason, .. } => assert_eq!(reason, "max_depth"),
+            DelegationSchedulerDecision::Defer { .. } => {
+                panic!("depth overflow should fail closed");
+            }
+        }
+    }
+
+    #[test]
+    fn evaluate_delegation_scheduler_limits_fails_total_child_overflow() {
+        let limits = DelegationRuntimeLimits {
+            max_concurrent_children: 4,
+            max_children_per_parent: 8,
+            max_total_children: 1,
+            max_parallel_groups: 2,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
+            child_budget_override: None,
+            child_timeout_ms: 60_000,
+        };
+        let older = sample_task(
+            "task-older",
+            AuxiliaryTaskState::Queued.as_str(),
+            10,
+            "group-a",
+            limits.clone(),
+        );
+        let current =
+            sample_task("task-current", AuxiliaryTaskState::Queued.as_str(), 20, "group-b", limits);
+
+        let decision = evaluate_delegation_scheduler_limits(&[older, current.clone()], &current)
+            .expect("total child overflow should fail");
+        match decision {
+            DelegationSchedulerDecision::Fail { reason, .. } => {
+                assert_eq!(reason, "max_total_children");
+            }
+            DelegationSchedulerDecision::Defer { .. } => {
+                panic!("total child overflow should fail closed");
+            }
+        }
+    }
+
+    #[test]
+    fn evaluate_delegation_scheduler_limits_rejects_lineage_cycle() {
+        let limits = DelegationRuntimeLimits {
+            max_concurrent_children: 4,
+            max_children_per_parent: 8,
+            max_total_children: 16,
+            max_parallel_groups: 2,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
+            child_budget_override: None,
+            child_timeout_ms: 60_000,
+        };
+        let mut first = sample_task(
+            "task-first",
+            AuxiliaryTaskState::Running.as_str(),
+            10,
+            "group-a",
+            limits.clone(),
+        );
+        first.parent_run_id = Some("run-second".to_owned());
+        first.target_run_id = Some("parent-run".to_owned());
+        let mut second = sample_task(
+            "task-second",
+            AuxiliaryTaskState::Running.as_str(),
+            11,
+            "group-b",
+            limits.clone(),
+        );
+        second.parent_run_id = Some("parent-run".to_owned());
+        second.target_run_id = Some("run-second".to_owned());
+        let current =
+            sample_task("task-current", AuxiliaryTaskState::Queued.as_str(), 20, "group-c", limits);
+
+        let decision =
+            evaluate_delegation_scheduler_limits(&[first, second, current.clone()], &current)
+                .expect("cyclic lineage should fail");
+        match decision {
+            DelegationSchedulerDecision::Fail { reason, .. } => {
+                assert_eq!(reason, "delegation_cycle");
+            }
+            DelegationSchedulerDecision::Defer { .. } => {
+                panic!("lineage cycle should fail closed");
+            }
+        }
+    }
+
+    #[test]
     fn delegated_child_timeout_message_uses_runtime_limit() {
         let mut task = sample_task(
             "task-timeout",
@@ -2276,7 +2758,10 @@ mod tests {
             DelegationRuntimeLimits {
                 max_concurrent_children: 1,
                 max_children_per_parent: 8,
+                max_total_children: 16,
                 max_parallel_groups: 1,
+                max_depth: 3,
+                max_budget_share_bps: 10_000,
                 child_budget_override: None,
                 child_timeout_ms: 25,
             },

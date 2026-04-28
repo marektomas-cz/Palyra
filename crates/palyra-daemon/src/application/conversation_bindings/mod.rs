@@ -274,7 +274,10 @@ impl ConversationBindingResolveRequest {
             binding_kind,
             channel: normalize_component(self.channel.as_str()).unwrap_or_default(),
             conversation_id: normalize_optional_component(self.conversation_id.as_deref()),
-            thread_id: if binding_kind == ConversationBindingKind::Thread {
+            thread_id: if matches!(
+                binding_kind,
+                ConversationBindingKind::Thread | ConversationBindingKind::DelegatedRun
+            ) {
                 normalize_optional_component(self.thread_id.as_deref())
             } else {
                 None
@@ -478,6 +481,7 @@ impl ConversationBindingStore {
     ) -> Result<ConversationBindingResolution, ConversationBindingError> {
         let expired = self.expire_due(request.now_unix_ms)?;
         let guard = self.lock_records()?;
+        let delegated_key = request.scope_key(ConversationBindingKind::DelegatedRun);
         let thread_key = request.scope_key(ConversationBindingKind::Thread);
         let main_key = request.scope_key(ConversationBindingKind::Main);
         let mut candidates = guard
@@ -485,7 +489,7 @@ impl ConversationBindingStore {
             .filter(|record| record.active(request.now_unix_ms))
             .filter(|record| {
                 let key = record.scope_key();
-                key == thread_key || key == main_key
+                key == delegated_key || key == thread_key || key == main_key
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -499,6 +503,9 @@ impl ConversationBindingStore {
         let conflicts = detect_conflicts(guard.values(), request.now_unix_ms);
         let record = candidates.into_iter().next();
         let reason = match record.as_ref() {
+            Some(value) if value.binding_kind == ConversationBindingKind::DelegatedRun => {
+                "delegated_run_binding_resolved"
+            }
             Some(value) if value.binding_kind == ConversationBindingKind::Thread => {
                 "thread_binding_resolved"
             }
@@ -1111,6 +1118,41 @@ mod tests {
             )
             .expect("list succeeds");
         assert_eq!(records[0].state, ConversationBindingLifecycleState::Expired);
+    }
+
+    #[test]
+    fn resolver_prefers_delegated_run_scope_over_thread_scope() {
+        let store = ConversationBindingStore::open_temp();
+        let thread = store
+            .create_or_touch(create_request("01ARZ3NDEKTSV4RRFFQ69G5FAV", 1_000))
+            .expect("thread binding create succeeds");
+        let mut delegated = create_request("01ARZ3NDEKTSV4RRFFQ69G5FAW", 1_001);
+        delegated.binding_kind = ConversationBindingKind::DelegatedRun;
+        delegated.thread_id = Some("delegation:task-1".to_owned());
+        delegated.sender_identity = Some("delegated-run:child-run".to_owned());
+        delegated.policy_scope = "delegation:parent-run".to_owned();
+        let delegated = store.create_or_touch(delegated).expect("delegated binding succeeds");
+
+        let resolved = store
+            .resolve(ConversationBindingResolveRequest {
+                channel: "discord:default".to_owned(),
+                conversation_id: Some("conv-1".to_owned()),
+                thread_id: Some("delegation:task-1".to_owned()),
+                sender_identity: Some("delegated-run:child-run".to_owned()),
+                principal: "user:ops".to_owned(),
+                now_unix_ms: 1_050,
+            })
+            .expect("resolve succeeds");
+
+        assert_eq!(
+            resolved.record.as_ref().map(|record| record.binding_id.as_str()),
+            Some(delegated.record.binding_id.as_str())
+        );
+        assert_ne!(
+            resolved.record.as_ref().map(|record| record.binding_id.as_str()),
+            Some(thread.record.binding_id.as_str())
+        );
+        assert_eq!(resolved.reason, "delegated_run_binding_resolved");
     }
 
     #[test]

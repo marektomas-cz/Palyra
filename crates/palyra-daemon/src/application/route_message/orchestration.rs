@@ -220,9 +220,13 @@ pub(crate) async fn handle_routed_route_message(
     plan.binding_reason = Some(binding_outcome.reason.clone());
     let (input_is_command, input_urgent_stop) =
         match ChannelCommandRegistry::builtin().parse_text(input.text.as_str()) {
-            ChannelCommandParseOutcome::Parsed(invocation) => {
-                (true, invocation.command == ChannelCommandName::Stop)
-            }
+            ChannelCommandParseOutcome::Parsed(invocation) => (
+                true,
+                matches!(
+                    invocation.command,
+                    ChannelCommandName::Stop | ChannelCommandName::DelegationInterrupt
+                ),
+            ),
             ChannelCommandParseOutcome::Malformed(_) => (true, false),
             ChannelCommandParseOutcome::NotCommand => (false, false),
         };

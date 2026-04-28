@@ -22,6 +22,11 @@ pub(crate) enum ChannelCommandName {
     Compact,
     Approve,
     Queue,
+    Delegate,
+    Delegations,
+    DelegationStatus,
+    DelegationInterrupt,
+    MergePreview,
     Whoami,
 }
 
@@ -35,6 +40,11 @@ impl ChannelCommandName {
             Self::Compact => "compact",
             Self::Approve => "approve",
             Self::Queue => "queue",
+            Self::Delegate => "delegate",
+            Self::Delegations => "delegations",
+            Self::DelegationStatus => "delegation-status",
+            Self::DelegationInterrupt => "delegation-interrupt",
+            Self::MergePreview => "merge-preview",
             Self::Whoami => "whoami",
         }
     }
@@ -48,13 +58,26 @@ impl ChannelCommandName {
             Self::Compact => "channel.command.compact",
             Self::Approve => "channel.command.approve",
             Self::Queue => "channel.command.queue",
+            Self::Delegate => "channel.command.delegate",
+            Self::Delegations => "channel.command.delegations",
+            Self::DelegationStatus => "channel.command.delegation_status",
+            Self::DelegationInterrupt => "channel.command.delegation_interrupt",
+            Self::MergePreview => "channel.command.merge_preview",
             Self::Whoami => "channel.command.whoami",
         }
     }
 
     #[must_use]
     pub(crate) const fn side_effecting(self) -> bool {
-        !matches!(self, Self::Status | Self::Queue | Self::Whoami)
+        !matches!(
+            self,
+            Self::Status
+                | Self::Queue
+                | Self::Delegations
+                | Self::DelegationStatus
+                | Self::MergePreview
+                | Self::Whoami
+        )
     }
 
     #[must_use]
@@ -66,6 +89,17 @@ impl ChannelCommandName {
             "compact" | "summarize" => Some(Self::Compact),
             "approve" | "approval" => Some(Self::Approve),
             "queue" => Some(Self::Queue),
+            "delegate" | "spawn" => Some(Self::Delegate),
+            "delegations" | "delegation-list" | "delegate-list" => Some(Self::Delegations),
+            "delegation-status" | "delegate-status" | "child-status" => {
+                Some(Self::DelegationStatus)
+            }
+            "delegation-interrupt" | "delegate-interrupt" | "interrupt-delegation" => {
+                Some(Self::DelegationInterrupt)
+            }
+            "merge-preview" | "delegation-merge-preview" | "delegate-merge-preview" => {
+                Some(Self::MergePreview)
+            }
             "whoami" | "who" => Some(Self::Whoami),
             _ => None,
         }
@@ -351,6 +385,86 @@ impl ChannelCommandRegistry {
                 ],
             ),
             command_spec(
+                ChannelCommandName::Delegate,
+                "Create a bounded delegated child run from this scope",
+                &[
+                    arg(
+                        "objective",
+                        ChannelCommandArgumentKind::FreeformTail,
+                        true,
+                        &[],
+                        "Delegated child objective",
+                    ),
+                    arg(
+                        "profile_id",
+                        ChannelCommandArgumentKind::String,
+                        false,
+                        &[],
+                        "Delegation profile id",
+                    ),
+                    arg(
+                        "template_id",
+                        ChannelCommandArgumentKind::String,
+                        false,
+                        &[],
+                        "Delegation template id",
+                    ),
+                    arg(
+                        "parent_run_id",
+                        ChannelCommandArgumentKind::IdRef,
+                        false,
+                        &[],
+                        "Parent run id",
+                    ),
+                ],
+            ),
+            command_spec(
+                ChannelCommandName::Delegations,
+                "List or explain delegated child runs in scope",
+                &[
+                    arg("session_id", ChannelCommandArgumentKind::IdRef, false, &[], "Session id"),
+                    arg("run_id", ChannelCommandArgumentKind::IdRef, false, &[], "Parent run id"),
+                    arg(
+                        "action",
+                        ChannelCommandArgumentKind::Enum,
+                        false,
+                        &["list", "explain"],
+                        "Delegation query action",
+                    ),
+                ],
+            ),
+            command_spec(
+                ChannelCommandName::DelegationStatus,
+                "Show delegated child run status",
+                &[
+                    arg("task_id", ChannelCommandArgumentKind::IdRef, false, &[], "Task id"),
+                    arg("run_id", ChannelCommandArgumentKind::IdRef, false, &[], "Child run id"),
+                ],
+            ),
+            command_spec(
+                ChannelCommandName::DelegationInterrupt,
+                "Interrupt a delegated child run",
+                &[
+                    arg("task_id", ChannelCommandArgumentKind::IdRef, false, &[], "Task id"),
+                    arg("run_id", ChannelCommandArgumentKind::IdRef, false, &[], "Child run id"),
+                    arg(
+                        "reason",
+                        ChannelCommandArgumentKind::FreeformTail,
+                        false,
+                        &[],
+                        "Interrupt reason",
+                    ),
+                ],
+            ),
+            command_spec(
+                ChannelCommandName::MergePreview,
+                "Show delegated child merge preview",
+                &[
+                    arg("task_id", ChannelCommandArgumentKind::IdRef, false, &[], "Task id"),
+                    arg("run_id", ChannelCommandArgumentKind::IdRef, false, &[], "Child run id"),
+                ],
+            ),
+            command_spec(
                 ChannelCommandName::Whoami,
                 "Show the channel principal and binding identity",
                 &[],
@@ -507,11 +621,16 @@ pub(crate) fn build_channel_command_response(
     let code = match invocation.command {
         ChannelCommandName::Status => "channel_command/status",
         ChannelCommandName::Queue => "channel_command/queue",
+        ChannelCommandName::Delegations => "channel_command/delegations",
+        ChannelCommandName::DelegationStatus => "channel_command/delegation_status",
+        ChannelCommandName::MergePreview => "channel_command/merge_preview",
         ChannelCommandName::Whoami => "channel_command/whoami",
         ChannelCommandName::Stop
         | ChannelCommandName::Reset
         | ChannelCommandName::Compact
-        | ChannelCommandName::Approve => {
+        | ChannelCommandName::Approve
+        | ChannelCommandName::Delegate
+        | ChannelCommandName::DelegationInterrupt => {
             if runtime.binding_id.is_none() && !has_explicit_target(invocation) {
                 "channel_command/requires_binding"
             } else {
@@ -545,6 +664,58 @@ pub(crate) fn build_channel_command_response(
                 .map(ChannelCommandValue::user_visible)
                 .unwrap_or_else(|| "list".to_owned())
         ),
+        ChannelCommandName::Delegations => format!(
+            "delegations: channel={} action={} session={} parent_run={} binding={}",
+            scope.channel,
+            invocation
+                .arguments
+                .get("action")
+                .map(ChannelCommandValue::user_visible)
+                .unwrap_or_else(|| "list".to_owned()),
+            invocation
+                .arguments
+                .get("session_id")
+                .map(ChannelCommandValue::user_visible)
+                .or_else(|| runtime.session_id.clone())
+                .unwrap_or_else(|| "none".to_owned()),
+            invocation
+                .arguments
+                .get("run_id")
+                .map(ChannelCommandValue::user_visible)
+                .or_else(|| runtime.run_id.clone())
+                .unwrap_or_else(|| "none".to_owned()),
+            runtime.binding_id.as_deref().unwrap_or("none")
+        ),
+        ChannelCommandName::DelegationStatus => format!(
+            "delegation-status: task={} child_run={} session={} binding={}",
+            invocation
+                .arguments
+                .get("task_id")
+                .map(ChannelCommandValue::user_visible)
+                .unwrap_or_else(|| "none".to_owned()),
+            invocation
+                .arguments
+                .get("run_id")
+                .map(ChannelCommandValue::user_visible)
+                .unwrap_or_else(|| "none".to_owned()),
+            runtime.session_id.as_deref().unwrap_or("none"),
+            runtime.binding_id.as_deref().unwrap_or("none")
+        ),
+        ChannelCommandName::MergePreview => format!(
+            "merge-preview: task={} child_run={} session={} binding={}",
+            invocation
+                .arguments
+                .get("task_id")
+                .map(ChannelCommandValue::user_visible)
+                .unwrap_or_else(|| "none".to_owned()),
+            invocation
+                .arguments
+                .get("run_id")
+                .map(ChannelCommandValue::user_visible)
+                .unwrap_or_else(|| "none".to_owned()),
+            runtime.session_id.as_deref().unwrap_or("none"),
+            runtime.binding_id.as_deref().unwrap_or("none")
+        ),
         ChannelCommandName::Whoami => format!(
             "whoami: principal={} device_scope=channel sender={} conversation={} thread={} binding={}",
             redact_auth_error(scope.principal.as_str()),
@@ -557,6 +728,8 @@ pub(crate) fn build_channel_command_response(
         | ChannelCommandName::Reset
         | ChannelCommandName::Compact
         | ChannelCommandName::Approve
+        | ChannelCommandName::Delegate
+        | ChannelCommandName::DelegationInterrupt
             if !ok =>
         {
             format!(
@@ -694,6 +867,8 @@ fn coerce_text_arguments(
             let tail = positional[position..].join(" ");
             if !tail.is_empty() {
                 output.insert(argument.name.clone(), coerce_text_value(argument, tail.as_str())?);
+            } else if argument.required {
+                return Err(format!("missing required argument `{}`", argument.name));
             }
             continue;
         }
@@ -855,6 +1030,8 @@ fn split_command_tokens(input: &str) -> Result<Vec<String>, String> {
 fn has_explicit_target(invocation: &ChannelCommandInvocation) -> bool {
     invocation.arguments.contains_key("run_id")
         || invocation.arguments.contains_key("session_id")
+        || invocation.arguments.contains_key("parent_run_id")
+        || invocation.arguments.contains_key("task_id")
         || invocation.arguments.contains_key("approval_id")
 }
 
@@ -894,6 +1071,47 @@ mod tests {
     }
 
     #[test]
+    fn text_parser_accepts_delegation_commands() {
+        let registry = ChannelCommandRegistry::builtin();
+        let ChannelCommandParseOutcome::Parsed(delegate) = registry.parse_text(
+            "/palyra delegate profile_id=research Summarize outage evidence from parent context",
+        ) else {
+            panic!("delegate command should parse");
+        };
+        assert_eq!(delegate.command, ChannelCommandName::Delegate);
+        assert!(delegate.arguments.contains_key("objective"));
+        assert!(delegate.arguments.contains_key("profile_id"));
+
+        let ChannelCommandParseOutcome::Parsed(status) =
+            registry.parse_text("/palyra delegation-status task_id=01ARZ3")
+        else {
+            panic!("delegation-status command should parse");
+        };
+        assert_eq!(status.command, ChannelCommandName::DelegationStatus);
+        assert!(status.arguments.contains_key("task_id"));
+
+        let ChannelCommandParseOutcome::Parsed(preview) =
+            registry.parse_text("/palyra merge-preview run_id=01ARZ3")
+        else {
+            panic!("merge-preview command should parse");
+        };
+        assert_eq!(preview.command, ChannelCommandName::MergePreview);
+        assert!(preview.arguments.contains_key("run_id"));
+    }
+
+    #[test]
+    fn delegate_command_requires_objective() {
+        let registry = ChannelCommandRegistry::builtin();
+        let parsed = registry.parse_text("/palyra delegate profile_id=research");
+
+        let ChannelCommandParseOutcome::Malformed(error) = parsed else {
+            panic!("delegate without objective should be malformed");
+        };
+        assert_eq!(error.code, "channel_command/invalid_arguments");
+        assert!(error.message.contains("objective"));
+    }
+
+    #[test]
     fn command_catalog_hash_is_deterministic() {
         let first = ChannelCommandRegistry::builtin().catalog_hash();
         let second = ChannelCommandRegistry::builtin().catalog_hash();
@@ -919,6 +1137,42 @@ mod tests {
         let ChannelCommandParseOutcome::Parsed(invocation) = registry.parse_text("/palyra stop")
         else {
             panic!("stop command should parse");
+        };
+        let response = build_channel_command_response(
+            &invocation,
+            &ChannelCommandScope {
+                channel: "discord:default".to_owned(),
+                conversation_id: Some("c1".to_owned()),
+                thread_id: None,
+                sender_identity: Some("u1".to_owned()),
+                principal: "channel:discord:default".to_owned(),
+            },
+            &ChannelCommandRuntimeView {
+                queue_depth: 0,
+                route_config_hash: "0".repeat(64),
+                command_catalog_hash: "0".repeat(64),
+                binding_id: None,
+                binding_kind: None,
+                session_id: None,
+                run_id: None,
+                pending_approval_count: 0,
+                provider_wait_ms: None,
+                last_error: None,
+                observed_at_unix_ms: 1,
+            },
+        );
+
+        assert!(!response.ok);
+        assert_eq!(response.code, "channel_command/requires_binding");
+    }
+
+    #[test]
+    fn delegation_interrupt_without_binding_fails_closed() {
+        let registry = ChannelCommandRegistry::builtin();
+        let ChannelCommandParseOutcome::Parsed(invocation) =
+            registry.parse_text("/palyra delegation-interrupt")
+        else {
+            panic!("delegation interrupt command should parse");
         };
         let response = build_channel_command_response(
             &invocation,

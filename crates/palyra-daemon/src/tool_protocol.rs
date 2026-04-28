@@ -148,6 +148,8 @@ const MAX_MEMORY_RETAIN_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_MEMORY_REFLECT_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_ROUTINES_QUERY_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_ROUTINES_CONTROL_TOOL_INPUT_BYTES: usize = 128 * 1024;
+const MAX_DELEGATION_QUERY_TOOL_INPUT_BYTES: usize = 64 * 1024;
+const MAX_DELEGATION_CONTROL_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_HTTP_FETCH_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_TOOL_PROGRAM_RUN_TOOL_INPUT_BYTES: usize = 256 * 1024;
@@ -309,6 +311,12 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
         }
         "palyra.routines.control" => {
+            Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
+        }
+        "palyra.delegation.query" => {
+            Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
+        }
+        "palyra.delegation.control" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.artifact.read" => Some(ToolMetadata {
@@ -664,6 +672,14 @@ async fn run_allowlisted_tool(
             executor: "routines_runtime".to_owned(),
             sandbox_enforcement: "none".to_owned(),
         },
+        "palyra.delegation.query" | "palyra.delegation.control" => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: format!("{tool_name} requires gateway delegation runtime context"),
+            timed_out: false,
+            executor: "delegation_runtime".to_owned(),
+            sandbox_enforcement: "delegation_scope".to_owned(),
+        },
         "palyra.artifact.read" => ToolExecutionRawResult {
             success: false,
             output_json: b"{}".to_vec(),
@@ -751,6 +767,8 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.memory.reflect"
             | "palyra.routines.query"
             | "palyra.routines.control"
+            | "palyra.delegation.query"
+            | "palyra.delegation.control"
             | "palyra.artifact.read"
             | "palyra.http.fetch"
             | "palyra.process.run"
@@ -804,6 +822,8 @@ fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
         "gateway_runtime".to_owned()
     } else if matches!(tool_name, "palyra.routines.query" | "palyra.routines.control") {
         "routines_runtime".to_owned()
+    } else if matches!(tool_name, "palyra.delegation.query" | "palyra.delegation.control") {
+        "delegation_runtime".to_owned()
     } else if tool_name == "palyra.artifact.read" {
         "gateway_artifacts".to_owned()
     } else if tool_name == "palyra.plugin.run" {
@@ -823,6 +843,8 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.memory.reflect" => MAX_MEMORY_REFLECT_TOOL_INPUT_BYTES,
         "palyra.routines.query" => MAX_ROUTINES_QUERY_TOOL_INPUT_BYTES,
         "palyra.routines.control" => MAX_ROUTINES_CONTROL_TOOL_INPUT_BYTES,
+        "palyra.delegation.query" => MAX_DELEGATION_QUERY_TOOL_INPUT_BYTES,
+        "palyra.delegation.control" => MAX_DELEGATION_CONTROL_TOOL_INPUT_BYTES,
         "palyra.artifact.read" => MAX_ARTIFACT_READ_TOOL_INPUT_BYTES,
         "palyra.http.fetch" => MAX_HTTP_FETCH_TOOL_INPUT_BYTES,
         "palyra.process.run" => MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES,
@@ -869,6 +891,8 @@ fn sandbox_enforcement_for_tool(config: &ToolCallConfig, tool_name: &str) -> Str
         "browser_service".to_owned()
     } else if tool_name == "palyra.artifact.read" {
         "artifact_scope".to_owned()
+    } else if matches!(tool_name, "palyra.delegation.query" | "palyra.delegation.control") {
+        "delegation_scope".to_owned()
     } else {
         "none".to_owned()
     }

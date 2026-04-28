@@ -1,18 +1,39 @@
+use palyra_common::redaction::{redact_auth_error, redact_url_segments_in_text};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tonic::Status;
 
+const DELEGATED_RUN_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MODEL_PROFILE: &str = "gpt-4o-mini";
 const DEFAULT_MAX_ATTEMPTS: u64 = 3;
 const DEFAULT_MAX_CONCURRENT_CHILDREN: u64 = 2;
 const DEFAULT_MAX_CHILDREN_PER_PARENT: u64 = 8;
+const DEFAULT_MAX_TOTAL_CHILDREN: u64 = 16;
 const DEFAULT_MAX_PARALLEL_GROUPS: u64 = 2;
+const DEFAULT_MAX_DEPTH: u64 = 3;
+const DEFAULT_MAX_BUDGET_SHARE_BPS: u64 = 10_000;
 const DEFAULT_CHILD_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
 const MAX_DELEGATION_BUDGET_TOKENS: u64 = 32_768;
 const MAX_DELEGATION_ATTEMPTS: u64 = 16;
 const MAX_DELEGATION_CONCURRENT_CHILDREN: u64 = 16;
 const MAX_DELEGATION_CHILDREN_PER_PARENT: u64 = 64;
+const MAX_DELEGATION_TOTAL_CHILDREN: u64 = 256;
 const MAX_DELEGATION_PARALLEL_GROUPS: u64 = 16;
+const MAX_DELEGATION_DEPTH: u64 = 8;
+const MAX_DELEGATION_BUDGET_SHARE_BPS: u64 = 10_000;
 const MAX_DELEGATION_CHILD_TIMEOUT_MS: u64 = 6 * 60 * 60 * 1_000;
+
+const fn default_max_total_children() -> u64 {
+    DEFAULT_MAX_TOTAL_CHILDREN
+}
+
+const fn default_max_depth() -> u64 {
+    DEFAULT_MAX_DEPTH
+}
+
+const fn default_max_budget_share_bps() -> u64 {
+    DEFAULT_MAX_BUDGET_SHARE_BPS
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -59,7 +80,13 @@ pub struct DelegationMergeContract {
 pub struct DelegationRuntimeLimits {
     pub max_concurrent_children: u64,
     pub max_children_per_parent: u64,
+    #[serde(default = "default_max_total_children")]
+    pub max_total_children: u64,
     pub max_parallel_groups: u64,
+    #[serde(default = "default_max_depth")]
+    pub max_depth: u64,
+    #[serde(default = "default_max_budget_share_bps")]
+    pub max_budget_share_bps: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_budget_override: Option<u64>,
     pub child_timeout_ms: u64,
@@ -70,7 +97,10 @@ impl Default for DelegationRuntimeLimits {
         Self {
             max_concurrent_children: DEFAULT_MAX_CONCURRENT_CHILDREN,
             max_children_per_parent: DEFAULT_MAX_CHILDREN_PER_PARENT,
+            max_total_children: DEFAULT_MAX_TOTAL_CHILDREN,
             max_parallel_groups: DEFAULT_MAX_PARALLEL_GROUPS,
+            max_depth: DEFAULT_MAX_DEPTH,
+            max_budget_share_bps: DEFAULT_MAX_BUDGET_SHARE_BPS,
             child_budget_override: None,
             child_timeout_ms: DEFAULT_CHILD_TIMEOUT_MS,
         }
@@ -99,6 +129,427 @@ pub struct DelegationSnapshot {
     pub runtime_limits: DelegationRuntimeLimits,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRunState {
+    Queued,
+    Accepted,
+    Running,
+    WaitingForSlot,
+    WaitingForApproval,
+    MergePreview,
+    Merged,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Rejected,
+}
+
+impl DelegatedRunState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Accepted => "accepted",
+            Self::Running => "running",
+            Self::WaitingForSlot => "waiting_for_slot",
+            Self::WaitingForApproval => "waiting_for_approval",
+            Self::MergePreview => "merge_preview",
+            Self::Merged => "merged",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    #[must_use]
+    pub fn from_child_state(value: &str) -> Self {
+        match value {
+            "queued" => Self::Queued,
+            "accepted" => Self::Accepted,
+            "running" | "in_progress" | "model_streaming" | "tool_proposed" | "tool_decided"
+            | "tool_completed" | "tool_attested" => Self::Running,
+            "waiting" | "waiting_for_slot" => Self::WaitingForSlot,
+            "waiting_for_approval" | "approval_resolved" => Self::WaitingForApproval,
+            "merge_preview" => Self::MergePreview,
+            "done" | "completed" | "merged" => Self::Merged,
+            "cancelled" | "canceled" => Self::Cancelled,
+            "timed_out" | "timeout" => Self::TimedOut,
+            "rejected" => Self::Rejected,
+            _ => Self::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationMergeStatus {
+    NotReady,
+    PreviewReady,
+    ApprovalRequired,
+    Approved,
+    Merged,
+    Rejected,
+    Failed,
+}
+
+impl DelegationMergeStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotReady => "not_ready",
+            Self::PreviewReady => "preview_ready",
+            Self::ApprovalRequired => "approval_required",
+            Self::Approved => "approved",
+            Self::Merged => "merged",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunReference {
+    pub ref_id: String,
+    pub reason: String,
+    pub sensitivity: String,
+}
+
+impl DelegatedRunReference {
+    #[must_use]
+    pub fn safe_snapshot_json(&self) -> Value {
+        json!({
+            "ref_id": safe_text(self.ref_id.as_str()),
+            "reason": safe_text(self.reason.as_str()),
+            "sensitivity": safe_text(self.sensitivity.as_str()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunScope {
+    pub tool_allowlist: Vec<String>,
+    pub skill_allowlist: Vec<String>,
+    pub memory_scope: DelegationMemoryScopeKind,
+    pub context_refs: Vec<DelegatedRunReference>,
+    pub memory_refs: Vec<DelegatedRunReference>,
+    pub artifact_refs: Vec<DelegatedRunReference>,
+    pub child_prompt: String,
+}
+
+impl DelegatedRunScope {
+    #[must_use]
+    pub fn safe_snapshot_json(&self) -> Value {
+        json!({
+            "tool_allowlist": self.tool_allowlist,
+            "skill_allowlist": self.skill_allowlist,
+            "memory_scope": self.memory_scope,
+            "context_refs": self.context_refs.iter().map(DelegatedRunReference::safe_snapshot_json).collect::<Vec<_>>(),
+            "memory_refs": self.memory_refs.iter().map(DelegatedRunReference::safe_snapshot_json).collect::<Vec<_>>(),
+            "artifact_refs": self.artifact_refs.iter().map(DelegatedRunReference::safe_snapshot_json).collect::<Vec<_>>(),
+            "child_prompt": safe_text(self.child_prompt.as_str()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunBudgets {
+    pub budget_tokens: u64,
+    pub max_attempts: u64,
+    pub max_concurrent_children: u64,
+    pub max_children_per_parent: u64,
+    pub max_total_children: u64,
+    pub max_parallel_groups: u64,
+    pub max_depth: u64,
+    pub max_budget_share_bps: u64,
+    pub max_wall_clock_ms: u64,
+}
+
+impl From<&DelegationSnapshot> for DelegatedRunBudgets {
+    fn from(value: &DelegationSnapshot) -> Self {
+        Self {
+            budget_tokens: value.budget_tokens,
+            max_attempts: value.max_attempts,
+            max_concurrent_children: value.runtime_limits.max_concurrent_children,
+            max_children_per_parent: value.runtime_limits.max_children_per_parent,
+            max_total_children: value.runtime_limits.max_total_children,
+            max_parallel_groups: value.runtime_limits.max_parallel_groups,
+            max_depth: value.runtime_limits.max_depth,
+            max_budget_share_bps: value.runtime_limits.max_budget_share_bps,
+            max_wall_clock_ms: value.runtime_limits.child_timeout_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunLifecycleEvent {
+    pub event_type: String,
+    pub state: String,
+    pub reason: String,
+    pub observed_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunRecord {
+    pub schema_version: u32,
+    pub delegated_run_id: String,
+    pub parent_run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub objective: String,
+    pub scope: DelegatedRunScope,
+    pub budgets: DelegatedRunBudgets,
+    pub state: DelegatedRunState,
+    pub merge_status: DelegationMergeStatus,
+    pub delegation: DelegationSnapshot,
+    pub lifecycle_events: Vec<DelegatedRunLifecycleEvent>,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+impl DelegatedRunRecord {
+    #[must_use]
+    pub fn safe_snapshot_json(&self) -> Value {
+        json!({
+            "schema_version": self.schema_version,
+            "delegated_run_id": self.delegated_run_id,
+            "parent_run_id": self.parent_run_id,
+            "child_run_id": self.child_run_id,
+            "task_id": self.task_id,
+            "objective": safe_text(self.objective.as_str()),
+            "scope": self.scope.safe_snapshot_json(),
+            "budgets": self.budgets,
+            "state": self.state.as_str(),
+            "merge_status": self.merge_status.as_str(),
+            "delegation": self.delegation,
+            "lifecycle_events": self.lifecycle_events,
+            "created_at_unix_ms": self.created_at_unix_ms,
+            "updated_at_unix_ms": self.updated_at_unix_ms,
+        })
+    }
+
+    #[must_use]
+    pub fn explain_json(&self) -> Value {
+        json!({
+            "delegated_run_id": self.delegated_run_id,
+            "reason": safe_text(self.objective.as_str()),
+            "scope": {
+                "memory_scope": self.scope.memory_scope,
+                "tool_allowlist": self.scope.tool_allowlist,
+                "skill_allowlist": self.scope.skill_allowlist,
+                "context_refs": self.scope.context_refs.iter().map(DelegatedRunReference::safe_snapshot_json).collect::<Vec<_>>(),
+                "memory_refs": self.scope.memory_refs.iter().map(DelegatedRunReference::safe_snapshot_json).collect::<Vec<_>>(),
+                "artifact_refs": self.scope.artifact_refs.iter().map(DelegatedRunReference::safe_snapshot_json).collect::<Vec<_>>(),
+            },
+            "limits": self.budgets,
+            "state": self.state.as_str(),
+            "merge_status": self.merge_status.as_str(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRunGraphSnapshot {
+    pub parent_run_id: String,
+    pub children: Vec<DelegatedRunRecord>,
+    pub active_child_count: u64,
+    pub terminal_child_count: u64,
+}
+
+impl DelegatedRunGraphSnapshot {
+    #[must_use]
+    pub fn explain_json(&self) -> Value {
+        json!({
+            "parent_run_id": self.parent_run_id,
+            "active_child_count": self.active_child_count,
+            "terminal_child_count": self.terminal_child_count,
+            "children": self.children.iter().map(DelegatedRunRecord::explain_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[must_use]
+pub fn build_delegated_run_graph(
+    parent_run_id: String,
+    children: Vec<DelegatedRunRecord>,
+) -> DelegatedRunGraphSnapshot {
+    let terminal_child_count =
+        children.iter().filter(|child| delegated_run_state_terminal(child.state)).count();
+    DelegatedRunGraphSnapshot {
+        parent_run_id,
+        active_child_count: children.len().saturating_sub(terminal_child_count) as u64,
+        terminal_child_count: terminal_child_count as u64,
+        children,
+    }
+}
+
+const fn delegated_run_state_terminal(state: DelegatedRunState) -> bool {
+    matches!(
+        state,
+        DelegatedRunState::Merged
+            | DelegatedRunState::Failed
+            | DelegatedRunState::Cancelled
+            | DelegatedRunState::TimedOut
+            | DelegatedRunState::Rejected
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedRunRecordBuildRequest {
+    pub parent_run_id: String,
+    pub child_run_id: Option<String>,
+    pub task_id: Option<String>,
+    pub objective: String,
+    pub scope: DelegatedRunScope,
+    pub delegation: DelegationSnapshot,
+    pub state: DelegatedRunState,
+    pub merge_status: DelegationMergeStatus,
+    pub event_type: String,
+    pub event_reason: String,
+    pub observed_at_unix_ms: i64,
+}
+
+#[must_use]
+pub fn build_delegated_run_record(request: DelegatedRunRecordBuildRequest) -> DelegatedRunRecord {
+    let delegated_run_id = stable_delegated_run_id(
+        request.parent_run_id.as_str(),
+        request.child_run_id.as_deref(),
+        request.task_id.as_deref(),
+    );
+    DelegatedRunRecord {
+        schema_version: DELEGATED_RUN_SCHEMA_VERSION,
+        delegated_run_id,
+        parent_run_id: request.parent_run_id,
+        child_run_id: request.child_run_id,
+        task_id: request.task_id,
+        objective: safe_text(request.objective.as_str()),
+        scope: request.scope,
+        budgets: DelegatedRunBudgets::from(&request.delegation),
+        state: request.state,
+        merge_status: request.merge_status,
+        delegation: request.delegation,
+        lifecycle_events: vec![DelegatedRunLifecycleEvent {
+            event_type: request.event_type,
+            state: request.state.as_str().to_owned(),
+            reason: safe_text(request.event_reason.as_str()),
+            observed_at_unix_ms: request.observed_at_unix_ms,
+        }],
+        created_at_unix_ms: request.observed_at_unix_ms,
+        updated_at_unix_ms: request.observed_at_unix_ms,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedReferenceInput {
+    pub ref_id: String,
+    pub reason: String,
+    pub sensitivity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedScopeBuildRequest {
+    pub objective: String,
+    pub delegation: DelegationSnapshot,
+    pub parent_tool_allowlist: Vec<String>,
+    pub parent_skill_allowlist: Vec<String>,
+    pub context_refs: Vec<DelegatedReferenceInput>,
+    pub memory_refs: Vec<DelegatedReferenceInput>,
+    pub artifact_refs: Vec<DelegatedReferenceInput>,
+}
+
+pub fn build_delegated_scope(
+    request: DelegatedScopeBuildRequest,
+) -> Result<DelegatedRunScope, Status> {
+    let tool_allowlist = normalize_allowlist(request.delegation.tool_allowlist.clone());
+    validate_allowlist_subset(
+        "delegation.scope.tool_allowlist",
+        tool_allowlist.as_slice(),
+        request.parent_tool_allowlist.as_slice(),
+    )?;
+    let skill_allowlist = normalize_allowlist(request.delegation.skill_allowlist.clone());
+    validate_allowlist_subset(
+        "delegation.scope.skill_allowlist",
+        skill_allowlist.as_slice(),
+        request.parent_skill_allowlist.as_slice(),
+    )?;
+    let objective = normalize_optional_text(Some(request.objective.as_str()))
+        .ok_or_else(|| Status::invalid_argument("delegation objective cannot be empty"))?;
+
+    Ok(DelegatedRunScope {
+        tool_allowlist,
+        skill_allowlist,
+        memory_scope: request.delegation.memory_scope,
+        context_refs: normalize_refs("delegation.scope.context_refs", request.context_refs)?,
+        memory_refs: normalize_refs("delegation.scope.memory_refs", request.memory_refs)?,
+        artifact_refs: normalize_refs("delegation.scope.artifact_refs", request.artifact_refs)?,
+        child_prompt: build_child_prompt(
+            objective.as_str(),
+            request.delegation.profile_id.as_str(),
+            request.delegation.memory_scope,
+        ),
+    })
+}
+
+fn normalize_refs(
+    field: &str,
+    values: Vec<DelegatedReferenceInput>,
+) -> Result<Vec<DelegatedRunReference>, Status> {
+    let mut output = Vec::new();
+    for value in values {
+        let ref_id = normalize_optional_text(Some(value.ref_id.as_str()))
+            .ok_or_else(|| Status::invalid_argument(format!("{field}.ref_id cannot be empty")))?;
+        let reason = normalize_optional_text(Some(value.reason.as_str()))
+            .ok_or_else(|| Status::invalid_argument(format!("{field}.reason cannot be empty")))?;
+        let sensitivity =
+            normalize_optional_text(Some(value.sensitivity.as_str())).ok_or_else(|| {
+                Status::invalid_argument(format!("{field}.sensitivity cannot be empty"))
+            })?;
+        output.push(DelegatedRunReference {
+            ref_id: safe_text(ref_id.as_str()),
+            reason: safe_text(reason.as_str()),
+            sensitivity: safe_text(sensitivity.as_str()),
+        });
+    }
+    output.sort_by(|left, right| {
+        left.ref_id
+            .cmp(&right.ref_id)
+            .then_with(|| left.reason.cmp(&right.reason))
+            .then_with(|| left.sensitivity.cmp(&right.sensitivity))
+    });
+    output.dedup_by(|left, right| {
+        left.ref_id == right.ref_id
+            && left.reason == right.reason
+            && left.sensitivity == right.sensitivity
+    });
+    Ok(output)
+}
+
+fn build_child_prompt(
+    objective: &str,
+    profile_id: &str,
+    memory_scope: DelegationMemoryScopeKind,
+) -> String {
+    format!(
+        "Delegated objective: {objective}\nProfile: {profile_id}\nMemory scope: {:?}\nDo not request broader tools, memory, artifacts, credentials, or context than the delegated scope permits. Return a concise summary with blockers, evidence refs, and next action.",
+        memory_scope
+    )
+}
+
+fn stable_delegated_run_id(
+    parent_run_id: &str,
+    child_run_id: Option<&str>,
+    task_id: Option<&str>,
+) -> String {
+    format!("dr_{}_{}", parent_run_id, child_run_id.or(task_id).unwrap_or("pending"))
+}
+
+fn safe_text(value: &str) -> String {
+    redact_url_segments_in_text(&redact_auth_error(value))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -268,7 +719,13 @@ pub struct DelegationManifestInput {
     #[serde(default)]
     pub max_children_per_parent: Option<u64>,
     #[serde(default)]
+    pub max_total_children: Option<u64>,
+    #[serde(default)]
     pub max_parallel_groups: Option<u64>,
+    #[serde(default)]
+    pub max_depth: Option<u64>,
+    #[serde(default)]
+    pub max_budget_share_bps: Option<u64>,
     #[serde(default)]
     pub child_budget_override: Option<u64>,
     #[serde(default)]
@@ -404,7 +861,10 @@ pub fn built_in_delegation_catalog() -> DelegationCatalog {
             runtime_limits: Some(DelegationRuntimeLimits {
                 max_concurrent_children: 2,
                 max_children_per_parent: 8,
+                max_total_children: DEFAULT_MAX_TOTAL_CHILDREN,
                 max_parallel_groups: 2,
+                max_depth: DEFAULT_MAX_DEPTH,
+                max_budget_share_bps: DEFAULT_MAX_BUDGET_SHARE_BPS,
                 child_budget_override: None,
                 child_timeout_ms: DEFAULT_CHILD_TIMEOUT_MS,
             }),
@@ -424,7 +884,10 @@ pub fn built_in_delegation_catalog() -> DelegationCatalog {
             runtime_limits: Some(DelegationRuntimeLimits {
                 max_concurrent_children: 1,
                 max_children_per_parent: 6,
+                max_total_children: DEFAULT_MAX_TOTAL_CHILDREN,
                 max_parallel_groups: 1,
+                max_depth: DEFAULT_MAX_DEPTH,
+                max_budget_share_bps: DEFAULT_MAX_BUDGET_SHARE_BPS,
                 child_budget_override: None,
                 child_timeout_ms: DEFAULT_CHILD_TIMEOUT_MS,
             }),
@@ -444,7 +907,10 @@ pub fn built_in_delegation_catalog() -> DelegationCatalog {
             runtime_limits: Some(DelegationRuntimeLimits {
                 max_concurrent_children: 1,
                 max_children_per_parent: 4,
+                max_total_children: DEFAULT_MAX_TOTAL_CHILDREN,
                 max_parallel_groups: 1,
+                max_depth: DEFAULT_MAX_DEPTH,
+                max_budget_share_bps: DEFAULT_MAX_BUDGET_SHARE_BPS,
                 child_budget_override: None,
                 child_timeout_ms: DEFAULT_CHILD_TIMEOUT_MS,
             }),
@@ -465,7 +931,10 @@ pub fn built_in_delegation_catalog() -> DelegationCatalog {
             runtime_limits: Some(DelegationRuntimeLimits {
                 max_concurrent_children: 3,
                 max_children_per_parent: 10,
+                max_total_children: DEFAULT_MAX_TOTAL_CHILDREN,
                 max_parallel_groups: 3,
+                max_depth: DEFAULT_MAX_DEPTH,
+                max_budget_share_bps: DEFAULT_MAX_BUDGET_SHARE_BPS,
                 child_budget_override: None,
                 child_timeout_ms: DEFAULT_CHILD_TIMEOUT_MS,
             }),
@@ -580,6 +1049,18 @@ fn ensure_child_timeout_ms(value: u64, field: &str) -> Result<u64, Status> {
     Ok(value)
 }
 
+fn ensure_budget_share_bps(value: u64, field: &str) -> Result<u64, Status> {
+    if value == 0 {
+        return Err(Status::invalid_argument(format!("{field} must be greater than zero")));
+    }
+    if value > MAX_DELEGATION_BUDGET_SHARE_BPS {
+        return Err(Status::invalid_argument(format!(
+            "{field} exceeds the supported budget share ceiling"
+        )));
+    }
+    Ok(value)
+}
+
 fn ensure_runtime_limits(
     limits: DelegationRuntimeLimits,
     field: &str,
@@ -599,10 +1080,24 @@ fn ensure_runtime_limits(
             &format!("{field}.max_children_per_parent"),
             MAX_DELEGATION_CHILDREN_PER_PARENT,
         )?,
+        max_total_children: ensure_count_limit(
+            limits.max_total_children,
+            &format!("{field}.max_total_children"),
+            MAX_DELEGATION_TOTAL_CHILDREN,
+        )?,
         max_parallel_groups: ensure_count_limit(
             limits.max_parallel_groups,
             &format!("{field}.max_parallel_groups"),
             MAX_DELEGATION_PARALLEL_GROUPS,
+        )?,
+        max_depth: ensure_count_limit(
+            limits.max_depth,
+            &format!("{field}.max_depth"),
+            MAX_DELEGATION_DEPTH,
+        )?,
+        max_budget_share_bps: ensure_budget_share_bps(
+            limits.max_budget_share_bps,
+            &format!("{field}.max_budget_share_bps"),
         )?,
         child_budget_override,
         child_timeout_ms: ensure_child_timeout_ms(
@@ -630,12 +1125,27 @@ fn apply_manifest_runtime_overrides(
             MAX_DELEGATION_CHILDREN_PER_PARENT,
         )?;
     }
+    if let Some(value) = manifest.max_total_children {
+        limits.max_total_children = ensure_count_limit(
+            value,
+            "delegation.manifest.max_total_children",
+            MAX_DELEGATION_TOTAL_CHILDREN,
+        )?;
+    }
     if let Some(value) = manifest.max_parallel_groups {
         limits.max_parallel_groups = ensure_count_limit(
             value,
             "delegation.manifest.max_parallel_groups",
             MAX_DELEGATION_PARALLEL_GROUPS,
         )?;
+    }
+    if let Some(value) = manifest.max_depth {
+        limits.max_depth =
+            ensure_count_limit(value, "delegation.manifest.max_depth", MAX_DELEGATION_DEPTH)?;
+    }
+    if let Some(value) = manifest.max_budget_share_bps {
+        limits.max_budget_share_bps =
+            ensure_budget_share_bps(value, "delegation.manifest.max_budget_share_bps")?;
     }
     if let Some(value) = manifest.child_budget_override {
         limits.child_budget_override =
@@ -779,6 +1289,15 @@ pub fn resolve_delegation_request(
                 "delegation budget_tokens exceeds the parent budget ceiling",
             ));
         }
+        let allowed_share = parent_budget_tokens
+            .saturating_mul(runtime_limits.max_budget_share_bps)
+            .saturating_div(10_000)
+            .max(1);
+        if budget_tokens > allowed_share {
+            return Err(Status::invalid_argument(
+                "delegation budget_tokens exceeds the configured parent budget share",
+            ));
+        }
     }
 
     let tool_allowlist = normalize_allowlist(base_profile.tool_allowlist.clone());
@@ -844,9 +1363,11 @@ pub fn resolve_delegation_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        built_in_delegation_catalog, resolve_delegation_request, DelegationExecutionMode,
-        DelegationManifestInput, DelegationMemoryScopeKind, DelegationParentContext,
-        DelegationRequestInput, DelegationRole,
+        build_delegated_run_record, build_delegated_scope, built_in_delegation_catalog,
+        resolve_delegation_request, DelegatedReferenceInput, DelegatedRunRecordBuildRequest,
+        DelegatedRunState, DelegatedScopeBuildRequest, DelegationExecutionMode,
+        DelegationManifestInput, DelegationMemoryScopeKind, DelegationMergeStatus,
+        DelegationParentContext, DelegationRequestInput, DelegationRole,
     };
 
     fn parent_context() -> DelegationParentContext {
@@ -931,7 +1452,10 @@ mod tests {
                 manifest: Some(DelegationManifestInput {
                     max_concurrent_children: Some(3),
                     max_children_per_parent: Some(9),
+                    max_total_children: Some(12),
                     max_parallel_groups: Some(2),
+                    max_depth: Some(4),
+                    max_budget_share_bps: Some(5_000),
                     child_budget_override: Some(1_100),
                     child_timeout_ms: Some(45_000),
                     ..Default::default()
@@ -945,7 +1469,10 @@ mod tests {
         assert_eq!(snapshot.budget_tokens, 1_100);
         assert_eq!(snapshot.runtime_limits.max_concurrent_children, 3);
         assert_eq!(snapshot.runtime_limits.max_children_per_parent, 9);
+        assert_eq!(snapshot.runtime_limits.max_total_children, 12);
         assert_eq!(snapshot.runtime_limits.max_parallel_groups, 2);
+        assert_eq!(snapshot.runtime_limits.max_depth, 4);
+        assert_eq!(snapshot.runtime_limits.max_budget_share_bps, 5_000);
         assert_eq!(snapshot.runtime_limits.child_budget_override, Some(1_100));
         assert_eq!(snapshot.runtime_limits.child_timeout_ms, 45_000);
 
@@ -983,5 +1510,130 @@ mod tests {
         assert_eq!(snapshot.execution_mode, DelegationExecutionMode::Serial);
         assert_eq!(snapshot.runtime_limits.max_concurrent_children, 1);
         assert_eq!(snapshot.runtime_limits.max_parallel_groups, 1);
+    }
+
+    #[test]
+    fn resolve_delegation_request_rejects_budget_share_escalation() {
+        let error = resolve_delegation_request(
+            &DelegationRequestInput {
+                manifest: Some(DelegationManifestInput {
+                    budget_tokens: Some(1_300),
+                    max_budget_share_bps: Some(5_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &parent_context(),
+        )
+        .expect_err("budget above the configured parent share should fail");
+
+        assert!(error.message().contains("configured parent budget share"));
+    }
+
+    #[test]
+    fn delegated_scope_builder_rejects_scope_escalation_and_redacts_refs() {
+        let delegation = resolve_delegation_request(
+            &DelegationRequestInput {
+                manifest: Some(DelegationManifestInput {
+                    budget_tokens: Some(1_000),
+                    tool_allowlist: vec!["palyra.http.fetch".to_owned()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &parent_context(),
+        )
+        .expect("delegation should resolve");
+
+        let scope = build_delegated_scope(DelegatedScopeBuildRequest {
+            objective: "Read https://example.com/callback?access_token=secret and summarize"
+                .to_owned(),
+            delegation: delegation.clone(),
+            parent_tool_allowlist: vec!["palyra.http.fetch".to_owned()],
+            parent_skill_allowlist: vec![],
+            context_refs: vec![DelegatedReferenceInput {
+                ref_id: "ctx-1".to_owned(),
+                reason: "needed for the child objective".to_owned(),
+                sensitivity: "internal".to_owned(),
+            }],
+            memory_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+        })
+        .expect("narrow scope should build");
+
+        assert_eq!(scope.tool_allowlist, vec!["palyra.http.fetch"]);
+        assert!(scope.child_prompt.contains("Do not request broader tools"));
+        assert!(!scope.safe_snapshot_json()["child_prompt"]
+            .as_str()
+            .expect("child prompt should be text")
+            .contains("secret"));
+
+        let mut wider = delegation;
+        wider.tool_allowlist = vec!["palyra.fs.apply_patch".to_owned()];
+        let error = build_delegated_scope(DelegatedScopeBuildRequest {
+            objective: "Patch files".to_owned(),
+            delegation: wider,
+            parent_tool_allowlist: vec!["palyra.http.fetch".to_owned()],
+            parent_skill_allowlist: vec![],
+            context_refs: Vec::new(),
+            memory_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+        })
+        .expect_err("wider tool scope should fail");
+        assert!(error.message().contains("scope.tool_allowlist"));
+    }
+
+    #[test]
+    fn delegated_run_record_has_deterministic_safe_snapshot_and_explain() {
+        let delegation = resolve_delegation_request(
+            &DelegationRequestInput {
+                manifest: Some(DelegationManifestInput {
+                    budget_tokens: Some(1_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &parent_context(),
+        )
+        .expect("delegation should resolve");
+        let scope = build_delegated_scope(DelegatedScopeBuildRequest {
+            objective: "Summarize child output".to_owned(),
+            delegation: delegation.clone(),
+            parent_tool_allowlist: vec!["palyra.http.fetch".to_owned()],
+            parent_skill_allowlist: vec!["repo.read".to_owned()],
+            context_refs: Vec::new(),
+            memory_refs: Vec::new(),
+            artifact_refs: vec![DelegatedReferenceInput {
+                ref_id: "artifact-1".to_owned(),
+                reason: "merge evidence".to_owned(),
+                sensitivity: "internal".to_owned(),
+            }],
+        })
+        .expect("scope should build");
+
+        let record = build_delegated_run_record(DelegatedRunRecordBuildRequest {
+            parent_run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            child_run_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned()),
+            task_id: Some("task-1".to_owned()),
+            objective: "Summarize child output".to_owned(),
+            scope,
+            delegation,
+            state: DelegatedRunState::Running,
+            merge_status: DelegationMergeStatus::NotReady,
+            event_type: "child_started".to_owned(),
+            event_reason: "spawned by delegate command".to_owned(),
+            observed_at_unix_ms: 1_000,
+        });
+
+        let first =
+            serde_json::to_string(&record.safe_snapshot_json()).expect("snapshot should serialize");
+        let second = serde_json::to_string(&record.safe_snapshot_json())
+            .expect("snapshot should serialize deterministically");
+        assert_eq!(first, second);
+        assert_eq!(
+            record.delegated_run_id,
+            "dr_01ARZ3NDEKTSV4RRFFQ69G5FAV_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+        );
+        assert_eq!(record.explain_json()["state"], "running");
     }
 }

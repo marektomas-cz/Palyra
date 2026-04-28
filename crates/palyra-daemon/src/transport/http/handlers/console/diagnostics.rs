@@ -380,7 +380,10 @@ async fn collect_console_delegation_diagnostics(
                     active_parallel_groups: Vec::new(),
                     max_concurrent_children: delegation.runtime_limits.max_concurrent_children,
                     max_children_per_parent: delegation.runtime_limits.max_children_per_parent,
+                    max_total_children: delegation.runtime_limits.max_total_children,
                     max_parallel_groups: delegation.runtime_limits.max_parallel_groups,
+                    max_depth: delegation.runtime_limits.max_depth,
+                    max_budget_share_bps: delegation.runtime_limits.max_budget_share_bps,
                     child_timeout_ms: delegation.runtime_limits.child_timeout_ms,
                 }
             });
@@ -391,8 +394,13 @@ async fn collect_console_delegation_diagnostics(
             group.max_children_per_parent = group
                 .max_children_per_parent
                 .min(delegation.runtime_limits.max_children_per_parent);
+            group.max_total_children =
+                group.max_total_children.min(delegation.runtime_limits.max_total_children);
             group.max_parallel_groups =
                 group.max_parallel_groups.min(delegation.runtime_limits.max_parallel_groups);
+            group.max_depth = group.max_depth.min(delegation.runtime_limits.max_depth);
+            group.max_budget_share_bps =
+                group.max_budget_share_bps.min(delegation.runtime_limits.max_budget_share_bps);
             group.child_timeout_ms =
                 group.child_timeout_ms.min(delegation.runtime_limits.child_timeout_ms);
             match task.state.as_str() {
@@ -454,7 +462,10 @@ async fn collect_console_delegation_diagnostics(
                 "active_parallel_group_count": group.active_parallel_groups.len(),
                 "max_concurrent_children": group.max_concurrent_children,
                 "max_children_per_parent": group.max_children_per_parent,
+                "max_total_children": group.max_total_children,
                 "max_parallel_groups": group.max_parallel_groups,
+                "max_depth": group.max_depth,
+                "max_budget_share_bps": group.max_budget_share_bps,
                 "child_timeout_ms": group.child_timeout_ms,
             })
         })
@@ -483,7 +494,10 @@ struct DelegationParentDiagnostics {
     active_parallel_groups: Vec<String>,
     max_concurrent_children: u64,
     max_children_per_parent: u64,
+    max_total_children: u64,
     max_parallel_groups: u64,
+    max_depth: u64,
+    max_budget_share_bps: u64,
     child_timeout_ms: u64,
 }
 

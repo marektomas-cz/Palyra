@@ -1,5 +1,6 @@
 pub(crate) mod artifacts;
 pub(crate) mod browser;
+pub(crate) mod delegation;
 pub(crate) mod http_fetch;
 pub(crate) mod memory;
 pub(crate) mod networked_worker;
