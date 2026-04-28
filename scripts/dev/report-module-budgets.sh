@@ -377,6 +377,10 @@ if ${strict_mode}; then
     strict_failed=true
   fi
 
+  if ! bash scripts/check-architecture-boundaries.sh; then
+    strict_failed=true
+  fi
+
   if ${strict_failed}; then
     exit 1
   fi

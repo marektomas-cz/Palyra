@@ -223,6 +223,9 @@ jobs:
       - name: Guard local-only tracked paths
         run: bash scripts/check-local-only-tracked-files.sh
 
+      - name: Changed-scope planner self-test
+        run: bash scripts/ci/plan-changed-scope.sh --self-test
+
       - name: Module budget and connector boundary checks
         run: bash scripts/dev/report-module-budgets.sh --strict
 

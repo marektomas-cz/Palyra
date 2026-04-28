@@ -1,0 +1,30 @@
+# schema_version=1
+# glob<TAB>scopes<TAB>strict
+Cargo.toml	rust:workspace,contracts	true
+Cargo.lock	rust:workspace,security	true
+deny.toml	security	true
+osv-scanner.toml	security	true
+.github/workflows/*	ci,strict-gates	true
+scripts/*	ci,strict-gates	true
+schemas/proto/*	protocol,contracts	true
+schemas/json/*	protocol,contracts	true
+schemas/generated/*	protocol,contracts	true
+crates/palyra-daemon/*	rust:palyra-daemon,contracts:daemon	true
+crates/palyra-cli/*	rust:palyra-cli,contracts:cli	false
+crates/palyra-policy/*	rust:palyra-policy,contracts:policy	true
+crates/palyra-connectors/*	rust:palyra-connectors,contracts:connectors	true
+crates/palyra-auth/*	rust:palyra-auth,contracts:auth	true
+crates/palyra-vault/*	rust:palyra-vault,security	true
+crates/palyra-browserd/*	rust:palyra-browserd,contracts:browser	true
+crates/palyra-common/*	rust:palyra-common,contracts	true
+crates/palyra-transport-quic/*	rust:palyra-transport-quic,security	true
+crates/palyra-sandbox/*	rust:palyra-sandbox,security	true
+crates/palyra-skills/*	rust:palyra-skills,contracts:skills	true
+crates/*	rust:workspace	false
+apps/web/*	web,contracts:web	false
+apps/desktop/ui/*	desktop-ui	false
+apps/desktop/src-tauri/*	desktop-tauri	true
+apps/browser-extension/*	browser-extension	false
+fuzz/*	fuzz	true
+infra/*	infra	true
+roadmap/*	planning	false

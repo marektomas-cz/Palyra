@@ -61,8 +61,11 @@ bash "$ROOT_DIR/scripts/test/ensure-js-workspace.sh"
 bash "$ROOT_DIR/scripts/test/ensure-desktop-ui.sh"
 
 bash "$ROOT_DIR/scripts/test/check-deterministic-fixtures.sh"
+bash "$ROOT_DIR/scripts/ci/plan-changed-scope.sh" --self-test
+bash "$ROOT_DIR/scripts/check-architecture-boundaries.sh" --self-test
 bash "$ROOT_DIR/scripts/test/run-retrieval-benchmark.sh"
 bash "$ROOT_DIR/scripts/test/run-replay-gate.sh"
+bash "$ROOT_DIR/scripts/test/check-runtime-contract-snapshots.sh"
 
 "$CARGO_BIN" build -p palyra-cli --locked
 
