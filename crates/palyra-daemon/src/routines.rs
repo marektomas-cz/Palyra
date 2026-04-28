@@ -33,6 +33,7 @@ pub const SHADOW_AT_TIMESTAMP_RFC3339: &str = "2100-01-01T00:00:00Z";
 pub const ROUTINE_EXPORT_SCHEMA_ID: &str = "palyra.routine.export.v1";
 pub const ROUTINE_EXPORT_SCHEMA_VERSION: u32 = 1;
 pub const ROUTINE_TEMPLATE_PACK_VERSION: u32 = 1;
+pub const ROUTINE_RUN_LEASE_TTL_MS: i64 = 15 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -203,6 +204,59 @@ impl RoutineRunOutcomeKind {
             Self::Denied => "denied",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineRunLeaseState {
+    Active,
+    Expired,
+    Released,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineApprovalGateState {
+    NotRequired,
+    Pending,
+    Approved,
+    Denied,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineDeliveryContractKind {
+    Channel,
+    ArtifactOnly,
+    Silent,
+    OperatorReview,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineDeliveryContract {
+    pub kind: RoutineDeliveryContractKind,
+    pub mode: RoutineDeliveryMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    pub announced: bool,
+    pub requires_operator_review: bool,
+    pub retryable: bool,
+    pub dead_letter: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineRunLifecycleSnapshot {
+    pub run_id: String,
+    pub routine_id: String,
+    pub status: CronRunStatus,
+    pub lease_state: RoutineRunLeaseState,
+    pub approval_gate: RoutineApprovalGateState,
+    pub terminal: bool,
+    pub delivery_ready: bool,
+    pub recovery_hint: String,
 }
 
 #[allow(dead_code)]
@@ -1117,6 +1171,52 @@ pub fn default_outcome_from_cron_status(status: CronRunStatus) -> RoutineRunOutc
     }
 }
 
+#[must_use]
+pub fn routine_run_lifecycle_snapshot(
+    routine_id: &str,
+    run: &CronRunRecord,
+    metadata: Option<&RoutineRunMetadataRecord>,
+    approval_policy: &RoutineApprovalPolicy,
+    now_unix_ms: i64,
+) -> RoutineRunLifecycleSnapshot {
+    let terminal = !run.status.is_active();
+    let lease_state = if terminal {
+        RoutineRunLeaseState::Released
+    } else if now_unix_ms.saturating_sub(run.updated_at_unix_ms) > ROUTINE_RUN_LEASE_TTL_MS {
+        RoutineRunLeaseState::Expired
+    } else {
+        RoutineRunLeaseState::Active
+    };
+    let approval_gate = routine_approval_gate_state(approval_policy, metadata);
+    let delivery_ready = terminal
+        && matches!(
+            approval_gate,
+            RoutineApprovalGateState::NotRequired | RoutineApprovalGateState::Approved
+        );
+    let recovery_hint = if lease_state == RoutineRunLeaseState::Expired {
+        "repair_or_cancel_expired_routine_run_lease"
+    } else if approval_gate == RoutineApprovalGateState::Pending {
+        "request_or_resolve_operator_approval"
+    } else if approval_gate == RoutineApprovalGateState::Denied {
+        "keep_delivery_suppressed_after_denied_approval"
+    } else if !terminal {
+        "wait_for_terminal_routine_run"
+    } else {
+        "delivery_contract_ready"
+    };
+
+    RoutineRunLifecycleSnapshot {
+        run_id: run.run_id.clone(),
+        routine_id: routine_id.to_owned(),
+        status: run.status,
+        lease_state,
+        approval_gate,
+        terminal,
+        delivery_ready,
+        recovery_hint: recovery_hint.to_owned(),
+    }
+}
+
 pub fn join_run_metadata(
     routine_id: &str,
     run: &CronRunRecord,
@@ -1136,6 +1236,20 @@ pub fn join_run_metadata(
     let effective_delivery = effective_delivery_target(
         &delivery,
         matches!(outcome_kind, RoutineRunOutcomeKind::Failed | RoutineRunOutcomeKind::Denied),
+    );
+    let delivery_contract = routine_delivery_contract(
+        &delivery,
+        outcome_kind,
+        metadata
+            .and_then(|entry| entry.approval_note.as_deref())
+            .is_some_and(approval_note_requires_operator_review),
+    );
+    let lifecycle = routine_run_lifecycle_snapshot(
+        routine_id,
+        run,
+        metadata,
+        &RoutineApprovalPolicy::default(),
+        run.updated_at_unix_ms,
     );
     json!({
         "routine_id": routine_id,
@@ -1159,6 +1273,8 @@ pub fn join_run_metadata(
         "delivery_failure_channel": delivery.failure_channel,
         "silent_policy": delivery.silent_policy.as_str(),
         "delivery_preview": routine_delivery_preview(&delivery),
+        "delivery_contract": delivery_contract,
+        "lifecycle": lifecycle,
         "effective_delivery_mode": effective_delivery.mode.as_str(),
         "effective_delivery_channel": effective_delivery.channel,
         "delivery_reason": delivery_reason,
@@ -1478,6 +1594,85 @@ fn normalize_quiet_hours(
         end_minute_of_day: quiet_hours.end_minute_of_day,
         timezone: quiet_hours.timezone.and_then(trim_to_option),
     }))
+}
+
+fn routine_approval_gate_state(
+    approval_policy: &RoutineApprovalPolicy,
+    metadata: Option<&RoutineRunMetadataRecord>,
+) -> RoutineApprovalGateState {
+    if approval_policy.mode == RoutineApprovalMode::None {
+        return RoutineApprovalGateState::NotRequired;
+    }
+    let Some(note) = metadata.and_then(|entry| entry.approval_note.as_deref()) else {
+        return RoutineApprovalGateState::Pending;
+    };
+    let normalized = note.trim().to_ascii_lowercase();
+    if normalized.contains("denied") || normalized.contains("rejected") {
+        RoutineApprovalGateState::Denied
+    } else if normalized.contains("approved") || normalized.contains("allowed") {
+        RoutineApprovalGateState::Approved
+    } else {
+        RoutineApprovalGateState::Pending
+    }
+}
+
+fn approval_note_requires_operator_review(note: &str) -> bool {
+    let normalized = note.trim().to_ascii_lowercase();
+    if normalized.contains("approved")
+        || normalized.contains("allowed")
+        || normalized.contains("denied")
+        || normalized.contains("rejected")
+    {
+        return false;
+    }
+    normalized.contains("pending")
+        || normalized.contains("required")
+        || normalized.contains("review")
+        || normalized.contains("approval")
+}
+
+#[must_use]
+pub fn routine_delivery_contract(
+    delivery: &RoutineDeliveryConfig,
+    outcome_kind: RoutineRunOutcomeKind,
+    approval_required: bool,
+) -> RoutineDeliveryContract {
+    let failure_path =
+        matches!(outcome_kind, RoutineRunOutcomeKind::Failed | RoutineRunOutcomeKind::Denied);
+    let target = effective_delivery_target(delivery, failure_path);
+    let announced = delivery_announced_for_outcome(delivery, outcome_kind);
+    let requires_operator_review = approval_required || (failure_path && !announced);
+    let kind = if requires_operator_review {
+        RoutineDeliveryContractKind::OperatorReview
+    } else if !announced {
+        RoutineDeliveryContractKind::Silent
+    } else if matches!(target.mode, RoutineDeliveryMode::LocalOnly | RoutineDeliveryMode::LogsOnly)
+    {
+        RoutineDeliveryContractKind::ArtifactOnly
+    } else {
+        RoutineDeliveryContractKind::Channel
+    };
+    let retryable = failure_path && !requires_operator_review;
+    let dead_letter = failure_path && requires_operator_review;
+    let reason = if approval_required {
+        "operator approval must resolve before routine output delivery".to_owned()
+    } else if dead_letter {
+        "terminal failure is retained for operator review because no channel announcement is allowed"
+            .to_owned()
+    } else {
+        delivery_reason_for_outcome(delivery, outcome_kind)
+    };
+
+    RoutineDeliveryContract {
+        kind,
+        mode: target.mode,
+        channel: target.channel,
+        announced,
+        requires_operator_review,
+        retryable,
+        dead_letter,
+        reason,
+    }
 }
 
 pub fn validate_routine_prompt_self_contained(
@@ -2053,16 +2248,18 @@ fn humanize_duration(duration_ms: u64) -> String {
 mod tests {
     use super::{
         build_routine_export_bundle, default_outcome_from_cron_status,
-        natural_language_schedule_preview, resolve_routines_root, routine_delivery_preview,
+        natural_language_schedule_preview, resolve_routines_root, routine_delivery_contract,
+        routine_delivery_preview, routine_run_lifecycle_snapshot,
         shadow_manual_schedule_payload_json, validate_routine_export_bundle,
-        validate_routine_prompt_self_contained, RoutineApprovalMode, RoutineApprovalPolicy,
-        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineExecutionConfig, RoutineRegistry,
-        RoutineRunMetadataUpsert, RoutineRunMode, RoutineSilentPolicy, RoutineTriggerKind,
-        ROUTINE_EXPORT_SCHEMA_ID,
+        validate_routine_prompt_self_contained, RoutineApprovalGateState, RoutineApprovalMode,
+        RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryContractKind,
+        RoutineDeliveryMode, RoutineExecutionConfig, RoutineRegistry, RoutineRunLeaseState,
+        RoutineRunMetadataUpsert, RoutineRunMode, RoutineRunOutcomeKind, RoutineSilentPolicy,
+        RoutineTriggerKind, ROUTINE_EXPORT_SCHEMA_ID, ROUTINE_RUN_LEASE_TTL_MS,
     };
     use crate::{
         cron::CronTimezoneMode,
-        journal::{CronRunStatus, CronScheduleType},
+        journal::{CronRunRecord, CronRunStatus, CronScheduleType},
     };
     use chrono::DateTime;
     use serde_json::json;
@@ -2074,6 +2271,27 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("palyra-routines-test-{stamp}"))
+    }
+
+    fn sample_cron_run(status: CronRunStatus, updated_at_unix_ms: i64) -> CronRunRecord {
+        CronRunRecord {
+            run_id: "run-1".to_owned(),
+            job_id: "routine-1".to_owned(),
+            attempt: 1,
+            session_id: Some("session-1".to_owned()),
+            orchestrator_run_id: Some("orchestrator-1".to_owned()),
+            started_at_unix_ms: 1_000,
+            finished_at_unix_ms: if status.is_active() { None } else { Some(2_000) },
+            status,
+            error_kind: None,
+            error_message_redacted: None,
+            model_tokens_in: 0,
+            model_tokens_out: 0,
+            tool_calls: 0,
+            tool_denies: 0,
+            created_at_unix_ms: 1_000,
+            updated_at_unix_ms,
+        }
     }
 
     #[test]
@@ -2275,6 +2493,68 @@ mod tests {
         assert_eq!(preview["failure"]["mode"], json!("specific_channel"));
         assert_eq!(preview["failure"]["channel"], json!("ops:alerts"));
         assert_eq!(preview["failure"]["announced"], json!(true));
+    }
+
+    #[test]
+    fn delivery_contract_classifies_silent_and_operator_review_paths() {
+        let silent = routine_delivery_contract(
+            &RoutineDeliveryConfig {
+                mode: RoutineDeliveryMode::SameChannel,
+                channel: None,
+                failure_mode: None,
+                failure_channel: None,
+                silent_policy: RoutineSilentPolicy::AuditOnly,
+            },
+            RoutineRunOutcomeKind::SuccessWithOutput,
+            false,
+        );
+        assert_eq!(silent.kind, RoutineDeliveryContractKind::Silent);
+        assert!(!silent.announced);
+        assert!(!silent.dead_letter);
+
+        let review = routine_delivery_contract(
+            &RoutineDeliveryConfig {
+                mode: RoutineDeliveryMode::LogsOnly,
+                channel: None,
+                failure_mode: None,
+                failure_channel: None,
+                silent_policy: RoutineSilentPolicy::Noisy,
+            },
+            RoutineRunOutcomeKind::Failed,
+            false,
+        );
+        assert_eq!(review.kind, RoutineDeliveryContractKind::OperatorReview);
+        assert!(review.requires_operator_review);
+        assert!(review.dead_letter);
+        assert!(!review.retryable);
+    }
+
+    #[test]
+    fn lifecycle_snapshot_blocks_delivery_until_approval_and_detects_expired_lease() {
+        let terminal = sample_cron_run(CronRunStatus::Succeeded, 2_000);
+        let approval_pending = routine_run_lifecycle_snapshot(
+            "routine-1",
+            &terminal,
+            None,
+            &RoutineApprovalPolicy { mode: RoutineApprovalMode::BeforeFirstRun },
+            2_100,
+        );
+        assert_eq!(approval_pending.approval_gate, RoutineApprovalGateState::Pending);
+        assert_eq!(approval_pending.lease_state, RoutineRunLeaseState::Released);
+        assert!(!approval_pending.delivery_ready);
+
+        let active = sample_cron_run(CronRunStatus::Running, 1_000);
+        let expired = routine_run_lifecycle_snapshot(
+            "routine-1",
+            &active,
+            None,
+            &RoutineApprovalPolicy::default(),
+            1_000 + ROUTINE_RUN_LEASE_TTL_MS + 1,
+        );
+        assert_eq!(expired.lease_state, RoutineRunLeaseState::Expired);
+        assert_eq!(expired.approval_gate, RoutineApprovalGateState::NotRequired);
+        assert!(!expired.delivery_ready);
+        assert_eq!(expired.recovery_hint, "repair_or_cancel_expired_routine_run_lease");
     }
 
     #[test]

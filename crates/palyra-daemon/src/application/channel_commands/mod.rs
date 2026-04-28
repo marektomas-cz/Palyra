@@ -22,6 +22,12 @@ pub(crate) enum ChannelCommandName {
     Compact,
     Approve,
     Queue,
+    RoutineStatus,
+    RoutinePause,
+    RoutineResume,
+    RoutineRunNow,
+    RoutineCancel,
+    RoutineHistory,
     Delegate,
     Delegations,
     DelegationStatus,
@@ -40,6 +46,12 @@ impl ChannelCommandName {
             Self::Compact => "compact",
             Self::Approve => "approve",
             Self::Queue => "queue",
+            Self::RoutineStatus => "routine-status",
+            Self::RoutinePause => "routine-pause",
+            Self::RoutineResume => "routine-resume",
+            Self::RoutineRunNow => "routine-run-now",
+            Self::RoutineCancel => "routine-cancel",
+            Self::RoutineHistory => "routine-history",
             Self::Delegate => "delegate",
             Self::Delegations => "delegations",
             Self::DelegationStatus => "delegation-status",
@@ -58,6 +70,12 @@ impl ChannelCommandName {
             Self::Compact => "channel.command.compact",
             Self::Approve => "channel.command.approve",
             Self::Queue => "channel.command.queue",
+            Self::RoutineStatus => "channel.command.routine.status",
+            Self::RoutinePause => "channel.command.routine.pause",
+            Self::RoutineResume => "channel.command.routine.resume",
+            Self::RoutineRunNow => "channel.command.routine.run_now",
+            Self::RoutineCancel => "channel.command.routine.cancel",
+            Self::RoutineHistory => "channel.command.routine.history",
             Self::Delegate => "channel.command.delegate",
             Self::Delegations => "channel.command.delegations",
             Self::DelegationStatus => "channel.command.delegation_status",
@@ -73,6 +91,8 @@ impl ChannelCommandName {
             self,
             Self::Status
                 | Self::Queue
+                | Self::RoutineStatus
+                | Self::RoutineHistory
                 | Self::Delegations
                 | Self::DelegationStatus
                 | Self::MergePreview
@@ -89,6 +109,14 @@ impl ChannelCommandName {
             "compact" | "summarize" => Some(Self::Compact),
             "approve" | "approval" => Some(Self::Approve),
             "queue" => Some(Self::Queue),
+            "routine-status" | "routine.status" | "routine:status" => Some(Self::RoutineStatus),
+            "routine-pause" | "routine.pause" | "routine:pause" => Some(Self::RoutinePause),
+            "routine-resume" | "routine.resume" | "routine:resume" => Some(Self::RoutineResume),
+            "routine-run-now" | "routine-run" | "routine.run-now" | "routine:run-now" => {
+                Some(Self::RoutineRunNow)
+            }
+            "routine-cancel" | "routine.cancel" | "routine:cancel" => Some(Self::RoutineCancel),
+            "routine-history" | "routine.history" | "routine:history" => Some(Self::RoutineHistory),
             "delegate" | "spawn" => Some(Self::Delegate),
             "delegations" | "delegation-list" | "delegate-list" => Some(Self::Delegations),
             "delegation-status" | "delegate-status" | "child-status" => {
@@ -385,6 +413,124 @@ impl ChannelCommandRegistry {
                 ],
             ),
             command_spec(
+                ChannelCommandName::RoutineStatus,
+                "Show routine status in the scoped channel",
+                &[arg(
+                    "routine_id",
+                    ChannelCommandArgumentKind::IdRef,
+                    false,
+                    &[],
+                    "Routine id to inspect",
+                )],
+            ),
+            command_spec(
+                ChannelCommandName::RoutinePause,
+                "Pause a routine in the scoped channel",
+                &[
+                    arg(
+                        "routine_id",
+                        ChannelCommandArgumentKind::IdRef,
+                        false,
+                        &[],
+                        "Routine id to pause",
+                    ),
+                    arg(
+                        "reason",
+                        ChannelCommandArgumentKind::FreeformTail,
+                        false,
+                        &[],
+                        "Pause reason",
+                    ),
+                ],
+            ),
+            command_spec(
+                ChannelCommandName::RoutineResume,
+                "Resume a paused routine in the scoped channel",
+                &[
+                    arg(
+                        "routine_id",
+                        ChannelCommandArgumentKind::IdRef,
+                        false,
+                        &[],
+                        "Routine id to resume",
+                    ),
+                    arg(
+                        "reason",
+                        ChannelCommandArgumentKind::FreeformTail,
+                        false,
+                        &[],
+                        "Resume reason",
+                    ),
+                ],
+            ),
+            command_spec(
+                ChannelCommandName::RoutineRunNow,
+                "Dispatch a manual routine run now",
+                &[
+                    arg(
+                        "routine_id",
+                        ChannelCommandArgumentKind::IdRef,
+                        false,
+                        &[],
+                        "Routine id to run",
+                    ),
+                    arg(
+                        "reason",
+                        ChannelCommandArgumentKind::FreeformTail,
+                        false,
+                        &[],
+                        "Run reason",
+                    ),
+                ],
+            ),
+            command_spec(
+                ChannelCommandName::RoutineCancel,
+                "Cancel an active routine run",
+                &[
+                    arg(
+                        "run_id",
+                        ChannelCommandArgumentKind::IdRef,
+                        false,
+                        &[],
+                        "Routine run id to cancel",
+                    ),
+                    arg(
+                        "routine_id",
+                        ChannelCommandArgumentKind::IdRef,
+                        false,
+                        &[],
+                        "Routine id to cancel",
+                    ),
+                    arg(
+                        "reason",
+                        ChannelCommandArgumentKind::FreeformTail,
+                        false,
+                        &[],
+                        "Cancel reason",
+                    ),
+                ],
+            ),
+            command_spec(
+                ChannelCommandName::RoutineHistory,
+                "Show routine run history in the scoped channel",
+                &[
+                    arg(
+                        "routine_id",
+                        ChannelCommandArgumentKind::IdRef,
+                        false,
+                        &[],
+                        "Routine id to inspect",
+                    ),
+                    arg(
+                        "limit",
+                        ChannelCommandArgumentKind::Int,
+                        false,
+                        &[],
+                        "Maximum run records to return",
+                    ),
+                ],
+            ),
+            command_spec(
                 ChannelCommandName::Delegate,
                 "Create a bounded delegated child run from this scope",
                 &[
@@ -621,6 +767,8 @@ pub(crate) fn build_channel_command_response(
     let code = match invocation.command {
         ChannelCommandName::Status => "channel_command/status",
         ChannelCommandName::Queue => "channel_command/queue",
+        ChannelCommandName::RoutineStatus => "channel_command/routine_status",
+        ChannelCommandName::RoutineHistory => "channel_command/routine_history",
         ChannelCommandName::Delegations => "channel_command/delegations",
         ChannelCommandName::DelegationStatus => "channel_command/delegation_status",
         ChannelCommandName::MergePreview => "channel_command/merge_preview",
@@ -629,6 +777,10 @@ pub(crate) fn build_channel_command_response(
         | ChannelCommandName::Reset
         | ChannelCommandName::Compact
         | ChannelCommandName::Approve
+        | ChannelCommandName::RoutinePause
+        | ChannelCommandName::RoutineResume
+        | ChannelCommandName::RoutineRunNow
+        | ChannelCommandName::RoutineCancel
         | ChannelCommandName::Delegate
         | ChannelCommandName::DelegationInterrupt => {
             if runtime.binding_id.is_none() && !has_explicit_target(invocation) {
@@ -663,6 +815,33 @@ pub(crate) fn build_channel_command_response(
                 .get("action")
                 .map(ChannelCommandValue::user_visible)
                 .unwrap_or_else(|| "list".to_owned())
+        ),
+        ChannelCommandName::RoutineStatus => format!(
+            "routine-status: channel={} routine={} binding={} session={}",
+            scope.channel,
+            invocation
+                .arguments
+                .get("routine_id")
+                .map(ChannelCommandValue::user_visible)
+                .unwrap_or_else(|| "scoped".to_owned()),
+            runtime.binding_id.as_deref().unwrap_or("none"),
+            runtime.session_id.as_deref().unwrap_or("none")
+        ),
+        ChannelCommandName::RoutineHistory => format!(
+            "routine-history: channel={} routine={} limit={} binding={} session={}",
+            scope.channel,
+            invocation
+                .arguments
+                .get("routine_id")
+                .map(ChannelCommandValue::user_visible)
+                .unwrap_or_else(|| "scoped".to_owned()),
+            invocation
+                .arguments
+                .get("limit")
+                .map(ChannelCommandValue::user_visible)
+                .unwrap_or_else(|| "20".to_owned()),
+            runtime.binding_id.as_deref().unwrap_or("none"),
+            runtime.session_id.as_deref().unwrap_or("none")
         ),
         ChannelCommandName::Delegations => format!(
             "delegations: channel={} action={} session={} parent_run={} binding={}",
@@ -728,6 +907,10 @@ pub(crate) fn build_channel_command_response(
         | ChannelCommandName::Reset
         | ChannelCommandName::Compact
         | ChannelCommandName::Approve
+        | ChannelCommandName::RoutinePause
+        | ChannelCommandName::RoutineResume
+        | ChannelCommandName::RoutineRunNow
+        | ChannelCommandName::RoutineCancel
         | ChannelCommandName::Delegate
         | ChannelCommandName::DelegationInterrupt
             if !ok =>
@@ -1033,6 +1216,7 @@ fn has_explicit_target(invocation: &ChannelCommandInvocation) -> bool {
         || invocation.arguments.contains_key("parent_run_id")
         || invocation.arguments.contains_key("task_id")
         || invocation.arguments.contains_key("approval_id")
+        || invocation.arguments.contains_key("routine_id")
 }
 
 fn malformed(code: impl Into<String>, message: impl Into<String>) -> ChannelCommandParseOutcome {
@@ -1097,6 +1281,37 @@ mod tests {
         };
         assert_eq!(preview.command, ChannelCommandName::MergePreview);
         assert!(preview.arguments.contains_key("run_id"));
+    }
+
+    #[test]
+    fn text_parser_accepts_routine_control_commands() {
+        let registry = ChannelCommandRegistry::builtin();
+        let ChannelCommandParseOutcome::Parsed(status) =
+            registry.parse_text("/palyra routine-status routine_id=daily-report")
+        else {
+            panic!("routine status command should parse");
+        };
+        assert_eq!(status.command, ChannelCommandName::RoutineStatus);
+        assert!(status.arguments.contains_key("routine_id"));
+        assert!(!status.command.side_effecting());
+
+        let ChannelCommandParseOutcome::Parsed(run_now) =
+            registry.parse_text("/palyra routine-run-now routine_id=daily-report operator request")
+        else {
+            panic!("routine run-now command should parse");
+        };
+        assert_eq!(run_now.command, ChannelCommandName::RoutineRunNow);
+        assert!(run_now.arguments.contains_key("routine_id"));
+        assert!(run_now.arguments.contains_key("reason"));
+        assert!(run_now.command.side_effecting());
+
+        let ChannelCommandParseOutcome::Parsed(history) =
+            registry.parse_text("/palyra routine-history daily-report 5")
+        else {
+            panic!("routine history command should parse");
+        };
+        assert_eq!(history.command, ChannelCommandName::RoutineHistory);
+        assert!(!history.command.side_effecting());
     }
 
     #[test]
@@ -1200,5 +1415,42 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.code, "channel_command/requires_binding");
+    }
+
+    #[test]
+    fn routine_side_effecting_command_allows_explicit_routine_target_without_binding() {
+        let registry = ChannelCommandRegistry::builtin();
+        let ChannelCommandParseOutcome::Parsed(invocation) =
+            registry.parse_text("/palyra routine-pause routine_id=daily-report planned hold")
+        else {
+            panic!("routine pause command should parse");
+        };
+        let response = build_channel_command_response(
+            &invocation,
+            &ChannelCommandScope {
+                channel: "discord:default".to_owned(),
+                conversation_id: Some("c1".to_owned()),
+                thread_id: None,
+                sender_identity: Some("u1".to_owned()),
+                principal: "channel:discord:default".to_owned(),
+            },
+            &ChannelCommandRuntimeView {
+                queue_depth: 0,
+                route_config_hash: "0".repeat(64),
+                command_catalog_hash: "0".repeat(64),
+                binding_id: None,
+                binding_kind: None,
+                session_id: None,
+                run_id: None,
+                pending_approval_count: 0,
+                provider_wait_ms: None,
+                last_error: None,
+                observed_at_unix_ms: 1,
+            },
+        );
+
+        assert!(response.ok);
+        assert_eq!(response.code, "channel_command/accepted");
+        assert_eq!(response.audit_json["policy_action"], "channel.command.routine.pause");
     }
 }
