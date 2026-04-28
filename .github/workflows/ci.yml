@@ -17,6 +17,10 @@ jobs:
   build-and-test:
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +48,10 @@ jobs:
 
       - name: Cargo build
         run: cargo build --workspace --locked
+
+      - name: Free Cargo build artifacts before workspace tests
+        if: runner.os == 'Linux'
+        run: cargo clean
 
       - name: Cargo test
         run: cargo test --workspace --locked
