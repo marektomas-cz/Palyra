@@ -133,6 +133,7 @@ async fn execute_acp_command(
     envelope: AcpCommandEnvelope,
 ) -> Result<Value, AcpDispatchError> {
     match envelope.command {
+        AcpCommand::Status => acp_status(state, client).await,
         AcpCommand::SessionList => session_list(state, request_context, client, &envelope).await,
         AcpCommand::SessionLoad => session_load(state, request_context, client, &envelope).await,
         AcpCommand::SessionNew => session_new(state, request_context, client, &envelope).await,
@@ -178,6 +179,15 @@ async fn execute_acp_command(
         }
         AcpCommand::BindingExplain => binding_explain(state, client, &envelope).await,
     }
+}
+
+async fn acp_status(
+    state: &AppState,
+    client: &AcpClientContext,
+) -> Result<Value, AcpDispatchError> {
+    ensure_grant(client, AcpScope::SessionsRead, AcpCapability::RuntimeStatus)?;
+    status::build_acp_status_payload(state, Some(client.owner_principal.as_str()))
+        .map_err(AcpDispatchError::Acp)
 }
 
 async fn session_list(

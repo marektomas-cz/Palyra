@@ -1,0 +1,15 @@
+{
+  "actions": [
+    {
+      "action": "detach",
+      "automatic_apply": true,
+      "binding_id": "convbind_a",
+      "conflict_kind": "duplicate_active_binding",
+      "policy_gate": "acp.binding.repair",
+      "reason": "duplicate active external conversation binding",
+      "target_kind": "conversation_binding",
+      "target_session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    }
+  ],
+  "dry_run": true
+}

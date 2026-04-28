@@ -845,6 +845,7 @@ runtime_contract_enum! {
 runtime_contract_enum! {
     /// Feature capabilities advertised and enforced by daemon-level ACP.
     pub enum AcpCapability {
+        RuntimeStatus => "runtime_status",
         SessionList => "session_list",
         SessionLoad => "session_load",
         SessionNew => "session_new",
@@ -865,6 +866,7 @@ runtime_contract_enum! {
 runtime_contract_enum! {
     /// Stable command names for the ACP control plane.
     pub enum AcpCommand {
+        Status => "status" | "acp.status",
         SessionList => "session.list",
         SessionLoad => "session.load",
         SessionNew => "session.new",
@@ -925,9 +927,38 @@ runtime_contract_enum! {
     /// Conflict state for reverse indexes between external conversations and Palyra sessions.
     pub enum ConversationBindingConflictState {
         None => "none",
+        DuplicateActiveBinding => "duplicate_active_binding",
         DuplicateExternalIdentity => "duplicate_external_identity",
         DuplicateSession => "duplicate_session",
+        StaleThread => "stale_thread",
+        PrincipalMismatch => "principal_mismatch",
+        WorkspaceMismatch => "workspace_mismatch",
+        ExpiredReference => "expired_reference",
+        ParentMissing => "parent_missing",
         Detached => "detached"
+    }
+}
+
+runtime_contract_enum! {
+    /// Diagnostic conflict kind emitted by ACP binding explain and repair previews.
+    pub enum AcpBindingConflictKind {
+        DuplicateActiveBinding => "duplicate_active_binding",
+        StaleThread => "stale_thread",
+        PrincipalMismatch => "principal_mismatch",
+        WorkspaceMismatch => "workspace_mismatch",
+        ExpiredReferenced => "expired_referenced" | "expired_reference",
+        ParentMissing => "parent_missing"
+    }
+}
+
+runtime_contract_enum! {
+    /// Safe repair action vocabulary for ACP binding previews and audited apply flows.
+    pub enum AcpBindingRepairActionKind {
+        Detach => "detach",
+        Rebind => "rebind",
+        Expire => "expire",
+        Split => "split",
+        MarkStale => "mark_stale"
     }
 }
 
@@ -1319,17 +1350,18 @@ runtime_contract_enum! {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcpCapability, AcpClientContext, AcpCommand, AcpCommandEnvelope, AcpProtocolVersionRange,
-        AcpScope, AcpSessionBindingRecord, AcpSessionMode, AcpTransportKind,
-        ArtifactRetentionDisposition, ArtifactRetentionPolicy, AuxiliaryTaskKind,
-        AuxiliaryTaskState, DeliveryPolicy, FlowState, FlowStepState, IdempotencyReplayDecision,
-        PruningPolicyClass, QueueDecision, QueueMode, QueuedInputState, RealtimeCapability,
-        RealtimeCommand, RealtimeCommandEnvelope, RealtimeEventSensitivity, RealtimeEventTopic,
-        RealtimeHandshakeRequest, RealtimeProtocolVersionRange, RealtimeRole, RealtimeScope,
-        RealtimeSubscription, RunLifecycleHookDecision, RunLifecycleHookDecisionKind,
-        RunLifecycleHookPhase, RunLifecyclePhase, ToolResultSensitivity, ToolResultVisibility,
-        ToolTurnBudget, WorkerLifecycleState, ACP_PROTOCOL_MAX_VERSION, ACP_PROTOCOL_MIN_VERSION,
-        REALTIME_PROTOCOL_MAX_VERSION, REALTIME_PROTOCOL_MIN_VERSION,
+        AcpBindingConflictKind, AcpBindingRepairActionKind, AcpCapability, AcpClientContext,
+        AcpCommand, AcpCommandEnvelope, AcpProtocolVersionRange, AcpScope, AcpSessionBindingRecord,
+        AcpSessionMode, AcpTransportKind, ArtifactRetentionDisposition, ArtifactRetentionPolicy,
+        AuxiliaryTaskKind, AuxiliaryTaskState, DeliveryPolicy, FlowState, FlowStepState,
+        IdempotencyReplayDecision, PruningPolicyClass, QueueDecision, QueueMode, QueuedInputState,
+        RealtimeCapability, RealtimeCommand, RealtimeCommandEnvelope, RealtimeEventSensitivity,
+        RealtimeEventTopic, RealtimeHandshakeRequest, RealtimeProtocolVersionRange, RealtimeRole,
+        RealtimeScope, RealtimeSubscription, RunLifecycleHookDecision,
+        RunLifecycleHookDecisionKind, RunLifecycleHookPhase, RunLifecyclePhase,
+        ToolResultSensitivity, ToolResultVisibility, ToolTurnBudget, WorkerLifecycleState,
+        ACP_PROTOCOL_MAX_VERSION, ACP_PROTOCOL_MIN_VERSION, REALTIME_PROTOCOL_MAX_VERSION,
+        REALTIME_PROTOCOL_MIN_VERSION,
     };
     use serde_json::json;
 
@@ -1536,8 +1568,15 @@ mod tests {
         assert_eq!(AcpTransportKind::Stdio.as_str(), "stdio");
         assert_eq!(AcpScope::SessionsRead.as_str(), "sessions:read");
         assert_eq!(AcpCapability::ApprovalBridge.as_str(), "approval_bridge");
+        assert_eq!(AcpCapability::RuntimeStatus.as_str(), "runtime_status");
+        assert_eq!(AcpCommand::Status.as_str(), "status");
         assert_eq!(AcpCommand::BindingRepairApply.as_str(), "binding.repair.apply");
         assert_eq!(AcpSessionMode::ReadOnly.as_str(), "read_only");
+        assert_eq!(
+            AcpBindingConflictKind::DuplicateActiveBinding.as_str(),
+            "duplicate_active_binding"
+        );
+        assert_eq!(AcpBindingRepairActionKind::MarkStale.as_str(), "mark_stale");
         assert!(AcpProtocolVersionRange::default().contains(ACP_PROTOCOL_MIN_VERSION));
         assert!(AcpProtocolVersionRange::default().contains(ACP_PROTOCOL_MAX_VERSION));
     }

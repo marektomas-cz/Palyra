@@ -1,6 +1,6 @@
 use super::*;
 use palyra_common::runtime_contracts::{AcpCapability, AcpScope, AcpTransportKind};
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn context() -> AcpClientContext {
     AcpClientContext {
@@ -186,9 +186,104 @@ fn conversation_binding_repair_detaches_duplicate_external_binding() {
 }
 
 #[test]
+fn conversation_binding_repair_marks_principal_mismatch_without_widening() {
+    let index = AcpBindingsIndex {
+        schema_version: 1,
+        updated_at_unix_ms: 10_000,
+        session_bindings: Vec::new(),
+        conversation_bindings: vec![
+            conversation_record("convbind_a", "operator:a", "01ARZ3NDEKTSV4RRFFQ69G5FAV", 1),
+            conversation_record("convbind_b", "operator:b", "01BX5ZZKBKACTAV9WEVGEMMVRZ", 2),
+        ],
+        pending_prompts: Vec::new(),
+    };
+
+    let plan = build_repair_plan(&index, true);
+
+    assert_eq!(plan.actions.len(), 2);
+    assert!(plan.actions.iter().all(|action| action.action == "mark_stale"));
+    assert!(plan.actions.iter().all(|action| !action.automatic_apply));
+    assert!(plan.actions.iter().all(|action| action.conflict_kind == "principal_mismatch"));
+}
+
+#[test]
+fn conversation_binding_repair_plan_matches_golden_fixture() {
+    let index = AcpBindingsIndex {
+        schema_version: 1,
+        updated_at_unix_ms: 10_000,
+        session_bindings: Vec::new(),
+        conversation_bindings: vec![
+            conversation_record("convbind_a", "operator", "01ARZ3NDEKTSV4RRFFQ69G5FAV", 1),
+            conversation_record("convbind_b", "operator", "01BX5ZZKBKACTAV9WEVGEMMVRZ", 2),
+        ],
+        pending_prompts: Vec::new(),
+    };
+
+    let actual = serde_json::to_value(build_repair_plan(&index, true))
+        .expect("repair plan should serialize");
+    let expected = read_golden_json("acp_binding_repair_plan.json");
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn conversation_binding_repair_can_mark_parent_missing_for_required_parent_scope() {
+    let mut record =
+        conversation_record("convbind_parent", "operator", "01ARZ3NDEKTSV4RRFFQ69G5FAV", 1);
+    record.scopes.push("parent:required".to_owned());
+    let index = AcpBindingsIndex {
+        schema_version: 1,
+        updated_at_unix_ms: 10_000,
+        session_bindings: Vec::new(),
+        conversation_bindings: vec![record],
+        pending_prompts: Vec::new(),
+    };
+
+    let plan = build_repair_plan(&index, true);
+
+    assert_eq!(plan.actions.len(), 1);
+    assert_eq!(plan.actions[0].action, "mark_stale");
+    assert_eq!(plan.actions[0].conflict_kind, "parent_missing");
+    assert!(plan.actions[0].automatic_apply);
+}
+
+#[test]
 fn translator_rejects_unknown_event_types_as_compatibility_errors() {
     assert_eq!(translate_palyra_event_type("model_token").unwrap(), "message.delta");
     let error =
         translate_palyra_event_type("provider.raw.unknown").expect_err("unknown event fails");
     assert_eq!(error.stable_code(), "acp/compatibility_error");
+}
+
+fn conversation_record(
+    binding_id: &str,
+    owner_principal: &str,
+    palyra_session_id: &str,
+    updated_at_unix_ms: i64,
+) -> ConversationBindingRecord {
+    ConversationBindingRecord {
+        schema_version: 1,
+        binding_id: binding_id.to_owned(),
+        connector_kind: "acp".to_owned(),
+        external_identity: "user-a".to_owned(),
+        external_conversation_id: "thread-1".to_owned(),
+        palyra_session_id: palyra_session_id.to_owned(),
+        owner_principal: owner_principal.to_owned(),
+        device_id: "desktop".to_owned(),
+        channel: None,
+        scopes: vec!["sessions:read".to_owned()],
+        sensitivity: ConversationBindingSensitivity::Internal,
+        delivery_cursor: AcpCursor::default(),
+        last_event_id: Some(format!("event-{updated_at_unix_ms}")),
+        conflict_state: ConversationBindingConflictState::None,
+        created_at_unix_ms: 0,
+        updated_at_unix_ms,
+    }
+}
+
+fn read_golden_json(name: &str) -> Value {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("golden").join(name);
+    let payload = std::fs::read_to_string(path).expect("golden fixture should be readable");
+    serde_json::from_str(payload.as_str()).expect("golden fixture should parse")
 }

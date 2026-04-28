@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -8,9 +8,10 @@ use std::{
 
 use palyra_common::{
     runtime_contracts::{
-        AcpCapability, AcpClientContext, AcpCommand, AcpCommandResultEnvelope, AcpCursor,
-        AcpPendingPromptRecord, AcpProtocolVersionRange, AcpScope, AcpSessionBindingRecord,
-        AcpSessionMode, ConversationBindingConflictState, ConversationBindingRecord,
+        AcpBindingConflictKind, AcpBindingRepairActionKind, AcpCapability, AcpClientContext,
+        AcpCommand, AcpCommandResultEnvelope, AcpCursor, AcpPendingPromptRecord,
+        AcpProtocolVersionRange, AcpScope, AcpSessionBindingRecord, AcpSessionMode,
+        ConversationBindingConflictState, ConversationBindingRecord,
         ConversationBindingSensitivity, StableErrorEnvelope, ACP_DEFAULT_DISCONNECT_GRACE_MS,
         ACP_PROTOCOL_MAX_VERSION, ACP_PROTOCOL_MIN_VERSION,
     },
@@ -196,9 +197,13 @@ pub(crate) struct BindingRepairPlan {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct BindingRepairAction {
     pub(crate) action: String,
+    pub(crate) conflict_kind: String,
+    pub(crate) target_kind: String,
     pub(crate) binding_id: String,
     pub(crate) reason: String,
     pub(crate) target_session_id: String,
+    pub(crate) policy_gate: String,
+    pub(crate) automatic_apply: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +217,8 @@ pub(crate) struct BindingExplainSnapshot {
     pub(crate) acp_client_id: Option<String>,
     pub(crate) acp_session_id: Option<String>,
     pub(crate) conflict_state: String,
+    pub(crate) conflict_kinds: Vec<String>,
+    pub(crate) repair_actions: Vec<String>,
     pub(crate) stale_permissions: bool,
     pub(crate) last_event_id: Option<String>,
     pub(crate) delivery_cursor: u64,
@@ -707,16 +714,43 @@ impl AcpRuntime {
         let mut index = self.lock_index()?;
         let plan = build_repair_plan(&index, false);
         for action in &plan.actions {
-            if action.action != "detach" {
-                continue;
-            }
-            if let Some(record) = index
-                .conversation_bindings
-                .iter_mut()
-                .find(|entry| entry.binding_id == action.binding_id)
-            {
-                record.conflict_state = ConversationBindingConflictState::Detached;
-                record.updated_at_unix_ms = now;
+            match action.action.as_str() {
+                "detach" => {
+                    if let Some(record) = index
+                        .conversation_bindings
+                        .iter_mut()
+                        .find(|entry| entry.binding_id == action.binding_id)
+                    {
+                        record.conflict_state = ConversationBindingConflictState::Detached;
+                        record.updated_at_unix_ms = now;
+                    }
+                }
+                "expire" if action.target_kind == "pending_prompt" => {
+                    index.pending_prompts.retain(|entry| entry.prompt_id != action.binding_id);
+                }
+                "mark_stale" => {
+                    if let Some(record) = index
+                        .conversation_bindings
+                        .iter_mut()
+                        .find(|entry| entry.binding_id == action.binding_id)
+                    {
+                        record.conflict_state = match action.conflict_kind.as_str() {
+                            "principal_mismatch" => {
+                                ConversationBindingConflictState::PrincipalMismatch
+                            }
+                            "workspace_mismatch" => {
+                                ConversationBindingConflictState::WorkspaceMismatch
+                            }
+                            "parent_missing" => ConversationBindingConflictState::ParentMissing,
+                            "expired_referenced" | "expired_reference" => {
+                                ConversationBindingConflictState::ExpiredReference
+                            }
+                            _ => ConversationBindingConflictState::StaleThread,
+                        };
+                        record.updated_at_unix_ms = now;
+                    }
+                }
+                _ => {}
             }
         }
         normalize_conversation_conflicts(&mut index);
@@ -733,6 +767,12 @@ impl AcpRuntime {
         if let Some(record) =
             index.session_bindings.iter().find(|entry| entry.binding_id == binding_id)
         {
+            let repair_actions = build_repair_plan(&index, true)
+                .actions
+                .into_iter()
+                .filter(|action| action.binding_id == record.binding_id)
+                .map(|action| action.action)
+                .collect::<Vec<_>>();
             return Ok(BindingExplainSnapshot {
                 binding_id: record.binding_id.clone(),
                 binding_kind: "acp_session".to_owned(),
@@ -743,6 +783,8 @@ impl AcpRuntime {
                 acp_client_id: Some(record.acp_client_id.clone()),
                 acp_session_id: Some(record.acp_session_id.clone()),
                 conflict_state: "none".to_owned(),
+                conflict_kinds: Vec::new(),
+                repair_actions,
                 stale_permissions: record.stale_permissions,
                 last_event_id: None,
                 delivery_cursor: record.cursor.sequence,
@@ -751,6 +793,12 @@ impl AcpRuntime {
         if let Some(record) =
             index.conversation_bindings.iter().find(|entry| entry.binding_id == binding_id)
         {
+            let repair_actions = build_repair_plan(&index, true)
+                .actions
+                .into_iter()
+                .filter(|action| action.binding_id == record.binding_id)
+                .map(|action| action.action)
+                .collect::<Vec<_>>();
             return Ok(BindingExplainSnapshot {
                 binding_id: record.binding_id.clone(),
                 binding_kind: "conversation".to_owned(),
@@ -761,6 +809,8 @@ impl AcpRuntime {
                 acp_client_id: None,
                 acp_session_id: None,
                 conflict_state: record.conflict_state.as_str().to_owned(),
+                conflict_kinds: conflict_kinds_for_conversation(record, &index),
+                repair_actions,
                 stale_permissions: false,
                 last_event_id: record.last_event_id.clone(),
                 delivery_cursor: record.delivery_cursor.sequence,
@@ -1124,25 +1174,55 @@ fn prune_expired_pending_prompts(index: &mut AcpBindingsIndex, now_unix_ms: i64)
 fn normalize_conversation_conflicts(index: &mut AcpBindingsIndex) {
     let mut grouped: BTreeMap<(String, String, String), Vec<usize>> = BTreeMap::new();
     for (position, entry) in index.conversation_bindings.iter_mut().enumerate() {
-        if entry.conflict_state != ConversationBindingConflictState::Detached {
-            entry.conflict_state = ConversationBindingConflictState::None;
-            grouped
-                .entry((
-                    entry.connector_kind.clone(),
-                    entry.external_identity.clone(),
-                    entry.external_conversation_id.clone(),
-                ))
-                .or_default()
-                .push(position);
+        match entry.conflict_state {
+            ConversationBindingConflictState::Detached
+            | ConversationBindingConflictState::StaleThread
+            | ConversationBindingConflictState::PrincipalMismatch
+            | ConversationBindingConflictState::WorkspaceMismatch
+            | ConversationBindingConflictState::ExpiredReference
+            | ConversationBindingConflictState::ParentMissing => continue,
+            ConversationBindingConflictState::None
+            | ConversationBindingConflictState::DuplicateActiveBinding
+            | ConversationBindingConflictState::DuplicateExternalIdentity
+            | ConversationBindingConflictState::DuplicateSession => {
+                entry.conflict_state = ConversationBindingConflictState::None;
+                grouped
+                    .entry((
+                        entry.connector_kind.clone(),
+                        entry.external_identity.clone(),
+                        entry.external_conversation_id.clone(),
+                    ))
+                    .or_default()
+                    .push(position);
+            }
         }
     }
     for positions in grouped.values() {
         if positions.len() <= 1 {
             continue;
         }
+        let owner_count = positions
+            .iter()
+            .filter_map(|position| index.conversation_bindings.get(*position))
+            .map(|entry| entry.owner_principal.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let session_count = positions
+            .iter()
+            .filter_map(|position| index.conversation_bindings.get(*position))
+            .map(|entry| entry.palyra_session_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let conflict_state = if owner_count > 1 {
+            ConversationBindingConflictState::PrincipalMismatch
+        } else if session_count == 1 {
+            ConversationBindingConflictState::DuplicateSession
+        } else {
+            ConversationBindingConflictState::DuplicateActiveBinding
+        };
         for position in positions {
             if let Some(entry) = index.conversation_bindings.get_mut(*position) {
-                entry.conflict_state = ConversationBindingConflictState::DuplicateExternalIdentity;
+                entry.conflict_state = conflict_state;
             }
         }
     }
@@ -1169,22 +1249,178 @@ fn build_repair_plan(index: &AcpBindingsIndex, dry_run: bool) -> BindingRepairPl
         if records.len() <= 1 {
             continue;
         }
+        let owner_count = records
+            .iter()
+            .map(|entry| entry.owner_principal.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let workspace_count = records
+            .iter()
+            .filter_map(|entry| workspace_key_for_session(index, entry.palyra_session_id.as_str()))
+            .collect::<BTreeSet<_>>()
+            .len();
         records.sort_by(|left, right| {
             right
                 .updated_at_unix_ms
                 .cmp(&left.updated_at_unix_ms)
                 .then(right.binding_id.cmp(&left.binding_id))
         });
+        if owner_count > 1 {
+            for record in records.iter() {
+                actions.push(binding_repair_action(
+                    AcpBindingRepairActionKind::MarkStale,
+                    AcpBindingConflictKind::PrincipalMismatch,
+                    "conversation_binding",
+                    record.binding_id.as_str(),
+                    "external conversation is claimed by multiple principals; automatic widening is refused",
+                    record.palyra_session_id.as_str(),
+                    false,
+                ));
+            }
+            continue;
+        }
+        if workspace_count > 1 {
+            for record in records.iter().skip(1) {
+                actions.push(binding_repair_action(
+                    AcpBindingRepairActionKind::Split,
+                    AcpBindingConflictKind::WorkspaceMismatch,
+                    "conversation_binding",
+                    record.binding_id.as_str(),
+                    "external conversation spans multiple workspace roots and needs explicit operator split",
+                    record.palyra_session_id.as_str(),
+                    false,
+                ));
+            }
+            continue;
+        }
         for duplicate in records.iter().skip(1) {
-            actions.push(BindingRepairAction {
-                action: "detach".to_owned(),
-                binding_id: duplicate.binding_id.clone(),
-                reason: "duplicate external conversation binding".to_owned(),
-                target_session_id: duplicate.palyra_session_id.clone(),
-            });
+            actions.push(binding_repair_action(
+                AcpBindingRepairActionKind::Detach,
+                AcpBindingConflictKind::DuplicateActiveBinding,
+                "conversation_binding",
+                duplicate.binding_id.as_str(),
+                "duplicate active external conversation binding",
+                duplicate.palyra_session_id.as_str(),
+                true,
+            ));
+        }
+    }
+    for binding in &index.conversation_bindings {
+        if binding.conflict_state == ConversationBindingConflictState::Detached {
+            continue;
+        }
+        if binding.scopes.iter().any(|scope| scope == "parent:required")
+            && !session_exists(index, binding.palyra_session_id.as_str())
+        {
+            actions.push(binding_repair_action(
+                AcpBindingRepairActionKind::MarkStale,
+                AcpBindingConflictKind::ParentMissing,
+                "conversation_binding",
+                binding.binding_id.as_str(),
+                "conversation binding references a session with no active ACP session binding",
+                binding.palyra_session_id.as_str(),
+                true,
+            ));
+        }
+    }
+    let now = unix_ms_now().unwrap_or(i64::MAX);
+    for prompt in &index.pending_prompts {
+        if prompt.expires_at_unix_ms < now {
+            actions.push(binding_repair_action(
+                AcpBindingRepairActionKind::Expire,
+                AcpBindingConflictKind::ExpiredReferenced,
+                "pending_prompt",
+                prompt.prompt_id.as_str(),
+                "pending ACP prompt is past its disconnect grace deadline",
+                prompt.palyra_session_id.as_str(),
+                true,
+            ));
         }
     }
     BindingRepairPlan { dry_run, actions }
+}
+
+fn binding_repair_action(
+    action: AcpBindingRepairActionKind,
+    conflict_kind: AcpBindingConflictKind,
+    target_kind: &str,
+    binding_id: &str,
+    reason: &str,
+    target_session_id: &str,
+    automatic_apply: bool,
+) -> BindingRepairAction {
+    BindingRepairAction {
+        action: action.as_str().to_owned(),
+        conflict_kind: conflict_kind.as_str().to_owned(),
+        target_kind: target_kind.to_owned(),
+        binding_id: binding_id.to_owned(),
+        reason: reason.to_owned(),
+        target_session_id: target_session_id.to_owned(),
+        policy_gate: "acp.binding.repair".to_owned(),
+        automatic_apply,
+    }
+}
+
+fn session_exists(index: &AcpBindingsIndex, session_id: &str) -> bool {
+    index.session_bindings.iter().any(|binding| binding.palyra_session_id == session_id)
+}
+
+fn workspace_key_for_session(index: &AcpBindingsIndex, session_id: &str) -> Option<String> {
+    index.session_bindings.iter().find(|binding| binding.palyra_session_id == session_id).and_then(
+        |binding| {
+            binding
+                .config
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .or_else(|| binding.config.get("workspace").and_then(Value::as_str))
+                .map(str::to_owned)
+                .or_else(|| workspace_from_session_key(binding.session_key.as_str()))
+        },
+    )
+}
+
+fn workspace_from_session_key(session_key: &str) -> Option<String> {
+    session_key
+        .strip_prefix("repo:")
+        .or_else(|| session_key.strip_prefix("cwd:"))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+}
+
+fn conflict_kinds_for_conversation(
+    record: &ConversationBindingRecord,
+    index: &AcpBindingsIndex,
+) -> Vec<String> {
+    let mut kinds = BTreeSet::new();
+    match record.conflict_state {
+        ConversationBindingConflictState::DuplicateActiveBinding
+        | ConversationBindingConflictState::DuplicateExternalIdentity
+        | ConversationBindingConflictState::DuplicateSession => {
+            kinds.insert(AcpBindingConflictKind::DuplicateActiveBinding.as_str().to_owned());
+        }
+        ConversationBindingConflictState::StaleThread => {
+            kinds.insert(AcpBindingConflictKind::StaleThread.as_str().to_owned());
+        }
+        ConversationBindingConflictState::PrincipalMismatch => {
+            kinds.insert(AcpBindingConflictKind::PrincipalMismatch.as_str().to_owned());
+        }
+        ConversationBindingConflictState::WorkspaceMismatch => {
+            kinds.insert(AcpBindingConflictKind::WorkspaceMismatch.as_str().to_owned());
+        }
+        ConversationBindingConflictState::ExpiredReference => {
+            kinds.insert(AcpBindingConflictKind::ExpiredReferenced.as_str().to_owned());
+        }
+        ConversationBindingConflictState::ParentMissing => {
+            kinds.insert(AcpBindingConflictKind::ParentMissing.as_str().to_owned());
+        }
+        ConversationBindingConflictState::None | ConversationBindingConflictState::Detached => {}
+    }
+    for action in build_repair_plan(index, true).actions {
+        if action.binding_id == record.binding_id {
+            kinds.insert(action.conflict_kind);
+        }
+    }
+    kinds.into_iter().collect()
 }
 
 #[cfg(test)]
