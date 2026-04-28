@@ -29,6 +29,7 @@ Commands:
   docs            Discover local CLI help snapshots from source checkouts or portable installs
   plugins
   hooks
+  extension
   profile         Manage CLI connection profiles and active environment selection
   devices
   node
@@ -126,6 +127,7 @@ Canonical command map:
   sandbox    Effective isolation/runtime policy explain surface for process and WASM tooling
   plugins    Trusted WASM plugin binding and lifecycle surface
   hooks      Event-driven automation bindings over trusted plugins
+  extension  Unified package preflight, grants, and lifecycle diagnostics
   reset      Destructive local recovery surface with explicit scope selection
   uninstall  Installer-aware package removal surface
   update     Package update/check orchestration surface
