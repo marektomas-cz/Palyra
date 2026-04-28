@@ -46,4 +46,6 @@ pub enum SkillPackagingError {
     Zip(String),
     #[error("serialization failed: {0}")]
     Serialization(String),
+    #[error("extension lifecycle failed: {0}")]
+    ExtensionLifecycle(String),
 }

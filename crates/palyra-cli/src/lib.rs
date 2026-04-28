@@ -81,8 +81,8 @@ use cli::{
     ApprovalsCommand, AuthAccessCommand, AuthCommand, AuthCredentialArg, AuthOpenAiCommand,
     AuthProfilesCommand, AuthProviderArg, AuthScopeArg, BrowserCommand, Cli, Command as CliCommand,
     CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand, DaemonCommand,
-    DeploymentCommand, DeploymentProfileArg, DocsCommand, GatewayBindProfileArg, HooksCommand,
-    InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
+    DeploymentCommand, DeploymentProfileArg, DocsCommand, ExtensionCommand, GatewayBindProfileArg,
+    HooksCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
     MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand, OnboardingAuthMethodArg,
     OnboardingCommand, OnboardingFlowArg, PatchCommand, PluginsCommand, PolicyCommand,
     ProtocolCommand, RemoteVerificationModeArg, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
@@ -304,6 +304,7 @@ fn run_cli() -> Result<()> {
         CliCommand::Docs { command } => commands::docs::run_docs(command),
         CliCommand::Plugins { command } => commands::plugins::run_plugins(command),
         CliCommand::Hooks { command } => commands::hooks::run_hooks(command),
+        CliCommand::Extension { command } => commands::extension::run_extension(command),
         CliCommand::Profile { command } => commands::profile::run_profile(command),
         CliCommand::Browser { command } => commands::browser::run_browser(command),
         CliCommand::System { command } => commands::system::run_system(command),
@@ -5435,6 +5436,10 @@ struct InstalledSkillRecord {
     source: InstalledSkillSource,
     #[serde(default)]
     missing_secrets: Vec<MissingSkillSecret>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    security_scan: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_snapshot: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6246,6 +6251,8 @@ fn install_verified_skill_artifact(
         trust_decision: trust_decision_label(verification_report.trust_decision).to_owned(),
         source: install_context.source,
         missing_secrets: install_context.missing_secrets,
+        security_scan: None,
+        rollback_snapshot: None,
     };
     index.entries.push(record.clone());
     normalize_installed_skills_index(index);
@@ -9371,6 +9378,8 @@ tier = "c"
                         reference: "a".to_owned(),
                     },
                     missing_secrets: Vec::new(),
+                    security_scan: None,
+                    rollback_snapshot: None,
                 },
                 InstalledSkillRecord {
                     skill_id: "acme.echo_http".to_owned(),
@@ -9387,6 +9396,8 @@ tier = "c"
                         reference: "b".to_owned(),
                     },
                     missing_secrets: Vec::new(),
+                    security_scan: None,
+                    rollback_snapshot: None,
                 },
             ],
         };

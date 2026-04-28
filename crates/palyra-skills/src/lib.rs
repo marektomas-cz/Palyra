@@ -2,6 +2,7 @@ mod artifact;
 mod audit;
 mod constants;
 mod error;
+mod extension;
 mod manifest;
 mod models;
 mod runtime;
@@ -16,6 +17,7 @@ pub use constants::{
     SKILL_MANIFEST_VERSION, SKILL_VERIFICATION_EVENT_KIND,
 };
 pub use error::SkillPackagingError;
+pub use extension::*;
 pub use manifest::{parse_ed25519_signing_key, parse_manifest_toml};
 pub use models::*;
 pub use runtime::{

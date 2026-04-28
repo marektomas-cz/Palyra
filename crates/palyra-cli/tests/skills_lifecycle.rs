@@ -398,6 +398,78 @@ fn skills_install_verify_remove_lifecycle_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn extension_doctor_preflights_artifact_without_installing() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let artifact_path = workdir.path().join("dist").join("acme.echo_http.palyra-skill");
+    let trust_store = workdir.path().join("trust-store.json");
+
+    build_sample_artifact(&workdir, artifact_path.as_path())?;
+
+    let doctor_args = vec![
+        "extension".to_owned(),
+        "doctor".to_owned(),
+        "--artifact".to_owned(),
+        artifact_path.to_string_lossy().into_owned(),
+        "--trust-store".to_owned(),
+        trust_store.to_string_lossy().into_owned(),
+        "--allow-tofu".to_owned(),
+        "--json".to_owned(),
+    ];
+    let doctor_output = run_cli(&workdir, doctor_args.as_slice())?;
+    assert!(
+        doctor_output.status.success(),
+        "extension doctor should accept the baseline artifact: {}",
+        String::from_utf8_lossy(&doctor_output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(doctor_output.stdout.as_slice())
+        .context("extension doctor output should be JSON")?;
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("ready"));
+    assert_eq!(
+        payload.get("package_id").and_then(Value::as_str),
+        Some("skill:acme.echo_http@1.0.0")
+    );
+    assert!(
+        !workdir.path().join("skills").exists(),
+        "extension doctor must not install or activate an artifact"
+    );
+    assert!(!trust_store.exists(), "extension doctor must not persist trust-store TOFU decisions");
+    Ok(())
+}
+
+#[test]
+fn extension_doctor_blocks_incomplete_grant_set() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let artifact_path = workdir.path().join("dist").join("acme.echo_http.palyra-skill");
+
+    build_sample_artifact(&workdir, artifact_path.as_path())?;
+
+    let doctor_args = vec![
+        "extension".to_owned(),
+        "doctor".to_owned(),
+        "--artifact".to_owned(),
+        artifact_path.to_string_lossy().into_owned(),
+        "--allow-tofu".to_owned(),
+        "--grant".to_owned(),
+        "network=api.example.com".to_owned(),
+        "--json".to_owned(),
+    ];
+    let doctor_output = run_cli(&workdir, doctor_args.as_slice())?;
+    assert!(!doctor_output.status.success(), "missing capability grants must block doctor");
+    let payload: Value = serde_json::from_slice(doctor_output.stdout.as_slice())
+        .context("blocked extension doctor output should still be JSON")?;
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("blocked"));
+    let reason_codes = payload
+        .get("reason_codes")
+        .and_then(Value::as_array)
+        .context("blocked doctor output must include reason codes")?;
+    assert!(
+        reason_codes.iter().any(|code| code.as_str() == Some("missing_capability_grant")),
+        "blocked doctor output should include missing capability grant reason"
+    );
+    Ok(())
+}
+
+#[test]
 fn skills_install_rejects_tampered_artifact() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let skills_dir = workdir.path().join("skills-managed");

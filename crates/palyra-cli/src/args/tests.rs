@@ -10,21 +10,21 @@ use super::{
     ChannelResolveEntityArg, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli,
     Command, CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand,
     CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
-    DevicesCommand, DocsCommand, FlowStateArg, FlowsCommand, GatewayBindProfileArg, HooksCommand,
-    InitModeArg, InitTlsScaffoldArg, JobsCommand, JournalCheckpointModeArg, MemoryCommand,
-    MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, MessageCommand, ModelsCommand,
-    NodeCommand, NodesCommand, ObjectiveKindArg, ObjectivePriorityArg, ObjectiveScheduleTypeArg,
-    ObjectiveUpsertCommandArgs, ObjectivesCommand, OnboardingAuthMethodArg, OnboardingCommand,
-    OnboardingFlowArg, PairingClientKindArg, PairingCommand, PairingMethodArg, PairingStateArg,
-    PatchCommand, PluginsCommand, PolicyCommand, ProfileCommand, ProfileExportModeArg,
-    ProfileModeArg, ProfileRiskLevelArg, ProtocolCommand, RemoteVerificationModeArg, ResetCommand,
-    ResetScopeArg, RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutineExecutionPostureArg,
-    RoutinePreviewTimezoneArg, RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg,
-    RoutineUpsertCommand, RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
-    SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
-    SkillsCommand, SkillsPackageCommand, SupportBundleCommand, SystemCommand, SystemEventCommand,
-    SystemEventSeverityArg, TuiCommand, UninstallCommand, UpdateCommand, WebhooksCommand,
-    WizardOverridesArg, WorkspaceRoleArg,
+    DevicesCommand, DocsCommand, ExtensionCommand, FlowStateArg, FlowsCommand,
+    GatewayBindProfileArg, HooksCommand, InitModeArg, InitTlsScaffoldArg, JobsCommand,
+    JournalCheckpointModeArg, MemoryCommand, MemoryLearningCommand, MemoryScopeArg,
+    MemorySourceArg, MessageCommand, ModelsCommand, NodeCommand, NodesCommand, ObjectiveKindArg,
+    ObjectivePriorityArg, ObjectiveScheduleTypeArg, ObjectiveUpsertCommandArgs, ObjectivesCommand,
+    OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PairingClientKindArg,
+    PairingCommand, PairingMethodArg, PairingStateArg, PatchCommand, PluginsCommand, PolicyCommand,
+    ProfileCommand, ProfileExportModeArg, ProfileModeArg, ProfileRiskLevelArg, ProtocolCommand,
+    RemoteVerificationModeArg, ResetCommand, ResetScopeArg, RoutineApprovalModeArg,
+    RoutineDeliveryModeArg, RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
+    RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg, RoutineUpsertCommand,
+    RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand, SecretsConfigureCommand,
+    SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
+    SupportBundleCommand, SystemCommand, SystemEventCommand, SystemEventSeverityArg, TuiCommand,
+    UninstallCommand, UpdateCommand, WebhooksCommand, WizardOverridesArg, WorkspaceRoleArg,
 };
 
 mod parser_stability_plugin_tests;
@@ -5020,6 +5020,38 @@ fn parse_skills_remove_list_and_verify() {
                 trust_store: None,
                 trusted_publishers: Vec::new(),
                 allow_untrusted: true,
+                json: true,
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_extension_doctor_command() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "extension",
+        "doctor",
+        "--artifact",
+        "dist/acme.echo_http.palyra-skill",
+        "--trust-store",
+        "state/skills-trust.json",
+        "--trusted-publisher",
+        "acme=001122",
+        "--allow-tofu",
+        "--grant",
+        "network=api.example.com",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Extension {
+            command: ExtensionCommand::Doctor {
+                artifact: "dist/acme.echo_http.palyra-skill".to_owned(),
+                trust_store: Some("state/skills-trust.json".to_owned()),
+                trusted_publishers: vec!["acme=001122".to_owned()],
+                allow_tofu: true,
+                grants: vec!["network=api.example.com".to_owned()],
                 json: true,
             },
         }

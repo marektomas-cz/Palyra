@@ -1,10 +1,17 @@
+use super::ExtensionPackageRegistry;
 use super::{
     audit_skill_artifact_security, build_signed_skill_artifact, builder_manifest_requires_review,
-    capability_grants_from_manifest, inspect_skill_artifact, parse_ed25519_signing_key,
-    parse_manifest_toml, policy_requests_from_manifest, verify_skill_artifact, ArtifactFile,
-    SkillArtifactBuildRequest, SkillAuditCheckStatus, SkillPackagingError,
-    SkillSecurityAuditPolicy, SkillTrustStore, TrustDecision, MAX_ARTIFACT_BYTES, MAX_ENTRIES,
-    SBOM_PATH, SIGNATURE_PATH, SKILL_MANIFEST_PATH, SKILL_MANIFEST_VERSION,
+    capability_grants_from_manifest, evaluate_extension_contract_fixture, evaluate_skill_fixture,
+    extension_capability_grants_from_skill_manifest, extension_doctor_for_skill_artifact,
+    extension_enable_gate, extension_record_from_skill_artifact, inspect_skill_artifact,
+    parse_ed25519_signing_key, parse_manifest_toml, plan_self_improvement_rollback,
+    policy_requests_from_manifest, skill_extension_package_id, verify_skill_artifact, ArtifactFile,
+    ExtensionCapabilityClass, ExtensionCapabilityGrant, ExtensionContractFixture,
+    ExtensionLifecycleTransitionRequest, ExtensionPackageSource, ExtensionPackageStatus,
+    InMemoryExtensionPackageRegistry, SkillArtifactBuildRequest, SkillAuditCheckStatus,
+    SkillEvalFixture, SkillPackagingError, SkillSecurityAuditPolicy, SkillTrustStore,
+    TrustDecision, MAX_ARTIFACT_BYTES, MAX_ENTRIES, SBOM_PATH, SIGNATURE_PATH, SKILL_MANIFEST_PATH,
+    SKILL_MANIFEST_VERSION,
 };
 use base64::Engine as _;
 
@@ -626,6 +633,158 @@ fn mapping_to_runtime_grants_and_policy_requests() {
         requests.iter().any(|request| request.action == "tool.execute"),
         "tool policy requests should be generated"
     );
+}
+
+#[test]
+fn extension_registry_record_projects_skill_manifest_and_grants() {
+    let output = build_signed_skill_artifact(sample_request()).expect("artifact should build");
+    let inspection =
+        inspect_skill_artifact(output.artifact_bytes.as_slice()).expect("artifact should inspect");
+    let record = extension_record_from_skill_artifact(
+        &inspection,
+        ExtensionPackageSource::local_artifact("dist/acme.echo_http.palyra-skill"),
+        ExtensionPackageStatus::Verified,
+        1_700_000_000_000,
+        1_700_000_000_000,
+    );
+
+    assert_eq!(record.package_id, skill_extension_package_id("acme.echo_http", "1.0.0"));
+    assert!(record.compatibility.compatible);
+    assert!(record.grants.iter().any(|grant| {
+        grant.class == ExtensionCapabilityClass::Network && grant.value == "api.example.com"
+    }));
+    assert!(record.grants.iter().any(|grant| {
+        grant.class == ExtensionCapabilityClass::Secret
+            && grant.scope.as_deref() == Some("skill:acme.echo_http")
+            && grant.value == "api_token"
+    }));
+}
+
+#[test]
+fn extension_doctor_reports_missing_capability_grants_without_installing() {
+    let output = build_signed_skill_artifact(sample_request()).expect("artifact should build");
+    let mut trust_store = SkillTrustStore::default();
+    let report = extension_doctor_for_skill_artifact(
+        output.artifact_bytes.as_slice(),
+        ExtensionPackageSource::local_artifact("dist/acme.echo_http.palyra-skill"),
+        &mut trust_store,
+        true,
+        &[],
+        &SkillSecurityAuditPolicy::default(),
+    )
+    .expect("doctor should inspect artifact");
+    assert_eq!(report.status, "ready");
+
+    let manifest = parse_manifest_toml(sample_manifest().as_str()).expect("manifest");
+    let granted = extension_capability_grants_from_skill_manifest(&manifest)
+        .into_iter()
+        .filter(|grant| grant.class != ExtensionCapabilityClass::Secret)
+        .collect::<Vec<_>>();
+    let report = extension_doctor_for_skill_artifact(
+        output.artifact_bytes.as_slice(),
+        ExtensionPackageSource::local_artifact("dist/acme.echo_http.palyra-skill"),
+        &mut trust_store,
+        true,
+        granted.as_slice(),
+        &SkillSecurityAuditPolicy::default(),
+    )
+    .expect("doctor should inspect artifact with explicit grants");
+
+    assert_eq!(report.status, "blocked");
+    assert!(report.reason_codes.iter().any(|code| code == "missing_capability_grant"));
+    assert!(report
+        .capability_diff
+        .missing
+        .iter()
+        .any(|grant| grant.class == ExtensionCapabilityClass::Secret));
+}
+
+#[test]
+fn extension_lifecycle_blocks_quarantine_enable_without_review() {
+    let output = build_signed_skill_artifact(sample_request()).expect("artifact should build");
+    let inspection =
+        inspect_skill_artifact(output.artifact_bytes.as_slice()).expect("artifact should inspect");
+    let record = extension_record_from_skill_artifact(
+        &inspection,
+        ExtensionPackageSource::local_artifact("dist/acme.echo_http.palyra-skill"),
+        ExtensionPackageStatus::Quarantined,
+        1,
+        1,
+    );
+    let mut registry = InMemoryExtensionPackageRegistry::default();
+    registry.upsert_package(record);
+
+    let error = registry
+        .transition_package(ExtensionLifecycleTransitionRequest {
+            package_id: skill_extension_package_id("acme.echo_http", "1.0.0"),
+            target_status: ExtensionPackageStatus::Enabled,
+            actor_principal: "user:ops".to_owned(),
+            reason: "operator reviewed".to_owned(),
+            approved_by: None,
+            requested_at_unix_ms: 2,
+        })
+        .expect_err("quarantine enable must require review approval");
+    assert!(error.to_string().contains("approved_by"));
+}
+
+#[test]
+fn extension_contract_fixture_enforces_host_version_range() {
+    let fixture = ExtensionContractFixture {
+        fixture_id: "future-host-range".to_owned(),
+        package_kind: super::ExtensionPackageKind::Skill,
+        manifest_version: SKILL_MANIFEST_VERSION,
+        required_protocol_major: palyra_common::CANONICAL_PROTOCOL_MAJOR,
+        min_host_version: "999.0.0".to_owned(),
+        max_host_version: None,
+        expected_reason_codes: Vec::new(),
+    };
+    let outcome = evaluate_extension_contract_fixture(&fixture);
+
+    assert!(!outcome.passed, "future host range must block contract compatibility");
+    assert!(
+        outcome.observed_reason_codes.iter().any(|code| code == "host_below_min_palyra_version"),
+        "contract outcome should include host version range failure"
+    );
+}
+
+#[test]
+fn skill_eval_gate_blocks_failed_self_improvement_rollout() {
+    let output = build_signed_skill_artifact(sample_request()).expect("artifact should build");
+    let inspection =
+        inspect_skill_artifact(output.artifact_bytes.as_slice()).expect("artifact should inspect");
+    let record = extension_record_from_skill_artifact(
+        &inspection,
+        ExtensionPackageSource::local_artifact("dist/acme.echo_http.palyra-skill"),
+        ExtensionPackageStatus::Verified,
+        1,
+        1,
+    );
+    let fixture = SkillEvalFixture {
+        fixture_id: "echo-output".to_owned(),
+        label: "echo output".to_owned(),
+        expected_outputs: std::collections::BTreeMap::from([(
+            "result".to_owned(),
+            "ok".to_owned(),
+        )]),
+        required_capabilities: vec![ExtensionCapabilityGrant::new(
+            ExtensionCapabilityClass::Network,
+            "api.example.com",
+            None,
+        )],
+        regression_labels: vec!["self_improvement".to_owned()],
+    };
+    let actual_outputs =
+        std::collections::BTreeMap::from([("result".to_owned(), "wrong".to_owned())]);
+    let outcome =
+        evaluate_skill_fixture(&fixture, &actual_outputs, record.grants.as_slice(), vec![]);
+    assert!(!outcome.passed);
+
+    let gate = extension_enable_gate(&record, std::slice::from_ref(&outcome));
+    assert!(!gate.allowed);
+    assert!(gate.reasons.iter().any(|reason| reason == "eval_failed:echo-output"));
+
+    let rollback = plan_self_improvement_rollback(&record, &[outcome]);
+    assert_eq!(rollback.target_status, ExtensionPackageStatus::RolledBack);
 }
 
 #[test]

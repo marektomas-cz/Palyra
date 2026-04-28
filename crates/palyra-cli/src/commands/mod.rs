@@ -15,6 +15,7 @@ pub mod deployment;
 pub mod devices;
 pub mod docs;
 pub mod doctor;
+pub mod extension;
 pub mod flows;
 pub mod health;
 pub mod hooks;

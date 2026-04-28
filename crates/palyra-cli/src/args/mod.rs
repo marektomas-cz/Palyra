@@ -17,6 +17,7 @@ mod daemon;
 mod deployment;
 mod devices;
 mod docs;
+mod extension;
 mod flows;
 mod hooks;
 mod init;
@@ -80,6 +81,7 @@ pub use daemon::{DaemonCommand, JournalCheckpointModeArg};
 pub use deployment::{DeploymentCommand, DeploymentProfileArg};
 pub use devices::DevicesCommand;
 pub use docs::DocsCommand;
+pub use extension::ExtensionCommand;
 pub use flows::{FlowStateArg, FlowsCommand};
 pub use hooks::HooksCommand;
 pub use init::{InitModeArg, InitTlsScaffoldArg};
@@ -158,6 +160,7 @@ Canonical command map:
   sandbox    Effective isolation/runtime policy explain surface for process and WASM tooling
   plugins    Trusted WASM plugin binding and lifecycle surface
   hooks      Event-driven automation bindings over trusted plugins
+  extension  Unified package preflight, grants, and lifecycle diagnostics
   reset      Destructive local recovery surface with explicit scope selection
   uninstall  Installer-aware package removal surface
   update     Package update/check orchestration surface
@@ -630,6 +633,10 @@ pub enum Command {
     Hooks {
         #[command(subcommand)]
         command: HooksCommand,
+    },
+    Extension {
+        #[command(subcommand)]
+        command: ExtensionCommand,
     },
     #[command(about = "Manage CLI connection profiles and active environment selection")]
     Profile {
