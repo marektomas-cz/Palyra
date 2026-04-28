@@ -4,15 +4,21 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "${repo_root}"
 
-state_roots=(
+recursive_state_roots=(
   "./apps/desktop/src-tauri/data"
   "./crates/palyra-cli/data"
+)
+
+shallow_state_roots=(
   "./data"
 )
 
-for dir in "${state_roots[@]}"; do
-  [[ -d "${dir}" ]] || continue
-  find "${dir}" -type f \
+delete_runtime_files() {
+  local dir="$1"
+  shift
+  [[ -d "${dir}" ]] || return 0
+
+  find "${dir}" "$@" -type f \
     \( \
       -iname "*.sqlite" \
       -o -iname "*.sqlite3" \
@@ -23,6 +29,15 @@ for dir in "${state_roots[@]}"; do
       -o -iname "*.shm" \
       -o -iname "*.log" \
     \) -delete
+}
+
+for dir in "${recursive_state_roots[@]}"; do
+  delete_runtime_files "${dir}"
+done
+
+for dir in "${shallow_state_roots[@]}"; do
+  [[ -d "${dir}" ]] || continue
+  delete_runtime_files "${dir}" -maxdepth 1
 done
 
 find . -maxdepth 1 -type f -iname "support-bundle*.json" -delete

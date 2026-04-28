@@ -34,8 +34,16 @@ resolve_cargo() {
 CARGO_BIN="$(resolve_cargo)"
 
 cleanup_runtime_artifacts() {
-  echo "Cleaning runtime artifacts generated during local validation..."
+  local scope="${1:-generated during local validation}"
+  echo "Cleaning runtime artifacts ${scope}..."
   bash "$ROOT_DIR/scripts/clean-runtime-artifacts.sh" >/dev/null
+}
+
+check_runtime_artifact_hygiene() {
+  local label="$1"
+  echo "$label"
+  cleanup_runtime_artifacts "before runtime artifact hygiene check"
+  bash "$ROOT_DIR/scripts/check-runtime-artifacts.sh"
 }
 
 run_js_workspace_checks() {
@@ -55,8 +63,7 @@ run_fast_profile() {
   echo "Running clippy..."
   "$CARGO_BIN" clippy --workspace --all-targets -- -D warnings
 
-  echo "Checking runtime artifact hygiene before local validation..."
-  bash "$ROOT_DIR/scripts/check-runtime-artifacts.sh"
+  check_runtime_artifact_hygiene "Checking runtime artifact hygiene before local validation..."
 
   echo "Checking local-only tracked paths..."
   bash "$ROOT_DIR/scripts/check-local-only-tracked-files.sh"
@@ -80,8 +87,7 @@ run_full_profile() {
   echo "Running rustfmt check..."
   "$CARGO_BIN" fmt --all --check
 
-  echo "Checking runtime artifact hygiene before local validation..."
-  bash "$ROOT_DIR/scripts/check-runtime-artifacts.sh"
+  check_runtime_artifact_hygiene "Checking runtime artifact hygiene before local validation..."
 
   echo "Checking local-only tracked paths..."
   bash "$ROOT_DIR/scripts/check-local-only-tracked-files.sh"
@@ -111,6 +117,7 @@ run_full_profile() {
 }
 
 trap cleanup_runtime_artifacts EXIT
+cleanup_runtime_artifacts "from prior local validation runs"
 
 case "$PROFILE" in
   fast)
@@ -127,5 +134,4 @@ case "$PROFILE" in
     ;;
 esac
 
-echo "Running runtime artifact hygiene guard..."
-bash "$ROOT_DIR/scripts/check-runtime-artifacts.sh"
+check_runtime_artifact_hygiene "Running runtime artifact hygiene guard..."
