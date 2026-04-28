@@ -19,6 +19,7 @@ pub mod flows;
 pub mod health;
 pub mod hooks;
 pub mod init;
+pub mod jobs;
 pub mod logs;
 pub mod mcp;
 pub mod memory;

@@ -15,6 +15,7 @@ pub(crate) mod doctor;
 pub(crate) mod flows;
 pub(crate) mod hooks;
 pub(crate) mod inventory;
+pub(crate) mod jobs;
 pub(crate) mod logs;
 pub(crate) mod maintenance;
 pub(crate) mod memory;

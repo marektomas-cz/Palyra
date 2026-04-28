@@ -11,7 +11,7 @@ use super::{
     Command, CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand,
     CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
     DevicesCommand, DocsCommand, FlowStateArg, FlowsCommand, GatewayBindProfileArg, HooksCommand,
-    InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
+    InitModeArg, InitTlsScaffoldArg, JobsCommand, JournalCheckpointModeArg, MemoryCommand,
     MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, MessageCommand, ModelsCommand,
     NodeCommand, NodesCommand, ObjectiveKindArg, ObjectivePriorityArg, ObjectiveScheduleTypeArg,
     ObjectiveUpsertCommandArgs, ObjectivesCommand, OnboardingAuthMethodArg, OnboardingCommand,
@@ -265,6 +265,79 @@ fn parse_logs_with_follow() {
             lines: 100,
             follow: true,
             poll_interval_ms: 2500,
+        }
+    );
+}
+
+#[test]
+fn parse_jobs_commands() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "jobs",
+        "list",
+        "--session-id",
+        "session-123",
+        "--include-terminal",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Jobs {
+            command: JobsCommand::List {
+                limit: None,
+                session_id: Some("session-123".to_owned()),
+                run_id: None,
+                include_terminal: true,
+                json: true,
+            }
+        }
+    );
+
+    let parsed = Cli::parse_from([
+        "palyra",
+        "jobs",
+        "retry",
+        "job-123",
+        "--idempotency-key",
+        "retry-1",
+        "--reason",
+        "operator retry",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Jobs {
+            command: JobsCommand::Retry {
+                id: "job-123".to_owned(),
+                idempotency_key: Some("retry-1".to_owned()),
+                reason: Some("operator retry".to_owned()),
+                json: false,
+            }
+        }
+    );
+
+    let parsed = Cli::parse_from([
+        "palyra",
+        "jobs",
+        "tail",
+        "job-123",
+        "--offset",
+        "10",
+        "--limit",
+        "25",
+        "--max-bytes",
+        "4096",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Jobs {
+            command: JobsCommand::Tail {
+                id: "job-123".to_owned(),
+                offset: Some(10),
+                limit: Some(25),
+                max_bytes: Some(4096),
+                json: true,
+            }
         }
     );
 }

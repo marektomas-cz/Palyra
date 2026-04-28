@@ -288,6 +288,7 @@ fn run_cli() -> Result<()> {
         CliCommand::Routines { command } => commands::routines::run_routines(command),
         CliCommand::Objectives { command } => commands::objectives::run_objectives(command),
         CliCommand::Flows { command } => commands::flows::run_flows(command),
+        CliCommand::Jobs { command } => commands::jobs::run_jobs(command),
         CliCommand::Cron { command } => commands::cron::run_cron(command),
         CliCommand::Memory { command } => commands::memory::run_memory(command),
         CliCommand::Message { command } => commands::message::run_message(command),

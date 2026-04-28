@@ -20,6 +20,7 @@ mod docs;
 mod flows;
 mod hooks;
 mod init;
+mod jobs;
 mod mcp;
 mod memory;
 mod message;
@@ -82,6 +83,7 @@ pub use docs::DocsCommand;
 pub use flows::{FlowStateArg, FlowsCommand};
 pub use hooks::HooksCommand;
 pub use init::{InitModeArg, InitTlsScaffoldArg};
+pub use jobs::JobsCommand;
 pub use mcp::{McpCommand, McpSubcommand};
 pub use memory::{
     MemoryCommand, MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, MemoryWorkspaceCommand,
@@ -562,6 +564,11 @@ pub enum Command {
     Flows {
         #[command(subcommand)]
         command: FlowsCommand,
+    },
+    #[command(about = "Inspect and control durable long-running tool jobs")]
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
     },
     #[command(
         about = "Manage schedule-only cron workflows through the routines compatibility layer",

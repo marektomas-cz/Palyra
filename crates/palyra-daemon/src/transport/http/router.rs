@@ -521,6 +521,26 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/console/v1/support-bundle/jobs/{job_id}",
             get(console::support_bundle::console_support_bundle_job_get_handler),
         )
+        .route("/console/v1/jobs", get(console::jobs::console_jobs_list_handler))
+        .route(
+            "/console/v1/jobs/sweep-expired",
+            post(console::jobs::console_jobs_sweep_expired_handler),
+        )
+        .route(
+            "/console/v1/jobs/recover-stale",
+            post(console::jobs::console_jobs_recover_stale_handler),
+        )
+        .route("/console/v1/jobs/{job_id}", get(console::jobs::console_job_get_handler))
+        .route("/console/v1/jobs/{job_id}/tail", get(console::jobs::console_job_tail_handler))
+        .route("/console/v1/jobs/{job_id}/cancel", post(console::jobs::console_job_cancel_handler))
+        .route("/console/v1/jobs/{job_id}/drain", post(console::jobs::console_job_drain_handler))
+        .route("/console/v1/jobs/{job_id}/resume", post(console::jobs::console_job_resume_handler))
+        .route("/console/v1/jobs/{job_id}/retry", post(console::jobs::console_job_retry_handler))
+        .route("/console/v1/jobs/{job_id}/attach", post(console::jobs::console_job_attach_handler))
+        .route(
+            "/console/v1/jobs/{job_id}/release",
+            post(console::jobs::console_job_release_handler),
+        )
         .route(
             "/console/v1/networked-workers/reap-expired",
             post(console::diagnostics::console_networked_workers_reap_expired_handler),
