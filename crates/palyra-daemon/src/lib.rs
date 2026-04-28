@@ -1774,9 +1774,33 @@ struct SkillBuilderCandidateRecord {
     capability_declaration_path: String,
     provenance_path: String,
     test_harness_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_plan_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    eval_outcome_path: Option<String>,
+    #[serde(default = "default_builder_artifact_status")]
+    artifact_status: String,
+    #[serde(default = "default_builder_eval_status")]
+    eval_status: String,
+    #[serde(default = "default_builder_quarantine_reason")]
+    quarantine_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reproducibility_key: Option<String>,
     capability_profile: crate::plugins::PluginCapabilityProfile,
     generated_at_unix_ms: i64,
     updated_at_unix_ms: i64,
+}
+
+fn default_builder_artifact_status() -> String {
+    "legacy_untracked".to_owned()
+}
+
+fn default_builder_eval_status() -> String {
+    "legacy_untracked".to_owned()
+}
+
+fn default_builder_quarantine_reason() -> String {
+    "generated skill remains quarantined until signed artifact, eval, and review pass".to_owned()
 }
 
 impl Default for InstalledSkillsIndex {

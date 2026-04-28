@@ -3,15 +3,16 @@ use super::{
     audit_skill_artifact_security, build_signed_skill_artifact, builder_manifest_requires_review,
     capability_grants_from_manifest, evaluate_extension_contract_fixture, evaluate_skill_fixture,
     extension_capability_grants_from_skill_manifest, extension_doctor_for_skill_artifact,
-    extension_enable_gate, extension_record_from_skill_artifact, inspect_skill_artifact,
-    parse_ed25519_signing_key, parse_manifest_toml, plan_self_improvement_rollback,
-    policy_requests_from_manifest, skill_extension_package_id, verify_skill_artifact, ArtifactFile,
-    ExtensionCapabilityClass, ExtensionCapabilityGrant, ExtensionContractFixture,
-    ExtensionLifecycleTransitionRequest, ExtensionPackageSource, ExtensionPackageStatus,
-    InMemoryExtensionPackageRegistry, SkillArtifactBuildRequest, SkillAuditCheckStatus,
-    SkillEvalFixture, SkillPackagingError, SkillSecurityAuditPolicy, SkillTrustStore,
-    TrustDecision, MAX_ARTIFACT_BYTES, MAX_ENTRIES, SBOM_PATH, SIGNATURE_PATH, SKILL_MANIFEST_PATH,
-    SKILL_MANIFEST_VERSION,
+    extension_enable_gate, extension_record_from_skill_artifact,
+    extract_self_improvement_candidate, inspect_skill_artifact, parse_ed25519_signing_key,
+    parse_manifest_toml, plan_self_improvement_rollback, policy_requests_from_manifest,
+    skill_eval_run_record, skill_extension_package_id, skill_scaffold_artifact_plan,
+    verify_skill_artifact, ArtifactFile, ExtensionCapabilityClass, ExtensionCapabilityGrant,
+    ExtensionContractFixture, ExtensionLifecycleTransitionRequest, ExtensionPackageSource,
+    ExtensionPackageStatus, InMemoryExtensionPackageRegistry, SkillArtifactBuildRequest,
+    SkillAuditCheckStatus, SkillEvalFixture, SkillEvalOutcome, SkillPackagingError,
+    SkillSecurityAuditPolicy, SkillTrustStore, TrustDecision, MAX_ARTIFACT_BYTES, MAX_ENTRIES,
+    SBOM_PATH, SIGNATURE_PATH, SKILL_MANIFEST_PATH, SKILL_MANIFEST_VERSION,
 };
 use base64::Engine as _;
 
@@ -759,6 +760,10 @@ fn skill_eval_gate_blocks_failed_self_improvement_rollout() {
         1,
         1,
     );
+    let missing_eval_gate = extension_enable_gate(&record, &[]);
+    assert!(!missing_eval_gate.allowed);
+    assert!(missing_eval_gate.reasons.iter().any(|reason| reason == "eval_missing"));
+
     let fixture = SkillEvalFixture {
         fixture_id: "echo-output".to_owned(),
         label: "echo output".to_owned(),
@@ -785,6 +790,66 @@ fn skill_eval_gate_blocks_failed_self_improvement_rollout() {
 
     let rollback = plan_self_improvement_rollback(&record, &[outcome]);
     assert_eq!(rollback.target_status, ExtensionPackageStatus::RolledBack);
+}
+
+#[test]
+fn self_improvement_candidate_extracts_review_metadata_and_grants() {
+    let payload = serde_json::json!({
+        "source_refs": ["run:01", "run:01", "tool:palyra.fs.apply_patch"],
+        "rationale": "Observed repeated successful scaffold edits.",
+        "risk": "review",
+        "expected_capabilities": [
+            { "class": "network", "value": "api.example.com" },
+            { "class": "secret", "scope": "skill:acme.echo_http", "value": "api_token" }
+        ],
+        "tests": ["smoke:echo", "smoke:echo", "regression:capability-grants"],
+        "sensitivity": "operator_review",
+    });
+    let candidate = extract_self_improvement_candidate("candidate-1", &payload)
+        .expect("self-improvement candidate metadata should parse");
+
+    assert_eq!(candidate.source_refs, vec!["run:01", "tool:palyra.fs.apply_patch"]);
+    assert_eq!(candidate.tests, vec!["regression:capability-grants", "smoke:echo"]);
+    assert!(candidate.expected_capabilities.iter().any(|grant| {
+        grant.class == ExtensionCapabilityClass::Secret
+            && grant.scope.as_deref() == Some("skill:acme.echo_http")
+            && grant.value == "api_token"
+    }));
+}
+
+#[test]
+fn scaffold_plan_and_eval_run_track_rollout_gate_inputs() {
+    let package_id = skill_extension_package_id("acme.echo_http", "1.0.0");
+    let plan = skill_scaffold_artifact_plan(
+        package_id.clone(),
+        "skill.toml",
+        "builder-capabilities.json",
+        "provenance.json",
+        "tests/smoke.test.json",
+        "sha256:abc",
+    );
+    assert_eq!(plan.quarantine_status, ExtensionPackageStatus::Quarantined);
+    assert_eq!(plan.artifact_status, "prepared_for_signing");
+    assert!(plan.audit_events.iter().any(|event| event == "skill.eval_required"));
+
+    let outcome = SkillEvalOutcome {
+        fixture_id: "smoke".to_owned(),
+        passed: true,
+        failed_checks: Vec::new(),
+        flaky_signal: false,
+        provider_usage: std::collections::BTreeMap::from([("input_tokens".to_owned(), 12)]),
+        artifact_refs: vec!["artifact://skill/acme.echo_http/1.0.0".to_owned()],
+    };
+    let record = skill_eval_run_record(
+        "eval-1",
+        package_id,
+        vec![outcome],
+        vec!["smoke".to_owned(), "smoke".to_owned()],
+        1_700_000_000_000,
+    );
+    assert_eq!(record.status, "passed");
+    assert_eq!(record.regression_labels, vec!["smoke"]);
+    assert_eq!(record.provider_usage.get("input_tokens"), Some(&12));
 }
 
 #[test]

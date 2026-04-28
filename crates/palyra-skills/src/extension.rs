@@ -301,6 +301,43 @@ pub struct SkillEvalOutcome {
     pub artifact_refs: Vec<String>,
 }
 
+/// Durable summary for one eval harness run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillEvalRunRecord {
+    pub schema_version: u32,
+    pub eval_run_id: String,
+    pub package_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub outcomes: Vec<SkillEvalOutcome>,
+    #[serde(default)]
+    pub regression_labels: Vec<String>,
+    #[serde(default)]
+    pub provider_usage: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+    pub recorded_at_unix_ms: i64,
+}
+
+/// Reproducible scaffold signing/eval plan for generated skills.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillScaffoldArtifactPlan {
+    pub schema_version: u32,
+    pub package_id: String,
+    pub manifest_path: String,
+    pub capability_declaration_path: String,
+    pub provenance_path: String,
+    pub test_harness_path: String,
+    pub artifact_status: String,
+    pub signature_status: String,
+    pub quarantine_status: ExtensionPackageStatus,
+    pub reproducibility_key: String,
+    #[serde(default)]
+    pub audit_events: Vec<String>,
+}
+
 /// Enable gate result for self-improvement rollout decisions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -670,6 +707,52 @@ pub fn evaluate_skill_fixture(
     }
 }
 
+/// Records deterministic eval outcomes and aggregates provider usage/artifact refs.
+#[must_use]
+pub fn skill_eval_run_record(
+    eval_run_id: impl Into<String>,
+    package_id: impl Into<String>,
+    outcomes: Vec<SkillEvalOutcome>,
+    regression_labels: Vec<String>,
+    recorded_at_unix_ms: i64,
+) -> SkillEvalRunRecord {
+    let mut provider_usage = BTreeMap::<String, u64>::new();
+    let mut artifact_refs = BTreeSet::<String>::new();
+    for outcome in &outcomes {
+        for (key, value) in &outcome.provider_usage {
+            *provider_usage.entry(key.clone()).or_default() += *value;
+        }
+        for artifact_ref in &outcome.artifact_refs {
+            artifact_refs.insert(artifact_ref.clone());
+        }
+    }
+    let status = if outcomes.is_empty() {
+        "missing"
+    } else if outcomes.iter().any(|outcome| outcome.flaky_signal) {
+        "flaky"
+    } else if outcomes.iter().all(|outcome| outcome.passed) {
+        "passed"
+    } else {
+        "failed"
+    }
+    .to_owned();
+    SkillEvalRunRecord {
+        schema_version: 1,
+        eval_run_id: eval_run_id.into(),
+        package_id: package_id.into(),
+        status,
+        outcomes,
+        regression_labels: regression_labels
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        provider_usage,
+        artifact_refs: artifact_refs.into_iter().collect(),
+        recorded_at_unix_ms,
+    }
+}
+
 /// Blocks extension enablement when eval or compatibility gates failed.
 #[must_use]
 pub fn extension_enable_gate(
@@ -683,6 +766,9 @@ pub fn extension_enable_gate(
     if record.status == ExtensionPackageStatus::Quarantined {
         reasons.push("package_quarantined".to_owned());
     }
+    if eval_outcomes.is_empty() {
+        reasons.push("eval_missing".to_owned());
+    }
     for outcome in eval_outcomes {
         if !outcome.passed {
             reasons.push(format!("eval_failed:{}", outcome.fixture_id));
@@ -692,6 +778,35 @@ pub fn extension_enable_gate(
         }
     }
     ExtensionEnableGate { allowed: reasons.is_empty(), reasons }
+}
+
+/// Builds the signed-artifact preparation plan for a quarantined scaffold.
+#[must_use]
+pub fn skill_scaffold_artifact_plan(
+    package_id: impl Into<String>,
+    manifest_path: impl Into<String>,
+    capability_declaration_path: impl Into<String>,
+    provenance_path: impl Into<String>,
+    test_harness_path: impl Into<String>,
+    reproducibility_key: impl Into<String>,
+) -> SkillScaffoldArtifactPlan {
+    SkillScaffoldArtifactPlan {
+        schema_version: 1,
+        package_id: package_id.into(),
+        manifest_path: manifest_path.into(),
+        capability_declaration_path: capability_declaration_path.into(),
+        provenance_path: provenance_path.into(),
+        test_harness_path: test_harness_path.into(),
+        artifact_status: "prepared_for_signing".to_owned(),
+        signature_status: "unsigned_requires_operator_signature".to_owned(),
+        quarantine_status: ExtensionPackageStatus::Quarantined,
+        reproducibility_key: reproducibility_key.into(),
+        audit_events: vec![
+            "skill.scaffolded".to_owned(),
+            "skill.quarantined".to_owned(),
+            "skill.eval_required".to_owned(),
+        ],
+    }
 }
 
 /// Plans a fail-closed rollback or disable action after self-improvement regression.
@@ -751,12 +866,19 @@ pub fn extract_self_improvement_candidate(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let expected_capabilities = payload
+        .get("expected_capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(parse_expected_capability_payload)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(SelfImprovementCandidate {
         candidate_id,
         source_refs,
         rationale,
         risk,
-        expected_capabilities: Vec::new(),
+        expected_capabilities: canonicalize_grants(expected_capabilities),
         tests,
         sensitivity,
     })
@@ -933,6 +1055,32 @@ fn canonicalize_grants(grants: Vec<ExtensionCapabilityGrant>) -> Vec<ExtensionCa
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpectedCapabilityPayload {
+    class: ExtensionCapabilityClass,
+    value: String,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+fn parse_expected_capability_payload(
+    payload: &Value,
+) -> Result<ExtensionCapabilityGrant, SkillPackagingError> {
+    let parsed =
+        serde_json::from_value::<ExpectedCapabilityPayload>(payload.clone()).map_err(|error| {
+            SkillPackagingError::ExtensionLifecycle(format!(
+                "invalid expected self-improvement capability: {error}"
+            ))
+        })?;
+    if parsed.value.trim().is_empty() {
+        return Err(SkillPackagingError::ExtensionLifecycle(
+            "expected self-improvement capability value cannot be empty".to_owned(),
+        ));
+    }
+    Ok(ExtensionCapabilityGrant::new(parsed.class, parsed.value, parsed.scope))
 }
 
 fn required_payload_text(

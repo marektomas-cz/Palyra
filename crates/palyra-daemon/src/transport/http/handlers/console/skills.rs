@@ -209,6 +209,12 @@ pub(crate) async fn console_skill_builder_candidate_create_handler(
         capability_declaration_path: scaffold.capability_declaration_path.clone(),
         provenance_path: scaffold.provenance_path.clone(),
         test_harness_path: scaffold.test_harness_path.clone(),
+        artifact_plan_path: Some(scaffold.artifact_plan_path.clone()),
+        eval_outcome_path: Some(scaffold.eval_outcome_path.clone()),
+        artifact_status: scaffold.artifact_status.clone(),
+        eval_status: scaffold.eval_status.clone(),
+        quarantine_reason: scaffold.quarantine_reason.clone(),
+        reproducibility_key: Some(scaffold.reproducibility_key.clone()),
         capability_profile: scaffold.capability_profile.clone(),
         generated_at_unix_ms: scaffold.generated_at_unix_ms,
         updated_at_unix_ms: scaffold.generated_at_unix_ms,
@@ -669,6 +675,12 @@ pub(crate) async fn console_procedure_skill_promote_handler(
         capability_declaration_path: scaffold.capability_declaration_path.clone(),
         provenance_path: scaffold.provenance_path.clone(),
         test_harness_path: scaffold.test_harness_path.clone(),
+        artifact_plan_path: Some(scaffold.artifact_plan_path.clone()),
+        eval_outcome_path: Some(scaffold.eval_outcome_path.clone()),
+        artifact_status: scaffold.artifact_status.clone(),
+        eval_status: scaffold.eval_status.clone(),
+        quarantine_reason: scaffold.quarantine_reason.clone(),
+        reproducibility_key: Some(scaffold.reproducibility_key.clone()),
         capability_profile: scaffold.capability_profile.clone(),
         generated_at_unix_ms: scaffold.generated_at_unix_ms,
         updated_at_unix_ms: scaffold.generated_at_unix_ms,
@@ -747,6 +759,12 @@ struct GeneratedSkillScaffold {
     capability_declaration_path: String,
     provenance_path: String,
     test_harness_path: String,
+    artifact_plan_path: String,
+    eval_outcome_path: String,
+    artifact_status: String,
+    eval_status: String,
+    quarantine_reason: String,
+    reproducibility_key: String,
     capability_profile: crate::plugins::PluginCapabilityProfile,
     generated_at_unix_ms: i64,
     files: Vec<String>,
@@ -897,6 +915,7 @@ fn write_skill_builder_scaffold(
             scaffold_root.display()
         )))
     })?;
+    let generated_at_unix_ms = current_unix_ms();
 
     let manifest = build_builder_skill_manifest(source, &request);
     let manifest_toml = toml::to_string_pretty(&manifest).map_err(|error| {
@@ -912,7 +931,7 @@ fn write_skill_builder_scaffold(
 
     let readme =
         build_builder_skill_readme(source, request.skill_id.as_str(), request.version.as_str());
-    let request_payload = build_builder_request_payload(source, &request);
+    let request_payload = build_builder_request_payload(source, &request, generated_at_unix_ms);
     let request_json_bytes = serde_json::to_vec_pretty(&request_payload).map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to encode builder request JSON: {error}"
@@ -1001,6 +1020,46 @@ fn write_skill_builder_scaffold(
             "failed to encode scaffold provenance: {error}"
         )))
     })?;
+    let package_id = palyra_skills::skill_extension_package_id(
+        request.skill_id.as_str(),
+        request.version.as_str(),
+    );
+    let reproducibility_key = sha256_hex(
+        format!(
+            "{}:{}:{}:{}:{}",
+            sha256_hex(manifest_toml.as_bytes()),
+            sha256_hex(capability_json_bytes.as_slice()),
+            sha256_hex(test_harness_bytes.as_slice()),
+            sha256_hex(sbom_bytes.as_slice()),
+            builder_source_ref(source),
+        )
+        .as_bytes(),
+    );
+    let artifact_plan = palyra_skills::skill_scaffold_artifact_plan(
+        package_id.clone(),
+        "skill.toml",
+        "builder-capabilities.json",
+        "provenance.json",
+        "tests/smoke.test.json",
+        reproducibility_key.clone(),
+    );
+    let artifact_plan_bytes = serde_json::to_vec_pretty(&artifact_plan).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to encode scaffold artifact plan: {error}"
+        )))
+    })?;
+    let eval_record = palyra_skills::skill_eval_run_record(
+        format!("pending:{package_id}"),
+        package_id,
+        Vec::new(),
+        vec!["generated_skill_smoke".to_owned()],
+        generated_at_unix_ms,
+    );
+    let eval_outcome_bytes = serde_json::to_vec_pretty(&eval_record).map_err(|error| {
+        runtime_status_response(tonic::Status::internal(format!(
+            "failed to encode scaffold eval outcome: {error}"
+        )))
+    })?;
 
     let files = [
         ("skill.toml", manifest_toml.into_bytes()),
@@ -1008,6 +1067,8 @@ fn write_skill_builder_scaffold(
         ("builder-request.json", request_json_bytes),
         ("builder-capabilities.json", capability_json_bytes),
         ("tests/smoke.test.json", test_harness_bytes),
+        ("artifact-plan.json", artifact_plan_bytes),
+        ("tests/eval-outcome.json", eval_outcome_bytes),
         ("sbom.cdx.json", sbom_bytes),
         ("provenance.json", provenance_bytes),
     ];
@@ -1055,8 +1116,19 @@ fn write_skill_builder_scaffold(
             .join("tests/smoke.test.json")
             .to_string_lossy()
             .into_owned(),
+        artifact_plan_path: scaffold_root.join("artifact-plan.json").to_string_lossy().into_owned(),
+        eval_outcome_path: scaffold_root
+            .join("tests/eval-outcome.json")
+            .to_string_lossy()
+            .into_owned(),
+        artifact_status: artifact_plan.artifact_status,
+        eval_status: eval_record.status,
+        quarantine_reason:
+            "generated skill remains quarantined until signed artifact, eval, and review pass"
+                .to_owned(),
+        reproducibility_key,
         capability_profile,
-        generated_at_unix_ms: current_unix_ms(),
+        generated_at_unix_ms,
         files: written_files,
     })
 }
@@ -1191,6 +1263,7 @@ Source: {source_kind} ({source_ref})\n\n\
 fn build_builder_request_payload(
     source: &BuilderSource,
     request: &SkillBuilderScaffoldRequest,
+    generated_at_unix_ms: i64,
 ) -> Value {
     json!({
         "source_kind": builder_source_kind(source),
@@ -1202,7 +1275,7 @@ fn build_builder_request_payload(
         },
         "review_notes": request.review_notes,
         "requested_capabilities": request.capabilities,
-        "generated_at_unix_ms": current_unix_ms(),
+        "generated_at_unix_ms": generated_at_unix_ms,
     })
 }
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -641,7 +641,42 @@ fn build_procedure_candidates(
         .map(|(signature, runs)| {
             let dedupe_key = format!("procedure:{}", crate::sha256_hex(signature.as_bytes()));
             let confidence = 0.88;
-            let review_min_confidence = learning_review_min_confidence("procedure", learning_config);
+            let review_min_confidence =
+                learning_review_min_confidence("procedure", learning_config);
+            let successful_runs = runs.iter().map(|run| run.run_id.clone()).collect::<Vec<_>>();
+            let tools = runs.first().map(|run| run.tools.clone()).unwrap_or_default();
+            let approval_count = runs.iter().map(|run| run.approval_count).sum::<usize>();
+            let status = if confidence < review_min_confidence {
+                "suppressed".to_owned()
+            } else {
+                "queued".to_owned()
+            };
+            let risk_level = if confidence < review_min_confidence {
+                "low_confidence".to_owned()
+            } else if approval_count > 0 {
+                "review".to_owned()
+            } else {
+                "normal".to_owned()
+            };
+            let summary =
+                format!("Observed {} successful runs with the same tool sequence.", runs.len());
+            let sensitivity = if approval_count > 0 { "approval_gated" } else { "normal" };
+            let self_improvement = self_improvement_metadata(
+                successful_runs.iter().map(|run_id| format!("run:{run_id}")).collect::<Vec<_>>(),
+                summary.clone(),
+                risk_level.as_str(),
+                json!({
+                    "kind": "tool_sequence",
+                    "tools": tools.clone(),
+                    "approval_count": approval_count,
+                }),
+                vec![json!({
+                    "kind": "smoke",
+                    "fixture": "replay_tool_sequence",
+                    "status": "required_before_enable",
+                })],
+                sensitivity,
+            );
             LearningCandidateCreateRequest {
                 candidate_id: Ulid::new().to_string(),
                 candidate_kind: "procedure".to_owned(),
@@ -652,41 +687,29 @@ fn build_procedure_candidates(
                 channel: run.channel.clone(),
                 scope_kind: "workspace".to_owned(),
                 scope_id: session_id.to_owned(),
-                status: if confidence < review_min_confidence {
-                    "suppressed".to_owned()
-                } else {
-                    "queued".to_owned()
-                },
+                status,
                 auto_applied: false,
                 confidence,
-                risk_level: if confidence < review_min_confidence {
-                    "low_confidence".to_owned()
-                } else if runs.iter().any(|run| run.approval_count > 0) {
-                    "review".to_owned()
-                } else {
-                    "normal".to_owned()
-                },
+                risk_level,
                 title: format!("Procedure candidate: {signature}"),
-                summary: format!(
-                    "Observed {} successful runs with the same tool sequence.",
-                    runs.len()
-                ),
+                summary,
                 target_path: None,
                 dedupe_key,
                 content_json: json!({
                     "signature": signature,
-                    "successful_runs": runs.iter().map(|run| run.run_id.clone()).collect::<Vec<_>>(),
-                    "tools": runs.first().map(|run| run.tools.clone()).unwrap_or_default(),
-                    "approval_count": runs.iter().map(|run| run.approval_count).sum::<usize>(),
+                    "successful_runs": successful_runs,
+                    "tools": tools,
+                    "approval_count": approval_count,
                     "preconditions": [
                         "Runs must complete successfully",
                         "Tool outputs must not contain prompt-injection findings"
                     ],
-                    "risk_notes": if runs.iter().any(|run| run.approval_count > 0) {
+                    "risk_notes": if approval_count > 0 {
                         vec!["Sequence contains approval-gated steps and must stay review-required"]
                     } else {
                         Vec::<&str>::new()
                     },
+                    "self_improvement": self_improvement,
                 })
                 .to_string(),
                 provenance_json: serde_json::to_string(
@@ -911,6 +934,27 @@ fn build_patch_candidates(
             run_evidence.external_sources.len(),
             result.error.as_str(),
         );
+        let self_improvement = self_improvement_metadata(
+            vec![
+                format!("run:{run_id}"),
+                format!("proposal:{}", proposal.proposal_id),
+                format!("patch:{patch_sha256}"),
+            ],
+            summary.clone(),
+            risk_level.as_str(),
+            json!({
+                "kind": candidate_kind,
+                "paths": path_summaries.clone(),
+                "capability_delta": capability_delta.clone(),
+                "high_risk_paths": high_risk_paths.clone(),
+            }),
+            self_improvement_tests_for_patch_candidate(candidate_kind),
+            if matches!(risk_level.as_str(), "sensitive" | "poisoned") {
+                "sensitive"
+            } else {
+                "operator_review"
+            },
+        );
         let limits = WorkspacePatchLimits::default();
         let content_json = json!({
             "proposal_type": candidate_kind,
@@ -961,6 +1005,7 @@ fn build_patch_candidates(
                     "signals": capability_delta,
                 },
             },
+            "self_improvement": self_improvement,
         })
         .to_string();
         let mut provenance = vec![proposal.provenance.clone(), result.provenance.clone()];
@@ -1021,6 +1066,52 @@ fn patch_candidate_summary(
         details.push(format!("tool result message: {error}"));
     }
     format!("Reusable {label} over {}.", details.join(", "))
+}
+
+fn self_improvement_metadata(
+    source_refs: Vec<String>,
+    rationale: String,
+    risk: &str,
+    expected_capability: Value,
+    tests: Vec<Value>,
+    sensitivity: &str,
+) -> Value {
+    json!({
+        "activation_state": "proposal_only",
+        "required_gates": [
+            "scaffold",
+            "signed_artifact",
+            "eval",
+            "operator_review"
+        ],
+        "source_refs": source_refs
+            .into_iter()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        "rationale": rationale,
+        "risk": risk,
+        "expected_capability": expected_capability,
+        "tests": tests,
+        "sensitivity": sensitivity,
+    })
+}
+
+fn self_improvement_tests_for_patch_candidate(candidate_kind: &str) -> Vec<Value> {
+    let mut tests = vec![json!({
+        "kind": "workspace_patch_dry_run",
+        "status": "passed",
+    })];
+    if matches!(candidate_kind, PATCH_SKILL_CANDIDATE_KIND | PATCH_PROCEDURE_CANDIDATE_KIND) {
+        tests.push(json!({
+            "kind": "skill_eval",
+            "fixture": "generated_skill_smoke",
+            "status": "required_before_enable",
+        }));
+    }
+    tests
 }
 
 fn classify_patch_candidate_kind(files: &[Value]) -> &'static str {
@@ -1808,6 +1899,25 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].candidate_kind, "procedure");
         assert!(candidates[0].summary.contains("2 successful runs"));
+        let content = serde_json::from_str::<Value>(candidates[0].content_json.as_str())
+            .expect("content JSON");
+        assert_eq!(
+            content.pointer("/self_improvement/activation_state").and_then(Value::as_str),
+            Some("proposal_only")
+        );
+        assert_eq!(
+            content.pointer("/self_improvement/expected_capability/kind").and_then(Value::as_str),
+            Some("tool_sequence")
+        );
+        assert!(
+            content
+                .pointer("/self_improvement/required_gates")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|gate| gate.as_str() == Some("eval")),
+            "procedure candidates must require eval before activation"
+        );
     }
 
     #[test]
@@ -2055,6 +2165,19 @@ mod tests {
             content.pointer("/reasoning/high_risk_paths/0").and_then(Value::as_str),
             Some(".agents/skills/release/skill.toml")
         );
+        assert_eq!(
+            content.pointer("/self_improvement/sensitivity").and_then(Value::as_str),
+            Some("sensitive")
+        );
+        assert!(
+            content
+                .pointer("/self_improvement/tests")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|test| test.get("kind").and_then(Value::as_str) == Some("skill_eval")),
+            "skill patch candidates must require generated skill eval"
+        );
     }
 
     #[test]
@@ -2143,6 +2266,15 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(signals.iter().any(|signal| signal == "capabilities_section_changed"));
         assert!(signals.iter().any(|signal| signal == "http_egress_changed"));
+        assert!(
+            content
+                .pointer("/self_improvement/expected_capability/capability_delta")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|signal| signal.as_str() == Some("http_egress_changed")),
+            "self-improvement metadata should mirror capability delta signals"
+        );
     }
 
     #[test]
@@ -2205,6 +2337,10 @@ mod tests {
         assert_eq!(
             content.pointer("/reasoning/poison_reasons/0").and_then(Value::as_str),
             Some("nested_risk_state:tainted")
+        );
+        assert_eq!(
+            content.pointer("/self_improvement/activation_state").and_then(Value::as_str),
+            Some("proposal_only")
         );
     }
 }
