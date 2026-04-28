@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "release_scope": "runtime_preview_acceptance_harness",
-  "updated_at": "2026-04-22",
+  "updated_at": "2026-04-28",
   "matrix_manifest": "infra/release/workflow-regression-matrix.json",
   "rollout_controls": [
     {
@@ -28,6 +28,11 @@
       "id": "networked_worker_preview_rollout",
       "kind": "feature_flag",
       "summary": "Keep networked worker preview gated behind attestation-aware rollout state and disabled-by-default execution posture."
+    },
+    {
+      "id": "routine_automation_rollout_gate",
+      "kind": "feature_flag",
+      "summary": "Keep routine automation disabled by default and tied to staged rollout until workflow regression remains green."
     }
   ],
   "migration_tracks": [
@@ -91,6 +96,7 @@
         "preflight_checkpoint_pair_contract",
         "child_progress_merge_contract",
         "flow_transitions_contract",
+        "routine_automation_smoke_contract",
         "delivery_arbitration_contract",
         "networked_worker_preview_contract"
       ]
@@ -118,6 +124,7 @@
         "preflight_checkpoint_pair_contract",
         "child_progress_merge_contract",
         "flow_transitions_contract",
+        "routine_automation_smoke_contract",
         "delivery_arbitration_contract",
         "networked_worker_preview_contract",
         "pruning_decision_runtime_preview",
@@ -179,7 +186,7 @@
       "validation_mode": "structural",
       "path": "crates/palyra-common/src/runtime_preview.rs",
       "must_contain": [
-        "pub const ALL_RUNTIME_ACCEPTANCE_SCENARIOS: [RuntimeAcceptanceScenario; 8]",
+        "pub const ALL_RUNTIME_ACCEPTANCE_SCENARIOS: [RuntimeAcceptanceScenario; 9]",
         "pub fn runtime_acceptance_fixture_catalog() -> Value"
       ]
     }

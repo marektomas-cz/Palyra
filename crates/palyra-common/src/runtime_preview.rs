@@ -512,18 +512,20 @@ runtime_preview_enum! {
         PreflightCheckpointPair => "preflight_checkpoint_pair",
         ChildProgressMerge => "child_progress_merge",
         FlowTransitions => "flow_transitions",
+        RoutineAutomationSmoke => "routine_automation_smoke",
         DeliveryArbitration => "delivery_arbitration",
         NetworkedWorkerPreview => "networked_worker_preview"
     }
 }
 
-pub const ALL_RUNTIME_ACCEPTANCE_SCENARIOS: [RuntimeAcceptanceScenario; 8] = [
+pub const ALL_RUNTIME_ACCEPTANCE_SCENARIOS: [RuntimeAcceptanceScenario; 9] = [
     RuntimeAcceptanceScenario::QueuedInputLifecycle,
     RuntimeAcceptanceScenario::PruningDecision,
     RuntimeAcceptanceScenario::DualPathRetrieval,
     RuntimeAcceptanceScenario::PreflightCheckpointPair,
     RuntimeAcceptanceScenario::ChildProgressMerge,
     RuntimeAcceptanceScenario::FlowTransitions,
+    RuntimeAcceptanceScenario::RoutineAutomationSmoke,
     RuntimeAcceptanceScenario::DeliveryArbitration,
     RuntimeAcceptanceScenario::NetworkedWorkerPreview,
 ];
@@ -534,6 +536,7 @@ pub const RUNTIME_ACCEPTANCE_FIXTURE_WORKSPACE_PATCH: &str = "workspace_patch";
 pub const RUNTIME_ACCEPTANCE_FIXTURE_DELEGATED_CHILD_RUN: &str = "delegated_child_run";
 pub const RUNTIME_ACCEPTANCE_FIXTURE_REPLAY_BUNDLE: &str = "replay_bundle";
 pub const RUNTIME_ACCEPTANCE_FIXTURE_WORKER_LEASE: &str = "worker_lease";
+pub const RUNTIME_ACCEPTANCE_FIXTURE_AUTOMATION_TRACE: &str = "automation_trace";
 
 const QUEUED_INPUT_LIFECYCLE_FIXTURES: &[&str] = &[RUNTIME_ACCEPTANCE_FIXTURE_SESSION_TRANSCRIPT];
 const PRUNING_DECISION_FIXTURES: &[&str] =
@@ -546,6 +549,12 @@ const CHILD_PROGRESS_MERGE_FIXTURES: &[&str] = &[RUNTIME_ACCEPTANCE_FIXTURE_DELE
 const FLOW_TRANSITIONS_FIXTURES: &[&str] = &[
     RUNTIME_ACCEPTANCE_FIXTURE_SESSION_TRANSCRIPT,
     RUNTIME_ACCEPTANCE_FIXTURE_DELEGATED_CHILD_RUN,
+];
+const ROUTINE_AUTOMATION_SMOKE_FIXTURES: &[&str] = &[
+    RUNTIME_ACCEPTANCE_FIXTURE_SESSION_TRANSCRIPT,
+    RUNTIME_ACCEPTANCE_FIXTURE_RETRIEVAL_QUERY,
+    RUNTIME_ACCEPTANCE_FIXTURE_DELEGATED_CHILD_RUN,
+    RUNTIME_ACCEPTANCE_FIXTURE_AUTOMATION_TRACE,
 ];
 const DELIVERY_ARBITRATION_FIXTURES: &[&str] = &[
     RUNTIME_ACCEPTANCE_FIXTURE_SESSION_TRANSCRIPT,
@@ -563,6 +572,7 @@ impl RuntimeAcceptanceScenario {
             Self::PreflightCheckpointPair => "Preflight checkpoint pair",
             Self::ChildProgressMerge => "Child progress merge",
             Self::FlowTransitions => "Flow transitions",
+            Self::RoutineAutomationSmoke => "Routine automation smoke",
             Self::DeliveryArbitration => "Delivery arbitration",
             Self::NetworkedWorkerPreview => "Networked worker preview",
         }
@@ -589,6 +599,9 @@ impl RuntimeAcceptanceScenario {
             Self::FlowTransitions => {
                 "Flow cancellation, retry, and preview transition surfaces remain regression-tested."
             }
+            Self::RoutineAutomationSmoke => {
+                "Provider, tool, memory, channel, job, delegation, and routine controls remain wired through deterministic smoke coverage."
+            }
             Self::DeliveryArbitration => {
                 "Descendant-aware delivery policy and stale-parent suppression stay explicit."
             }
@@ -607,6 +620,7 @@ impl RuntimeAcceptanceScenario {
             Self::PreflightCheckpointPair => RuntimePreviewCapability::ReplayCapture,
             Self::ChildProgressMerge => RuntimePreviewCapability::AuxiliaryExecutor,
             Self::FlowTransitions => RuntimePreviewCapability::FlowOrchestration,
+            Self::RoutineAutomationSmoke => RuntimePreviewCapability::FlowOrchestration,
             Self::DeliveryArbitration => RuntimePreviewCapability::DeliveryArbitration,
             Self::NetworkedWorkerPreview => RuntimePreviewCapability::NetworkedWorkers,
         }
@@ -621,6 +635,7 @@ impl RuntimeAcceptanceScenario {
             Self::PreflightCheckpointPair => PREFLIGHT_CHECKPOINT_PAIR_FIXTURES,
             Self::ChildProgressMerge => CHILD_PROGRESS_MERGE_FIXTURES,
             Self::FlowTransitions => FLOW_TRANSITIONS_FIXTURES,
+            Self::RoutineAutomationSmoke => ROUTINE_AUTOMATION_SMOKE_FIXTURES,
             Self::DeliveryArbitration => DELIVERY_ARBITRATION_FIXTURES,
             Self::NetworkedWorkerPreview => NETWORKED_WORKER_PREVIEW_FIXTURES,
         }
@@ -718,6 +733,52 @@ pub fn runtime_acceptance_fixture_catalog() -> Value {
             "lease_id": "lease-preview-01",
             "requested_backend": "networked_worker",
             "requested_capability": "networked_worker_preview"
+        },
+        "automation_trace": {
+            "provider": {
+                "provider_id": "echo",
+                "auth_profile": "vault_ref_only",
+                "feature_flag": "routines_automation"
+            },
+            "tools": [
+                {
+                    "name": "palyra.http.fetch",
+                    "policy": "deny_private_targets",
+                    "timeout_required": true
+                },
+                {
+                    "name": "palyra.fs.apply_patch",
+                    "attestation_required": true,
+                    "workspace_confinement_required": true
+                }
+            ],
+            "memory": {
+                "scope": "workspace",
+                "recall_preview": true,
+                "retention_policy": "ttl_guarded"
+            },
+            "channel": {
+                "kind": "discord",
+                "delivery_contract": "operator_review",
+                "retryable": true,
+                "dead_letter_on_terminal_failure": true
+            },
+            "jobs": {
+                "scheduler_health": "catch_up_limited",
+                "lease_ttl_ms": 300000,
+                "missed_run_audit": true
+            },
+            "delegation": {
+                "child_run_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                "delivery_policy": "merge_progress_updates",
+                "approval_gate_blocks_delivery": true
+            },
+            "routine": {
+                "routine_id": "daily-report",
+                "controls": ["status", "pause", "resume", "run_now", "cancel", "history"],
+                "delivery_modes": ["channel", "artifact_only", "silent", "operator_review"],
+                "backfill_idempotent": true
+            }
         }
     })
 }
@@ -857,6 +918,12 @@ mod tests {
         );
         assert!(fixture.get("replay_bundle").is_some());
         assert!(fixture.get("worker_lease").is_some());
+        assert_eq!(fixture["automation_trace"]["provider"]["feature_flag"], "routines_automation");
+        assert_eq!(
+            fixture["automation_trace"]["routine"]["controls"],
+            json!(["status", "pause", "resume", "run_now", "cancel", "history"])
+        );
+        assert_eq!(fixture["automation_trace"]["channel"]["delivery_contract"], "operator_review");
     }
 
     #[test]

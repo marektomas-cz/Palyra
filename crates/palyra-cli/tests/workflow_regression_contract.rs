@@ -68,6 +68,14 @@ fn flow_transitions_contract() -> Result<()> {
 }
 
 #[test]
+fn routine_automation_smoke_contract() -> Result<()> {
+    assert_runtime_acceptance_contract(
+        "routine_automation_smoke_contract",
+        RuntimeAcceptanceScenario::RoutineAutomationSmoke,
+    )
+}
+
+#[test]
 fn delivery_arbitration_contract() -> Result<()> {
     assert_runtime_acceptance_contract(
         "delivery_arbitration_contract",

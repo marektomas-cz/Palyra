@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "release_scope": "runtime_preview_acceptance_harness",
-  "updated_at": "2026-04-22",
+  "updated_at": "2026-04-28",
   "profiles": {
     "fast": {
       "description": "Per-push runtime preview acceptance baseline that keeps every canonical acceptance scenario wired through deterministic contract checks.",
@@ -90,6 +90,10 @@
     {
       "id": "worker_lease",
       "summary": "Attested worker lease fixture for networked worker preview inventory and lifecycle coverage."
+    },
+    {
+      "id": "automation_trace",
+      "summary": "End-to-end routine automation fixture covering provider, tool, memory, channel, scheduler job, delegation, and routine-control boundaries."
     }
   ],
   "runtime_acceptance_scenarios": [
@@ -173,6 +177,22 @@
       "fixture_keys": [
         "session_transcript",
         "delegated_child_run"
+      ]
+    },
+    {
+      "id": "routine_automation_smoke",
+      "label": "Routine automation smoke",
+      "summary": "Provider, tool, memory, channel, job, delegation, and routine controls remain wired through deterministic smoke coverage.",
+      "capability": "flow_orchestration",
+      "required_profiles": [
+        "fast",
+        "full"
+      ],
+      "fixture_keys": [
+        "session_transcript",
+        "retrieval_query",
+        "delegated_child_run",
+        "automation_trace"
       ]
     },
     {
@@ -374,6 +394,35 @@
         "workflow_regression_contract",
         "--locked",
         "flow_transitions_contract",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "routine_automation_smoke_contract",
+      "label": "Routine automation smoke contract remains wired into workflow regression",
+      "category": "contract",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "subsystems": [
+        "flow_orchestration"
+      ],
+      "chaos": false,
+      "acceptance_scenarios": [
+        "routine_automation_smoke"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "palyra-cli",
+        "--test",
+        "workflow_regression_contract",
+        "--locked",
+        "routine_automation_smoke_contract",
         "--",
         "--exact",
         "--test-threads=1"
