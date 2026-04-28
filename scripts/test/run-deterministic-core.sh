@@ -79,6 +79,10 @@ run_desktop_test support_bundle_export_plan_capture_does_not_hold_supervisor_loc
 "$CARGO_BIN" test -p palyra-daemon --test gateway_grpc --locked grpc_route_message_with_fake_adapter_emits_reply_and_journal_events
 "$CARGO_BIN" test -p palyra-daemon --test gateway_grpc --locked grpc_route_message_preserves_attachment_metadata_in_outbound_and_journal
 "$CARGO_BIN" test -p palyra-daemon --test gateway_grpc --locked grpc_approvals_service_persists_and_exports_denied_tool_approval
+"$CARGO_BIN" test -p palyra-daemon delegation --locked
+"$CARGO_BIN" test -p palyra-daemon channel_commands --locked
+"$CARGO_BIN" test -p palyra-daemon conversation_bindings --locked
+"$CARGO_BIN" test -p palyra-daemon tool_registry --locked
 
 npm run web:test -- \
   src/App.openai-auth.test.tsx \

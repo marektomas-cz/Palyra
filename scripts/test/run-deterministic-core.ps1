@@ -29,6 +29,10 @@ cargo test -p palyra-daemon --test admin_surface --locked console_support_bundle
 cargo test -p palyra-daemon --test gateway_grpc --locked grpc_route_message_with_fake_adapter_emits_reply_and_journal_events
 cargo test -p palyra-daemon --test gateway_grpc --locked grpc_route_message_preserves_attachment_metadata_in_outbound_and_journal
 cargo test -p palyra-daemon --test gateway_grpc --locked grpc_approvals_service_persists_and_exports_denied_tool_approval
+cargo test -p palyra-daemon delegation --locked
+cargo test -p palyra-daemon channel_commands --locked
+cargo test -p palyra-daemon conversation_bindings --locked
+cargo test -p palyra-daemon tool_registry --locked
 
 npm run web:test -- `
   src/App.openai-auth.test.tsx `
