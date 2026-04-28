@@ -807,6 +807,41 @@ pub struct RoutineExportBundle {
     pub job: CronJobRecord,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoutineRetentionPolicy {
+    pub ttl_ms: i64,
+    pub max_records: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RoutineRetentionCandidate {
+    pub run_id: String,
+    pub routine_id: String,
+    pub reason: String,
+    pub protected_by_active_ref: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RoutineRetentionDryRun {
+    pub dry_run: bool,
+    pub would_delete_count: usize,
+    pub retained_active_refs: usize,
+    pub candidates: Vec<RoutineRetentionCandidate>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RoutineRuntimeBackfillReport {
+    pub dry_run: bool,
+    pub cron_jobs_missing_metadata: Vec<String>,
+    pub routines_missing_cron_job: Vec<String>,
+    pub run_metadata_without_routine: Vec<String>,
+    pub changed_records: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct RoutineRegistryDocument {
     schema_version: u32,
@@ -1331,6 +1366,83 @@ pub fn validate_routine_export_bundle(
         });
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+#[must_use]
+pub fn routine_retention_dry_run(
+    runs: &[RoutineRunMetadataRecord],
+    active_run_ids: &BTreeSet<String>,
+    policy: RoutineRetentionPolicy,
+    now_unix_ms: i64,
+) -> RoutineRetentionDryRun {
+    let overflow_count = runs.len().saturating_sub(policy.max_records);
+    let mut candidates = Vec::new();
+    let mut retained_active_refs = 0usize;
+    for (position, run) in runs.iter().enumerate() {
+        let expired = now_unix_ms.saturating_sub(run.updated_at_unix_ms) > policy.ttl_ms;
+        let overflow = position < overflow_count;
+        if !expired && !overflow {
+            continue;
+        }
+        let protected_by_active_ref = active_run_ids.contains(run.run_id.as_str());
+        if protected_by_active_ref {
+            retained_active_refs = retained_active_refs.saturating_add(1);
+        }
+        candidates.push(RoutineRetentionCandidate {
+            run_id: run.run_id.clone(),
+            routine_id: run.routine_id.clone(),
+            reason: if expired { "ttl_expired" } else { "max_records_overflow" }.to_owned(),
+            protected_by_active_ref,
+        });
+    }
+    let would_delete_count =
+        candidates.iter().filter(|candidate| !candidate.protected_by_active_ref).count();
+    RoutineRetentionDryRun { dry_run: true, would_delete_count, retained_active_refs, candidates }
+}
+
+#[allow(dead_code)]
+#[must_use]
+pub fn routine_runtime_backfill_plan(
+    routines: &[RoutineMetadataRecord],
+    cron_jobs: &[CronJobRecord],
+    run_metadata: &[RoutineRunMetadataRecord],
+    dry_run: bool,
+) -> RoutineRuntimeBackfillReport {
+    let routine_ids =
+        routines.iter().map(|routine| routine.routine_id.as_str()).collect::<BTreeSet<_>>();
+    let cron_job_ids = cron_jobs.iter().map(|job| job.job_id.as_str()).collect::<BTreeSet<_>>();
+
+    let mut cron_jobs_missing_metadata = cron_jobs
+        .iter()
+        .filter(|job| !routine_ids.contains(job.job_id.as_str()))
+        .map(|job| job.job_id.clone())
+        .collect::<Vec<_>>();
+    let mut routines_missing_cron_job = routines
+        .iter()
+        .filter(|routine| !cron_job_ids.contains(routine.routine_id.as_str()))
+        .map(|routine| routine.routine_id.clone())
+        .collect::<Vec<_>>();
+    let mut run_metadata_without_routine = run_metadata
+        .iter()
+        .filter(|run| !routine_ids.contains(run.routine_id.as_str()))
+        .map(|run| run.run_id.clone())
+        .collect::<Vec<_>>();
+
+    cron_jobs_missing_metadata.sort();
+    routines_missing_cron_job.sort();
+    run_metadata_without_routine.sort();
+    let changed_records = cron_jobs_missing_metadata
+        .len()
+        .saturating_add(routines_missing_cron_job.len())
+        .saturating_add(run_metadata_without_routine.len());
+    RoutineRuntimeBackfillReport {
+        dry_run,
+        cron_jobs_missing_metadata,
+        routines_missing_cron_job,
+        run_metadata_without_routine,
+        changed_records,
+    }
 }
 
 #[must_use]
@@ -2249,21 +2361,29 @@ mod tests {
     use super::{
         build_routine_export_bundle, default_outcome_from_cron_status,
         natural_language_schedule_preview, resolve_routines_root, routine_delivery_contract,
-        routine_delivery_preview, routine_run_lifecycle_snapshot,
-        shadow_manual_schedule_payload_json, validate_routine_export_bundle,
-        validate_routine_prompt_self_contained, RoutineApprovalGateState, RoutineApprovalMode,
-        RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryContractKind,
-        RoutineDeliveryMode, RoutineExecutionConfig, RoutineRegistry, RoutineRunLeaseState,
-        RoutineRunMetadataUpsert, RoutineRunMode, RoutineRunOutcomeKind, RoutineSilentPolicy,
-        RoutineTriggerKind, ROUTINE_EXPORT_SCHEMA_ID, ROUTINE_RUN_LEASE_TTL_MS,
+        routine_delivery_preview, routine_retention_dry_run, routine_run_lifecycle_snapshot,
+        routine_runtime_backfill_plan, shadow_manual_schedule_payload_json,
+        validate_routine_export_bundle, validate_routine_prompt_self_contained,
+        RoutineApprovalGateState, RoutineApprovalMode, RoutineApprovalPolicy,
+        RoutineDeliveryConfig, RoutineDeliveryContractKind, RoutineDeliveryMode,
+        RoutineExecutionConfig, RoutineMetadataRecord, RoutineRegistry, RoutineRetentionPolicy,
+        RoutineRunLeaseState, RoutineRunMetadataRecord, RoutineRunMetadataUpsert, RoutineRunMode,
+        RoutineRunOutcomeKind, RoutineSilentPolicy, RoutineTriggerKind, ROUTINE_EXPORT_SCHEMA_ID,
+        ROUTINE_RUN_LEASE_TTL_MS,
     };
     use crate::{
         cron::CronTimezoneMode,
-        journal::{CronRunRecord, CronRunStatus, CronScheduleType},
+        journal::{
+            CronConcurrencyPolicy, CronJobRecord, CronMisfirePolicy, CronRetryPolicy,
+            CronRunRecord, CronRunStatus, CronScheduleType,
+        },
     };
     use chrono::DateTime;
     use serde_json::json;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        collections::BTreeSet,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn temp_state_root() -> std::path::PathBuf {
         let stamp = SystemTime::now()
@@ -2291,6 +2411,74 @@ mod tests {
             tool_denies: 0,
             created_at_unix_ms: 1_000,
             updated_at_unix_ms,
+        }
+    }
+
+    fn sample_run_metadata(
+        run_id: &str,
+        routine_id: &str,
+        updated_at_unix_ms: i64,
+    ) -> RoutineRunMetadataRecord {
+        RoutineRunMetadataRecord {
+            run_id: run_id.to_owned(),
+            routine_id: routine_id.to_owned(),
+            trigger_kind: RoutineTriggerKind::Manual,
+            trigger_reason: None,
+            trigger_payload_json: json!({ "source": "test" }).to_string(),
+            trigger_dedupe_key: None,
+            execution: RoutineExecutionConfig::default(),
+            delivery: RoutineDeliveryConfig::default(),
+            dispatch_mode: super::RoutineDispatchMode::Normal,
+            source_run_id: None,
+            outcome_override: None,
+            outcome_message: None,
+            output_delivered: None,
+            skip_reason: None,
+            delivery_reason: None,
+            approval_note: None,
+            safety_note: None,
+            created_at_unix_ms: updated_at_unix_ms,
+            updated_at_unix_ms,
+        }
+    }
+
+    fn sample_routine_metadata(routine_id: &str) -> RoutineMetadataRecord {
+        RoutineMetadataRecord {
+            routine_id: routine_id.to_owned(),
+            trigger_kind: RoutineTriggerKind::Manual,
+            trigger_payload_json: json!({ "kind": "manual" }).to_string(),
+            execution: RoutineExecutionConfig::default(),
+            delivery: RoutineDeliveryConfig::default(),
+            quiet_hours: None,
+            cooldown_ms: 0,
+            approval_policy: RoutineApprovalPolicy::default(),
+            template_id: None,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        }
+    }
+
+    fn sample_cron_job(job_id: &str) -> CronJobRecord {
+        CronJobRecord {
+            job_id: job_id.to_owned(),
+            name: "routine".to_owned(),
+            prompt: "test".to_owned(),
+            owner_principal: "user:ops".to_owned(),
+            channel: "system:routines".to_owned(),
+            session_key: None,
+            session_label: None,
+            schedule_type: CronScheduleType::At,
+            schedule_payload_json: shadow_manual_schedule_payload_json(),
+            enabled: true,
+            concurrency_policy: CronConcurrencyPolicy::Forbid,
+            retry_policy: CronRetryPolicy { max_attempts: 1, backoff_ms: 1 },
+            misfire_policy: CronMisfirePolicy::Skip,
+            jitter_ms: 0,
+            next_run_at_unix_ms: None,
+            last_run_at_unix_ms: None,
+            queued_run: false,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
         }
     }
 
@@ -2461,6 +2649,70 @@ mod tests {
         .expect("export bundle should build");
         assert_eq!(bundle.schema_id, ROUTINE_EXPORT_SCHEMA_ID);
         validate_routine_export_bundle(&bundle).expect("bundle should validate");
+    }
+
+    #[test]
+    fn routine_retention_dry_run_protects_active_refs() {
+        let runs = vec![
+            sample_run_metadata("old-active", "routine-1", 1_000),
+            sample_run_metadata("old-free", "routine-1", 2_000),
+            sample_run_metadata("fresh", "routine-1", 10_000),
+        ];
+        let active_run_ids = BTreeSet::from(["old-active".to_owned()]);
+        let plan = routine_retention_dry_run(
+            runs.as_slice(),
+            &active_run_ids,
+            RoutineRetentionPolicy { ttl_ms: 5_000, max_records: 2 },
+            10_000,
+        );
+
+        assert!(plan.dry_run);
+        assert_eq!(plan.retained_active_refs, 1);
+        assert_eq!(plan.would_delete_count, 1);
+        assert!(
+            plan.candidates
+                .iter()
+                .any(|candidate| candidate.run_id == "old-active"
+                    && candidate.protected_by_active_ref)
+        );
+        assert!(plan
+            .candidates
+            .iter()
+            .any(|candidate| candidate.run_id == "old-free" && !candidate.protected_by_active_ref));
+    }
+
+    #[test]
+    fn routine_backfill_plan_reports_missing_runtime_records_idempotently() {
+        let routines = vec![
+            sample_routine_metadata("routine-present"),
+            sample_routine_metadata("routine-orphan"),
+        ];
+        let cron_jobs = vec![sample_cron_job("routine-present"), sample_cron_job("cron-orphan")];
+        let run_metadata = vec![
+            sample_run_metadata("run-present", "routine-present", 1_000),
+            sample_run_metadata("run-orphan", "routine-missing", 1_000),
+        ];
+
+        let plan = routine_runtime_backfill_plan(
+            routines.as_slice(),
+            cron_jobs.as_slice(),
+            run_metadata.as_slice(),
+            true,
+        );
+
+        assert!(plan.dry_run);
+        assert_eq!(plan.cron_jobs_missing_metadata, vec!["cron-orphan".to_owned()]);
+        assert_eq!(plan.routines_missing_cron_job, vec!["routine-orphan".to_owned()]);
+        assert_eq!(plan.run_metadata_without_routine, vec!["run-orphan".to_owned()]);
+        assert_eq!(plan.changed_records, 3);
+
+        let clean = routine_runtime_backfill_plan(
+            &[sample_routine_metadata("routine-present")],
+            &[sample_cron_job("routine-present")],
+            &[sample_run_metadata("run-present", "routine-present", 1_000)],
+            true,
+        );
+        assert_eq!(clean.changed_records, 0);
     }
 
     #[test]

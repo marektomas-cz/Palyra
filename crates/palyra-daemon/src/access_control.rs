@@ -22,6 +22,7 @@ pub(crate) const FEATURE_API_TOKENS: &str = "api_tokens";
 pub(crate) const FEATURE_TEAM_MODE: &str = "team_mode";
 pub(crate) const FEATURE_RBAC: &str = "rbac";
 pub(crate) const FEATURE_STAGED_ROLLOUT: &str = "staged_rollout";
+pub(crate) const FEATURE_ROUTINES_AUTOMATION: &str = "routines_automation";
 
 pub(crate) const PERMISSION_COMPAT_MODELS_READ: &str = "compat.models.read";
 pub(crate) const PERMISSION_COMPAT_CHAT_CREATE: &str = "compat.chat.create";
@@ -1745,6 +1746,18 @@ fn default_feature_flags() -> Vec<FeatureFlagRecord> {
             updated_at_unix_ms: 0,
             updated_by_principal: "system".to_owned(),
         },
+        FeatureFlagRecord {
+            key: FEATURE_ROUTINES_AUTOMATION.to_owned(),
+            label: "Routine automation controls".to_owned(),
+            description:
+                "Enable unattended routine scheduler controls with command kill switches and operator review fallback."
+                    .to_owned(),
+            enabled: false,
+            stage: "pilot".to_owned(),
+            depends_on: vec![FEATURE_STAGED_ROLLOUT.to_owned()],
+            updated_at_unix_ms: 0,
+            updated_by_principal: "system".to_owned(),
+        },
     ]
 }
 
@@ -2194,6 +2207,13 @@ mod tests {
             snapshot.feature_flags.iter().any(|flag| flag.key == FEATURE_STAGED_ROLLOUT),
             "backfill should restore missing rollout package flags"
         );
+        let routines_flag = snapshot
+            .feature_flags
+            .iter()
+            .find(|flag| flag.key == FEATURE_ROUTINES_AUTOMATION)
+            .expect("backfill should restore routine automation rollout flag");
+        assert!(!routines_flag.enabled);
+        assert_eq!(routines_flag.depends_on, vec![FEATURE_STAGED_ROLLOUT.to_owned()]);
         assert_eq!(snapshot.api_tokens[0].rate_limit_per_minute, 10);
         assert!(snapshot.api_tokens[0]
             .scopes

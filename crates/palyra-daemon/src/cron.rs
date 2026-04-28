@@ -21,7 +21,7 @@ use palyra_policy::{
     PolicyRequestContext,
 };
 use palyra_skills::{audit_skill_artifact_security, SkillSecurityAuditPolicy, SkillTrustStore};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tokio_stream::StreamExt;
@@ -126,6 +126,16 @@ impl CronMisfireRecoveryAction {
             Self::RequireReview => "require_review",
         }
     }
+
+    #[must_use]
+    pub const fn operator_action(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::RunOnce => "run_once",
+            Self::CatchUpLimited => "replay_all",
+            Self::RequireReview => "manual_review",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +145,40 @@ pub struct CronMisfireRecoveryPlan {
     pub missed_runs: usize,
     pub oldest_missed_at_unix_ms: Option<i64>,
     pub reason: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SchedulerHealthSnapshot {
+    pub generated_at_unix_ms: i64,
+    pub state: String,
+    pub due_jobs: usize,
+    pub active_runs: usize,
+    pub expired_active_run_leases: usize,
+    pub missed_runs: usize,
+    pub catch_up_backlog: usize,
+    pub manual_review_required: usize,
+    pub next_due_at_unix_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub audit: SchedulerHealthAudit,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SchedulerHealthAudit {
+    pub event: String,
+    pub severity: String,
+    pub recovery_hint: String,
+    pub missed_run_reasons: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SchedulerHealthInput<'a> {
+    pub jobs: &'a [CronJobRecord],
+    pub active_runs: &'a [CronRunRecord],
+    pub now_unix_ms: i64,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -528,6 +572,118 @@ pub fn compute_misfire_recovery_plan(
         missed_runs,
         oldest_missed_at_unix_ms: Some(oldest_missed_at_unix_ms),
         reason: "catch_up_within_limit".to_owned(),
+    })
+}
+
+#[allow(dead_code)]
+pub fn build_scheduler_health_snapshot(
+    input: SchedulerHealthInput<'_>,
+) -> Result<SchedulerHealthSnapshot, Status> {
+    let mut due_jobs = 0usize;
+    let mut missed_runs = 0usize;
+    let mut catch_up_backlog = 0usize;
+    let mut manual_review_required = 0usize;
+    let mut next_due_at_unix_ms = None::<i64>;
+    let mut missed_run_reasons = Vec::new();
+
+    for job in input.jobs {
+        let Some(reference_unix_ms) = job.next_run_at_unix_ms else {
+            continue;
+        };
+        if reference_unix_ms > input.now_unix_ms {
+            next_due_at_unix_ms = Some(
+                next_due_at_unix_ms
+                    .map(|current| current.min(reference_unix_ms))
+                    .unwrap_or(reference_unix_ms),
+            );
+            continue;
+        }
+        due_jobs = due_jobs.saturating_add(1);
+        let recovery_plan =
+            compute_misfire_recovery_plan(job, reference_unix_ms, input.now_unix_ms)?;
+        missed_runs = missed_runs.saturating_add(recovery_plan.missed_runs);
+        match recovery_plan.action {
+            CronMisfireRecoveryAction::CatchUpLimited => {
+                catch_up_backlog = catch_up_backlog.saturating_add(recovery_plan.missed_runs);
+            }
+            CronMisfireRecoveryAction::RunOnce => {
+                catch_up_backlog = catch_up_backlog.saturating_add(1);
+            }
+            CronMisfireRecoveryAction::RequireReview => {
+                manual_review_required = manual_review_required.saturating_add(1);
+            }
+            CronMisfireRecoveryAction::Skip => {}
+        }
+        if recovery_plan.missed_runs > 0 {
+            missed_run_reasons.push(format!(
+                "{}:{}:{}",
+                job.job_id,
+                recovery_plan.action.operator_action(),
+                recovery_plan.reason
+            ));
+        }
+        if let Some(next) = recovery_plan.next_run_at_unix_ms {
+            next_due_at_unix_ms =
+                Some(next_due_at_unix_ms.map(|current| current.min(next)).unwrap_or(next));
+        }
+    }
+
+    let active_runs = input.active_runs.iter().filter(|run| run.status.is_active()).count();
+    let expired_active_run_leases = input
+        .active_runs
+        .iter()
+        .filter(|run| should_repair_stale_cron_run(run, input.now_unix_ms))
+        .count();
+    let state = if input.last_error.is_some() || manual_review_required > 0 {
+        "blocked"
+    } else if due_jobs > 0 || missed_runs > 0 || expired_active_run_leases > 0 {
+        "degraded"
+    } else {
+        "healthy"
+    };
+    let recovery_hint = match state {
+        "blocked" if manual_review_required > 0 => "review_missed_runs_before_replay",
+        "blocked" => "inspect_scheduler_last_error",
+        "degraded" if expired_active_run_leases > 0 => "repair_or_cancel_stale_scheduler_runs",
+        "degraded" => "allow_scheduler_to_catch_up",
+        _ => "no_action_required",
+    };
+
+    Ok(SchedulerHealthSnapshot {
+        generated_at_unix_ms: input.now_unix_ms,
+        state: state.to_owned(),
+        due_jobs,
+        active_runs,
+        expired_active_run_leases,
+        missed_runs,
+        catch_up_backlog,
+        manual_review_required,
+        next_due_at_unix_ms,
+        last_error: input.last_error,
+        audit: SchedulerHealthAudit {
+            event: "cron.scheduler.health".to_owned(),
+            severity: if state == "healthy" { "info" } else { "warning" }.to_owned(),
+            recovery_hint: recovery_hint.to_owned(),
+            missed_run_reasons,
+        },
+    })
+}
+
+pub fn cron_misfire_audit_payload(
+    job: &CronJobRecord,
+    recovery_plan: &CronMisfireRecoveryPlan,
+    reference_unix_ms: i64,
+) -> Value {
+    json!({
+        "event": "cron.misfire.recovery",
+        "job_id": job.job_id,
+        "action": recovery_plan.action.as_str(),
+        "operator_action": recovery_plan.action.operator_action(),
+        "missed_runs": recovery_plan.missed_runs,
+        "oldest_missed_at_unix_ms": recovery_plan.oldest_missed_at_unix_ms,
+        "reference_unix_ms": reference_unix_ms,
+        "next_run_at_unix_ms": recovery_plan.next_run_at_unix_ms,
+        "reason": recovery_plan.reason,
     })
 }
 
@@ -1202,9 +1358,14 @@ async fn record_misfire_review_required(
     reference_unix_ms: i64,
 ) -> Result<(), Status> {
     let run_id = Ulid::new().to_string();
+    let audit_payload = cron_misfire_audit_payload(job, recovery_plan, reference_unix_ms);
     let message = format!(
-        "cron misfire requires review: action={}, missed_runs={}, oldest_missed_at={:?}, reference={reference_unix_ms}",
+        "cron misfire requires review: action={}, operator_action={}, missed_runs={}, oldest_missed_at={:?}, reference={reference_unix_ms}",
         recovery_plan.action.as_str(),
+        audit_payload
+            .get("operator_action")
+            .and_then(Value::as_str)
+            .unwrap_or("manual_review"),
         recovery_plan.missed_runs,
         recovery_plan.oldest_missed_at_unix_ms
     );
@@ -1992,12 +2153,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        compute_misfire_recovery_plan, compute_next_run_after, decide_concurrency_policy,
-        load_periodic_reaudit_skills_index, normalize_schedule, now_unix_ms_or_fallback,
-        parse_skill_reaudit_interval, periodic_reaudit_targets, should_repair_stale_cron_run,
-        ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction, CronTimezoneMode,
-        InstalledSkillRecord, InstalledSkillsIndex, SCHEDULER_STALE_RUN_AFTER_MS,
-        SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
+        build_scheduler_health_snapshot, compute_misfire_recovery_plan, compute_next_run_after,
+        cron_misfire_audit_payload, decide_concurrency_policy, load_periodic_reaudit_skills_index,
+        normalize_schedule, now_unix_ms_or_fallback, parse_skill_reaudit_interval,
+        periodic_reaudit_targets, should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher,
+        CronMisfireRecoveryAction, CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex,
+        SchedulerHealthInput, SCHEDULER_STALE_RUN_AFTER_MS, SKILLS_INDEX_FILE_NAME,
+        SKILLS_LAYOUT_VERSION,
     };
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
     use crate::journal::{
@@ -2006,6 +2168,55 @@ mod tests {
     };
     use chrono::TimeZone;
     use serde_json::json;
+
+    fn sample_every_job(
+        job_id: &str,
+        next_run_at_unix_ms: Option<i64>,
+        misfire_policy: CronMisfirePolicy,
+    ) -> CronJobRecord {
+        CronJobRecord {
+            job_id: job_id.to_owned(),
+            name: "health-check".to_owned(),
+            prompt: "test".to_owned(),
+            owner_principal: "user:ops".to_owned(),
+            channel: "system:cron".to_owned(),
+            session_key: None,
+            session_label: None,
+            schedule_type: CronScheduleType::Every,
+            schedule_payload_json: json!({ "interval_ms": 1_000_i64 }).to_string(),
+            enabled: true,
+            concurrency_policy: CronConcurrencyPolicy::Forbid,
+            retry_policy: CronRetryPolicy { max_attempts: 1, backoff_ms: 1 },
+            misfire_policy,
+            jitter_ms: 0,
+            next_run_at_unix_ms,
+            last_run_at_unix_ms: None,
+            queued_run: false,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        }
+    }
+
+    fn sample_cron_run(status: CronRunStatus, updated_at_unix_ms: i64) -> CronRunRecord {
+        CronRunRecord {
+            run_id: "run-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            attempt: 1,
+            session_id: None,
+            orchestrator_run_id: None,
+            started_at_unix_ms: 0,
+            finished_at_unix_ms: if status.is_active() { None } else { Some(updated_at_unix_ms) },
+            status,
+            error_kind: None,
+            error_message_redacted: None,
+            model_tokens_in: 0,
+            model_tokens_out: 0,
+            tool_calls: 0,
+            tool_denies: 0,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms,
+        }
+    }
 
     #[test]
     fn cron_matcher_accepts_step_and_list_fields() {
@@ -2130,6 +2341,41 @@ mod tests {
             .expect("skip policy should compute next run")
             .expect("every schedule should return next run");
         assert_eq!(skip_next, 4_000, "skip policy should advance past missed slots");
+    }
+
+    #[test]
+    fn scheduler_health_snapshot_surfaces_catch_up_and_review_backlog() {
+        let catch_up_job =
+            sample_every_job("catch-up-job", Some(1_000), CronMisfirePolicy::CatchUp);
+        let review_job = sample_every_job("review-job", Some(1_000), CronMisfirePolicy::CatchUp);
+        let stale_run = sample_cron_run(CronRunStatus::Running, 1_000);
+        let snapshot = build_scheduler_health_snapshot(SchedulerHealthInput {
+            jobs: &[catch_up_job.clone(), review_job.clone()],
+            active_runs: &[stale_run],
+            now_unix_ms: 1_000 + super::SCHEDULER_CATCH_UP_WINDOW_MS + 10_000,
+            last_error: None,
+        })
+        .expect("health snapshot should build");
+
+        assert_eq!(snapshot.state, "blocked");
+        assert_eq!(snapshot.due_jobs, 2);
+        assert_eq!(snapshot.manual_review_required, 2);
+        assert_eq!(snapshot.expired_active_run_leases, 1);
+        assert_eq!(snapshot.audit.recovery_hint, "review_missed_runs_before_replay");
+        assert!(snapshot
+            .audit
+            .missed_run_reasons
+            .iter()
+            .any(|reason| reason.contains("manual_review")));
+
+        let plan = compute_misfire_recovery_plan(
+            &catch_up_job,
+            1_000,
+            1_000 + super::SCHEDULER_CATCH_UP_WINDOW_MS + 10_000,
+        )
+        .expect("recovery plan should compute");
+        let audit = cron_misfire_audit_payload(&catch_up_job, &plan, 1_000);
+        assert_eq!(audit["operator_action"], json!("manual_review"));
     }
 
     #[test]
