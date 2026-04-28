@@ -16,6 +16,7 @@ Commands:
   routines        Manage unified automation routines across schedules and event triggers
   objectives      Manage durable objectives, heartbeats, standing orders, and programs
   flows           Inspect and control durable orchestration flows
+  jobs            Inspect and control durable long-running tool jobs
   cron            Manage schedule-only cron workflows through the routines compatibility layer
   memory
   message
