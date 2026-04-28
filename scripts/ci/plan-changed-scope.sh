@@ -147,12 +147,12 @@ emit_plan() {
 
 run_self_test() {
   local output
-  output="$(PALYRA_CHANGED_SCOPE_FILES=$'crates/palyra-policy/src/lib.rs\napps/web/src/App.tsx' "$0")"
+  output="$(PALYRA_CHANGED_SCOPE_FILES=$'crates/palyra-policy/src/lib.rs\napps/web/src/App.tsx' bash "$0")"
   grep -q '"rust:palyra-policy"' <<<"$output"
   grep -q '"web"' <<<"$output"
   grep -q '"fallback_full":false' <<<"$output"
 
-  output="$(PALYRA_CHANGED_SCOPE_FILES='unclassified/path.bin' "$0")"
+  output="$(PALYRA_CHANGED_SCOPE_FILES='unclassified/path.bin' bash "$0")"
   grep -q '"fallback_full":true' <<<"$output"
   grep -q '"unclassified_path"' <<<"$output"
 }
