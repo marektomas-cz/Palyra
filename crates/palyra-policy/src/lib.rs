@@ -345,6 +345,37 @@ pub fn evaluate_with_context(
     })
 }
 
+#[must_use]
+pub fn policy_explain_diagnostics_value(
+    request: &PolicyRequest,
+    evaluation: &PolicyEvaluation,
+) -> serde_json::Value {
+    let decision = match evaluation.decision {
+        PolicyDecision::Allow => "allow",
+        PolicyDecision::DenyByDefault { .. } => "deny_by_default",
+    };
+    let reason_code = policy_reason_code(evaluation.explanation.reason.as_str());
+    json!({
+        "schema_version": 1,
+        "decision": decision,
+        "action": request.action,
+        "principal_class": identifier_class(request.principal.as_str()),
+        "resource_class": identifier_class(request.resource.as_str()),
+        "action_class": action_class(request.action.as_str()),
+        "reason_code": reason_code,
+        "missing_grant_hints": missing_grant_hints(evaluation),
+        "redaction": {
+            "raw_principal_included": false,
+            "raw_resource_included": false,
+            "internal_policy_source_included": false,
+        },
+        "matched": {
+            "reason_count": evaluation.explanation.matched_policy_ids.len(),
+            "diagnostic_error_count": evaluation.explanation.diagnostics_errors.len(),
+        }
+    })
+}
+
 fn default_policy_set() -> Result<&'static PolicySet, PolicyEngineError> {
     static POLICY_SET: OnceLock<Result<PolicySet, PolicyEngineError>> = OnceLock::new();
     match POLICY_SET.get_or_init(|| {
@@ -486,6 +517,100 @@ fn decision_reason(
     }
 
     BASELINE_DENY_REASON.to_owned()
+}
+
+fn policy_reason_code(reason: &str) -> &'static str {
+    if reason.contains("allowed by Cedar policy") || reason.contains("allowed by Cedar baseline") {
+        return "policy.allow";
+    }
+    if reason == SENSITIVE_DENY_REASON {
+        return "policy.explicit_approval_required";
+    }
+    if reason == TOOL_EXECUTE_PRINCIPAL_DENY_REASON {
+        return "tool.execute.principal_not_allowlisted";
+    }
+    if reason == TOOL_EXECUTE_CHANNEL_DENY_REASON {
+        return "tool.execute.channel_not_allowlisted";
+    }
+    if reason == POLICY_DENY_REASON {
+        return "tool.execute.tool_not_allowlisted";
+    }
+    if reason == SKILL_POLICY_DENY_REASON {
+        return "skill.execute.skill_not_allowlisted";
+    }
+    if reason == BASELINE_DENY_REASON {
+        return "policy.baseline_deny";
+    }
+    if reason.contains("policy evaluation diagnostics") || reason.contains("failed safely") {
+        return "policy.deny.evaluation_error";
+    }
+    "policy.deny.unspecified"
+}
+
+fn identifier_class(identifier: &str) -> String {
+    let trimmed = identifier.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_owned();
+    }
+    let has_scope = trimmed.contains(':');
+    let class = trimmed
+        .split_once(':')
+        .map(|(class, _)| class)
+        .unwrap_or(trimmed)
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if class.is_empty() {
+        return "unknown".to_owned();
+    }
+    if has_scope {
+        format!("{class}:*")
+    } else {
+        class
+    }
+}
+
+fn action_class(action: &str) -> String {
+    let trimmed = action.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_owned();
+    }
+    trimmed
+        .split_once('.')
+        .map(|(class, _)| class)
+        .unwrap_or(trimmed)
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn missing_grant_hints(evaluation: &PolicyEvaluation) -> Vec<&'static str> {
+    let mut hints = Vec::new();
+    let explanation = &evaluation.explanation;
+    if matches!(evaluation.decision, PolicyDecision::Allow) {
+        return hints;
+    }
+    if explanation.is_sensitive_action {
+        hints.push("request_explicit_approval");
+    }
+    if explanation.requested_tool.is_some() && !explanation.is_allowlisted_tool {
+        hints.push("grant_tool_allowlist");
+    }
+    if explanation.requested_skill.is_some() && !explanation.is_allowlisted_skill {
+        hints.push("enable_or_allowlist_skill");
+    }
+    if !explanation.is_tool_execute_principal_allowed {
+        hints.push("add_principal_to_tool_execute_allowlist");
+    }
+    if !explanation.is_tool_execute_channel_allowed {
+        hints.push("add_channel_to_tool_execute_allowlist");
+    }
+    if hints.is_empty() {
+        hints.push("review_action_resource_scope");
+    }
+    hints
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1164,6 +1289,33 @@ mod tests {
             PolicyDecision::DenyByDefault { reason: TOOL_EXECUTE_PRINCIPAL_DENY_REASON.to_owned() }
         );
         assert!(!evaluation.explanation.is_tool_execute_principal_allowed);
+    }
+
+    #[test]
+    fn explain_diagnostics_reports_safe_reason_code_and_hints() {
+        let request = PolicyRequest {
+            principal: "user:finance@example.com".to_owned(),
+            action: "tool.execute".to_owned(),
+            resource: "tool:palyra.echo".to_owned(),
+        };
+        let config = PolicyEvaluationConfig {
+            allowlisted_tools: vec!["palyra.echo".to_owned()],
+            tool_execute_principal_allowlist: vec!["user:ops".to_owned()],
+            ..PolicyEvaluationConfig::default()
+        };
+
+        let evaluation = evaluate_with_config(&request, &config).expect("evaluation");
+        let diagnostics = super::policy_explain_diagnostics_value(&request, &evaluation);
+
+        assert_eq!(diagnostics["schema_version"], 1);
+        assert_eq!(diagnostics["decision"], "deny_by_default");
+        assert_eq!(diagnostics["principal_class"], "user:*");
+        assert_eq!(diagnostics["reason_code"], "tool.execute.principal_not_allowlisted");
+        assert_eq!(
+            diagnostics["missing_grant_hints"][0],
+            "add_principal_to_tool_execute_allowlist"
+        );
+        assert_eq!(diagnostics["redaction"]["internal_policy_source_included"], false);
     }
 
     #[test]

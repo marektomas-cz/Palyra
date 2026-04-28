@@ -134,15 +134,98 @@ pub(crate) async fn console_diagnostics_handler(
     )
     .await?;
     let context_engine_payload = collect_console_context_engine_diagnostics(&state);
+    let tool_jobs = state
+        .runtime
+        .list_tool_jobs(crate::journal::ToolJobsListFilter {
+            owner_principal: Some(session.context.principal.clone()),
+            session_id: None,
+            run_id: None,
+            include_terminal: true,
+            limit: 256,
+        })
+        .await
+        .map_err(runtime_status_response)?;
     let generated_at_unix_ms = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
         )))
     })?;
+    let memory_payload = json!({
+        "usage": memory_status.usage,
+        "embeddings": memory_embeddings,
+        "providers": memory_provider_statuses,
+        "retrieval": {
+            "backend": retrieval_backend,
+            "scoring": retrieval_config.scoring,
+        },
+        "retention": {
+            "max_entries": memory_runtime_config.retention_max_entries,
+            "max_bytes": memory_runtime_config.retention_max_bytes,
+            "ttl_days": memory_runtime_config.retention_ttl_days,
+            "vacuum_schedule": memory_runtime_config.retention_vacuum_schedule,
+        },
+        "maintenance": {
+            "interval_ms": i64::try_from(MEMORY_MAINTENANCE_INTERVAL.as_millis())
+                .unwrap_or(i64::MAX),
+            "last_run": memory_status.last_run,
+            "last_vacuum_at_unix_ms": memory_status.last_vacuum_at_unix_ms,
+            "next_vacuum_due_at_unix_ms": memory_status.next_vacuum_due_at_unix_ms,
+            "next_run_at_unix_ms": memory_status.next_maintenance_run_at_unix_ms,
+        }
+    });
+    let null_payload = Value::Null;
+    let runtime_preview_payload =
+        observability_payload.pointer("/runtime_preview").unwrap_or(&null_payload);
+    let support_bundle_payload =
+        observability_payload.pointer("/support_bundle").unwrap_or(&null_payload);
+    let self_healing_payload =
+        observability_payload.pointer("/self_healing").unwrap_or(&null_payload);
+    let runtime_health = crate::runtime_diagnostics::build_runtime_health_snapshot(
+        generated_at_unix_ms,
+        &status_snapshot,
+        &auth_payload,
+        &memory_payload,
+        &skills_payload,
+        &plugins_payload,
+        &networked_workers_payload,
+        support_bundle_payload,
+        runtime_preview_payload,
+        &tool_jobs,
+    );
+    let runtime_metrics = crate::runtime_diagnostics::build_agent_runtime_metrics_snapshot(
+        &status_snapshot,
+        runtime_preview_payload,
+        &memory_payload,
+        &tool_jobs,
+    );
+    let otel_spans = crate::runtime_diagnostics::build_otel_span_contract(
+        generated_at_unix_ms,
+        &status_snapshot,
+    );
+    let connector_delivery = crate::runtime_diagnostics::build_connector_delivery_diagnostics(
+        &status_snapshot,
+        runtime_preview_payload,
+    );
+    let runtime_watchdog = crate::runtime_diagnostics::build_runtime_watchdog_diagnostics(
+        generated_at_unix_ms,
+        self_healing_payload,
+        &tool_jobs,
+    );
+    let budget_gates = crate::runtime_diagnostics::build_budget_gates_snapshot(
+        &status_snapshot,
+        &memory_payload,
+        runtime_preview_payload,
+    );
 
     Ok(Json(json!({
         "contract": contract_descriptor(),
         "generated_at_unix_ms": generated_at_unix_ms,
+        "runtime_health": runtime_health,
+        "agent_runtime_metrics": runtime_metrics,
+        "opentelemetry": otel_spans,
+        "connector_delivery": connector_delivery,
+        "runtime_watchdog": runtime_watchdog,
+        "budget_gates": budget_gates,
         "model_provider": provider_payload,
         "rate_limits": {
             "admin_api_window_ms": ADMIN_RATE_LIMIT_WINDOW_MS,
@@ -175,29 +258,7 @@ pub(crate) async fn console_diagnostics_handler(
         "networked_workers": networked_workers_payload,
         "canvas_experiments": canvas_experiments_payload,
         "observability": observability_payload,
-        "memory": {
-            "usage": memory_status.usage,
-            "embeddings": memory_embeddings,
-            "providers": memory_provider_statuses,
-            "retrieval": {
-                "backend": retrieval_backend,
-                "scoring": retrieval_config.scoring,
-            },
-            "retention": {
-                "max_entries": memory_runtime_config.retention_max_entries,
-                "max_bytes": memory_runtime_config.retention_max_bytes,
-                "ttl_days": memory_runtime_config.retention_ttl_days,
-                "vacuum_schedule": memory_runtime_config.retention_vacuum_schedule,
-            },
-            "maintenance": {
-                "interval_ms": i64::try_from(MEMORY_MAINTENANCE_INTERVAL.as_millis())
-                    .unwrap_or(i64::MAX),
-                "last_run": memory_status.last_run,
-                "last_vacuum_at_unix_ms": memory_status.last_vacuum_at_unix_ms,
-                "next_vacuum_due_at_unix_ms": memory_status.next_vacuum_due_at_unix_ms,
-                "next_run_at_unix_ms": memory_status.next_maintenance_run_at_unix_ms,
-            }
-        },
+        "memory": memory_payload,
         "learning": {
             "enabled": learning_runtime_config.enabled,
             "sampling_percent": learning_runtime_config.sampling_percent,
@@ -1907,6 +1968,7 @@ pub(crate) fn build_support_bundle_observability(state: &AppState) -> Value {
         },
         "workspace_restore": build_workspace_restore_observability(state),
         "health_graph": build_support_bundle_health_graph_observability(state),
+        "collector_contract": crate::runtime_diagnostics::build_support_bundle_collector_contract(),
         "replay": build_replay_support_observability(),
         "runtime_preview": runtime_preview,
         "networked_workers": networked_workers,

@@ -39,6 +39,7 @@ mod realtime;
 mod replay_capture;
 mod retrieval;
 mod routines;
+mod runtime_diagnostics;
 mod runtime_preview_controls;
 mod sandbox_runner;
 mod self_healing;
@@ -1923,6 +1924,7 @@ struct PolicyExplainResponse {
     approval_required: bool,
     reason: String,
     matched_policies: Vec<String>,
+    diagnostics: serde_json::Value,
 }
 
 #[derive(Clone)]

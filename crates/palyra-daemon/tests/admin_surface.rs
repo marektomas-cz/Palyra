@@ -69,6 +69,24 @@ fn admin_status_requires_token_and_context() -> Result<()> {
     assert!(success.contains("\"status\":\"ok\""), "expected admin status to be healthy");
     assert!(success.contains("\"admin_auth_required\":true"));
     assert!(success.contains("\"grpc_port\""));
+    assert!(success.contains("\"runtime_health\""));
+    assert!(success.contains("\"agent_runtime_metrics\""));
+
+    let metrics_url = format!("http://127.0.0.1:{admin_port}/admin/v1/metrics");
+    let metrics = client
+        .get(metrics_url)
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "user:ops")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin metrics with valid context")?
+        .error_for_status()
+        .context("admin metrics returned non-success status")?
+        .text()
+        .context("failed to read admin metrics response body")?;
+    assert!(metrics.contains("# HELP palyra_agent_runs_started_total"));
+    assert!(metrics.contains("palyra_tool_job_state{state=\"queued\"}"));
     Ok(())
 }
 
@@ -145,6 +163,10 @@ fn admin_policy_explain_requires_token_and_returns_decision_payload() -> Result<
     assert!(
         body.contains("\"matched_policies\":"),
         "policy explain must include matched policies: {body}"
+    );
+    assert!(
+        body.contains("\"diagnostics\":") && body.contains("\"reason_code\":"),
+        "policy explain must include diagnostics with reason_code: {body}"
     );
     Ok(())
 }

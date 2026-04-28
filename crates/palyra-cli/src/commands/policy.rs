@@ -17,6 +17,8 @@ pub(crate) fn run_policy(command: PolicyCommand) -> Result<()> {
                     ("deny_by_default", true, reason.as_str())
                 }
             };
+            let diagnostics =
+                palyra_policy::policy_explain_diagnostics_value(&request, &evaluation);
             if output::preferred_json(json) {
                 return output::print_json_pretty(
                     &json!({
@@ -27,6 +29,7 @@ pub(crate) fn run_policy(command: PolicyCommand) -> Result<()> {
                         "approval_required": approval_required,
                         "reason": reason,
                         "matched_policies": evaluation.explanation.matched_policy_ids,
+                        "diagnostics": diagnostics,
                         "explanation": {
                             "evaluated_with_cedar": evaluation.explanation.evaluated_with_cedar,
                             "diagnostics_errors": evaluation.explanation.diagnostics_errors,

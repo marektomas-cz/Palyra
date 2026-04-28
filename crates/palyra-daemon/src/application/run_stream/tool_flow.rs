@@ -17,7 +17,7 @@ use tokio::{
     time::{interval, timeout, MissedTickBehavior},
 };
 use tonic::{Status, Streaming};
-use tracing::info;
+use tracing::{info, Instrument};
 use ulid::Ulid;
 
 use crate::{
@@ -1143,21 +1143,32 @@ async fn execute_prepared_tool_runtime(
     cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let must_drain_execution_after_cancel =
         tool_cancellation_requires_execution_drain(prepared.tool_name.as_str());
-    let mut execution_future = Box::pin(execute_tool_with_runtime_dispatch(
-        runtime_state,
-        ToolRuntimeExecutionContext {
-            principal: request_context.principal.as_str(),
-            device_id: request_context.device_id.as_str(),
-            channel: request_context.channel.as_deref(),
-            session_id: prepared.resolved_session_id.as_str(),
-            run_id,
-            execution_backend: prepared.backend_selection.resolution.resolved,
-            backend_reason_code: prepared.backend_selection.resolution.reason_code.as_str(),
-        },
-        prepared.proposal_id.as_str(),
-        prepared.tool_name.as_str(),
-        prepared.input_json.as_slice(),
-    ));
+    let tool_span = tracing::info_span!(
+        "tool.call",
+        run_id = %run_id,
+        tool_call_id = %prepared.proposal_id,
+        tool_name = %prepared.tool_name,
+        execution_surface = "run_stream",
+        status = tracing::field::Empty,
+    );
+    let mut execution_future = Box::pin(
+        execute_tool_with_runtime_dispatch(
+            runtime_state,
+            ToolRuntimeExecutionContext {
+                principal: request_context.principal.as_str(),
+                device_id: request_context.device_id.as_str(),
+                channel: request_context.channel.as_deref(),
+                session_id: prepared.resolved_session_id.as_str(),
+                run_id,
+                execution_backend: prepared.backend_selection.resolution.resolved,
+                backend_reason_code: prepared.backend_selection.resolution.reason_code.as_str(),
+            },
+            prepared.proposal_id.as_str(),
+            prepared.tool_name.as_str(),
+            prepared.input_json.as_slice(),
+        )
+        .instrument(tool_span),
+    );
     let mut cancel_requested_during_execution = false;
     let outcome = loop {
         tokio::select! {

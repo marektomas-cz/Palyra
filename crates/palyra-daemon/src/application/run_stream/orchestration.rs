@@ -6,7 +6,7 @@ use tokio::{
     time::{interval, MissedTickBehavior},
 };
 use tonic::{Status, Streaming};
-use tracing::warn;
+use tracing::{warn, Instrument};
 
 use crate::{
     application::learning::schedule_post_run_reflection,
@@ -179,8 +179,19 @@ async fn execute_run_stream_provider_request(
     lease_context: ProviderLeaseExecutionContext,
     tape_seq: &mut i64,
 ) -> Result<RunStreamProviderRequestOutcome, Status> {
-    let mut provider_future =
-        Box::pin(runtime_state.execute_model_provider_with_lease(provider_request, lease_context));
+    let provider_span = tracing::info_span!(
+        "provider.call",
+        run_id = %run_id,
+        trace_id = provider_request.context_trace_id.as_deref().unwrap_or("none"),
+        has_tool_catalog = provider_request.tool_catalog_snapshot.is_some(),
+        json_mode = provider_request.json_mode,
+        status = tracing::field::Empty,
+    );
+    let mut provider_future = Box::pin(
+        runtime_state
+            .execute_model_provider_with_lease(provider_request, lease_context)
+            .instrument(provider_span),
+    );
     let mut cancel_poll = interval(Duration::from_millis(100));
     cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
