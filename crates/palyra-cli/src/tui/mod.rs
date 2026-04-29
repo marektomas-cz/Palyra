@@ -232,6 +232,7 @@ struct App {
     status_line: String,
     settings_selected: usize,
     show_tips: bool,
+    force_clear_next_frame: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +264,9 @@ pub(crate) fn run(options: LaunchOptions) -> Result<()> {
 async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     loop {
         app.drain_stream_events().await?;
+        if app.take_force_clear_next_frame() {
+            terminal.clear().context("failed to clear terminal before redraw")?;
+        }
         terminal.draw(|frame| render(frame, app))?;
         if app.should_exit() {
             return Ok(());
@@ -357,6 +361,7 @@ impl App {
             status_line: text::connected(locale),
             settings_selected: 0,
             show_tips: true,
+            force_clear_next_frame: false,
         };
         app.refresh_agent_identity(None, false).await?;
         match app.runtime.list_models(None) {
@@ -389,6 +394,15 @@ impl App {
 
     fn should_exit(&self) -> bool {
         matches!(self.mode, Mode::Chat) && self.status_line == "__exit__"
+    }
+
+    fn close_overlay(&mut self) {
+        self.mode = Mode::Chat;
+        self.force_clear_next_frame = true;
+    }
+
+    fn take_force_clear_next_frame(&mut self) -> bool {
+        std::mem::take(&mut self.force_clear_next_frame)
     }
 
     async fn drain_stream_events(&mut self) -> Result<()> {
@@ -3310,11 +3324,11 @@ impl App {
 
     async fn apply_picker_selection(&mut self) -> Result<()> {
         let Some(picker) = self.pending_picker.clone() else {
-            self.mode = Mode::Chat;
+            self.close_overlay();
             return Ok(());
         };
         let Some(item) = picker.items.get(picker.selected) else {
-            self.mode = Mode::Chat;
+            self.close_overlay();
             return Ok(());
         };
         match picker.kind {
@@ -3323,7 +3337,7 @@ impl App {
             PickerKind::Model => self.set_model(item.id.clone()).await?,
         }
         self.pending_picker = None;
-        self.mode = Mode::Chat;
+        self.close_overlay();
         Ok(())
     }
 
@@ -3459,7 +3473,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     }
     match app.mode {
         Mode::Help => match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.mode = Mode::Chat,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.close_overlay(),
             _ => {}
         },
         Mode::Approval => handle_approval_key(app, key).await?,
@@ -3658,7 +3672,7 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
 async fn handle_approval_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let Some(approval) = app.pending_approval.clone() else {
-        app.mode = Mode::Chat;
+        app.close_overlay();
         return Ok(());
     };
     match key.code {
@@ -3678,7 +3692,7 @@ async fn handle_approval_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 format!("Approved {}", approval.tool_name),
             );
             app.pending_approval = None;
-            app.mode = Mode::Chat;
+            app.close_overlay();
             app.status_line = text::approval_granted_once(app.locale);
             app.emit_ux_event(
                 "ux.approval.resolved",
@@ -3708,7 +3722,7 @@ async fn handle_approval_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 format!("Denied {}", approval.tool_name),
             );
             app.pending_approval = None;
-            app.mode = Mode::Chat;
+            app.close_overlay();
             app.status_line = text::approval_denied(app.locale);
             app.emit_ux_event(
                 "ux.approval.resolved",
@@ -3732,12 +3746,12 @@ async fn handle_shell_confirm_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('y') | KeyCode::Enter => {
             if strict_profile_blocks_local_shell() {
                 app.pending_shell_command = None;
-                app.mode = Mode::Chat;
+                app.close_overlay();
                 app.status_line = text::local_shell_blocked(app.locale);
                 return Ok(());
             }
             app.local_shell_enabled = true;
-            app.mode = Mode::Chat;
+            app.close_overlay();
             app.status_line = text::local_shell_enabled_for_session(app.locale);
             if let Some(command) = app.pending_shell_command.take() {
                 app.handle_shell_request(command).await?;
@@ -3745,7 +3759,7 @@ async fn handle_shell_confirm_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Char('n') | KeyCode::Esc => {
             app.pending_shell_command = None;
-            app.mode = Mode::Chat;
+            app.close_overlay();
             app.status_line = text::local_shell_remains_disabled(app.locale);
         }
         _ => {}
@@ -3756,7 +3770,7 @@ async fn handle_shell_confirm_key(app: &mut App, key: KeyEvent) -> Result<()> {
 async fn handle_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let items = settings_items();
     match key.code {
-        KeyCode::Esc => app.mode = Mode::Chat,
+        KeyCode::Esc => app.close_overlay(),
         KeyCode::Up => app.settings_selected = app.settings_selected.saturating_sub(1),
         KeyCode::Down => {
             app.settings_selected = (app.settings_selected + 1).min(items.len().saturating_sub(1));
@@ -3785,13 +3799,13 @@ async fn handle_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
 async fn handle_picker_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let Some(picker) = app.pending_picker.as_mut() else {
-        app.mode = Mode::Chat;
+        app.close_overlay();
         return Ok(());
     };
     match key.code {
         KeyCode::Esc => {
             app.pending_picker = None;
-            app.mode = Mode::Chat;
+            app.close_overlay();
         }
         KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
         KeyCode::Down => {
@@ -3860,6 +3874,7 @@ mod tests {
             status_line: String::new(),
             settings_selected: 0,
             show_tips: true,
+            force_clear_next_frame: false,
         }
     }
 
@@ -4021,6 +4036,23 @@ mod tests {
         assert!(!handle_key(&mut app, backslash).await.expect("AltGr text should be accepted"));
 
         assert_eq!(app.composer.text(), "\\");
+    }
+
+    #[tokio::test]
+    async fn escape_from_help_requests_full_redraw() {
+        let mut app = test_app();
+        app.mode = Mode::Help;
+        let escape =
+            KeyEvent::new_with_kind(KeyCode::Esc, KeyModifiers::empty(), KeyEventKind::Press);
+
+        assert!(!handle_key(&mut app, escape).await.expect("escape should close help"));
+
+        assert!(matches!(app.mode, Mode::Chat));
+        assert!(app.take_force_clear_next_frame(), "closing help should clear the next frame");
+        assert!(
+            !app.take_force_clear_next_frame(),
+            "clear request should be consumed after one frame"
+        );
     }
 
     #[tokio::test]
