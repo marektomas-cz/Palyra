@@ -747,7 +747,13 @@ impl App {
             return Ok(());
         }
         if let Some(command) = value.strip_prefix('/') {
-            return self.handle_slash_command(command).await;
+            if self.handle_slash_command(command).await? {
+                self.clear_current_draft();
+                self.slash_palette_dismissed = false;
+                self.pending_slash_palette = None;
+                self.slash_palette_selected = 0;
+            }
+            return Ok(());
         }
         if self.active_stream.is_some() {
             self.status_line = text::run_already_in_progress(self.locale);
@@ -839,24 +845,24 @@ impl App {
         Ok(())
     }
 
-    async fn handle_slash_command(&mut self, command: &str) -> Result<()> {
+    async fn handle_slash_command(&mut self, command: &str) -> Result<bool> {
         let mut parts = command.split_whitespace();
         let Some(raw_name) = parts.next() else {
-            return Ok(());
+            return Ok(false);
         };
         let raw_arguments =
             command.trim().strip_prefix(raw_name).map(str::trim).unwrap_or_default();
         let Some(name) = resolve_shared_chat_command_name(raw_name, SharedChatCommandSurface::Tui)
         else {
             self.status_line = format!("Unknown slash command: /{raw_name}");
-            return Ok(());
+            return Ok(false);
         };
         if self.active_stream.is_some()
             && !matches!(name, "help" | "status" | "usage" | "queue" | "interrupt")
         {
             self.status_line =
                 format!("/{name} is unavailable while a run is active. Use /interrupt or /queue.");
-            return Ok(());
+            return Ok(false);
         }
         self.ux_metrics.record(TuiUxMetricKey::SlashCommands);
         match name {
@@ -1055,7 +1061,7 @@ impl App {
                 "shared chat command registry contains an unmapped TUI command `{other}`"
             ),
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn switch_agent(&mut self, agent_id: String) -> Result<()> {
@@ -1931,6 +1937,25 @@ impl App {
             self.ux_metrics.record(TuiUxMetricKey::KeyboardAccepts);
         }
         self.sync_composer_after_edit();
+    }
+
+    fn selected_slash_suggestion_replacement(&self) -> Option<String> {
+        self.pending_slash_palette
+            .as_ref()
+            .and_then(|palette| palette.suggestions.get(self.slash_palette_selected))
+            .map(|suggestion| suggestion.replacement.clone())
+    }
+
+    async fn submit_or_accept_slash_palette(&mut self) -> Result<()> {
+        if let Some(replacement) = self.selected_slash_suggestion_replacement() {
+            self.apply_selected_slash_suggestion(true);
+            if slash_replacement_is_bare_command(replacement.as_str()) {
+                self.submit_input().await?;
+            }
+            return Ok(());
+        }
+
+        self.submit_input().await
     }
 
     async fn refresh_slash_entity_catalogs(&mut self) -> Result<()> {
@@ -3443,6 +3468,18 @@ fn is_text_input_modifier(modifiers: KeyModifiers) -> bool {
     !modifiers.intersects(command_modifiers)
 }
 
+fn slash_replacement_is_bare_command(replacement: &str) -> bool {
+    let trimmed = replacement.trim();
+    let Some(command) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    let mut parts = command.split_whitespace();
+    let Some(name) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && matches!(name, "help" | "status" | "usage")
+}
+
 async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Tab => {
@@ -3518,7 +3555,9 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.composer.insert_newline();
             app.sync_composer_after_edit();
         }
-        KeyCode::Enter if matches!(app.focus, Focus::Input) => app.submit_input().await?,
+        KeyCode::Enter if matches!(app.focus, Focus::Input) => {
+            app.submit_or_accept_slash_palette().await?;
+        }
         KeyCode::Backspace if matches!(app.focus, Focus::Input) => {
             app.composer.backspace();
             app.sync_composer_after_edit();
@@ -3944,6 +3983,56 @@ mod tests {
             .expect("release key should remain ignored"));
 
         assert_eq!(app.composer.text(), "R");
+    }
+
+    #[tokio::test]
+    async fn enter_accepts_and_runs_bare_slash_palette_suggestion() {
+        let mut app = test_app();
+        app.composer.set_text("/sta".to_owned());
+        app.sync_composer_after_edit();
+
+        assert_eq!(
+            app.pending_slash_palette
+                .as_ref()
+                .and_then(|palette| palette.suggestions.first())
+                .map(|suggestion| suggestion.replacement.trim()),
+            Some("/status")
+        );
+
+        let enter =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::empty(), KeyEventKind::Press);
+        assert!(!handle_key(&mut app, enter).await.expect("enter should be handled"));
+
+        assert!(app.composer.is_empty(), "executed slash command should clear the composer");
+        assert!(
+            app.pending_slash_palette.is_none(),
+            "executed slash command should close the slash palette"
+        );
+        assert_eq!(
+            app.transcript.last().map(|entry| entry.title.as_str()),
+            Some("Status"),
+            "bare command suggestion should execute when accepted with Enter"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_dismisses_slash_palette_without_editing_composer() {
+        let mut app = test_app();
+        app.composer.set_text("/status".to_owned());
+        app.sync_composer_after_edit();
+
+        assert!(
+            app.pending_slash_palette.is_some(),
+            "recognized slash command should keep palette state available for dismissal"
+        );
+
+        let escape =
+            KeyEvent::new_with_kind(KeyCode::Esc, KeyModifiers::empty(), KeyEventKind::Press);
+        assert!(!handle_key(&mut app, escape).await.expect("escape should be handled"));
+
+        assert_eq!(app.composer.text(), "/status");
+        assert!(app.pending_slash_palette.is_none());
+        assert!(app.slash_palette_dismissed);
     }
 
     #[test]
