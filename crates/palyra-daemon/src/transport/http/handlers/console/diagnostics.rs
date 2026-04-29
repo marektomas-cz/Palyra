@@ -1856,14 +1856,14 @@ pub(crate) fn build_connector_observability(
         if queue.paused {
             paused = paused.saturating_add(1);
         }
-        if connector.readiness.as_str() != "ready" || connector.liveness.as_str() != "running" {
-            degraded = degraded.saturating_add(1);
-        }
-        if let Some(runtime) = state
+        let runtime = state
             .channels
             .runtime_snapshot(connector.connector_id.as_str())
-            .map_err(|error| Box::new(channel_platform_error_response(error)))?
-        {
+            .map_err(|error| Box::new(channel_platform_error_response(error)))?;
+        if connector_has_actionable_degradation(&connector, runtime.as_ref()) {
+            degraded = degraded.saturating_add(1);
+        }
+        if let Some(runtime) = runtime.as_ref() {
             if let Some(error) = runtime.get("last_error").and_then(Value::as_str) {
                 if !error.trim().is_empty() && last_errors.len() < 5 {
                     last_errors.push(json!({
@@ -1891,6 +1891,18 @@ pub(crate) fn build_connector_observability(
         "upload_failure_rate_basis": "recent_upload_failures_only",
         "recent_errors": last_errors,
     }))
+}
+
+fn connector_has_actionable_degradation(
+    connector: &palyra_connectors::ConnectorStatusSnapshot,
+    runtime: Option<&Value>,
+) -> bool {
+    connector.readiness.as_str() != "ready"
+        || connector.last_error.as_deref().is_some_and(|error| !error.trim().is_empty())
+        || runtime
+            .and_then(|payload| payload.get("last_error"))
+            .and_then(Value::as_str)
+            .is_some_and(|error| !error.trim().is_empty())
 }
 
 pub(crate) async fn collect_console_browser_action_diagnostics(state: &AppState) -> Value {
@@ -4833,6 +4845,9 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod connector_observability_tests;
 
 #[cfg(test)]
 mod config_ref_health_tests {

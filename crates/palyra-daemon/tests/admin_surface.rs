@@ -2496,6 +2496,18 @@ fn console_system_surface_returns_presence_and_enforces_emit_csrf() -> Result<()
         presence_response.pointer("/subsystems/model_provider").is_some(),
         "system presence should include model provider subsystem"
     );
+    assert_eq!(
+        presence_response.pointer("/subsystems/channels/state").and_then(Value::as_str),
+        Some("ok"),
+        "idle optional channel connectors should not mark a fresh local install degraded: {presence_response}"
+    );
+    assert_eq!(
+        presence_response
+            .pointer("/subsystems/channels/status/degraded_connectors")
+            .and_then(Value::as_u64),
+        Some(0),
+        "disabled or internal-test-only stopped connectors should not count as degraded: {presence_response}"
+    );
 
     let insights_response = client
         .get(format!("http://127.0.0.1:{admin_port}/console/v1/system/insights"))
