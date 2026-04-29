@@ -10,6 +10,24 @@ pub(crate) struct BrowserServiceImpl {
     pub(crate) runtime: Arc<BrowserRuntimeState>,
 }
 
+fn navigate_action_outcome(outcome: &NavigateOutcome) -> &'static str {
+    if outcome.success {
+        return "navigated";
+    }
+    let error = outcome.error.to_ascii_lowercase();
+    if error.contains("blocked url scheme") || error.contains("private/local") {
+        "policy_blocked"
+    } else if error.contains("socks5") || error.contains("proxy") {
+        "browser_proxy_failed"
+    } else if error.contains("chromium") || error.contains("tab runtime") {
+        "browser_runtime_failed"
+    } else if error.contains("request failed") || error.contains("error sending request") {
+        "network_request_failed"
+    } else {
+        "navigation_failed"
+    }
+}
+
 #[tonic::async_trait]
 impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
     async fn health(
@@ -976,6 +994,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         if url.is_empty() {
             return Err(Status::invalid_argument("navigate requires non-empty url"));
         }
+        let started_at_unix_ms = current_unix_ms();
         let (timeout_ms, max_response_bytes, allow_private_targets, cookie_header) = {
             let mut sessions = self.runtime.sessions.lock().await;
             let Some(session) = sessions.get_mut(session_id.as_str()) else {
@@ -1065,6 +1084,28 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 Status::internal(format!("failed to persist state after navigate: {error}"))
             })?;
         }
+        let _ = finalize_session_action(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            FinalizeActionRequest {
+                action_name: "navigate",
+                selector: url.as_str(),
+                success: outcome.success,
+                outcome: navigate_action_outcome(&outcome),
+                error: outcome.error.as_str(),
+                started_at_unix_ms,
+                attempts: 1,
+                capture_failure_screenshot: false,
+                max_failure_screenshot_bytes: 0,
+            },
+        )
+        .await;
+        let session_for_persist = {
+            let sessions = self.runtime.sessions.lock().await;
+            sessions.get(session_id.as_str()).filter(|session| session.persistence.enabled).cloned()
+        };
+        persist_session_after_mutation(self.runtime.as_ref(), session_for_persist, "navigate")
+            .map_err(map_persist_error_to_status)?;
 
         Ok(Response::new(browser_v1::NavigateResponse {
             v: CANONICAL_PROTOCOL_MAJOR,

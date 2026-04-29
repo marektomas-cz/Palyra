@@ -2861,8 +2861,25 @@ fn browser_failure_detail(error: &str) -> String {
     let trimmed = error.trim();
     if trimmed.is_empty() {
         "browser service returned success=false".to_owned()
+    } else if let Some(class) = browser_failure_class(trimmed) {
+        format!("{class}: {trimmed}")
     } else {
         trimmed.to_owned()
+    }
+}
+
+fn browser_failure_class(error: &str) -> Option<&'static str> {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("private/local") || lower.contains("blocked url scheme") {
+        Some("policy_blocked")
+    } else if lower.contains("socks5") || lower.contains("proxy") {
+        Some("browser_proxy_failed")
+    } else if lower.contains("chromium") || lower.contains("tab runtime") {
+        Some("browser_runtime_failed")
+    } else if lower.contains("request failed") || lower.contains("error sending request") {
+        Some("network_request_failed")
+    } else {
+        None
     }
 }
 
@@ -3471,7 +3488,7 @@ fn proto_console_severity_text(value: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_command_policy_action, browser_identifier_json_value,
+        browser_command_policy_action, browser_failure_detail, browser_identifier_json_value,
         browser_service_auth_token_command, browser_service_enable_command,
         browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
@@ -3578,6 +3595,23 @@ mod tests {
             error.to_string().contains("browser.screenshot failed: tab crashed"),
             "failure should include command and browser service error: {error}"
         );
+    }
+
+    #[test]
+    fn browser_failure_detail_classifies_network_proxy_and_policy_errors() {
+        let network = ensure_browser_command_success(
+            "browser.navigate",
+            false,
+            "request failed: error sending request for url (https://example.com/)",
+        )
+        .expect_err("network navigation failure should fail");
+        assert!(
+            network.to_string().contains("network_request_failed:"),
+            "network failure should include an actionable class: {network}"
+        );
+        assert!(browser_failure_detail("blocked URL scheme file").starts_with("policy_blocked:"));
+        assert!(browser_failure_detail("Chromium session SOCKS5 proxy request failed")
+            .starts_with("browser_proxy_failed:"));
     }
 
     #[test]

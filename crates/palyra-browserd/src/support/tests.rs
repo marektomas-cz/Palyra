@@ -124,6 +124,69 @@ async fn create_test_session(
         .into_inner()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_service_records_failed_navigation_in_action_log() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime };
+    let created = create_test_session(&service, "user:ops").await;
+    let session_id = created.session_id.expect("session id should be present");
+
+    let navigate = service
+        .navigate(Request::new(browser_v1::NavigateRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            url: "file:///tmp/index.html".to_owned(),
+            timeout_ms: 1_000,
+            allow_redirects: true,
+            max_redirects: 3,
+            allow_private_targets: false,
+        }))
+        .await
+        .expect("navigate should return a failure response")
+        .into_inner();
+
+    assert!(!navigate.success, "file navigation should fail closed");
+    let mut inspect = Request::new(browser_v1::InspectSessionRequest {
+        v: 1,
+        session_id: Some(session_id),
+        include_cookies: false,
+        include_storage: false,
+        include_action_log: true,
+        include_network_log: false,
+        include_page_snapshot: false,
+        include_console_log: true,
+        include_page_diagnostics: false,
+        max_cookie_bytes: 0,
+        max_storage_bytes: 0,
+        max_action_log_entries: 10,
+        max_network_log_entries: 0,
+        max_network_log_bytes: 0,
+        max_dom_snapshot_bytes: 0,
+        max_visible_text_bytes: 0,
+        max_console_log_entries: 10,
+        max_console_log_bytes: 1024,
+    });
+    insert_principal(&mut inspect, "user:ops");
+    let inspected = service
+        .inspect_session(inspect)
+        .await
+        .expect("inspect_session should include action log")
+        .into_inner();
+
+    let entry = inspected
+        .action_log
+        .iter()
+        .find(|entry| entry.action_name == "navigate")
+        .expect("failed navigate should be recorded as an action log entry");
+    assert!(!entry.success);
+    assert_eq!(entry.outcome, "policy_blocked");
+    assert!(entry.error.contains("blocked URL scheme"));
+    assert!(
+        inspected.console_log.iter().any(|entry| entry.message.contains("navigate failed")),
+        "failed navigation should also appear in diagnostics"
+    );
+}
+
 #[test]
 fn query_redaction_treats_oauth_code_and_state_as_sensitive() {
     let redacted = super::redact_query_pairs("code=oauth123&state=abc123&safe=1");
