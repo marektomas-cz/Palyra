@@ -67,6 +67,8 @@ struct BrowserResolvedConfig {
     connection: BrowserServiceConnection,
     policy: BrowserPolicySnapshot,
     config_path: Option<String>,
+    token_from_cli_only: bool,
+    token_conflicts_with_gateway_config: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +81,8 @@ struct BrowserServiceMetadata {
     stdout_log_path: String,
     stderr_log_path: String,
     started_at_unix_ms: u64,
+    #[serde(default)]
+    auth_token_configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -480,7 +484,14 @@ fn browser_permissions_policy_action(command: &BrowserPermissionsCommand) -> &'s
 
 fn ensure_browser_cli_policy_enabled(action: &str) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
-    ensure_browser_service_enabled(&resolved.policy, action, resolved.config_path.as_deref())
+    ensure_browser_service_enabled(&resolved.policy, action, resolved.config_path.as_deref())?;
+    let metadata = read_browser_service_metadata()?;
+    ensure_browser_gateway_auth_token_alignment(
+        &resolved.policy,
+        metadata.as_ref(),
+        action,
+        resolved.config_path.as_deref(),
+    )
 }
 
 async fn run_browser_status(
@@ -498,8 +509,13 @@ async fn run_browser_status(
         probe_browser_grpc(&resolved.connection).await.err().map(|error| error.to_string());
     let control_plane = probe_browser_control_plane_policy().await;
     let browserd_reachable = health_response.is_some() || grpc_error.is_none();
-    let mut warnings =
-        browser_status_warnings(&resolved.policy, &control_plane, browserd_reachable);
+    let mut warnings = browser_status_warnings(
+        &resolved.policy,
+        &control_plane,
+        browserd_reachable,
+        metadata.as_ref(),
+        resolved.config_path.as_deref(),
+    );
     warnings.extend(browser_profile_prerequisite_warnings(&resolved.policy));
     let payload = BrowserStatusPayload {
         service: "palyra-browserd",
@@ -535,7 +551,9 @@ async fn run_browser_start(
 ) -> Result<()> {
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
     ensure_browser_service_enabled(&resolved.policy, "start", resolved.config_path.as_deref())?;
-    let lifecycle_warnings = browser_profile_prerequisite_warnings(&resolved.policy);
+    ensure_browser_start_token_alignment(&resolved)?;
+    let mut lifecycle_warnings = browser_profile_prerequisite_warnings(&resolved.policy);
+    lifecycle_warnings.extend(browser_start_auth_token_warnings(&resolved));
     if fetch_browser_health(resolved.connection.health_base_url.as_str()).await.is_ok() {
         let metadata = read_browser_service_metadata()?;
         let payload = BrowserLifecyclePayload {
@@ -603,6 +621,7 @@ async fn run_browser_start(
         stdout_log_path: stdout_log_path.display().to_string(),
         stderr_log_path: stderr_log_path.display().to_string(),
         started_at_unix_ms: now_unix_ms(),
+        auth_token_configured: resolved.connection.auth_token.is_some(),
     };
     write_browser_service_metadata(&metadata)?;
 
@@ -2446,12 +2465,14 @@ fn resolve_browser_config(
         health_url.unwrap_or_else(|| derive_browser_health_base_url(grpc_url.as_str())),
         "browser health URL",
     )?;
-    let resolved_token = token
+    let cli_token = token.as_deref().and_then(normalize_optional_text).map(ToOwned::to_owned);
+    let gateway_configured_token = env_token.clone().or(file_auth_token.clone());
+    let resolved_token = cli_token.clone().or(gateway_configured_token.clone());
+    let token_from_cli_only = cli_token.is_some() && gateway_configured_token.is_none();
+    let token_conflicts_with_gateway_config = cli_token
         .as_deref()
-        .and_then(normalize_optional_text)
-        .map(ToOwned::to_owned)
-        .or(env_token.clone())
-        .or(file_auth_token.clone());
+        .zip(gateway_configured_token.as_deref())
+        .is_some_and(|(cli_token, gateway_token)| cli_token != gateway_token);
 
     Ok(BrowserResolvedConfig {
         connection: BrowserServiceConnection {
@@ -2476,7 +2497,57 @@ fn resolve_browser_config(
             profiles_ready: env_state_encryption_key.is_some(),
         },
         config_path: config_path.map(|value| value.display().to_string()),
+        token_from_cli_only,
+        token_conflicts_with_gateway_config,
     })
+}
+
+fn ensure_browser_start_token_alignment(resolved: &BrowserResolvedConfig) -> Result<()> {
+    if resolved.token_conflicts_with_gateway_config {
+        anyhow::bail!(
+            "browser start --token differs from the browser service token already configured for the gateway; use the configured token, update `tool_call.browser_service.auth_token`, or restart the gateway with matching PALYRA_BROWSER_SERVICE_AUTH_TOKEN before starting browserd"
+        );
+    }
+    Ok(())
+}
+
+fn browser_start_auth_token_warnings(resolved: &BrowserResolvedConfig) -> Vec<String> {
+    if !resolved.token_from_cli_only {
+        return Vec::new();
+    }
+    vec![browser_gateway_auth_token_setup_warning(resolved.config_path.as_deref())]
+}
+
+fn ensure_browser_gateway_auth_token_alignment(
+    policy: &BrowserPolicySnapshot,
+    metadata: Option<&BrowserServiceMetadata>,
+    action: &str,
+    config_path: Option<&str>,
+) -> Result<()> {
+    if metadata.is_some_and(|entry| entry.auth_token_configured) && !policy.auth_token_configured {
+        anyhow::bail!(
+            "palyra browser {action} cannot use the CLI-managed browser service because browserd was started with an auth token, but the gateway has no browser service token configured. {}",
+            browser_gateway_auth_token_setup_warning(config_path)
+        );
+    }
+    Ok(())
+}
+
+fn browser_gateway_auth_token_setup_warning(config_path: Option<&str>) -> String {
+    let configure_command = browser_service_auth_token_command(config_path);
+    format!(
+        "Set `tool_call.browser_service.auth_token` to the same token with `{configure_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun gateway-mediated browser commands such as `palyra browser open`."
+    )
+}
+
+fn browser_service_auth_token_command(config_path: Option<&str>) -> String {
+    let mut command = "palyra config set".to_owned();
+    if let Some(path) = config_path.and_then(normalize_optional_text) {
+        command.push_str(" --path ");
+        command.push_str(&quote_cli_argument(path));
+    }
+    command.push_str(" --key tool_call.browser_service.auth_token --value '\"<same-token>\"'");
+    command
 }
 
 fn ensure_browser_service_enabled(
@@ -2519,8 +2590,16 @@ fn browser_status_warnings(
     policy: &BrowserPolicySnapshot,
     control_plane: &BrowserControlPlaneSnapshot,
     browserd_reachable: bool,
+    metadata: Option<&BrowserServiceMetadata>,
+    config_path: Option<&str>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
+    if metadata.is_some_and(|entry| entry.auth_token_configured) && !policy.auth_token_configured {
+        warnings.push(format!(
+            "CLI-managed browserd was started with an auth token, but no gateway browser service token is configured. {}",
+            browser_gateway_auth_token_setup_warning(config_path)
+        ));
+    }
     if policy.configured_enabled
         && control_plane.reachable
         && control_plane.browser_enabled == Some(false)
@@ -3341,9 +3420,12 @@ fn proto_console_severity_text(value: i32) -> &'static str {
 mod tests {
     use super::{
         browser_command_policy_action, browser_identifier_json_value,
-        browser_service_enable_command, browser_status_warnings, ensure_browser_command_success,
-        ensure_browser_service_enabled, session_summary_value, BrowserControlPlaneSnapshot,
-        BrowserPolicySnapshot,
+        browser_service_auth_token_command, browser_service_enable_command,
+        browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
+        ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
+        ensure_browser_start_token_alignment, session_summary_value, BrowserControlPlaneSnapshot,
+        BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
+        BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use serde_json::Value;
@@ -3361,6 +3443,46 @@ mod tests {
             state_key_vault_ref_configured: false,
             state_encryption_key_env_configured: false,
             profiles_ready: false,
+        }
+    }
+
+    fn resolved_browser_config_for_test() -> BrowserResolvedConfig {
+        BrowserResolvedConfig {
+            connection: BrowserServiceConnection {
+                grpc_url: "http://127.0.0.1:7543".to_owned(),
+                health_base_url: "http://127.0.0.1:7143".to_owned(),
+                auth_token: Some("token-a".to_owned()),
+            },
+            policy: BrowserPolicySnapshot {
+                configured_enabled: true,
+                auth_token_configured: true,
+                endpoint: "http://127.0.0.1:7543".to_owned(),
+                connect_timeout_ms: None,
+                request_timeout_ms: None,
+                max_screenshot_bytes: None,
+                max_title_bytes: None,
+                state_dir: None,
+                state_key_vault_ref_configured: false,
+                state_encryption_key_env_configured: false,
+                profiles_ready: false,
+            },
+            config_path: Some(r"C:\Palyra\palyra.toml".to_owned()),
+            token_from_cli_only: false,
+            token_conflicts_with_gateway_config: false,
+        }
+    }
+
+    fn browser_metadata_with_token() -> BrowserServiceMetadata {
+        BrowserServiceMetadata {
+            schema_version: super::BROWSER_SERVICE_METADATA_SCHEMA_VERSION,
+            pid: 123,
+            binary: "palyra-browserd".to_owned(),
+            grpc_url: "http://127.0.0.1:7543".to_owned(),
+            health_base_url: "http://127.0.0.1:7143".to_owned(),
+            stdout_log_path: "browserd.stdout.log".to_owned(),
+            stderr_log_path: "browserd.stderr.log".to_owned(),
+            started_at_unix_ms: 1,
+            auth_token_configured: true,
         }
     }
 
@@ -3508,6 +3630,8 @@ mod tests {
                 error: None,
             },
             true,
+            None,
+            None,
         );
 
         assert!(
@@ -3517,6 +3641,95 @@ mod tests {
                     && warning.contains("restart the gateway")
             }),
             "stale gateway policy should produce a restart warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn browser_auth_token_command_includes_config_path_and_placeholder() {
+        let command = browser_service_auth_token_command(Some(r"C:\Palyra\palyra.toml"));
+
+        assert_eq!(
+            command,
+            r#"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.auth_token --value '"<same-token>"'"#
+        );
+    }
+
+    #[test]
+    fn browser_start_warns_for_cli_only_token() {
+        let mut resolved = resolved_browser_config_for_test();
+        resolved.token_from_cli_only = true;
+
+        let warnings = browser_start_auth_token_warnings(&resolved);
+
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("tool_call.browser_service.auth_token")
+                    && warning.contains("restart the gateway")
+                    && warning.contains("palyra browser open")
+            }),
+            "CLI-only browser start token should warn about gateway setup: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn browser_start_rejects_token_that_conflicts_with_gateway_config() {
+        let mut resolved = resolved_browser_config_for_test();
+        resolved.token_conflicts_with_gateway_config = true;
+
+        let error = ensure_browser_start_token_alignment(&resolved)
+            .expect_err("conflicting browser start token should be rejected");
+
+        assert!(
+            error.to_string().contains("differs from the browser service token"),
+            "conflict error should explain the token mismatch: {error}"
+        );
+    }
+
+    #[test]
+    fn browser_status_warns_when_cli_managed_browserd_token_is_not_in_gateway_config() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        let metadata = browser_metadata_with_token();
+        let warnings = browser_status_warnings(
+            &policy,
+            &BrowserControlPlaneSnapshot {
+                reachable: true,
+                browser_enabled: Some(true),
+                error: None,
+            },
+            true,
+            Some(&metadata),
+            Some(r"C:\Palyra\palyra.toml"),
+        );
+
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("CLI-managed browserd")
+                    && warning.contains("tool_call.browser_service.auth_token")
+                    && warning.contains("palyra browser open")
+            }),
+            "missing gateway token should produce a setup blocker warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn browser_actions_fail_before_gateway_401_when_cli_managed_token_is_missing_from_config() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        let metadata = browser_metadata_with_token();
+
+        let error = ensure_browser_gateway_auth_token_alignment(
+            &policy,
+            Some(&metadata),
+            "open",
+            Some(r"C:\Palyra\palyra.toml"),
+        )
+        .expect_err("gateway-mediated browser actions should fail before a browserd 401");
+
+        assert!(
+            error.to_string().contains("gateway has no browser service token configured")
+                && error.to_string().contains("palyra config set"),
+            "preflight error should include actionable gateway token setup: {error}"
         );
     }
 }
