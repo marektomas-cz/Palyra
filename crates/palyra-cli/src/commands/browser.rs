@@ -764,7 +764,7 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
         &payload,
         format!(
             "browser.open session_id={} success={} final_url={} status_code={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             payload.pointer("/navigate/success").and_then(Value::as_bool).unwrap_or(false),
             payload.pointer("/navigate/final_url").and_then(Value::as_str).unwrap_or("-"),
             payload.pointer("/navigate/status_code").and_then(Value::as_u64).unwrap_or(0)
@@ -814,7 +814,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 &value,
                 format!(
                     "browser.session.create session_id={} principal={} downloads_enabled={} persistence_enabled={} profile_id={}",
-                    redacted_browser_identifier_text(envelope.session_id.as_deref(), "session"),
+                    browser_session_handle_text(envelope.session_id.as_deref()),
                     envelope.principal,
                     envelope.downloads_enabled,
                     envelope.persistence_enabled,
@@ -854,19 +854,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
             );
             for session in &response.sessions {
                 text.push('\n');
-                text.push_str(
-                    format!(
-                        "session principal={} channel={} tabs={} has_active_tab={} private_targets={} downloads={} has_profile={}",
-                        empty_as_dash(session.principal.as_str()),
-                        empty_as_dash(session.channel.as_str()),
-                        session.tab_count,
-                        session.active_tab_id.is_some(),
-                        session.allow_private_targets,
-                        session.downloads_enabled,
-                        session.profile_id.is_some(),
-                    )
-                    .as_str(),
-                );
+                text.push_str(format_browser_session_summary_text(session).as_str());
             }
             emit_browser_value(&value, text, "failed to encode browser session list output")
         }
@@ -962,7 +950,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 &value,
                 format!(
                     "browser.session.close session_id={} closed={} reason={}",
-                    redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+                    browser_session_handle_text(Some(envelope.session_id.as_str())),
                     envelope.closed,
                     empty_as_dash(envelope.reason.as_str()),
                 ),
@@ -3120,6 +3108,28 @@ fn browser_identifier_json_value(value: Option<&str>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn browser_session_handle_text(value: Option<&str>) -> &str {
+    value.filter(|candidate| !candidate.trim().is_empty()).unwrap_or("-")
+}
+
+fn browser_canonical_session_handle_text(value: Option<&common_v1::CanonicalId>) -> &str {
+    browser_session_handle_text(value.map(|entry| entry.ulid.as_str()))
+}
+
+fn format_browser_session_summary_text(session: &browser_v1::BrowserSessionSummary) -> String {
+    format!(
+        "session session_id={} principal={} channel={} tabs={} has_active_tab={} private_targets={} downloads={} has_profile={}",
+        browser_canonical_session_handle_text(session.session_id.as_ref()),
+        empty_as_dash(session.principal.as_str()),
+        empty_as_dash(session.channel.as_str()),
+        session.tab_count,
+        session.active_tab_id.is_some(),
+        session.allow_private_targets,
+        session.downloads_enabled,
+        session.profile_id.is_some(),
+    )
+}
+
 fn browser_identifier_kind_for_key(key: &str) -> Option<&'static str> {
     match key {
         "session_id" => Some("session"),
@@ -3423,9 +3433,9 @@ mod tests {
         browser_service_auth_token_command, browser_service_enable_command,
         browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
-        ensure_browser_start_token_alignment, session_summary_value, BrowserControlPlaneSnapshot,
-        BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
-        BrowserServiceMetadata,
+        ensure_browser_start_token_alignment, format_browser_session_summary_text,
+        session_summary_value, BrowserControlPlaneSnapshot, BrowserPolicySnapshot,
+        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use serde_json::Value;
@@ -3591,6 +3601,24 @@ mod tests {
         let value = session_summary_value(&summary);
 
         assert_eq!(value.get("session_id").and_then(Value::as_str), Some(session_id));
+    }
+
+    #[test]
+    fn browser_session_list_text_includes_reusable_session_id() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let line = format_browser_session_summary_text(&browser_v1::BrowserSessionSummary {
+            session_id: Some(common_v1::CanonicalId { ulid: session_id.to_owned() }),
+            principal: "user:ops".to_owned(),
+            channel: "cli".to_owned(),
+            tab_count: 1,
+            ..Default::default()
+        });
+
+        assert!(
+            line.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                && !line.contains("session_id=session-"),
+            "session list should print the canonical reusable session handle: {line}"
+        );
     }
 
     #[test]
