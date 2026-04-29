@@ -1033,9 +1033,10 @@ pub(crate) async fn console_chat_derived_artifact_purge_handler(
                 channel: session.context.channel.clone(),
                 agent_id: None,
                 session_id: Some(session_id.to_owned()),
-                path: format!(
-                    "attachments/{}/{}/{}.md",
-                    session_id, existing.source_artifact_id, existing.kind
+                path: console_attachment_workspace_path(
+                    session_id,
+                    existing.source_artifact_id.as_str(),
+                    existing.kind.as_str(),
                 ),
             })
             .await;
@@ -5417,7 +5418,11 @@ async fn index_derived_artifact_targets(
             channel: session.context.channel.clone(),
             agent_id: None,
             session_id: Some(session_id.to_owned()),
-            path: format!("attachments/{}/{}/{}.md", session_id, artifact.artifact_id, record.kind),
+            path: console_attachment_workspace_path(
+                session_id,
+                artifact.artifact_id.as_str(),
+                record.kind.as_str(),
+            ),
             title: Some(format!("{} ({})", artifact.filename, record.kind)),
             content_text: workspace_content.clone(),
             template_id: None,
@@ -5455,6 +5460,10 @@ async fn index_derived_artifact_targets(
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn console_attachment_workspace_path(session_id: &str, artifact_id: &str, kind: &str) -> String {
+    format!("projects/attachments/{session_id}/{artifact_id}/{kind}.md")
 }
 
 fn build_console_chat_message_envelope(
@@ -5677,10 +5686,10 @@ fn build_console_run_lineage_payload(
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_canvas_transcript_reference, extract_canvas_id_from_frame_reference,
-        run_matches_console_context,
+        console_attachment_workspace_path, derive_canvas_transcript_reference,
+        extract_canvas_id_from_frame_reference, run_matches_console_context,
     };
-    use crate::{gateway, journal};
+    use crate::{domain::workspace::normalize_workspace_path, gateway, journal};
 
     #[test]
     fn run_matches_console_context_rejects_mismatched_principal() {
@@ -5727,6 +5736,26 @@ mod tests {
             Some("01ARZ3NDEKTSV4RRFFQ69G5FB2")
         );
         assert_eq!(extract_canvas_id_from_frame_reference("not-a-canvas-url"), None);
+    }
+
+    #[test]
+    fn console_attachment_workspace_path_uses_allowed_workspace_root() {
+        let path = console_attachment_workspace_path(
+            "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+            "metadata_summary",
+        );
+
+        assert_eq!(
+            path,
+            "projects/attachments/01ARZ3NDEKTSV4RRFFQ69G5FA1/01ARZ3NDEKTSV4RRFFQ69G5FA2/metadata_summary.md"
+        );
+        assert_eq!(
+            normalize_workspace_path(path.as_str())
+                .expect("path should be accepted")
+                .normalized_path,
+            path
+        );
     }
 
     #[test]

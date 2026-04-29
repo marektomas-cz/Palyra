@@ -1725,7 +1725,10 @@ impl App {
             }
             return Ok(());
         }
-        self.upload_attachment_from_path(trimmed).await
+        if let Err(error) = self.upload_attachment_from_path(trimmed).await {
+            self.report_attachment_error(format!("{error:#}"));
+        }
+        Ok(())
     }
 
     fn list_pending_attachments(&mut self) {
@@ -1755,6 +1758,13 @@ impl App {
         }));
         lines.push("Use `/attach remove <index>` to drop one item before sending.".to_owned());
         self.push_entry(EntryKind::System, "Attachments", lines.join("\n"));
+    }
+
+    fn report_attachment_error(&mut self, error: impl AsRef<str>) {
+        self.ux_metrics.record(TuiUxMetricKey::Errors);
+        let message = sanitize_terminal_text(error.as_ref());
+        self.status_line = format!("Attachment failed: {}", truncate_text(message.clone(), 120));
+        self.push_entry(EntryKind::System, "Attachment error", message);
     }
 
     async fn upload_attachment_from_path(&mut self, raw_path: &str) -> Result<()> {
@@ -3460,12 +3470,11 @@ fn should_handle_key_event(key: KeyEvent) -> bool {
 }
 
 fn is_text_input_modifier(modifiers: KeyModifiers) -> bool {
-    let command_modifiers = KeyModifiers::CONTROL
-        | KeyModifiers::ALT
-        | KeyModifiers::SUPER
-        | KeyModifiers::HYPER
-        | KeyModifiers::META;
-    !modifiers.intersects(command_modifiers)
+    if modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) {
+        return false;
+    }
+    let without_shift = modifiers & !KeyModifiers::SHIFT;
+    without_shift.is_empty() || without_shift == (KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 fn slash_replacement_is_bare_command(replacement: &str) -> bool {
@@ -3983,6 +3992,41 @@ mod tests {
             .expect("release key should remain ignored"));
 
         assert_eq!(app.composer.text(), "R");
+    }
+
+    #[tokio::test]
+    async fn composer_accepts_altgr_characters_for_windows_paths() {
+        let mut app = test_app();
+
+        let backslash = KeyEvent::new_with_kind(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyEventKind::Press,
+        );
+        assert!(!handle_key(&mut app, backslash).await.expect("AltGr text should be accepted"));
+
+        assert_eq!(app.composer.text(), "\\");
+    }
+
+    #[tokio::test]
+    async fn attach_path_errors_stay_inside_tui() {
+        let mut app = test_app();
+
+        let handled = app
+            .handle_slash_command(r"attach C:\definitely\missing\palyra-file.txt")
+            .await
+            .expect("missing attachment should not exit the TUI");
+
+        assert!(handled);
+        assert!(
+            app.status_line.starts_with("Attachment failed:"),
+            "status should surface the attachment error, got {}",
+            app.status_line
+        );
+        assert_eq!(
+            app.transcript.last().map(|entry| entry.title.as_str()),
+            Some("Attachment error")
+        );
     }
 
     #[tokio::test]
