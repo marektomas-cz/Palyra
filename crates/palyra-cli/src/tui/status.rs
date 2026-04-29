@@ -313,6 +313,11 @@ impl App {
         Ok(())
     }
 
+    pub(super) fn clear_browser_catalog(&mut self) {
+        self.slash_entity_catalog.browser_profiles.clear();
+        self.slash_entity_catalog.browser_sessions.clear();
+    }
+
     pub(super) fn status_summary(&self) -> String {
         let handoff = build_console_handoff_path(&TuiCrossSurfaceHandoff {
             section: "chat".to_owned(),
@@ -448,4 +453,10 @@ impl App {
         ]
         .join("\n")
     }
+}
+
+pub(super) fn browser_service_disabled_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    message.contains("browser service is disabled")
+        || message.contains("tool_call.browser_service.enabled=false")
 }

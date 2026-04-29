@@ -1972,7 +1972,13 @@ impl App {
         self.refresh_session_catalog().await?;
         self.refresh_objective_catalog().await?;
         self.refresh_auth_profile_catalog().await?;
-        self.refresh_browser_catalog().await?;
+        if let Err(error) = self.refresh_browser_catalog().await {
+            if status::browser_service_disabled_error(&error) {
+                self.clear_browser_catalog();
+            } else {
+                return Err(error);
+            }
+        }
         self.refresh_checkpoint_catalog().await?;
         self.refresh_workspace_catalog().await?;
         Ok(())
@@ -3802,8 +3808,8 @@ mod tests {
     use super::{
         display_session_identity, handle_key, parse_toggle, parse_tui_objective_create_spec,
         parse_tui_objective_kind, quick_control_reset_requested, sanitize_terminal_text,
-        should_handle_key_event, App, Focus, Mode, SessionRuntimeSnapshot, TuiComposer, TuiLocale,
-        TuiSlashEntityCatalog, TuiUxMetrics,
+        should_handle_key_event, status, App, Focus, Mode, SessionRuntimeSnapshot, TuiComposer,
+        TuiLocale, TuiSlashEntityCatalog, TuiUxMetrics,
     };
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -3875,6 +3881,15 @@ mod tests {
         assert!(quick_control_reset_requested("reset"));
         assert!(quick_control_reset_requested("inherit"));
         assert!(!quick_control_reset_requested("on"));
+    }
+
+    #[test]
+    fn browser_service_disabled_error_is_optional_for_catalog_refresh() {
+        let error = anyhow::anyhow!(
+            "request failed with HTTP 412: browser service is disabled (tool_call.browser_service.enabled=false)"
+        );
+
+        assert!(status::browser_service_disabled_error(&error));
     }
 
     #[test]
