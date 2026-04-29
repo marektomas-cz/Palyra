@@ -450,7 +450,8 @@ pub(crate) async fn console_objective_lifecycle_handler(
     let action = payload.action.trim().to_ascii_lowercase();
     let reason = normalize_lifecycle_reason(payload.reason)?;
     let mut preflight_objective = objective.clone();
-    apply_lifecycle_workspace_projection(action.as_str(), &mut preflight_objective)?;
+    apply_lifecycle_workspace_projection(action.as_str(), &mut preflight_objective)
+        .map_err(runtime_status_response)?;
     preflight_objective_workspace_projection(&state, &preflight_objective).await?;
     match action.as_str() {
         "fire" => apply_fire_action(&state, &mut objective, reason).await?,
@@ -1163,18 +1164,18 @@ async fn validate_owner_objective_blocks_projection(
 fn apply_lifecycle_workspace_projection(
     action: &str,
     objective: &mut ObjectiveRecord,
-) -> Result<(), Response> {
+) -> Result<(), tonic::Status> {
     match action {
         "fire" => {
             if matches!(objective.state, ObjectiveState::Cancelled | ObjectiveState::Archived) {
-                return Err(runtime_status_response(tonic::Status::failed_precondition(
+                return Err(tonic::Status::failed_precondition(
                     "cancelled or archived objectives cannot be fired",
-                )));
+                ));
             }
             if !objective.automation.enabled {
-                return Err(runtime_status_response(tonic::Status::failed_precondition(
+                return Err(tonic::Status::failed_precondition(
                     "objective automation is paused or disabled",
-                )));
+                ));
             }
             objective.state = ObjectiveState::Active;
         }
@@ -1184,9 +1185,9 @@ fn apply_lifecycle_workspace_projection(
         }
         "resume" => {
             if objective.state == ObjectiveState::Archived {
-                return Err(runtime_status_response(tonic::Status::failed_precondition(
+                return Err(tonic::Status::failed_precondition(
                     "archived objectives cannot be resumed",
-                )));
+                ));
             }
             objective.state = ObjectiveState::Active;
             objective.automation.enabled = true;
@@ -1200,9 +1201,9 @@ fn apply_lifecycle_workspace_projection(
             objective.automation.enabled = false;
         }
         _ => {
-            return Err(runtime_status_response(tonic::Status::invalid_argument(
+            return Err(tonic::Status::invalid_argument(
                 "action must be one of fire|pause|resume|cancel|archive",
-            )));
+            ));
         }
     }
     Ok(())
