@@ -263,7 +263,7 @@ async fn run_agent_interactive_async(
         })?;
         last_run_id = Some(request.run_id.clone());
         let run_id = request.run_id.clone();
-        let outcome = execute_agent_stream(connection.clone(), request, ndjson)?;
+        let outcome = execute_agent_stream_async(connection.clone(), request, ndjson).await?;
         if let Some(state_root) = onboarding_state_root.as_ref().filter(|_| outcome.completed()) {
             commands::onboarding::record_cli_first_success(state_root.as_path(), run_id.as_str())?;
         }

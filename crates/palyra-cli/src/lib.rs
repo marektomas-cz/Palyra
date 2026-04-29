@@ -3469,40 +3469,46 @@ fn execute_agent_stream(
     request: AgentRunInput,
     ndjson: bool,
 ) -> Result<AgentStreamOutcome> {
-    let ndjson = output::preferred_ndjson(false, ndjson);
-    let json_output = !ndjson && output::preferred_json(false);
     let runtime = build_runtime()?;
     runtime
-        .block_on(async {
-            let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
-            let outcome = if json_output {
-                let mut events = Vec::new();
-                let outcome = stream_agent_events_async(&mut client, request, |event| {
-                    events.push(agent_event_json_value(event));
-                    Ok(())
-                })
-                .await?;
-                output::print_json_pretty(
-                    &json!({ "events": events }),
-                    "failed to encode agent stream as JSON",
-                )?;
-                outcome.ensure_success()?;
-                outcome
-            } else {
-                let outcome = stream_agent_events_async(&mut client, request, |event| {
-                    if ndjson {
-                        emit_acp_event_ndjson(event)
-                    } else {
-                        emit_agent_event_text(event)
-                    }
-                })
-                .await?;
-                outcome.ensure_success()?;
-                outcome
-            };
-            Result::<AgentStreamOutcome>::Ok(outcome)
-        })
+        .block_on(execute_agent_stream_async(connection, request, ndjson))
         .context("agent stream execution failed")
+}
+
+async fn execute_agent_stream_async(
+    connection: AgentConnection,
+    request: AgentRunInput,
+    ndjson: bool,
+) -> Result<AgentStreamOutcome> {
+    let ndjson = output::preferred_ndjson(false, ndjson);
+    let json_output = !ndjson && output::preferred_json(false);
+    let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
+    let outcome = if json_output {
+        let mut events = Vec::new();
+        let outcome = stream_agent_events_async(&mut client, request, |event| {
+            events.push(agent_event_json_value(event));
+            Ok(())
+        })
+        .await?;
+        output::print_json_pretty(
+            &json!({ "events": events }),
+            "failed to encode agent stream as JSON",
+        )?;
+        outcome.ensure_success()?;
+        outcome
+    } else {
+        let outcome = stream_agent_events_async(&mut client, request, |event| {
+            if ndjson {
+                emit_acp_event_ndjson(event)
+            } else {
+                emit_agent_event_text(event)
+            }
+        })
+        .await?;
+        outcome.ensure_success()?;
+        outcome
+    };
+    Ok(outcome)
 }
 
 fn run_agent_stream_as_acp(connection: AgentConnection, request: AgentRunInput) -> Result<()> {
