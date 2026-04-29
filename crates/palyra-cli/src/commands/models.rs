@@ -32,6 +32,7 @@ pub(crate) struct ModelsStatusPayload {
     pub(crate) protocol_compatibility: String,
     pub(crate) provider_kind: String,
     pub(crate) auth_provider_kind: Option<String>,
+    pub(crate) endpoint_base_url: Option<String>,
     pub(crate) openai_base_url: Option<String>,
     pub(crate) text_model: Option<String>,
     pub(crate) embeddings_model: Option<String>,
@@ -304,7 +305,8 @@ fn emit_models_status(payload: &ModelsStatusPayload, json_output: bool) -> Resul
             payload.migrated
         );
         println!(
-            "models.status.provider base_url={} embeddings_dims={} default_chat_model={} default_embeddings_model={} registry_providers={} registry_models={} failover_enabled={} response_cache_enabled={} registry_valid={}",
+            "models.status.provider base_url={} openai_base_url={} embeddings_dims={} default_chat_model={} default_embeddings_model={} registry_providers={} registry_models={} failover_enabled={} response_cache_enabled={} registry_valid={}",
+            payload.endpoint_base_url.as_deref().unwrap_or("none"),
             payload.openai_base_url.as_deref().unwrap_or("none"),
             payload
                 .embeddings_dims
@@ -963,6 +965,9 @@ fn load_models_overview(path: Option<String>) -> Result<ModelsOverview> {
     let auth_provider_kind = provider_entry
         .and_then(|entry| entry.auth_provider_kind.clone())
         .or_else(|| model_provider.auth_provider_kind.clone());
+    let endpoint_base_url = provider_entry
+        .and_then(|entry| entry.base_url.clone())
+        .or_else(|| default_base_url_for_kind(provider_kind_for_status.as_str(), &model_provider));
     let auth_profile_id = model_provider.auth_profile_id.clone().or_else(|| {
         providers
             .iter()
@@ -998,6 +1003,7 @@ fn load_models_overview(path: Option<String>) -> Result<ModelsOverview> {
             provider_display_name,
             protocol_compatibility,
             auth_provider_kind,
+            endpoint_base_url,
             openai_base_url,
             text_model,
             embeddings_model,

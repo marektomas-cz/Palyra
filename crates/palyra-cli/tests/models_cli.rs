@@ -446,6 +446,33 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
         Some("minimax"),
         "status should expose the MiniMax auth provider selection: {status_payload}"
     );
+    assert_eq!(
+        status_payload.get("endpoint_base_url").and_then(Value::as_str),
+        Some("https://api.minimax.io/anthropic"),
+        "status should expose the effective MiniMax endpoint: {status_payload}"
+    );
+
+    let text_status_output =
+        run_cli(&workdir, &["models", "status", "--path", &config_path_string])?;
+    assert!(
+        text_status_output.status.success(),
+        "models text status should succeed for legacy minimax config: {}",
+        String::from_utf8_lossy(&text_status_output.stderr)
+    );
+    let text_status_stdout =
+        String::from_utf8(text_status_output.stdout).context("stdout was not valid UTF-8")?;
+    assert!(
+        text_status_stdout.contains("base_url=https://api.minimax.io/anthropic"),
+        "text status should show the effective MiniMax endpoint: {text_status_stdout}"
+    );
+    assert!(
+        text_status_stdout.contains("openai_base_url=none"),
+        "text status should label the provider-specific OpenAI endpoint separately: {text_status_stdout}"
+    );
+    assert!(
+        !text_status_stdout.contains("models.status.provider base_url=none"),
+        "text status must not hide a configured MiniMax endpoint as none: {text_status_stdout}"
+    );
 
     let explain_output =
         run_cli(&workdir, &["models", "explain", "--path", &config_path_string, "--json"])?;
