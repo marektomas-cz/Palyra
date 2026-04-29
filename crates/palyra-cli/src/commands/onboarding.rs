@@ -932,8 +932,12 @@ fn get_bool_at_path(document: &toml::Value, key: &str) -> Option<bool> {
 }
 
 fn model_auth_configured(document: &toml::Value) -> Result<bool> {
-    Ok(get_string_at_path(document, "model_provider.openai_api_key_vault_ref").is_some()
+    Ok(get_string_at_path(document, "model_provider.openai_api_key").is_some()
+        || get_string_at_path(document, "model_provider.openai_api_key_vault_ref").is_some()
+        || get_value_at_path(document, "model_provider.openai_api_key_secret_ref")?.is_some()
+        || get_string_at_path(document, "model_provider.anthropic_api_key").is_some()
         || get_string_at_path(document, "model_provider.anthropic_api_key_vault_ref").is_some()
+        || get_value_at_path(document, "model_provider.anthropic_api_key_secret_ref")?.is_some()
         || get_string_at_path(document, "model_provider.auth_profile_id").is_some())
 }
 
@@ -1156,6 +1160,37 @@ kind = "anthropic"
             agent_step.blocked.as_ref().map(|blocked| blocked.code.as_str()),
             Some("gateway_not_running")
         );
+    }
+
+    #[test]
+    fn onboarding_signals_accept_inline_minimax_auth() -> Result<()> {
+        let temp = tempdir()?;
+        let config_path = temp.path().join("config").join("palyra.toml");
+        let config = r#"
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key = "sk-inline-minimax"
+"#;
+        fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        fs::write(config_path.as_path(), config)?;
+        let document: toml::Value = toml::from_str(config)?;
+
+        let signals = collect_onboarding_signals(
+            &document,
+            config_path.display().to_string(),
+            OnboardingVariant::Quickstart,
+        )?;
+        let steps = build_onboarding_steps(OnboardingVariant::Quickstart, &signals);
+        let provider_step =
+            steps.iter().find(|step| step.step_id == "provider_auth").expect("provider step");
+
+        assert!(signals.provider_auth_configured);
+        assert_eq!(signals.provider_health_state, "configured");
+        assert_eq!(provider_step.status, control_plane::OnboardingStepStatus::Done);
+        assert_eq!(provider_step.verification_state.as_deref(), Some("configured"));
+        Ok(())
     }
 
     #[test]
