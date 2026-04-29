@@ -410,6 +410,51 @@ fn setup_wizard_quickstart_supports_minimax_api_key() -> Result<()> {
 }
 
 #[test]
+fn onboarding_wizard_without_path_uses_palyra_config_env_path() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("env-config").join("palyra.toml");
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "onboarding",
+            "wizard",
+            "--flow",
+            "quickstart",
+            "--non-interactive",
+            "--accept-risk",
+            "--auth-method",
+            "skip",
+            "--skip-health",
+            "--skip-channels",
+            "--skip-skills",
+            "--json",
+        ],
+        &[("PALYRA_CONFIG", &config_path_string)],
+    )?;
+    assert!(
+        output.status.success(),
+        "onboarding wizard should honor PALYRA_CONFIG without --path: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).context("onboarding stdout should be JSON")?;
+    assert_eq!(
+        payload.get("config_path").and_then(Value::as_str),
+        Some(config_path_string.as_str()),
+        "onboarding summary should report the PALYRA_CONFIG path: {payload}"
+    );
+    assert!(config_path.is_file(), "onboarding should write the PALYRA_CONFIG target path");
+    assert!(
+        !workdir.path().join("palyra.toml").exists(),
+        "onboarding should not create an implicit cwd palyra.toml when PALYRA_CONFIG is set"
+    );
+    Ok(())
+}
+
+#[test]
 fn setup_wizard_stores_minimax_secret_in_state_root_vault_by_default() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("config").join("palyra.toml");

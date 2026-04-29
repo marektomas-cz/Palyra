@@ -555,10 +555,10 @@ fn default_deployment_profile_for_init(
     }
 }
 
-fn resolve_init_path(path: Option<String>) -> Result<PathBuf> {
+fn resolve_bootstrap_config_path(path: Option<String>, command_label: &str) -> Result<PathBuf> {
     if let Some(path) = path {
         return parse_config_path(path.as_str())
-            .with_context(|| format!("init config path is invalid: {}", path));
+            .with_context(|| format!("{command_label} config path is invalid: {}", path));
     }
     let root_context = app::current_root_context();
     if let Some(path) =
@@ -579,9 +579,13 @@ fn resolve_init_path(path: Option<String>) -> Result<PathBuf> {
     }
     if let Some(path) = find_default_config_path() {
         return parse_config_path(path.as_str())
-            .with_context(|| format!("default init config path is invalid: {}", path));
+            .with_context(|| format!("default {command_label} config path is invalid: {}", path));
     }
     Ok(PathBuf::from("palyra.toml"))
+}
+
+fn resolve_init_path(path: Option<String>) -> Result<PathBuf> {
+    resolve_bootstrap_config_path(path, "init")
 }
 
 fn resolve_init_state_root() -> Result<PathBuf> {
@@ -3791,11 +3795,7 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 fn resolve_onboarding_path(path: Option<String>) -> Result<PathBuf> {
-    if let Some(path) = path {
-        return parse_config_path(path.as_str())
-            .with_context(|| format!("onboarding config path is invalid: {}", path));
-    }
-    Ok(PathBuf::from("palyra.toml"))
+    resolve_bootstrap_config_path(path, "onboarding")
 }
 
 async fn fetch_grpc_health_with_retry(grpc_url: String) -> Result<gateway_v1::HealthResponse> {
