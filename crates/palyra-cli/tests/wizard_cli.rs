@@ -825,6 +825,34 @@ fn configure_auth_model_backfills_admin_defaults_for_resume_path() -> Result<()>
             .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("auth-model"))),
         "auth-model should be marked changed when admin defaults are backfilled: {payload}"
     );
+    let auth_model_change = payload
+        .get("section_changes")
+        .and_then(Value::as_array)
+        .and_then(|changes| {
+            changes
+                .iter()
+                .find(|change| change.get("section").and_then(Value::as_str) == Some("auth-model"))
+        })
+        .context("configure summary should include auth-model change details")?;
+    let after_values = auth_model_change
+        .get("after")
+        .and_then(Value::as_array)
+        .context("auth-model change should include after values")?;
+    assert_eq!(
+        after_values.first().and_then(Value::as_str),
+        Some("provider_display_name=MiniMax"),
+        "MiniMax configure output should lead with the selected provider display name: {payload}"
+    );
+    assert!(
+        after_values
+            .iter()
+            .any(|value| value.as_str() == Some("protocol_compatibility=anthropic_compatible")),
+        "configure output should expose Anthropic compatibility as a secondary detail: {payload}"
+    );
+    assert!(
+        after_values.iter().any(|value| value.as_str() == Some("provider_kind=anthropic")),
+        "configure output should preserve the technical compatibility provider kind: {payload}"
+    );
 
     let written = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;

@@ -27,10 +27,10 @@ const CURATED_EMBEDDING_MODELS: &[&str] = &["text-embedding-3-small", "text-embe
 #[derive(Debug, Serialize)]
 pub(crate) struct ModelsStatusPayload {
     pub(crate) path: String,
-    pub(crate) provider_kind: String,
     pub(crate) provider_id: String,
     pub(crate) provider_display_name: String,
     pub(crate) protocol_compatibility: String,
+    pub(crate) provider_kind: String,
     pub(crate) auth_provider_kind: Option<String>,
     pub(crate) openai_base_url: Option<String>,
     pub(crate) text_model: Option<String>,
@@ -143,9 +143,9 @@ pub(crate) struct ModelsConnectionPayload {
 pub(crate) struct ModelsExplainCandidatePayload {
     pub(crate) order: usize,
     pub(crate) provider_id: String,
-    pub(crate) provider_kind: String,
     pub(crate) provider_display_name: String,
     pub(crate) protocol_compatibility: String,
+    pub(crate) provider_kind: String,
     pub(crate) auth_provider_kind: Option<String>,
     pub(crate) model_id: String,
     pub(crate) role: String,

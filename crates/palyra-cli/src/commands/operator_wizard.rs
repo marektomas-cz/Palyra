@@ -2949,6 +2949,16 @@ fn describe_configure_section(
                 .unwrap_or_else(|| "unset".to_owned())
         )]),
         ConfigureSectionArg::AuthModel => {
+            let provider_kind = get_string_value_at_path(document, "model_provider.kind")?
+                .unwrap_or_else(|| "unset".to_owned());
+            let auth_provider_kind =
+                get_string_value_at_path(document, "model_provider.auth_provider_kind")?;
+            let provider_display_name = configure_provider_display_name(
+                provider_kind.as_str(),
+                auth_provider_kind.as_deref(),
+            );
+            let protocol_compatibility =
+                configure_provider_protocol_compatibility(provider_kind.as_str());
             let auth_source =
                 if get_string_value_at_path(document, "model_provider.openai_api_key_vault_ref")?
                     .is_some()
@@ -2967,11 +2977,9 @@ fn describe_configure_section(
                     "unset".to_owned()
                 };
             Ok(vec![
-                format!(
-                    "provider_kind={}",
-                    get_string_value_at_path(document, "model_provider.kind")?
-                        .unwrap_or_else(|| "unset".to_owned())
-                ),
+                format!("provider_display_name={provider_display_name}"),
+                format!("protocol_compatibility={protocol_compatibility}"),
+                format!("provider_kind={provider_kind}"),
                 format!("auth_source={auth_source}"),
                 format!(
                     "chat_model={}",
@@ -3094,6 +3102,34 @@ fn describe_configure_section(
                     .unwrap_or(false)
             ),
         ]),
+    }
+}
+
+fn configure_provider_display_name(
+    provider_kind: &str,
+    auth_provider_kind: Option<&str>,
+) -> &'static str {
+    if provider_kind == "anthropic"
+        && auth_provider_kind.is_some_and(|kind| kind.eq_ignore_ascii_case("minimax"))
+    {
+        return "MiniMax";
+    }
+    match provider_kind {
+        "openai_compatible" => "OpenAI-compatible",
+        "anthropic" => "Anthropic",
+        "deterministic" => "Deterministic",
+        "unset" => "unset",
+        _ => "Unknown",
+    }
+}
+
+fn configure_provider_protocol_compatibility(provider_kind: &str) -> &'static str {
+    match provider_kind {
+        "openai_compatible" => "openai_compatible",
+        "anthropic" => "anthropic_compatible",
+        "deterministic" => "deterministic",
+        "unset" => "unset",
+        _ => "unknown",
     }
 }
 

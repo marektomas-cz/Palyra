@@ -409,6 +409,16 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
     );
     let status_stdout =
         String::from_utf8(status_output.stdout).context("stdout was not valid UTF-8")?;
+    let display_name_index = status_stdout
+        .find("\"provider_display_name\"")
+        .context("status JSON should include provider_display_name")?;
+    let provider_kind_index = status_stdout
+        .find("\"provider_kind\"")
+        .context("status JSON should include provider_kind")?;
+    assert!(
+        display_name_index < provider_kind_index,
+        "status JSON should lead with the provider display name before compatibility kind: {status_stdout}"
+    );
     let status_payload: Value =
         serde_json::from_str(status_stdout.as_str()).context("status stdout was not JSON")?;
     assert_eq!(
