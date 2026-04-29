@@ -429,6 +429,35 @@ fn completion_generates_bash_script() -> Result<()> {
 }
 
 #[test]
+fn completion_treats_closed_stdout_pipe_as_clean_exit() -> Result<()> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .args(["completion", "--shell", "powershell"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn palyra completion")?;
+    let mut stdout = child.stdout.take().context("failed to capture completion stdout")?;
+    let mut prefix = [0_u8; 256];
+    let bytes = stdout.read(&mut prefix).context("failed to read completion output prefix")?;
+    assert!(bytes > 0, "completion should produce stdout before the pipe closes");
+    drop(stdout);
+
+    let output = child.wait_with_output().context("failed waiting for completion command")?;
+    assert!(
+        output.status.success(),
+        "completion should treat closed stdout pipe as clean shutdown: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).context("stderr was not valid UTF-8")?;
+    assert!(!stderr.contains("panicked"), "completion must not panic: {stderr}");
+    assert!(
+        !stderr.contains("internal_error"),
+        "completion must not report an internal error for BrokenPipe: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn onboarding_wizard_writes_config_file() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("config").join("palyra.toml");
