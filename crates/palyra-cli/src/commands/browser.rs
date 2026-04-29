@@ -1280,13 +1280,15 @@ async fn run_browser_navigate(
         .context("failed to navigate browser session")?;
     let success = envelope.success;
     let error = envelope.error.clone();
-    let value =
+    let mut value =
         serde_json::to_value(&envelope).context("failed to encode browser navigate output")?;
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     emit_browser_value(
         &value,
         format!(
-            "browser.navigate session_id={} success={} status_code={} final_url={} title={}",
-            redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+            "browser.navigate session_id={}{} success={} status_code={} final_url={} title={}",
+            browser_session_handle_text(Some(session_id.as_str())),
+            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
             envelope.success,
             envelope.status_code,
             empty_as_dash(envelope.final_url.as_str()),
@@ -1562,6 +1564,7 @@ async fn run_browser_snapshot(args: BrowserSnapshotArgs) -> Result<()> {
             .context("failed to observe browser session")?,
     )
     .context("failed to encode browser snapshot output")?;
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     let written =
         write_optional_json_output(output.as_deref(), session_id.as_str(), "snapshot", &value)?;
     maybe_attach_output_path(&mut value, written.as_ref());
@@ -1569,7 +1572,7 @@ async fn run_browser_snapshot(args: BrowserSnapshotArgs) -> Result<()> {
         &value,
         format!(
             "browser.snapshot session_id={} page_url={} dom_truncated={} text_truncated={} output={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             value.get("page_url").and_then(Value::as_str).unwrap_or("-"),
             value.get("dom_truncated").and_then(Value::as_bool).unwrap_or(false),
             value.get("visible_text_truncated").and_then(Value::as_bool).unwrap_or(false),
@@ -1639,12 +1642,15 @@ async fn run_browser_title(session_id: String, max_title_bytes: Option<u64>) -> 
         .context("failed to read browser title")?;
     let success = envelope.success;
     let error = envelope.error.clone();
-    let value = serde_json::to_value(&envelope).context("failed to encode browser title output")?;
+    let mut value =
+        serde_json::to_value(&envelope).context("failed to encode browser title output")?;
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     emit_browser_value(
         &value,
         format!(
-            "browser.title session_id={} success={} title={}",
-            redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+            "browser.title session_id={}{} success={} title={}",
+            browser_session_handle_text(Some(session_id.as_str())),
+            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
             envelope.success,
             empty_as_dash(envelope.title.as_str()),
         ),
@@ -3112,6 +3118,42 @@ fn browser_session_handle_text(value: Option<&str>) -> &str {
     value.filter(|candidate| !candidate.trim().is_empty()).unwrap_or("-")
 }
 
+fn runtime_session_id_text(requested_session_id: &str, returned_session_id: &str) -> String {
+    let requested = requested_session_id.trim();
+    let returned = returned_session_id.trim();
+    if requested.is_empty() || returned.is_empty() || requested == returned {
+        String::new()
+    } else {
+        format!(
+            " runtime_session_id={}",
+            redacted_browser_identifier_text(Some(returned), "session")
+        )
+    }
+}
+
+fn normalize_session_scoped_output(value: &mut Value, requested_session_id: &str) {
+    let requested = requested_session_id.trim();
+    if requested.is_empty() {
+        return;
+    }
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    let Some(returned) = map
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    if returned == requested {
+        return;
+    }
+    map.insert("runtime_session_id".to_owned(), Value::String(returned.to_owned()));
+    map.insert("session_id".to_owned(), Value::String(requested.to_owned()));
+}
+
 fn browser_canonical_session_handle_text(value: Option<&common_v1::CanonicalId>) -> &str {
     browser_session_handle_text(value.map(|entry| entry.ulid.as_str()))
 }
@@ -3434,11 +3476,12 @@ mod tests {
         browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
         ensure_browser_start_token_alignment, format_browser_session_summary_text,
-        session_summary_value, BrowserControlPlaneSnapshot, BrowserPolicySnapshot,
-        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
+        normalize_session_scoped_output, runtime_session_id_text, session_summary_value,
+        BrowserControlPlaneSnapshot, BrowserPolicySnapshot, BrowserResolvedConfig,
+        BrowserServiceConnection, BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     fn disabled_policy() -> BrowserPolicySnapshot {
         BrowserPolicySnapshot {
@@ -3618,6 +3661,25 @@ mod tests {
             line.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV")
                 && !line.contains("session_id=session-"),
             "session list should print the canonical reusable session handle: {line}"
+        );
+    }
+
+    #[test]
+    fn session_scoped_output_preserves_requested_session_id() {
+        let requested = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let runtime = "session-b66347f61acd";
+        let mut value = json!({
+            "session_id": runtime,
+            "success": true,
+        });
+
+        normalize_session_scoped_output(&mut value, requested);
+
+        assert_eq!(value.get("session_id").and_then(Value::as_str), Some(requested));
+        assert_eq!(value.get("runtime_session_id").and_then(Value::as_str), Some(runtime));
+        assert!(
+            runtime_session_id_text(requested, runtime).contains("runtime_session_id=session-"),
+            "text output should label the internal runtime id separately"
         );
     }
 
