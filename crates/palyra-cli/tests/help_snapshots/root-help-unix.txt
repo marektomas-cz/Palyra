@@ -11,29 +11,29 @@ Commands:
   status          Show transport and admin status across HTTP/gRPC surfaces
   acp             Run the ACP stdio bridge and legacy compatibility shim
   mcp             Run the MCP stdio facade
-  agent
-  agents
+  agent           Run one-off or interactive agent sessions
+  agents          Manage daemon agent registry, bindings, and defaults
   routines        Manage unified automation routines across schedules and event triggers
   objectives      Manage durable objectives, heartbeats, standing orders, and programs
   flows           Inspect and control durable orchestration flows
   jobs            Inspect and control durable long-running tool jobs
   cron            Manage schedule-only cron workflows through the routines compatibility layer
-  memory
-  message
-  approvals
-  sessions
+  memory          Inspect and manage session, workspace, and learning memory
+  message         Inspect and manage routed channel messages
+  approvals       Review and resolve pending tool approvals
+  sessions        List, inspect, and manage chat sessions
   tui             Launch the terminal operator client
-  auth
-  channels
+  auth            Manage auth profiles, provider access, and OAuth/API-key flows
+  channels        Manage connector channels and routing
   webhooks        Manage webhook-backed integrations
   docs            Discover local CLI help snapshots from source checkouts or portable installs
-  plugins
-  hooks
-  extension
+  plugins         Manage installed plugin packages and discovery
+  hooks           Manage local hooks and bindings
+  extension       Manage extension integration surfaces
   profile         Manage CLI connection profiles and active environment selection
-  devices
-  node
-  nodes
+  devices         List and manage paired operator devices
+  node            Manage the local node runtime
+  nodes           Inspect and invoke remote node RPC surfaces
   browser         Operate the browser service and browser-backed automation sessions
   system          Inspect runtime heartbeat, subsystem presence, operator insights, and recent system events
   sandbox         Inspect effective process-runner and WASM sandbox policy surfaces
@@ -47,17 +47,17 @@ Commands:
   reset           Reset selected local runtime scopes
   uninstall       Remove an installed Palyra package and optional state
   update          Check or apply a packaged Palyra update
-  support-bundle
-  policy
-  protocol
-  config
-  models
-  patch
-  skills          [aliases: skill]
-  secrets
-  security
-  tunnel
-  pairing
+  support-bundle  Export, import, and replay support bundles
+  policy          Explain policy decisions and authorization posture
+  protocol        Validate schema and protocol contract artifacts
+  config          Inspect and validate local configuration
+  models          Inspect and configure model providers and defaults
+  patch           Apply workspace patches through the guarded patch engine
+  skills          Manage skill packages, trust, and lifecycle gates [aliases: skill]
+  secrets         Manage local secrets and vault-backed credentials
+  security        Run security audits and posture checks
+  tunnel          Open an SSH tunnel for remote daemon access
+  pairing         Manage device pairing and trust bootstrap
 
 Options:
   -h, --help
