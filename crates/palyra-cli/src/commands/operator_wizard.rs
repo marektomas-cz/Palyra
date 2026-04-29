@@ -1544,6 +1544,9 @@ fn resolve_existing_config_action(
     if !config_path.exists() {
         return Ok(None);
     }
+    if config_path.metadata().map(|metadata| metadata.len() == 0).unwrap_or(false) {
+        return Ok(None);
+    }
     if force {
         return Ok(Some(ExistingConfigAction::Overwrite));
     }
@@ -3660,6 +3663,21 @@ mod tests {
         let action =
             resolve_existing_config_action(&mut wizard, true, path.as_path()).expect("action");
         assert_eq!(action, Some(ExistingConfigAction::Overwrite));
+    }
+
+    #[test]
+    fn resolve_existing_config_action_ignores_empty_placeholder() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("palyra.toml");
+        fs::write(path.as_path(), "").expect("seed empty placeholder");
+        let mut backend = ScriptedWizardBackend::new(BTreeMap::new(), true);
+        let backend_ref: &mut dyn WizardBackend = &mut backend;
+        let mut wizard = WizardSession::new(backend_ref);
+
+        let action =
+            resolve_existing_config_action(&mut wizard, false, path.as_path()).expect("action");
+
+        assert_eq!(action, None);
     }
 
     #[test]
