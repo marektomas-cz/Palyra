@@ -448,12 +448,16 @@ pub(crate) async fn console_objective_lifecycle_handler(
     let mut objective =
         load_objective_record(&state, objective_id.as_str(), session.context.principal.as_str())?;
     let action = payload.action.trim().to_ascii_lowercase();
+    let reason = normalize_lifecycle_reason(payload.reason)?;
+    let mut preflight_objective = objective.clone();
+    apply_lifecycle_workspace_projection(action.as_str(), &mut preflight_objective)?;
+    preflight_objective_workspace_projection(&state, &preflight_objective).await?;
     match action.as_str() {
-        "fire" => apply_fire_action(&state, &mut objective, payload.reason).await?,
-        "pause" => apply_pause_action(&state, &mut objective, payload.reason).await?,
-        "resume" => apply_resume_action(&state, &mut objective, payload.reason).await?,
-        "cancel" => apply_cancel_action(&state, &mut objective, payload.reason).await?,
-        "archive" => apply_archive_action(&state, &mut objective, payload.reason).await?,
+        "fire" => apply_fire_action(&state, &mut objective, reason).await?,
+        "pause" => apply_pause_action(&state, &mut objective, reason).await?,
+        "resume" => apply_resume_action(&state, &mut objective, reason).await?,
+        "cancel" => apply_cancel_action(&state, &mut objective, reason).await?,
+        "archive" => apply_archive_action(&state, &mut objective, reason).await?,
         _ => {
             return Err(runtime_status_response(tonic::Status::invalid_argument(
                 "action must be one of fire|pause|resume|cancel|archive",
@@ -1087,6 +1091,123 @@ async fn apply_archive_action(
     Ok(())
 }
 
+async fn preflight_objective_workspace_projection(
+    state: &AppState,
+    objective: &ObjectiveRecord,
+) -> Result<(), Response> {
+    validate_objective_document_projection(state, objective).await?;
+    validate_owner_objective_blocks_projection(state, objective).await
+}
+
+async fn validate_objective_document_projection(
+    state: &AppState,
+    objective: &ObjectiveRecord,
+) -> Result<(), Response> {
+    let current = state
+        .runtime
+        .workspace_document_by_path(
+            objective.owner_principal.clone(),
+            objective.channel.clone(),
+            None,
+            objective.workspace.workspace_document_path.clone(),
+            false,
+        )
+        .await
+        .map_err(runtime_status_response)?;
+    let content = current
+        .as_ref()
+        .map(|entry| entry.content_text.as_str())
+        .unwrap_or_else(|| objective_document_heading(objective.kind));
+    sync_workspace_managed_block(content, &objective_record_block(objective))
+        .map_err(objective_workspace_error_response)?;
+    Ok(())
+}
+
+async fn validate_owner_objective_blocks_projection(
+    state: &AppState,
+    objective: &ObjectiveRecord,
+) -> Result<(), Response> {
+    let mut objectives =
+        state.objectives.list_objectives().map_err(objective_registry_error_response)?;
+    if let Some(existing) =
+        objectives.iter_mut().find(|entry| entry.objective_id == objective.objective_id)
+    {
+        *existing = objective.clone();
+    } else {
+        objectives.push(objective.clone());
+    }
+    let owner_objectives = objectives
+        .into_iter()
+        .filter(|entry| entry.owner_principal == objective.owner_principal)
+        .collect::<Vec<_>>();
+    for (path, update) in owner_objective_block_updates(&owner_objectives) {
+        let current = state
+            .runtime
+            .workspace_document_by_path(
+                objective.owner_principal.clone(),
+                objective.channel.clone(),
+                None,
+                path.to_owned(),
+                false,
+            )
+            .await
+            .map_err(runtime_status_response)?;
+        let existing_content =
+            current.as_ref().map(|entry| entry.content_text.as_str()).unwrap_or_default();
+        sync_workspace_managed_block(existing_content, &update)
+            .map_err(objective_workspace_error_response)?;
+    }
+    Ok(())
+}
+
+fn apply_lifecycle_workspace_projection(
+    action: &str,
+    objective: &mut ObjectiveRecord,
+) -> Result<(), Response> {
+    match action {
+        "fire" => {
+            if matches!(objective.state, ObjectiveState::Cancelled | ObjectiveState::Archived) {
+                return Err(runtime_status_response(tonic::Status::failed_precondition(
+                    "cancelled or archived objectives cannot be fired",
+                )));
+            }
+            if !objective.automation.enabled {
+                return Err(runtime_status_response(tonic::Status::failed_precondition(
+                    "objective automation is paused or disabled",
+                )));
+            }
+            objective.state = ObjectiveState::Active;
+        }
+        "pause" => {
+            objective.state = ObjectiveState::Paused;
+            objective.automation.enabled = false;
+        }
+        "resume" => {
+            if objective.state == ObjectiveState::Archived {
+                return Err(runtime_status_response(tonic::Status::failed_precondition(
+                    "archived objectives cannot be resumed",
+                )));
+            }
+            objective.state = ObjectiveState::Active;
+            objective.automation.enabled = true;
+        }
+        "cancel" => {
+            objective.state = ObjectiveState::Cancelled;
+            objective.automation.enabled = false;
+        }
+        "archive" => {
+            objective.state = ObjectiveState::Archived;
+            objective.automation.enabled = false;
+        }
+        _ => {
+            return Err(runtime_status_response(tonic::Status::invalid_argument(
+                "action must be one of fire|pause|resume|cancel|archive",
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn project_objective_workspace(
     state: &AppState,
     owner_principal: &str,
@@ -1115,42 +1236,11 @@ async fn write_objective_document(
         )
         .await
         .map_err(runtime_status_response)?;
-    let heading = if objective.kind == ObjectiveKind::Heartbeat {
-        "# Heartbeat Objective\n\nManual notes outside the managed block are preserved.\n"
-    } else {
-        "# Objective\n\nManual notes outside the managed block are preserved.\n"
-    };
-    let content = current.as_ref().map(|entry| entry.content_text.as_str()).unwrap_or(heading);
-    let block = WorkspaceManagedBlockUpdate {
-        block_id: "objective-record".to_owned(),
-        heading: format!("{} Summary", objective.name),
-        entries: vec![
-            managed_entry("objective", format!("[{}] {}", objective.kind.as_str(), objective.name)),
-            managed_entry("state", format!("state: {}", objective.state.as_str())),
-            managed_entry(
-                "focus",
-                objective
-                    .current_focus
-                    .clone()
-                    .unwrap_or_else(|| "No current focus recorded.".to_owned()),
-            ),
-            managed_entry(
-                "success",
-                objective
-                    .success_criteria
-                    .clone()
-                    .unwrap_or_else(|| "No success criteria recorded.".to_owned()),
-            ),
-            managed_entry(
-                "next_step",
-                objective
-                    .next_recommended_step
-                    .clone()
-                    .unwrap_or_else(|| "No next recommended step recorded.".to_owned()),
-            ),
-        ],
-    };
-    let next_content = sync_workspace_managed_block(content, &block)
+    let content = current
+        .as_ref()
+        .map(|entry| entry.content_text.as_str())
+        .unwrap_or_else(|| objective_document_heading(objective.kind));
+    let next_content = sync_workspace_managed_block(content, &objective_record_block(objective))
         .map_err(objective_workspace_error_response)?
         .content_text;
     state
@@ -1187,99 +1277,10 @@ async fn sync_owner_objective_blocks(
         .into_iter()
         .filter(|entry| entry.owner_principal == owner_principal)
         .collect::<Vec<_>>();
-    sync_owner_block(
-        state,
-        owner_principal,
-        channel,
-        "context/current-focus.md",
-        WorkspaceManagedBlockUpdate {
-            block_id: OBJECTIVE_FOCUS_BLOCK_ID.to_owned(),
-            heading: "Objective Focus".to_owned(),
-            entries: objectives
-                .iter()
-                .filter(|entry| {
-                    !matches!(entry.state, ObjectiveState::Archived | ObjectiveState::Cancelled)
-                })
-                .map(|entry| {
-                    managed_entry(
-                        entry.objective_id.as_str(),
-                        format!(
-                            "[{}] {}: {}",
-                            entry.state.as_str(),
-                            entry.name,
-                            entry
-                                .current_focus
-                                .clone()
-                                .unwrap_or_else(|| "No current focus recorded.".to_owned())
-                        ),
-                    )
-                })
-                .collect(),
-        },
-    )
-    .await?;
-    sync_owner_block(
-        state,
-        owner_principal,
-        channel,
-        "HEARTBEAT.md",
-        WorkspaceManagedBlockUpdate {
-            block_id: OBJECTIVE_HEARTBEAT_BLOCK_ID.to_owned(),
-            heading: "Objective Heartbeats".to_owned(),
-            entries: objectives
-                .iter()
-                .filter(|entry| entry.kind == ObjectiveKind::Heartbeat)
-                .map(|entry| {
-                    managed_entry(
-                        entry.objective_id.as_str(),
-                        format!(
-                            "[{}] {} -> next step: {}",
-                            entry.state.as_str(),
-                            entry.name,
-                            entry
-                                .next_recommended_step
-                                .clone()
-                                .unwrap_or_else(|| "No next step recorded.".to_owned())
-                        ),
-                    )
-                })
-                .collect(),
-        },
-    )
-    .await?;
-    sync_owner_block(
-        state,
-        owner_principal,
-        channel,
-        "projects/inbox.md",
-        WorkspaceManagedBlockUpdate {
-            block_id: OBJECTIVE_INBOX_BLOCK_ID.to_owned(),
-            heading: "Objective Inbox".to_owned(),
-            entries: objectives
-                .iter()
-                .filter(|entry| {
-                    matches!(
-                        entry.state,
-                        ObjectiveState::Draft | ObjectiveState::Active | ObjectiveState::Paused
-                    )
-                })
-                .map(|entry| {
-                    managed_entry(
-                        entry.objective_id.as_str(),
-                        format!(
-                            "{} -> {}",
-                            entry.name,
-                            entry
-                                .next_recommended_step
-                                .clone()
-                                .unwrap_or_else(|| "Review the objective summary.".to_owned())
-                        ),
-                    )
-                })
-                .collect(),
-        },
-    )
-    .await
+    for (path, update) in owner_objective_block_updates(&objectives) {
+        sync_owner_block(state, owner_principal, channel, path, update).await?;
+    }
+    Ok(())
 }
 
 async fn sync_owner_block(
@@ -1329,6 +1330,153 @@ async fn sync_owner_block(
 
 fn managed_entry(entry_id: &str, content: String) -> WorkspaceManagedEntry {
     WorkspaceManagedEntry { entry_id: entry_id.to_owned(), label: "objective".to_owned(), content }
+}
+
+fn objective_document_heading(kind: ObjectiveKind) -> &'static str {
+    if kind == ObjectiveKind::Heartbeat {
+        "# Heartbeat Objective\n\nManual notes outside the managed block are preserved.\n"
+    } else {
+        "# Objective\n\nManual notes outside the managed block are preserved.\n"
+    }
+}
+
+fn objective_record_block(objective: &ObjectiveRecord) -> WorkspaceManagedBlockUpdate {
+    WorkspaceManagedBlockUpdate {
+        block_id: "objective-record".to_owned(),
+        heading: format!("{} Summary", objective.name),
+        entries: vec![
+            managed_entry("objective", format!("[{}] {}", objective.kind.as_str(), objective.name)),
+            managed_entry("state", format!("state: {}", objective.state.as_str())),
+            managed_entry(
+                "focus",
+                objective
+                    .current_focus
+                    .clone()
+                    .unwrap_or_else(|| "No current focus recorded.".to_owned()),
+            ),
+            managed_entry(
+                "success",
+                objective
+                    .success_criteria
+                    .clone()
+                    .unwrap_or_else(|| "No success criteria recorded.".to_owned()),
+            ),
+            managed_entry(
+                "next_step",
+                objective
+                    .next_recommended_step
+                    .clone()
+                    .unwrap_or_else(|| "No next recommended step recorded.".to_owned()),
+            ),
+        ],
+    }
+}
+
+fn owner_objective_block_updates(
+    objectives: &[ObjectiveRecord],
+) -> Vec<(&'static str, WorkspaceManagedBlockUpdate)> {
+    vec![
+        (
+            "context/current-focus.md",
+            WorkspaceManagedBlockUpdate {
+                block_id: OBJECTIVE_FOCUS_BLOCK_ID.to_owned(),
+                heading: "Objective Focus".to_owned(),
+                entries: objectives
+                    .iter()
+                    .filter(|entry| {
+                        !matches!(entry.state, ObjectiveState::Archived | ObjectiveState::Cancelled)
+                    })
+                    .map(|entry| {
+                        managed_entry(
+                            entry.objective_id.as_str(),
+                            format!(
+                                "[{}] {}: {}",
+                                entry.state.as_str(),
+                                entry.name,
+                                entry
+                                    .current_focus
+                                    .clone()
+                                    .unwrap_or_else(|| "No current focus recorded.".to_owned())
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
+        ),
+        (
+            "HEARTBEAT.md",
+            WorkspaceManagedBlockUpdate {
+                block_id: OBJECTIVE_HEARTBEAT_BLOCK_ID.to_owned(),
+                heading: "Objective Heartbeats".to_owned(),
+                entries: objectives
+                    .iter()
+                    .filter(|entry| entry.kind == ObjectiveKind::Heartbeat)
+                    .map(|entry| {
+                        managed_entry(
+                            entry.objective_id.as_str(),
+                            format!(
+                                "[{}] {} -> next step: {}",
+                                entry.state.as_str(),
+                                entry.name,
+                                entry
+                                    .next_recommended_step
+                                    .clone()
+                                    .unwrap_or_else(|| "No next step recorded.".to_owned())
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
+        ),
+        (
+            "projects/inbox.md",
+            WorkspaceManagedBlockUpdate {
+                block_id: OBJECTIVE_INBOX_BLOCK_ID.to_owned(),
+                heading: "Objective Inbox".to_owned(),
+                entries: objectives
+                    .iter()
+                    .filter(|entry| {
+                        matches!(
+                            entry.state,
+                            ObjectiveState::Draft | ObjectiveState::Active | ObjectiveState::Paused
+                        )
+                    })
+                    .map(|entry| {
+                        managed_entry(
+                            entry.objective_id.as_str(),
+                            format!(
+                                "{} -> {}",
+                                entry.name,
+                                entry
+                                    .next_recommended_step
+                                    .clone()
+                                    .unwrap_or_else(|| "Review the objective summary.".to_owned())
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
+        ),
+    ]
+}
+
+#[allow(clippy::result_large_err)]
+fn normalize_lifecycle_reason(reason: Option<String>) -> Result<Option<String>, Response> {
+    let Some(reason) = reason else {
+        return Ok(None);
+    };
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > 500 {
+        return Err(validation_error_response(
+            "reason",
+            "too_large",
+            "reason must be at most 500 bytes",
+        ));
+    }
+    Ok(Some(trimmed.to_owned()))
 }
 
 fn normalize_budget(
@@ -1704,7 +1852,9 @@ fn routine_registry_error_response(error: crate::routines::RoutineRegistryError)
 fn objective_workspace_error_response(
     error: crate::domain::workspace::WorkspaceManagedBlockError,
 ) -> Response {
-    runtime_status_response(tonic::Status::failed_precondition(error.to_string()))
+    runtime_status_response(tonic::Status::failed_precondition(format!(
+        "objective workspace projection blocked before lifecycle mutation: {error}. Repair the affected Palyra managed block by removing manual edits between PALYRA markers or delete the malformed managed block, then retry the objective command."
+    )))
 }
 
 fn internal_console_error(error: anyhow::Error) -> Response {
@@ -1716,8 +1866,13 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_objective_health, managed_entry, normalize_budget, parse_objective_kind,
-        parse_objective_priority, render_objective_summary_markdown, ConsoleObjectiveBudgetPayload,
+        apply_lifecycle_workspace_projection, compute_objective_health, managed_entry,
+        normalize_budget, normalize_lifecycle_reason, objective_record_block,
+        owner_objective_block_updates, parse_objective_kind, parse_objective_priority,
+        render_objective_summary_markdown, ConsoleObjectiveBudgetPayload,
+    };
+    use crate::domain::workspace::{
+        sync_workspace_managed_block, WorkspaceManagedBlockError, WorkspaceManagedBlockUpdate,
     };
     use crate::objectives::{
         ObjectiveAutomationBinding, ObjectiveBudget, ObjectiveKind, ObjectivePriority,
@@ -1840,5 +1995,59 @@ mod tests {
     fn managed_entry_uses_objective_label() {
         let entry = managed_entry("demo", "Track the next step".to_owned());
         assert_eq!(entry.label, "objective");
+    }
+
+    #[test]
+    fn lifecycle_projection_is_pure_before_side_effects() {
+        let mut objective = sample_objective();
+        apply_lifecycle_workspace_projection("pause", &mut objective)
+            .expect("pause projection should succeed");
+        assert_eq!(objective.state, ObjectiveState::Paused);
+        assert!(!objective.automation.enabled);
+        assert!(objective.lifecycle_history.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_reason_is_normalized_before_mutation() {
+        assert_eq!(
+            normalize_lifecycle_reason(Some("  operator pause  ".to_owned()))
+                .expect("reason should normalize")
+                .as_deref(),
+            Some("operator pause")
+        );
+        assert!(
+            normalize_lifecycle_reason(Some("x".repeat(501))).is_err(),
+            "oversized reasons must fail before lifecycle side effects"
+        );
+    }
+
+    #[test]
+    fn objective_projection_rejects_malformed_managed_block() {
+        let objective = sample_objective();
+        let malformed = "\
+# Heartbeat Objective
+
+## Daily heartbeat Summary
+<!-- PALYRA:BEGIN objective-record -->
+manual edit inside managed block
+<!-- PALYRA:END objective-record -->
+";
+        let error = sync_workspace_managed_block(malformed, &objective_record_block(&objective))
+            .expect_err("malformed managed content should block projection");
+        assert!(matches!(error, WorkspaceManagedBlockError::MalformedItem { .. }));
+    }
+
+    #[test]
+    fn owner_projection_blocks_cover_expected_workspace_docs() {
+        let objective = sample_objective();
+        let updates = owner_objective_block_updates(&[objective]);
+        let paths = updates.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+        assert_eq!(paths, vec!["context/current-focus.md", "HEARTBEAT.md", "projects/inbox.md"]);
+        assert!(
+            updates.iter().all(|(_, update): &(&str, WorkspaceManagedBlockUpdate)| {
+                !update.block_id.trim().is_empty()
+            }),
+            "all owner projection updates should target a managed block"
+        );
     }
 }
