@@ -760,6 +760,10 @@ fn run_skills_check(
         records
     };
 
+    if selected_records.is_empty() && json_output {
+        skills_output::emit_check_results(skills_root.as_path(), &[], json_output)?;
+        return std::io::stdout().flush().context("stdout flush failed");
+    }
     if selected_records.is_empty() {
         anyhow::bail!("no installed skills matched the requested check scope");
     }

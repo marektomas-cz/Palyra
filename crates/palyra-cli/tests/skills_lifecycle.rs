@@ -98,6 +98,37 @@ fn build_sample_artifact(workdir: &TempDir, artifact_path: &Path) -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn skills_check_json_reports_empty_inventory() -> Result<()> {
+    let workdir = TempDir::new().context("tempdir")?;
+    let skills_dir = workdir.path().join("skills");
+    fs::create_dir_all(skills_dir.as_path()).context("create empty skills dir")?;
+    let args = vec![
+        "skills".to_owned(),
+        "check".to_owned(),
+        "--skills-dir".to_owned(),
+        skills_dir.to_string_lossy().into_owned(),
+        "--json".to_owned(),
+    ];
+
+    let output = run_cli(&workdir, args.as_slice())?;
+
+    assert!(
+        output.status.success(),
+        "skills check should treat empty inventory as a normal JSON result: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(output.stdout.as_slice()).context("check output should be JSON")?;
+    assert_eq!(payload.get("count").and_then(Value::as_u64), Some(0));
+    assert_eq!(
+        payload.get("results").and_then(Value::as_array).map(Vec::len),
+        Some(0),
+        "empty skills check should include an empty results array"
+    );
+    Ok(())
+}
+
 fn seed_skill_secret(workdir: &TempDir, scope: &str, key: &str, value: &str) -> Result<()> {
     let args = vec![
         "secrets".to_owned(),
