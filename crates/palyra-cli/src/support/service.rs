@@ -8,6 +8,8 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use windows_sys::Win32::Globalization::{GetOEMCP, MultiByteToWideChar};
 
 const SERVICE_METADATA_SCHEMA_VERSION: u32 = 1;
 
@@ -352,14 +354,48 @@ fn build_windows_task_install_error(
 
 #[cfg(windows)]
 fn summarize_command_output(output: &Output) -> Option<String> {
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let stdout = decode_windows_process_output(output.stdout.as_slice());
+    let stderr = decode_windows_process_output(output.stderr.as_slice());
     match (stdout.is_empty(), stderr.is_empty()) {
         (false, false) => Some(format!("stdout: {stdout}; stderr: {stderr}")),
         (false, true) => Some(format!("stdout: {stdout}")),
         (true, false) => Some(format!("stderr: {stderr}")),
         (true, true) => None,
     }
+}
+
+#[cfg(windows)]
+fn decode_windows_process_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(value) = std::str::from_utf8(bytes) {
+        return value.trim().to_owned();
+    }
+    windows_code_page_to_string(bytes, unsafe { GetOEMCP() })
+        .or_else(|| windows_code_page_to_string(bytes, 1250))
+        .unwrap_or_else(|| format!("non-UTF-8 localized output ({} bytes)", bytes.len()))
+        .trim()
+        .to_owned()
+}
+
+#[cfg(windows)]
+fn windows_code_page_to_string(bytes: &[u8], code_page: u32) -> Option<String> {
+    let input_len = i32::try_from(bytes.len()).ok()?;
+    let required = unsafe {
+        MultiByteToWideChar(code_page, 0, bytes.as_ptr(), input_len, std::ptr::null_mut(), 0)
+    };
+    if required <= 0 {
+        return None;
+    }
+    let mut buffer = vec![0_u16; usize::try_from(required).ok()?];
+    let written = unsafe {
+        MultiByteToWideChar(code_page, 0, bytes.as_ptr(), input_len, buffer.as_mut_ptr(), required)
+    };
+    if written <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..usize::try_from(written).ok()?]))
 }
 
 #[cfg(windows)]
@@ -827,7 +863,7 @@ fn current_uid() -> Result<u32> {
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::summarize_command_output;
+    use super::{decode_windows_process_output, summarize_command_output};
     use super::{
         default_service_name, load_service_metadata, query_gateway_service_status,
         service_metadata_path, GatewayServiceMetadata, SERVICE_METADATA_SCHEMA_VERSION,
@@ -899,5 +935,16 @@ mod tests {
         let summary = summarize_command_output(&output).expect("summary should include output");
         assert!(summary.contains("stdout: ERROR:"));
         assert!(summary.contains("stderr: ERROR:"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decode_windows_process_output_preserves_localized_schtasks_text() {
+        let decoded = decode_windows_process_output(b"ERROR: P\xfd\xa1stup byl odep\xfden.");
+
+        assert!(
+            decoded.contains("Přístup byl odepřen"),
+            "localized schtasks output should not be mojibake: {decoded}"
+        );
     }
 }

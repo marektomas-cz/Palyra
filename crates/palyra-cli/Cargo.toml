@@ -55,3 +55,6 @@ tonic-prost-build.workspace = true
 [dev-dependencies]
 reqwest.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Globalization"] }

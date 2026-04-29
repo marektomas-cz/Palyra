@@ -123,6 +123,7 @@ enum ServiceInstallMode {
     NotNow,
     GuidanceOnly,
     InstallNow,
+    InstallFailedDeferred,
 }
 
 impl ServiceInstallMode {
@@ -131,6 +132,7 @@ impl ServiceInstallMode {
             Self::NotNow => "not_now",
             Self::GuidanceOnly => "guidance_only",
             Self::InstallNow => "install_now",
+            Self::InstallFailedDeferred => "install_failed_deferred",
         }
     }
 }
@@ -1832,10 +1834,10 @@ fn apply_onboarding_plan(
 }
 
 fn record_service_install_failure(plan: &mut OnboardingMutationPlan, error: &anyhow::Error) {
-    plan.service_install_mode = ServiceInstallMode::GuidanceOnly;
+    plan.service_install_mode = ServiceInstallMode::InstallFailedDeferred;
     plan.risk_events.push("service_install_deferred_after_failure".to_owned());
     plan.warnings.push(format!(
-        "background gateway service install failed and was deferred: {error:#}. Run `palyra gateway run` for an immediate foreground runtime, or retry `palyra gateway install --start` after fixing service permissions."
+        "`Install Now` was selected, but background gateway service install failed and was deferred: {error:#}. Run `palyra gateway run` for an immediate foreground runtime, or retry `palyra gateway install --start` after fixing service permissions."
     ));
     dedupe_strings(&mut plan.risk_events);
     dedupe_strings(&mut plan.warnings);
@@ -3690,7 +3692,7 @@ mod tests {
 
         record_service_install_failure(&mut plan, &anyhow::anyhow!("scheduled task denied"));
 
-        assert_eq!(plan.service_install_mode, ServiceInstallMode::GuidanceOnly);
+        assert_eq!(plan.service_install_mode, ServiceInstallMode::InstallFailedDeferred);
         assert!(plan
             .risk_events
             .iter()
