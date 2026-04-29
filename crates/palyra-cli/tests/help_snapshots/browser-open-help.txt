@@ -1,0 +1,37 @@
+Create a session and immediately navigate it to a URL
+
+Usage: palyra browser open [OPTIONS] --url <URL>
+
+Options:
+      --url <URL>
+      --principal <PRINCIPAL>
+      --channel <CHANNEL>
+      --allow-private-targets
+      --allow-downloads
+      --profile-id <PROFILE_ID>
+      --private-profile
+      --timeout-ms <TIMEOUT_MS>
+  -h, --help                     Print help
+
+Global Options:
+      --profile <PROFILE>
+
+      --expect-profile <EXPECT_PROFILE>
+
+      --config <CONFIG_PATH>
+
+      --state-root <STATE_ROOT>
+
+  -v, --verbose...
+          Increase logging verbosity (-v => debug, -vv => trace)
+      --log-level <LOG_LEVEL>
+          [default: info] [possible values: error, warn, info, debug, trace]
+      --output-format <OUTPUT_FORMAT>
+          [default: text] [possible values: text, json, ndjson]
+      --plain
+
+      --no-color
+
+      --allow-profile-mismatch
+
+      --allow-strict-profile-actions

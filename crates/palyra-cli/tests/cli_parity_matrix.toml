@@ -435,6 +435,26 @@ path = "browser"
 file = "browser-help.txt"
 
 [[entries]]
+path = "browser open"
+category = "nested_surface"
+status = "done"
+summary = "Browser open create-and-navigate contract."
+required_flags = [
+    "url",
+    "principal",
+    "channel",
+    "allow-private-targets",
+    "allow-downloads",
+    "profile-id",
+    "private-profile",
+    "timeout-ms",
+]
+
+[entries.snapshot]
+path = "browser open"
+file = "browser-open-help.txt"
+
+[[entries]]
 path = "system"
 category = "canonical_family"
 status = "done"
