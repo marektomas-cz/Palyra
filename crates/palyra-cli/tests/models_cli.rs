@@ -565,6 +565,68 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
 }
 
 #[test]
+fn models_set_embeddings_for_minimax_legacy_config_returns_validation_guidance() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "https://api.minimax.io/anthropic"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key_vault_ref = "global/minimax_api_key"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "models",
+            "set-embeddings",
+            "text-embedding-3-small",
+            "--path",
+            &config_path_string,
+            "--json",
+        ],
+    )?;
+    assert!(
+        !output.status.success(),
+        "models set-embeddings should reject unsupported legacy MiniMax configs"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "unsupported embeddings setup should be classified as a validation error"
+    );
+    let stderr = String::from_utf8(output.stderr).context("stderr was not valid UTF-8")?;
+    assert!(
+        stderr.contains("error[validation_error]"),
+        "stderr should classify the operator mistake as validation, not internal: {stderr}"
+    );
+    assert!(
+        stderr.contains("model_provider.default_embeddings_model_id"),
+        "stderr should point to the supported registry default field: {stderr}"
+    );
+    assert!(
+        stderr.contains("hash fallback"),
+        "stderr should name the safe degraded memory mode: {stderr}"
+    );
+
+    let config_body = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    assert!(
+        !config_body.contains("default_embeddings_model_id"),
+        "rejected embeddings update must not partially mutate the config: {config_body}"
+    );
+    Ok(())
+}
+
+#[test]
 fn models_test_connection_discovers_live_models_with_cache() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let state_root = workdir.path().join("state");

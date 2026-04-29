@@ -637,7 +637,7 @@ fn legacy_embeddings_model_key(provider_kind: &str) -> Result<&'static str> {
             Ok("model_provider.openai_embeddings_model")
         }
         ANTHROPIC_PROVIDER_KIND => anyhow::bail!(
-            "legacy anthropic model provider configs do not support embeddings defaults; configure model_provider.default_embeddings_model_id with a provider registry"
+            "models set-embeddings requires an OpenAI-compatible provider or a provider registry entry with an embeddings model; legacy Anthropic-compatible providers such as MiniMax cannot use OpenAI embeddings directly. Configure model_provider.providers/model_provider.models with an embeddings-capable OpenAI-compatible provider and set model_provider.default_embeddings_model_id, or leave memory in hash fallback."
         ),
         _ => anyhow::bail!(
             "model_provider.kind must be one of deterministic, openai_compatible, or anthropic"

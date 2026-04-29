@@ -766,7 +766,7 @@ pub(crate) fn build_memory_embedding_runtime_selection(
             MemoryEmbeddingsPosture::DegradedConfigFallback,
             None,
             "embeddings_model_not_configured",
-            "retrieval embeddings defaulted to hash fallback because no embeddings-capable provider or model is configured"
+            "retrieval embeddings defaulted to hash fallback because no embeddings-capable provider or model is configured. Configure an OpenAI-compatible embeddings provider in model_provider.providers/model_provider.models, set model_provider.default_embeddings_model_id, then run palyra models set-embeddings <model>; otherwise memory remains usable with hash fallback."
                 .to_owned(),
             DEFAULT_PRODUCTION_EMBEDDINGS_DIMS,
         );
@@ -1503,6 +1503,28 @@ mod tests {
             .expect("offline selection should succeed");
         assert!(!selection.profile.production_default_active);
         assert_eq!(selection.profile.posture.as_str(), "degraded_offline");
+    }
+
+    #[test]
+    fn memory_embedding_selection_guides_operator_when_embeddings_are_unconfigured() {
+        let config = ModelProviderConfig {
+            kind: ModelProviderKind::Anthropic,
+            ..ModelProviderConfig::default()
+        };
+
+        let selection = build_memory_embedding_runtime_selection(&config, false)
+            .expect("unconfigured embeddings should use hash fallback");
+        assert!(!selection.profile.production_default_active);
+        assert_eq!(selection.profile.posture.as_str(), "degraded_config_fallback");
+        let warning = selection.profile.warning.as_deref().expect("warning should be present");
+        assert!(
+            warning.contains("model_provider.default_embeddings_model_id"),
+            "warning should identify the supported embeddings default path: {warning}"
+        );
+        assert!(
+            warning.contains("hash fallback"),
+            "warning should make the degraded fallback mode explicit: {warning}"
+        );
     }
 
     #[test]
