@@ -478,7 +478,12 @@ fn chromium_new_tab_retryable_error_classifier_matches_transient_protocol_races(
 #[test]
 fn chromium_remote_ip_guard_records_incident_for_private_addresses() {
     let incident = Arc::new(StdMutex::new(None::<String>));
-    record_chromium_remote_ip_incident(Some("127.0.0.1"), false, &incident);
+    record_chromium_remote_ip_incident(
+        Some("http://127.0.0.1/"),
+        Some("127.0.0.1"),
+        false,
+        &incident,
+    );
     let message = incident
         .lock()
         .expect("guard should lock after IPv4 incident")
@@ -490,7 +495,7 @@ fn chromium_remote_ip_guard_records_incident_for_private_addresses() {
     );
 
     let incident = Arc::new(StdMutex::new(None::<String>));
-    record_chromium_remote_ip_incident(Some("[::1]"), false, &incident);
+    record_chromium_remote_ip_incident(Some("http://[::1]/"), Some("[::1]"), false, &incident);
     let message = incident
         .lock()
         .expect("guard should lock after IPv6 incident")
@@ -502,16 +507,36 @@ fn chromium_remote_ip_guard_records_incident_for_private_addresses() {
 #[test]
 fn chromium_remote_ip_guard_ignores_public_and_opted_in_private_targets() {
     let incident = Arc::new(StdMutex::new(None::<String>));
-    record_chromium_remote_ip_incident(Some("93.184.216.34"), false, &incident);
+    record_chromium_remote_ip_incident(None, Some("93.184.216.34"), false, &incident);
     assert!(
         incident.lock().expect("guard should lock after public response IP check").is_none(),
         "public response IP should not produce a remote IP guard incident"
     );
 
-    record_chromium_remote_ip_incident(Some("127.0.0.1"), true, &incident);
+    record_chromium_remote_ip_incident(
+        Some("http://127.0.0.1/"),
+        Some("127.0.0.1"),
+        true,
+        &incident,
+    );
     assert!(
         incident.lock().expect("guard should lock after private-target opt-in check").is_none(),
         "private-target opt-in should bypass remote IP guard incidents"
+    );
+}
+
+#[test]
+fn chromium_remote_ip_guard_ignores_local_proxy_hop_for_public_response_url() {
+    let incident = Arc::new(StdMutex::new(None::<String>));
+    record_chromium_remote_ip_incident(
+        Some("https://93.184.216.34/"),
+        Some("127.0.0.1"),
+        false,
+        &incident,
+    );
+    assert!(
+        incident.lock().expect("guard should lock after local proxy response IP check").is_none(),
+        "loopback SOCKS5 proxy hop should not block an otherwise public response URL"
     );
 }
 

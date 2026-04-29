@@ -326,6 +326,7 @@ pub(crate) fn parse_chromium_remote_ip_literal(raw: &str) -> Option<IpAddr> {
 }
 
 pub(crate) fn record_chromium_remote_ip_incident(
+    response_url: Option<&str>,
     remote_ip: Option<&str>,
     allow_private_targets: bool,
     security_incident: &Arc<std::sync::Mutex<Option<String>>>,
@@ -342,6 +343,11 @@ pub(crate) fn record_chromium_remote_ip_incident(
     if !netguard::is_private_or_local_ip(parsed_remote_ip) {
         return;
     }
+    if parsed_remote_ip.is_loopback()
+        && chromium_loopback_remote_ip_is_expected_proxy_hop(response_url, allow_private_targets)
+    {
+        return;
+    }
     if let Ok(mut guard) = security_incident.lock() {
         if guard.is_none() {
             *guard = Some(format!(
@@ -350,6 +356,20 @@ pub(crate) fn record_chromium_remote_ip_incident(
             ));
         }
     }
+}
+
+pub(crate) fn chromium_loopback_remote_ip_is_expected_proxy_hop(
+    response_url: Option<&str>,
+    allow_private_targets: bool,
+) -> bool {
+    let Some(response_url) = response_url else {
+        return false;
+    };
+
+    // Chromium reports the local SOCKS5 proxy as the response remote IP. The
+    // actual origin address is enforced by request interception and by the
+    // per-session proxy before CONNECT succeeds.
+    validate_target_url_blocking(response_url, allow_private_targets).is_ok()
 }
 
 pub(crate) fn configure_chromium_tab(
@@ -381,6 +401,7 @@ pub(crate) fn configure_chromium_tab(
         CHROMIUM_REMOTE_IP_GUARD_HANDLER_NAME,
         Box::new(move |response, _fetch_body| {
             record_chromium_remote_ip_incident(
+                Some(response.response.url.as_str()),
                 response.response.remote_ip_address.as_deref(),
                 allow_private_targets,
                 &remote_ip_guard,
