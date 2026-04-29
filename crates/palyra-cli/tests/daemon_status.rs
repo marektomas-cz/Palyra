@@ -37,6 +37,46 @@ fn palyra_daemon_status_reads_health_endpoint() -> Result<()> {
 }
 
 #[test]
+fn palyra_gateway_status_distinguishes_runtime_from_service_manager() -> Result<()> {
+    let (child, port, state_root) = spawn_palyrad_with_dynamic_port()?;
+    let state_root_arg = state_root.path().to_string_lossy().into_owned();
+    let _daemon = ChildGuard::new(child, state_root);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .args([
+            "--state-root",
+            state_root_arg.as_str(),
+            "gateway",
+            "status",
+            "--url",
+            &format!("http://127.0.0.1:{port}"),
+        ])
+        .output()
+        .context("failed to execute palyra gateway status")?;
+
+    assert!(
+        output.status.success(),
+        "palyra gateway status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
+    assert!(
+        stdout.contains("runtime_running=true"),
+        "expected foreground runtime to be reported separately, got: {stdout}"
+    );
+    assert!(stdout.contains("runtime_health=ok"), "expected runtime health, got: {stdout}");
+    assert!(
+        stdout.contains("service_running=false"),
+        "expected missing service-manager state to stay visible, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains(" running=false"),
+        "status should not expose a bare running=false token when the runtime is healthy: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
 fn palyra_daemon_admin_status_without_token_succeeds_when_auth_is_disabled() -> Result<()> {
     let (child, port, state_root) =
         spawn_palyrad_with_dynamic_port_and_env(&[("PALYRA_ADMIN_REQUIRE_AUTH", "false")])?;

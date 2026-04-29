@@ -796,9 +796,17 @@ fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
         return std::io::stdout().flush().context("stdout flush failed");
     }
 
+    let runtime_health = report
+        .health
+        .as_ref()
+        .and_then(|health| health.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
     println!(
-        "gateway.status daemon_url={} installed={} running={} enabled={} manager={} service_name={}",
+        "gateway.status daemon_url={} runtime_running={} runtime_health={} service_installed={} service_running={} service_enabled={} manager={} service_name={}",
         report.daemon_url,
+        report.health.is_some(),
+        runtime_health,
         report.service.installed,
         report.service.running,
         report.service.enabled,
