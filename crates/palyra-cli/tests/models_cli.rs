@@ -885,6 +885,107 @@ enabled = true
 }
 
 #[test]
+fn models_test_connection_accepts_minimax_auth_provider_filter_alias() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let state_root = workdir.path().join("state");
+    fs::create_dir_all(&state_root)
+        .with_context(|| format!("failed to create {}", state_root.display()))?;
+    let server = MockProviderServer::spawn(vec![MockProviderResponse {
+        status_line: "404 Not Found",
+        body: r#"{"error":"not found"}"#,
+        expected_header: Some("authorization: Bearer sk-minimax-test".to_owned()),
+    }])?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "{base_url}"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key = "sk-minimax-test"
+"#,
+            base_url = server.base_url
+        ),
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let state_root_string = state_root.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "--state-root",
+            &state_root_string,
+            "models",
+            "test-connection",
+            "--path",
+            &config_path_string,
+            "--provider",
+            "minimax",
+            "--refresh",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "models test-connection should accept auth_provider_kind filter aliases: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
+    let payload: Value = serde_json::from_str(stdout.as_str()).context("stdout was not JSON")?;
+    assert_eq!(payload.get("provider_filter").and_then(Value::as_str), Some("minimax"));
+    assert_eq!(
+        payload.pointer("/providers/0/provider_id").and_then(Value::as_str),
+        Some("minimax-primary"),
+        "auth provider alias should resolve the configured MiniMax provider: {payload}"
+    );
+    assert_eq!(
+        payload.pointer("/providers/0/state").and_then(Value::as_str),
+        Some("verification_incomplete"),
+        "unsupported live discovery should still return a structured provider result: {payload}"
+    );
+
+    let invalid = run_cli(
+        &workdir,
+        &[
+            "--state-root",
+            &state_root_string,
+            "models",
+            "test-connection",
+            "--path",
+            &config_path_string,
+            "--provider",
+            "missing-provider",
+            "--json",
+        ],
+    )?;
+    assert!(
+        !invalid.status.success(),
+        "unknown provider filters should fail before network probing"
+    );
+    assert_eq!(
+        invalid.status.code(),
+        Some(2),
+        "unknown provider filters should be validation errors"
+    );
+    let stderr = String::from_utf8(invalid.stderr).context("stderr was not valid UTF-8")?;
+    assert!(
+        stderr.contains("error[validation_error]"),
+        "unknown provider filters should not be internal errors: {stderr}"
+    );
+    assert!(
+        stderr.contains("models list --json"),
+        "unknown provider filter guidance should point to provider discovery: {stderr}"
+    );
+    server.finish()?;
+    Ok(())
+}
+
+#[test]
 fn models_explain_reports_primary_and_failover_candidates() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("palyra.toml");

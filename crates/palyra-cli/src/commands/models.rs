@@ -666,13 +666,13 @@ fn run_provider_checks(
         .into_iter()
         .filter(|provider| {
             provider_filter_ref
-                .map(|filter| provider.provider_id == filter || provider.kind == filter)
+                .map(|filter| provider_matches_filter(provider, filter))
                 .unwrap_or(true)
         })
         .collect::<Vec<_>>();
     if filtered_targets.is_empty() {
         anyhow::bail!(
-            "no provider matched '{}'",
+            "invalid provider filter '{}': no configured provider matched; use `palyra models list --json` to inspect provider_id values and aliases",
             provider_filter.as_deref().unwrap_or("configured registry")
         );
     }
@@ -715,6 +715,22 @@ fn run_provider_checks(
         provider_count: providers.len(),
         providers,
     })
+}
+
+fn provider_matches_filter(provider: &ProbeableProvider, filter: &str) -> bool {
+    let normalized_filter = normalize_provider_filter_alias(filter);
+    [
+        Some(provider.provider_id.as_str()),
+        Some(provider.kind.as_str()),
+        provider.auth_provider_kind.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|candidate| normalize_provider_filter_alias(candidate) == normalized_filter)
+}
+
+fn normalize_provider_filter_alias(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace('-', "_")
 }
 
 fn explain_models_routing(
