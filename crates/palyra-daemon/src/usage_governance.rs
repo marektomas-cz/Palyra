@@ -22,6 +22,7 @@ use crate::{
 };
 
 const ALERT_MIN_COST_SPIKE_USD: f64 = 0.50;
+const PRIMARY_INTERACTIVE_LEASE_WAIT_MS: u64 = 30_000;
 pub(crate) const USAGE_BUDGET_SUBJECT_PREFIX: &str = "usage-budget:";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,7 +107,7 @@ impl RoutingTaskClass {
 
     pub(crate) const fn max_lease_wait_ms(self) -> u64 {
         match self {
-            Self::PrimaryInteractive => 750,
+            Self::PrimaryInteractive => PRIMARY_INTERACTIVE_LEASE_WAIT_MS,
             Self::BackgroundAutomation => 200,
             Self::AuxiliarySummary | Self::AuxiliaryRecall => 150,
             Self::AuxiliaryClassification => 100,
@@ -1964,6 +1965,19 @@ mod tests {
             selected_provider_candidate: Some("openai:credential-openai".to_owned()),
             timeout_ms: Some(250),
         }
+    }
+
+    #[test]
+    fn primary_interactive_lease_wait_absorbs_short_foreground_backpressure() {
+        assert!(
+            RoutingTaskClass::PrimaryInteractive.max_lease_wait_ms() >= 30_000,
+            "interactive agent runs should queue through short concurrent provider bursts"
+        );
+        assert!(
+            RoutingTaskClass::PrimaryInteractive.max_lease_wait_ms()
+                > RoutingTaskClass::BackgroundAutomation.max_lease_wait_ms(),
+            "background work must keep a shorter lease wait than interactive user work"
+        );
     }
 
     #[test]

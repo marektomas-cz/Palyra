@@ -414,6 +414,43 @@ pub struct GatewayJournalConfigSnapshot {
 #[rustfmt::skip]
 pub struct GatewayRuntimeDependencies { pub model_provider: Arc<dyn ModelProvider>, pub vault: Arc<Vault>, pub auth_profile_registry: Option<Arc<AuthProfileRegistry>>, pub agent_registry: AgentRegistry, pub tool_posture_registry: ToolPostureRegistry, pub retrieval_backend: Arc<dyn RetrievalBackend>, pub external_retrieval_index: Arc<ExternalRetrievalRuntime>, pub conversation_bindings: ConversationBindingStore }
 
+fn provider_lease_pressure_reason(preview: &ProviderLeasePreviewSnapshot) -> &'static str {
+    match preview.reason.as_deref() {
+        Some("shared_capacity_exhausted") => "shared provider capacity is exhausted",
+        Some("foreground_waiters_present") => "foreground work is already queued",
+        Some("foreground_capacity_reserved") => "foreground provider capacity is reserved",
+        Some(reason) if reason.starts_with("credential_feedback:") => {
+            "provider credential is cooling down after a provider error"
+        }
+        _ => "provider capacity is busy",
+    }
+}
+
+fn provider_lease_deferred_status(
+    lease_context: &ProviderLeaseExecutionContext,
+    preview: ProviderLeasePreviewSnapshot,
+) -> Status {
+    let reason = provider_lease_pressure_reason(&preview);
+    Status::resource_exhausted(format!(
+        "model provider capacity is busy for {} on provider '{}' ({reason}); retry shortly or reduce concurrent agent runs",
+        lease_context.task_label,
+        lease_context.provider_id,
+    ))
+}
+
+fn provider_lease_timeout_status(
+    waited_ms: u64,
+    lease_context: &ProviderLeaseExecutionContext,
+    preview: ProviderLeasePreviewSnapshot,
+) -> Status {
+    let reason = provider_lease_pressure_reason(&preview);
+    Status::resource_exhausted(format!(
+        "model provider capacity is busy for {} on provider '{}' ({reason}); queued for {waited_ms} ms before timing out; retry shortly or reduce concurrent agent runs",
+        lease_context.task_label,
+        lease_context.provider_id,
+    ))
+}
+
 #[derive(Clone)]
 pub(crate) struct RoutinesRuntimeConfig {
     pub registry: Arc<crate::routines::RoutineRegistry>,
@@ -2867,22 +2904,10 @@ impl GatewayRuntimeState {
             .await
             .map_err(|error| match error {
                 ProviderLeaseAcquireError::Deferred(preview) => {
-                    Status::resource_exhausted(format!(
-                        "shared provider lease deferred {} for {}:{} ({})",
-                        lease_context.task_label,
-                        lease_context.provider_id,
-                        lease_context.credential_id,
-                        preview.reason.unwrap_or_else(|| "foreground capacity reserved".to_owned()),
-                    ))
+                    provider_lease_deferred_status(&lease_context, preview)
                 }
                 ProviderLeaseAcquireError::TimedOut { waited_ms, preview } => {
-                    Status::unavailable(format!(
-                        "shared provider lease wait exceeded {} ms for {}:{} ({})",
-                        waited_ms,
-                        lease_context.provider_id,
-                        lease_context.credential_id,
-                        preview.reason.unwrap_or_else(|| "shared capacity exhausted".to_owned()),
-                    ))
+                    provider_lease_timeout_status(waited_ms, &lease_context, preview)
                 }
             })?;
         self.counters.model_provider_requests.fetch_add(1, Ordering::Relaxed);
@@ -7814,7 +7839,59 @@ fn normalize_optional_agent_model_profile(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::select_default_agent_model_profile;
+    use super::{provider_lease_timeout_status, select_default_agent_model_profile};
+    use crate::provider_leases::{
+        LeasePreviewState, LeasePriority, ProviderLeaseExecutionContext,
+        ProviderLeasePreviewSnapshot,
+    };
+    use tonic::Code;
+
+    #[test]
+    fn provider_lease_timeout_status_surfaces_backpressure_without_internal_reason_codes() {
+        let status = provider_lease_timeout_status(
+            763,
+            &ProviderLeaseExecutionContext {
+                provider_id: "openai".to_owned(),
+                credential_id: "cred-a".to_owned(),
+                priority: LeasePriority::Foreground,
+                task_label: "primary_interactive".to_owned(),
+                max_wait_ms: 30_000,
+                session_id: Some("session-1".to_owned()),
+                run_id: Some("run-1".to_owned()),
+            },
+            ProviderLeasePreviewSnapshot {
+                state: LeasePreviewState::Waiting,
+                priority: LeasePriority::Foreground,
+                estimated_wait_ms: Some(25),
+                retry_after_ms: None,
+                active_provider_leases: 2,
+                active_credential_leases: 2,
+                foreground_waiters: 1,
+                background_waiters: 0,
+                credential_state: None,
+                reason: Some("shared_capacity_exhausted".to_owned()),
+                queue_position: Some(2),
+                wait_reason: Some("shared_capacity_exhausted".to_owned()),
+                priority_class: "foreground".to_owned(),
+                selected_provider_candidate: Some("openai:cred-a".to_owned()),
+                timeout_ms: Some(30_000),
+            },
+        );
+
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert!(
+            status.message().contains("model provider capacity is busy"),
+            "lease timeout should be reported as explicit backpressure"
+        );
+        assert!(
+            status.message().contains("queued for 763 ms"),
+            "lease timeout should include the observed queue wait"
+        );
+        assert!(
+            !status.message().contains("shared_capacity_exhausted"),
+            "internal lease reason codes should not leak into user-facing errors"
+        );
+    }
 
     #[test]
     fn default_agent_model_profile_prefers_registry_default_model() {
