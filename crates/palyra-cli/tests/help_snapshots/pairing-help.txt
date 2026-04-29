@@ -1,3 +1,5 @@
+Manage device pairing and trust bootstrap
+
 Usage: palyra pairing [OPTIONS] <COMMAND>
 
 Commands:

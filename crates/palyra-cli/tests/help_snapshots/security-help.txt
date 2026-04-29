@@ -1,3 +1,5 @@
+Run security audits and posture checks
+
 Usage: palyra security [OPTIONS] <COMMAND>
 
 Commands:

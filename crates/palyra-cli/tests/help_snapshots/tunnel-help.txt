@@ -1,3 +1,5 @@
+Open an SSH tunnel for remote daemon access
+
 Usage: palyra tunnel [OPTIONS] --ssh <SSH>
 
 Options:

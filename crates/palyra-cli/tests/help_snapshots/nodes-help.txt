@@ -1,3 +1,5 @@
+Inspect and invoke remote node RPC surfaces
+
 Usage: palyra nodes [OPTIONS] <COMMAND>
 
 Commands:

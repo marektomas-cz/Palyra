@@ -1,3 +1,5 @@
+Manage auth profiles, provider access, and OAuth/API-key flows
+
 Usage: palyra auth [OPTIONS] <COMMAND>
 
 Commands:

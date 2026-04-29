@@ -1,3 +1,5 @@
+Explain policy decisions and authorization posture
+
 Usage: palyra policy [OPTIONS] <COMMAND>
 
 Commands:

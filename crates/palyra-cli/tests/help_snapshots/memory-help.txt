@@ -1,3 +1,5 @@
+Inspect and manage session, workspace, and learning memory
+
 Usage: palyra memory [OPTIONS] <COMMAND>
 
 Commands:

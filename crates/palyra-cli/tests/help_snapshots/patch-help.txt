@@ -1,3 +1,5 @@
+Apply workspace patches through the guarded patch engine
+
 Usage: palyra patch [OPTIONS] <COMMAND>
 
 Commands:

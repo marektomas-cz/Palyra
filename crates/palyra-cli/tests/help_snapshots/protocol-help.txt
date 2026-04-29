@@ -1,3 +1,5 @@
+Validate schema and protocol contract artifacts
+
 Usage: palyra protocol [OPTIONS] <COMMAND>
 
 Commands:

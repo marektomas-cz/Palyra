@@ -2,6 +2,7 @@ use clap::Subcommand;
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum AgentsCommand {
+    #[command(about = "List registered agents")]
     List {
         #[arg(long)]
         after: Option<String>,
@@ -12,11 +13,13 @@ pub enum AgentsCommand {
         #[arg(long, default_value_t = false, conflicts_with = "json")]
         ndjson: bool,
     },
+    #[command(about = "Show one registered agent")]
     Show {
         agent_id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "List session, principal, and channel agent bindings")]
     Bindings {
         #[arg(long)]
         agent_id: Option<String>,
@@ -33,6 +36,7 @@ pub enum AgentsCommand {
         #[arg(long, default_value_t = false, conflicts_with = "json")]
         ndjson: bool,
     },
+    #[command(about = "Bind an agent to a session or operator context")]
     Bind {
         agent_id: String,
         #[arg(long)]
@@ -44,6 +48,7 @@ pub enum AgentsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Remove an agent binding from a session or operator context")]
     Unbind {
         #[arg(long)]
         principal: Option<String>,
@@ -54,11 +59,13 @@ pub enum AgentsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Set the default agent")]
     SetDefault {
         agent_id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Create a registered agent")]
     Create {
         agent_id: String,
         #[arg(long)]
@@ -82,6 +89,7 @@ pub enum AgentsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Delete a registered agent")]
     Delete {
         agent_id: String,
         #[arg(long, default_value_t = false)]
@@ -91,6 +99,7 @@ pub enum AgentsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Resolve the effective agent for an operator context")]
     Identity {
         #[arg(long)]
         principal: Option<String>,

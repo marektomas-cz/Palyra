@@ -1,3 +1,5 @@
+Export, import, and replay support bundles
+
 Usage: palyra support-bundle [OPTIONS] <COMMAND>
 
 Commands:

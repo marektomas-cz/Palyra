@@ -1,3 +1,5 @@
+Manage skill packages, trust, and lifecycle gates
+
 Usage: palyra skills [OPTIONS] <COMMAND>
 
 Commands:

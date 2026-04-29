@@ -1,3 +1,5 @@
+Manage local hooks and bindings
+
 Usage: palyra hooks [OPTIONS] <COMMAND>
 
 Commands:

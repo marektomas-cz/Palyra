@@ -542,10 +542,12 @@ pub enum Command {
         #[command(flatten)]
         command: McpCommand,
     },
+    #[command(about = "Run one-off or interactive agent sessions")]
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    #[command(about = "Manage daemon agent registry, bindings, and defaults")]
     Agents {
         #[command(subcommand)]
         command: AgentsCommand,
@@ -581,18 +583,22 @@ pub enum Command {
         #[command(subcommand)]
         command: CronCommand,
     },
+    #[command(about = "Inspect and manage session, workspace, and learning memory")]
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    #[command(about = "Inspect and manage routed channel messages")]
     Message {
         #[command(subcommand)]
         command: MessageCommand,
     },
+    #[command(about = "Review and resolve pending tool approvals")]
     Approvals {
         #[command(subcommand)]
         command: ApprovalsCommand,
     },
+    #[command(about = "List, inspect, and manage chat sessions")]
     Sessions {
         #[command(subcommand)]
         command: SessionsCommand,
@@ -605,10 +611,12 @@ pub enum Command {
         #[command(flatten)]
         command: TuiCommand,
     },
+    #[command(about = "Manage auth profiles, provider access, and OAuth/API-key flows")]
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    #[command(about = "Manage connector channels and routing")]
     Channels {
         #[command(subcommand)]
         command: ChannelsCommand,
@@ -626,14 +634,17 @@ pub enum Command {
         #[command(subcommand)]
         command: DocsCommand,
     },
+    #[command(about = "Manage installed plugin packages and discovery")]
     Plugins {
         #[command(subcommand)]
         command: PluginsCommand,
     },
+    #[command(about = "Manage local hooks and bindings")]
     Hooks {
         #[command(subcommand)]
         command: HooksCommand,
     },
+    #[command(about = "Manage extension integration surfaces")]
     Extension {
         #[command(subcommand)]
         command: ExtensionCommand,
@@ -643,14 +654,17 @@ pub enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    #[command(about = "List and manage paired operator devices")]
     Devices {
         #[command(subcommand)]
         command: DevicesCommand,
     },
+    #[command(about = "Manage the local node runtime")]
     Node {
         #[command(subcommand)]
         command: NodeCommand,
     },
+    #[command(about = "Inspect and invoke remote node RPC surfaces")]
     Nodes {
         #[command(subcommand)]
         command: NodesCommand,
@@ -821,43 +835,55 @@ pub enum Command {
         #[command(flatten)]
         command: UpdateCommand,
     },
+    #[command(about = "Export, import, and replay support bundles")]
     SupportBundle {
         #[command(subcommand)]
         command: SupportBundleCommand,
     },
+    #[command(about = "Explain policy decisions and authorization posture")]
     Policy {
         #[command(subcommand)]
         command: PolicyCommand,
     },
+    #[command(about = "Validate schema and protocol contract artifacts")]
     Protocol {
         #[command(subcommand)]
         command: ProtocolCommand,
     },
+    #[command(about = "Inspect and validate local configuration")]
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
+    #[command(about = "Inspect and configure model providers and defaults")]
     Models {
         #[command(subcommand)]
         command: ModelsCommand,
     },
+    #[command(about = "Apply workspace patches through the guarded patch engine")]
     Patch {
         #[command(subcommand)]
         command: PatchCommand,
     },
-    #[command(visible_alias = "skill")]
+    #[command(
+        visible_alias = "skill",
+        about = "Manage skill packages, trust, and lifecycle gates"
+    )]
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
     },
+    #[command(about = "Manage local secrets and vault-backed credentials")]
     Secrets {
         #[command(subcommand)]
         command: SecretsCommand,
     },
+    #[command(about = "Run security audits and posture checks")]
     Security {
         #[command(subcommand)]
         command: SecurityCommand,
     },
+    #[command(about = "Open an SSH tunnel for remote daemon access")]
     Tunnel {
         #[arg(long)]
         ssh: String,
@@ -870,6 +896,7 @@ pub enum Command {
         #[arg(long)]
         identity_file: Option<String>,
     },
+    #[command(about = "Manage device pairing and trust bootstrap")]
     Pairing {
         #[command(subcommand)]
         command: PairingCommand,

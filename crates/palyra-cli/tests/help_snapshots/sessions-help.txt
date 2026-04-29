@@ -1,3 +1,5 @@
+List, inspect, and manage chat sessions
+
 Usage: palyra sessions [OPTIONS] <COMMAND>
 
 Commands:

@@ -1,3 +1,5 @@
+Manage connector channels and routing
+
 Usage: palyra channels [OPTIONS] <COMMAND>
 
 Commands:

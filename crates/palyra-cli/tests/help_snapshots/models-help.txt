@@ -1,13 +1,15 @@
+Inspect and configure model providers and defaults
+
 Usage: palyra models [OPTIONS] <COMMAND>
 
 Commands:
-  status
-  list
-  test-connection
-  discover
-  explain
-  set
-  set-embeddings
+  status           Show the effective model-provider configuration
+  list             List configured and available model catalog entries
+  test-connection  Verify model-provider credentials and connectivity
+  discover         Discover live provider models with registry fallback
+  explain          Explain model routing and provider candidate selection
+  set              Set the default chat model
+  set-embeddings   Set the default embeddings model
 
 Options:
   -h, --help  Print help

@@ -2,18 +2,21 @@ use clap::Subcommand;
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ModelsCommand {
+    #[command(about = "Show the effective model-provider configuration")]
     Status {
         #[arg(long)]
         path: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "List configured and available model catalog entries")]
     List {
         #[arg(long)]
         path: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Verify model-provider credentials and connectivity")]
     TestConnection {
         #[arg(long)]
         path: Option<String>,
@@ -26,6 +29,7 @@ pub enum ModelsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Discover live provider models with registry fallback")]
     Discover {
         #[arg(long)]
         path: Option<String>,
@@ -38,6 +42,7 @@ pub enum ModelsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Explain model routing and provider candidate selection")]
     Explain {
         #[arg(long)]
         path: Option<String>,
@@ -50,6 +55,7 @@ pub enum ModelsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Set the default chat model")]
     Set {
         model: String,
         #[arg(long)]
@@ -59,6 +65,7 @@ pub enum ModelsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Set the default embeddings model")]
     SetEmbeddings {
         model: String,
         #[arg(long)]

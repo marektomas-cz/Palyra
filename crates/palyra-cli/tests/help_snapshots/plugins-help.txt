@@ -1,3 +1,5 @@
+Manage installed plugin packages and discovery
+
 Usage: palyra plugins [OPTIONS] <COMMAND>
 
 Commands:

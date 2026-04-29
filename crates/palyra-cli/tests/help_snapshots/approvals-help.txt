@@ -1,3 +1,5 @@
+Review and resolve pending tool approvals
+
 Usage: palyra approvals [OPTIONS] <COMMAND>
 
 Commands:

@@ -1,15 +1,17 @@
+Manage daemon agent registry, bindings, and defaults
+
 Usage: palyra agents [OPTIONS] <COMMAND>
 
 Commands:
-  list
-  show
-  bindings
-  bind
-  unbind
-  set-default
-  create
-  delete
-  identity
+  list         List registered agents
+  show         Show one registered agent
+  bindings     List session, principal, and channel agent bindings
+  bind         Bind an agent to a session or operator context
+  unbind       Remove an agent binding from a session or operator context
+  set-default  Set the default agent
+  create       Create a registered agent
+  delete       Delete a registered agent
+  identity     Resolve the effective agent for an operator context
 
 Options:
   -h, --help  Print help

@@ -1,3 +1,5 @@
+Manage the local node runtime
+
 Usage: palyra node [OPTIONS] <COMMAND>
 
 Commands:

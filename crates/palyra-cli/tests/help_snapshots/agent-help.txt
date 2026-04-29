@@ -1,3 +1,5 @@
+Run one-off or interactive agent sessions
+
 Usage: palyra agent [OPTIONS] <COMMAND>
 
 Commands:

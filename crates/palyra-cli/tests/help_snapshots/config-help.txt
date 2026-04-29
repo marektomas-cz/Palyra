@@ -1,3 +1,5 @@
+Inspect and validate local configuration
+
 Usage: palyra config [OPTIONS] [COMMAND]
 
 Commands:

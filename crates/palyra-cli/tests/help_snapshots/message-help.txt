@@ -1,3 +1,5 @@
+Inspect and manage routed channel messages
+
 Usage: palyra message [OPTIONS] <COMMAND>
 
 Commands:
