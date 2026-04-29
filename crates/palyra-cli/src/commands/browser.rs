@@ -735,6 +735,8 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
         )
         .await
         .context("failed to navigate browser session")?;
+    let navigate_success = navigate.success;
+    let navigate_error = navigate.error.clone();
     let payload = json!({
         "session": create,
         "navigate": navigate,
@@ -749,7 +751,8 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
             payload.pointer("/navigate/status_code").and_then(Value::as_u64).unwrap_or(0)
         ),
         "failed to encode browser open output",
-    )
+    )?;
+    ensure_browser_command_success("browser.open", navigate_success, navigate_error.as_str())
 }
 
 async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<()> {
@@ -1157,6 +1160,8 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                 )
                 .await
                 .context("failed to open browser tab")?;
+            let success = envelope.success;
+            let error = envelope.error.clone();
             let value = serde_json::to_value(&envelope)
                 .context("failed to encode browser tab open output")?;
             emit_browser_value(
@@ -1175,7 +1180,8 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                     envelope.navigated,
                 ),
                 "failed to encode browser tab open output",
-            )
+            )?;
+            ensure_browser_command_success("browser.tabs.open", success, error.as_str())
         }
         BrowserTabsCommand::Switch { tab_id } => {
             let envelope = context
@@ -1186,6 +1192,8 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                 )
                 .await
                 .context("failed to switch browser tab")?;
+            let success = envelope.success;
+            let error = envelope.error.clone();
             let value = serde_json::to_value(&envelope)
                 .context("failed to encode browser tab switch output")?;
             emit_browser_value(
@@ -1202,7 +1210,8 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                     envelope.success,
                 ),
                 "failed to encode browser tab switch output",
-            )
+            )?;
+            ensure_browser_command_success("browser.tabs.switch", success, error.as_str())
         }
         BrowserTabsCommand::Close { tab_id } => {
             let envelope = context
@@ -1213,6 +1222,8 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                 )
                 .await
                 .context("failed to close browser tab")?;
+            let success = envelope.success;
+            let error = envelope.error.clone();
             let value = serde_json::to_value(&envelope)
                 .context("failed to encode browser tab close output")?;
             emit_browser_value(
@@ -1230,7 +1241,8 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                         .unwrap_or_else(|| "-".to_owned()),
                 ),
                 "failed to encode browser tab close output",
-            )
+            )?;
+            ensure_browser_command_success("browser.tabs.close", success, error.as_str())
         }
     }
 }
@@ -1259,6 +1271,8 @@ async fn run_browser_navigate(
         )
         .await
         .context("failed to navigate browser session")?;
+    let success = envelope.success;
+    let error = envelope.error.clone();
     let value =
         serde_json::to_value(&envelope).context("failed to encode browser navigate output")?;
     emit_browser_value(
@@ -1272,7 +1286,8 @@ async fn run_browser_navigate(
             empty_as_dash(envelope.title.as_str()),
         ),
         "failed to encode browser navigate output",
-    )
+    )?;
+    ensure_browser_command_success("browser.navigate", success, error.as_str())
 }
 
 async fn run_browser_click(
@@ -1300,6 +1315,8 @@ async fn run_browser_click(
         )
         .await
         .context("failed to click browser session")?;
+    let success = envelope.success;
+    let error = envelope.error.clone();
     let screenshot_path = write_optional_failure_screenshot(
         output.as_deref(),
         session_id.as_str(),
@@ -1325,7 +1342,8 @@ async fn run_browser_click(
             screenshot_path.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser click output",
-    )
+    )?;
+    ensure_browser_command_success("browser.click", success, error.as_str())
 }
 
 async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
@@ -1356,6 +1374,8 @@ async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
         )
         .await
         .context("failed to type into browser session")?;
+    let success = envelope.success;
+    let error = envelope.error.clone();
     let screenshot_path = write_optional_failure_screenshot(
         output.as_deref(),
         session_id.as_str(),
@@ -1382,6 +1402,11 @@ async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
             screenshot_path.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser type output",
+    )?;
+    ensure_browser_command_success(
+        if clear_existing { "browser.fill" } else { "browser.type" },
+        success,
+        error.as_str(),
     )
 }
 
@@ -1408,6 +1433,8 @@ async fn run_browser_scroll(
         )
         .await
         .context("failed to scroll browser session")?;
+    let success = envelope.success;
+    let error = envelope.error.clone();
     let screenshot_path = write_optional_failure_screenshot(
         output.as_deref(),
         session_id.as_str(),
@@ -1433,7 +1460,8 @@ async fn run_browser_scroll(
             screenshot_path.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser scroll output",
-    )
+    )?;
+    ensure_browser_command_success("browser.scroll", success, error.as_str())
 }
 
 async fn run_browser_wait(args: BrowserWaitArgs) -> Result<()> {
@@ -1464,6 +1492,8 @@ async fn run_browser_wait(args: BrowserWaitArgs) -> Result<()> {
         )
         .await
         .context("failed to wait for browser session state")?;
+    let success = envelope.success;
+    let error = envelope.error.clone();
     let screenshot_path = write_optional_failure_screenshot(
         output.as_deref(),
         session_id.as_str(),
@@ -1490,7 +1520,8 @@ async fn run_browser_wait(args: BrowserWaitArgs) -> Result<()> {
             screenshot_path.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser wait output",
-    )
+    )?;
+    ensure_browser_command_success("browser.wait", success, error.as_str())
 }
 
 async fn run_browser_snapshot(args: BrowserSnapshotArgs) -> Result<()> {
@@ -1557,6 +1588,8 @@ async fn run_browser_screenshot(
         )
         .await
         .context("failed to capture browser screenshot")?;
+    let success = envelope.success;
+    let error = envelope.error.clone();
     let suggested_ext = format
         .as_deref()
         .map(sanitize_screenshot_format)
@@ -1582,7 +1615,8 @@ async fn run_browser_screenshot(
             output_path.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser screenshot output",
-    )
+    )?;
+    ensure_browser_command_success("browser.screenshot", success, error.as_str())
 }
 
 async fn run_browser_title(session_id: String, max_title_bytes: Option<u64>) -> Result<()> {
@@ -1596,6 +1630,8 @@ async fn run_browser_title(session_id: String, max_title_bytes: Option<u64>) -> 
         )
         .await
         .context("failed to read browser title")?;
+    let success = envelope.success;
+    let error = envelope.error.clone();
     let value = serde_json::to_value(&envelope).context("failed to encode browser title output")?;
     emit_browser_value(
         &value,
@@ -1606,7 +1642,8 @@ async fn run_browser_title(session_id: String, max_title_bytes: Option<u64>) -> 
             empty_as_dash(envelope.title.as_str()),
         ),
         "failed to encode browser title output",
-    )
+    )?;
+    ensure_browser_command_success("browser.title", success, error.as_str())
 }
 
 async fn run_browser_network(
@@ -1629,6 +1666,8 @@ async fn run_browser_network(
         )
         .await
         .context("failed to fetch browser network log")?;
+    let success = envelope.success;
+    let error = envelope.error.clone();
     let value =
         serde_json::to_value(&envelope).context("failed to encode browser network output")?;
     let mut text = format!(
@@ -1651,7 +1690,8 @@ async fn run_browser_network(
             .as_str(),
         );
     }
-    emit_browser_value(&value, text, "failed to encode browser network output")
+    emit_browser_value(&value, text, "failed to encode browser network output")?;
+    ensure_browser_command_success("browser.network", success, error.as_str())
 }
 
 async fn run_browser_storage(
@@ -1921,6 +1961,8 @@ async fn run_browser_press(session_id: String, key: String) -> Result<()> {
         .await
         .context("failed to press browser key")?
         .into_inner();
+    let success = response.success;
+    let error = response.error.clone();
     let value = json!({
         "session_id": browser_identifier_json_value(Some(session_id.as_str())),
         "success": response.success,
@@ -1937,7 +1979,8 @@ async fn run_browser_press(session_id: String, key: String) -> Result<()> {
             key,
         ),
         "failed to encode browser press output",
-    )
+    )?;
+    ensure_browser_command_success("browser.press", success, error.as_str())
 }
 
 async fn run_browser_select(session_id: String, selector: String, value: String) -> Result<()> {
@@ -1961,6 +2004,8 @@ async fn run_browser_select(session_id: String, selector: String, value: String)
         .await
         .context("failed to select browser option")?
         .into_inner();
+    let success = response.success;
+    let error = response.error.clone();
     let payload = json!({
         "session_id": browser_identifier_json_value(Some(session_id.as_str())),
         "success": response.success,
@@ -1978,7 +2023,8 @@ async fn run_browser_select(session_id: String, selector: String, value: String)
             value,
         ),
         "failed to encode browser select output",
-    )
+    )?;
+    ensure_browser_command_success("browser.select", success, error.as_str())
 }
 
 async fn run_browser_highlight(session_id: String, selector: String) -> Result<()> {
@@ -2002,6 +2048,8 @@ async fn run_browser_highlight(session_id: String, selector: String) -> Result<(
         .await
         .context("failed to highlight browser selector")?
         .into_inner();
+    let success = response.success;
+    let error = response.error.clone();
     let payload = json!({
         "session_id": browser_identifier_json_value(Some(session_id.as_str())),
         "success": response.success,
@@ -2018,7 +2066,8 @@ async fn run_browser_highlight(session_id: String, selector: String) -> Result<(
             selector,
         ),
         "failed to encode browser highlight output",
-    )
+    )?;
+    ensure_browser_command_success("browser.highlight", success, error.as_str())
 }
 
 async fn run_browser_downloads(
@@ -2735,6 +2784,22 @@ fn emit_browser_value(value: &Value, text: String, error_context: &'static str) 
     emit_browser_value_with_json(value, text, error_context, false)
 }
 
+fn browser_failure_detail(error: &str) -> String {
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        "browser service returned success=false".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn ensure_browser_command_success(command: &str, success: bool, error: &str) -> Result<()> {
+    if success {
+        return Ok(());
+    }
+    anyhow::bail!("{command} failed: {}", browser_failure_detail(error))
+}
+
 fn emit_browser_value_with_json(
     value: &Value,
     text: String,
@@ -3276,8 +3341,9 @@ fn proto_console_severity_text(value: i32) -> &'static str {
 mod tests {
     use super::{
         browser_command_policy_action, browser_identifier_json_value,
-        browser_service_enable_command, browser_status_warnings, ensure_browser_service_enabled,
-        session_summary_value, BrowserControlPlaneSnapshot, BrowserPolicySnapshot,
+        browser_service_enable_command, browser_status_warnings, ensure_browser_command_success,
+        ensure_browser_service_enabled, session_summary_value, BrowserControlPlaneSnapshot,
+        BrowserPolicySnapshot,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use serde_json::Value;
@@ -3325,6 +3391,17 @@ mod tests {
         assert_eq!(
             command,
             r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.enabled --value true"
+        );
+    }
+
+    #[test]
+    fn browser_success_false_is_a_command_failure() {
+        let error = ensure_browser_command_success("browser.screenshot", false, "tab crashed")
+            .expect_err("success=false browser envelopes must fail the CLI command");
+
+        assert!(
+            error.to_string().contains("browser.screenshot failed: tab crashed"),
+            "failure should include command and browser service error: {error}"
         );
     }
 
