@@ -85,6 +85,75 @@ pub(crate) enum RunStreamMessageProcessingOutcome {
     Terminate,
 }
 
+fn run_stream_attachment_metadata(attachments: &[common_v1::MessageAttachment]) -> Vec<Value> {
+    attachments
+        .iter()
+        .map(|attachment| {
+            let kind =
+                match common_v1::message_attachment::AttachmentKind::try_from(attachment.kind).ok()
+                {
+                    Some(common_v1::message_attachment::AttachmentKind::Image) => "image",
+                    Some(common_v1::message_attachment::AttachmentKind::File) => "file",
+                    Some(common_v1::message_attachment::AttachmentKind::Audio) => "audio",
+                    Some(common_v1::message_attachment::AttachmentKind::Video) => "video",
+                    _ => "unspecified",
+                };
+            json!({
+                "kind": kind,
+                "artifact_id": attachment
+                    .artifact_id
+                    .as_ref()
+                    .map(|value| value.ulid.clone()),
+                "size_bytes": if attachment.size_bytes > 0 {
+                    Some(attachment.size_bytes)
+                } else {
+                    None
+                },
+            })
+        })
+        .collect()
+}
+
+struct RunStreamUserMessage<'a> {
+    run_id: &'a str,
+    request_context: &'a RequestContext,
+    envelope_id: Option<&'a common_v1::CanonicalId>,
+    input_content: &'a common_v1::MessageContent,
+    session_key: &'a str,
+    json_mode_requested: bool,
+}
+
+#[allow(clippy::result_large_err)]
+async fn append_run_stream_user_message(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    tape_seq: &mut i64,
+    message: RunStreamUserMessage<'_>,
+) -> Result<(), Status> {
+    if message.input_content.text.trim().is_empty() && message.input_content.attachments.is_empty()
+    {
+        return Ok(());
+    }
+
+    runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: message.run_id.to_owned(),
+            seq: *tape_seq,
+            event_type: "message.received".to_owned(),
+            payload_json: json!({
+                "envelope_id": message.envelope_id.map(|value| value.ulid.clone()),
+                "text": message.input_content.text.clone(),
+                "channel": message.request_context.channel.clone(),
+                "session_key": non_empty(message.session_key.to_owned()),
+                "json_mode_requested": message.json_mode_requested,
+                "attachments": run_stream_attachment_metadata(message.input_content.attachments.as_slice()),
+            })
+            .to_string(),
+        })
+        .await?;
+    *tape_seq = tape_seq.saturating_add(1);
+    Ok(())
+}
+
 async fn persist_run_stream_delegation_metadata(
     runtime_state: &Arc<GatewayRuntimeState>,
     run_id: &str,
@@ -464,7 +533,7 @@ pub(crate) async fn process_run_stream_message(
 
     let input_envelope = message.input.unwrap_or_default();
     let input_content = input_envelope.content.unwrap_or_default();
-    let input_text = input_content.text;
+    let input_text = input_content.text.clone();
     let json_mode_requested = security_requests_json_mode(input_envelope.security.as_ref());
     let session_id_for_message = active_session_id
         .as_deref()
@@ -512,6 +581,20 @@ pub(crate) async fn process_run_stream_message(
         run_id.as_str(),
         in_progress_emitted,
         tape_seq,
+    )
+    .await?;
+
+    append_run_stream_user_message(
+        runtime_state,
+        tape_seq,
+        RunStreamUserMessage {
+            run_id: run_id.as_str(),
+            request_context,
+            envelope_id: input_envelope.envelope_id.as_ref(),
+            input_content: &input_content,
+            session_key: message.session_key.as_str(),
+            json_mode_requested,
+        },
     )
     .await?;
 

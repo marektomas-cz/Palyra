@@ -11,21 +11,26 @@
   },
   {
     "seq": 2,
+    "event_type": "message.received",
+    "payload_json": "{\"envelope_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAY\",\"text\":\"alpha beta gamma\",\"channel\":\"cli\",\"session_key\":null,\"json_mode_requested\":false,\"attachments\":[]}"
+  },
+  {
+    "seq": 3,
     "event_type": "model_token",
     "payload_json": "{\"is_final\":true,\"token\":\"<redacted>\"}"
   },
   {
-    "seq": 3,
+    "seq": 4,
     "event_type": "provider_turn_output",
     "payload_json": "{\"full_text\":\"alpha beta gamma\",\"content_parts\":[{\"kind\":\"text\",\"text\":\"alpha beta gamma\"}],\"finish_reason\":\"stop\",\"usage\":{\"prompt_tokens\":\"<redacted>\",\"completion_tokens\":\"<redacted>\",\"total_tokens\":\"<redacted>\",\"source\":\"estimated\"},\"raw_provider_refs\":{\"provider_model_id\":\"deterministic\",\"provider_trace_ref\":\"deterministic\"},\"redaction_state\":{\"output_redacted\":false,\"user_visible_projected\":true,\"diagnostics_redacted\":true}}"
   },
   {
-    "seq": 4,
+    "seq": 5,
     "event_type": "message.replied",
     "payload_json": "{\"reply_text\":\"alpha beta gamma\"}"
   },
   {
-    "seq": 5,
+    "seq": 6,
     "event_type": "status",
     "payload_json": "{\"kind\":\"done\",\"message\":\"completed\"}"
   }

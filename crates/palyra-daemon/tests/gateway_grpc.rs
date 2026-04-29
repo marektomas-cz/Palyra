@@ -8592,6 +8592,132 @@ async fn grpc_run_stream_persists_orchestrator_snapshot_and_matches_golden_tape(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_run_stream_session_context_includes_previous_user_turn() -> Result<()> {
+    let first_response =
+        r#"{"choices":[{"finish_reason":"stop","message":{"content":"first reply acknowledged"}}]}"#
+            .to_owned();
+    let second_response =
+        r#"{"choices":[{"finish_reason":"stop","message":{"content":"AURORA-713"}}]}"#.to_owned();
+    let (openai_base_url, request_bodies, request_count, server_handle) =
+        spawn_scripted_openai_server_with_request_capture(vec![
+            ScriptedOpenAiResponse::immediate(200, first_response),
+            ScriptedOpenAiResponse::immediate(200, second_response),
+        ])?;
+    let (child, admin_port, grpc_port, _journal_db_path) =
+        spawn_palyrad_with_openai_provider(openai_base_url.as_str(), OPENAI_API_KEY)?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+    let session_key = "cli:e2e:codeword";
+
+    let mut first_request = sample_run_stream_request_with_ids(
+        SESSION_ID,
+        RUN_ID,
+        "Please remember codeword AURORA-713 for this session".to_owned(),
+    );
+    first_request.session_key = session_key.to_owned();
+    let mut first_stream_request = tonic::Request::new(tokio_stream::iter(vec![first_request]));
+    first_stream_request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {ADMIN_TOKEN}").parse()?);
+    first_stream_request.metadata_mut().insert("x-palyra-principal", "user:ops".parse()?);
+    first_stream_request.metadata_mut().insert("x-palyra-device-id", DEVICE_ID.parse()?);
+    first_stream_request.metadata_mut().insert("x-palyra-channel", "cli".parse()?);
+
+    let mut first_response_stream = client
+        .run_stream(first_stream_request)
+        .await
+        .context("failed to call first RunStream")?
+        .into_inner();
+    let mut first_saw_done = false;
+    while let Some(event) = first_response_stream.next().await {
+        let event = event.context("failed to read first RunStream event")?;
+        if let Some(common_v1::run_stream_event::Body::Status(status)) = event.body {
+            first_saw_done |= status.kind == common_v1::stream_status::StatusKind::Done as i32;
+        }
+    }
+    assert!(first_saw_done, "first run stream should complete successfully");
+
+    let first_tape_snapshot =
+        admin_get_json_async(admin_port, format!("/admin/v1/runs/{RUN_ID}/tape")).await?;
+    let first_tape_events = first_tape_snapshot
+        .get("events")
+        .and_then(Value::as_array)
+        .context("first run tape snapshot missing events array")?;
+    let received_payload_json = first_tape_events
+        .iter()
+        .find(|event| event.get("event_type").and_then(Value::as_str) == Some("message.received"))
+        .and_then(|event| event.get("payload_json").and_then(Value::as_str))
+        .context("first run tape should include message.received event")?;
+    let received_payload: Value = serde_json::from_str(received_payload_json)
+        .context("message.received payload_json should decode")?;
+    assert_eq!(
+        received_payload.get("text").and_then(Value::as_str),
+        Some("Please remember codeword AURORA-713 for this session")
+    );
+    assert_eq!(received_payload.get("session_key").and_then(Value::as_str), Some(session_key));
+
+    let mut second_request = sample_run_stream_request_with_ids(
+        SESSION_ID,
+        RUN_ID_ALT,
+        "What codeword did I ask you to remember?".to_owned(),
+    );
+    second_request.session_key = session_key.to_owned();
+    let mut second_stream_request = tonic::Request::new(tokio_stream::iter(vec![second_request]));
+    second_stream_request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {ADMIN_TOKEN}").parse()?);
+    second_stream_request.metadata_mut().insert("x-palyra-principal", "user:ops".parse()?);
+    second_stream_request.metadata_mut().insert("x-palyra-device-id", DEVICE_ID.parse()?);
+    second_stream_request.metadata_mut().insert("x-palyra-channel", "cli".parse()?);
+
+    let mut second_response_stream = client
+        .run_stream(second_stream_request)
+        .await
+        .context("failed to call second RunStream")?
+        .into_inner();
+    let mut second_saw_done = false;
+    while let Some(event) = second_response_stream.next().await {
+        let event = event.context("failed to read second RunStream event")?;
+        if let Some(common_v1::run_stream_event::Body::Status(status)) = event.body {
+            second_saw_done |= status.kind == common_v1::stream_status::StatusKind::Done as i32;
+        }
+    }
+    assert!(second_saw_done, "second run stream should complete successfully");
+    assert_eq!(request_count.load(Ordering::Relaxed), 2);
+
+    let captured_request_bodies =
+        request_bodies.lock().expect("captured request bodies lock should not poison").clone();
+    assert_eq!(captured_request_bodies.len(), 2);
+    let second_provider_payload: Value = serde_json::from_str(captured_request_bodies[1].as_str())
+        .context("second provider request should decode as JSON")?;
+    let second_provider_text = second_provider_payload.to_string();
+    assert!(
+        second_provider_text.contains("<recent_conversation>"),
+        "follow-up run stream should include bounded recent conversation context"
+    );
+    assert!(
+        second_provider_text.contains("user: Please remember codeword AURORA-713"),
+        "follow-up run stream should preserve the prior user turn"
+    );
+    assert!(
+        second_provider_text.contains("assistant: first reply acknowledged"),
+        "follow-up run stream should preserve the prior assistant reply"
+    );
+    assert!(
+        second_provider_text.contains("What codeword did I ask you to remember?"),
+        "follow-up run stream should keep the current user input"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_run_stream_honors_cancel_command_and_marks_run_cancelled() -> Result<()> {
     let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);
