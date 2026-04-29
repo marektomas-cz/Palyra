@@ -322,6 +322,7 @@ pub(crate) fn run_onboarding_wizard(request: OnboardingWizardRequest) -> Result<
 pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()> {
     let config_path = resolve_config_path(request.path.clone(), true)?;
     let path_ref = Path::new(&config_path);
+    let apply_context = prepare_apply_context(path_ref, true, None)?;
     let original_document = load_document_from_existing_path(path_ref)
         .with_context(|| format!("failed to parse {}", path_ref.display()))?
         .0;
@@ -484,6 +485,12 @@ pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()
                     auth_method.as_str(),
                     &mut warnings,
                 )?;
+                if ensure_runtime_defaults(&mut document, &apply_context)? {
+                    warnings.push(
+                        "runtime path defaults were backfilled so the daemon and CLI share the same local identity and vault state."
+                            .to_owned(),
+                    );
+                }
                 if ensure_admin_auth_defaults(&mut document)? {
                     warnings.push(
                         "admin auth defaults were backfilled so the daemon can start after this reconfiguration."
@@ -1641,6 +1648,12 @@ fn apply_onboarding_plan(
     };
 
     ensure_onboarding_admin_defaults(&mut document, plan)?;
+    if ensure_runtime_defaults(&mut document, context)? {
+        plan.warnings.push(
+            "Runtime path defaults were backfilled so the daemon and CLI share the same local identity and vault state."
+                .to_owned(),
+        );
+    }
 
     if let Some(workspace_root) = plan.workspace_root.as_ref() {
         set_value_at_path(
@@ -1854,6 +1867,28 @@ fn ensure_admin_auth_defaults_with_token(
             "admin.bound_principal",
             toml::Value::String(DEFAULT_ADMIN_BOUND_PRINCIPAL.to_owned()),
         )?;
+    }
+    Ok(document != &before)
+}
+
+fn ensure_runtime_defaults(document: &mut toml::Value, context: &ApplyContext) -> Result<bool> {
+    let before = document.clone();
+    if get_string_value_at_path(document, "gateway.identity_store_dir")?.is_none() {
+        set_value_at_path(
+            document,
+            "gateway.identity_store_dir",
+            toml::Value::String(context.identity_store_dir.to_string_lossy().into_owned()),
+        )?;
+    }
+    if get_string_value_at_path(document, "storage.vault_dir")?.is_none() {
+        set_value_at_path(
+            document,
+            "storage.vault_dir",
+            toml::Value::String(context.vault_dir.to_string_lossy().into_owned()),
+        )?;
+    }
+    if get_bool_value_at_path(document, "orchestrator.runloop_v1_enabled")?.is_none() {
+        set_value_at_path(document, "orchestrator.runloop_v1_enabled", toml::Value::Boolean(true))?;
     }
     Ok(document != &before)
 }

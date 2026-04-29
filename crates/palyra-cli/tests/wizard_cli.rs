@@ -833,6 +833,18 @@ fn configure_auth_model_backfills_admin_defaults_for_resume_path() -> Result<()>
         "expected MiniMax auth provider after configure: {written}"
     );
     assert!(
+        written.contains("identity_store_dir = "),
+        "configure auth-model should backfill the gateway identity store path for daemon startup: {written}"
+    );
+    assert!(
+        written.contains("vault_dir = "),
+        "configure auth-model should backfill the storage vault path used by CLI-stored secrets: {written}"
+    );
+    assert!(
+        written.contains("runloop_v1_enabled = true"),
+        "configure auth-model should enable the local orchestrator run loop for first agent smoke prompts: {written}"
+    );
+    assert!(
         written.contains("require_auth = true"),
         "configure auth-model should enable admin auth when it repairs a partial install: {written}"
     );
