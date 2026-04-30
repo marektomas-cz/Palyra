@@ -1032,7 +1032,7 @@ fn session_to_json(session: &gateway_v1::SessionSummary) -> Value {
     json!({
         "session_id": optional_canonical_id_json_value(&session.session_id),
         "session_key": empty_to_json_or_null(session.session_key.as_str()),
-        "session_label": redacted_presence_json_value(!session.session_label.trim().is_empty()),
+        "session_label": empty_to_json_or_null(session.session_label.as_str()),
         "title": empty_to_json_or_null(session.title.as_str()),
         "title_source": empty_to_json_or_null(session.title_source.as_str()),
         "title_generator_version": empty_to_json_or_null(session.title_generator_version.as_str()),
@@ -1073,14 +1073,6 @@ fn redacted_presence_for_output(present: bool) -> String {
         REDACTED.to_owned()
     } else {
         "none".to_owned()
-    }
-}
-
-fn redacted_presence_json_value(present: bool) -> Value {
-    if present {
-        Value::String(REDACTED.to_owned())
-    } else {
-        Value::Null
     }
 }
 
@@ -1426,7 +1418,6 @@ mod render_tests {
 mod tests {
     use super::{build_cleanup_session_request, build_resolve_session_request, session_to_json};
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
-    use palyra_common::redaction::REDACTED;
 
     #[test]
     fn resolve_session_request_requires_identifier() {
@@ -1457,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn session_json_preserves_command_identifiers() {
+    fn session_json_preserves_command_identifiers_and_label() {
         let session = gateway_v1::SessionSummary {
             session_id: Some(common_v1::CanonicalId {
                 ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
@@ -1492,7 +1483,7 @@ mod tests {
         );
         assert_eq!(
             payload.get("session_label").and_then(serde_json::Value::as_str),
-            Some(REDACTED)
+            Some("Sensitive user label")
         );
     }
 
