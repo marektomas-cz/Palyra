@@ -13403,7 +13403,7 @@ impl JournalStore {
         validate_workspace_content(request.content_text.as_str())
             .map_err(|error| JournalError::InvalidWorkspaceContent { reason: error.to_string() })?;
         let now = current_unix_ms()?;
-        let normalized_content = normalize_memory_text(request.content_text.as_str());
+        let normalized_content = normalize_workspace_document_text(request.content_text.as_str());
         let content_text =
             sanitize_object_text_field("workspace.content_text", normalized_content.as_str())?;
         let content_hash = sha256_hex(content_text.as_bytes());
@@ -18413,6 +18413,24 @@ fn normalize_memory_text(raw: &str) -> String {
     normalized.trim().to_owned()
 }
 
+fn normalize_workspace_document_text(raw: &str) -> String {
+    let normalized_line_endings = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let mut normalized = String::with_capacity(normalized_line_endings.len());
+    for character in normalized_line_endings.chars() {
+        if character.is_control() && !matches!(character, '\n' | '\t') {
+            continue;
+        }
+        normalized.push(character);
+    }
+
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() || trimmed.ends_with('\n') {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}\n")
+    }
+}
+
 fn normalize_catalog_text(raw: &str, max_chars: usize) -> Option<String> {
     let normalized = palyra_common::redaction::redact_url_segments_in_text(
         palyra_common::redaction::redact_auth_error(raw).as_str(),
@@ -22717,6 +22735,49 @@ mod tests {
         assert_eq!(versions[1].event_type, "move");
         assert_eq!(versions[2].event_type, "update");
         assert_eq!(versions[3].event_type, "create");
+    }
+
+    #[test]
+    fn workspace_document_preserves_markdown_line_structure() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        let content = "\
+# Objective\r\n\
+\r\n\
+## E2E Objective Summary\r\n\
+<!-- PALYRA:BEGIN objective-record -->\r\n\
+<!-- PALYRA:ITEM state -->\r\n\
+- [objective] state: draft\r\n\
+<!-- PALYRA:END objective-record -->\r\n";
+
+        let stored = store
+            .upsert_workspace_document(&sample_workspace_write_request(
+                "projects/objectives/e2e.md",
+                content,
+            ))
+            .expect("workspace document should be stored");
+
+        assert!(
+            stored.content_text.contains("\n## E2E Objective Summary\n"),
+            "stored content was {:?}",
+            stored.content_text
+        );
+        assert!(
+            stored.content_text.contains("\n<!-- PALYRA:ITEM state -->\n"),
+            "stored content was {:?}",
+            stored.content_text
+        );
+        assert!(
+            stored.content_text.contains("\n- [objective] state: draft\n"),
+            "stored content was {:?}",
+            stored.content_text
+        );
+        assert!(
+            !stored.content_text.contains("# Objective  ## E2E Objective Summary"),
+            "workspace markdown must not collapse line boundaries"
+        );
     }
 
     #[test]
