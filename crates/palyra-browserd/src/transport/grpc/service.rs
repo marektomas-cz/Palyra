@@ -28,6 +28,11 @@ fn navigate_action_outcome(outcome: &NavigateOutcome) -> &'static str {
     }
 }
 
+fn observe_byte_limit(requested: u64, session_limit: u64) -> usize {
+    let limit = if requested == 0 { session_limit } else { requested.min(session_limit) }.max(1);
+    usize::try_from(limit).unwrap_or(usize::MAX)
+}
+
 #[tonic::async_trait]
 impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
     async fn health(
@@ -2203,14 +2208,18 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             };
             (
                 tab.tab_id.clone(),
-                payload.max_dom_snapshot_bytes.max(1).min(session.budget.max_observe_snapshot_bytes)
-                    as usize,
-                payload
-                    .max_accessibility_tree_bytes
-                    .max(1)
-                    .min(session.budget.max_observe_snapshot_bytes) as usize,
-                payload.max_visible_text_bytes.max(1).min(session.budget.max_visible_text_bytes)
-                    as usize,
+                observe_byte_limit(
+                    payload.max_dom_snapshot_bytes,
+                    session.budget.max_observe_snapshot_bytes,
+                ),
+                observe_byte_limit(
+                    payload.max_accessibility_tree_bytes,
+                    session.budget.max_observe_snapshot_bytes,
+                ),
+                observe_byte_limit(
+                    payload.max_visible_text_bytes,
+                    session.budget.max_visible_text_bytes,
+                ),
             )
         };
 
@@ -3306,4 +3315,25 @@ fn request_principal(metadata: &tonic::metadata::MetadataMap) -> Result<&str, St
         return Err(Status::unauthenticated("missing caller principal"));
     }
     Ok(principal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::observe_byte_limit;
+
+    #[test]
+    fn observe_byte_limit_uses_session_budget_for_default_zero() {
+        assert_eq!(observe_byte_limit(0, 16 * 1024), 16 * 1024);
+    }
+
+    #[test]
+    fn observe_byte_limit_clamps_explicit_request_to_session_budget() {
+        assert_eq!(observe_byte_limit(32 * 1024, 4096), 4096);
+        assert_eq!(observe_byte_limit(256, 4096), 256);
+    }
+
+    #[test]
+    fn observe_byte_limit_remains_non_zero() {
+        assert_eq!(observe_byte_limit(0, 0), 1);
+    }
 }
