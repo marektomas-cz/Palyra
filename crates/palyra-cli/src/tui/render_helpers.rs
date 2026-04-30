@@ -676,13 +676,19 @@ pub(super) async fn run_local_shell(command: String) -> Result<ShellResult> {
     .context("local shell worker failed")?
 }
 
-pub(super) fn truncate_text(mut value: String, limit: usize) -> String {
+pub(super) fn truncate_text(value: String, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
     if value.chars().count() <= limit {
         return value;
     }
-    value = value.chars().take(limit).collect::<String>();
-    value.push_str("...");
-    value
+    if limit <= 3 {
+        return value.chars().take(limit).collect();
+    }
+    let mut truncated = value.chars().take(limit - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 pub(super) fn sanitize_terminal_text(value: &str) -> String {
@@ -737,5 +743,24 @@ pub(super) fn format_shell_result(result: &ShellResult) -> String {
         "no output".to_owned()
     } else {
         body.trim_end().to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_text;
+
+    #[test]
+    fn truncate_text_keeps_result_within_limit() {
+        let truncated = truncate_text("abcdef".to_owned(), 5);
+        assert_eq!(truncated, "ab...");
+        assert_eq!(truncated.chars().count(), 5);
+    }
+
+    #[test]
+    fn truncate_text_handles_tiny_limits() {
+        assert_eq!(truncate_text("abcdef".to_owned(), 0), "");
+        assert_eq!(truncate_text("abcdef".to_owned(), 2), "ab");
+        assert_eq!(truncate_text("abc".to_owned(), 3), "abc");
     }
 }

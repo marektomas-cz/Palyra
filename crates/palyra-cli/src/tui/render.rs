@@ -57,20 +57,83 @@ pub(super) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Span::styled("Session ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::raw(display_session_identity(&app.session)),
     ]);
-    let status_line = Line::from(vec![
-        Span::styled("Agent ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw(app.current_session_agent_display()),
-        Span::raw("  "),
-        Span::styled("Model ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::raw(app.current_session_model_display()),
-        Span::raw("  "),
-        Span::styled("Status ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-        Span::raw(sanitize_terminal_text(app.status_line.as_str())),
-    ]);
+    let status_line = header_status_line(
+        app.current_session_agent_display().as_str(),
+        app.current_session_model_display().as_str(),
+        app.status_line.as_str(),
+        bottom.width as usize,
+    );
     let profile_line = Line::from(profile_header_summary(profile.as_ref()));
     frame.render_widget(Paragraph::new(connection_line), top);
     frame.render_widget(Paragraph::new(status_line), bottom);
     frame.render_widget(Paragraph::new(profile_line), banner);
+}
+
+const HEADER_STATUS_FIXED_WIDTH: usize = "Agent ".len() + "  Model ".len() + "  Status ".len();
+
+enum HeaderStatusFields {
+    StatusOnly(String),
+    Fields { agent: String, model: String, status: String },
+}
+
+fn header_status_fields(
+    agent: &str,
+    model: &str,
+    status: &str,
+    width: usize,
+) -> HeaderStatusFields {
+    let agent = sanitize_terminal_text(agent);
+    let model = sanitize_terminal_text(model);
+    let status = sanitize_terminal_text(status);
+    if width <= HEADER_STATUS_FIXED_WIDTH {
+        return HeaderStatusFields::StatusOnly(truncate_text(format!("Status {status}"), width));
+    }
+    let full = format!("Agent {agent}  Model {model}  Status {status}");
+    if full.chars().count() <= width {
+        return HeaderStatusFields::Fields { agent, model, status };
+    }
+
+    let value_budget = width - HEADER_STATUS_FIXED_WIDTH;
+    let status_floor = value_budget.min(16);
+    let shared_budget = value_budget.saturating_sub(status_floor);
+    let agent_budget = agent.chars().count().min(shared_budget / 2);
+    let model_budget = model.chars().count().min(shared_budget - agent_budget);
+    let status_budget = value_budget.saturating_sub(agent_budget + model_budget);
+
+    HeaderStatusFields::Fields {
+        agent: truncate_text(agent, agent_budget),
+        model: truncate_text(model, model_budget),
+        status: truncate_text(status, status_budget),
+    }
+}
+
+#[cfg(test)]
+fn header_status_text(agent: &str, model: &str, status: &str, width: usize) -> String {
+    match header_status_fields(agent, model, status, width) {
+        HeaderStatusFields::StatusOnly(line) => line,
+        HeaderStatusFields::Fields { agent, model, status } => {
+            format!("Agent {agent}  Model {model}  Status {status}")
+        }
+    }
+}
+
+fn header_status_line(agent: &str, model: &str, status: &str, width: usize) -> Line<'static> {
+    match header_status_fields(agent, model, status, width) {
+        HeaderStatusFields::StatusOnly(line) => Line::from(line),
+        HeaderStatusFields::Fields { agent, model, status } => Line::from(vec![
+            Span::styled("Agent ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(agent),
+            Span::raw("  "),
+            Span::styled(
+                "Model ",
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(model),
+            Span::raw("  "),
+            Span::styled("Status ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+            Span::raw(status),
+        ]),
+    }
 }
 
 pub(super) fn render_transcript(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -400,7 +463,8 @@ pub(super) fn fit_segments_to_width(width: usize, segments: Vec<String>) -> Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_shortcut_line_for_hint, display_gateway_grpc_endpoint, profile_header_summary,
+        compact_shortcut_line_for_hint, display_gateway_grpc_endpoint, header_status_text,
+        profile_header_summary,
     };
 
     #[test]
@@ -425,5 +489,26 @@ mod tests {
         let line = compact_shortcut_line_for_hint("/ commands", 120);
         assert!(line.contains("Ctrl+C exit"));
         assert!(!line.contains("q quit"));
+    }
+
+    #[test]
+    fn header_status_text_fits_available_width() {
+        let line = header_status_text(
+            "very-long-agent-name-that-cannot-fit",
+            "very-long-model-name-that-cannot-fit",
+            "Local shell remains disabled after declining the prompt",
+            42,
+        );
+
+        assert!(line.chars().count() <= 42, "{line}");
+        assert!(line.contains("Status"), "{line}");
+    }
+
+    #[test]
+    fn header_status_text_preserves_short_status_when_it_fits() {
+        let line =
+            header_status_text("default", "MiniMax-M2.7", "Local shell remains disabled", 80);
+
+        assert_eq!(line, "Agent default  Model MiniMax-M2.7  Status Local shell remains disabled");
     }
 }
