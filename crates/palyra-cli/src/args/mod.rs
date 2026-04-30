@@ -395,13 +395,17 @@ pub enum LogLevelArg {
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 #[command(next_help_heading = "Global Options")]
 pub struct RootOptions {
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Use the named CLI profile from the local profile registry")]
     pub profile: Option<String>,
-    #[arg(long = "expect-profile", global = true)]
+    #[arg(
+        long = "expect-profile",
+        global = true,
+        help = "Require the resolved active profile name to match this value"
+    )]
     pub expect_profile: Option<String>,
-    #[arg(long = "config", global = true)]
+    #[arg(long = "config", global = true, help = "Use this palyra.toml config file")]
     pub config_path: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Use this runtime state root directory")]
     pub state_root: Option<String>,
     #[arg(
         short = 'v',
@@ -411,17 +415,39 @@ pub struct RootOptions {
         help = "Increase logging verbosity (-v => debug, -vv => trace)"
     )]
     pub verbose: u8,
-    #[arg(long, value_enum, default_value_t = LogLevelArg::Info, global = true)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = LogLevelArg::Info,
+        global = true,
+        help = "Set diagnostic log verbosity"
+    )]
     pub log_level: LogLevelArg,
-    #[arg(long = "output-format", value_enum, default_value_t = OutputFormatArg::Text, global = true)]
+    #[arg(
+        long = "output-format",
+        value_enum,
+        default_value_t = OutputFormatArg::Text,
+        global = true,
+        help = "Select text, JSON, or NDJSON output for automation"
+    )]
     pub output_format: OutputFormatArg,
-    #[arg(long, default_value_t = false, global = true)]
+    #[arg(long, default_value_t = false, global = true, help = "Disable styled terminal output")]
     pub plain: bool,
-    #[arg(long, default_value_t = false, global = true)]
+    #[arg(long, default_value_t = false, global = true, help = "Disable ANSI color output")]
     pub no_color: bool,
-    #[arg(long, default_value_t = false, global = true)]
+    #[arg(
+        long,
+        default_value_t = false,
+        global = true,
+        help = "Allow commands to continue when the selected profile differs from context"
+    )]
     pub allow_profile_mismatch: bool,
-    #[arg(long, default_value_t = false, global = true)]
+    #[arg(
+        long,
+        default_value_t = false,
+        global = true,
+        help = "Permit strict profile-scoped actions after explicit profile checks"
+    )]
     pub allow_strict_profile_actions: bool,
 }
 
