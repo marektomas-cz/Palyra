@@ -2,20 +2,35 @@ Usage: palyra routines create-from-template [OPTIONS] --template-id <TEMPLATE_ID
 
 Options:
       --template-id <TEMPLATE_ID>
-      --id <ID>
+
+      --id <ULID>
+          Canonical routine ULID. Omit to generate one; use --name for a human-readable label
       --name <NAME>
+
       --prompt <PROMPT>
+
       --owner <OWNER>
+
       --channel <CHANNEL>
+
       --session-key <SESSION_KEY>
+
       --session-label <SESSION_LABEL>
-      --enabled <ENABLED>                                      [possible values: true, false]
+
+      --enabled <ENABLED>
+          [possible values: true, false]
       --natural-language-schedule <NATURAL_LANGUAGE_SCHEDULE>
+
       --delivery-channel <DELIVERY_CHANNEL>
+
       --trigger-payload <TRIGGER_PAYLOAD>
+
       --trigger-payload-stdin
+
       --json
-  -h, --help                                                   Print help
+
+  -h, --help
+          Print help
 
 Global Options:
       --profile <PROFILE>

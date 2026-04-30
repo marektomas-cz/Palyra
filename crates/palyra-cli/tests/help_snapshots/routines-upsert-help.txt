@@ -1,8 +1,8 @@
 Usage: palyra routines upsert [OPTIONS] --name <NAME> --prompt <PROMPT> --trigger-kind <TRIGGER_KIND>
 
 Options:
-      --id <ID>
-
+      --id <ULID>
+          Canonical routine ULID. Omit to generate one; use --name for a human-readable label
       --name <NAME>
 
       --prompt <PROMPT>

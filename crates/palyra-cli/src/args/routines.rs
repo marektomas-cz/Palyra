@@ -37,7 +37,7 @@ pub enum RoutinesCommand {
         json: bool,
     },
     Show {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -47,7 +47,11 @@ pub enum RoutinesCommand {
     CreateFromTemplate {
         #[arg(long)]
         template_id: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "ULID",
+            help = "Canonical routine ULID. Omit to generate one; use --name for a human-readable label"
+        )]
         id: Option<String>,
         #[arg(long)]
         name: Option<String>,
@@ -75,26 +79,26 @@ pub enum RoutinesCommand {
         json: bool,
     },
     Enable {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
     Disable {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
     RunNow {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
     #[command(visible_alias = "replay")]
     TestRun {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long)]
         source_run_id: Option<String>,
@@ -109,7 +113,7 @@ pub enum RoutinesCommand {
     },
     #[command(visible_alias = "runs")]
     Logs {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long)]
         after: Option<String>,
@@ -119,7 +123,7 @@ pub enum RoutinesCommand {
         json: bool,
     },
     Dispatch {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long, value_enum)]
         trigger_kind: Option<RoutineTriggerKindArg>,
@@ -136,7 +140,7 @@ pub enum RoutinesCommand {
     },
     #[command(visible_alias = "rm")]
     Delete {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -153,7 +157,7 @@ pub enum RoutinesCommand {
         json: bool,
     },
     Export {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Routine ULID")]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -168,7 +172,11 @@ pub enum RoutinesCommand {
         file: Option<String>,
         #[arg(long, default_value_t = false)]
         stdin: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "ULID",
+            help = "Routine ULID override. Omit to keep the imported id or generate one"
+        )]
         id: Option<String>,
         #[arg(long)]
         enabled: Option<bool>,
@@ -179,7 +187,11 @@ pub enum RoutinesCommand {
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct RoutineUpsertCommand {
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "ULID",
+        help = "Canonical routine ULID. Omit to generate one; use --name for a human-readable label"
+    )]
     pub id: Option<String>,
     #[arg(long)]
     pub name: String,

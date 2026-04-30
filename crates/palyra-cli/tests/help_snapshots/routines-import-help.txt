@@ -3,7 +3,7 @@ Usage: palyra routines import [OPTIONS] <--file <FILE>|--stdin>
 Options:
       --file <FILE>
       --stdin
-      --id <ID>
+      --id <ULID>          Routine ULID override. Omit to keep the imported id or generate one
       --enabled <ENABLED>  [possible values: true, false]
       --json
   -h, --help               Print help

@@ -29,13 +29,13 @@ pub enum ObjectivesCommand {
         json: bool,
     },
     Show {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Objective ULID")]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
     Summary {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Objective ULID")]
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -43,7 +43,7 @@ pub enum ObjectivesCommand {
     #[command(visible_alias = "apply")]
     Upsert(Box<ObjectiveUpsertCommandArgs>),
     Fire {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Objective ULID")]
         id: String,
         #[arg(long)]
         reason: Option<String>,
@@ -51,7 +51,7 @@ pub enum ObjectivesCommand {
         json: bool,
     },
     Pause {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Objective ULID")]
         id: String,
         #[arg(long)]
         reason: Option<String>,
@@ -59,7 +59,7 @@ pub enum ObjectivesCommand {
         json: bool,
     },
     Resume {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Objective ULID")]
         id: String,
         #[arg(long)]
         reason: Option<String>,
@@ -67,7 +67,7 @@ pub enum ObjectivesCommand {
         json: bool,
     },
     Cancel {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Objective ULID")]
         id: String,
         #[arg(long)]
         reason: Option<String>,
@@ -75,7 +75,7 @@ pub enum ObjectivesCommand {
         json: bool,
     },
     Archive {
-        #[arg(long)]
+        #[arg(long, value_name = "ULID", help = "Objective ULID")]
         id: String,
         #[arg(long)]
         reason: Option<String>,
@@ -86,7 +86,11 @@ pub enum ObjectivesCommand {
 
 #[derive(Args, Debug, PartialEq, Eq)]
 pub struct ObjectiveUpsertCommandArgs {
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "ULID",
+        help = "Canonical objective ULID. Omit to generate one; use --name for a human-readable label"
+    )]
     pub id: Option<String>,
     #[arg(long, value_enum)]
     pub kind: ObjectiveKindArg,

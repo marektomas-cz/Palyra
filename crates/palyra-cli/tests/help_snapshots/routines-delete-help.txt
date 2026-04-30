@@ -1,9 +1,9 @@
-Usage: palyra routines delete [OPTIONS] --id <ID>
+Usage: palyra routines delete [OPTIONS] --id <ULID>
 
 Options:
-      --id <ID>
+      --id <ULID>  Routine ULID
       --json
-  -h, --help     Print help
+  -h, --help       Print help
 
 Global Options:
       --profile <PROFILE>

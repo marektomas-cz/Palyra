@@ -1136,6 +1136,18 @@ path = "routines delete"
 file = "routines-delete-help.txt"
 
 [[entries]]
+path = "objectives upsert"
+category = "nested_surface"
+status = "done"
+summary = "Durable objective upsert contract for heartbeats, standing orders, and programs."
+required_aliases = ["apply"]
+required_flags = ["kind", "name", "prompt"]
+
+[entries.snapshot]
+path = "objectives upsert"
+file = "objectives-upsert-help.txt"
+
+[[entries]]
 path = "hooks bind"
 category = "nested_surface"
 status = "done"
