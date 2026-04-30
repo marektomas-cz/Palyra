@@ -930,7 +930,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 &value,
                 format!(
                     "browser.session.inspect session_id={} cookies={} storage={} action_log={} network_log={} output={}",
-                    redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+                    browser_session_handle_text(Some(session_id.as_str())),
                     value.get("cookies").and_then(Value::as_array).map_or(0, Vec::len),
                     value.get("storage").and_then(Value::as_array).map_or(0, Vec::len),
                     value.get("action_log").and_then(Value::as_array).map_or(0, Vec::len),
@@ -1130,7 +1130,7 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                 .context("failed to encode browser tabs list output")?;
             let mut text = format!(
                 "browser.tabs.list session_id={} count={} active_tab_id={}",
-                redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+                browser_session_handle_text(Some(session_id.as_str())),
                 envelope.tabs.len(),
                 redacted_browser_identifier_text(envelope.active_tab_id.as_deref(), "tab"),
             );
@@ -1180,7 +1180,7 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                 &value,
                 format!(
                     "browser.tabs.open session_id={} tab_id={} success={} status_code={} navigated={}",
-                    redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+                    browser_session_handle_text(Some(session_id.as_str())),
                     envelope
                         .tab
                         .as_ref()
@@ -1212,7 +1212,7 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                 &value,
                 format!(
                     "browser.tabs.switch session_id={} active_tab_id={} success={}",
-                    redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+                    browser_session_handle_text(Some(session_id.as_str())),
                     envelope
                         .active_tab
                         .as_ref()
@@ -1242,7 +1242,7 @@ async fn run_browser_tabs_command(session_id: String, command: BrowserTabsComman
                 &value,
                 format!(
                     "browser.tabs.close session_id={} closed_tab_id={} tabs_remaining={} active_tab_id={}",
-                    redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+                    browser_session_handle_text(Some(session_id.as_str())),
                     redacted_browser_identifier_text(envelope.closed_tab_id.as_deref(), "tab"),
                     envelope.tabs_remaining,
                     envelope
@@ -1345,11 +1345,13 @@ async fn run_browser_click(
         &["failure_screenshot_base64"],
     );
     maybe_attach_output_path(&mut value, screenshot_path.as_ref());
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     emit_browser_value(
         &value,
         format!(
-            "browser.click session_id={} success={} selector={} action_id={} artifact={}",
-            redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+            "browser.click session_id={}{} success={} selector={} action_id={} artifact={}",
+            browser_session_handle_text(Some(session_id.as_str())),
+            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
             envelope.success,
             selector,
             envelope.action_log.as_ref().map(|entry| entry.action_id.as_str()).unwrap_or("-"),
@@ -1404,12 +1406,14 @@ async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
         &["failure_screenshot_base64"],
     );
     maybe_attach_output_path(&mut value, screenshot_path.as_ref());
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     emit_browser_value(
         &value,
         format!(
-            "browser.{} session_id={} success={} selector={} typed_bytes={} artifact={}",
+            "browser.{} session_id={}{} success={} selector={} typed_bytes={} artifact={}",
             if clear_existing { "fill" } else { "type" },
-            redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
+            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
             envelope.success,
             selector,
             envelope.typed_bytes,
@@ -1463,11 +1467,13 @@ async fn run_browser_scroll(
         &["failure_screenshot_base64"],
     );
     maybe_attach_output_path(&mut value, screenshot_path.as_ref());
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     emit_browser_value(
         &value,
         format!(
-            "browser.scroll session_id={} success={} scroll_x={} scroll_y={} artifact={}",
-            redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+            "browser.scroll session_id={}{} success={} scroll_x={} scroll_y={} artifact={}",
+            browser_session_handle_text(Some(session_id.as_str())),
+            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
             envelope.success,
             envelope.scroll_x,
             envelope.scroll_y,
@@ -1522,11 +1528,13 @@ async fn run_browser_wait(args: BrowserWaitArgs) -> Result<()> {
         &["failure_screenshot_base64"],
     );
     maybe_attach_output_path(&mut value, screenshot_path.as_ref());
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     emit_browser_value(
         &value,
         format!(
-            "browser.wait session_id={} success={} waited_ms={} matched_selector={} matched_text={} artifact={}",
-            redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+            "browser.wait session_id={}{} success={} waited_ms={} matched_selector={} matched_text={} artifact={}",
+            browser_session_handle_text(Some(session_id.as_str())),
+            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
             envelope.success,
             envelope.waited_ms,
             empty_as_dash(envelope.matched_selector.as_str()),
@@ -1621,11 +1629,13 @@ async fn run_browser_screenshot(
         serde_json::to_value(&envelope).context("failed to encode browser screenshot output")?;
     strip_large_binary_fields(&mut value, output_path.is_some(), &["image_base64"]);
     maybe_attach_output_path(&mut value, output_path.as_ref());
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     emit_browser_value(
         &value,
         format!(
-            "browser.screenshot session_id={} success={} mime_type={} output={}",
-            redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+            "browser.screenshot session_id={}{} success={} mime_type={} output={}",
+            browser_session_handle_text(Some(session_id.as_str())),
+            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
             envelope.success,
             envelope.mime_type.as_deref().unwrap_or("-"),
             output_path.as_deref().unwrap_or("-"),
@@ -1687,11 +1697,13 @@ async fn run_browser_network(
         .context("failed to fetch browser network log")?;
     let success = envelope.success;
     let error = envelope.error.clone();
-    let value =
+    let mut value =
         serde_json::to_value(&envelope).context("failed to encode browser network output")?;
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     let mut text = format!(
-        "browser.network session_id={} success={} entries={} truncated={}",
-        redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+        "browser.network session_id={}{} success={} entries={} truncated={}",
+        browser_session_handle_text(Some(session_id.as_str())),
+        runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
         envelope.success,
         envelope.entries.len(),
         envelope.truncated,
@@ -1750,7 +1762,7 @@ async fn run_browser_storage(
         &value,
         format!(
             "browser.storage session_id={} cookie_domains={} origins={} output={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             value.get("cookies").and_then(Value::as_array).map_or(0, Vec::len),
             value.get("storage").and_then(Value::as_array).map_or(0, Vec::len),
             written.as_deref().unwrap_or("-"),
@@ -1812,7 +1824,7 @@ async fn run_browser_errors(
         &value,
         format!(
             "browser.errors session_id={} count={} output={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             value.get("errors").and_then(Value::as_array).map_or(0, Vec::len),
             written.as_deref().unwrap_or("-"),
         ),
@@ -1858,7 +1870,7 @@ async fn run_browser_trace(
         &value,
         format!(
             "browser.trace session_id={} output={} action_log={} network_log={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             written.as_deref().unwrap_or("-"),
             value.get("action_log").and_then(Value::as_array).map_or(0, Vec::len),
             value.get("network_log").and_then(Value::as_array).map_or(0, Vec::len),
@@ -1903,7 +1915,7 @@ async fn run_browser_console(session_id: String, output: Option<String>) -> Resu
         &value,
         format!(
             "browser.console session_id={} entries={} truncated={} output={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             value.get("entries").and_then(Value::as_array).map_or(0, Vec::len),
             value.get("truncated").and_then(Value::as_bool).unwrap_or(false),
             written.as_deref().unwrap_or("-"),
@@ -1952,7 +1964,7 @@ async fn run_browser_pdf(session_id: String, output: Option<String>) -> Result<(
         &value,
         format!(
             "browser.pdf session_id={} size_bytes={} output={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             value.get("size_bytes").and_then(Value::as_u64).unwrap_or(0),
             output_path.as_deref().unwrap_or("-"),
         ),
@@ -1993,7 +2005,7 @@ async fn run_browser_press(session_id: String, key: String) -> Result<()> {
         &value,
         format!(
             "browser.press session_id={} success={} key={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             value.get("success").and_then(Value::as_bool).unwrap_or(false),
             key,
         ),
@@ -2037,7 +2049,7 @@ async fn run_browser_select(session_id: String, selector: String, value: String)
         &payload,
         format!(
             "browser.select session_id={} success={} value={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             payload.get("success").and_then(Value::as_bool).unwrap_or(false),
             value,
         ),
@@ -2080,7 +2092,7 @@ async fn run_browser_highlight(session_id: String, selector: String) -> Result<(
         &payload,
         format!(
             "browser.highlight session_id={} success={} selector={}",
-            redacted_browser_identifier_text(Some(session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             payload.get("success").and_then(Value::as_bool).unwrap_or(false),
             selector,
         ),
@@ -2105,11 +2117,12 @@ async fn run_browser_downloads(
         })
         .await
         .context("failed to list browser download artifacts")?;
-    let value =
+    let mut value =
         serde_json::to_value(&envelope).context("failed to encode browser downloads output")?;
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     let mut text = format!(
         "browser.downloads session_id={} count={} truncated={} quarantined_only={}",
-        redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+        browser_session_handle_text(Some(session_id.as_str())),
         envelope.artifacts.len(),
         envelope.truncated,
         quarantined_only,
@@ -2144,16 +2157,14 @@ async fn run_browser_permissions_command(
                 .get_browser_permissions(session_id.as_str())
                 .await
                 .context("failed to get browser permissions")?;
-            let value = serde_json::to_value(&envelope)
+            let mut value = serde_json::to_value(&envelope)
                 .context("failed to encode browser permissions output")?;
+            normalize_session_scoped_output(&mut value, session_id.as_str());
             emit_browser_value(
                 &value,
                 format!(
                     "browser.permissions.get session_id={} success={} camera={} microphone={} location={}",
-                    redacted_browser_identifier_text(
-                        Some(envelope.session_id.as_str()),
-                        "session",
-                    ),
+                    browser_session_handle_text(Some(session_id.as_str())),
                     envelope.success,
                     permission_setting_text(
                         envelope.permissions.as_ref().map(|value| value.camera)
@@ -2182,16 +2193,14 @@ async fn run_browser_permissions_command(
                 )
                 .await
                 .context("failed to set browser permissions")?;
-            let value = serde_json::to_value(&envelope)
+            let mut value = serde_json::to_value(&envelope)
                 .context("failed to encode browser permissions mutation output")?;
+            normalize_session_scoped_output(&mut value, session_id.as_str());
             emit_browser_value(
                 &value,
                 format!(
                     "browser.permissions.set session_id={} success={} camera={} microphone={} location={}",
-                    redacted_browser_identifier_text(
-                        Some(envelope.session_id.as_str()),
-                        "session",
-                    ),
+                    browser_session_handle_text(Some(session_id.as_str())),
                     envelope.success,
                     permission_setting_text(
                         envelope.permissions.as_ref().map(|value| value.camera)
@@ -2231,13 +2240,14 @@ async fn run_browser_reset_state(
         )
         .await
         .context("failed to reset browser state")?;
-    let value =
+    let mut value =
         serde_json::to_value(&envelope).context("failed to encode browser reset-state output")?;
+    normalize_session_scoped_output(&mut value, session_id.as_str());
     emit_browser_value(
         &value,
         format!(
             "browser.reset-state session_id={} success={} cookies_cleared={} storage_entries_cleared={} tabs_closed={}",
-            redacted_browser_identifier_text(Some(envelope.session_id.as_str()), "session"),
+            browser_session_handle_text(Some(session_id.as_str())),
             envelope.success,
             envelope.cookies_cleared,
             envelope.storage_entries_cleared,
@@ -3225,7 +3235,7 @@ fn format_browser_session_summary_text(session: &browser_v1::BrowserSessionSumma
 
 fn browser_identifier_kind_for_key(key: &str) -> Option<&'static str> {
     match key {
-        "session_id" => Some("session"),
+        "runtime_session_id" => Some("session"),
         "active_tab_id" | "tab_id" | "closed_tab_id" => Some("tab"),
         "profile_id" | "active_profile_id" => Some("profile"),
         "artifact_id" => Some("artifact"),
@@ -3524,13 +3534,14 @@ mod tests {
     use super::{
         browser_command_policy_action, browser_failure_detail, browser_identifier_json_value,
         browser_service_auth_token_command, browser_service_enable_command,
-        browser_snapshot_emits_json_to_stdout, browser_start_auth_token_warnings,
-        browser_status_warnings, ensure_browser_command_success,
+        browser_session_handle_text, browser_snapshot_emits_json_to_stdout,
+        browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
         ensure_browser_start_token_alignment, format_browser_session_summary_text,
-        normalize_session_scoped_output, runtime_session_id_text, session_summary_value,
-        BrowserControlPlaneSnapshot, BrowserOutputMode, BrowserPolicySnapshot,
-        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
+        normalize_session_scoped_output, redact_browser_output_value, runtime_session_id_text,
+        session_summary_value, BrowserControlPlaneSnapshot, BrowserOutputMode,
+        BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
+        BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use serde_json::{json, Value};
@@ -3731,6 +3742,50 @@ mod tests {
                 && !line.contains("session_id=session-"),
             "session list should print the canonical reusable session handle: {line}"
         );
+    }
+
+    #[test]
+    fn browser_output_redaction_preserves_reusable_session_id() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let runtime_session_id = "session-b66347f61acd";
+        let mut value = json!({
+            "session_id": session_id,
+            "runtime_session_id": runtime_session_id,
+            "active_tab_id": "tab-secret-value",
+        });
+
+        redact_browser_output_value(&mut value, None);
+
+        assert_eq!(value.get("session_id").and_then(Value::as_str), Some(session_id));
+        assert!(
+            value
+                .get("runtime_session_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("session-")),
+            "runtime session id should stay redacted: {value}"
+        );
+        assert!(
+            value
+                .get("active_tab_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("tab-")),
+            "tab id should stay redacted: {value}"
+        );
+    }
+
+    #[test]
+    fn session_scoped_text_keeps_requested_session_id_copyable() {
+        let requested = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let runtime = "session-b66347f61acd";
+        let text = format!(
+            "browser.screenshot session_id={}{}",
+            browser_session_handle_text(Some(requested)),
+            runtime_session_id_text(requested, runtime)
+        );
+
+        assert!(text.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"), "{text}");
+        assert!(!text.contains(" session_id=session-"), "{text}");
+        assert!(text.contains("runtime_session_id=session-"), "{text}");
     }
 
     #[test]
