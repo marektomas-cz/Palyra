@@ -823,7 +823,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 "failed to encode browser session create output",
             )
         }
-        BrowserSessionCommand::List { principal, limit } => {
+        BrowserSessionCommand::List { principal, limit, json } => {
             let resolved = resolve_browser_config(None, None, None)?;
             let mut client = connect_browser_service(&resolved.connection).await?;
             let caller_principal =
@@ -856,7 +856,12 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 text.push('\n');
                 text.push_str(format_browser_session_summary_text(session).as_str());
             }
-            emit_browser_value(&value, text, "failed to encode browser session list output")
+            emit_browser_value_with_json(
+                &value,
+                text,
+                "failed to encode browser session list output",
+                json,
+            )
         }
         BrowserSessionCommand::Show { session_id, principal } => {
             let detail =

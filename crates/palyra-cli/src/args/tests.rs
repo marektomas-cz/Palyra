@@ -3543,6 +3543,33 @@ fn parse_browser_session_create() {
 }
 
 #[test]
+fn parse_browser_session_list_json_flag() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "browser",
+        "session",
+        "list",
+        "--principal",
+        "user:browser",
+        "--limit",
+        "5",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Session {
+                command: BrowserSessionCommand::List {
+                    principal: Some("user:browser".to_owned()),
+                    limit: Some(5),
+                    json: true,
+                },
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_browser_snapshot_with_output() {
     let parsed = Cli::parse_from([
         "palyra",

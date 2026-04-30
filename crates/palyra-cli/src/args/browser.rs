@@ -318,6 +318,8 @@ pub enum BrowserSessionCommand {
         principal: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Show session summary, budget, and tabs")]
     Show {
