@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use chrono::{TimeZone, Timelike};
 use serde::Deserialize;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::diagnostics::{authorize_console_session, build_page_info};
@@ -677,21 +678,95 @@ pub(crate) async fn console_routine_runs_handler(
         .list_cron_runs(Some(routine.job.job_id.clone()), query.after_run_id.clone(), Some(limit))
         .await
         .map_err(runtime_status_response)?;
-    let mapped_runs = runs
-        .iter()
-        .map(|run| {
-            let metadata = state
-                .routines
-                .find_run_metadata(run.run_id.as_str())
-                .map_err(routine_registry_error_response)?;
-            Ok(join_run_metadata(routine.metadata.routine_id.as_str(), run, metadata.as_ref()))
-        })
-        .collect::<Result<Vec<_>, Response>>()?;
+    let mut mapped_runs = Vec::with_capacity(runs.len());
+    for run in &runs {
+        let metadata = state
+            .routines
+            .find_run_metadata(run.run_id.as_str())
+            .map_err(routine_registry_error_response)?;
+        let mut mapped =
+            join_run_metadata(routine.metadata.routine_id.as_str(), run, metadata.as_ref());
+        enrich_routine_run_output_fields(&state, routine.job.owner_principal.as_str(), &mut mapped)
+            .await?;
+        mapped_runs.push(mapped);
+    }
     Ok(Json(json!({
         "runs": mapped_runs,
         "next_after_run_id": next_after_run_id,
         "page": build_page_info(limit, mapped_runs.len(), next_after_run_id.clone()),
     })))
+}
+
+async fn enrich_routine_run_output_fields(
+    state: &AppState,
+    owner_principal: &str,
+    run: &mut Value,
+) -> Result<(), Response> {
+    let Some(session_id) = run
+        .pointer("/session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(session) = state
+        .runtime
+        .orchestrator_session_by_id(session_id.to_owned())
+        .await
+        .map_err(runtime_status_response)?
+    else {
+        return Ok(());
+    };
+    let Some(fields) = routine_output_fields_from_session(session_id, owner_principal, &session)
+    else {
+        return Ok(());
+    };
+    if let Some(object) = run.as_object_mut() {
+        for (key, value) in fields {
+            object.insert(key, value);
+        }
+    }
+    Ok(())
+}
+
+fn routine_output_fields_from_session(
+    session_id: &str,
+    owner_principal: &str,
+    session: &crate::journal::OrchestratorSessionRecord,
+) -> Option<Map<String, Value>> {
+    if session.principal != owner_principal {
+        return None;
+    }
+
+    let preview = normalize_routine_output_text(session.preview.as_deref());
+    let summary = normalize_routine_output_text(session.last_summary.as_deref());
+    let mut fields = Map::new();
+    if let Some(output_preview) = preview.clone().or_else(|| summary.clone()) {
+        fields.insert("output_preview".to_owned(), json!(output_preview));
+    }
+    if let Some(output_summary) = summary {
+        fields.insert("output_summary".to_owned(), json!(output_summary));
+    }
+    fields.insert("output_source".to_owned(), json!("session_preview"));
+    fields.insert(
+        "output_lookup".to_owned(),
+        json!({
+            "session_id": session_id,
+            "command": format!("palyra sessions show --session-id {session_id} --json"),
+        }),
+    );
+    Some(fields)
+}
+
+fn normalize_routine_output_text(value: Option<&str>) -> Option<String> {
+    let normalized = value?
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .take(2_000)
+        .collect::<String>();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 pub(crate) async fn console_routine_dispatch_handler(
@@ -2301,8 +2376,9 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 mod tests {
     use super::{
         compare_optional_matchers, is_in_quiet_hours, parse_delivery, parse_execution_config,
-        parse_quiet_hours, routine_matches_trigger,
+        parse_quiet_hours, routine_matches_trigger, routine_output_fields_from_session,
     };
+    use crate::journal::OrchestratorSessionRecord;
     use crate::routines::{
         RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig, RoutineMetadataRecord,
         RoutineSilentPolicy, RoutineTriggerKind,
@@ -2406,5 +2482,77 @@ mod tests {
         assert!(compare_optional_matchers(None, Some("anything")));
         assert!(compare_optional_matchers(Some("push"), Some("push")));
         assert!(!compare_optional_matchers(Some("push"), Some("deploy")));
+    }
+
+    #[test]
+    fn routine_output_fields_expose_owner_session_preview() {
+        let session = OrchestratorSessionRecord {
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+            session_key: "cron:daily".to_owned(),
+            session_label: Some("Daily routine".to_owned()),
+            principal: "operator".to_owned(),
+            device_id: "system:scheduler".to_owned(),
+            channel: Some("system:routines".to_owned()),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            last_run_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned()),
+            archived_at_unix_ms: None,
+            auto_title: None,
+            auto_title_source: None,
+            auto_title_generator_version: None,
+            auto_title_updated_at_unix_ms: None,
+            title_generation_state: "manual".to_owned(),
+            manual_title_locked: false,
+            manual_title_updated_at_unix_ms: None,
+            model_profile_override: None,
+            thinking_override: None,
+            trace_override: None,
+            verbose_override: None,
+            title: "Daily routine".to_owned(),
+            title_source: "manual".to_owned(),
+            title_generator_version: None,
+            preview: Some("ROUTINE_OK".to_owned()),
+            last_intent: None,
+            last_summary: Some("ROUTINE_OK".to_owned()),
+            match_snippet: None,
+            branch_state: "root".to_owned(),
+            parent_session_id: None,
+            branch_origin_run_id: None,
+            last_run_state: Some("succeeded".to_owned()),
+        };
+
+        let fields =
+            routine_output_fields_from_session("01ARZ3NDEKTSV4RRFFQ69G5FAW", "operator", &session)
+                .expect("owner session output should be visible");
+
+        assert_eq!(
+            fields.get("output_preview").and_then(|value| value.as_str()),
+            Some("ROUTINE_OK")
+        );
+        assert_eq!(
+            fields.get("output_summary").and_then(|value| value.as_str()),
+            Some("ROUTINE_OK")
+        );
+        assert_eq!(
+            fields.get("output_source").and_then(|value| value.as_str()),
+            Some("session_preview")
+        );
+        assert_eq!(
+            fields
+                .get("output_lookup")
+                .and_then(|value| value.get("session_id"))
+                .and_then(|value| value.as_str()),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAW")
+        );
+        assert!(fields
+            .get("output_lookup")
+            .and_then(|value| value.get("command"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|command| command.contains("sessions show --session-id")));
+        assert!(
+            routine_output_fields_from_session("01ARZ3NDEKTSV4RRFFQ69G5FAW", "other", &session)
+                .is_none(),
+            "routine logs must not expose output from another principal"
+        );
     }
 }
