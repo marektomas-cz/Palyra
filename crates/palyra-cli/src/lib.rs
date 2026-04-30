@@ -3649,7 +3649,7 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
             .context("failed to read prompt from stdin")?;
         let prompt = input.trim_end_matches(['\r', '\n']).trim();
         if prompt.is_empty() {
-            anyhow::bail!("prompt from stdin is empty");
+            anyhow::bail!("prompt from stdin is empty; pipe text into stdin or use --prompt");
         }
         return Ok(prompt.to_owned());
     }

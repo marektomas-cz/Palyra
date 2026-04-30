@@ -230,6 +230,7 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
         || lower.contains("requires")
         || lower.contains("required")
         || lower.contains("missing prompt")
+        || lower.contains("prompt from stdin is empty")
     {
         return CliExitCode::Validation;
     }
@@ -344,6 +345,12 @@ mod tests {
         );
         assert_eq!(
             classify_error(&anyhow!("missing prompt: use --prompt or --prompt-stdin")),
+            CliExitCode::Validation
+        );
+        assert_eq!(
+            classify_error(&anyhow!(
+                "prompt from stdin is empty; pipe text into stdin or use --prompt"
+            )),
             CliExitCode::Validation
         );
     }
