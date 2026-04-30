@@ -219,6 +219,8 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
     if lower.contains("failed precondition")
         || lower.contains("precondition failed")
         || lower.contains("http 412")
+        || lower.contains("browser service is disabled")
+        || lower.contains("tool_call.browser_service.enabled=false")
     {
         return CliExitCode::Precondition;
     }
@@ -368,6 +370,16 @@ mod tests {
             }),
         };
         assert_eq!(classify_error(&anyhow!(precondition)), CliExitCode::Precondition);
+    }
+
+    #[test]
+    fn classify_error_maps_browser_disabled_precondition() {
+        assert_eq!(
+            classify_error(&anyhow!(
+                "browser service is disabled (tool_call.browser_service.enabled=false); enable it with `palyra config set --key tool_call.browser_service.enabled --value true`"
+            )),
+            CliExitCode::Precondition
+        );
     }
 
     #[test]
