@@ -197,13 +197,18 @@ const TRUST_STORE_INTEGRITY_VAULT_KEY_PREFIX: &str = "skills.trust_store.integri
 pub fn run() -> ExitCode {
     match run_cli_entrypoint() {
         Ok(()) => output::CliExitCode::Success.as_exit_code(),
-        Err(error) => match output::emit_error(&error) {
-            Ok(exit_code) => exit_code.as_exit_code(),
-            Err(emit_error) => {
-                eprintln!("error[internal_error] failed to render CLI error: {emit_error}");
-                output::CliExitCode::Internal.as_exit_code()
+        Err(error) => {
+            if let Some(exit_code) = output::already_emitted_exit_code(&error) {
+                return exit_code.as_exit_code();
             }
-        },
+            match output::emit_error(&error) {
+                Ok(exit_code) => exit_code.as_exit_code(),
+                Err(emit_error) => {
+                    eprintln!("error[internal_error] failed to render CLI error: {emit_error}");
+                    output::CliExitCode::Internal.as_exit_code()
+                }
+            }
+        }
     }
 }
 

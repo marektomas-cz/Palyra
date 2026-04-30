@@ -3,6 +3,7 @@ use crate::*;
 pub(crate) fn run_patch(command: PatchCommand) -> Result<()> {
     match command {
         PatchCommand::Apply { stdin, dry_run, json } => {
+            let json = output::preferred_json(json);
             if !stdin {
                 anyhow::bail!("patch apply requires --stdin");
             }
@@ -45,6 +46,9 @@ pub(crate) fn run_patch(command: PatchCommand) -> Result<()> {
                         .parse_location()
                         .map(|(line, column)| json!({ "line": line, "column": column }));
                     let payload = json!({
+                        "success": false,
+                        "error_kind": "validation_error",
+                        "exit_code": output::CliExitCode::Validation as u8,
                         "patch_sha256": compute_patch_sha256(patch.as_str()),
                         "dry_run": dry_run,
                         "rollback_performed": error.rollback_performed(),
@@ -60,6 +64,8 @@ pub(crate) fn run_patch(command: PatchCommand) -> Result<()> {
                         let rendered = serde_json::to_string_pretty(&payload)
                             .context("failed to serialize patch apply failure output")?;
                         println!("{rendered}");
+                        std::io::stdout().flush().context("stdout flush failed")?;
+                        return Err(output::already_emitted_error(output::CliExitCode::Validation));
                     } else {
                         println!(
                             "patch.apply success=false dry_run={} rollback_performed={} error={}",
@@ -69,7 +75,7 @@ pub(crate) fn run_patch(command: PatchCommand) -> Result<()> {
                         );
                     }
                     std::io::stdout().flush().context("stdout flush failed")?;
-                    anyhow::bail!("patch apply failed: {error}");
+                    anyhow::bail!("invalid patch: {error}");
                 }
             }
         }

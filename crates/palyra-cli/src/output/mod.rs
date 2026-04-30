@@ -1,4 +1,4 @@
-use std::{io::Write, process::ExitCode};
+use std::{fmt, io::Write, process::ExitCode};
 
 use anyhow::{Context, Result};
 use palyra_common::redaction::{redact_auth_error, redact_url_segments_in_text};
@@ -30,6 +30,29 @@ impl CliExitCode {
     pub(crate) fn as_exit_code(self) -> ExitCode {
         ExitCode::from(self as u8)
     }
+}
+
+#[derive(Debug)]
+struct AlreadyEmittedCliError {
+    exit_code: CliExitCode,
+}
+
+impl fmt::Display for AlreadyEmittedCliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "CLI output was already emitted")
+    }
+}
+
+impl std::error::Error for AlreadyEmittedCliError {}
+
+pub(crate) fn already_emitted_error(exit_code: CliExitCode) -> anyhow::Error {
+    AlreadyEmittedCliError { exit_code }.into()
+}
+
+pub(crate) fn already_emitted_exit_code(error: &anyhow::Error) -> Option<CliExitCode> {
+    error.chain().find_map(|cause| {
+        cause.downcast_ref::<AlreadyEmittedCliError>().map(|value| value.exit_code)
+    })
 }
 
 #[derive(Serialize)]
