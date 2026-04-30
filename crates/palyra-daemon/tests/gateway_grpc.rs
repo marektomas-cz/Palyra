@@ -4213,6 +4213,9 @@ async fn grpc_memory_get_hides_ttl_expired_item() -> Result<()> {
             .await
             .context("failed to connect memory gRPC client")?;
 
+    const EXPIRING_MEMORY_TTL_MS: i64 = 2_000;
+    const POST_TTL_DELAY_MS: u64 = 2_250;
+
     let now_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system time should be after unix epoch")?
@@ -4225,7 +4228,7 @@ async fn grpc_memory_get_hides_ttl_expired_item() -> Result<()> {
         session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
         tags: Vec::new(),
         confidence: 0.8,
-        ttl_unix_ms: now_unix_ms.saturating_add(120),
+        ttl_unix_ms: now_unix_ms.saturating_add(EXPIRING_MEMORY_TTL_MS),
     });
     authorize_metadata(ingest_request.metadata_mut())?;
     let memory_id = memory_client
@@ -4238,7 +4241,7 @@ async fn grpc_memory_get_hides_ttl_expired_item() -> Result<()> {
         .map(|id| id.ulid)
         .context("expiring ingest should return memory id")?;
 
-    tokio::time::sleep(Duration::from_millis(220)).await;
+    tokio::time::sleep(Duration::from_millis(POST_TTL_DELAY_MS)).await;
 
     let mut get_request = tonic::Request::new(memory_v1::GetMemoryItemRequest {
         v: 1,
@@ -4265,6 +4268,9 @@ async fn grpc_memory_search_hides_ttl_expired_cached_item() -> Result<()> {
             .await
             .context("failed to connect memory gRPC client")?;
 
+    const EXPIRING_MEMORY_TTL_MS: i64 = 2_000;
+    const POST_TTL_SEARCH_DELAY_MS: u64 = 2_250;
+
     let now_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system time should be after unix epoch")?
@@ -4277,7 +4283,7 @@ async fn grpc_memory_search_hides_ttl_expired_cached_item() -> Result<()> {
         session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
         tags: Vec::new(),
         confidence: 0.8,
-        ttl_unix_ms: now_unix_ms.saturating_add(120),
+        ttl_unix_ms: now_unix_ms.saturating_add(EXPIRING_MEMORY_TTL_MS),
     });
     authorize_metadata(ingest_request.metadata_mut())?;
     let memory_id = memory_client
@@ -4315,7 +4321,7 @@ async fn grpc_memory_search_hides_ttl_expired_cached_item() -> Result<()> {
         "first search should return the expiring memory item before TTL elapses"
     );
 
-    tokio::time::sleep(Duration::from_millis(220)).await;
+    tokio::time::sleep(Duration::from_millis(POST_TTL_SEARCH_DELAY_MS)).await;
 
     let mut second_search_request = tonic::Request::new(memory_v1::SearchMemoryRequest {
         v: 1,
