@@ -305,7 +305,7 @@ fn emit_models_status(payload: &ModelsStatusPayload, json_output: bool) -> Resul
             payload.migrated
         );
         println!(
-            "models.status.provider base_url={} openai_base_url={} embeddings_dims={} registry_default_chat_model={} registry_default_embeddings_model={} registry_providers={} registry_models={} failover_enabled={} response_cache_enabled={} registry_valid={}",
+            "models.status.provider base_url={} openai_base_url={} embeddings_dims={} default_chat_model={} registry_default_embeddings_model={} registry_providers={} registry_models={} failover_enabled={} response_cache_enabled={} registry_valid={}",
             payload.endpoint_base_url.as_deref().unwrap_or("none"),
             payload.openai_base_url.as_deref().unwrap_or("none"),
             payload
@@ -953,6 +953,7 @@ fn load_models_overview(path: Option<String>) -> Result<ModelsOverview> {
         model_provider.default_chat_model_id.as_deref(),
         model_provider.default_embeddings_model_id.as_deref(),
     );
+    let default_chat_model_id = effective_default_chat_model_id(&model_provider, models.as_slice());
     let openai_base_url = model_provider.openai_base_url.clone();
     let text_model = model_provider
         .default_chat_model_id
@@ -1026,7 +1027,7 @@ fn load_models_overview(path: Option<String>) -> Result<ModelsOverview> {
             embeddings_dims,
             auth_profile_id,
             api_key_configured,
-            default_chat_model_id: model_provider.default_chat_model_id,
+            default_chat_model_id,
             default_embeddings_model_id: model_provider.default_embeddings_model_id,
             failover_enabled: model_provider.failover_enabled.unwrap_or(true),
             response_cache_enabled: model_provider.response_cache_enabled.unwrap_or(true),
@@ -1501,11 +1502,27 @@ fn default_provider_id<'a>(
         .as_deref()
         .or(config.openai_model.as_deref())
         .or(config.anthropic_model.as_deref());
-    default_chat_model_id.and_then(|model_id| {
-        models
+    if let Some(model_id) = default_chat_model_id {
+        return models
             .iter()
             .find(|entry| entry.model_id == model_id && entry.role == "chat")
-            .map(|entry| entry.provider_id.as_str())
+            .map(|entry| entry.provider_id.as_str());
+    }
+    models
+        .iter()
+        .find(|entry| entry.enabled && entry.role == "chat")
+        .map(|entry| entry.provider_id.as_str())
+}
+
+fn effective_default_chat_model_id(
+    config: &FileModelProviderConfig,
+    models: &[RegistryModelEntry],
+) -> Option<String> {
+    config.default_chat_model_id.clone().or_else(|| {
+        models
+            .iter()
+            .find(|entry| entry.enabled && entry.role == "chat")
+            .map(|entry| entry.model_id.clone())
     })
 }
 

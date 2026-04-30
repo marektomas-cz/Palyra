@@ -451,6 +451,11 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
         Some("https://api.minimax.io/anthropic"),
         "status should expose the effective MiniMax endpoint: {status_payload}"
     );
+    assert_eq!(
+        status_payload.get("default_chat_model_id").and_then(Value::as_str),
+        Some("MiniMax-M2.7"),
+        "status should expose the effective default chat model used by routing: {status_payload}"
+    );
 
     let text_status_output =
         run_cli(&workdir, &["models", "status", "--path", &config_path_string])?;
@@ -474,8 +479,8 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
         "text status must not hide a configured MiniMax endpoint as none: {text_status_stdout}"
     );
     assert!(
-        text_status_stdout.contains("registry_default_chat_model=none"),
-        "text status should label absent registry defaults separately from the effective text model: {text_status_stdout}"
+        text_status_stdout.contains("default_chat_model=MiniMax-M2.7"),
+        "text status should expose the effective default chat model: {text_status_stdout}"
     );
     assert!(
         !text_status_stdout.contains(" default_chat_model=none"),
