@@ -398,7 +398,9 @@ fn windows_output_decode_penalty(value: &str) -> usize {
         .map(|ch| match ch {
             '\u{fffd}' => 100,
             ch if ch.is_control() && !ch.is_whitespace() => 50,
-            '²' | '°' | '±' | '¤' | '¦' | '§' | '¨' | '¸' | '¬' | 'ˇ' | '˙' => 10,
+            '²' | '°' | '±' | '¤' | '¦' | '§' | '¨' | '¸' | '¬' | 'ˇ' | '˙' | 'ø' | 'Ø' => {
+                10
+            }
             ch if ch.is_alphabetic() || ch.is_ascii_punctuation() || ch.is_whitespace() => 0,
             ch if ch.is_numeric() => 0,
             _ => 1,
