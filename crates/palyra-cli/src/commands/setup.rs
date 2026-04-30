@@ -10,8 +10,9 @@ pub(crate) fn run_setup(
 ) -> Result<()> {
     let requested_path = path.clone();
     let deployment_profile = wizard_options.deployment_profile;
+    let json = wizard_options.json;
     if !wizard {
-        commands::init::run_init(mode, deployment_profile, path, force, tls_scaffold)?;
+        commands::init::run_init(mode, deployment_profile, path, force, tls_scaffold, json)?;
     } else {
         let wizard_options = WizardOverridesArg {
             flow: wizard_options.flow,

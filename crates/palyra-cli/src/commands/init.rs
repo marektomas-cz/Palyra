@@ -6,6 +6,7 @@ pub(crate) fn run_init(
     path: Option<String>,
     force: bool,
     tls_scaffold: InitTlsScaffoldArg,
+    json: bool,
 ) -> Result<()> {
     let requested_mode = InitMode::from_arg(mode);
     let deployment_profile = deployment_profile
@@ -76,24 +77,57 @@ pub(crate) fn run_init(
         .with_context(|| format!("failed to write init config {}", config_path.display()))?;
     app::update_active_profile_paths(Some(config_path.as_path()), Some(state_root.as_path()))?;
 
-    println!(
-        "init.status=complete mode={} config_path={} force={}",
-        mode.deployment_mode(),
-        config_path.display(),
-        force
-    );
-    println!("init.deployment_profile={}", deployment_profile.as_str());
-    println!(
-        "init.state_root={} identity_store={} vault_dir={}",
-        state_root.display(),
-        identity_store_dir.display(),
-        vault_dir.display()
-    );
-    println!("init.admin_token_generated=true location=config(admin.auth_token)");
+    if output::preferred_json(json) {
+        return output::print_json_pretty(
+            &json!({
+                "status": "complete",
+                "mode": mode.deployment_mode(),
+                "config_path": config_path,
+                "force": force,
+                "deployment_profile": deployment_profile.as_str(),
+                "state_root": state_root,
+                "identity_store": identity_store_dir,
+                "vault_dir": vault_dir,
+                "admin_token_generated": true,
+                "admin_token_location": "config(admin.auth_token)",
+                "tls_scaffold": init_tls_scaffold_label(tls_scaffold),
+                "tls_cert_path": tls_paths.as_ref().map(|(cert_path, _)| cert_path),
+                "tls_key_path": tls_paths.as_ref().map(|(_, key_path)| key_path),
+                "next": [
+                    "run `palyra doctor` and `palyra status`",
+                    "start daemon with `palyra gateway run`"
+                ],
+            }),
+            "failed to encode init summary as JSON",
+        );
+    } else {
+        println!(
+            "init.status=complete mode={} config_path={} force={}",
+            mode.deployment_mode(),
+            config_path.display(),
+            force
+        );
+        println!("init.deployment_profile={}", deployment_profile.as_str());
+        println!(
+            "init.state_root={} identity_store={} vault_dir={}",
+            state_root.display(),
+            identity_store_dir.display(),
+            vault_dir.display()
+        );
+        println!("init.admin_token_generated=true location=config(admin.auth_token)");
 
-    if mode == InitMode::RemoteVps {
-        emit_remote_init_guidance(tls_scaffold, tls_paths.as_ref())?;
+        if mode == InitMode::RemoteVps {
+            emit_remote_init_guidance(tls_scaffold, tls_paths.as_ref())?;
+        }
     }
 
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn init_tls_scaffold_label(value: InitTlsScaffoldArg) -> &'static str {
+    match value {
+        InitTlsScaffoldArg::None => "none",
+        InitTlsScaffoldArg::BringYourOwn => "bring-your-own",
+        InitTlsScaffoldArg::SelfSigned => "self-signed",
+    }
 }

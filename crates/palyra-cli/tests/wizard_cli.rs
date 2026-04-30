@@ -198,6 +198,40 @@ fn setup_wizard_quickstart_emits_json_summary() -> Result<()> {
 }
 
 #[test]
+fn setup_non_wizard_emits_json_summary() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("config").join("palyra.toml");
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli(
+        &workdir,
+        &["setup", "--mode", "local", "--path", &config_path_string, "--force", "--json"],
+        &[],
+    )?;
+    assert!(
+        output.status.success(),
+        "setup should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).context("non-wizard setup stdout should be JSON")?;
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("complete"));
+    assert_eq!(payload.get("mode").and_then(Value::as_str), Some("local_desktop"));
+    assert_eq!(
+        payload.get("config_path").and_then(Value::as_str),
+        Some(config_path_string.as_str())
+    );
+    assert_eq!(payload.get("force").and_then(Value::as_bool), Some(true));
+    assert_eq!(payload.get("deployment_profile").and_then(Value::as_str), Some("local"));
+    assert!(payload.get("state_root").and_then(Value::as_str).is_some());
+    assert!(
+        payload.get("next").and_then(Value::as_array).is_some_and(|steps| !steps.is_empty()),
+        "setup JSON should include next steps: {payload}"
+    );
+    assert!(config_path.exists(), "setup should create config file");
+    Ok(())
+}
+
+#[test]
 fn onboarding_wizard_stdin_secret_requires_non_interactive_mode() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("config").join("palyra.toml");

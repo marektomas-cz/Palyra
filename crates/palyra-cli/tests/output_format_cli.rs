@@ -55,6 +55,30 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     let config_path = bootstrap_local_config(&workdir)?;
     let support_bundle_path = workdir.path().join("artifacts").join("support-bundle.json");
     let support_bundle_path_string = support_bundle_path.display().to_string();
+    let setup_global_path = workdir.path().join("config").join("setup-global.toml");
+    let setup_global_path_string = setup_global_path.display().to_string();
+
+    let setup = parse_stdout_json(
+        run_cli(
+            &workdir,
+            &[
+                "--output-format",
+                "json",
+                "setup",
+                "--mode",
+                "local",
+                "--path",
+                setup_global_path_string.as_str(),
+                "--force",
+            ],
+        )?,
+        "setup --output-format json",
+    )?;
+    assert_eq!(setup.get("status").and_then(Value::as_str), Some("complete"));
+    assert_eq!(
+        setup.get("config_path").and_then(Value::as_str),
+        Some(setup_global_path_string.as_str())
+    );
 
     let doctor = parse_stdout_json(
         run_cli(&workdir, &["--output-format", "json", "doctor"])?,
