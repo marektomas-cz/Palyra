@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use zip::{
     read::ZipArchive,
+    result::ZipError,
     write::{SimpleFileOptions, ZipWriter},
     CompressionMethod,
 };
@@ -478,12 +479,16 @@ fn add_bytes_to_zip(
 }
 
 fn read_backup_manifest(archive: &mut ZipArchive<fs::File>) -> Result<BackupManifest> {
-    let mut file =
-        archive.by_name(BACKUP_MANIFEST_PATH).context("backup archive is missing manifest.json")?;
+    let mut file = archive.by_name(BACKUP_MANIFEST_PATH).map_err(|error| match error {
+        ZipError::FileNotFound => anyhow!(
+            "invalid backup archive: missing manifest.json; selected ZIP is not a Palyra backup archive"
+        ),
+        other => anyhow!(other).context("failed to locate backup manifest"),
+    })?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).context("failed to read backup manifest")?;
     serde_json::from_slice::<BackupManifest>(bytes.as_slice())
-        .context("failed to parse backup manifest")
+        .context("invalid backup archive: failed to parse manifest.json")
 }
 
 fn emit_backup_create_report(report: &BackupCreateReport, json: bool) -> Result<()> {
