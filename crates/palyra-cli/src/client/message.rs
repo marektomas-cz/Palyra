@@ -140,6 +140,7 @@ pub(crate) fn load_capabilities(
     device_id: String,
     channel: Option<String>,
 ) -> Result<MessageCapabilities> {
+    validate_message_connector_id(connector_id)?;
     let status = resolve_connector_status(
         connector_id,
         url,
@@ -151,6 +152,19 @@ pub(crate) fn load_capabilities(
     )?;
     let provider_kind = connector_kind(&status).unwrap_or("unknown").to_owned();
     Ok(capabilities_from_status(&status, provider_kind.as_str()))
+}
+
+pub(crate) fn validate_message_connector_id(connector_id: &str) -> Result<()> {
+    let connector_id = connector_id.trim();
+    if connector_id.is_empty() {
+        bail!("message commands require a connector id such as `echo:default`");
+    }
+    if connector_id.contains(':') {
+        return Ok(());
+    }
+    bail!(
+        "message commands require a routable connector id with provider and instance, such as `{connector_id}:default`; `{connector_id}` is a provider shorthand for channel filters, not a message connector id. Run `palyra channels list --json` and use the `connector_id` value."
+    );
 }
 
 pub(crate) fn send_message(options: MessageDispatchOptions) -> Result<Value> {
@@ -534,9 +548,10 @@ fn mutate_reaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        capabilities_from_status, MESSAGE_ACTION_DELETE, MESSAGE_ACTION_EDIT,
-        MESSAGE_ACTION_REACT_ADD, MESSAGE_ACTION_REACT_REMOVE, MESSAGE_ACTION_READ,
-        MESSAGE_ACTION_REPLY, MESSAGE_ACTION_SEARCH, MESSAGE_ACTION_SEND, MESSAGE_ACTION_THREAD,
+        capabilities_from_status, validate_message_connector_id, MESSAGE_ACTION_DELETE,
+        MESSAGE_ACTION_EDIT, MESSAGE_ACTION_REACT_ADD, MESSAGE_ACTION_REACT_REMOVE,
+        MESSAGE_ACTION_READ, MESSAGE_ACTION_REPLY, MESSAGE_ACTION_SEARCH, MESSAGE_ACTION_SEND,
+        MESSAGE_ACTION_THREAD,
     };
     use serde_json::{json, Value};
 
@@ -609,5 +624,24 @@ mod tests {
 
         assert!(capabilities.supported_actions.is_empty());
         assert_eq!(capabilities.unsupported_actions.len(), 9);
+    }
+
+    #[test]
+    fn message_connector_id_validation_suggests_default_instance_for_provider_shorthand() {
+        let error = validate_message_connector_id("echo")
+            .expect_err("message commands should reject provider shorthand");
+
+        assert!(
+            error.to_string().contains("echo:default")
+                && error.to_string().contains("palyra channels list --json")
+                && error.to_string().contains("provider shorthand"),
+            "provider shorthand should produce an actionable connector id hint: {error}"
+        );
+    }
+
+    #[test]
+    fn message_connector_id_validation_accepts_provider_instance_ids() {
+        validate_message_connector_id("echo:default")
+            .expect("provider instance connector ids should be accepted");
     }
 }
