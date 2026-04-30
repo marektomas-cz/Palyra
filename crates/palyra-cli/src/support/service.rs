@@ -9,7 +9,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
-use windows_sys::Win32::Globalization::{GetOEMCP, MultiByteToWideChar};
+use windows_sys::Win32::Globalization::{GetACP, GetOEMCP, MultiByteToWideChar};
 
 const SERVICE_METADATA_SCHEMA_VERSION: u32 = 1;
 
@@ -372,11 +372,38 @@ fn decode_windows_process_output(bytes: &[u8]) -> String {
     if let Ok(value) = std::str::from_utf8(bytes) {
         return value.trim().to_owned();
     }
-    windows_code_page_to_string(bytes, unsafe { GetOEMCP() })
-        .or_else(|| windows_code_page_to_string(bytes, 1250))
+
+    windows_process_output_candidates(bytes)
+        .into_iter()
+        .min_by_key(|candidate| windows_output_decode_penalty(candidate))
         .unwrap_or_else(|| format!("non-UTF-8 localized output ({} bytes)", bytes.len()))
         .trim()
         .to_owned()
+}
+
+#[cfg(windows)]
+fn windows_process_output_candidates(bytes: &[u8]) -> Vec<String> {
+    let mut code_pages = Vec::from([unsafe { GetOEMCP() }, unsafe { GetACP() }, 852, 1250]);
+    code_pages.dedup();
+    code_pages
+        .into_iter()
+        .filter_map(|code_page| windows_code_page_to_string(bytes, code_page))
+        .collect()
+}
+
+#[cfg(windows)]
+fn windows_output_decode_penalty(value: &str) -> usize {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '\u{fffd}' => 100,
+            ch if ch.is_control() && !ch.is_whitespace() => 50,
+            '²' | '°' | '±' | '¤' | '¦' | '§' | '¨' | '¸' | '¬' | 'ˇ' | '˙' => 10,
+            ch if ch.is_alphabetic() || ch.is_ascii_punctuation() || ch.is_whitespace() => 0,
+            ch if ch.is_numeric() => 0,
+            _ => 1,
+        })
+        .sum()
 }
 
 #[cfg(windows)]
@@ -945,6 +972,17 @@ mod tests {
         assert!(
             decoded.contains("Přístup byl odepřen"),
             "localized schtasks output should not be mojibake: {decoded}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decode_windows_process_output_preserves_ansi_localized_schtasks_text() {
+        let decoded = decode_windows_process_output(b"ERROR: P\xf8\xedstup byl odep\xf8en.");
+
+        assert!(
+            decoded.contains("Přístup byl odepřen"),
+            "localized ANSI output should not be mojibake: {decoded}"
         );
     }
 }
