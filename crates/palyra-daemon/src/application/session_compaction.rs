@@ -1024,10 +1024,10 @@ fn build_active_task_summary(
         .take(4)
         .map(|candidate| truncate_console_text(candidate.content.as_str(), 160))
         .collect::<Vec<_>>();
-    let recent_steps = protected_records
+    let mut recent_step_records = protected_records.iter().rev().take(4).collect::<Vec<_>>();
+    recent_step_records.reverse();
+    let recent_steps = recent_step_records
         .iter()
-        .rev()
-        .take(4)
         .map(|record| {
             format!(
                 "{}: {}",
@@ -2099,6 +2099,37 @@ mod tests {
         );
         assert!(!plan.eligible);
         assert_eq!(plan.blocked_reason.as_deref(), Some("an approval interaction is still open"));
+    }
+
+    #[test]
+    fn active_task_recent_steps_keep_chronological_order() {
+        let transcript = (0..10)
+            .map(|seq| {
+                let payload = format!(r#"{{"text":"Step {seq}"}}"#);
+                transcript_record(seq, "message.received", payload.as_str())
+            })
+            .collect::<Vec<_>>();
+
+        let plan = build_session_compaction_plan(
+            &session_record(),
+            transcript.as_slice(),
+            &[],
+            &[],
+            Some("test_compaction"),
+            Some("test_policy"),
+        );
+
+        assert_eq!(plan.active_task_summary.recent_steps.len(), 4);
+        assert!(
+            plan.active_task_summary.recent_steps[0].contains("Step 6"),
+            "recent steps should start with the oldest retained step: {:?}",
+            plan.active_task_summary.recent_steps
+        );
+        assert!(
+            plan.active_task_summary.recent_steps[3].contains("Step 9"),
+            "recent steps should end with the newest retained step: {:?}",
+            plan.active_task_summary.recent_steps
+        );
     }
 
     #[test]
