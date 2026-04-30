@@ -229,7 +229,11 @@ impl std::fmt::Display for WorkspacePathError {
                 write!(formatter, "workspace path segment contains control characters: {segment}")
             }
             Self::RootNotAllowed(root) => {
-                write!(formatter, "workspace root is not allowed: {root}")
+                write!(
+                    formatter,
+                    "workspace root is not allowed: {root}; allowed roots: {}; run `palyra memory status` to inspect workspace memory",
+                    curated_workspace_roots().join(", ")
+                )
             }
             Self::SensitiveSegment(segment) => {
                 write!(formatter, "workspace path enters a sensitive segment: {segment}")
@@ -778,6 +782,23 @@ mod tests {
     fn normalize_workspace_path_rejects_sensitive_roots() {
         let error = normalize_workspace_path(".git/config").expect_err("sensitive root must fail");
         assert!(matches!(error, WorkspacePathError::SensitiveSegment(_)));
+    }
+
+    #[test]
+    fn workspace_root_error_lists_allowed_roots() {
+        let error =
+            normalize_workspace_path("e2e/current-note.md").expect_err("unknown root must fail");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(
+                "allowed roots: README.md, MEMORY.md, HEARTBEAT.md, context, daily, projects"
+            ),
+            "root validation should name the valid workspace roots: {rendered}"
+        );
+        assert!(
+            rendered.contains("palyra memory status"),
+            "root validation should point operators at memory status guidance: {rendered}"
+        );
     }
 
     #[test]

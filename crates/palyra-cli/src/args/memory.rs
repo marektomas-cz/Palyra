@@ -272,7 +272,14 @@ pub enum MemoryWorkspaceCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(
+        about = "Write a workspace memory document under an allowed curated root",
+        long_about = "Write a workspace memory document under an allowed curated root.\n\nAllowed roots: README.md, MEMORY.md, HEARTBEAT.md, context/, daily/, projects/. Run `palyra memory status` to inspect workspace memory."
+    )]
     Write {
+        #[arg(
+            help = "Workspace path. Allowed roots: README.md, MEMORY.md, HEARTBEAT.md, context/, daily/, projects/."
+        )]
         path: String,
         content: String,
         #[arg(long)]

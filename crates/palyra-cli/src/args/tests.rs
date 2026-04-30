@@ -2181,6 +2181,24 @@ fn parse_memory_status_and_index() {
 }
 
 #[test]
+fn memory_workspace_write_help_names_allowed_roots() {
+    let error = Cli::try_parse_from(["palyra", "memory", "workspace", "write", "--help"])
+        .expect_err("help should be rendered as a clap display error");
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    let help = error.to_string();
+    assert!(
+        help.contains(
+            "Allowed roots: README.md, MEMORY.md, HEARTBEAT.md, context/, daily/, projects/."
+        ),
+        "workspace write help should name valid roots: {help}"
+    );
+    assert!(
+        help.contains("palyra memory status"),
+        "workspace write help should point operators at memory status: {help}"
+    );
+}
+
+#[test]
 fn parse_system_commands() {
     let heartbeat = Cli::parse_from(["palyra", "system", "heartbeat", "--json"]);
     assert_eq!(
