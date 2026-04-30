@@ -410,6 +410,70 @@ fn setup_wizard_quickstart_supports_minimax_api_key() -> Result<()> {
 }
 
 #[test]
+fn onboarding_wizard_existing_config_preserves_ready_auth_state() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("config").join("palyra.toml");
+    seed_quickstart_config(&workdir, &config_path)?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "onboarding",
+            "wizard",
+            "--path",
+            &config_path_string,
+            "--flow",
+            "quickstart",
+            "--auth-method",
+            "existing-config",
+            "--non-interactive",
+            "--accept-risk",
+            "--skip-channels",
+            "--skip-skills",
+            "--json",
+        ],
+        &[],
+    )?;
+    assert!(
+        output.status.success(),
+        "existing-config onboarding should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).context("onboarding stdout should be JSON")?;
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("existing_config_ready"));
+    assert_eq!(payload.get("auth_method").and_then(Value::as_str), Some("existing_config"));
+    assert_eq!(
+        payload.get("recommended_step_id").and_then(Value::as_str),
+        Some("onboarding_status")
+    );
+    assert!(
+        payload
+            .get("next_step")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.contains("Existing model-provider config was preserved")),
+        "existing-config summary should describe config refresh instead of stale startup blockers: {payload}"
+    );
+    assert!(
+        payload.get("risk_events").and_then(Value::as_array).is_some_and(|values| !values
+            .iter()
+            .any(|value| value.as_str() == Some("model_auth_skipped"))),
+        "existing-config should not be reported as skipped auth: {payload}"
+    );
+    assert!(
+        payload.get("warnings").and_then(Value::as_array).is_some_and(|values| !values.iter().any(
+            |value| value
+                .as_str()
+                .is_some_and(|warning| warning.contains("Model-provider auth was skipped")
+                    || warning.contains("local runtime startup was deferred"))
+        )),
+        "existing-config should not emit stale auth/runtime warnings: {payload}"
+    );
+    Ok(())
+}
+
+#[test]
 fn onboarding_wizard_without_path_uses_palyra_config_env_path() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("env-config").join("palyra.toml");
@@ -928,6 +992,18 @@ fn configure_auth_model_backfills_admin_defaults_for_resume_path() -> Result<()>
     assert!(
         written.contains("bound_principal = \"admin:local\""),
         "configure auth-model should write the local admin principal when missing: {written}"
+    );
+    assert!(
+        written.contains("profile = \"local\""),
+        "configure auth-model should backfill the local deployment profile for preflight: {written}"
+    );
+    assert!(
+        written.contains("mode = \"local_desktop\""),
+        "configure auth-model should backfill local deployment mode for preflight: {written}"
+    );
+    assert!(
+        written.contains("bind_profile = \"loopback_only\""),
+        "configure auth-model should backfill loopback bind profile for preflight: {written}"
     );
     Ok(())
 }

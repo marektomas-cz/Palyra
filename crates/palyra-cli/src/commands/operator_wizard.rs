@@ -294,8 +294,12 @@ pub(crate) fn run_onboarding_wizard(request: OnboardingWizardRequest) -> Result<
         run_post_apply_health_check(flow, &apply_context, &plan)?
     };
     plan.health_status = health_report.status;
-    let (status, recommended_step_id, next_step) =
-        onboarding_summary_next_step(flow, plan.service_install_mode, plan.health_status);
+    let (status, recommended_step_id, next_step) = onboarding_summary_next_step(
+        flow,
+        plan.service_install_mode,
+        plan.health_status,
+        plan.auth_method.as_str(),
+    );
     let summary = OnboardingSummary {
         status,
         flow: plan.flow,
@@ -496,6 +500,15 @@ pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()
                 if ensure_admin_auth_defaults(&mut document)? {
                     warnings.push(
                         "admin auth defaults were backfilled so the daemon can start after this reconfiguration."
+                            .to_owned(),
+                    );
+                }
+                if ensure_missing_deployment_profile_defaults(
+                    &mut document,
+                    palyra_common::deployment_profiles::DeploymentProfileId::Local,
+                )? {
+                    warnings.push(
+                        "local deployment defaults were backfilled so deployment preflight and runtime startup use the same loopback posture."
                             .to_owned(),
                     );
                 }
@@ -1099,7 +1112,7 @@ fn execute_onboarding_flow(
             ServiceInstallMode::GuidanceOnly
         }
         _ => {
-            if !matches!(flow, WizardFlowKind::Remote) {
+            if !matches!(flow, WizardFlowKind::Remote) && plan.auth_method != "existing_config" {
                 plan.warnings.push(
                     "local runtime startup was deferred; run `palyra gateway run` now, or `palyra gateway install --start` to register a persistent background service."
                         .to_owned(),
@@ -1169,6 +1182,11 @@ fn populate_quickstart_plan(
                 Some("use MiniMax M2.7 through the Anthropic-compatible endpoint"),
             ),
             choice(
+                "existing_config",
+                "Reuse Current",
+                Some("keep the existing credential source if one is already configured"),
+            ),
+            choice(
                 "skip",
                 "Skip for Now",
                 Some("leave model auth unset and continue with warnings"),
@@ -1191,7 +1209,7 @@ fn populate_quickstart_plan(
             |value| validate_non_empty_text(value, api_key_label),
         )?;
         plan.api_key = Some(api_key);
-    } else {
+    } else if auth_method == "skip" {
         plan.risk_events.push("model_auth_skipped".to_owned());
         plan.warnings.push(
             "Model-provider auth was skipped; the resulting config is structurally valid but not ready for remote model calls."
@@ -1898,6 +1916,36 @@ fn ensure_runtime_defaults(document: &mut toml::Value, context: &ApplyContext) -
     Ok(document != &before)
 }
 
+fn ensure_missing_deployment_profile_defaults(
+    document: &mut toml::Value,
+    deployment_profile: palyra_common::deployment_profiles::DeploymentProfileId,
+) -> Result<bool> {
+    let before = document.clone();
+    let manifest =
+        palyra_common::deployment_profiles::deployment_profile_manifest(deployment_profile);
+    for default in manifest.defaults {
+        if get_value_at_path(document, default.config_path.as_str())?.is_some() {
+            continue;
+        }
+        let value = match default.value {
+            palyra_common::deployment_profiles::DeploymentProfileDefaultValue::String(value) => {
+                toml::Value::String(value)
+            }
+            palyra_common::deployment_profiles::DeploymentProfileDefaultValue::Integer(value) => {
+                toml::Value::Integer(value)
+            }
+            palyra_common::deployment_profiles::DeploymentProfileDefaultValue::Boolean(value) => {
+                toml::Value::Boolean(value)
+            }
+            palyra_common::deployment_profiles::DeploymentProfileDefaultValue::StringList(
+                values,
+            ) => toml::Value::Array(values.into_iter().map(toml::Value::String).collect()),
+        };
+        set_value_at_path(document, default.config_path.as_str(), value)?;
+    }
+    Ok(document != &before)
+}
+
 fn run_post_apply_health_check(
     flow: WizardFlowKind,
     context: &ApplyContext,
@@ -2021,12 +2069,21 @@ fn onboarding_summary_next_step(
     flow: WizardFlowKind,
     service_install_mode: ServiceInstallMode,
     health_status: HealthStatus,
+    auth_method: &str,
 ) -> (&'static str, Option<&'static str>, Option<&'static str>) {
     if matches!(health_status, HealthStatus::ManualFollowUpRequired | HealthStatus::Skipped) {
         return (
             "next_step_required",
             Some("onboarding_status"),
             Some("Run `palyra onboarding status --json` to inspect the current blocker before starting the first agent run."),
+        );
+    }
+
+    if auth_method == "existing_config" {
+        return (
+            "existing_config_ready",
+            Some("onboarding_status"),
+            Some("Existing model-provider config was preserved and config defaults were refreshed. Run `palyra onboarding status --json` for live gateway, default-agent, and first-success state."),
         );
     }
 
