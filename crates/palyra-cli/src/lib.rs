@@ -3484,6 +3484,7 @@ async fn execute_agent_stream_async(
     request: AgentRunInput,
     ndjson: bool,
 ) -> Result<AgentStreamOutcome> {
+    let principal = connection.principal.clone();
     let ndjson = output::preferred_ndjson(false, ndjson);
     let json_output = !ndjson && output::preferred_json(false);
     let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
@@ -3493,7 +3494,8 @@ async fn execute_agent_stream_async(
             events.push(agent_event_json_value(event));
             Ok(())
         })
-        .await?;
+        .await
+        .map_err(|error| enrich_agent_principal_auth_error(error, principal.as_str()))?;
         output::print_json_pretty(
             &json!({ "events": events }),
             "failed to encode agent stream as JSON",
@@ -3508,7 +3510,8 @@ async fn execute_agent_stream_async(
                 emit_agent_event_text(event)
             }
         })
-        .await?;
+        .await
+        .map_err(|error| enrich_agent_principal_auth_error(error, principal.as_str()))?;
         outcome.ensure_success()?;
         outcome
     };
@@ -3517,15 +3520,83 @@ async fn execute_agent_stream_async(
 
 fn run_agent_stream_as_acp(connection: AgentConnection, request: AgentRunInput) -> Result<()> {
     let runtime = build_runtime()?;
+    let principal = connection.principal.clone();
     runtime
         .block_on(async {
             let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
-            let outcome =
-                stream_agent_events_async(&mut client, request, emit_acp_event_ndjson).await?;
+            let outcome = stream_agent_events_async(&mut client, request, emit_acp_event_ndjson)
+                .await
+                .map_err(|error| enrich_agent_principal_auth_error(error, principal.as_str()))?;
             outcome.ensure_success()?;
             Result::<()>::Ok(())
         })
         .context("ACP shim stream execution failed")
+}
+
+fn enrich_agent_principal_auth_error(error: anyhow::Error, principal: &str) -> anyhow::Error {
+    if !is_agent_principal_auth_error(&error) {
+        return error;
+    }
+    error.context(format!(
+        "requested principal `{principal}` was rejected by the active authorization token binding; omit `--principal` to use the configured bound principal, or pass a token issued for `{principal}` with `--token` or `PALYRA_ADMIN_TOKEN`"
+    ))
+}
+
+fn is_agent_principal_auth_error(error: &anyhow::Error) -> bool {
+    let has_auth_status = error.chain().any(|cause| {
+        cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
+            matches!(status.code(), tonic::Code::PermissionDenied | tonic::Code::Unauthenticated)
+        })
+    });
+    if !has_auth_status {
+        return false;
+    }
+
+    let message = error
+        .chain()
+        .map(|cause| cause.to_string().to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    message.contains("authorization token")
+        || message.contains("token is invalid")
+        || message.contains("invalid token")
+        || message.contains("token binding")
+}
+
+#[cfg(test)]
+mod agent_auth_error_tests {
+    use super::{enrich_agent_principal_auth_error, is_agent_principal_auth_error};
+
+    #[test]
+    fn enrich_agent_principal_auth_error_adds_token_binding_hint() {
+        let error =
+            anyhow::anyhow!(tonic::Status::permission_denied("authorization token is invalid"))
+                .context("failed to call ResolveSession");
+
+        let enriched = enrich_agent_principal_auth_error(error, "user:local");
+        let message = format!("{enriched:#}");
+
+        assert!(
+            message.contains("requested principal `user:local`")
+                && message.contains("active authorization token binding")
+                && message.contains("--token")
+                && message.contains("PALYRA_ADMIN_TOKEN")
+                && message.contains("failed to call ResolveSession"),
+            "agent run auth failures should explain token/principal binding: {message}"
+        );
+    }
+
+    #[test]
+    fn agent_principal_auth_error_detection_ignores_unrelated_policy_denials() {
+        let error =
+            anyhow::anyhow!(tonic::Status::permission_denied("policy denied by approval gate"))
+                .context("failed to call ResolveSession");
+
+        assert!(
+            !is_agent_principal_auth_error(&error),
+            "unrelated policy denials should not be labeled as token binding failures"
+        );
+    }
 }
 
 async fn stream_agent_events_async<F>(
