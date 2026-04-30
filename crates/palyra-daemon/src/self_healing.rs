@@ -792,12 +792,19 @@ async fn heal_missing_active_profiles(state: &AppState) -> Result<(), String> {
         apply_browser_service_auth(state, request.metadata_mut()).map_err(|response| {
             format!("browser profile probe auth failed with http {}", response.status())
         })?;
-        let response = client
-            .list_profiles(request)
-            .await
-            .map_err(|error| format!("browser profile list failed: {error}"))?
-            .into_inner();
         let dedupe_key = format!("browser_active_profile:{principal}");
+        let response = match client.list_profiles(request).await {
+            Ok(response) => response.into_inner(),
+            Err(error) if browser_profiles_intentionally_unavailable(error.message()) => {
+                state.runtime.resolve_self_healing_incident(
+                    IncidentDomain::Browser,
+                    dedupe_key.as_str(),
+                    "browser profile self-healing skipped because profile persistence is unavailable",
+                );
+                continue;
+            }
+            Err(error) => return Err(format!("browser profile list failed: {error}")),
+        };
         if response.active_profile_id.is_some() || response.profiles.is_empty() {
             state.runtime.resolve_self_healing_incident(
                 IncidentDomain::Browser,
@@ -884,6 +891,12 @@ async fn heal_missing_active_profiles(state: &AppState) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn browser_profiles_intentionally_unavailable(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("browser profiles require")
+        && normalized.contains("palyra_browserd_state_encryption_key")
 }
 
 async fn evaluate_skill_runtime(state: &AppState) -> Result<(), String> {
@@ -1138,6 +1151,16 @@ mod tests {
 
         state.clear_heartbeat(WorkHeartbeatKind::Run, "01ARZ3NDEKTSV4RRFFQ69G5FAX");
         assert!(state.list_heartbeats().is_empty());
+    }
+
+    #[test]
+    fn browser_profile_encryption_key_error_is_non_noisy_for_self_healing() {
+        assert!(browser_profiles_intentionally_unavailable(
+            "browser profiles require PALYRA_BROWSERD_STATE_ENCRYPTION_KEY to be configured"
+        ));
+        assert!(!browser_profiles_intentionally_unavailable(
+            "browser profile list failed: transport error"
+        ));
     }
 
     #[test]
