@@ -324,6 +324,24 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+pub(super) fn render_status_detail_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lines = app
+        .status_detail_summary()
+        .lines()
+        .map(|line| Line::from(line.to_owned()))
+        .collect::<Vec<_>>();
+    let popup_height = area.height.saturating_sub(2).min(lines.len() as u16 + 2).max(10);
+    let popup = centered_rect(92, popup_height, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL).title("Status detail"))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
 pub(super) fn percent_encode_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.as_bytes() {

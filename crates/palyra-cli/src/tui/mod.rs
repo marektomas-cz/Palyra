@@ -78,6 +78,7 @@ enum Focus {
 enum Mode {
     Chat,
     Help,
+    StatusDetail,
     Picker(PickerKind),
     Settings,
     Approval,
@@ -761,11 +762,15 @@ impl App {
             return Ok(());
         }
         if let Some(command) = value.strip_prefix('/') {
+            let had_slash_palette = self.pending_slash_palette.is_some();
             if self.handle_slash_command(command).await? {
                 self.clear_current_draft();
                 self.slash_palette_dismissed = false;
                 self.pending_slash_palette = None;
                 self.slash_palette_selected = 0;
+                if had_slash_palette {
+                    self.force_clear_next_frame = true;
+                }
             }
             return Ok(());
         }
@@ -888,6 +893,10 @@ impl App {
                     "Status",
                     if detail { self.status_detail_summary() } else { self.status_summary() },
                 );
+                if detail {
+                    self.mode = Mode::StatusDetail;
+                    self.force_clear_next_frame = true;
+                }
                 self.status_line = text::status_refreshed(self.locale);
             }
             "new" => {
@@ -3485,7 +3494,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         return Ok(true);
     }
     match app.mode {
-        Mode::Help => match key.code {
+        Mode::Help | Mode::StatusDetail => match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.close_overlay(),
             _ => {}
         },
@@ -4126,6 +4135,48 @@ mod tests {
             Some("Status"),
             "bare command suggestion should execute when accepted with Enter"
         );
+    }
+
+    #[tokio::test]
+    async fn status_detail_opens_clearable_detail_view() {
+        let mut app = test_app();
+        app.composer.set_text("/status detail".to_owned());
+        app.sync_composer_after_edit();
+
+        assert!(
+            app.pending_slash_palette.is_some(),
+            "status detail should keep palette preview state until submission"
+        );
+
+        let enter =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::empty(), KeyEventKind::Press);
+        assert!(!handle_key(&mut app, enter).await.expect("enter should be handled"));
+
+        assert!(app.composer.is_empty(), "executed slash command should clear the composer");
+        assert!(
+            app.pending_slash_palette.is_none(),
+            "executed detail command should close the slash palette"
+        );
+        assert!(matches!(app.mode, Mode::StatusDetail));
+        assert!(
+            app.take_force_clear_next_frame(),
+            "closing the slash palette and opening the detail view should clear the next frame"
+        );
+        let detail = app.transcript.last().expect("status entry should be appended");
+        assert_eq!(detail.title, "Status");
+        assert!(detail.body.contains("Context detail"), "missing context detail: {}", detail.body);
+        assert!(
+            detail.body.contains("Workspace detail"),
+            "missing workspace detail: {}",
+            detail.body
+        );
+
+        let escape =
+            KeyEvent::new_with_kind(KeyCode::Esc, KeyModifiers::empty(), KeyEventKind::Press);
+        assert!(!handle_key(&mut app, escape).await.expect("escape should close detail view"));
+
+        assert!(matches!(app.mode, Mode::Chat));
+        assert!(app.take_force_clear_next_frame(), "closing detail view should clear the frame");
     }
 
     #[tokio::test]

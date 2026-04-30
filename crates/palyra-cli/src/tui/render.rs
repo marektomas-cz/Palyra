@@ -26,6 +26,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
 
     match app.mode {
         Mode::Help => render_help_popup(frame, frame.area(), app),
+        Mode::StatusDetail => render_status_detail_popup(frame, frame.area(), app),
         Mode::Approval => render_approval_popup(frame, frame.area(), app),
         Mode::Picker(_) => render_picker_popup(frame, frame.area(), app),
         Mode::Settings => render_settings_popup(frame, frame.area(), app),
