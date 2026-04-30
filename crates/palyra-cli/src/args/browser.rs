@@ -25,6 +25,8 @@ pub enum BrowserCommand {
         token: Option<String>,
         #[arg(long, default_value_t = 10_000)]
         wait_ms: u64,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Stop the local browser service started by this CLI")]
     Stop,
@@ -234,6 +236,8 @@ pub enum BrowserCommand {
         limit: Option<u32>,
         #[arg(long, default_value_t = false)]
         quarantined_only: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Get or set browser permissions for a session")]
     Permissions {
@@ -258,6 +262,8 @@ pub enum BrowserCommand {
         session_id: String,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Export the active browser session as PDF")]
     Pdf {
@@ -360,7 +366,11 @@ pub enum BrowserSessionCommand {
         output: Option<String>,
     },
     #[command(about = "Close a browser session")]
-    Close { session_id: String },
+    Close {
+        session_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]

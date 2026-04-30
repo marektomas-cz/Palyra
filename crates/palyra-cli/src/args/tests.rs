@@ -384,13 +384,41 @@ fn parse_backup_create_with_explicit_components() {
 }
 
 #[test]
-fn parse_backup_verify() {
-    let parsed =
-        Cli::parse_from(["palyra", "backup", "verify", "--archive", "artifacts/palyra-backup.zip"]);
+fn parse_backup_verify_json_flag() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "backup",
+        "verify",
+        "--archive",
+        "artifacts/palyra-backup.zip",
+        "--json",
+    ]);
     assert_eq!(
         parsed.command,
         Command::Backup {
-            command: BackupCommand::Verify { archive: "artifacts/palyra-backup.zip".to_owned() }
+            command: BackupCommand::Verify {
+                archive: "artifacts/palyra-backup.zip".to_owned(),
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_update_check_json_flag() {
+    let parsed = Cli::parse_from(["palyra", "update", "--check", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Update {
+            command: UpdateCommand {
+                install_root: None,
+                archive: None,
+                check: true,
+                dry_run: false,
+                yes: false,
+                skip_service_restart: false,
+                json: true,
+            }
         }
     );
 }
@@ -467,6 +495,7 @@ fn parse_update_check_with_archive_hint() {
                 dry_run: false,
                 yes: false,
                 skip_service_restart: true,
+                json: false,
             }
         }
     );
@@ -3487,6 +3516,24 @@ fn parse_browser_status_json_flag() {
 }
 
 #[test]
+fn parse_browser_start_json_flag() {
+    let parsed = Cli::parse_from(["palyra", "browser", "start", "--wait-ms", "15000", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Start {
+                bin_path: None,
+                endpoint: None,
+                health_url: None,
+                token: None,
+                wait_ms: 15000,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_browser_profiles_list_json_flag() {
     let parsed = Cli::parse_from([
         "palyra",
@@ -3582,6 +3629,62 @@ fn parse_browser_session_list_json_flag() {
                     limit: Some(5),
                     json: true,
                 },
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_browser_session_close_json_flag() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "browser",
+        "session",
+        "close",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Session {
+                command: BrowserSessionCommand::Close {
+                    session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                    json: true,
+                },
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_browser_downloads_json_flag() {
+    let parsed =
+        Cli::parse_from(["palyra", "browser", "downloads", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Downloads {
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                limit: None,
+                quarantined_only: false,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_browser_console_json_flag() {
+    let parsed =
+        Cli::parse_from(["palyra", "browser", "console", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Console {
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                output: None,
+                json: true,
             }
         }
     );

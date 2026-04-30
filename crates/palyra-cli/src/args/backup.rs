@@ -33,5 +33,7 @@ pub enum BackupCommand {
     Verify {
         #[arg(long)]
         archive: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }

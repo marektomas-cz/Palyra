@@ -14,4 +14,6 @@ pub struct UpdateCommand {
     pub yes: bool,
     #[arg(long, default_value_t = false)]
     pub skip_service_restart: bool,
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }

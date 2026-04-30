@@ -84,7 +84,7 @@ pub(crate) fn run_backup(command: BackupCommand) -> Result<()> {
             force,
             json,
         ),
-        BackupCommand::Verify { archive } => run_backup_verify(archive),
+        BackupCommand::Verify { archive, json } => run_backup_verify(archive, json),
     }
 }
 
@@ -222,7 +222,7 @@ fn run_backup_create(
     emit_backup_create_report(&report, json)
 }
 
-fn run_backup_verify(archive: String) -> Result<()> {
+fn run_backup_verify(archive: String, json: bool) -> Result<()> {
     let archive_path = PathBuf::from(archive);
     let file = fs::File::open(archive_path.as_path())
         .with_context(|| format!("failed to open backup archive {}", archive_path.display()))?;
@@ -263,7 +263,7 @@ fn run_backup_verify(archive: String) -> Result<()> {
         verified_entries: manifest.entries.len(),
         ok: true,
     };
-    emit_backup_verify_report(&report)
+    emit_backup_verify_report(&report, json)
 }
 
 fn build_embedded_support_bundle(generated_at_unix_ms: i64) -> Result<SupportBundle> {
@@ -513,10 +513,10 @@ fn emit_backup_create_report(report: &BackupCreateReport, json: bool) -> Result<
     std::io::stdout().flush().context("stdout flush failed")
 }
 
-fn emit_backup_verify_report(report: &BackupVerifyReport) -> Result<()> {
+fn emit_backup_verify_report(report: &BackupVerifyReport, json: bool) -> Result<()> {
     let context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for backup command"))?;
-    if context.prefers_json() {
+    if json || context.prefers_json() {
         return output::print_json_pretty(report, "failed to encode backup verify output as JSON");
     }
     if context.prefers_ndjson() {

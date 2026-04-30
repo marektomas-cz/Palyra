@@ -186,8 +186,8 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
         BrowserCommand::Status { endpoint, health_url, token, json } => {
             run_browser_status(endpoint, health_url, token, json).await
         }
-        BrowserCommand::Start { bin_path, endpoint, health_url, token, wait_ms } => {
-            run_browser_start(bin_path, endpoint, health_url, token, wait_ms).await
+        BrowserCommand::Start { bin_path, endpoint, health_url, token, wait_ms, json } => {
+            run_browser_start(bin_path, endpoint, health_url, token, wait_ms, json).await
         }
         BrowserCommand::Stop => run_browser_stop(),
         BrowserCommand::Open {
@@ -377,8 +377,8 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
         BrowserCommand::Trace { session_id, principal, output } => {
             run_browser_trace(session_id, principal, output).await
         }
-        BrowserCommand::Downloads { session_id, limit, quarantined_only } => {
-            run_browser_downloads(session_id, limit, quarantined_only).await
+        BrowserCommand::Downloads { session_id, limit, quarantined_only, json } => {
+            run_browser_downloads(session_id, limit, quarantined_only, json).await
         }
         BrowserCommand::Permissions { session_id, command } => {
             run_browser_permissions_command(session_id, command).await
@@ -399,8 +399,8 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             )
             .await
         }
-        BrowserCommand::Console { session_id, output } => {
-            run_browser_console(session_id, output).await
+        BrowserCommand::Console { session_id, output, json } => {
+            run_browser_console(session_id, output, json).await
         }
         BrowserCommand::Pdf { session_id, output } => run_browser_pdf(session_id, output).await,
         BrowserCommand::Press { session_id, key } => run_browser_press(session_id, key).await,
@@ -548,6 +548,7 @@ async fn run_browser_start(
     health_url: Option<String>,
     token: Option<String>,
     wait_ms: u64,
+    json: bool,
 ) -> Result<()> {
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
     ensure_browser_service_enabled(&resolved.policy, "start", resolved.config_path.as_deref())?;
@@ -570,10 +571,11 @@ async fn run_browser_start(
         };
         let value =
             serde_json::to_value(&payload).context("failed to encode browser lifecycle payload")?;
-        return emit_browser_value(
+        return emit_browser_value_with_json(
             &value,
             format_browser_lifecycle_text(&payload),
             "failed to encode browser lifecycle output",
+            json,
         );
     }
 
@@ -643,10 +645,11 @@ async fn run_browser_start(
             };
             let value = serde_json::to_value(&payload)
                 .context("failed to encode browser lifecycle payload")?;
-            return emit_browser_value(
+            return emit_browser_value_with_json(
                 &value,
                 format_browser_lifecycle_text(&payload),
                 "failed to encode browser lifecycle output",
+                json,
             );
         }
         if started.elapsed().unwrap_or_default() >= deadline {
@@ -941,7 +944,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 "failed to encode browser session inspect output",
             )
         }
-        BrowserSessionCommand::Close { session_id } => {
+        BrowserSessionCommand::Close { session_id, json } => {
             let context =
                 client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
                     .await?;
@@ -952,7 +955,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 .context("failed to close browser session")?;
             let value = serde_json::to_value(&envelope)
                 .context("failed to encode browser session close output")?;
-            emit_browser_value(
+            emit_browser_value_with_json(
                 &value,
                 format!(
                     "browser.session.close session_id={} closed={} reason={}",
@@ -961,6 +964,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                     empty_as_dash(envelope.reason.as_str()),
                 ),
                 "failed to encode browser session close output",
+                json,
             )
         }
     }
@@ -1880,7 +1884,7 @@ async fn run_browser_trace(
     )
 }
 
-async fn run_browser_console(session_id: String, output: Option<String>) -> Result<()> {
+async fn run_browser_console(session_id: String, output: Option<String>, json: bool) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
     let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
     let mut client = connect_browser_service(&resolved.connection).await?;
@@ -1912,7 +1916,7 @@ async fn run_browser_console(session_id: String, output: Option<String>) -> Resu
     let written =
         write_optional_json_output(output.as_deref(), session_id.as_str(), "console", &value)?;
     maybe_attach_output_path(&mut value, written.as_ref());
-    emit_browser_value(
+    emit_browser_value_with_json(
         &value,
         format!(
             "browser.console session_id={} entries={} truncated={} output={}",
@@ -1922,6 +1926,7 @@ async fn run_browser_console(session_id: String, output: Option<String>) -> Resu
             written.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser console output",
+        json,
     )
 }
 
@@ -2106,6 +2111,7 @@ async fn run_browser_downloads(
     session_id: String,
     limit: Option<u32>,
     quarantined_only: bool,
+    json: bool,
 ) -> Result<()> {
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
@@ -2142,7 +2148,7 @@ async fn run_browser_downloads(
             .as_str(),
         );
     }
-    emit_browser_value(&value, text, "failed to encode browser downloads output")
+    emit_browser_value_with_json(&value, text, "failed to encode browser downloads output", json)
 }
 
 async fn run_browser_permissions_command(

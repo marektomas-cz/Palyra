@@ -79,7 +79,7 @@ pub(crate) fn run_update(command: UpdateCommand) -> Result<()> {
             command.skip_service_restart,
         ),
     };
-    emit_update_report(&report)
+    emit_update_report(&report, command.json)
 }
 
 fn load_candidate_archive_snapshot(archive_path: String) -> Result<UpdateArchiveSnapshot> {
@@ -127,10 +127,10 @@ fn build_update_next_steps(
     steps
 }
 
-fn emit_update_report(report: &UpdateReport) -> Result<()> {
+fn emit_update_report(report: &UpdateReport, json: bool) -> Result<()> {
     let context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for update command"))?;
-    if context.prefers_json() {
+    if json || context.prefers_json() {
         return output::print_json_pretty(report, "failed to encode update output as JSON");
     }
     if context.prefers_ndjson() {
