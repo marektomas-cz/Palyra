@@ -455,8 +455,11 @@ impl App {
     }
 }
 
-pub(super) fn browser_service_disabled_error(error: &anyhow::Error) -> bool {
+pub(super) fn browser_catalog_optional_error(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}").to_ascii_lowercase();
     message.contains("browser service is disabled")
         || message.contains("tool_call.browser_service.enabled=false")
+        || message.contains("failed to connect to browser service")
+        || message.contains("browser service connect failed")
+        || message.contains("browserd is unavailable")
 }

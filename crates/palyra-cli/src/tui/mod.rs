@@ -1987,7 +1987,7 @@ impl App {
         self.refresh_objective_catalog().await?;
         self.refresh_auth_profile_catalog().await?;
         if let Err(error) = self.refresh_browser_catalog().await {
-            if status::browser_service_disabled_error(&error) {
+            if status::browser_catalog_optional_error(&error) {
                 self.clear_browser_catalog();
             } else {
                 return Err(error);
@@ -2360,7 +2360,20 @@ impl App {
         if self.slash_entity_catalog.browser_profiles.is_empty()
             && self.slash_entity_catalog.browser_sessions.is_empty()
         {
-            self.refresh_browser_catalog().await?;
+            if let Err(error) = self.refresh_browser_catalog().await {
+                if status::browser_catalog_optional_error(&error) {
+                    self.clear_browser_catalog();
+                    self.push_entry(
+                        EntryKind::System,
+                        "Browser",
+                        "Browser service is unavailable. Chat and session commands remain usable; start browserd or disable tool_call.browser_service.enabled to restore browser catalog details.",
+                    );
+                    self.status_line =
+                        "Browser service unavailable; chat remains usable".to_owned();
+                    return Ok(());
+                }
+                return Err(error);
+            }
         }
         let target = normalize_owned_optional_text(arguments.join(" "));
         if let Some(target) = target {
@@ -3899,12 +3912,21 @@ mod tests {
     }
 
     #[test]
-    fn browser_service_disabled_error_is_optional_for_catalog_refresh() {
+    fn browser_disabled_error_is_optional_for_catalog_refresh() {
         let error = anyhow::anyhow!(
             "request failed with HTTP 412: browser service is disabled (tool_call.browser_service.enabled=false)"
         );
 
-        assert!(status::browser_service_disabled_error(&error));
+        assert!(status::browser_catalog_optional_error(&error));
+    }
+
+    #[test]
+    fn browser_unavailable_error_is_optional_for_catalog_refresh() {
+        let error = anyhow::anyhow!(
+            "request failed with HTTP 503: failed to connect to browser service 'http://127.0.0.1:7543': transport error"
+        );
+
+        assert!(status::browser_catalog_optional_error(&error));
     }
 
     #[test]
