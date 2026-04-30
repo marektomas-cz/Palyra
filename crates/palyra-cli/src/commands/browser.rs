@@ -9,6 +9,7 @@ use std::{
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palyra_common::config_system::get_value_at_path;
 use palyra_control_plane as control_plane;
 use reqwest::{Client as AsyncClient, Url};
@@ -31,6 +32,8 @@ const BROWSER_SERVICE_STATE_DIR: &str = "browser-cli";
 const BROWSER_SERVICE_METADATA_FILE_NAME: &str = "browser-service.json";
 const BROWSER_SERVICE_STDOUT_LOG_FILE_NAME: &str = "browserd.stdout.log";
 const BROWSER_SERVICE_STDERR_LOG_FILE_NAME: &str = "browserd.stderr.log";
+const BROWSERD_STATE_ENCRYPTION_KEY_ENV: &str = "PALYRA_BROWSERD_STATE_ENCRYPTION_KEY";
+const BROWSERD_STATE_ENCRYPTION_KEY_LEN: usize = 32;
 const BROWSER_ARTIFACT_DIR: &str = "browser-artifacts";
 const BROWSER_CALLER_PRINCIPAL_HEADER: &str = "x-palyra-principal";
 const BROWSER_PROBE_PRINCIPAL: &str = "admin:browser-probe";
@@ -67,6 +70,7 @@ struct BrowserResolvedConfig {
     connection: BrowserServiceConnection,
     policy: BrowserPolicySnapshot,
     config_path: Option<String>,
+    state_key_vault_ref: Option<String>,
     token_from_cli_only: bool,
     token_conflicts_with_gateway_config: bool,
 }
@@ -485,6 +489,11 @@ fn browser_permissions_policy_action(command: &BrowserPermissionsCommand) -> &'s
 fn ensure_browser_cli_policy_enabled(action: &str) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
     ensure_browser_service_enabled(&resolved.policy, action, resolved.config_path.as_deref())?;
+    ensure_browser_profile_prerequisites(
+        &resolved.policy,
+        action,
+        resolved.config_path.as_deref(),
+    )?;
     let metadata = read_browser_service_metadata()?;
     ensure_browser_gateway_auth_token_alignment(
         &resolved.policy,
@@ -516,7 +525,10 @@ async fn run_browser_status(
         metadata.as_ref(),
         resolved.config_path.as_deref(),
     );
-    warnings.extend(browser_profile_prerequisite_warnings(&resolved.policy));
+    warnings.extend(browser_profile_prerequisite_warnings(
+        &resolved.policy,
+        resolved.config_path.as_deref(),
+    ));
     let payload = BrowserStatusPayload {
         service: "palyra-browserd",
         grpc_url: resolved.connection.grpc_url,
@@ -554,7 +566,9 @@ async fn run_browser_start(
     ensure_browser_service_enabled(&resolved.policy, "start", resolved.config_path.as_deref())?;
     ensure_browser_start_auth_token_configured(&resolved)?;
     ensure_browser_start_token_alignment(&resolved)?;
-    let mut lifecycle_warnings = browser_profile_prerequisite_warnings(&resolved.policy);
+    let browserd_state_encryption_key = resolve_browserd_state_encryption_key_for_start(&resolved)?;
+    let mut lifecycle_warnings =
+        browser_profile_prerequisite_warnings(&resolved.policy, resolved.config_path.as_deref());
     lifecycle_warnings.extend(browser_start_auth_token_warnings(&resolved));
     if fetch_browser_health(resolved.connection.health_base_url.as_str()).await.is_ok() {
         let metadata = read_browser_service_metadata()?;
@@ -607,6 +621,9 @@ async fn run_browser_start(
         .stderr(Stdio::from(stderr));
     if let Some(auth_token) = resolved.connection.auth_token.as_ref() {
         command.arg("--auth-token").arg(auth_token);
+    }
+    if let Some(state_key) = browserd_state_encryption_key.as_ref() {
+        command.env(BROWSERD_STATE_ENCRYPTION_KEY_ENV, state_key);
     }
     #[cfg(windows)]
     command.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
@@ -2469,7 +2486,9 @@ fn resolve_browser_config(
     let env_max_title_bytes = env_u64("PALYRA_BROWSER_SERVICE_MAX_TITLE_BYTES");
     let env_state_dir = env_optional("PALYRA_BROWSERD_STATE_DIR");
     let env_state_key_vault_ref = env_optional("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY_VAULT_REF");
-    let env_state_encryption_key = env_optional("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY");
+    let env_state_encryption_key = env_optional(BROWSERD_STATE_ENCRYPTION_KEY_ENV);
+    let state_key_vault_ref = env_state_key_vault_ref.clone().or(file_state_key_vault_ref.clone());
+    let state_key_vault_ref_configured = state_key_vault_ref.is_some();
 
     let grpc_url = normalize_browser_base_url(
         endpoint
@@ -2508,12 +2527,12 @@ fn resolve_browser_config(
             max_screenshot_bytes: env_max_screenshot_bytes.or(file_max_screenshot_bytes),
             max_title_bytes: env_max_title_bytes.or(file_max_title_bytes),
             state_dir: env_state_dir.or(file_state_dir),
-            state_key_vault_ref_configured: env_state_key_vault_ref.is_some()
-                || file_state_key_vault_ref.is_some(),
+            state_key_vault_ref_configured,
             state_encryption_key_env_configured: env_state_encryption_key.is_some(),
             profiles_ready: env_state_encryption_key.is_some(),
         },
         config_path: config_path.map(|value| value.display().to_string()),
+        state_key_vault_ref,
         token_from_cli_only,
         token_conflicts_with_gateway_config,
     })
@@ -2592,8 +2611,9 @@ fn ensure_browser_service_enabled(
     }
     let enable_command = browser_service_enable_command(config_path);
     let token_command = browser_service_auth_token_command(config_path);
+    let state_key_guidance = browser_profile_state_key_guidance(config_path);
     anyhow::bail!(
-        "browser service is disabled (tool_call.browser_service.enabled=false); configure an auth token first with `{token_command}`, enable it with `{enable_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser {action}`"
+        "browser service is disabled (tool_call.browser_service.enabled=false); configure an auth token first with `{token_command}`, enable it with `{enable_command}`, {state_key_guidance} Then restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser {action}`"
     );
 }
 
@@ -2651,14 +2671,96 @@ fn browser_status_warnings(
     warnings
 }
 
-fn browser_profile_prerequisite_warnings(policy: &BrowserPolicySnapshot) -> Vec<String> {
-    if !policy.configured_enabled || policy.profiles_ready {
+fn browser_profile_prerequisite_warnings(
+    policy: &BrowserPolicySnapshot,
+    config_path: Option<&str>,
+) -> Vec<String> {
+    if !policy.configured_enabled || browser_profile_state_key_configured(policy) {
         return Vec::new();
     }
-    vec![
-        "browser profiles require PALYRA_BROWSERD_STATE_ENCRYPTION_KEY in the browserd process environment; set it before starting browserd to use `palyra browser profiles ...`, persistent sessions, or profile-backed browser commands"
-            .to_owned(),
-    ]
+    vec![browser_profile_state_key_guidance(config_path)]
+}
+
+fn ensure_browser_profile_prerequisites(
+    policy: &BrowserPolicySnapshot,
+    action: &str,
+    config_path: Option<&str>,
+) -> Result<()> {
+    if !action.starts_with("profiles ") || browser_profile_state_key_configured(policy) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "palyra browser {action} requires browser profile state encryption setup before contacting browserd. {}",
+        browser_profile_state_key_guidance(config_path)
+    );
+}
+
+fn browser_profile_state_key_configured(policy: &BrowserPolicySnapshot) -> bool {
+    policy.profiles_ready || policy.state_key_vault_ref_configured
+}
+
+fn browser_profile_state_key_guidance(config_path: Option<&str>) -> String {
+    let configure_command = browser_state_key_configure_command(config_path);
+    format!(
+        "Browser profiles require {BROWSERD_STATE_ENCRYPTION_KEY_ENV} in the browserd process environment. Set it to a stable base64-encoded 32-byte key before starting browserd, or store one with `{configure_command}` so `palyra browser start` can inject it. Restart browserd, then run `palyra browser status` and confirm profiles_ready=true or state_key_vault_ref_configured=true before using `palyra browser profiles ...`."
+    )
+}
+
+fn browser_state_key_configure_command(config_path: Option<&str>) -> String {
+    let mut command =
+        "palyra secrets configure browser-state-key global browser_state_key --value-stdin"
+            .to_owned();
+    if let Some(path) = config_path.and_then(normalize_optional_text) {
+        command.push_str(" --path ");
+        command.push_str(&quote_cli_argument(path));
+    }
+    command
+}
+
+fn resolve_browserd_state_encryption_key_for_start(
+    resolved: &BrowserResolvedConfig,
+) -> Result<Option<String>> {
+    if let Some(env_key) = env_optional(BROWSERD_STATE_ENCRYPTION_KEY_ENV) {
+        validate_browserd_state_encryption_key(
+            env_key.as_str(),
+            BROWSERD_STATE_ENCRYPTION_KEY_ENV,
+        )?;
+        return Ok(None);
+    }
+
+    let Some(vault_ref) = resolved.state_key_vault_ref.as_deref() else {
+        return Ok(None);
+    };
+    let parsed = VaultRef::parse(vault_ref).with_context(|| {
+        format!("failed to parse tool_call.browser_service.state_key_vault_ref `{vault_ref}`")
+    })?;
+    let secret = open_cli_vault()
+        .context("failed to initialize vault runtime for browser state key")?
+        .get_secret(&parsed.scope, parsed.key.as_str())
+        .with_context(|| format!("failed to read browser state key vault ref `{vault_ref}`"))?;
+    let secret = String::from_utf8(secret)
+        .with_context(|| format!("browser state key vault ref `{vault_ref}` must be UTF-8 text"))?;
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("browser state key vault ref `{vault_ref}` resolved to an empty value");
+    }
+    validate_browserd_state_encryption_key(
+        trimmed,
+        "tool_call.browser_service.state_key_vault_ref",
+    )?;
+    Ok(Some(trimmed.to_owned()))
+}
+
+fn validate_browserd_state_encryption_key(value: &str, source: &str) -> Result<()> {
+    let decoded = BASE64_STANDARD.decode(value.trim()).with_context(|| {
+        format!("{source} must contain a base64-encoded 32-byte browser state key")
+    })?;
+    if decoded.len() != BROWSERD_STATE_ENCRYPTION_KEY_LEN {
+        anyhow::bail!(
+            "{source} must decode to exactly {BROWSERD_STATE_ENCRYPTION_KEY_LEN} bytes for browser profile state encryption"
+        );
+    }
+    Ok(())
 }
 
 fn browser_service_enable_command(config_path: Option<&str>) -> String {
@@ -3606,6 +3708,7 @@ mod tests {
                 profiles_ready: false,
             },
             config_path: Some(r"C:\Palyra\palyra.toml".to_owned()),
+            state_key_vault_ref: None,
             token_from_cli_only: false,
             token_conflicts_with_gateway_config: false,
         }
@@ -3652,6 +3755,11 @@ mod tests {
         assert!(
             error.to_string().contains("restart the gateway"),
             "disabled-service error should explain that the running gateway must reload the config: {error}"
+        );
+        assert!(
+            error.to_string().contains("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY")
+                && error.to_string().contains("palyra secrets configure browser-state-key"),
+            "disabled-service remediation should include browser profile state key setup: {error}"
         );
     }
 
@@ -3903,15 +4011,51 @@ mod tests {
     fn browser_profile_prerequisite_warning_mentions_state_key() {
         let mut policy = disabled_policy();
         policy.configured_enabled = true;
-        let warnings = super::browser_profile_prerequisite_warnings(&policy);
+        let warnings =
+            super::browser_profile_prerequisite_warnings(&policy, Some(r"C:\Palyra\palyra.toml"));
 
         assert!(
             warnings.iter().any(|warning| {
                 warning.contains("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY")
-                    && warning.contains("browser profiles")
+                    && warning.contains("palyra secrets configure browser-state-key")
+                    && warning.contains("palyra browser status")
             }),
             "missing browser profile key should produce an actionable warning: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn browser_profiles_fail_before_gateway_when_state_key_is_missing() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+
+        let error = super::ensure_browser_profile_prerequisites(
+            &policy,
+            "profiles list",
+            Some(r"C:\Palyra\palyra.toml"),
+        )
+        .expect_err("profile commands should fail before browserd without a state key");
+
+        assert!(
+            error.to_string().contains("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY")
+                && error.to_string().contains("palyra secrets configure browser-state-key")
+                && error.to_string().contains("palyra browser status"),
+            "profile prerequisite error should include state key setup guidance: {error}"
+        );
+    }
+
+    #[test]
+    fn browser_profile_prerequisites_accept_vault_ref_configuration() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        policy.state_key_vault_ref_configured = true;
+
+        super::ensure_browser_profile_prerequisites(
+            &policy,
+            "profiles list",
+            Some(r"C:\Palyra\palyra.toml"),
+        )
+        .expect("vault-backed state key config should satisfy profile preflight");
     }
 
     #[test]
@@ -3921,7 +4065,24 @@ mod tests {
         policy.state_encryption_key_env_configured = true;
         policy.profiles_ready = true;
 
-        assert!(super::browser_profile_prerequisite_warnings(&policy).is_empty());
+        assert!(super::browser_profile_prerequisite_warnings(&policy, None).is_empty());
+    }
+
+    #[test]
+    fn browserd_state_key_validation_requires_base64_32_bytes() {
+        super::validate_browserd_state_encryption_key(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            "test",
+        )
+        .expect("32-byte base64 key should be accepted");
+
+        let error = super::validate_browserd_state_encryption_key("dG9vLXNob3J0", "test")
+            .expect_err("short key should be rejected");
+
+        assert!(
+            error.to_string().contains("exactly 32 bytes"),
+            "invalid browser state key should fail before browserd start: {error}"
+        );
     }
 
     #[test]
