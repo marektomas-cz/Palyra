@@ -130,6 +130,26 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
         "config list JSON should include the config document: {config_list}"
     );
 
+    let config_get = parse_stdout_json(
+        run_cli(
+            &workdir,
+            &[
+                "--output-format",
+                "json",
+                "config",
+                "get",
+                "--path",
+                config_path.as_str(),
+                "--key",
+                "daemon.port",
+            ],
+        )?,
+        "config get --output-format json",
+    )?;
+    assert_eq!(config_get.get("key").and_then(Value::as_str), Some("daemon.port"));
+    assert_eq!(config_get.get("value").and_then(Value::as_i64), Some(7444));
+    assert_eq!(config_get.get("source").and_then(Value::as_str), Some(config_path.as_str()));
+
     let docs_search = parse_stdout_json(
         run_cli(&workdir, &["--output-format", "json", "docs", "search", "gateway"])?,
         "docs search --output-format json",

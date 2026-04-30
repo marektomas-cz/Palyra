@@ -4686,6 +4686,7 @@ fn parse_config_get_with_key() {
                 path: Some("custom.toml".to_owned()),
                 key: "daemon.port".to_owned(),
                 show_secrets: false,
+                json: false,
             })
         }
     );
@@ -4710,6 +4711,7 @@ fn parse_config_get_with_show_secrets() {
                 path: Some("custom.toml".to_owned()),
                 key: "admin.auth_token".to_owned(),
                 show_secrets: true,
+                json: false,
             })
         }
     );
@@ -5302,6 +5304,7 @@ fn parse_secrets_get_with_reveal() {
                 scope: "global".to_owned(),
                 key: "openai_api_key".to_owned(),
                 reveal: true,
+                json: false,
             }
         }
     );

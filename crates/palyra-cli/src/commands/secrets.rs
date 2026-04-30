@@ -100,12 +100,30 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
             );
             std::io::stdout().flush().context("stdout flush failed")
         }
-        SecretsCommand::Get { scope, key, reveal } => {
+        SecretsCommand::Get { scope, key, reveal, json } => {
+            let json = output::preferred_json(json);
             let vault = open_cli_vault().context("failed to initialize vault runtime")?;
             let scope = parse_vault_scope(scope.as_str())?;
             let value = vault
                 .get_secret(&scope, key.as_str())
                 .with_context(|| format!("failed to load secret key={} scope={scope}", key))?;
+            if json {
+                let value = if reveal {
+                    String::from_utf8_lossy(value.as_slice()).into_owned()
+                } else {
+                    "<redacted>".to_owned()
+                };
+                return output::print_json_pretty(
+                    &json!({
+                        "scope": scope.to_string(),
+                        "key": key,
+                        "value": value,
+                        "reveal": reveal,
+                        "redacted": !reveal,
+                    }),
+                    "failed to encode secrets get output as JSON",
+                );
+            }
             if reveal {
                 eprintln!(
                     "warning: printing secret bytes to stdout can leak via shell history or logs"

@@ -36,6 +36,8 @@ pub enum ConfigCommand {
         key: String,
         #[arg(long, default_value_t = false)]
         show_secrets: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Set {
         #[arg(long)]

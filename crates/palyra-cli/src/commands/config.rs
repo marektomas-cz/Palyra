@@ -113,13 +113,32 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             print!("{rendered}");
             std::io::stdout().flush().context("stdout flush failed")
         }
-        ConfigCommand::Get { path, key, show_secrets } => {
+        ConfigCommand::Get { path, key, show_secrets, json } => {
+            let json = output::preferred_json(json);
             let path = resolve_config_path(path, true)?;
             let (document, _) = load_document_from_existing_path(Path::new(&path))
                 .with_context(|| format!("failed to parse {path}"))?;
             let value = get_value_at_path(&document, key.as_str())
                 .with_context(|| format!("invalid config key path: {}", key))?
                 .with_context(|| format!("config key not found: {}", key))?;
+            let redacted = !show_secrets && is_secret_config_path(key.as_str());
+            if json {
+                let output_value = if redacted {
+                    toml::Value::String(REDACTED_CONFIG_VALUE.to_owned())
+                } else {
+                    value.clone()
+                };
+                return output::print_json_pretty(
+                    &json!({
+                        "key": key,
+                        "value": output_value,
+                        "source": path,
+                        "show_secrets": show_secrets,
+                        "redacted": redacted,
+                    }),
+                    "failed to encode config get as JSON",
+                );
+            }
             let display_value = format_config_get_display_value(key.as_str(), value, show_secrets);
             println!(
                 "config.get key={} value={} source={} show_secrets={show_secrets}",

@@ -145,6 +145,44 @@ fn secrets_get_without_reveal_redacts_output() -> Result<()> {
 }
 
 #[test]
+fn secrets_get_honors_global_json_output_format() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let secret_value = b"json-secret-token";
+
+    let set_output = run_cli_with_stdin(
+        &workdir,
+        &["secrets", "set", "global", "discord_token", "--value-stdin"],
+        secret_value,
+    )?;
+    assert!(
+        set_output.status.success(),
+        "secrets set should succeed: {}",
+        String::from_utf8_lossy(&set_output.stderr)
+    );
+
+    let get_output = run_cli(
+        &workdir,
+        &["--output-format", "json", "secrets", "get", "global", "discord_token"],
+    )?;
+    assert!(
+        get_output.status.success(),
+        "secrets get should succeed: {}",
+        String::from_utf8_lossy(&get_output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&get_output.stdout).context("secrets get stdout was not JSON")?;
+    assert_eq!(value.get("scope").and_then(serde_json::Value::as_str), Some("global"));
+    assert_eq!(value.get("key").and_then(serde_json::Value::as_str), Some("discord_token"));
+    assert_eq!(value.get("value").and_then(serde_json::Value::as_str), Some("<redacted>"));
+    assert_eq!(value.get("redacted").and_then(serde_json::Value::as_bool), Some(true));
+    assert!(
+        !value.to_string().contains("json-secret-token"),
+        "JSON get output must not reveal secrets without --reveal: {value}"
+    );
+    Ok(())
+}
+
+#[test]
 fn secrets_get_missing_key_fails_with_not_found_error() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let output = run_cli(&workdir, &["secrets", "get", "global", "missing_key"])?;
