@@ -473,6 +473,14 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
         !text_status_stdout.contains("models.status.provider base_url=none"),
         "text status must not hide a configured MiniMax endpoint as none: {text_status_stdout}"
     );
+    assert!(
+        text_status_stdout.contains("registry_default_chat_model=none"),
+        "text status should label absent registry defaults separately from the effective text model: {text_status_stdout}"
+    );
+    assert!(
+        !text_status_stdout.contains(" default_chat_model=none"),
+        "text status must not make the effective MiniMax text model look unset: {text_status_stdout}"
+    );
 
     let explain_output =
         run_cli(&workdir, &["models", "explain", "--path", &config_path_string, "--json"])?;

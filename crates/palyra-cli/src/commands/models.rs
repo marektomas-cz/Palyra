@@ -305,7 +305,7 @@ fn emit_models_status(payload: &ModelsStatusPayload, json_output: bool) -> Resul
             payload.migrated
         );
         println!(
-            "models.status.provider base_url={} openai_base_url={} embeddings_dims={} default_chat_model={} default_embeddings_model={} registry_providers={} registry_models={} failover_enabled={} response_cache_enabled={} registry_valid={}",
+            "models.status.provider base_url={} openai_base_url={} embeddings_dims={} registry_default_chat_model={} registry_default_embeddings_model={} registry_providers={} registry_models={} failover_enabled={} response_cache_enabled={} registry_valid={}",
             payload.endpoint_base_url.as_deref().unwrap_or("none"),
             payload.openai_base_url.as_deref().unwrap_or("none"),
             payload
