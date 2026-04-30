@@ -1568,7 +1568,7 @@ async fn run_browser_snapshot(args: BrowserSnapshotArgs) -> Result<()> {
     let written =
         write_optional_json_output(output.as_deref(), session_id.as_str(), "snapshot", &value)?;
     maybe_attach_output_path(&mut value, written.as_ref());
-    emit_browser_value(
+    emit_browser_snapshot_value(
         &value,
         format!(
             "browser.snapshot session_id={} page_url={} dom_truncated={} text_truncated={} output={}",
@@ -1578,6 +1578,7 @@ async fn run_browser_snapshot(args: BrowserSnapshotArgs) -> Result<()> {
             value.get("visible_text_truncated").and_then(Value::as_bool).unwrap_or(false),
             written.as_deref().unwrap_or("-"),
         ),
+        written.is_some(),
         "failed to encode browser snapshot output",
     )
 }
@@ -2897,6 +2898,15 @@ fn emit_browser_value_with_json(
     json: bool,
 ) -> Result<()> {
     let mode = if json { BrowserOutputMode::Json } else { browser_output_mode() };
+    emit_browser_value_for_mode(value, text, error_context, mode)
+}
+
+fn emit_browser_value_for_mode(
+    value: &Value,
+    text: String,
+    error_context: &'static str,
+    mode: BrowserOutputMode,
+) -> Result<()> {
     match mode {
         BrowserOutputMode::Json => output::print_json_pretty(value, error_context),
         BrowserOutputMode::Ndjson => output::print_json_line(value, error_context),
@@ -2908,6 +2918,25 @@ fn emit_browser_value_with_json(
             std::io::stdout().flush().context("stdout flush failed")
         }
     }
+}
+
+fn emit_browser_snapshot_value(
+    value: &Value,
+    text: String,
+    output_written: bool,
+    error_context: &'static str,
+) -> Result<()> {
+    let mode = browser_output_mode();
+    if browser_snapshot_emits_json_to_stdout(mode, output_written) {
+        let mut redacted = value.clone();
+        redact_browser_output_value(&mut redacted, None);
+        return output::print_json_pretty(&redacted, error_context);
+    }
+    emit_browser_value_for_mode(value, text, error_context, mode)
+}
+
+fn browser_snapshot_emits_json_to_stdout(mode: BrowserOutputMode, output_written: bool) -> bool {
+    matches!(mode, BrowserOutputMode::Text) && !output_written
 }
 
 fn format_browser_status_text(payload: &BrowserStatusPayload) -> String {
@@ -3490,12 +3519,13 @@ mod tests {
     use super::{
         browser_command_policy_action, browser_failure_detail, browser_identifier_json_value,
         browser_service_auth_token_command, browser_service_enable_command,
-        browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
+        browser_snapshot_emits_json_to_stdout, browser_start_auth_token_warnings,
+        browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
         ensure_browser_start_token_alignment, format_browser_session_summary_text,
         normalize_session_scoped_output, runtime_session_id_text, session_summary_value,
-        BrowserControlPlaneSnapshot, BrowserPolicySnapshot, BrowserResolvedConfig,
-        BrowserServiceConnection, BrowserServiceMetadata,
+        BrowserControlPlaneSnapshot, BrowserOutputMode, BrowserPolicySnapshot,
+        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use serde_json::{json, Value};
@@ -3696,6 +3726,14 @@ mod tests {
                 && !line.contains("session_id=session-"),
             "session list should print the canonical reusable session handle: {line}"
         );
+    }
+
+    #[test]
+    fn browser_snapshot_text_mode_uses_stdout_json_without_output_file() {
+        assert!(browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Text, false));
+        assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Text, true));
+        assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Json, false));
+        assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Ndjson, false));
     }
 
     #[test]
