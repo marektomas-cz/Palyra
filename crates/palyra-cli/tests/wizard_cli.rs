@@ -180,6 +180,14 @@ fn setup_wizard_quickstart_emits_json_summary() -> Result<()> {
     );
     assert!(
         payload
+            .get("skipped_sections")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("channels"))
+                && values.iter().any(|value| value.as_str() == Some("skills"))),
+        "explicit skip flags should remain visible in JSON summary: {payload}"
+    );
+    assert!(
+        payload
             .get("health_checks")
             .and_then(Value::as_array)
             .is_some_and(|values| !values.is_empty()),
@@ -223,6 +231,71 @@ fn onboarding_wizard_stdin_secret_requires_non_interactive_mode() -> Result<()> 
     assert!(
         !stderr.contains("stdin/stdout/stderr TTY"),
         "specific stdin guidance should be emitted before the generic TTY guard: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn quickstart_defaults_do_not_report_optional_sections_as_explicitly_skipped() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("config").join("palyra.toml");
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli(
+        &workdir,
+        &[
+            "setup",
+            "--wizard",
+            "--mode",
+            "local",
+            "--path",
+            &config_path_string,
+            "--force",
+            "--flow",
+            "quickstart",
+            "--non-interactive",
+            "--accept-risk",
+            "--auth-method",
+            "api-key",
+            "--api-key-env",
+            "OPENAI_API_KEY",
+            "--skip-health",
+            "--json",
+        ],
+        &[("OPENAI_API_KEY", "sk-test-setup")],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "quickstart should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).context("setup wizard stdout should be JSON")?;
+    let skipped = payload
+        .get("skipped_sections")
+        .and_then(Value::as_array)
+        .context("summary should expose skipped_sections")?;
+    assert!(
+        skipped.iter().all(|value| {
+            value.as_str() != Some("channels") && value.as_str() != Some("skills")
+        }),
+        "quickstart defaults should not be reported as explicit skips: {payload}"
+    );
+    assert!(
+        payload.get("warnings").and_then(Value::as_array).is_some_and(|values| values
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains("quickstart default")
+                && warning.contains("--skip-channels"))),
+        "summary should explain deferred channel setup: {payload}"
+    );
+    assert!(
+        payload.get("warnings").and_then(Value::as_array).is_some_and(|values| values
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains("quickstart default")
+                && warning.contains("--skip-skills"))),
+        "summary should explain deferred skill setup: {payload}"
     );
     Ok(())
 }

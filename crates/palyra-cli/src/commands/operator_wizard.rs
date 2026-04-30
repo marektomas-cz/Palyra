@@ -1065,7 +1065,14 @@ fn execute_onboarding_flow(
         Some(false),
     ))?;
     if !configure_channels {
-        plan.skipped_sections.push("channels".to_owned());
+        if request.options.skip_channels || !request.options.non_interactive {
+            plan.skipped_sections.push("channels".to_owned());
+        } else {
+            plan.warnings.push(
+                "channel setup was left for `palyra channels ...` by the quickstart default; pass --skip-channels to record an explicit skip."
+                    .to_owned(),
+            );
+        }
     } else {
         plan.warnings.push(
             "channels remain guidance-only here; use `palyra channels discord setup` for connector provisioning."
@@ -1080,7 +1087,14 @@ fn execute_onboarding_flow(
         Some(false),
     ))?;
     if !configure_skills {
-        plan.skipped_sections.push("skills".to_owned());
+        if request.options.skip_skills || !request.options.non_interactive {
+            plan.skipped_sections.push("skills".to_owned());
+        } else {
+            plan.warnings.push(
+                "skill lifecycle setup was left for `palyra skills ...` by the quickstart default; pass --skip-skills to record an explicit skip."
+                    .to_owned(),
+            );
+        }
     } else {
         plan.warnings.push(
             "skills lifecycle remains CLI-driven here; use `palyra skills list|info|check` for concrete actions."
