@@ -916,11 +916,6 @@ pub fn load_config() -> Result<LoadedConfig> {
                         state_key_vault_ref.as_str(),
                         "tool_call.browser_service.state_key_vault_ref",
                     )?;
-                    tool_call.browser_service.state_key_secret_ref = tool_call
-                        .browser_service
-                        .state_key_vault_ref
-                        .clone()
-                        .map(SecretRef::from_legacy_vault_ref);
                 }
                 if let Some(connect_timeout_ms) = file_browser_service.connect_timeout_ms {
                     tool_call.browser_service.connect_timeout_ms = parse_positive_u64(
@@ -1638,11 +1633,6 @@ pub fn load_config() -> Result<LoadedConfig> {
             browserd_state_key_vault_ref.as_str(),
             "PALYRA_BROWSERD_STATE_ENCRYPTION_KEY_VAULT_REF",
         )?;
-        tool_call.browser_service.state_key_secret_ref = tool_call
-            .browser_service
-            .state_key_vault_ref
-            .clone()
-            .map(SecretRef::from_legacy_vault_ref);
         source.push_str(" +env(PALYRA_BROWSERD_STATE_ENCRYPTION_KEY_VAULT_REF)");
     }
     if let Ok(connect_timeout_ms) = env::var("PALYRA_BROWSER_SERVICE_CONNECT_TIMEOUT_MS") {
@@ -4513,6 +4503,47 @@ openai_api_key_vault_ref = "global/openai_api_key"
         assert!(
             loaded.model_provider.openai_api_key_secret_ref.is_none(),
             "legacy vault ref should not be converted during config loading and then self-conflict"
+        );
+    }
+
+    #[test]
+    fn load_config_accepts_legacy_browser_state_key_vault_ref() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let tempdir = tempfile::tempdir().expect("temporary directory should be created");
+        let config_path = tempdir.path().join("palyra.toml");
+        std::fs::write(
+            config_path.as_path(),
+            r#"
+version = 1
+
+[admin]
+require_auth = false
+
+[tool_call.browser_service]
+enabled = true
+auth_token = "browser-token"
+state_key_vault_ref = "global/browser_state_key"
+"#,
+        )
+        .expect("legacy browser state-key vault-ref config should be written");
+
+        let _config = ScopedEnvVar::set(
+            "PALYRA_CONFIG",
+            config_path.to_str().expect("test path should be UTF-8"),
+        );
+        let _state_key_vault_ref =
+            ScopedEnvVar::unset("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY_VAULT_REF");
+
+        let loaded =
+            super::load_config().expect("legacy browser state-key vault-ref config should load");
+
+        assert_eq!(
+            loaded.tool_call.browser_service.state_key_vault_ref.as_deref(),
+            Some("global/browser_state_key")
+        );
+        assert!(
+            loaded.tool_call.browser_service.state_key_secret_ref.is_none(),
+            "legacy browser state-key vault ref should not be converted during config loading and then self-conflict"
         );
     }
 

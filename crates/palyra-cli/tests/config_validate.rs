@@ -161,6 +161,38 @@ variable = "PALYRA_OPENAI_API_KEY"
 }
 
 #[test]
+fn config_validate_with_explicit_path_rejects_browser_state_key_secret_conflict() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("conflicting-browser-state-key.toml");
+    fs::write(
+        &config_path,
+        r#"
+[tool_call.browser_service]
+enabled = true
+state_key_vault_ref = "global/browser_state_key"
+
+[tool_call.browser_service.state_key_secret_ref]
+kind = "env"
+variable = "PALYRA_BROWSERD_STATE_ENCRYPTION_KEY"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    let output =
+        run_cli(&workdir, &["config", "validate", "--path", "conflicting-browser-state-key.toml"])?;
+
+    assert!(!output.status.success(), "config with two browser state key sources must fail");
+    let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;
+    assert!(
+        stderr.contains(
+            "tool_call.browser_service.state_key cannot set both *_secret_ref and legacy vault_ref"
+        ),
+        "unexpected stderr output: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_validate_with_explicit_path_rejects_invalid_gateway_grpc_bind_address() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("invalid-gateway-grpc-bind.toml");

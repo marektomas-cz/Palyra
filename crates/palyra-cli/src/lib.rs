@@ -7304,6 +7304,7 @@ fn validate_daemon_compatible_document(document: &toml::Value) -> Result<()> {
     let parsed: RootFileConfig =
         toml::from_str(&content).context("invalid daemon config schema")?;
     validate_model_provider_secret_sources(&parsed)?;
+    validate_browser_service_secret_sources(&parsed)?;
     let bind_addr = parsed
         .daemon
         .as_ref()
@@ -7365,6 +7366,27 @@ fn validate_model_provider_secret_sources(parsed: &RootFileConfig) -> Result<()>
         config_string_present(model_provider.anthropic_api_key.as_deref()),
         model_provider.anthropic_api_key_secret_ref.is_some(),
         config_string_present(model_provider.anthropic_api_key_vault_ref.as_deref()),
+    )
+}
+
+fn validate_browser_service_secret_sources(parsed: &RootFileConfig) -> Result<()> {
+    let Some(browser_service) =
+        parsed.tool_call.as_ref().and_then(|tool_call| tool_call.browser_service.as_ref())
+    else {
+        return Ok(());
+    };
+
+    validate_secret_source_exclusivity(
+        "tool_call.browser_service.auth_token",
+        config_string_present(browser_service.auth_token.as_deref()),
+        browser_service.auth_token_secret_ref.is_some(),
+        false,
+    )?;
+    validate_secret_source_exclusivity(
+        "tool_call.browser_service.state_key",
+        false,
+        browser_service.state_key_secret_ref.is_some(),
+        config_string_present(browser_service.state_key_vault_ref.as_deref()),
     )
 }
 
