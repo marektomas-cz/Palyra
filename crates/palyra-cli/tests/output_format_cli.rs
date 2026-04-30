@@ -71,6 +71,29 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     )?;
     assert_eq!(validate.get("status").and_then(Value::as_str), Some("valid"));
 
+    let config_set = parse_stdout_json(
+        run_cli(
+            &workdir,
+            &[
+                "--output-format",
+                "json",
+                "config",
+                "set",
+                "--path",
+                config_path.as_str(),
+                "--key",
+                "daemon.port",
+                "--value",
+                "7444",
+            ],
+        )?,
+        "config set --output-format json",
+    )?;
+    assert_eq!(config_set.get("key").and_then(Value::as_str), Some("daemon.port"));
+    assert_eq!(config_set.get("source").and_then(Value::as_str), Some(config_path.as_str()));
+    assert_eq!(config_set.get("backups").and_then(Value::as_u64), Some(5));
+    assert!(config_set.get("migrated").and_then(Value::as_bool).is_some());
+
     let config_list = parse_stdout_json(
         run_cli(
             &workdir,

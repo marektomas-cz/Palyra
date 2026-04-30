@@ -141,14 +141,25 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             })?;
             write_document_with_backups(path_ref, &document, backups)
                 .with_context(|| format!("failed to persist config {}", path_ref.display()))?;
-            println!(
-                "config.set key={} source={} backups={} migrated={}",
-                key,
-                path_ref.display(),
-                backups,
-                migration.migrated
-            );
-            std::io::stdout().flush().context("stdout flush failed")
+            let source = path_ref.display().to_string();
+            let payload = json!({
+                "key": key.as_str(),
+                "source": source.as_str(),
+                "backups": backups,
+                "migrated": migration.migrated,
+            });
+            let json = output::preferred_json(false);
+            if json {
+                output::print_json_pretty(&payload, "failed to encode config set as JSON")
+            } else if output::preferred_ndjson(json, false) {
+                output::print_json_line(&payload, "failed to encode config set as NDJSON")
+            } else {
+                println!(
+                    "config.set key={} source={} backups={} migrated={}",
+                    key, source, backups, migration.migrated
+                );
+                std::io::stdout().flush().context("stdout flush failed")
+            }
         }
         ConfigCommand::Unset { path, key, backups } => {
             let path = resolve_config_path(path, true)?;
