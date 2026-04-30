@@ -3275,31 +3275,37 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         .clamp(1, MAX_DOWNLOAD_ARTIFACTS_PER_SESSION);
         let quarantined_only = payload.quarantined_only;
         let guard = self.runtime.download_sessions.lock().await;
-        let Some(download_session) = guard.get(session_id.as_str()) else {
+        if let Some(download_session) = guard.get(session_id.as_str()) {
+            let filtered = download_session
+                .artifacts
+                .iter()
+                .filter(|artifact| !quarantined_only || artifact.quarantined)
+                .cloned()
+                .collect::<Vec<_>>();
+            let truncated = filtered.len() > limit;
+            let artifacts = filtered
+                .into_iter()
+                .rev()
+                .take(limit)
+                .map(|record| download_artifact_to_proto(&record))
+                .collect::<Vec<_>>();
             return Ok(Response::new(browser_v1::ListDownloadArtifactsResponse {
                 v: CANONICAL_PROTOCOL_MAJOR,
-                artifacts: Vec::new(),
-                truncated: false,
-                error: "session_not_found".to_owned(),
+                artifacts,
+                truncated,
+                error: String::new(),
             }));
-        };
-        let filtered = download_session
-            .artifacts
-            .iter()
-            .filter(|artifact| !quarantined_only || artifact.quarantined)
-            .cloned()
-            .collect::<Vec<_>>();
-        let truncated = filtered.len() > limit;
-        let artifacts = filtered
-            .into_iter()
-            .rev()
-            .take(limit)
-            .map(|record| download_artifact_to_proto(&record))
-            .collect::<Vec<_>>();
+        }
+        drop(guard);
+
+        let sessions = self.runtime.sessions.lock().await;
+        if !sessions.contains_key(session_id.as_str()) {
+            return Err(Status::not_found("browser session not found"));
+        }
         Ok(Response::new(browser_v1::ListDownloadArtifactsResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
-            artifacts,
-            truncated,
+            artifacts: Vec::new(),
+            truncated: false,
             error: String::new(),
         }))
     }

@@ -3972,6 +3972,29 @@ async fn browser_service_rejects_downloads_that_exceed_max_file_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_service_lists_empty_downloads_for_existing_session_without_artifacts() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime };
+    let created = create_test_session(&service, "user:ops").await;
+    let session_id = created.session_id.expect("session id should be present");
+
+    let listed = service
+        .list_download_artifacts(Request::new(browser_v1::ListDownloadArtifactsRequest {
+            v: 1,
+            session_id: Some(session_id),
+            limit: 10,
+            quarantined_only: false,
+        }))
+        .await
+        .expect("existing session without downloads should list successfully")
+        .into_inner();
+
+    assert!(listed.artifacts.is_empty());
+    assert!(!listed.truncated);
+    assert!(listed.error.is_empty(), "empty download list must not report an error");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_service_lists_and_gets_session_details() {
     let runtime = simulated_runtime_for_tests();
     let service = BrowserServiceImpl { runtime: Arc::clone(&runtime) };
