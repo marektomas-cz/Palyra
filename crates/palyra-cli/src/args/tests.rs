@@ -980,9 +980,32 @@ fn parse_sessions_rename_and_abort() {
         rename.command,
         Command::Sessions {
             command: SessionsCommand::Rename {
-                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned()),
+                session_key: None,
                 session_label: "Primary session".to_owned(),
                 json: false,
+            }
+        }
+    );
+
+    let rename_by_key = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "rename",
+        "--session-key",
+        "e2e-context",
+        "--title",
+        "E2E context reset check",
+        "--json",
+    ]);
+    assert_eq!(
+        rename_by_key.command,
+        Command::Sessions {
+            command: SessionsCommand::Rename {
+                session_id: None,
+                session_key: Some("e2e-context".to_owned()),
+                session_label: "E2E context reset check".to_owned(),
+                json: true,
             }
         }
     );
@@ -1021,7 +1044,27 @@ fn parse_sessions_queue_controls() {
         policy.command,
         Command::Sessions {
             command: SessionsCommand::QueuePolicy {
-                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned()),
+                session_key: None,
+                json: true,
+            }
+        }
+    );
+
+    let policy_by_key = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "queue-policy",
+        "--session-key",
+        "e2e-context",
+        "--json",
+    ]);
+    assert_eq!(
+        policy_by_key.command,
+        Command::Sessions {
+            command: SessionsCommand::QueuePolicy {
+                session_id: None,
+                session_key: Some("e2e-context".to_owned()),
                 json: true,
             }
         }
@@ -1061,6 +1104,32 @@ fn parse_sessions_queue_controls() {
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
                 queued_input_id: "01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
                 reason: None,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_sessions_compact_preview_with_session_key() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "compact-preview",
+        "--session-key",
+        "e2e-context",
+        "--trigger-reason",
+        "manual_check",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Sessions {
+            command: SessionsCommand::CompactPreview {
+                session_id: None,
+                session_key: Some("e2e-context".to_owned()),
+                trigger_reason: Some("manual_check".to_owned()),
+                trigger_policy: None,
                 json: true,
             }
         }

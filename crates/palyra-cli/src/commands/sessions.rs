@@ -271,15 +271,15 @@ pub(crate) async fn run_sessions_async(
                 );
             }
         }
-        SessionsCommand::Rename { session_id, session_label, json: _ } => {
+        SessionsCommand::Rename { session_id, session_key, session_label, json: _ } => {
             let response = runtime
-                .resolve_session(SessionResolveInput {
-                    session_id: Some(resolve_required_canonical_id(session_id)?),
-                    session_key: String::new(),
-                    session_label,
-                    require_existing: true,
-                    reset_session: false,
-                })
+                .resolve_session(build_resolve_session_request(
+                    session_id,
+                    session_key,
+                    Some(session_label),
+                    true,
+                    false,
+                )?)
                 .await?;
             let session =
                 response.session.context("ResolveSession returned empty session payload")?;
@@ -419,7 +419,9 @@ pub(crate) async fn run_sessions_async(
                 );
             }
         }
-        SessionsCommand::QueuePolicy { session_id, json: _ } => {
+        SessionsCommand::QueuePolicy { session_id, session_key, json: _ } => {
+            let session_id =
+                resolve_session_selector_to_id(&runtime, session_id, session_key).await?;
             let context = connect_sessions_admin_console(&connection).await?;
             let payload = context
                 .client
@@ -611,7 +613,15 @@ pub(crate) async fn run_sessions_async(
                 println!("{}", serde_json::to_string_pretty(content)?);
             }
         }
-        SessionsCommand::CompactPreview { session_id, trigger_reason, trigger_policy, json: _ } => {
+        SessionsCommand::CompactPreview {
+            session_id,
+            session_key,
+            trigger_reason,
+            trigger_policy,
+            json: _,
+        } => {
+            let session_id =
+                resolve_session_selector_to_id(&runtime, session_id, session_key).await?;
             let context = connect_sessions_admin_console(&connection).await?;
             let payload = context
                 .client
@@ -1125,6 +1135,29 @@ fn build_cleanup_session_request(
         session_id: resolve_optional_canonical_id(session_id)?,
         session_key: session_key.unwrap_or_default(),
     })
+}
+
+async fn resolve_session_selector_to_id(
+    runtime: &client::operator::OperatorRuntime,
+    session_id: Option<String>,
+    session_key: Option<String>,
+) -> Result<String> {
+    if session_key.is_none() {
+        let session_id = session_id.context("session_id or session_key is required")?;
+        return Ok(resolve_required_canonical_id(session_id)?.ulid);
+    }
+
+    let response = runtime
+        .resolve_session(build_resolve_session_request(session_id, session_key, None, true, false)?)
+        .await?;
+    let session = response.session.context("ResolveSession returned empty session payload")?;
+    session
+        .session_id
+        .as_ref()
+        .map(|id| id.ulid.trim())
+        .filter(|ulid| !ulid.is_empty())
+        .map(ToOwned::to_owned)
+        .context("ResolveSession returned a session without a session_id")
 }
 
 async fn connect_sessions_admin_console(

@@ -53,8 +53,11 @@ pub enum SessionsCommand {
         json: bool,
     },
     Rename {
-        session_id: String,
-        #[arg(long)]
+        #[arg(value_name = "SESSION_ID", required_unless_present = "session_key")]
+        session_id: Option<String>,
+        #[arg(long, conflicts_with = "session_id")]
+        session_key: Option<String>,
+        #[arg(long, alias = "title")]
         session_label: String,
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -84,7 +87,10 @@ pub enum SessionsCommand {
         json: bool,
     },
     QueuePolicy {
-        session_id: String,
+        #[arg(value_name = "SESSION_ID", required_unless_present = "session_key")]
+        session_id: Option<String>,
+        #[arg(long, conflicts_with = "session_id")]
+        session_key: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -149,7 +155,10 @@ pub enum SessionsCommand {
         json: bool,
     },
     CompactPreview {
-        session_id: String,
+        #[arg(value_name = "SESSION_ID", required_unless_present = "session_key")]
+        session_id: Option<String>,
+        #[arg(long, conflicts_with = "session_id")]
+        session_key: Option<String>,
         #[arg(long)]
         trigger_reason: Option<String>,
         #[arg(long)]
