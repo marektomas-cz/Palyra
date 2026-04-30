@@ -47,7 +47,11 @@ pub struct WizardOverridesArg {
     pub auth_method: Option<OnboardingAuthMethodArg>,
     #[arg(long)]
     pub api_key_env: Option<String>,
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Read one model-provider API key from stdin; requires --non-interactive for scripted wizard runs"
+    )]
     pub api_key_stdin: bool,
     #[arg(long, default_value_t = false)]
     pub api_key_prompt: bool,
@@ -71,7 +75,11 @@ pub struct WizardOverridesArg {
     pub remote_base_url: Option<String>,
     #[arg(long)]
     pub admin_token_env: Option<String>,
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Read one admin token from stdin; requires --non-interactive for scripted wizard runs"
+    )]
     pub admin_token_stdin: bool,
     #[arg(long, default_value_t = false)]
     pub admin_token_prompt: bool,
@@ -107,7 +115,11 @@ pub struct SetupWizardOverridesArg {
     pub auth_method: Option<OnboardingAuthMethodArg>,
     #[arg(long)]
     pub api_key_env: Option<String>,
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Read one model-provider API key from stdin; requires --non-interactive for scripted wizard runs"
+    )]
     pub api_key_stdin: bool,
     #[arg(long, default_value_t = false)]
     pub api_key_prompt: bool,
@@ -129,7 +141,11 @@ pub struct SetupWizardOverridesArg {
     pub remote_base_url: Option<String>,
     #[arg(long)]
     pub admin_token_env: Option<String>,
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Read one admin token from stdin; requires --non-interactive for scripted wizard runs"
+    )]
     pub admin_token_stdin: bool,
     #[arg(long, default_value_t = false)]
     pub admin_token_prompt: bool,

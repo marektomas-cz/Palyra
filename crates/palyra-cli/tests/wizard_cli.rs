@@ -190,6 +190,44 @@ fn setup_wizard_quickstart_emits_json_summary() -> Result<()> {
 }
 
 #[test]
+fn onboarding_wizard_stdin_secret_requires_non_interactive_mode() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("config").join("palyra.toml");
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli_with_stdin(
+        &workdir,
+        &[
+            "onboarding",
+            "wizard",
+            "--path",
+            &config_path_string,
+            "--force",
+            "--flow",
+            "quickstart",
+            "--accept-risk",
+            "--auth-method",
+            "api-key",
+            "--api-key-stdin",
+        ],
+        &[],
+        Some(b"sk-test-setup\n"),
+    )?;
+
+    assert!(!output.status.success(), "wizard must reject stdin secrets without scripted mode");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--api-key-stdin"), "stderr should name the stdin flag: {stderr}");
+    assert!(
+        stderr.contains("--non-interactive"),
+        "stderr should explain the scripted mode requirement: {stderr}"
+    );
+    assert!(
+        !stderr.contains("stdin/stdout/stderr TTY"),
+        "specific stdin guidance should be emitted before the generic TTY guard: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn setup_wizard_bootstraps_missing_global_config_path() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("global-config").join("palyra.toml");

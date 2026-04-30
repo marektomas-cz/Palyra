@@ -768,7 +768,11 @@ fn build_onboarding_answers(
     request: &OnboardingWizardRequest,
     flow: WizardFlowKind,
 ) -> Result<BTreeMap<String, WizardValue>> {
-    validate_stdin_secret_usage(request.options.api_key_stdin, request.options.admin_token_stdin)?;
+    validate_stdin_secret_usage(
+        request.options.non_interactive,
+        request.options.api_key_stdin,
+        request.options.admin_token_stdin,
+    )?;
     let secrets = collect_secret_inputs(
         request.options.api_key_env.clone(),
         request.options.api_key_stdin,
@@ -878,7 +882,11 @@ fn build_onboarding_answers(
 fn build_configure_answers(
     request: &ConfigureWizardRequest,
 ) -> Result<BTreeMap<String, WizardValue>> {
-    validate_stdin_secret_usage(request.api_key_stdin, request.admin_token_stdin)?;
+    validate_stdin_secret_usage(
+        request.non_interactive,
+        request.api_key_stdin,
+        request.admin_token_stdin,
+    )?;
     let secrets = collect_secret_inputs(
         request.api_key_env.clone(),
         request.api_key_stdin,
@@ -2887,10 +2895,20 @@ fn load_secret_input_optional(
     Ok(Some(trimmed.to_owned()))
 }
 
-fn validate_stdin_secret_usage(api_key_stdin: bool, admin_token_stdin: bool) -> Result<()> {
+fn validate_stdin_secret_usage(
+    non_interactive: bool,
+    api_key_stdin: bool,
+    admin_token_stdin: bool,
+) -> Result<()> {
     if api_key_stdin && admin_token_stdin {
         anyhow::bail!(
             "only one secret may be sourced from stdin per invocation; split model-provider API key and admin token configuration into separate runs or use environment/prompt sources"
+        );
+    }
+    if (api_key_stdin || admin_token_stdin) && !non_interactive {
+        let flag = if api_key_stdin { "--api-key-stdin" } else { "--admin-token-stdin" };
+        anyhow::bail!(
+            "{flag} requires --non-interactive so stdin is reserved for the secret value instead of interactive wizard prompts; rerun scripted flows with --non-interactive --accept-risk or use an environment/prompt secret source"
         );
     }
     Ok(())
@@ -3709,6 +3727,23 @@ mod tests {
         assert_eq!(answers.get("configure_channels"), Some(&WizardValue::Bool(false)));
         assert_eq!(answers.get("configure_skills"), Some(&WizardValue::Bool(false)));
         assert_eq!(answers.get("run_health_checks"), Some(&WizardValue::Bool(false)));
+    }
+
+    #[test]
+    fn stdin_secret_sources_require_non_interactive_mode() {
+        let error = validate_stdin_secret_usage(false, true, false)
+            .expect_err("stdin secret sources should require scripted mode");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("--api-key-stdin"), "expected flag context in error: {message}");
+        assert!(
+            message.contains("--non-interactive"),
+            "expected scripted mode guidance in error: {message}"
+        );
+        assert!(
+            message.contains("--accept-risk"),
+            "expected complete non-interactive wizard guidance in error: {message}"
+        );
     }
 
     #[test]

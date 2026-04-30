@@ -737,7 +737,11 @@ pub enum Command {
         auth_method: Option<OnboardingAuthMethodArg>,
         #[arg(long)]
         api_key_env: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Read one model-provider API key from stdin; requires --non-interactive for scripted configure runs"
+        )]
         api_key_stdin: bool,
         #[arg(long, default_value_t = false)]
         api_key_prompt: bool,
@@ -759,7 +763,11 @@ pub enum Command {
         remote_base_url: Option<String>,
         #[arg(long)]
         admin_token_env: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Read one admin token from stdin; requires --non-interactive for scripted configure runs"
+        )]
         admin_token_stdin: bool,
         #[arg(long, default_value_t = false)]
         admin_token_prompt: bool,

@@ -34,6 +34,7 @@ Options:
       --api-key-env <API_KEY_ENV>
 
       --api-key-stdin
+          Read one model-provider API key from stdin; requires --non-interactive for scripted wizard runs
 
       --api-key-prompt
 
@@ -58,6 +59,7 @@ Options:
       --admin-token-env <ADMIN_TOKEN_ENV>
 
       --admin-token-stdin
+          Read one admin token from stdin; requires --non-interactive for scripted wizard runs
 
       --admin-token-prompt
 
