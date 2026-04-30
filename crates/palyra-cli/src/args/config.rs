@@ -45,7 +45,7 @@ pub enum ConfigCommand {
         #[arg(
             long,
             value_name = "TOML_LITERAL",
-            help = "TOML literal to write; quote strings, for example '\"value\"'"
+            help = "TOML literal to write; simple strings may be passed without TOML quotes"
         )]
         value: String,
         #[arg(long, default_value_t = 5)]

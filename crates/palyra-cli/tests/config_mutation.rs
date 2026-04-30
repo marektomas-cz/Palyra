@@ -35,7 +35,7 @@ fn config_set_help_describes_value_as_toml_literal() -> Result<()> {
     let stdout = String::from_utf8(output.stdout).context("stdout was not UTF-8")?;
     assert!(stdout.contains("--value <TOML_LITERAL>"), "unexpected help output: {stdout}");
     assert!(
-        stdout.contains("TOML literal to write; quote strings"),
+        stdout.contains("TOML literal to write; simple strings may be passed without TOML quotes"),
         "unexpected help output: {stdout}"
     );
     Ok(())
@@ -346,7 +346,7 @@ fn config_migrate_adds_version_and_recover_restores_latest_backup() -> Result<()
 }
 
 #[test]
-fn config_set_requires_valid_toml_value_literal() -> Result<()> {
+fn config_set_accepts_bare_string_values() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("palyra.toml");
     fs::write(&config_path, "version = 1\n")
@@ -361,10 +361,36 @@ fn config_set_requires_valid_toml_value_literal() -> Result<()> {
             "--path",
             &config_path_string,
             "--key",
-            "daemon.bind_addr",
+            "tool_call.browser_service.auth_token",
             "--value",
-            "not_a_toml_literal",
+            "e2e-browser-token-20260430",
         ],
+    )?;
+    assert!(
+        output.status.success(),
+        "bare string config set should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config_toml = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    assert!(
+        config_toml.contains("auth_token = \"e2e-browser-token-20260430\""),
+        "config should serialize the bare value as a TOML string: {config_toml}"
+    );
+    Ok(())
+}
+
+#[test]
+fn config_set_rejects_malformed_toml_container_literal() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(&config_path, "version = 1\n")
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &["config", "set", "--path", &config_path_string, "--key", "daemon.port", "--value", "["],
     )?;
     assert!(!output.status.success(), "invalid literal should fail");
     let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;

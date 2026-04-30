@@ -132,8 +132,7 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             let path_ref = Path::new(&path);
             let (mut document, migration) = load_document_for_mutation(path_ref)
                 .with_context(|| format!("failed to parse {}", path_ref.display()))?;
-            let literal = parse_toml_value_literal(value.as_str())
-                .context("config set value must be a valid TOML literal")?;
+            let literal = parse_config_set_value_literal(value.as_str())?;
             set_value_at_path(&mut document, key.as_str(), literal)
                 .with_context(|| format!("invalid config key path: {}", key))?;
             validate_daemon_compatible_document(&document).with_context(|| {
@@ -303,4 +302,22 @@ fn build_config_status_payload(path: Option<String>) -> Result<ConfigStatusPaylo
         provider_kind,
         auth_profile_id,
     })
+}
+
+fn parse_config_set_value_literal(raw: &str) -> Result<toml::Value> {
+    match parse_toml_value_literal(raw) {
+        Ok(value) => Ok(value),
+        Err(_) if can_treat_config_set_value_as_bare_string(raw) => {
+            Ok(toml::Value::String(raw.to_owned()))
+        }
+        Err(error) => Err(error).context("config set value must be a valid TOML literal"),
+    }
+}
+
+fn can_treat_config_set_value_as_bare_string(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !trimmed.is_empty()
+        && trimmed == raw
+        && !trimmed.contains(['\r', '\n'])
+        && !matches!(trimmed.as_bytes().first(), Some(b'"' | b'\'' | b'[' | b'{' | b'#' | b'='))
 }
