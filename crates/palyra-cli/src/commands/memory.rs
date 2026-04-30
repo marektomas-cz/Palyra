@@ -237,10 +237,12 @@ pub(crate) async fn run_memory_async(
                 .into_inner();
             let item = response.item.context("memory IngestMemory returned empty item payload")?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&memory_item_to_json(&item))?);
+                let mut payload = memory_item_to_json(&item);
+                attach_manual_ingest_visibility(&mut payload);
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "memory.ingest id={} source={} created_at_ms={}",
+                    "memory.ingest id={} source={} created_at_ms={} agent_visibility=explicit_recall_required recall_hint=\"palyra memory recall <query> --json\"",
                     item.memory_id.map(|value| value.ulid).unwrap_or_default(),
                     memory_source_to_text(item.source),
                     item.created_at_unix_ms
@@ -1045,9 +1047,26 @@ fn memory_session_scope_label(has_session_scope: bool) -> &'static str {
     }
 }
 
+fn attach_manual_ingest_visibility(payload: &mut Value) {
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "agent_visibility".to_owned(),
+        json!({
+            "manual_ingest_auto_attached_by_command": false,
+            "normal_agent_run_context": "manual memory ingest stores searchable memory; it does not itself attach recall evidence to later agent prompts",
+            "recall_for_prompt_preview": "palyra memory recall <query> --json",
+        }),
+    );
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{memory_session_scope_label, resolve_optional_query_arg};
+    use super::{
+        attach_manual_ingest_visibility, memory_session_scope_label, resolve_optional_query_arg,
+    };
+    use serde_json::json;
 
     #[test]
     fn memory_session_scope_label_redacts_identifier_value() {
@@ -1082,5 +1101,20 @@ mod tests {
         )
         .expect_err("ambiguous query should fail");
         assert!(ambiguous.to_string().contains("either a positional query or --query"));
+    }
+
+    #[test]
+    fn manual_ingest_visibility_makes_agent_boundary_explicit() {
+        let mut payload = json!({ "memory_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW" });
+        attach_manual_ingest_visibility(&mut payload);
+
+        assert_eq!(
+            payload.pointer("/agent_visibility/manual_ingest_auto_attached_by_command"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            payload.pointer("/agent_visibility/recall_for_prompt_preview"),
+            Some(&json!("palyra memory recall <query> --json"))
+        );
     }
 }
