@@ -43,7 +43,10 @@ pub enum CronCommand {
         prompt: String,
         #[arg(long, value_enum)]
         schedule_type: CronScheduleTypeArg,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every"
+        )]
         schedule: String,
         #[arg(long, default_value_t = true)]
         enabled: bool,
@@ -78,7 +81,11 @@ pub enum CronCommand {
         prompt: Option<String>,
         #[arg(long, value_enum, requires = "schedule")]
         schedule_type: Option<CronScheduleTypeArg>,
-        #[arg(long, requires = "schedule_type")]
+        #[arg(
+            long,
+            requires = "schedule_type",
+            help = "Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every"
+        )]
         schedule: Option<String>,
         #[arg(long)]
         enabled: Option<bool>,

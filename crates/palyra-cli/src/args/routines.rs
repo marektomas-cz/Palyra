@@ -201,7 +201,11 @@ pub struct RoutineUpsertCommand {
     pub natural_language_schedule: Option<String>,
     #[arg(long, value_enum, requires = "schedule")]
     pub schedule_type: Option<CronScheduleTypeArg>,
-    #[arg(long, requires = "schedule_type")]
+    #[arg(
+        long,
+        requires = "schedule_type",
+        help = "Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every"
+    )]
     pub schedule: Option<String>,
     #[arg(long)]
     pub trigger_payload: Option<String>,

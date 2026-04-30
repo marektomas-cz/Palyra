@@ -7,8 +7,8 @@ use crate::*;
 
 use super::routines::{
     delete_routine_value, get_routine_value, json_bool_at, json_i64_at, json_optional_string_at,
-    json_value_at, list_routine_runs_value, list_routines_value, run_routine_now_value,
-    set_routine_enabled_value, upsert_routine_value,
+    json_value_at, list_routine_runs_value, list_routines_value, parse_every_schedule_interval_ms,
+    run_routine_now_value, set_routine_enabled_value, upsert_routine_value,
 };
 
 pub(crate) fn run_cron(command: CronCommand) -> Result<()> {
@@ -578,9 +578,7 @@ fn insert_schedule_value(
             payload.insert("cron_expression".to_owned(), Value::String(schedule));
         }
         CronScheduleTypeArg::Every => {
-            let interval_ms = schedule.parse::<u64>().with_context(|| {
-                format!("failed to parse --schedule as milliseconds for schedule-type=every: {schedule}")
-            })?;
+            let interval_ms = parse_every_schedule_interval_ms(schedule.as_str())?;
             payload.insert("every_interval_ms".to_owned(), Value::from(interval_ms));
         }
         CronScheduleTypeArg::At => {

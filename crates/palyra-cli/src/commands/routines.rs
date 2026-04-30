@@ -1126,11 +1126,7 @@ fn insert_schedule_fields(
             payload.insert("cron_expression".to_owned(), Value::String(schedule.to_owned()));
         }
         CronScheduleTypeArg::Every => {
-            let interval_ms = schedule.parse::<u64>().with_context(|| {
-                format!(
-                    "failed to parse --schedule as milliseconds for schedule-type=every: {schedule}"
-                )
-            })?;
+            let interval_ms = parse_every_schedule_interval_ms(schedule)?;
             payload.insert("every_interval_ms".to_owned(), Value::from(interval_ms));
         }
         CronScheduleTypeArg::At => {
@@ -1138,6 +1134,46 @@ fn insert_schedule_fields(
         }
     }
     Ok(())
+}
+
+pub(crate) fn parse_every_schedule_interval_ms(schedule: &str) -> Result<u64> {
+    let value = schedule.trim();
+    if value.is_empty() {
+        anyhow::bail!("{}", every_schedule_validation_message(schedule));
+    }
+    if let Ok(interval_ms) = value.parse::<u64>() {
+        if interval_ms > 0 {
+            return Ok(interval_ms);
+        }
+        anyhow::bail!("{}", every_schedule_validation_message(schedule));
+    }
+
+    let unit_start =
+        value.find(|character: char| !character.is_ascii_digit()).unwrap_or(value.len());
+    let (amount, unit) = value.split_at(unit_start);
+    if amount.is_empty() || unit.is_empty() {
+        anyhow::bail!("{}", every_schedule_validation_message(schedule));
+    }
+    let amount =
+        amount.parse::<u64>().map_err(|_| anyhow!(every_schedule_validation_message(schedule)))?;
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "ms" | "millisecond" | "milliseconds" => 1,
+        "s" | "sec" | "secs" | "second" | "seconds" => 1_000,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60_000,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 60 * 60_000,
+        "d" | "day" | "days" => 24 * 60 * 60_000,
+        _ => anyhow::bail!("{}", every_schedule_validation_message(schedule)),
+    };
+    amount
+        .checked_mul(multiplier)
+        .filter(|interval_ms| *interval_ms > 0)
+        .ok_or_else(|| anyhow!(every_schedule_validation_message(schedule)))
+}
+
+fn every_schedule_validation_message(schedule: &str) -> String {
+    format!(
+        "schedule-type=every requires --schedule to be a positive interval in milliseconds or a duration like 30s, 5m, 2h, or 1d; got '{schedule}'"
+    )
 }
 
 fn template_from_payload<'a>(payload: &'a Value, template_id: &str) -> Result<&'a Value> {
@@ -1408,4 +1444,28 @@ struct TemplateRoutineArgs {
     natural_language_schedule: Option<String>,
     delivery_channel: Option<String>,
     trigger_payload: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_every_schedule_interval_ms;
+
+    #[test]
+    fn parse_every_schedule_interval_accepts_ms_and_human_durations() {
+        assert_eq!(parse_every_schedule_interval_ms("300000").unwrap(), 300_000);
+        assert_eq!(parse_every_schedule_interval_ms("5m").unwrap(), 300_000);
+        assert_eq!(parse_every_schedule_interval_ms("30s").unwrap(), 30_000);
+        assert_eq!(parse_every_schedule_interval_ms("2h").unwrap(), 7_200_000);
+        assert_eq!(parse_every_schedule_interval_ms("1d").unwrap(), 86_400_000);
+    }
+
+    #[test]
+    fn parse_every_schedule_interval_rejects_invalid_durations_as_validation_errors() {
+        let error = parse_every_schedule_interval_ms("soon")
+            .expect_err("invalid duration should fail before reaching daemon");
+        let message = error.to_string();
+
+        assert!(message.contains("schedule-type=every requires --schedule"));
+        assert!(message.contains("30s, 5m, 2h, or 1d"));
+    }
 }

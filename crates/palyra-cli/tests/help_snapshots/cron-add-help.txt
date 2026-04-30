@@ -8,7 +8,7 @@ Options:
       --schedule-type <SCHEDULE_TYPE>
           [possible values: cron, every, at]
       --schedule <SCHEDULE>
-
+          Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every
       --enabled
 
       --concurrency <CONCURRENCY>

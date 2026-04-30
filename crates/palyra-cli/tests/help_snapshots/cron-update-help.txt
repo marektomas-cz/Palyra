@@ -2,22 +2,39 @@ Usage: palyra cron update [OPTIONS] --id <ID>
 
 Options:
       --id <ID>
+
       --name <NAME>
+
       --prompt <PROMPT>
-      --schedule-type <SCHEDULE_TYPE>            [possible values: cron, every, at]
+
+      --schedule-type <SCHEDULE_TYPE>
+          [possible values: cron, every, at]
       --schedule <SCHEDULE>
-      --enabled <ENABLED>                        [possible values: true, false]
-      --concurrency <CONCURRENCY>                [possible values: forbid, replace, queue-one]
+          Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every
+      --enabled <ENABLED>
+          [possible values: true, false]
+      --concurrency <CONCURRENCY>
+          [possible values: forbid, replace, queue-one]
       --retry-max-attempts <RETRY_MAX_ATTEMPTS>
+
       --retry-backoff-ms <RETRY_BACKOFF_MS>
-      --misfire <MISFIRE>                        [possible values: skip, catch-up]
+
+      --misfire <MISFIRE>
+          [possible values: skip, catch-up]
       --jitter-ms <JITTER_MS>
+
       --owner <OWNER>
+
       --channel <CHANNEL>
+
       --session-key <SESSION_KEY>
+
       --session-label <SESSION_LABEL>
+
       --json
-  -h, --help                                     Print help
+
+  -h, --help
+          Print help
 
 Global Options:
       --profile <PROFILE>
