@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
+    net::IpAddr,
     num::NonZeroU32,
     path::{Path, PathBuf},
 };
@@ -1035,12 +1036,55 @@ fn create_profile_warnings(profile: &CliConnectionProfile) -> Vec<String> {
                 .to_owned(),
         );
     }
-    if profile.admin_token_env.is_none() && profile.daemon_url.is_some() {
+    if profile.admin_token_env.is_none() && profile_uses_remote_admin_surface(profile) {
         warnings.push(
-            "remote-oriented profile has no admin token environment override configured".to_owned(),
+            "profile targets a non-loopback daemon URL but has no admin token environment override configured"
+                .to_owned(),
         );
     }
     warnings
+}
+
+fn profile_uses_remote_admin_surface(profile: &CliConnectionProfile) -> bool {
+    if profile.mode.as_deref() == Some("remote") {
+        return true;
+    }
+    profile.daemon_url.as_deref().is_some_and(is_non_loopback_url)
+}
+
+fn is_non_loopback_url(raw: &str) -> bool {
+    match profile_url_host(raw) {
+        Some(host) => !is_loopback_host(host),
+        None => true,
+    }
+}
+
+fn profile_url_host(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let authority = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest.split_once(']').map(|(host, _)| host).filter(|host| !host.is_empty());
+    }
+    authority.split(':').next().filter(|host| !host.is_empty())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    normalized == "localhost"
+        || normalized == "::1"
+        || normalized.parse::<IpAddr>().is_ok_and(|address| address.is_loopback())
 }
 
 fn load_profile_config(config_path: Option<&str>) -> Result<ProfileConfigLoadOutcome> {
@@ -1606,9 +1650,10 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_secret_references, decrypt_profile_bundle, default_environment, default_risk_level,
-        encrypt_profile_bundle, ensure_safe_profile_state_root_removal, profile_mode_label,
-        PortableProfileConfig, ProfilePortabilityBundle, ProfileSecretReference,
+        collect_secret_references, create_profile_warnings, decrypt_profile_bundle,
+        default_environment, default_risk_level, encrypt_profile_bundle,
+        ensure_safe_profile_state_root_removal, profile_mode_label, PortableProfileConfig,
+        ProfilePortabilityBundle, ProfileSecretReference,
     };
     use crate::{
         app,
@@ -1624,6 +1669,36 @@ mod tests {
         assert_eq!(profile_mode_label(ProfileModeArg::Local), "local");
         assert_eq!(default_environment(ProfileModeArg::Remote), "remote");
         assert_eq!(default_risk_level(ProfileModeArg::Custom), "elevated");
+    }
+
+    #[test]
+    fn local_loopback_profile_does_not_emit_remote_admin_token_warning() {
+        let profile = app::CliConnectionProfile {
+            config_path: Some("palyra.toml".to_owned()),
+            daemon_url: Some("http://127.0.0.1:7142".to_owned()),
+            mode: Some("local".to_owned()),
+            ..app::CliConnectionProfile::default()
+        };
+        let warnings = create_profile_warnings(&profile);
+        assert!(
+            warnings.iter().all(|warning| !warning.contains("admin token environment override")),
+            "local loopback profiles should not emit remote admin-token guidance: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn non_loopback_profile_without_admin_token_env_warns() {
+        let profile = app::CliConnectionProfile {
+            config_path: Some("palyra.toml".to_owned()),
+            daemon_url: Some("https://palyra.example.test".to_owned()),
+            mode: Some("custom".to_owned()),
+            ..app::CliConnectionProfile::default()
+        };
+        let warnings = create_profile_warnings(&profile);
+        assert!(
+            warnings.iter().any(|warning| warning.contains("non-loopback daemon URL")),
+            "remote admin surfaces should keep admin-token guidance: {warnings:?}"
+        );
     }
 
     #[test]
