@@ -551,6 +551,7 @@ async fn run_browser_start(
 ) -> Result<()> {
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
     ensure_browser_service_enabled(&resolved.policy, "start", resolved.config_path.as_deref())?;
+    ensure_browser_start_auth_token_configured(&resolved)?;
     ensure_browser_start_token_alignment(&resolved)?;
     let mut lifecycle_warnings = browser_profile_prerequisite_warnings(&resolved.policy);
     lifecycle_warnings.extend(browser_start_auth_token_warnings(&resolved));
@@ -2521,6 +2522,21 @@ fn ensure_browser_start_token_alignment(resolved: &BrowserResolvedConfig) -> Res
     Ok(())
 }
 
+fn ensure_browser_start_auth_token_configured(resolved: &BrowserResolvedConfig) -> Result<()> {
+    if resolved.connection.auth_token.is_some() && !resolved.token_from_cli_only {
+        return Ok(());
+    }
+    let configure_command = browser_service_auth_token_command(resolved.config_path.as_deref());
+    if resolved.token_from_cli_only {
+        anyhow::bail!(
+            "browser start --token only configures browserd for this launch, but gateway-mediated browser commands require the same token in `tool_call.browser_service.auth_token`. Configure it with `{configure_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser start` without --token or with the matching configured token"
+        );
+    }
+    anyhow::bail!(
+        "browser start requires `tool_call.browser_service.auth_token` before launching browserd. Configure it with `{configure_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser start`"
+    );
+}
+
 fn browser_start_auth_token_warnings(resolved: &BrowserResolvedConfig) -> Vec<String> {
     if !resolved.token_from_cli_only {
         return Vec::new();
@@ -2569,8 +2585,9 @@ fn ensure_browser_service_enabled(
         return Ok(());
     }
     let enable_command = browser_service_enable_command(config_path);
+    let token_command = browser_service_auth_token_command(config_path);
     anyhow::bail!(
-        "browser service is disabled (tool_call.browser_service.enabled=false); enable it with `{enable_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser {action}`"
+        "browser service is disabled (tool_call.browser_service.enabled=false); configure an auth token first with `{token_command}`, enable it with `{enable_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser {action}`"
     );
 }
 
@@ -3537,11 +3554,11 @@ mod tests {
         browser_session_handle_text, browser_snapshot_emits_json_to_stdout,
         browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
-        ensure_browser_start_token_alignment, format_browser_session_summary_text,
-        normalize_session_scoped_output, redact_browser_output_value, runtime_session_id_text,
-        session_summary_value, BrowserControlPlaneSnapshot, BrowserOutputMode,
-        BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
-        BrowserServiceMetadata,
+        ensure_browser_start_auth_token_configured, ensure_browser_start_token_alignment,
+        format_browser_session_summary_text, normalize_session_scoped_output,
+        redact_browser_output_value, runtime_session_id_text, session_summary_value,
+        BrowserControlPlaneSnapshot, BrowserOutputMode, BrowserPolicySnapshot,
+        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use serde_json::{json, Value};
@@ -3611,6 +3628,16 @@ mod tests {
             "disabled-service error should explain the policy gate: {error}"
         );
         assert!(
+            error.to_string().contains("tool_call.browser_service.auth_token"),
+            "disabled-service error should explain the auth-token prerequisite: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("palyra config set --key tool_call.browser_service.auth_token"),
+            "disabled-service error should include an exact auth-token config command: {error}"
+        );
+        assert!(
             error
                 .to_string()
                 .contains("palyra config set --key tool_call.browser_service.enabled --value true"),
@@ -3674,6 +3701,12 @@ mod tests {
         );
         assert!(
             error.to_string().contains(
+                r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.auth_token"
+            ),
+            "disabled-service error should include a config-specific auth-token command: {error}"
+        );
+        assert!(
+            error.to_string().contains(
                 r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.enabled --value true"
             ),
             "disabled-service error should include a config-specific enable command: {error}"
@@ -3704,6 +3737,51 @@ mod tests {
         policy.configured_enabled = true;
         ensure_browser_service_enabled(&policy, "start", None)
             .expect("enabled browser service should allow start");
+    }
+
+    #[test]
+    fn browser_start_requires_gateway_auth_token() {
+        let mut resolved = resolved_browser_config_for_test();
+        resolved.connection.auth_token = None;
+        resolved.policy.auth_token_configured = false;
+
+        let error = ensure_browser_start_auth_token_configured(&resolved)
+            .expect_err("browser start should fail closed without a gateway token");
+
+        assert!(
+            error.to_string().contains("tool_call.browser_service.auth_token"),
+            "missing-token error should name the required config key: {error}"
+        );
+        assert!(
+            error.to_string().contains(
+                r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.auth_token"
+            ),
+            "missing-token error should include the exact config command: {error}"
+        );
+    }
+
+    #[test]
+    fn browser_start_rejects_cli_only_auth_token() {
+        let mut resolved = resolved_browser_config_for_test();
+        resolved.token_from_cli_only = true;
+        resolved.policy.auth_token_configured = true;
+        resolved.connection.auth_token = Some("token-from-cli".to_owned());
+
+        let error = ensure_browser_start_auth_token_configured(&resolved)
+            .expect_err("CLI-only token should not satisfy gateway auth-token setup");
+
+        assert!(
+            error.to_string().contains("--token only configures browserd"),
+            "CLI-only token error should explain why config is still required: {error}"
+        );
+    }
+
+    #[test]
+    fn browser_start_accepts_configured_gateway_auth_token() {
+        let resolved = resolved_browser_config_for_test();
+
+        ensure_browser_start_auth_token_configured(&resolved)
+            .expect("configured gateway browser token should satisfy browser start preflight");
     }
 
     #[test]
