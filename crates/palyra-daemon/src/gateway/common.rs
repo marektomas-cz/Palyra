@@ -145,6 +145,18 @@ pub(crate) fn map_memory_store_error(operation: &str, error: JournalError) -> St
         JournalError::DuplicateRecallArtifactId { artifact_id } => {
             Status::already_exists(format!("recall artifact already exists: {artifact_id}"))
         }
+        JournalError::DuplicateWorkspacePath { path } => {
+            Status::already_exists(format!("workspace document already exists for path: {path}"))
+        }
+        JournalError::WorkspaceDocumentNotFound { path } => {
+            Status::not_found(format!("workspace document not found for path: {path}"))
+        }
+        JournalError::InvalidWorkspacePath { reason } => {
+            Status::invalid_argument(format!("invalid workspace path: {reason}"))
+        }
+        JournalError::InvalidWorkspaceContent { reason } => {
+            Status::invalid_argument(format!("invalid workspace content: {reason}"))
+        }
         JournalError::PayloadTooLarge { payload_kind, actual_bytes, max_bytes } => {
             Status::invalid_argument(format!(
                 "{payload_kind} payload exceeds maximum size ({actual_bytes} > {max_bytes})"
@@ -192,4 +204,44 @@ pub(crate) fn current_unix_ms_status() -> Result<i64, Status> {
         .duration_since(UNIX_EPOCH)
         .map_err(|error| Status::internal(format!("system time before unix epoch: {error}")))?;
     Ok(elapsed.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_memory_store_error;
+    use crate::journal::JournalError;
+    use tonic::Code;
+
+    #[test]
+    fn map_memory_store_error_maps_invalid_workspace_path_to_invalid_argument() {
+        let status = map_memory_store_error(
+            "upsert workspace document",
+            JournalError::InvalidWorkspacePath { reason: "absolute paths are not allowed".into() },
+        );
+
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert!(status.message().contains("invalid workspace path"));
+    }
+
+    #[test]
+    fn map_memory_store_error_maps_workspace_document_not_found_to_not_found() {
+        let status = map_memory_store_error(
+            "get workspace document",
+            JournalError::WorkspaceDocumentNotFound { path: "docs/missing.md".into() },
+        );
+
+        assert_eq!(status.code(), Code::NotFound);
+        assert!(status.message().contains("docs/missing.md"));
+    }
+
+    #[test]
+    fn map_memory_store_error_maps_duplicate_workspace_path_to_already_exists() {
+        let status = map_memory_store_error(
+            "upsert workspace document",
+            JournalError::DuplicateWorkspacePath { path: "docs/guide.md".into() },
+        );
+
+        assert_eq!(status.code(), Code::AlreadyExists);
+        assert!(status.message().contains("docs/guide.md"));
+    }
 }
