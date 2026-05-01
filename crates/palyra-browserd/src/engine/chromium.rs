@@ -310,7 +310,7 @@ pub(crate) fn build_chromium_launch_options<'a>(
         .sandbox(true)
         .enable_gpu(false)
         .ignore_certificate_errors(false)
-        .idle_browser_timeout(chromium.startup_timeout)
+        .idle_browser_timeout(chromium_transport_idle_timeout(chromium.startup_timeout))
         .user_data_dir(Some(profile_dir.path().to_path_buf()))
         .args(chromium_args)
         .proxy_server(proxy_server);
@@ -318,6 +318,10 @@ pub(crate) fn build_chromium_launch_options<'a>(
         builder.path(Some(path));
     }
     builder.build().map_err(|error| format!("failed to build Chromium launch options: {error}"))
+}
+
+fn chromium_transport_idle_timeout(startup_timeout: Duration) -> Duration {
+    startup_timeout.max(Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS))
 }
 
 pub(crate) fn parse_chromium_remote_ip_literal(raw: &str) -> Option<IpAddr> {
@@ -1567,7 +1571,11 @@ pub(crate) async fn export_pdf_with_chromium(
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{clamp_chromium_snapshot, ChromiumObserveSnapshot};
+    use super::{
+        chromium_transport_idle_timeout, clamp_chromium_snapshot, ChromiumObserveSnapshot,
+    };
+    use crate::DEFAULT_SESSION_IDLE_TTL_MS;
+    use std::time::Duration;
 
     #[test]
     fn clamp_chromium_snapshot_enforces_body_and_title_budgets() {
@@ -1584,6 +1592,15 @@ mod tests {
         assert_eq!(clamped.page_url, "https://example.invalid/oversized");
         assert!(clamped.page_body.len() <= 17);
         assert!(clamped.title.len() <= 5);
+    }
+
+    #[test]
+    fn chromium_transport_idle_timeout_keeps_cdp_alive_for_session_ttl() {
+        let configured_startup_timeout = Duration::from_secs(20);
+
+        let timeout = chromium_transport_idle_timeout(configured_startup_timeout);
+
+        assert_eq!(timeout, Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS));
     }
 }
 
