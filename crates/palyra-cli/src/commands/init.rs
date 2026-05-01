@@ -43,6 +43,12 @@ pub(crate) fn run_init(
     })?;
     fs::create_dir_all(vault_dir.as_path())
         .with_context(|| format!("failed to create vault directory {}", vault_dir.display()))?;
+    if mode == InitMode::LocalDesktop {
+        let workspace_dir = state_root.join("workspace");
+        fs::create_dir_all(workspace_dir.as_path()).with_context(|| {
+            format!("failed to create local process workspace {}", workspace_dir.display())
+        })?;
+    }
 
     let tls_paths =
         if mode == InitMode::RemoteVps && !matches!(tls_scaffold, InitTlsScaffoldArg::None) {

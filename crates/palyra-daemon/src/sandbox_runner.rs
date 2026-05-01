@@ -156,14 +156,6 @@ pub fn run_constrained_process(
         });
     }
 
-    if matches!(policy.tier, SandboxProcessRunnerTier::B) && !cfg!(unix) {
-        return Err(SandboxProcessRunError {
-            kind: SandboxProcessRunErrorKind::UnsupportedPlatform,
-            message: "sandbox tier-b process runner requires unix resource controls for CPU/memory quotas"
-                .to_owned(),
-        });
-    }
-
     let input = parse_process_runner_input(input_json)?;
     validate_input_shape(&input)?;
     validate_allowed_executable(policy, input.command.as_str())?;
@@ -189,10 +181,15 @@ pub fn run_constrained_process(
     if !matches!(policy.egress_enforcement_mode, EgressEnforcementMode::None) {
         validate_egress_hosts(policy, requested_hosts.as_slice())?;
     }
+    if let Some(result) =
+        execute_builtin_process_command(policy, &input, working_directory.as_path())?
+    {
+        return Ok(result);
+    }
+    validate_platform_resource_quota_support(policy)?;
     if matches!(policy.egress_enforcement_mode, EgressEnforcementMode::Strict) {
         validate_runtime_egress_enforcement(policy)?;
     }
-    validate_platform_resource_quota_support(policy)?;
 
     let per_call_timeout = input
         .timeout_ms
@@ -271,6 +268,41 @@ pub fn run_constrained_process(
         message: format!("failed to serialize sandbox process output JSON: {error}"),
     })?;
     Ok(SandboxProcessRunSuccess { output_json })
+}
+
+fn execute_builtin_process_command(
+    policy: &SandboxProcessRunnerPolicy,
+    input: &ProcessRunnerInput,
+    cwd: &Path,
+) -> Result<Option<SandboxProcessRunSuccess>, SandboxProcessRunError> {
+    let stdout = match input.command.trim().to_ascii_lowercase().as_str() {
+        "pwd" => {
+            if !input.args.is_empty() {
+                return Err(SandboxProcessRunError {
+                    kind: SandboxProcessRunErrorKind::InvalidInput,
+                    message: "palyra.process.run builtin 'pwd' does not accept args".to_owned(),
+                });
+            }
+            format!("{}\n", cwd.to_string_lossy())
+        }
+        "echo" => format!("{}\n", input.args.join(" ")),
+        _ => return Ok(None),
+    };
+    let output_json = serde_json::to_vec(&json!({
+        "exit_code": 0,
+        "stdout": stdout,
+        "stderr": "",
+        "stdout_truncated": false,
+        "stderr_truncated": false,
+        "duration_ms": 0,
+        "tier": policy.tier.as_str(),
+        "sandbox_backend": "builtin_portable",
+    }))
+    .map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!("failed to serialize sandbox builtin process output JSON: {error}"),
+    })?;
+    Ok(Some(SandboxProcessRunSuccess { output_json }))
 }
 
 fn parse_process_runner_input(
@@ -907,6 +939,14 @@ fn execute_process(
 fn validate_platform_resource_quota_support(
     _policy: &SandboxProcessRunnerPolicy,
 ) -> Result<(), SandboxProcessRunError> {
+    #[cfg(not(unix))]
+    if matches!(_policy.tier, SandboxProcessRunnerTier::B) {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::UnsupportedPlatform,
+            message: "sandbox tier-b process runner requires unix resource controls for CPU/memory quotas"
+                .to_owned(),
+        });
+    }
     #[cfg(target_os = "macos")]
     {
         return Err(SandboxProcessRunError {
@@ -984,7 +1024,11 @@ fn sandbox_process_path() -> &'static str {
     {
         "/usr/bin:/bin:/usr/sbin:/sbin"
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        r"C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0"
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     }
@@ -1323,6 +1367,31 @@ mod tests {
         let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
             .expect_err("non-unix sandbox runner must fail closed");
         assert_eq!(error.kind, SandboxProcessRunErrorKind::UnsupportedPlatform);
+    }
+
+    #[test]
+    fn run_constrained_process_executes_portable_pwd_builtin() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["pwd".to_owned()]);
+        let input = br#"{"command":"pwd","args":[]}"#;
+
+        let result = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect("portable pwd builtin should execute without spawning a platform process");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+
+        assert_eq!(output.get("exit_code").and_then(serde_json::Value::as_i64), Some(0));
+        assert_eq!(
+            output.get("sandbox_backend").and_then(serde_json::Value::as_str),
+            Some("builtin_portable")
+        );
+        let stdout = output
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .expect("stdout should be present in process output");
+        let expected_workspace = fs::canonicalize(workspace.as_path()).unwrap_or(workspace);
+        assert_eq!(stdout.trim(), expected_workspace.to_string_lossy());
     }
 
     #[test]

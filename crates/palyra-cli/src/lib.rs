@@ -644,6 +644,21 @@ fn generate_admin_token() -> String {
 }
 
 const DEFAULT_ADMIN_BOUND_PRINCIPAL: &str = "admin:local";
+const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
+    "palyra.echo",
+    "palyra.sleep",
+    "palyra.memory.search",
+    "palyra.memory.recall",
+    "palyra.memory.retain",
+    "palyra.memory.reflect",
+    "palyra.artifact.read",
+    "palyra.delegation.query",
+    "palyra.routines.query",
+    "palyra.http.fetch",
+    "palyra.fs.apply_patch",
+    "palyra.process.run",
+];
+const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["pwd", "echo"];
 
 fn build_init_config_document(
     mode: InitMode,
@@ -739,6 +754,10 @@ fn build_init_config_document(
         toml::Value::Boolean(true),
     )?;
 
+    if mode == InitMode::LocalDesktop {
+        apply_local_desktop_tool_defaults(&mut document, identity_store_dir)?;
+    }
+
     if let Some((cert_path, key_path)) = tls_paths {
         set_value_at_path(&mut document, "gateway.tls.enabled", toml::Value::Boolean(false))?;
         set_value_at_path(
@@ -754,6 +773,57 @@ fn build_init_config_document(
     }
 
     Ok(document)
+}
+
+fn apply_local_desktop_tool_defaults(
+    document: &mut toml::Value,
+    identity_store_dir: &Path,
+) -> Result<()> {
+    let workspace_root = identity_store_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("workspace");
+    set_value_at_path(
+        document,
+        "tool_call.allowed_tools",
+        string_array_value(LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS),
+    )?;
+    set_value_at_path(document, "tool_call.max_calls_per_run", toml::Value::Integer(8))?;
+    set_value_at_path(document, "tool_call.process_runner.enabled", toml::Value::Boolean(true))?;
+    set_value_at_path(
+        document,
+        "tool_call.process_runner.tier",
+        toml::Value::String("b".to_owned()),
+    )?;
+    set_value_at_path(
+        document,
+        "tool_call.process_runner.workspace_root",
+        toml::Value::String(workspace_root.to_string_lossy().into_owned()),
+    )?;
+    set_value_at_path(
+        document,
+        "tool_call.process_runner.allowed_executables",
+        string_array_value(LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES),
+    )?;
+    set_value_at_path(
+        document,
+        "tool_call.process_runner.allow_interpreters",
+        toml::Value::Boolean(false),
+    )?;
+    set_value_at_path(
+        document,
+        "tool_call.process_runner.egress_enforcement_mode",
+        toml::Value::String("preflight".to_owned()),
+    )?;
+    Ok(())
+}
+
+fn string_array_value(values: &[&str]) -> toml::Value {
+    toml::Value::Array(
+        values.iter().map(|value| toml::Value::String((*value).to_owned())).collect(),
+    )
 }
 
 fn apply_deployment_profile_defaults(
@@ -9643,6 +9713,22 @@ mod init_command_tests {
         cursor.as_bool()
     }
 
+    fn read_string_array(document: &toml::Value, key: &str) -> Vec<String> {
+        let mut cursor = document;
+        for segment in key.split('.') {
+            let Some(next) = cursor.get(segment) else {
+                return Vec::new();
+            };
+            cursor = next;
+        }
+        cursor
+            .as_array()
+            .map(|values| {
+                values.iter().filter_map(|value| value.as_str().map(ToOwned::to_owned)).collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn local_init_document_uses_loopback_defaults() {
         let document = build_init_config_document(
@@ -9667,6 +9753,43 @@ mod init_command_tests {
         );
         assert_eq!(read_bool(&document, "admin.require_auth"), Some(true));
         assert_eq!(read_bool(&document, "gateway.tls.enabled"), None);
+    }
+
+    #[test]
+    fn local_init_document_enables_agent_local_tools() {
+        let document = build_init_config_document(
+            InitMode::LocalDesktop,
+            palyra_common::deployment_profiles::DeploymentProfileId::Local,
+            PathBuf::from("state/identity").as_path(),
+            PathBuf::from("state/vault").as_path(),
+            "token-local",
+            None,
+        )
+        .expect("local init document should build");
+
+        let allowed_tools = read_string_array(&document, "tool_call.allowed_tools");
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.process.run"),
+            "local init should expose process runner to local sandbox agents"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.fs.apply_patch"),
+            "local init should expose controlled workspace patching"
+        );
+        assert_eq!(read_bool(&document, "tool_call.process_runner.enabled"), Some(true));
+        assert_eq!(
+            read_string(&document, "tool_call.process_runner.egress_enforcement_mode").as_deref(),
+            Some("preflight")
+        );
+        let expected_workspace_root =
+            PathBuf::from("state").join("workspace").to_string_lossy().into_owned();
+        assert_eq!(
+            read_string(&document, "tool_call.process_runner.workspace_root").as_deref(),
+            Some(expected_workspace_root.as_str())
+        );
+        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
+            .iter()
+            .any(|executable| executable == "pwd"));
     }
 
     #[test]
