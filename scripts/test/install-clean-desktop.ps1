@@ -125,7 +125,6 @@ $installOutput = & (Join-Path $repoRoot "scripts/release/install-desktop-package
     -InstallRoot $installRoot `
     -StateRoot $stateRoot `
     -CliCommandRoot $cliCommandRoot `
-    -NoPersistCliPath `
     -Force
 $installMetadata = Convert-KeyValueOutputToHashtable -Lines $installOutput
 $resolvedInstallRoot = $installMetadata["install_root"]
@@ -135,6 +134,22 @@ if ([string]::IsNullOrWhiteSpace($resolvedInstallRoot)) {
 $resolvedCliCommandRoot = $installMetadata["cli_command_root"]
 if ([string]::IsNullOrWhiteSpace($resolvedCliCommandRoot)) {
     $resolvedCliCommandRoot = $cliCommandRoot
+}
+$resolvedCliCommandPath = $installMetadata["cli_command_path"]
+if ([string]::IsNullOrWhiteSpace($resolvedCliCommandPath)) {
+    $cliCommandFileName = if ($IsWindows) { "palyra.cmd" } else { "palyra" }
+    $resolvedCliCommandPath = Join-Path $resolvedCliCommandRoot $cliCommandFileName
+}
+$cliPersistenceStrategy = $installMetadata["cli_persistence_strategy"]
+if ([string]::IsNullOrWhiteSpace($cliPersistenceStrategy)) {
+    $cliPersistenceStrategy = if ($IsWindows) { "windows-user-path" } else { "posix-profile" }
+}
+
+if ($IsWindows) {
+    $userPathValue = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not (Test-PathEntryPresent -Entry $resolvedCliCommandRoot -PathValue $userPathValue)) {
+        throw "Clean desktop install did not persist the CLI command root to the Windows user PATH: $resolvedCliCommandRoot"
+    }
 }
 
 $launcherPath = Join-Path $resolvedInstallRoot "Launch-Palyra-Test.ps1"
@@ -188,6 +203,8 @@ $installSummary = [ordered]@{
     config_path = $configPath
     state_root = $stateRoot
     cli_command_root = $resolvedCliCommandRoot
+    cli_command_path = $resolvedCliCommandPath
+    cli_persistence_strategy = $cliPersistenceStrategy
     launcher_path = $launcherPath
 }
 $installSummary |
@@ -204,4 +221,6 @@ Write-Output "install_root=$resolvedInstallRoot"
 Write-Output "config_path=$configPath"
 Write-Output "state_root=$stateRoot"
 Write-Output "cli_command_root=$resolvedCliCommandRoot"
+Write-Output "cli_command_path=$resolvedCliCommandPath"
+Write-Output "cli_persistence_strategy=$cliPersistenceStrategy"
 Write-Output "launcher_path=$launcherPath"

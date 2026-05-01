@@ -39,6 +39,51 @@ function Stop-InstalledProcess {
         }
 }
 
+function Remove-CleanDesktopCliExposureFallback {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandRoot
+    )
+
+    $sessionPathUpdated = $false
+    $persistentPathUpdated = $false
+    $commandRootRemoved = $false
+    $commandRootPath = [IO.Path]::GetFullPath($CommandRoot)
+
+    if (Test-Path -LiteralPath $commandRootPath -PathType Container) {
+        $shimNames =
+            if ($IsWindows) {
+                @("palyra.cmd", "palyra.ps1")
+            } else {
+                @("palyra")
+            }
+
+        foreach ($shimName in $shimNames) {
+            $shimPath = Join-Path $commandRootPath $shimName
+            if (Test-Path -LiteralPath $shimPath -PathType Leaf) {
+                Remove-Item -LiteralPath $shimPath -Force
+            }
+        }
+
+        if (Test-DirectoryEmpty -Path $commandRootPath) {
+            Remove-Item -LiteralPath $commandRootPath -Force
+            $commandRootRemoved = $true
+        }
+    }
+
+    if ($IsWindows) {
+        $persistentPathUpdated = Remove-WindowsUserPathEntry -Entry $commandRootPath
+    }
+
+    $sessionPathUpdated = Remove-CurrentSessionPathEntry -Entry $commandRootPath
+
+    return [ordered]@{
+        command_root_removed = $commandRootRemoved
+        persistent_path_updated = $persistentPathUpdated
+        session_path_updated = $sessionPathUpdated
+    }
+}
+
 $workspaceRoot =
     if ([string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
         Get-DefaultHarnessRoot
@@ -60,10 +105,18 @@ foreach ($binaryPath in @($desktopBinary, $daemonBinary, $browserBinary)) {
     Stop-InstalledProcess -ExecutablePath $binaryPath
 }
 
+$uninstallMetadata = @{}
 if (Test-Path -LiteralPath $installRoot) {
-    & (Join-Path $PSScriptRoot "../release/uninstall-package.ps1") `
+    $uninstallOutput = & (Join-Path $PSScriptRoot "../release/uninstall-package.ps1") `
         -InstallRoot $installRoot `
-        -RemoveStateRoot | Out-Null
+        -RemoveStateRoot
+    $uninstallMetadata = Convert-KeyValueOutputToHashtable -Lines $uninstallOutput
+}
+
+$cliCleanup = Remove-CleanDesktopCliExposureFallback -CommandRoot $cliCommandRoot
+$cliCommandRootRemoved = $uninstallMetadata["cli_command_root_removed"]
+if ([string]::IsNullOrWhiteSpace($cliCommandRootRemoved)) {
+    $cliCommandRootRemoved = [string]$cliCleanup.command_root_removed
 }
 
 if (Test-Path -LiteralPath $stateRoot) {
@@ -87,4 +140,7 @@ Write-Output "workspace_root=$workspaceRoot"
 Write-Output "install_root=$installRoot"
 Write-Output "state_root=$stateRoot"
 Write-Output "cli_command_root=$cliCommandRoot"
+Write-Output "cli_command_root_removed=$cliCommandRootRemoved"
+Write-Output "cli_persistent_path_updated=$($cliCleanup.persistent_path_updated)"
+Write-Output "cli_session_path_updated=$($cliCleanup.session_path_updated)"
 Write-Output "artifacts_removed=$($KeepArtifacts -eq $false)"
