@@ -1713,29 +1713,47 @@ async fn grpc_route_message_followup_reuses_session_memory_and_agent_binding() -
     let second_request_payload: Value =
         serde_json::from_str(captured_request_bodies[1].as_str())
             .context("second route provider payload should decode as valid JSON")?;
-    let first_prompt = first_request_payload
-        .pointer("/messages/0/content")
-        .and_then(Value::as_str)
-        .context("first route provider request should include a user prompt")?;
-    let second_prompt = second_request_payload
-        .pointer("/messages/0/content")
-        .and_then(Value::as_str)
-        .context("second route provider request should include a user prompt")?;
+    fn provider_message_text(message: &Value) -> String {
+        match message.get("content") {
+            Some(Value::String(text)) => text.clone(),
+            Some(Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        }
+    }
+    let first_provider_text = first_request_payload.to_string();
     assert!(
-        !first_prompt.contains("<recent_conversation>"),
+        !first_provider_text.contains("<recent_conversation>"),
         "first route request should not include previous-run context when no prior run exists"
     );
+    let second_provider_messages = second_request_payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .context("second route provider request should include chat messages")?;
     assert!(
-        second_prompt.contains("<recent_conversation>"),
-        "follow-up route request should include bounded recent conversation context"
+        second_provider_messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && provider_message_text(message).contains("hey @palyra release rollback checklist")
+        }),
+        "follow-up route request should carry the previous user turn as a chat message"
     );
     assert!(
-        second_prompt.contains("assistant:") && second_prompt.contains("first route reply"),
-        "follow-up route prompt should include prior assistant reply context"
+        second_provider_messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+                && provider_message_text(message).contains("first route reply")
+        }),
+        "follow-up route request should carry the previous assistant reply as a chat message"
     );
     assert!(
-        second_prompt.contains("hey @palyra please recall the release rollback checklist"),
-        "follow-up route prompt should keep the current user input"
+        second_provider_messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && provider_message_text(message)
+                    .contains("hey @palyra please recall the release rollback checklist")
+        }),
+        "follow-up route request should keep the current user input"
     );
 
     assert_eq!(
