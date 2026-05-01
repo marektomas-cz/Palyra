@@ -39,7 +39,9 @@ use crate::{
     },
     media::MediaDerivedArtifactSelection,
     media::MediaRuntimeConfig,
-    model_provider::ProviderImageInput,
+    model_provider::{
+        ProviderImageInput, ProviderMessage, ProviderMessageContentPart, ProviderMessageRole,
+    },
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
 };
 use palyra_common::runtime_preview::{
@@ -56,7 +58,7 @@ const AUTO_SESSION_COMPACTION_COOLDOWN_MS: i64 = 5 * 60 * 1_000;
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedModelProviderInput {
     pub(crate) provider_input_text: String,
-    pub(crate) provider_messages: Vec<crate::model_provider::ProviderMessage>,
+    pub(crate) provider_messages: Vec<ProviderMessage>,
     pub(crate) vision_inputs: Vec<ProviderImageInput>,
     pub(crate) instruction_hash: Option<String>,
     pub(crate) context_trace_id: Option<String>,
@@ -472,13 +474,12 @@ fn extract_previous_run_turn_from_tape_event(
 }
 
 #[allow(clippy::result_large_err)]
-pub(crate) async fn build_previous_run_context_prompt(
+async fn load_previous_run_context_turns(
     runtime_state: &Arc<GatewayRuntimeState>,
     previous_run_id: Option<&str>,
-    input_text: &str,
-) -> Result<String, Status> {
+) -> Result<Vec<(&'static str, String)>, Status> {
     let Some(previous_run_id) = previous_run_id else {
-        return Ok(input_text.to_owned());
+        return Ok(Vec::new());
     };
     let tape_snapshot = match runtime_state
         .orchestrator_tape_snapshot(
@@ -489,7 +490,7 @@ pub(crate) async fn build_previous_run_context_prompt(
         .await
     {
         Ok(snapshot) => snapshot,
-        Err(error) if error.code() == tonic::Code::NotFound => return Ok(input_text.to_owned()),
+        Err(error) if error.code() == tonic::Code::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
 
@@ -499,11 +500,45 @@ pub(crate) async fn build_previous_run_context_prompt(
         .filter_map(extract_previous_run_turn_from_tape_event)
         .collect::<Vec<_>>();
     if turns.is_empty() {
-        return Ok(input_text.to_owned());
+        return Ok(Vec::new());
     }
     if turns.len() > MAX_PREVIOUS_RUN_CONTEXT_TURNS {
         let keep_from = turns.len() - MAX_PREVIOUS_RUN_CONTEXT_TURNS;
         turns.drain(0..keep_from);
+    }
+    Ok(turns)
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn build_previous_run_provider_messages(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    previous_run_id: Option<&str>,
+) -> Result<Vec<ProviderMessage>, Status> {
+    let turns = load_previous_run_context_turns(runtime_state, previous_run_id).await?;
+    Ok(turns
+        .into_iter()
+        .map(|(speaker, text)| match speaker {
+            "assistant" => ProviderMessage {
+                role: ProviderMessageRole::Assistant,
+                content: vec![ProviderMessageContentPart::text(text)],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            },
+            _ => ProviderMessage::user_text(text),
+        })
+        .collect())
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn build_previous_run_context_prompt(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    previous_run_id: Option<&str>,
+    input_text: &str,
+) -> Result<String, Status> {
+    let turns = load_previous_run_context_turns(runtime_state, previous_run_id).await?;
+    if turns.is_empty() {
+        return Ok(input_text.to_owned());
     }
 
     let mut block = String::from("<recent_conversation>\n");
@@ -752,6 +787,27 @@ async fn prepare_model_provider_input_legacy(
         memory_ingest_reason,
     )
     .await;
+    let previous_provider_messages = match build_previous_run_provider_messages(
+        runtime_state,
+        previous_run_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(
+                run_id,
+                principal = %context.principal,
+                session_id,
+                previous_run_id = %previous_run_id.unwrap_or("n/a"),
+                channel = channel_for_log,
+                status_code = ?error.code(),
+                status_message = %error.message(),
+                "failed to load previous-run provider messages; continuing with raw provider message history"
+            );
+            Vec::new()
+        }
+    };
     let input_with_recent_context = match build_previous_run_context_prompt(
         runtime_state,
         previous_run_id,
@@ -914,7 +970,7 @@ async fn prepare_model_provider_input_legacy(
     .await?;
     Ok(PreparedModelProviderInput {
         provider_input_text,
-        provider_messages: Vec::new(),
+        provider_messages: previous_provider_messages,
         vision_inputs: build_provider_image_inputs(attachments, &runtime_state.config.media),
         instruction_hash: None,
         context_trace_id: None,

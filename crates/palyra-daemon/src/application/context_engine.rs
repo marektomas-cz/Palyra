@@ -20,9 +20,10 @@ use crate::{
         provider_input::{
             build_attachment_recall_prompt, build_explicit_recall_prompt,
             build_memory_augmented_prompt, build_previous_run_context_prompt,
-            build_project_context_prompt, build_provider_image_inputs,
-            record_provider_pruning_decision, resolve_latest_session_compaction_artifact,
-            MemoryPromptFailureMode, PrepareModelProviderInputRequest, PreparedModelProviderInput,
+            build_previous_run_provider_messages, build_project_context_prompt,
+            build_provider_image_inputs, record_provider_pruning_decision,
+            resolve_latest_session_compaction_artifact, MemoryPromptFailureMode,
+            PrepareModelProviderInputRequest, PreparedModelProviderInput,
         },
         session_pruning::{
             classify_pruning_task, context_engine_pruning_outcome, detect_pruning_risk,
@@ -673,9 +674,13 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
         .await?;
     }
 
+    let mut provider_messages = compiled_instructions.provider_messages();
+    provider_messages
+        .extend(build_previous_run_provider_messages(runtime_state, previous_run_id).await?);
+
     Ok(PreparedModelProviderInput {
         provider_input_text: assembled.prompt_text,
-        provider_messages: compiled_instructions.provider_messages(),
+        provider_messages,
         vision_inputs,
         instruction_hash: Some(compiled_instructions.hash),
         context_trace_id: Some(assembled.explain.trace_id),

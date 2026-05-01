@@ -8701,6 +8701,17 @@ async fn grpc_run_stream_session_context_includes_previous_user_turn() -> Result
     assert_eq!(captured_request_bodies.len(), 2);
     let second_provider_payload: Value = serde_json::from_str(captured_request_bodies[1].as_str())
         .context("second provider request should decode as JSON")?;
+    fn provider_message_text(message: &Value) -> String {
+        match message.get("content") {
+            Some(Value::String(text)) => text.clone(),
+            Some(Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        }
+    }
     let second_provider_text = second_provider_payload.to_string();
     assert!(
         second_provider_text.contains("<recent_conversation>"),
@@ -8717,6 +8728,24 @@ async fn grpc_run_stream_session_context_includes_previous_user_turn() -> Result
     assert!(
         second_provider_text.contains("What codeword did I ask you to remember?"),
         "follow-up run stream should keep the current user input"
+    );
+    let second_provider_messages = second_provider_payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .context("second provider request should include chat messages")?;
+    assert!(
+        second_provider_messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && provider_message_text(message).contains("Please remember codeword AURORA-713")
+        }),
+        "follow-up provider request should carry the previous user turn as a chat message"
+    );
+    assert!(
+        second_provider_messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+                && provider_message_text(message).contains("first reply acknowledged")
+        }),
+        "follow-up provider request should carry the previous assistant reply as a chat message"
     );
 
     server_handle.join().expect("scripted openai server thread should exit");
