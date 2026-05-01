@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory as _, Parser};
 
 use super::{
     AcpBridgeArgs, AcpCommand, AcpConnectionArgs, AcpSessionDefaultsArgs, AcpShimArgs,
@@ -2383,6 +2383,22 @@ fn parse_memory_ingest() {
                 json: false,
             }
         }
+    );
+}
+
+#[test]
+fn memory_ingest_help_documents_confidence_range() {
+    let mut command = Cli::command();
+    let help = command
+        .find_subcommand_mut("memory")
+        .and_then(|memory| memory.find_subcommand_mut("ingest"))
+        .expect("memory ingest subcommand should be registered")
+        .render_long_help()
+        .to_string();
+
+    assert!(
+        help.contains("--confidence <0.0..1.0>") && help.contains("inclusive range 0.0..1.0"),
+        "memory ingest help should document the accepted confidence range: {help}"
     );
 }
 

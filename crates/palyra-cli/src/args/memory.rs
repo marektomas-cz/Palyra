@@ -72,7 +72,11 @@ pub enum MemoryCommand {
         channel: Option<String>,
         #[arg(long)]
         tag: Vec<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "0.0..1.0",
+            help = "Confidence score in the inclusive range 0.0..1.0"
+        )]
         confidence: Option<String>,
         #[arg(long)]
         ttl_unix_ms: Option<i64>,
