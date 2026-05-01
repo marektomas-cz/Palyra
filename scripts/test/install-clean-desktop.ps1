@@ -34,7 +34,6 @@ $desktopPackageOutput = Join-Path $artifactsRoot "desktop"
 $cargoTargetRoot = Join-Path $artifactsRoot "cargo-target"
 $installRoot = Join-Path $workspaceRoot "install"
 $stateRoot = Join-Path $workspaceRoot "state"
-$cliCommandRoot = Join-Path $workspaceRoot "cli-bin"
 $desktopExecutable = Resolve-ExecutableName -BaseName "palyra-desktop-control-center"
 $daemonExecutable = Resolve-ExecutableName -BaseName "palyrad"
 $browserExecutable = Resolve-ExecutableName -BaseName "palyra-browserd"
@@ -124,7 +123,6 @@ $installOutput = & (Join-Path $repoRoot "scripts/release/install-desktop-package
     -ArchivePath $archivePath `
     -InstallRoot $installRoot `
     -StateRoot $stateRoot `
-    -CliCommandRoot $cliCommandRoot `
     -Force
 $installMetadata = Convert-KeyValueOutputToHashtable -Lines $installOutput
 $resolvedInstallRoot = $installMetadata["install_root"]
@@ -133,7 +131,7 @@ if ([string]::IsNullOrWhiteSpace($resolvedInstallRoot)) {
 }
 $resolvedCliCommandRoot = $installMetadata["cli_command_root"]
 if ([string]::IsNullOrWhiteSpace($resolvedCliCommandRoot)) {
-    $resolvedCliCommandRoot = $cliCommandRoot
+    $resolvedCliCommandRoot = Get-PalyraCliCommandRoot
 }
 $resolvedCliCommandPath = $installMetadata["cli_command_path"]
 if ([string]::IsNullOrWhiteSpace($resolvedCliCommandPath)) {
@@ -146,9 +144,12 @@ if ([string]::IsNullOrWhiteSpace($cliPersistenceStrategy)) {
 }
 
 if ($IsWindows) {
-    $userPathValue = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not (Test-PathEntryPresent -Entry $resolvedCliCommandRoot -PathValue $userPathValue)) {
-        throw "Clean desktop install did not persist the CLI command root to the Windows user PATH: $resolvedCliCommandRoot"
+    $windowsPathValue = @(
+        [Environment]::GetEnvironmentVariable("Path", "User"),
+        [Environment]::GetEnvironmentVariable("Path", "Machine")
+    ) -join [IO.Path]::PathSeparator
+    if (-not (Test-PathEntryPresent -Entry $resolvedCliCommandRoot -PathValue $windowsPathValue)) {
+        throw "Clean desktop install did not persist or select a globally visible Windows CLI command root: $resolvedCliCommandRoot"
     }
 }
 

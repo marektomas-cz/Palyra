@@ -246,7 +246,7 @@ function Normalize-PathEntry {
         [string]$PathEntry
     )
 
-    $trimmed = $PathEntry.Trim().Trim('"')
+    $trimmed = [Environment]::ExpandEnvironmentVariables($PathEntry.Trim().Trim('"'))
     if ([string]::IsNullOrWhiteSpace($trimmed)) {
         return ""
     }
@@ -350,17 +350,33 @@ function Remove-PathEntry {
     return ($remainingEntries -join [IO.Path]::PathSeparator)
 }
 
+function Move-PathEntryToFront {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Entry,
+        [string]$PathValue = $env:PATH
+    )
+
+    $remainingPath = Remove-PathEntry -Entry $Entry -PathValue $PathValue
+    if ([string]::IsNullOrWhiteSpace($remainingPath)) {
+        return $Entry
+    }
+
+    return "$Entry$([IO.Path]::PathSeparator)$remainingPath"
+}
+
 function Add-CurrentSessionPathEntry {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Entry
     )
 
-    if (Test-PathEntryPresent -Entry $Entry -PathValue $env:PATH) {
+    $updatedPath = Move-PathEntryToFront -Entry $Entry -PathValue $env:PATH
+    if ([string]::Equals($updatedPath, $env:PATH, [StringComparison]::Ordinal)) {
         return $false
     }
 
-    $env:PATH = Prepend-PathEntry -Entry $Entry -PathValue $env:PATH
+    $env:PATH = $updatedPath
     return $true
 }
 
@@ -390,6 +406,30 @@ function Get-HomeDirectory {
     return [IO.Path]::GetFullPath($homeDirectory)
 }
 
+function Test-DirectoryWritable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [switch]$Create
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+            if (-not $Create) {
+                return $false
+            }
+            New-Item -ItemType Directory -Path $Path -Force | Out-Null
+        }
+
+        $probePath = Join-Path $Path (".palyra-write-test-" + [guid]::NewGuid().ToString("N"))
+        Set-Content -LiteralPath $probePath -Value "" -NoNewline
+        Remove-Item -LiteralPath $probePath -Force
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Get-PalyraCliCommandRoot {
     param(
         [string]$CommandRootOverride
@@ -405,10 +445,35 @@ function Get-PalyraCliCommandRoot {
             throw "Unable to resolve LocalApplicationData for Palyra CLI exposure."
         }
 
+        $windowsApps = Join-Path $localAppData "Microsoft/WindowsApps"
+        if (
+            (Test-PathEntryPresent -Entry $windowsApps -PathValue $env:PATH) -and
+            (Test-DirectoryWritable -Path $windowsApps -Create)
+        ) {
+            return [IO.Path]::GetFullPath($windowsApps)
+        }
+
         return Join-Path $localAppData "Palyra/bin"
     }
 
-    return Join-Path (Get-HomeDirectory) ".local/bin"
+    $homeLocalBin = Join-Path (Get-HomeDirectory) ".local/bin"
+    $candidateRoots = New-Object System.Collections.Generic.List[string]
+    if ($IsMacOS) {
+        $candidateRoots.Add("/opt/homebrew/bin") | Out-Null
+    }
+    $candidateRoots.Add("/usr/local/bin") | Out-Null
+    $candidateRoots.Add($homeLocalBin) | Out-Null
+
+    foreach ($candidateRoot in ($candidateRoots | Select-Object -Unique)) {
+        if (
+            (Test-PathEntryPresent -Entry $candidateRoot -PathValue $env:PATH) -and
+            (Test-DirectoryWritable -Path $candidateRoot -Create)
+        ) {
+            return [IO.Path]::GetFullPath($candidateRoot)
+        }
+    }
+
+    return $homeLocalBin
 }
 
 function Get-WindowsUserPathValue {
@@ -422,6 +487,50 @@ function Set-WindowsUserPathValue {
     )
 
     [Environment]::SetEnvironmentVariable("Path", $PathValue, "User")
+    Publish-WindowsEnvironmentChange | Out-Null
+}
+
+function Publish-WindowsEnvironmentChange {
+    if (-not $IsWindows) {
+        return $false
+    }
+
+    try {
+        if ($null -eq ("Palyra.Environment.NativeMethods" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace Palyra.Environment {
+    public static class NativeMethods {
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern IntPtr SendMessageTimeout(
+            IntPtr hWnd,
+            uint Msg,
+            UIntPtr wParam,
+            string lParam,
+            uint fuFlags,
+            uint uTimeout,
+            out UIntPtr lpdwResult);
+    }
+}
+"@ -ErrorAction Stop
+        }
+
+        $result = [UIntPtr]::Zero
+        [Palyra.Environment.NativeMethods]::SendMessageTimeout(
+            [IntPtr]0xffff,
+            0x001a,
+            [UIntPtr]::Zero,
+            "Environment",
+            0x0002,
+            5000,
+            [ref]$result) | Out-Null
+        return $true
+    } catch {
+        Write-Warning "Failed to broadcast Windows environment change. New terminals may need to be reopened before PATH changes are visible: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 function Add-WindowsUserPathEntry {
@@ -456,6 +565,55 @@ function Remove-WindowsUserPathEntry {
     }
     Set-WindowsUserPathValue -PathValue $updatedPath
     return $true
+}
+
+function Get-PalyraLegacyCliCommandRoots {
+    $roots = New-Object System.Collections.Generic.List[string]
+
+    if ($IsWindows) {
+        $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+        if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+            $roots.Add((Join-Path $localAppData "Palyra/bin")) | Out-Null
+            $roots.Add((Join-Path $localAppData "Palyra-TestHarness/cli-bin")) | Out-Null
+        }
+    }
+
+    return @($roots | ForEach-Object { [IO.Path]::GetFullPath($_) } | Select-Object -Unique)
+}
+
+function Remove-LegacyPalyraCliPathEntries {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandRoot
+    )
+
+    $removedRoots = New-Object System.Collections.Generic.List[string]
+    $sessionPathUpdated = $false
+    $userPathUpdated = $false
+
+    foreach ($legacyRoot in (Get-PalyraLegacyCliCommandRoots)) {
+        if (Test-PathEntryEquals -Left $legacyRoot -Right $CommandRoot) {
+            continue
+        }
+
+        $removedCurrentSession = Remove-CurrentSessionPathEntry -Entry $legacyRoot
+        $removedWindowsUserPath = $false
+        if ($IsWindows) {
+            $removedWindowsUserPath = Remove-WindowsUserPathEntry -Entry $legacyRoot
+        }
+
+        if ($removedCurrentSession -or $removedWindowsUserPath) {
+            $removedRoots.Add($legacyRoot) | Out-Null
+        }
+        $sessionPathUpdated = $sessionPathUpdated -or $removedCurrentSession
+        $userPathUpdated = $userPathUpdated -or $removedWindowsUserPath
+    }
+
+    return [ordered]@{
+        removed_roots = @($removedRoots | Select-Object -Unique)
+        session_path_updated = $sessionPathUpdated
+        user_path_updated = $userPathUpdated
+    }
 }
 
 function Get-PalyraCliManagedProfilePaths {
@@ -633,6 +791,7 @@ function Install-PalyraCliExposure {
 
     $resolvedTargetBinary = Assert-FileExists -Path $TargetBinaryPath -Label "CLI binary"
     $resolvedCommandRoot = Get-PalyraCliCommandRoot -CommandRootOverride $CommandRoot
+    $legacyPathCleanup = Remove-LegacyPalyraCliPathEntries -CommandRoot $resolvedCommandRoot
     New-Item -ItemType Directory -Path $resolvedCommandRoot -Force | Out-Null
     $resolvedStateRoot = $null
     if (-not [string]::IsNullOrWhiteSpace($StateRoot)) {
@@ -691,15 +850,25 @@ exec "$resolvedTargetBinary" "$@"
         $shimPaths.Add($shimPath) | Out-Null
     }
 
+    $commandRootAlreadyOnPath = Test-PathEntryPresent -Entry $resolvedCommandRoot -PathValue $env:PATH
     $sessionPathUpdated = Add-CurrentSessionPathEntry -Entry $resolvedCommandRoot
-    $persistenceStrategy = if ($PersistPath) { if ($IsWindows) { "windows-user-path" } else { "posix-profile" } } else { "session-only" }
+    $persistenceStrategy =
+        if (-not $PersistPath) {
+            "session-only"
+        } elseif ($commandRootAlreadyOnPath) {
+            "existing-path"
+        } elseif ($IsWindows) {
+            "windows-user-path"
+        } else {
+            "posix-profile"
+        }
     $userPathUpdated = $false
     $profileFiles = New-Object System.Collections.Generic.List[string]
 
     if ($PersistPath) {
         if ($IsWindows) {
             $userPathUpdated = Add-WindowsUserPathEntry -Entry $resolvedCommandRoot
-        } else {
+        } elseif (-not $commandRootAlreadyOnPath) {
             foreach ($profilePath in (Get-PalyraCliManagedProfilePaths)) {
                 if (Ensure-ProfileBlock -ProfilePath $profilePath -CommandRoot $resolvedCommandRoot) {
                     $profileFiles.Add($profilePath) | Out-Null
@@ -716,10 +885,14 @@ exec "$resolvedTargetBinary" "$@"
         target_binary_path = $resolvedTargetBinary
         state_root = $resolvedStateRoot
         config_path = $resolvedConfigPath
+        command_root_already_on_path = $commandRootAlreadyOnPath
         session_path_updated = $sessionPathUpdated
         persistent_path_requested = $PersistPath
         persistence_strategy = $persistenceStrategy
         user_path_updated = $userPathUpdated
+        legacy_path_entries_removed = @($legacyPathCleanup.removed_roots)
+        legacy_session_path_updated = $legacyPathCleanup.session_path_updated
+        legacy_user_path_updated = $legacyPathCleanup.user_path_updated
         profile_files = @($profileFiles)
     }
 }

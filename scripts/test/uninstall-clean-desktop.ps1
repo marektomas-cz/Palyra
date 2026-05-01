@@ -94,7 +94,18 @@ $workspaceRoot =
 $artifactsRoot = Join-Path $workspaceRoot "artifacts"
 $installRoot = Join-Path $workspaceRoot "install"
 $stateRoot = Join-Path $workspaceRoot "state"
+$metadataPath = Join-Path $workspaceRoot "clean-install-metadata.json"
 $cliCommandRoot = Join-Path $workspaceRoot "cli-bin"
+if (Test-Path -LiteralPath $metadataPath -PathType Leaf) {
+    $cleanMetadata = Read-JsonFile -Path $metadataPath
+    $metadataCliCommandRoot = $cleanMetadata.PSObject.Properties["cli_command_root"]
+    if (
+        $null -ne $metadataCliCommandRoot -and
+        -not [string]::IsNullOrWhiteSpace([string]$metadataCliCommandRoot.Value)
+    ) {
+        $cliCommandRoot = [string]$metadataCliCommandRoot.Value
+    }
+}
 
 $desktopBinary =
     Join-Path $installRoot (Resolve-ExecutableName -BaseName "palyra-desktop-control-center")
@@ -127,7 +138,6 @@ if ((Test-Path -LiteralPath $artifactsRoot) -and -not $KeepArtifacts) {
     Remove-Item -LiteralPath $artifactsRoot -Recurse -Force
 }
 
-$metadataPath = Join-Path $workspaceRoot "clean-install-metadata.json"
 if ((Test-Path -LiteralPath $metadataPath) -and -not $KeepArtifacts) {
     Remove-Item -LiteralPath $metadataPath -Force
 }
