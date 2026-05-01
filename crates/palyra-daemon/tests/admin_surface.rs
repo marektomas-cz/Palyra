@@ -2227,18 +2227,22 @@ fn console_channels_endpoints_require_session_and_csrf() -> Result<()> {
             "confirm": true,
         }))
         .send()
-        .context("failed to call channels discord test-send endpoint with csrf token")?
-        .error_for_status()
-        .context("channels discord test-send endpoint returned non-success status")?
-        .json::<Value>()
-        .context("failed to parse channels discord test-send response json")?;
-    assert!(
-        discord_test_send_response.get("dispatch").is_some(),
-        "channels discord test-send response should include dispatch payload"
+        .context("failed to call channels discord test-send endpoint with csrf token")?;
+    assert_eq!(
+        discord_test_send_response.status().as_u16(),
+        412,
+        "channels discord test-send endpoint should fail closed before enqueue when the connector is disabled"
     );
+    let discord_test_send_response = discord_test_send_response
+        .json::<Value>()
+        .context("failed to parse channels discord test-send error response json")?;
     assert!(
-        discord_test_send_response.get("status").is_some(),
-        "channels discord test-send response should include status payload"
+        discord_test_send_response
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.contains("cannot send outbound messages")
+                && value.contains("disabled")),
+        "channels discord test-send error response should explain the disabled connector precondition"
     );
 
     Ok(())
