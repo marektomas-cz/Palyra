@@ -1310,19 +1310,23 @@ async fn run_browser_navigate(
     let mut value =
         serde_json::to_value(&envelope).context("failed to encode browser navigate output")?;
     normalize_session_scoped_output(&mut value, session_id.as_str());
-    emit_browser_value(
-        &value,
-        format!(
-            "browser.navigate session_id={}{} success={} status_code={} final_url={} title={}",
-            browser_session_handle_text(Some(session_id.as_str())),
-            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
-            envelope.success,
-            envelope.status_code,
-            empty_as_dash(envelope.final_url.as_str()),
-            empty_as_dash(envelope.title.as_str()),
-        ),
-        "failed to encode browser navigate output",
-    )?;
+    let mode = browser_output_mode();
+    if browser_command_payload_should_emit(mode, success) {
+        emit_browser_value_for_mode(
+            &value,
+            format!(
+                "browser.navigate session_id={}{} success={} status_code={} final_url={} title={}",
+                browser_session_handle_text(Some(session_id.as_str())),
+                runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
+                envelope.success,
+                envelope.status_code,
+                empty_as_dash(envelope.final_url.as_str()),
+                empty_as_dash(envelope.title.as_str()),
+            ),
+            "failed to encode browser navigate output",
+            mode,
+        )?;
+    }
     ensure_browser_command_success("browser.navigate", success, error.as_str())
 }
 
