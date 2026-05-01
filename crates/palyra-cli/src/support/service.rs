@@ -235,8 +235,17 @@ fn write_service_metadata(state_root: &Path, metadata: &GatewayServiceMetadata) 
 }
 
 fn require_service_metadata(state_root: &Path) -> Result<GatewayServiceMetadata> {
-    load_service_metadata(state_root)?
-        .ok_or_else(|| anyhow!("gateway service metadata not found under {}", state_root.display()))
+    let metadata_path = service_metadata_path(state_root);
+    load_service_metadata(state_root)?.ok_or_else(|| {
+        anyhow!(
+            "precondition failed: no managed gateway service metadata exists at {}; \
+             `palyra gateway start`, `palyra gateway stop`, and `palyra gateway restart` \
+             control only a background service installed with `palyra gateway install`; \
+             a foreground `palyra gateway run` process is attached to its terminal and must be \
+             stopped with Ctrl+C in that terminal",
+            metadata_path.display()
+        )
+    })
 }
 
 fn current_service_manager() -> &'static str {
@@ -895,8 +904,10 @@ mod tests {
     use super::{decode_windows_process_output, summarize_command_output};
     use super::{
         default_service_name, load_service_metadata, query_gateway_service_status,
-        service_metadata_path, GatewayServiceMetadata, SERVICE_METADATA_SCHEMA_VERSION,
+        require_service_metadata, service_metadata_path, GatewayServiceMetadata,
+        SERVICE_METADATA_SCHEMA_VERSION,
     };
+    use crate::output::{classify_error, CliExitCode};
     use std::fs;
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt;
@@ -914,6 +925,27 @@ mod tests {
         assert!(
             status.detail.as_deref().is_some_and(|value| value.contains("not installed")),
             "status detail should explain missing installation"
+        );
+    }
+
+    #[test]
+    fn require_service_metadata_without_metadata_explains_service_mode() {
+        let tempdir = tempdir().expect("tempdir");
+        let error = require_service_metadata(tempdir.path())
+            .expect_err("missing metadata should fail with guidance");
+        let message = error.to_string();
+
+        assert_eq!(classify_error(&error), CliExitCode::Precondition);
+        assert!(message.contains("precondition failed"));
+        assert!(message.contains("gateway-service.json"));
+        assert!(message.contains("palyra gateway install"));
+        assert!(message.contains("palyra gateway start"));
+        assert!(message.contains("palyra gateway stop"));
+        assert!(message.contains("palyra gateway run"));
+        assert!(message.contains("Ctrl+C"));
+        assert!(
+            !message.contains("not found"),
+            "service-mode guidance should not look like a missing-path bug: {message}"
         );
     }
 
