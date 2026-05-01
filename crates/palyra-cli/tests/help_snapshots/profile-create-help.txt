@@ -4,30 +4,52 @@ Arguments:
   <NAME>
 
 Options:
-      --mode <MODE>                        [default: local] [possible values: local, remote, custom]
+      --mode <MODE>
+          [default: local] [possible values: local, remote, custom]
       --label <LABEL>
+
       --environment <ENVIRONMENT>
+
       --color <COLOR>
-      --risk-level <RISK_LEVEL>            [possible values: low, elevated, high, critical]
+
+      --risk-level <RISK_LEVEL>
+          [possible values: low, elevated, high, critical]
       --strict-mode
-      --config-path <CONFIG_PATH>
-      --state-root <STATE_ROOT>
+
+      --config-path <PROFILE_CONFIG_PATH>
+
+      --profile-state-root <PROFILE_STATE_ROOT>
+          Set only the new profile's isolated state root
       --daemon-url <DAEMON_URL>
+
       --grpc-url <GRPC_URL>
+
       --admin-token-env <ADMIN_TOKEN_ENV>
+
       --principal <PRINCIPAL>
+
       --device-id <DEVICE_ID>
+
       --channel <CHANNEL>
+
       --set-default
+
       --force
+
       --json
-  -h, --help                               Print help
+
+  -h, --help
+          Print help
 
 Global Options:
       --profile <PROFILE>
           Use the named CLI profile from the local profile registry
       --expect-profile <EXPECT_PROFILE>
           Require the resolved active profile name to match this value
+      --config <CONFIG_PATH>
+          Use this palyra.toml config file
+      --state-root <STATE_ROOT>
+          Use this runtime state root directory
   -v, --verbose...
           Increase logging verbosity (-v => debug, -vv => trace)
       --log-level <LOG_LEVEL>

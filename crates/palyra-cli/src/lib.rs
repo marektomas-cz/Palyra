@@ -60,15 +60,17 @@ pub mod proto {
     }
 }
 
-use std::sync::Arc;
 use std::{
     collections::{BTreeMap, HashSet},
-    env, fs,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
     io::{BufRead, IsTerminal, Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Component, Path, PathBuf},
     process::Command,
     process::ExitCode,
+    sync::Arc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -231,7 +233,8 @@ fn run_cli_entrypoint() -> Result<()> {
 }
 
 fn run_cli() -> Result<()> {
-    let cli = match Cli::try_parse() {
+    let args = normalize_profile_create_state_root_args(env::args_os().collect());
+    let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error)
             if matches!(
@@ -408,6 +411,42 @@ fn run_cli() -> Result<()> {
             commands::tunnel::run_tunnel(ssh, remote_port, local_port, open, identity_file)
         }
     }
+}
+
+fn normalize_profile_create_state_root_args(mut args: Vec<OsString>) -> Vec<OsString> {
+    let Some(create_args_start) = profile_create_args_start(args.as_slice()) else {
+        return args;
+    };
+
+    for arg in args.iter_mut().skip(create_args_start) {
+        if arg.as_os_str() == OsStr::new("--") {
+            break;
+        }
+        if arg.as_os_str() == OsStr::new("--state-root") {
+            *arg = OsString::from("--profile-state-root");
+            continue;
+        }
+        let Some(value) = arg.to_str() else {
+            continue;
+        };
+        if let Some(state_root) = value.strip_prefix("--state-root=") {
+            *arg = OsString::from(format!("--profile-state-root={state_root}"));
+        }
+    }
+
+    args
+}
+
+fn profile_create_args_start(args: &[OsString]) -> Option<usize> {
+    args.windows(2).enumerate().find_map(|(index, window)| {
+        if window[0].as_os_str() == OsStr::new("profile")
+            && window[1].as_os_str() == OsStr::new("create")
+        {
+            Some(index + 2)
+        } else {
+            None
+        }
+    })
 }
 
 fn enforce_profile_guardrails(command: &CliCommand) -> Result<()> {
@@ -10707,5 +10746,76 @@ mod tests {
             result.is_err(),
             "proof from CLI arg must require explicit insecure acknowledgment"
         );
+    }
+}
+
+#[cfg(test)]
+mod cli_arg_normalization_tests {
+    use super::{normalize_profile_create_state_root_args, Cli};
+    use clap::Parser as _;
+    use std::ffi::OsString;
+
+    #[test]
+    fn profile_create_state_root_after_subcommand_sets_profile_state_root() {
+        let args = [
+            "palyra",
+            "--config",
+            "active-config.toml",
+            "--state-root",
+            "active-state",
+            "profile",
+            "create",
+            "e2e-profile",
+            "--config-path",
+            "profile-config.toml",
+            "--state-root",
+            "profile-state",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+
+        let cli = Cli::parse_from(normalize_profile_create_state_root_args(args));
+        assert_eq!(cli.root.config_path.as_deref(), Some("active-config.toml"));
+        assert_eq!(cli.root.state_root.as_deref(), Some("active-state"));
+        match cli.command {
+            crate::cli::Command::Profile {
+                command:
+                    crate::cli::ProfileCommand::Create {
+                        profile_config_path: Some(config_path),
+                        profile_state_root: Some(state_root),
+                        ..
+                    },
+            } => {
+                assert_eq!(config_path, "profile-config.toml");
+                assert_eq!(state_root, "profile-state");
+            }
+            other => panic!("expected profile create command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_create_state_root_equals_form_sets_profile_state_root() {
+        let args = [
+            "palyra",
+            "--state-root=active-state",
+            "profile",
+            "create",
+            "e2e-profile",
+            "--state-root=profile-state",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+
+        let cli = Cli::parse_from(normalize_profile_create_state_root_args(args));
+        assert_eq!(cli.root.state_root.as_deref(), Some("active-state"));
+        match cli.command {
+            crate::cli::Command::Profile {
+                command:
+                    crate::cli::ProfileCommand::Create { profile_state_root: Some(state_root), .. },
+            } => assert_eq!(state_root, "profile-state"),
+            other => panic!("expected profile create command, got {other:?}"),
+        }
     }
 }

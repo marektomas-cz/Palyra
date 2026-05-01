@@ -17,6 +17,7 @@ Examples:
 Discoverability:
   `profile show` without a name resolves the active profile.
   `profile create`, `profile clone`, and `profile import` assign isolated per-profile state roots.
+  On `profile create`, root `--state-root` before `profile` selects the profile registry; `--profile-state-root` sets only the new profile's state root.
   `profile clone` and `profile import` also write copied config snapshots into isolated per-profile config paths when source config is available.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
@@ -72,10 +73,14 @@ pub enum ProfileCommand {
         risk_level: Option<ProfileRiskLevelArg>,
         #[arg(long, default_value_t = false)]
         strict_mode: bool,
-        #[arg(long)]
-        config_path: Option<String>,
-        #[arg(long)]
-        state_root: Option<String>,
+        #[arg(long = "config-path")]
+        profile_config_path: Option<String>,
+        #[arg(
+            long = "profile-state-root",
+            value_name = "PROFILE_STATE_ROOT",
+            help = "Set only the new profile's isolated state root"
+        )]
+        profile_state_root: Option<String>,
         #[arg(long)]
         daemon_url: Option<String>,
         #[arg(long)]

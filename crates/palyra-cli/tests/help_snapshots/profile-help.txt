@@ -72,4 +72,5 @@ Examples:
 Discoverability:
   `profile show` without a name resolves the active profile.
   `profile create`, `profile clone`, and `profile import` assign isolated per-profile state roots.
+  On `profile create`, root `--state-root` before `profile` selects the profile registry; `--profile-state-root` sets only the new profile's state root.
   `profile clone` and `profile import` also write copied config snapshots into isolated per-profile config paths when source config is available.
