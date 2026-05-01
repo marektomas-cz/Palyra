@@ -162,8 +162,13 @@ fn load_onboarding_document(path: Option<String>) -> Result<(toml::Value, String
         let resolved = resolve_config_path(Some(explicit), false)?;
         let path_ref = Path::new(&resolved);
         if path_ref.exists() {
-            let (document, _) = load_document_from_existing_path(path_ref)
-                .with_context(|| format!("failed to parse {}", path_ref.display()))?;
+            if config_document_has_content(path_ref)? {
+                let (document, _) = load_document_from_existing_path(path_ref)
+                    .with_context(|| format!("failed to parse {}", path_ref.display()))?;
+                return Ok((document, resolved));
+            }
+            let (document, _) = parse_document_with_migration("")
+                .context("failed to initialize empty config document")?;
             return Ok((document, resolved));
         }
         let (document, _) = parse_document_with_migration("")
@@ -173,8 +178,13 @@ fn load_onboarding_document(path: Option<String>) -> Result<(toml::Value, String
 
     if let Some(active_path) = effective_config_path() {
         let path_ref = Path::new(&active_path);
-        let (document, _) = load_document_from_existing_path(path_ref)
-            .with_context(|| format!("failed to parse {}", path_ref.display()))?;
+        if config_document_has_content(path_ref)? {
+            let (document, _) = load_document_from_existing_path(path_ref)
+                .with_context(|| format!("failed to parse {}", path_ref.display()))?;
+            return Ok((document, active_path));
+        }
+        let (document, _) = parse_document_with_migration("")
+            .context("failed to initialize empty config document")?;
         return Ok((document, active_path));
     }
 
@@ -240,7 +250,9 @@ fn collect_onboarding_signals(
     let (default_agent_configured, default_agent_message) = default_agent_status()?;
 
     Ok(OnboardingSignals {
-        config_exists: config_path != "defaults" && Path::new(&config_path).exists(),
+        config_exists: config_path != "defaults"
+            && Path::new(&config_path).exists()
+            && config_document_has_content(Path::new(&config_path))?,
         config_path,
         workspace_root_configured: get_string_at_path(
             document,
@@ -1259,6 +1271,26 @@ agent_id = "local-default"
         )?;
 
         assert!(!signals.config_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn onboarding_status_treats_empty_config_as_not_ready() -> Result<()> {
+        let temp = tempdir()?;
+        let config_path = temp.path().join("config").join("palyra.toml");
+        fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        fs::write(config_path.as_path(), "")?;
+
+        let (document, resolved_path) =
+            load_onboarding_document(Some(config_path.display().to_string()))?;
+        let signals =
+            collect_onboarding_signals(&document, resolved_path, OnboardingVariant::Quickstart)?;
+        let steps = build_onboarding_steps(OnboardingVariant::Quickstart, &signals);
+        let config_step = steps.iter().find(|step| step.step_id == "config").expect("config step");
+
+        assert!(!signals.config_exists);
+        assert_eq!(config_step.status, control_plane::OnboardingStepStatus::Todo);
+        assert_eq!(config_step.title, "Create config");
         Ok(())
     }
 }

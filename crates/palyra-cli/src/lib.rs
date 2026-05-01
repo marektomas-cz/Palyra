@@ -7420,6 +7420,7 @@ fn validate_secret_source_exclusivity(
 fn load_document_from_existing_path(path: &Path) -> Result<(toml::Value, ConfigMigrationInfo)> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    ensure_config_document_content_present(path, content.as_str())?;
     parse_document_with_migration(&content).context("failed to migrate config document")
 }
 
@@ -7428,6 +7429,69 @@ fn load_document_for_mutation(path: &Path) -> Result<(toml::Value, ConfigMigrati
         return load_document_from_existing_path(path);
     }
     parse_document_with_migration("").context("failed to initialize config document")
+}
+
+fn config_document_has_content(path: &Path) -> Result<bool> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(!content.trim().is_empty())
+}
+
+fn ensure_config_document_content_present(path: &Path, content: &str) -> Result<()> {
+    if content.trim().is_empty() {
+        anyhow::bail!(
+            "config file is empty: {}; run `palyra setup --wizard` to create a valid config",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod config_document_read_tests {
+    use std::{env, fs};
+
+    use anyhow::Result;
+    use tempfile::tempdir;
+
+    use super::{app, collect_doctor_config_snapshot, load_document_from_existing_path};
+
+    #[test]
+    fn existing_empty_config_file_is_not_parseable() -> Result<()> {
+        let temp = tempdir()?;
+        let config_path = temp.path().join("palyra.toml");
+        fs::write(config_path.as_path(), "")?;
+
+        let error = load_document_from_existing_path(config_path.as_path())
+            .expect_err("empty existing config should be invalid");
+
+        assert!(error.to_string().contains("config file is empty"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_config_snapshot_marks_empty_config_unparsed() -> Result<()> {
+        let _guard = app::test_env_lock_for_tests().lock().expect("env lock");
+        app::clear_root_context_for_tests();
+
+        let temp = tempdir()?;
+        let config_path = temp.path().join("palyra.toml");
+        fs::write(config_path.as_path(), "")?;
+
+        env::set_var("PALYRA_CONFIG", config_path.as_path());
+        let snapshot = collect_doctor_config_snapshot();
+        env::remove_var("PALYRA_CONFIG");
+
+        assert!(snapshot.exists);
+        assert!(!snapshot.parsed);
+        assert!(snapshot
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("config file is empty")));
+
+        app::clear_root_context_for_tests();
+        Ok(())
+    }
 }
 
 fn resolve_config_path(path: Option<String>, require_existing: bool) -> Result<String> {
@@ -7661,6 +7725,7 @@ fn read_doctor_root_file_config_with_migration(
 
     let content = fs::read_to_string(config_path.as_path())
         .with_context(|| format!("failed to read {}", config_path.display()))?;
+    ensure_config_document_content_present(config_path.as_path(), content.as_str())?;
     let (document, migration) = parse_document_with_migration(content.as_str())
         .context("failed to migrate doctor config document")?;
     let migrated =
