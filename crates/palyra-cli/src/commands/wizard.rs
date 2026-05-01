@@ -490,7 +490,7 @@ impl WizardBackend for NonInteractiveWizardBackend {
         }
         Err(WizardError::MissingInput {
             step_id: step.id.to_owned(),
-            message: "non-interactive mode requires an explicit value".to_owned(),
+            message: missing_non_interactive_input_message(step).to_owned(),
         })
     }
 
@@ -500,6 +500,15 @@ impl WizardBackend for NonInteractiveWizardBackend {
 
     fn retries_on_validation_error(&self) -> bool {
         false
+    }
+}
+
+fn missing_non_interactive_input_message(step: &WizardStep) -> &'static str {
+    match step.id {
+        "accept_risk_ack" => {
+            "non-interactive mode requires --accept-risk to acknowledge setup and configuration mutations"
+        }
+        _ => "non-interactive mode requires an explicit value",
     }
 }
 
@@ -616,6 +625,28 @@ mod tests {
                 message: "non-interactive mode requires an explicit value".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn non_interactive_backend_names_accept_risk_flag_for_missing_risk_ack() {
+        let mut backend = NonInteractiveWizardBackend::new(BTreeMap::new());
+        let mut wizard = WizardSession::new(&mut backend);
+        let error = wizard
+            .confirm(WizardStep {
+                id: "accept_risk_ack",
+                kind: StepKind::Confirm,
+                title: Some("Risk Acknowledgement".to_owned()),
+                message: "Proceed with setup?".to_owned(),
+                default_value: None,
+                placeholder: None,
+                sensitive: false,
+                allow_empty: false,
+                options: Vec::new(),
+            })
+            .expect_err("missing risk acknowledgement should fail");
+        let message = error.to_string();
+        assert!(message.contains("accept_risk_ack"), "message should name the missing step");
+        assert!(message.contains("--accept-risk"), "message should name the required flag");
     }
 
     #[test]

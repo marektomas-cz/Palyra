@@ -198,6 +198,40 @@ fn setup_wizard_quickstart_emits_json_summary() -> Result<()> {
 }
 
 #[test]
+fn setup_wizard_non_interactive_missing_risk_ack_names_accept_risk_flag() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("config").join("palyra.toml");
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli(
+        &workdir,
+        &[
+            "setup",
+            "--wizard",
+            "--mode",
+            "local",
+            "--path",
+            &config_path_string,
+            "--force",
+            "--flow",
+            "quickstart",
+            "--non-interactive",
+            "--auth-method",
+            "skip",
+            "--skip-health",
+            "--skip-channels",
+            "--skip-skills",
+        ],
+        &[],
+    )?;
+
+    assert!(!output.status.success(), "setup wizard must require explicit risk acknowledgement");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("accept_risk_ack"), "stderr should name the missing step: {stderr}");
+    assert!(stderr.contains("--accept-risk"), "stderr should name the required flag: {stderr}");
+    Ok(())
+}
+
+#[test]
 fn setup_non_wizard_emits_json_summary() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("config").join("palyra.toml");
