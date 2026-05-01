@@ -1,6 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
+$ProgressPreference = "SilentlyContinue"
+$InformationPreference = "SilentlyContinue"
 
 $script:PalyraCliProfileStartMarker = "# >>> Palyra CLI >>>"
 $script:PalyraCliProfileEndMarker = "# <<< Palyra CLI <<<"
@@ -664,6 +666,8 @@ $(if ($null -ne $resolvedConfigPath) { 'set "PALYRA_CONFIG=' + $resolvedConfigPa
 @"
 Set-StrictMode -Version Latest
 `$ErrorActionPreference = "Stop"
+`$ProgressPreference = "SilentlyContinue"
+`$InformationPreference = "SilentlyContinue"
 $(if ($null -ne $resolvedStateRoot) { '$env:PALYRA_STATE_ROOT = "' + $resolvedStateRoot + '"' })
 $(if ($null -ne $resolvedConfigPath) { '$env:PALYRA_CONFIG = "' + $resolvedConfigPath + '"' })
 if (`$MyInvocation.ExpectingInput) {

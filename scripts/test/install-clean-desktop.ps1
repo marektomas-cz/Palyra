@@ -7,6 +7,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
+$ProgressPreference = "SilentlyContinue"
+$InformationPreference = "SilentlyContinue"
 
 . (Join-Path $PSScriptRoot "../release/common.ps1")
 
@@ -145,6 +147,8 @@ param(
 
 Set-StrictMode -Version Latest
 `$ErrorActionPreference = "Stop"
+`$ProgressPreference = "SilentlyContinue"
+`$InformationPreference = "SilentlyContinue"
 
 `$installRoot = Split-Path -Parent `$MyInvocation.MyCommand.Path
 `$stateRoot = "$stateRoot"
