@@ -885,6 +885,18 @@ async fn set_objective_job_enabled(
     Ok(())
 }
 
+async fn delete_objective_job(
+    state: &AppState,
+    objective: &ObjectiveRecord,
+) -> Result<(), Response> {
+    let Some(routine_id) = objective.automation.routine_id.as_ref() else {
+        return Ok(());
+    };
+    state.runtime.delete_cron_job(routine_id.clone()).await.map_err(runtime_status_response)?;
+    state.routines.delete_routine(routine_id.as_str()).map_err(routine_registry_error_response)?;
+    Ok(())
+}
+
 async fn trigger_objective_now(
     state: &AppState,
     objective: &ObjectiveRecord,
@@ -1079,7 +1091,7 @@ async fn apply_archive_action(
     let from_state = objective.state;
     objective.state = ObjectiveState::Archived;
     objective.automation.enabled = false;
-    set_objective_job_enabled(state, objective, false).await?;
+    delete_objective_job(state, objective).await?;
     objective.lifecycle_history.push(ObjectiveLifecycleRecord {
         event_id: Ulid::new().to_string(),
         action: "archive".to_owned(),
@@ -2005,6 +2017,18 @@ mod tests {
             .expect("pause projection should succeed");
         assert_eq!(objective.state, ObjectiveState::Paused);
         assert!(!objective.automation.enabled);
+        assert!(objective.lifecycle_history.is_empty());
+    }
+
+    #[test]
+    fn archive_projection_disables_automation_without_losing_routine_history_link() {
+        let mut objective = sample_objective();
+        let routine_id = objective.automation.routine_id.clone();
+        apply_lifecycle_workspace_projection("archive", &mut objective)
+            .expect("archive projection should succeed");
+        assert_eq!(objective.state, ObjectiveState::Archived);
+        assert!(!objective.automation.enabled);
+        assert_eq!(objective.automation.routine_id, routine_id);
         assert!(objective.lifecycle_history.is_empty());
     }
 
