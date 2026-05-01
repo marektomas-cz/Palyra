@@ -2595,7 +2595,7 @@ fn ensure_browser_gateway_auth_token_alignment(
 fn browser_gateway_auth_token_setup_warning(config_path: Option<&str>) -> String {
     let configure_command = browser_service_auth_token_command(config_path);
     format!(
-        "Set `tool_call.browser_service.auth_token` to the same token with `{configure_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun gateway-mediated browser commands such as `palyra browser open`."
+        "Set `tool_call.browser_service.auth_token` to the same token with `{configure_command}`. Replace `<shared-browser-token>` with the token used by browserd; do not paste the placeholder literally. Restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun gateway-mediated browser commands such as `palyra browser open`."
     )
 }
 
@@ -2605,7 +2605,9 @@ fn browser_service_auth_token_command(config_path: Option<&str>) -> String {
         command.push_str(" --path ");
         command.push_str(&quote_cli_argument(path));
     }
-    command.push_str(" --key tool_call.browser_service.auth_token --value '\"<same-token>\"'");
+    command.push_str(
+        " --key tool_call.browser_service.auth_token --value '\"<shared-browser-token>\"'",
+    );
     command
 }
 
@@ -2618,10 +2620,8 @@ fn ensure_browser_service_enabled(
         return Ok(());
     }
     let enable_command = browser_service_enable_command(config_path);
-    let token_command = browser_service_auth_token_command(config_path);
-    let state_key_guidance = browser_profile_state_key_guidance(config_path);
     anyhow::bail!(
-        "browser service is disabled (tool_call.browser_service.enabled=false); configure an auth token first with `{token_command}`, enable it with `{enable_command}`, {state_key_guidance} Then restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser {action}`"
+        "browser service is disabled (tool_call.browser_service.enabled=false).\nNext steps:\n1. Enable the gateway browser service with `{enable_command}`.\n2. Restart the gateway with `palyra gateway run` or restart the running gateway service.\n3. Rerun `palyra browser {action}`."
     );
 }
 
@@ -3750,29 +3750,21 @@ mod tests {
             "disabled-service error should explain the policy gate: {error}"
         );
         assert!(
-            error.to_string().contains("tool_call.browser_service.auth_token"),
-            "disabled-service error should explain the auth-token prerequisite: {error}"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("palyra config set --key tool_call.browser_service.auth_token"),
-            "disabled-service error should include an exact auth-token config command: {error}"
-        );
-        assert!(
             error
                 .to_string()
                 .contains("palyra config set --key tool_call.browser_service.enabled --value true"),
             "disabled-service error should include an exact enable command: {error}"
         );
         assert!(
-            error.to_string().contains("restart the gateway"),
+            error.to_string().contains("Restart the gateway"),
             "disabled-service error should explain that the running gateway must reload the config: {error}"
         );
         assert!(
-            error.to_string().contains("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY")
-                && error.to_string().contains("palyra secrets configure browser-state-key"),
-            "disabled-service remediation should include browser profile state key setup: {error}"
+            error.to_string().contains("Next steps:")
+                && !error.to_string().contains("<same-token>")
+                && !error.to_string().contains("<shared-browser-token>")
+                && !error.to_string().contains("tool_call.browser_service.auth_token"),
+            "disabled-service remediation should stay focused on the disabled feature gate: {error}"
         );
     }
 
@@ -3828,15 +3820,13 @@ mod tests {
         );
         assert!(
             error.to_string().contains(
-                r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.auth_token"
-            ),
-            "disabled-service error should include a config-specific auth-token command: {error}"
-        );
-        assert!(
-            error.to_string().contains(
                 r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.enabled --value true"
             ),
             "disabled-service error should include a config-specific enable command: {error}"
+        );
+        assert!(
+            !error.to_string().contains("auth_token"),
+            "disabled-service error should not front-load auth-token setup: {error}"
         );
         assert!(
             error.to_string().contains("palyra gateway run"),
@@ -4138,7 +4128,7 @@ mod tests {
 
         assert_eq!(
             command,
-            r#"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.auth_token --value '"<same-token>"'"#
+            r#"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.auth_token --value '"<shared-browser-token>"'"#
         );
     }
 
@@ -4152,7 +4142,8 @@ mod tests {
         assert!(
             warnings.iter().any(|warning| {
                 warning.contains("tool_call.browser_service.auth_token")
-                    && warning.contains("restart the gateway")
+                    && warning.contains("Replace `<shared-browser-token>`")
+                    && warning.contains("Restart the gateway")
                     && warning.contains("palyra browser open")
             }),
             "CLI-only browser start token should warn about gateway setup: {warnings:?}"
@@ -4194,6 +4185,7 @@ mod tests {
             warnings.iter().any(|warning| {
                 warning.contains("CLI-managed browserd")
                     && warning.contains("tool_call.browser_service.auth_token")
+                    && warning.contains("Replace `<shared-browser-token>`")
                     && warning.contains("palyra browser open")
             }),
             "missing gateway token should produce a setup blocker warning: {warnings:?}"
