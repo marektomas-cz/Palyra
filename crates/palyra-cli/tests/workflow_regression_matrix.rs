@@ -1212,6 +1212,12 @@ fn browser_channels_and_session_workflows_are_regression_tested() -> Result<()> 
         "workflow:browser",
     )?;
 
+    let sessions_before_show = assert_json_success(
+        run_cli_json(&workdir, &["sessions", "list", "--json"], &browser_cli_env)?,
+        "sessions list before show",
+    )?;
+    let updated_before_show = session_updated_at(&sessions_before_show, "workflow:browser")?;
+
     let sessions_show_output = run_cli_json(
         &workdir,
         &["sessions", "show", "--session-key", "workflow:browser", "--json"],
@@ -1221,6 +1227,16 @@ fn browser_channels_and_session_workflows_are_regression_tested() -> Result<()> 
     assert_eq!(sessions_show_payload.get("created").and_then(Value::as_bool), Some(false));
     assert_eq!(sessions_show_payload.get("reset_applied").and_then(Value::as_bool), Some(false));
     assert!(sessions_show_payload.get("session").is_some());
+
+    let sessions_after_show = assert_json_success(
+        run_cli_json(&workdir, &["sessions", "list", "--json"], &browser_cli_env)?,
+        "sessions list after show",
+    )?;
+    let updated_after_show = session_updated_at(&sessions_after_show, "workflow:browser")?;
+    assert_eq!(
+        updated_after_show, updated_before_show,
+        "sessions show must not mutate session recency"
+    );
 
     let sessions_reset_output = run_cli_json(
         &workdir,
@@ -1538,6 +1554,19 @@ fn assert_json_success(output: Output, command_name: &str) -> Result<Value> {
     assert_success(&output, command_name)?;
     serde_json::from_slice::<Value>(&output.stdout)
         .with_context(|| format!("{command_name} stdout should be valid JSON"))
+}
+
+fn session_updated_at(payload: &Value, session_key: &str) -> Result<i64> {
+    payload
+        .get("sessions")
+        .and_then(Value::as_array)
+        .and_then(|sessions| {
+            sessions.iter().find(|session| {
+                session.get("session_key").and_then(Value::as_str) == Some(session_key)
+            })
+        })
+        .and_then(|session| session.get("updated_at_unix_ms").and_then(Value::as_i64))
+        .with_context(|| format!("session {session_key} should include updated_at_unix_ms"))
 }
 
 fn seed_install_root(install_root: &Path) -> Result<()> {

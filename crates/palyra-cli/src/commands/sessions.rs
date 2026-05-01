@@ -193,24 +193,14 @@ pub(crate) async fn run_sessions_async(
             }
         }
         SessionsCommand::Show { session_id, session_key, json: _ } => {
-            let response = runtime
-                .resolve_session(build_resolve_session_request(
-                    session_id,
-                    session_key,
-                    None,
-                    true,
-                    false,
-                )?)
-                .await?;
-            let session =
-                response.session.context("ResolveSession returned empty session payload")?;
+            let session = load_session_summary_for_show(&runtime, session_id, session_key).await?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
                         "session": session_to_json(&session),
-                        "created": response.created,
-                        "reset_applied": response.reset_applied,
+                        "created": false,
+                        "reset_applied": false,
                     }))?
                 );
             } else {
@@ -1026,6 +1016,60 @@ fn build_resolve_session_request(
         require_existing,
         reset_session,
     })
+}
+
+async fn load_session_summary_for_show(
+    runtime: &client::operator::OperatorRuntime,
+    session_id: Option<String>,
+    session_key: Option<String>,
+) -> Result<gateway_v1::SessionSummary> {
+    let requested_session_id = resolve_optional_canonical_id(session_id)?.map(|id| id.ulid);
+    let requested_session_key = normalize_optional_text(session_key);
+    if requested_session_id.is_none() && requested_session_key.is_none() {
+        anyhow::bail!("session_id or session_key is required");
+    }
+
+    let mut after_session_key = None;
+    loop {
+        let response =
+            runtime.list_sessions(after_session_key.clone(), true, Some(100), None).await?;
+        for session in response.sessions {
+            let id_matches = requested_session_id
+                .as_deref()
+                .is_some_and(|expected| session_id_matches(&session, expected));
+            let key_matches = requested_session_key
+                .as_deref()
+                .is_some_and(|expected| session.session_key == expected);
+            let selector_matches = requested_session_id.as_ref().is_none_or(|_| id_matches)
+                && requested_session_key.as_ref().is_none_or(|_| key_matches);
+            if selector_matches {
+                return Ok(session);
+            }
+            if id_matches || key_matches {
+                anyhow::bail!(
+                    "invalid session selector: session_id and session_key resolve to different sessions"
+                );
+            }
+        }
+
+        let next_after_session_key = normalize_optional_text(Some(response.next_after_session_key));
+        if next_after_session_key.is_none() || next_after_session_key == after_session_key {
+            break;
+        }
+        after_session_key = next_after_session_key;
+    }
+
+    anyhow::bail!(
+        "session not found: {}",
+        requested_session_id
+            .as_deref()
+            .or(requested_session_key.as_deref())
+            .unwrap_or("<unspecified>")
+    )
+}
+
+fn session_id_matches(session: &gateway_v1::SessionSummary, expected: &str) -> bool {
+    session.session_id.as_ref().is_some_and(|id| id.ulid == expected)
 }
 
 fn session_to_json(session: &gateway_v1::SessionSummary) -> Value {
