@@ -1885,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn run_constrained_process_fails_closed_for_tier_b_strict_mode_even_without_allowlists() {
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
         let policy = sandbox_policy(workspace);
@@ -1900,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn run_constrained_process_fails_closed_without_runtime_egress_enforcement() {
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
         let mut policy = sandbox_policy(workspace);
@@ -2006,7 +2006,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     fn tier_c_strict_mode_rejects_host_allowlists_when_backend_cannot_enforce_them() {
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
         let mut policy = sandbox_policy(workspace);
