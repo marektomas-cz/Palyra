@@ -1652,18 +1652,22 @@ async fn run_browser_screenshot(
     strip_large_binary_fields(&mut value, output_path.is_some(), &["image_base64"]);
     maybe_attach_output_path(&mut value, output_path.as_ref());
     normalize_session_scoped_output(&mut value, session_id.as_str());
-    emit_browser_value(
-        &value,
-        format!(
-            "browser.screenshot session_id={}{} success={} mime_type={} output={}",
-            browser_session_handle_text(Some(session_id.as_str())),
-            runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
-            envelope.success,
-            envelope.mime_type.as_deref().unwrap_or("-"),
-            output_path.as_deref().unwrap_or("-"),
-        ),
-        "failed to encode browser screenshot output",
-    )?;
+    let mode = browser_output_mode();
+    if browser_command_payload_should_emit(mode, success) {
+        emit_browser_value_for_mode(
+            &value,
+            format!(
+                "browser.screenshot session_id={}{} success={} mime_type={} output={}",
+                browser_session_handle_text(Some(session_id.as_str())),
+                runtime_session_id_text(session_id.as_str(), envelope.session_id.as_str()),
+                envelope.success,
+                envelope.mime_type.as_deref().unwrap_or("-"),
+                output_path.as_deref().unwrap_or("-"),
+            ),
+            "failed to encode browser screenshot output",
+            mode,
+        )?;
+    }
     ensure_browser_command_success("browser.screenshot", success, error.as_str())
 }
 
@@ -3031,6 +3035,10 @@ fn ensure_browser_command_success(command: &str, success: bool, error: &str) -> 
     anyhow::bail!("{command} failed: {}", browser_failure_detail(error))
 }
 
+fn browser_command_payload_should_emit(mode: BrowserOutputMode, success: bool) -> bool {
+    success || matches!(mode, BrowserOutputMode::Text)
+}
+
 fn emit_browser_value_with_json(
     value: &Value,
     text: String,
@@ -3657,10 +3665,11 @@ fn proto_console_severity_text(value: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_command_policy_action, browser_failure_detail, browser_identifier_json_value,
-        browser_service_auth_token_command, browser_service_enable_command,
-        browser_session_handle_text, browser_snapshot_emits_json_to_stdout,
-        browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
+        browser_command_payload_should_emit, browser_command_policy_action, browser_failure_detail,
+        browser_identifier_json_value, browser_service_auth_token_command,
+        browser_service_enable_command, browser_session_handle_text,
+        browser_snapshot_emits_json_to_stdout, browser_start_auth_token_warnings,
+        browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
         ensure_browser_start_auth_token_configured, ensure_browser_start_token_alignment,
         format_browser_session_summary_text, normalize_session_scoped_output,
@@ -3986,6 +3995,14 @@ mod tests {
         assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Text, true));
         assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Json, false));
         assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Ndjson, false));
+    }
+
+    #[test]
+    fn structured_browser_failures_skip_domain_payload_before_root_error() {
+        assert!(browser_command_payload_should_emit(BrowserOutputMode::Text, false));
+        assert!(browser_command_payload_should_emit(BrowserOutputMode::Json, true));
+        assert!(!browser_command_payload_should_emit(BrowserOutputMode::Json, false));
+        assert!(!browser_command_payload_should_emit(BrowserOutputMode::Ndjson, false));
     }
 
     #[test]
