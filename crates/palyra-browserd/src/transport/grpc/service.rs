@@ -33,6 +33,15 @@ fn observe_byte_limit(requested: u64, session_limit: u64) -> usize {
     usize::try_from(limit).unwrap_or(usize::MAX)
 }
 
+fn request_timeout_ms(requested: u64, session_limit: u64) -> u64 {
+    let limit = session_limit.max(1);
+    if requested == 0 {
+        limit
+    } else {
+        requested.max(1).min(limit)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ObserveInclusions {
     include_dom_snapshot: bool,
@@ -1033,7 +1042,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             };
             session.last_active = Instant::now();
             let timeout_ms =
-                payload.timeout_ms.max(1).min(session.budget.max_navigation_timeout_ms);
+                request_timeout_ms(payload.timeout_ms, session.budget.max_navigation_timeout_ms);
             let cookie_header = cookie_header_for_url(session, url.as_str());
             (
                 timeout_ms,
@@ -1187,7 +1196,8 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             }
         };
 
-        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let timeout_ms =
+            request_timeout_ms(payload.timeout_ms, context.budget.max_action_timeout_ms);
         let max_attempts = payload.max_retries.clamp(0, 16).saturating_add(1);
         let started_at_unix_ms = current_unix_ms();
         let (success, outcome, error, attempts) = match self.runtime.engine_mode {
@@ -1374,7 +1384,8 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             }));
         }
 
-        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let timeout_ms =
+            request_timeout_ms(payload.timeout_ms, context.budget.max_action_timeout_ms);
         let started_at_unix_ms = current_unix_ms();
         let (success, outcome, error, attempts) = match self.runtime.engine_mode {
             BrowserEngineMode::Simulated => {
@@ -1518,7 +1529,8 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             }
         };
 
-        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let timeout_ms =
+            request_timeout_ms(payload.timeout_ms, context.budget.max_action_timeout_ms);
         let started_at_unix_ms = current_unix_ms();
         let (success, outcome, error, attempts) = match self.runtime.engine_mode {
             BrowserEngineMode::Simulated => (true, "pressed".to_owned(), String::new(), 1),
@@ -1607,7 +1619,8 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             }
         };
 
-        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let timeout_ms =
+            request_timeout_ms(payload.timeout_ms, context.budget.max_action_timeout_ms);
         let started_at_unix_ms = current_unix_ms();
         let (success, outcome, error, attempts) = match self.runtime.engine_mode {
             BrowserEngineMode::Simulated => {
@@ -1745,7 +1758,8 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 }));
             }
         };
-        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let timeout_ms =
+            request_timeout_ms(payload.timeout_ms, context.budget.max_action_timeout_ms);
         let duration_ms = payload.duration_ms.max(500);
         let started_at_unix_ms = current_unix_ms();
         let (success, outcome, error, attempts) = match self.runtime.engine_mode {
@@ -1943,7 +1957,8 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             }
         };
 
-        let timeout_ms = payload.timeout_ms.max(1).min(context.budget.max_action_timeout_ms);
+        let timeout_ms =
+            request_timeout_ms(payload.timeout_ms, context.budget.max_action_timeout_ms);
         let poll_interval_ms = payload.poll_interval_ms.clamp(25, 1_000);
         let started_at_unix_ms = current_unix_ms();
         let (success, matched_selector, matched_text, attempts, waited_ms, error) =
@@ -2731,7 +2746,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 session.active_tab_id = created_tab_id.clone();
             }
             let timeout_ms =
-                payload.timeout_ms.max(1).min(session.budget.max_navigation_timeout_ms);
+                request_timeout_ms(payload.timeout_ms, session.budget.max_navigation_timeout_ms);
             let max_response_bytes = session.budget.max_response_bytes;
             let allow_private_targets = if relay_private_target_block {
                 false
@@ -3342,7 +3357,9 @@ fn request_principal(metadata: &tonic::metadata::MetadataMap) -> Result<&str, St
 
 #[cfg(test)]
 mod tests {
-    use super::{observe_byte_limit, resolve_observe_inclusions, ObserveInclusions};
+    use super::{
+        observe_byte_limit, request_timeout_ms, resolve_observe_inclusions, ObserveInclusions,
+    };
 
     #[test]
     fn observe_byte_limit_uses_session_budget_for_default_zero() {
@@ -3358,6 +3375,22 @@ mod tests {
     #[test]
     fn observe_byte_limit_remains_non_zero() {
         assert_eq!(observe_byte_limit(0, 0), 1);
+    }
+
+    #[test]
+    fn request_timeout_uses_session_budget_for_default_zero() {
+        assert_eq!(request_timeout_ms(0, 10_000), 10_000);
+    }
+
+    #[test]
+    fn request_timeout_clamps_explicit_request_to_session_budget() {
+        assert_eq!(request_timeout_ms(25_000, 10_000), 10_000);
+        assert_eq!(request_timeout_ms(500, 10_000), 500);
+    }
+
+    #[test]
+    fn request_timeout_remains_non_zero() {
+        assert_eq!(request_timeout_ms(0, 0), 1);
     }
 
     #[test]
