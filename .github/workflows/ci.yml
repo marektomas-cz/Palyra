@@ -162,7 +162,7 @@ jobs:
 
       - name: Upload workflow regression artifact
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: workflow-regression-fast
           path: target/release-artifacts/workflow-regression
@@ -271,7 +271,7 @@ jobs:
 
       - name: Upload CLI parity artifact
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: cli-parity-acceptance-matrix
           path: artifacts/cli-parity-acceptance-matrix.md

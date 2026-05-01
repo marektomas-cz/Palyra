@@ -45,7 +45,7 @@ jobs:
 
       - name: Upload workflow regression artifact
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: workflow-regression-full
           path: target/release-artifacts/workflow-regression
@@ -93,7 +93,7 @@ jobs:
 
       - name: Upload release smoke artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-smoke-${{ matrix.os }}
           path: target/release-artifacts/smoke
