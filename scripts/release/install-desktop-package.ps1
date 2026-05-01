@@ -54,6 +54,15 @@ try {
     }
 
     if ($null -ne $resolvedConfigPath) {
+        Remove-Item Env:PALYRA_CONFIG -ErrorAction SilentlyContinue
+        Invoke-CommandQuiet -Command $cliBinary -Arguments @(
+            "setup",
+            "--mode",
+            "local",
+            "--path",
+            $resolvedConfigPath,
+            "--force"
+        )
         $env:PALYRA_CONFIG = $resolvedConfigPath
     } else {
         Remove-Item Env:PALYRA_CONFIG -ErrorAction SilentlyContinue

@@ -226,6 +226,7 @@ function Invoke-CommandQuiet {
         [string[]]$Arguments = @()
     )
 
+    $PSNativeCommandUseErrorActionPreference = $false
     $output = @(& $Command @Arguments 2>&1)
     $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
     if ($exitCode -ne 0) {
@@ -615,10 +616,6 @@ function Ensure-PortableConfigFile {
     $configParent = Split-Path -Parent $resolvedConfigPath
     if (-not [string]::IsNullOrWhiteSpace($configParent)) {
         New-Item -ItemType Directory -Path $configParent -Force | Out-Null
-    }
-
-    if (-not (Test-Path -LiteralPath $resolvedConfigPath)) {
-        Set-Content -LiteralPath $resolvedConfigPath -Value "" -NoNewline
     }
 
     return $resolvedConfigPath
