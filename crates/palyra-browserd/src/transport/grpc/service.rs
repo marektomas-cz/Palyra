@@ -33,6 +33,32 @@ fn observe_byte_limit(requested: u64, session_limit: u64) -> usize {
     usize::try_from(limit).unwrap_or(usize::MAX)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObserveInclusions {
+    include_dom_snapshot: bool,
+    include_accessibility_tree: bool,
+    include_visible_text: bool,
+}
+
+fn resolve_observe_inclusions(
+    include_dom_snapshot: bool,
+    include_accessibility_tree: bool,
+    include_visible_text: bool,
+) -> ObserveInclusions {
+    if include_dom_snapshot || include_accessibility_tree || include_visible_text {
+        return ObserveInclusions {
+            include_dom_snapshot,
+            include_accessibility_tree,
+            include_visible_text,
+        };
+    }
+    ObserveInclusions {
+        include_dom_snapshot: true,
+        include_accessibility_tree: true,
+        include_visible_text: true,
+    }
+}
+
 #[tonic::async_trait]
 impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
     async fn health(
@@ -2152,23 +2178,14 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         let mut payload = request.into_inner();
         let session_id = parse_session_id_from_proto(payload.session_id.take())
             .map_err(Status::invalid_argument)?;
-        let include_dom_snapshot = if payload.include_dom_snapshot
-            || payload.include_accessibility_tree
-            || payload.include_visible_text
-        {
-            payload.include_dom_snapshot
-        } else {
-            true
-        };
-        let include_accessibility_tree = if payload.include_dom_snapshot
-            || payload.include_accessibility_tree
-            || payload.include_visible_text
-        {
-            payload.include_accessibility_tree
-        } else {
-            true
-        };
-        let include_visible_text = payload.include_visible_text;
+        let inclusions = resolve_observe_inclusions(
+            payload.include_dom_snapshot,
+            payload.include_accessibility_tree,
+            payload.include_visible_text,
+        );
+        let include_dom_snapshot = inclusions.include_dom_snapshot;
+        let include_accessibility_tree = inclusions.include_accessibility_tree;
+        let include_visible_text = inclusions.include_visible_text;
 
         let (
             active_tab_id,
@@ -3325,7 +3342,7 @@ fn request_principal(metadata: &tonic::metadata::MetadataMap) -> Result<&str, St
 
 #[cfg(test)]
 mod tests {
-    use super::observe_byte_limit;
+    use super::{observe_byte_limit, resolve_observe_inclusions, ObserveInclusions};
 
     #[test]
     fn observe_byte_limit_uses_session_budget_for_default_zero() {
@@ -3341,5 +3358,29 @@ mod tests {
     #[test]
     fn observe_byte_limit_remains_non_zero() {
         assert_eq!(observe_byte_limit(0, 0), 1);
+    }
+
+    #[test]
+    fn observe_defaults_include_visible_text_for_bare_snapshot() {
+        assert_eq!(
+            resolve_observe_inclusions(false, false, false),
+            ObserveInclusions {
+                include_dom_snapshot: true,
+                include_accessibility_tree: true,
+                include_visible_text: true,
+            }
+        );
+    }
+
+    #[test]
+    fn observe_inclusions_preserve_explicit_component_selection() {
+        assert_eq!(
+            resolve_observe_inclusions(true, false, false),
+            ObserveInclusions {
+                include_dom_snapshot: true,
+                include_accessibility_tree: false,
+                include_visible_text: false,
+            }
+        );
     }
 }
