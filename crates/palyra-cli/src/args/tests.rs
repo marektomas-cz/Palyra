@@ -4850,6 +4850,7 @@ fn parse_models_set_embeddings() {
             command: ModelsCommand::SetEmbeddings {
                 model: "text-embedding-3-small".to_owned(),
                 dims: Some(1536),
+                allow_custom: false,
                 path: Some("custom.toml".to_owned()),
                 backups: 5,
                 json: true,

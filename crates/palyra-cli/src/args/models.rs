@@ -63,6 +63,8 @@ pub enum ModelsCommand {
         #[arg(long, default_value_t = 5)]
         backups: usize,
         #[arg(long, default_value_t = false)]
+        allow_custom: bool,
+        #[arg(long, default_value_t = false)]
         json: bool,
     },
     #[command(about = "Set the default embeddings model")]
@@ -74,6 +76,8 @@ pub enum ModelsCommand {
         path: Option<String>,
         #[arg(long, default_value_t = 5)]
         backups: usize,
+        #[arg(long, default_value_t = false)]
+        allow_custom: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },

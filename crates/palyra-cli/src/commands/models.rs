@@ -275,12 +275,13 @@ pub(crate) fn run_models(command: ModelsCommand) -> Result<()> {
             let payload = explain_models_routing(path, model, json_mode, vision)?;
             emit_models_explain(&payload, output::preferred_json(json))
         }
-        ModelsCommand::Set { model, path, backups, json } => {
-            let payload = mutate_model_defaults(path, backups, "text", model, None)?;
+        ModelsCommand::Set { model, path, backups, allow_custom, json } => {
+            let payload = mutate_model_defaults(path, backups, "text", model, None, allow_custom)?;
             emit_models_mutation(&payload, output::preferred_json(json))
         }
-        ModelsCommand::SetEmbeddings { model, dims, path, backups, json } => {
-            let payload = mutate_model_defaults(path, backups, "embeddings", model, dims)?;
+        ModelsCommand::SetEmbeddings { model, dims, path, backups, allow_custom, json } => {
+            let payload =
+                mutate_model_defaults(path, backups, "embeddings", model, dims, allow_custom)?;
             emit_models_mutation(&payload, output::preferred_json(json))
         }
     }
@@ -519,6 +520,7 @@ pub(crate) fn mutate_model_defaults(
     target: &'static str,
     model: String,
     dims: Option<u32>,
+    allow_custom: bool,
 ) -> Result<ModelsMutationPayload> {
     let path = resolve_config_path(path, false)?;
     let path_ref = Path::new(&path);
@@ -547,6 +549,10 @@ pub(crate) fn mutate_model_defaults(
                 .context("invalid config key path: model_provider.openai_base_url")?;
             }
         }
+    }
+
+    if !allow_custom {
+        validate_model_mutation_selection(path.as_str(), &document, target, model.as_str())?;
     }
 
     match target {
@@ -595,6 +601,104 @@ pub(crate) fn mutate_model_defaults(
         embeddings_dims: dims,
         backups,
     })
+}
+
+fn validate_model_mutation_selection(
+    path: &str,
+    document: &toml::Value,
+    target: &'static str,
+    model: &str,
+) -> Result<()> {
+    let normalized = normalize_optional_text(model)
+        .ok_or_else(|| anyhow::anyhow!("invalid {target} model id: model id must not be empty"))?;
+    let role = model_role_for_target(target)?;
+    let root_config = parse_root_file_config(document)?;
+    let model_provider = root_config.model_provider.unwrap_or_default();
+    let has_registry = model_provider.providers.is_some() || model_provider.models.is_some();
+    let (_, models) = registry_views_from_config(&model_provider);
+
+    let configured_matches = models
+        .iter()
+        .any(|entry| entry.enabled && entry.role == role && entry.model_id.as_str() == normalized);
+    if configured_matches {
+        return Ok(());
+    }
+
+    if has_registry {
+        anyhow::bail!(
+            "invalid {target} model id '{normalized}': model is absent from enabled configured {role} models; run `palyra models list --json` to inspect configured models or rerun with `--allow-custom` only for an intentional unsafe provider override"
+        );
+    }
+
+    if curated_models_for_target(target).contains(&normalized) {
+        return Ok(());
+    }
+
+    if let Some(cache_validation) =
+        validate_model_against_discovery_cache(path, target, normalized)?
+    {
+        return cache_validation;
+    }
+
+    anyhow::bail!(
+        "invalid {target} model id '{normalized}': model is not configured or known from live discovery; run `palyra models discover --refresh --json` before selecting a provider-advertised model, or rerun with `--allow-custom` only for an intentional unsafe provider override"
+    );
+}
+
+fn validate_model_against_discovery_cache(
+    path: &str,
+    target: &'static str,
+    model: &str,
+) -> Result<Option<Result<()>>> {
+    let overview = load_models_overview(Some(path.to_owned()))?;
+    let provider_targets = build_probeable_providers(&overview)?;
+    let cache = load_provider_checks_cache()?;
+    let now_unix_ms = unix_timestamp_ms()?;
+    let mut verified_models = Vec::new();
+
+    for target in provider_targets {
+        for mode in ["discover", "test_connection"] {
+            let cache_key = provider_check_cache_key(mode, &target);
+            let Some(cached) = read_cached_provider_check(&cache, cache_key.as_str(), now_unix_ms)
+            else {
+                continue;
+            };
+            if !cached.live_discovery_verified {
+                continue;
+            }
+            if cached.discovered_model_ids.iter().any(|candidate| candidate == model) {
+                return Ok(Some(Ok(())));
+            }
+            verified_models.extend(cached.discovered_model_ids);
+        }
+    }
+
+    verified_models.sort();
+    verified_models.dedup();
+    if verified_models.is_empty() {
+        return Ok(None);
+    }
+    let preview = verified_models.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+    let suffix = if verified_models.len() > 8 { ", ..." } else { "" };
+    Ok(Some(Err(anyhow::anyhow!(
+        "invalid {target} model id '{model}': model is absent from live-discovered provider models ({preview}{suffix}); rerun with `--allow-custom` only for an intentional unsafe provider override"
+    ))))
+}
+
+fn model_role_for_target(target: &str) -> Result<&'static str> {
+    match target {
+        "text" => Ok("chat"),
+        "embeddings" => Ok("embeddings"),
+        _ => anyhow::bail!("unsupported model target: {target}"),
+    }
+}
+
+fn curated_models_for_target(target: &str) -> &'static [&'static str] {
+    match target {
+        "text" => CURATED_TEXT_MODELS,
+        "embeddings" => CURATED_EMBEDDING_MODELS,
+        _ => &[],
+    }
 }
 
 fn legacy_provider_kind_for_mutation(document: &toml::Value) -> Result<String> {

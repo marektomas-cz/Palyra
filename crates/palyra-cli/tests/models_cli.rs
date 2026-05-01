@@ -293,6 +293,141 @@ enabled = true
 }
 
 #[test]
+fn models_set_rejects_chat_model_absent_from_live_discovery_cache() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let state_root = workdir.path().join("state");
+    fs::create_dir_all(&state_root)
+        .with_context(|| format!("failed to create {}", state_root.display()))?;
+    let server = MockProviderServer::spawn(vec![MockProviderResponse {
+        status_line: "200 OK",
+        body: r#"{"data":[{"id":"MiniMax-M2.7"},{"id":"MiniMax-M2.5"}]}"#,
+        expected_header: Some("authorization: Bearer sk-minimax-test".to_owned()),
+    }])?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "{base_url}"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key = "sk-minimax-test"
+"#,
+            base_url = server.base_url
+        ),
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let state_root_string = state_root.to_string_lossy().into_owned();
+
+    let discover = run_cli(
+        &workdir,
+        &[
+            "--state-root",
+            &state_root_string,
+            "models",
+            "discover",
+            "--path",
+            &config_path_string,
+            "--refresh",
+            "--json",
+        ],
+    )?;
+    assert!(
+        discover.status.success(),
+        "models discover should succeed before selection validation: {}",
+        String::from_utf8_lossy(&discover.stderr)
+    );
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "--state-root",
+            &state_root_string,
+            "models",
+            "set",
+            "definitely-not-a-real-model",
+            "--path",
+            &config_path_string,
+            "--json",
+        ],
+    )?;
+    assert!(!output.status.success(), "models set should reject an undiscovered model id");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "undiscovered model selection should be classified as validation"
+    );
+    let stderr = String::from_utf8(output.stderr).context("stderr was not valid UTF-8")?;
+    assert!(
+        stderr.contains("error[validation_error]"),
+        "stderr should classify the selection as validation: {stderr}"
+    );
+    assert!(
+        stderr.contains("live-discovered provider models") && stderr.contains("--allow-custom"),
+        "stderr should explain the live discovery guard and explicit override: {stderr}"
+    );
+    let config_body = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    assert!(
+        config_body.contains("anthropic_model = \"MiniMax-M2.7\""),
+        "rejected model selection must not mutate the config: {config_body}"
+    );
+    assert!(
+        !config_body.contains("definitely-not-a-real-model"),
+        "rejected model id must not be persisted: {config_body}"
+    );
+    server.finish()?;
+    Ok(())
+}
+
+#[test]
+fn models_set_allows_custom_chat_model_with_explicit_override() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        r#"
+version = 1
+[model_provider]
+kind = "openai_compatible"
+openai_model = "gpt-4.1-mini"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "models",
+            "set",
+            "operator-owned-custom-model",
+            "--path",
+            &config_path_string,
+            "--allow-custom",
+            "--json",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "explicit custom model override should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config_body = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    assert!(
+        config_body.contains("openai_model = \"operator-owned-custom-model\""),
+        "custom override should persist the requested model: {config_body}"
+    );
+    Ok(())
+}
+
+#[test]
 fn models_list_preserves_minimax_identity_for_legacy_anthropic_configs() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("palyra.toml");
