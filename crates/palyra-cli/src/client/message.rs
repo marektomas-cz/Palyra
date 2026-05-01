@@ -140,8 +140,21 @@ pub(crate) fn load_capabilities(
     device_id: String,
     channel: Option<String>,
 ) -> Result<MessageCapabilities> {
+    let status = load_connector_status(connector_id, url, token, principal, device_id, channel)?;
+    let provider_kind = connector_kind(&status).unwrap_or("unknown").to_owned();
+    Ok(capabilities_from_status(&status, provider_kind.as_str()))
+}
+
+fn load_connector_status(
+    connector_id: &str,
+    url: Option<String>,
+    token: Option<String>,
+    principal: String,
+    device_id: String,
+    channel: Option<String>,
+) -> Result<Value> {
     validate_message_connector_id(connector_id)?;
-    let status = resolve_connector_status(
+    resolve_connector_status(
         connector_id,
         url,
         token,
@@ -149,9 +162,7 @@ pub(crate) fn load_capabilities(
         device_id,
         channel,
         "failed to call channels status endpoint for message capabilities",
-    )?;
-    let provider_kind = connector_kind(&status).unwrap_or("unknown").to_owned();
-    Ok(capabilities_from_status(&status, provider_kind.as_str()))
+    )
 }
 
 pub(crate) fn validate_message_connector_id(connector_id: &str) -> Result<()> {
@@ -168,7 +179,7 @@ pub(crate) fn validate_message_connector_id(connector_id: &str) -> Result<()> {
 }
 
 pub(crate) fn send_message(options: MessageDispatchOptions) -> Result<Value> {
-    ensure_message_actions_supported(
+    let status = ensure_message_actions_supported(
         options.connector_id.as_str(),
         options.url.clone(),
         options.token.clone(),
@@ -177,6 +188,7 @@ pub(crate) fn send_message(options: MessageDispatchOptions) -> Result<Value> {
         options.channel.clone(),
         dispatch_action_names(&options),
     )?;
+    ensure_connector_can_send(options.connector_id.as_str(), &status)?;
     post_connector_action(
         options.connector_id.as_str(),
         "/test-send",
@@ -389,8 +401,10 @@ fn ensure_message_actions_supported(
     device_id: String,
     channel: Option<String>,
     actions: Vec<&'static str>,
-) -> Result<()> {
-    let capabilities = load_capabilities(connector_id, url, token, principal, device_id, channel)?;
+) -> Result<Value> {
+    let status = load_connector_status(connector_id, url, token, principal, device_id, channel)?;
+    let provider_kind = connector_kind(&status).unwrap_or("unknown").to_owned();
+    let capabilities = capabilities_from_status(&status, provider_kind.as_str());
     let unsupported = actions
         .into_iter()
         .filter_map(|action| {
@@ -401,7 +415,7 @@ fn ensure_message_actions_supported(
         })
         .collect::<Vec<_>>();
     if unsupported.is_empty() {
-        return Ok(());
+        return Ok(status);
     }
 
     let reasons = unsupported
@@ -410,6 +424,31 @@ fn ensure_message_actions_supported(
         .collect::<Vec<_>>()
         .join(", ");
     bail!("unsupported message capability for connector '{connector_id}': {reasons}")
+}
+
+fn ensure_connector_can_send(connector_id: &str, status: &Value) -> Result<()> {
+    let connector = status.get("connector").unwrap_or(status);
+    let enabled = connector.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let readiness = connector.get("readiness").and_then(Value::as_str).unwrap_or("unknown");
+    let liveness = connector.get("liveness").and_then(Value::as_str).unwrap_or("unknown");
+    if enabled && readiness == "ready" && liveness == "running" {
+        return Ok(());
+    }
+
+    let mut reasons = Vec::new();
+    if !enabled {
+        reasons.push("disabled".to_owned());
+    }
+    if readiness != "ready" {
+        reasons.push(format!("readiness={readiness}"));
+    }
+    if liveness != "running" {
+        reasons.push(format!("liveness={liveness}"));
+    }
+    bail!(
+        "precondition failed: connector '{connector_id}' cannot send outbound messages because {}; run `palyra channels status {connector_id}` and enable or configure the connector before retrying",
+        reasons.join(", ")
+    )
 }
 
 fn capabilities_from_status(status: &Value, provider_kind: &str) -> MessageCapabilities {
@@ -548,10 +587,10 @@ fn mutate_reaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        capabilities_from_status, validate_message_connector_id, MESSAGE_ACTION_DELETE,
-        MESSAGE_ACTION_EDIT, MESSAGE_ACTION_REACT_ADD, MESSAGE_ACTION_REACT_REMOVE,
-        MESSAGE_ACTION_READ, MESSAGE_ACTION_REPLY, MESSAGE_ACTION_SEARCH, MESSAGE_ACTION_SEND,
-        MESSAGE_ACTION_THREAD,
+        capabilities_from_status, ensure_connector_can_send, validate_message_connector_id,
+        MESSAGE_ACTION_DELETE, MESSAGE_ACTION_EDIT, MESSAGE_ACTION_REACT_ADD,
+        MESSAGE_ACTION_REACT_REMOVE, MESSAGE_ACTION_READ, MESSAGE_ACTION_REPLY,
+        MESSAGE_ACTION_SEARCH, MESSAGE_ACTION_SEND, MESSAGE_ACTION_THREAD,
     };
     use serde_json::{json, Value};
 
@@ -624,6 +663,41 @@ mod tests {
 
         assert!(capabilities.supported_actions.is_empty());
         assert_eq!(capabilities.unsupported_actions.len(), 9);
+    }
+
+    #[test]
+    fn send_preflight_rejects_disabled_or_unready_connectors() {
+        let status = json!({
+            "connector": {
+                "enabled": false,
+                "readiness": "missing_credential",
+                "liveness": "stopped"
+            }
+        });
+
+        let error = ensure_connector_can_send("discord:default", &status)
+            .expect_err("message send should fail before POSTing to disabled connectors");
+
+        let message = error.to_string();
+        assert!(message.contains("precondition failed"));
+        assert!(message.contains("disabled"));
+        assert!(message.contains("readiness=missing_credential"));
+        assert!(message.contains("liveness=stopped"));
+        assert!(message.contains("palyra channels status discord:default"));
+    }
+
+    #[test]
+    fn send_preflight_accepts_ready_running_connectors() {
+        let status = json!({
+            "connector": {
+                "enabled": true,
+                "readiness": "ready",
+                "liveness": "running"
+            }
+        });
+
+        ensure_connector_can_send("discord:default", &status)
+            .expect("ready running connectors should pass send preflight");
     }
 
     #[test]

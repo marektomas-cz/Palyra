@@ -2910,6 +2910,9 @@ fn channel_platform_error_response(error: channels::ChannelPlatformError) -> Res
         channels::ChannelPlatformError::InvalidInput(message) => {
             tonic::Status::invalid_argument(message.clone())
         }
+        channels::ChannelPlatformError::Precondition(message) => {
+            tonic::Status::failed_precondition(message.clone())
+        }
         channels::ChannelPlatformError::UnsupportedConnector(message) => {
             tonic::Status::failed_precondition(message.clone())
         }

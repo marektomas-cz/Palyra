@@ -75,6 +75,8 @@ pub enum ChannelPlatformError {
     Media(#[from] crate::media::MediaStoreError),
     #[error("invalid test message input: {0}")]
     InvalidInput(String),
+    #[error("channel precondition failed: {0}")]
+    Precondition(String),
     #[error("unsupported connector: {0}")]
     UnsupportedConnector(String),
 }

@@ -860,15 +860,50 @@ fn browser_channels_and_session_workflows_are_regression_tested() -> Result<()> 
         ],
         &browser_cli_env,
     )?;
-    let channel_verify_payload =
-        assert_json_success(channel_verify_output, "channels discord verify")?;
     assert!(
-        channel_verify_payload.get("dispatch").is_some(),
-        "channels discord verify should return dispatch payload"
+        !channel_verify_output.status.success(),
+        "channels discord verify should reject disabled connectors before enqueue"
+    );
+    let channel_verify_failure = format!(
+        "{}{}",
+        String::from_utf8_lossy(&channel_verify_output.stdout),
+        String::from_utf8_lossy(&channel_verify_output.stderr)
     );
     assert!(
-        channel_verify_payload.get("status").is_some(),
-        "channels discord verify should return status payload"
+        channel_verify_failure.contains("precondition_failed")
+            && channel_verify_failure.contains("cannot send outbound messages"),
+        "channels discord verify should report an actionable disabled-connector failure: {channel_verify_failure}"
+    );
+    let channel_status_after_verify_output = run_cli_json(
+        &workdir,
+        &[
+            "channels",
+            "discord",
+            "status",
+            "--url",
+            base_url.as_str(),
+            "--token",
+            ADMIN_TOKEN,
+            "--principal",
+            "admin:local",
+            "--device-id",
+            DEVICE_ID,
+            "--channel",
+            "cli",
+            "--json",
+        ],
+        &browser_cli_env,
+    )?;
+    let channel_status_after_verify_payload = assert_json_success(
+        channel_status_after_verify_output,
+        "channels discord status after rejected verify",
+    )?;
+    assert_eq!(
+        channel_status_after_verify_payload
+            .pointer("/connector/queue_depth/pending_outbox")
+            .and_then(Value::as_u64),
+        Some(0),
+        "rejected discord verify must not enqueue outbound work"
     );
     let browser_status_output = run_cli_json(
         &workdir,

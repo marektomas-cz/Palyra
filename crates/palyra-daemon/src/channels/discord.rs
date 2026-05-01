@@ -1,6 +1,7 @@
 use palyra_connectors::{
     providers::discord as shared, ConnectorInstanceRecord, ConnectorInstanceSpec, ConnectorKind,
-    ConnectorMessageRecord, OutboundMessageRequest,
+    ConnectorLiveness, ConnectorMessageRecord, ConnectorReadiness, ConnectorStatusSnapshot,
+    OutboundMessageRequest,
 };
 use ulid::Ulid;
 
@@ -82,6 +83,7 @@ impl ChannelPlatform {
                 status.kind.as_str()
             )));
         }
+        ensure_discord_test_send_dispatchable(&status)?;
 
         let text = request.text.trim();
         if text.is_empty() {
@@ -150,6 +152,33 @@ impl ChannelPlatform {
             in_reply_to_message_id: outbound.in_reply_to_message_id,
         })
     }
+}
+
+fn ensure_discord_test_send_dispatchable(
+    status: &ConnectorStatusSnapshot,
+) -> Result<(), ChannelPlatformError> {
+    if status.enabled
+        && status.readiness == ConnectorReadiness::Ready
+        && status.liveness == ConnectorLiveness::Running
+    {
+        return Ok(());
+    }
+
+    let mut reasons = Vec::new();
+    if !status.enabled {
+        reasons.push("disabled".to_owned());
+    }
+    if status.readiness != ConnectorReadiness::Ready {
+        reasons.push(format!("readiness={}", status.readiness.as_str()));
+    }
+    if status.liveness != ConnectorLiveness::Running {
+        reasons.push(format!("liveness={}", status.liveness.as_str()));
+    }
+    Err(ChannelPlatformError::Precondition(format!(
+        "connector '{}' cannot send outbound messages because {}; enable and configure the connector before retrying",
+        status.connector_id,
+        reasons.join(", ")
+    )))
 }
 
 const LOW_RISK_EDIT_WINDOW_MS: i64 = 15 * 60 * 1_000;
@@ -267,7 +296,8 @@ pub(crate) fn classify_discord_message_mutation_governance(
 #[cfg(test)]
 mod tests {
     use palyra_connectors::{
-        ConnectorKind, ConnectorLiveness, ConnectorMessageLocator, ConnectorReadiness,
+        providers::provider_capabilities, ConnectorAvailability, ConnectorKind, ConnectorLiveness,
+        ConnectorMessageLocator, ConnectorQueueDepth, ConnectorReadiness, ConnectorStatusSnapshot,
     };
 
     use super::*;
@@ -319,6 +349,52 @@ mod tests {
             attachments: Vec::new(),
             reactions: Vec::new(),
         }
+    }
+
+    fn sample_status(
+        enabled: bool,
+        readiness: ConnectorReadiness,
+        liveness: ConnectorLiveness,
+    ) -> ConnectorStatusSnapshot {
+        ConnectorStatusSnapshot {
+            connector_id: "discord:default".to_owned(),
+            kind: ConnectorKind::Discord,
+            availability: ConnectorAvailability::Supported,
+            capabilities: provider_capabilities(ConnectorKind::Discord),
+            principal: "channel:discord:default".to_owned(),
+            enabled,
+            readiness,
+            liveness,
+            restart_count: 0,
+            queue_depth: ConnectorQueueDepth { pending_outbox: 0, dead_letters: 0 },
+            last_error: None,
+            last_inbound_unix_ms: None,
+            last_outbound_unix_ms: None,
+            updated_at_unix_ms: 1,
+        }
+    }
+
+    #[test]
+    fn discord_test_send_requires_dispatchable_connector_state() {
+        ensure_discord_test_send_dispatchable(&sample_status(
+            true,
+            ConnectorReadiness::Ready,
+            ConnectorLiveness::Running,
+        ))
+        .expect("ready running connector should accept test sends");
+
+        let error = ensure_discord_test_send_dispatchable(&sample_status(
+            false,
+            ConnectorReadiness::MissingCredential,
+            ConnectorLiveness::Stopped,
+        ))
+        .expect_err("disabled connector should reject test sends before enqueue");
+
+        let message = error.to_string();
+        assert!(message.contains("cannot send outbound messages"));
+        assert!(message.contains("disabled"));
+        assert!(message.contains("readiness=missing_credential"));
+        assert!(message.contains("liveness=stopped"));
     }
 
     #[test]
