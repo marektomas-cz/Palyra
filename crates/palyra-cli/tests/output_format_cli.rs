@@ -185,6 +185,12 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     )?;
     assert_eq!(skills_list.get("count").and_then(Value::as_u64), Some(0));
 
+    let skills_audit = parse_stdout_json(
+        run_cli(&workdir, &["--output-format", "json", "skills", "audit"])?,
+        "skills audit --output-format json",
+    )?;
+    assert_eq!(skills_audit.pointer("/summary/audited").and_then(Value::as_u64), Some(0));
+
     let support_bundle = parse_stdout_json(
         run_cli(
             &workdir,

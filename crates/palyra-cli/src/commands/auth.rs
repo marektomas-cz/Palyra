@@ -1121,6 +1121,7 @@ fn auth_credential_arg_to_control_plane(value: AuthCredentialArg) -> String {
 }
 
 fn emit_auth_runtime_payload(payload: Value, json_output: bool, label: &str) -> Result<()> {
+    let json_output = output::preferred_json(json_output);
     if json_output {
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -1146,6 +1147,7 @@ fn emit_auth_runtime_payload(payload: Value, json_output: bool, label: &str) -> 
 }
 
 fn emit_access_payload(payload: Value, json_output: bool) -> Result<()> {
+    let json_output = output::preferred_json(json_output);
     if json_output {
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());

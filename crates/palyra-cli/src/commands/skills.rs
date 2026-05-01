@@ -928,6 +928,7 @@ struct SkillAuditTarget {
 }
 
 fn run_skills_audit(command: SkillsAuditCommand) -> Result<()> {
+    let json_output = output::preferred_json(command.json);
     let trust_store_path = resolve_skills_trust_store_path(command.trust_store.as_deref())?;
     let mut store = load_trust_store_with_integrity(trust_store_path.as_path())?;
     for trusted in &command.trusted_publishers {
@@ -996,7 +997,7 @@ fn run_skills_audit(command: SkillsAuditCommand) -> Result<()> {
             },
             "message": "no installed skill artifacts were selected for audit",
         });
-        if command.json {
+        if json_output {
             println!("{}", serde_json::to_string_pretty(&output_payload)?);
         } else {
             println!(
@@ -1087,7 +1088,7 @@ fn run_skills_audit(command: SkillsAuditCommand) -> Result<()> {
     });
     let quarantine_required = reports.iter().any(|(_, report)| report.should_quarantine);
 
-    if command.json {
+    if json_output {
         println!("{}", serde_json::to_string_pretty(&output_payload)?);
     } else {
         for (target, report) in &reports {
