@@ -564,19 +564,19 @@ fn read_mcp_message(reader: &mut dyn BufRead) -> Result<Option<Value>> {
             anyhow::bail!("invalid MCP header line `{trimmed}`");
         };
         if name.eq_ignore_ascii_case("content-length") {
-            content_length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .with_context(|| format!("invalid Content-Length value `{}`", value.trim()))?,
-            );
+            content_length = Some(value.trim().parse::<usize>().with_context(|| {
+                format!("invalid MCP input: invalid Content-Length value `{}`", value.trim())
+            })?);
         }
     }
-    let content_length = content_length.context("missing Content-Length header")?;
+    let content_length =
+        content_length.context("invalid MCP input: missing Content-Length header")?;
     let mut payload = vec![0_u8; content_length];
-    reader.read_exact(payload.as_mut_slice()).context("failed to read framed MCP payload")?;
+    reader
+        .read_exact(payload.as_mut_slice())
+        .context("invalid MCP input: failed to read framed MCP payload")?;
     serde_json::from_slice::<Value>(payload.as_slice())
-        .context("failed to parse MCP JSON payload")
+        .context("invalid MCP input: failed to parse MCP JSON payload")
         .map(Some)
 }
 
@@ -1193,6 +1193,8 @@ fn normalize_optional_text(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::output::{classify_error, CliExitCode};
+
     use super::*;
 
     struct TestBackend {
@@ -1262,5 +1264,17 @@ mod tests {
             .expect("frame should parse")
             .expect("message should exist");
         assert_eq!(parsed, body);
+    }
+
+    #[test]
+    fn blank_frame_without_content_length_is_validation_error() {
+        let mut cursor = std::io::Cursor::new(b"\r\n".to_vec());
+        let error =
+            read_mcp_message(&mut cursor).expect_err("blank frame should require Content-Length");
+        let message = error.to_string();
+
+        assert_eq!(classify_error(&error), CliExitCode::Validation);
+        assert!(message.contains("invalid MCP input"));
+        assert!(message.contains("missing Content-Length header"));
     }
 }
