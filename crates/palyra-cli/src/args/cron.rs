@@ -48,7 +48,11 @@ pub enum CronCommand {
             help = "Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every"
         )]
         schedule: String,
-        #[arg(long, default_value_t = true)]
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Create the scheduled job enabled immediately; omitted jobs are created disabled"
+        )]
         enabled: bool,
         #[arg(long, value_enum, default_value_t = CronConcurrencyPolicyArg::Forbid)]
         concurrency: CronConcurrencyPolicyArg,

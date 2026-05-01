@@ -1494,6 +1494,45 @@ fn parse_cron_add() {
 }
 
 #[test]
+fn parse_cron_add_defaults_to_disabled() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "cron",
+        "add",
+        "--name",
+        "Draft summary",
+        "--prompt",
+        "Summarize status",
+        "--schedule-type",
+        "every",
+        "--schedule",
+        "1h",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Cron {
+            command: CronCommand::Add {
+                name: "Draft summary".to_owned(),
+                prompt: "Summarize status".to_owned(),
+                schedule_type: CronScheduleTypeArg::Every,
+                schedule: "1h".to_owned(),
+                enabled: false,
+                concurrency: CronConcurrencyPolicyArg::Forbid,
+                retry_max_attempts: 1,
+                retry_backoff_ms: 1000,
+                misfire: CronMisfirePolicyArg::Skip,
+                jitter_ms: 0,
+                owner: None,
+                channel: None,
+                session_key: None,
+                session_label: None,
+                json: false,
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_cron_update() {
     let parsed = Cli::parse_from([
         "palyra",
