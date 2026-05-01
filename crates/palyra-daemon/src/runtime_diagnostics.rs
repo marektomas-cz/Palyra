@@ -773,9 +773,24 @@ fn memory_health_component(memory_payload: &Value) -> RuntimeHealthComponentSnap
                 .count()
         })
         .unwrap_or_default();
+    let embeddings_degraded = memory_embeddings_degraded(memory_payload);
+    let embeddings_degraded_reason = memory_payload
+        .pointer("/embeddings/degraded_reason_code")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty());
     let mut reasons = Vec::new();
     if degraded_providers > 0 {
         reasons.push("memory.providers_degraded".to_owned());
+    }
+    if embeddings_degraded {
+        reasons.push("memory.embeddings_degraded".to_owned());
+        if let Some(reason) = embeddings_degraded_reason {
+            reasons.push(format!("memory.embeddings_{reason}"));
+        }
+    }
+    let mut repair_hints = vec!["run_memory_reindex_or_inspect_retrieval".to_owned()];
+    if embeddings_degraded {
+        repair_hints.push("configure_memory_embeddings_model".to_owned());
     }
     component(
         "memory",
@@ -784,11 +799,28 @@ fn memory_health_component(memory_payload: &Value) -> RuntimeHealthComponentSnap
         metrics(&[
             ("provider_count", provider_count as u64),
             ("degraded_provider_count", degraded_providers as u64),
+            ("embeddings_degraded", u64::from(embeddings_degraded)),
             ("entries", read_u64(memory_payload, "/usage/entries")),
             ("bytes", read_u64(memory_payload, "/usage/bytes")),
         ]),
-        vec!["run_memory_reindex_or_inspect_retrieval".to_owned()],
+        repair_hints,
     )
+}
+
+fn memory_embeddings_degraded(memory_payload: &Value) -> bool {
+    let posture = memory_payload.pointer("/embeddings/posture").and_then(Value::as_str);
+    if posture == Some("explicit_hash_fallback") {
+        return false;
+    }
+    if memory_payload.pointer("/embeddings/production_default_active").and_then(Value::as_bool)
+        == Some(false)
+    {
+        return true;
+    }
+    if posture.is_some_and(|value| value.starts_with("degraded")) {
+        return true;
+    }
+    memory_payload.pointer("/embeddings/mode").and_then(Value::as_str) == Some("hash_fallback")
 }
 
 fn jobs_health_component(
@@ -1135,6 +1167,46 @@ mod tests {
         assert_eq!(payload["status"], "degraded");
         assert_eq!(payload["observed"]["stale_tool_jobs"], 1);
         assert_eq!(payload["diagnostic_event"]["destructive_recovery_requires_policy"], true);
+    }
+
+    #[test]
+    fn memory_health_component_reports_embeddings_degradation() {
+        let component = memory_health_component(&json!({
+            "embeddings": {
+                "mode": "hash_fallback",
+                "posture": "degraded_config_fallback",
+                "production_default_active": false,
+                "degraded_reason_code": "embeddings_model_not_configured"
+            },
+            "providers": [],
+            "usage": { "entries": 3, "bytes": 128 }
+        }));
+
+        assert_eq!(component.status, RuntimeHealthStatus::Degraded);
+        assert!(component.reason_codes.contains(&"memory.embeddings_degraded".to_owned()));
+        assert!(component
+            .reason_codes
+            .contains(&"memory.embeddings_embeddings_model_not_configured".to_owned()));
+        assert_eq!(component.metrics.get("embeddings_degraded"), Some(&1_u64));
+        assert!(component.repair_hints.contains(&"configure_memory_embeddings_model".to_owned()));
+    }
+
+    #[test]
+    fn memory_health_component_allows_explicit_hash_fallback() {
+        let component = memory_health_component(&json!({
+            "embeddings": {
+                "mode": "hash_fallback",
+                "posture": "explicit_hash_fallback",
+                "production_default_active": false,
+                "degraded_reason_code": "explicit_hash_fallback"
+            },
+            "providers": [],
+            "usage": { "entries": 0, "bytes": 0 }
+        }));
+
+        assert_eq!(component.status, RuntimeHealthStatus::Healthy);
+        assert!(!component.reason_codes.contains(&"memory.embeddings_degraded".to_owned()));
+        assert_eq!(component.metrics.get("embeddings_degraded"), Some(&0_u64));
     }
 
     #[test]

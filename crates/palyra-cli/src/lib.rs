@@ -102,7 +102,10 @@ use palyra_common::{
         parse_toml_value_literal, recover_config_from_backup, serialize_document_pretty,
         set_value_at_path, unset_value_at_path, write_document_with_backups, ConfigMigrationInfo,
     },
-    daemon_config_schema::{is_secret_config_path, redact_secret_config_values, RootFileConfig},
+    daemon_config_schema::{
+        is_secret_config_path, redact_secret_config_values, FileModelProviderConfig,
+        FileModelProviderRegistryEntry, FileModelProviderRegistryModel, RootFileConfig,
+    },
     default_config_search_paths, parse_config_path, parse_daemon_bind_socket,
     redaction::{
         is_sensitive_key, redact_auth_error, redact_url, redact_url_segments_in_text, REDACTED,
@@ -7779,13 +7782,91 @@ fn memory_embeddings_model_configured(parsed: &RootFileConfig) -> bool {
     let Some(provider) = parsed.model_provider.as_ref() else {
         return true;
     };
-    let kind = provider.kind.as_deref().unwrap_or("deterministic").trim().to_ascii_lowercase();
-    let is_openai_compatible =
-        kind == "openai_compatible" || kind == "openai-compatible" || kind == "openai";
-    if !is_openai_compatible {
+
+    if let Some(model_id) = provider
+        .default_embeddings_model_id
+        .as_deref()
+        .filter(|model_id| config_string_present(Some(model_id)))
+    {
+        return embeddings_model_has_openai_compatible_provider(provider, model_id);
+    }
+
+    if config_string_present(provider.openai_embeddings_model.as_deref()) {
+        return model_provider_kind_openai_compatible(provider.kind.as_deref());
+    }
+
+    if model_provider_kind_deterministic(provider.kind.as_deref())
+        && provider.providers.as_ref().is_none_or(Vec::is_empty)
+        && provider.models.as_ref().is_none_or(Vec::is_empty)
+    {
         return true;
     }
-    provider.openai_embeddings_model.as_ref().map(|value| !value.trim().is_empty()).unwrap_or(false)
+
+    false
+}
+
+fn embeddings_model_has_openai_compatible_provider(
+    provider: &FileModelProviderConfig,
+    model_id: &str,
+) -> bool {
+    let Some(model) = provider
+        .models
+        .as_deref()
+        .and_then(|models| find_enabled_embeddings_model(models, model_id))
+    else {
+        return model_provider_kind_openai_compatible(provider.kind.as_deref());
+    };
+    let Some(provider_id) =
+        model.provider_id.as_deref().filter(|value| config_string_present(Some(value)))
+    else {
+        return false;
+    };
+
+    provider.providers.as_deref().is_some_and(|providers| {
+        providers.iter().any(|entry| {
+            registry_entry_enabled(entry)
+                && entry.provider_id.as_deref() == Some(provider_id)
+                && model_provider_kind_openai_compatible(entry.kind.as_deref())
+        })
+    })
+}
+
+fn find_enabled_embeddings_model<'a>(
+    models: &'a [FileModelProviderRegistryModel],
+    model_id: &str,
+) -> Option<&'a FileModelProviderRegistryModel> {
+    models.iter().find(|model| {
+        model.enabled.unwrap_or(true)
+            && model.model_id.as_deref() == Some(model_id)
+            && model_registry_entry_is_embeddings(model)
+    })
+}
+
+fn registry_entry_enabled(entry: &FileModelProviderRegistryEntry) -> bool {
+    entry.enabled.unwrap_or(true)
+}
+
+fn model_registry_entry_is_embeddings(model: &FileModelProviderRegistryModel) -> bool {
+    model.embeddings.unwrap_or(false)
+        || model
+            .role
+            .as_deref()
+            .is_some_and(|role| normalize_model_provider_kind(role) == "embeddings")
+}
+
+fn model_provider_kind_openai_compatible(kind: Option<&str>) -> bool {
+    matches!(
+        normalize_model_provider_kind(kind.unwrap_or("deterministic")).as_str(),
+        "openai" | "openai_compatible"
+    )
+}
+
+fn model_provider_kind_deterministic(kind: Option<&str>) -> bool {
+    normalize_model_provider_kind(kind.unwrap_or("deterministic")) == "deterministic"
+}
+
+fn normalize_model_provider_kind(value: &str) -> String {
+    value.trim().replace('-', "_").to_ascii_lowercase()
 }
 
 fn process_runner_tier_b_allowlist_config_ok() -> bool {
@@ -9476,6 +9557,80 @@ openai_embeddings_model = "text-embedding-3-small"
         assert!(
             memory_embeddings_model_configured(&parsed),
             "doctor check should pass when embeddings model is configured"
+        );
+    }
+
+    #[test]
+    fn memory_embeddings_model_check_warns_for_non_embedding_provider() {
+        let parsed: RootFileConfig = toml::from_str(
+            r#"
+[model_provider]
+kind = "anthropic"
+anthropic_model = "MiniMax-M2.7"
+"#,
+        )
+        .expect("fixture config should parse");
+        assert!(
+            !memory_embeddings_model_configured(&parsed),
+            "chat-only non-embedding providers should surface memory hash fallback in doctor"
+        );
+    }
+
+    #[test]
+    fn memory_embeddings_model_check_accepts_registry_openai_embeddings_provider() {
+        let parsed: RootFileConfig = toml::from_str(
+            r#"
+[model_provider]
+kind = "anthropic"
+anthropic_model = "MiniMax-M2.7"
+default_embeddings_model_id = "text-embedding-3-small"
+
+[[model_provider.providers]]
+provider_id = "openai-embeddings"
+kind = "openai_compatible"
+enabled = true
+api_key_vault_ref = "vault://models/openai"
+
+[[model_provider.models]]
+model_id = "text-embedding-3-small"
+provider_id = "openai-embeddings"
+role = "embeddings"
+enabled = true
+"#,
+        )
+        .expect("fixture config should parse");
+        assert!(
+            memory_embeddings_model_configured(&parsed),
+            "doctor check should pass when registry points embeddings at an OpenAI-compatible provider"
+        );
+    }
+
+    #[test]
+    fn memory_embeddings_model_check_rejects_registry_non_embedding_provider() {
+        let parsed: RootFileConfig = toml::from_str(
+            r#"
+[model_provider]
+kind = "anthropic"
+anthropic_model = "MiniMax-M2.7"
+default_embeddings_model_id = "claude-embedding"
+
+[[model_provider.providers]]
+provider_id = "anthropic-primary"
+kind = "anthropic"
+enabled = true
+api_key_vault_ref = "vault://models/anthropic"
+
+[[model_provider.models]]
+model_id = "claude-embedding"
+provider_id = "anthropic-primary"
+role = "embeddings"
+enabled = true
+"#,
+        )
+        .expect("fixture config should parse");
+        assert!(
+            !memory_embeddings_model_configured(&parsed),
+            "doctor check should not treat non-OpenAI-compatible registry providers as production embeddings"
         );
     }
 
