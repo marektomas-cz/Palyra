@@ -106,6 +106,7 @@ pub struct SandboxProcessRunError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxProcessRunErrorKind {
     Disabled,
+    #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
     UnsupportedPlatform,
     InvalidInput,
     WorkspaceScopeDenied,
