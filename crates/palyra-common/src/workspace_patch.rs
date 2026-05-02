@@ -431,7 +431,7 @@ fn normalize_unified_diff_patch(patch: &str) -> Option<String> {
             (UnifiedDiffPath::DevNull, UnifiedDiffPath::Path(path)) => {
                 let (add_lines, next_index) =
                     collect_unified_add_file_lines(lines.as_slice(), index)?;
-                operations.push(render_openclaw_add_file(path.as_str(), add_lines.as_slice()));
+                operations.push(render_palyra_add_file(path.as_str(), add_lines.as_slice()));
                 index = next_index;
             }
             (UnifiedDiffPath::Path(path), UnifiedDiffPath::DevNull) => {
@@ -441,7 +441,7 @@ fn normalize_unified_diff_patch(patch: &str) -> Option<String> {
             }
             (UnifiedDiffPath::Path(_old_path), UnifiedDiffPath::Path(new_path)) => {
                 let (hunks, next_index) = collect_unified_update_hunks(lines.as_slice(), index)?;
-                operations.push(render_openclaw_update_file(new_path.as_str(), hunks.as_slice()));
+                operations.push(render_palyra_update_file(new_path.as_str(), hunks.as_slice()));
                 index = next_index;
             }
             (UnifiedDiffPath::DevNull, UnifiedDiffPath::DevNull) => return None,
@@ -559,7 +559,7 @@ fn is_unified_file_header(lines: &[&str], index: usize) -> bool {
         && lines.get(index.saturating_add(1)).is_some_and(|line| line.starts_with("+++ "))
 }
 
-fn render_openclaw_add_file(path: &str, lines: &[String]) -> String {
+fn render_palyra_add_file(path: &str, lines: &[String]) -> String {
     let mut output = format!("*** Add File: {path}");
     for line in lines {
         output.push('\n');
@@ -569,7 +569,7 @@ fn render_openclaw_add_file(path: &str, lines: &[String]) -> String {
     output
 }
 
-fn render_openclaw_update_file(path: &str, hunks: &[Vec<String>]) -> String {
+fn render_palyra_update_file(path: &str, hunks: &[Vec<String>]) -> String {
     let mut output = format!("*** Update File: {path}");
     for hunk in hunks {
         output.push_str("\n@@");
