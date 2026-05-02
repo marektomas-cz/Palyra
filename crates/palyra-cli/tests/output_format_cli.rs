@@ -179,15 +179,15 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     )?;
     assert!(docs_search.is_array(), "docs search should emit a JSON array: {docs_search}");
 
-    let secrets_list = parse_stdout_json(
+    let secrets_output = parse_stdout_json(
         run_cli(&workdir, &["--output-format", "json", "secrets", "list", "global"])?,
         "secrets list --output-format json",
     )?;
-    assert_eq!(secrets_list.get("scope").and_then(Value::as_str), Some("global"));
-    assert!(secrets_list.get("entries").and_then(Value::as_array).is_some());
+    assert_eq!(secrets_output.get("scope").and_then(Value::as_str), Some("global"));
+    assert!(secrets_output.get("entries").and_then(Value::as_array).is_some());
     assert!(
-        !secrets_list.to_string().contains("value_bytes"),
-        "secrets list JSON must not disclose secret lengths: {secrets_list}"
+        !secrets_output.to_string().contains("value_bytes"),
+        "secrets list JSON must not disclose secret lengths"
     );
 
     let policy_explain = parse_stdout_json(

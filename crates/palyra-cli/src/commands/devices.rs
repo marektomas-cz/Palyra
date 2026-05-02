@@ -92,14 +92,14 @@ fn emit_device_envelope(
 
     let device = &envelope.device;
     println!(
-        "{event} id={} client_kind={} status={} paired_at_unix_ms={} updated_at_unix_ms={} approval_id={} cert_expires_at_unix_ms={} revoked_reason={} revoked_at_unix_ms={} removed_at_unix_ms={}",
+        "{event} id={} client_kind={} status={} paired_at_unix_ms={} updated_at_unix_ms={} approval_id={} cert_expires_at_known={} revoked_reason={} revoked_at_unix_ms={} removed_at_unix_ms={}",
         device.device_id,
         device.client_kind,
         device.status,
         device.paired_at_unix_ms,
         device.updated_at_unix_ms,
         text_or_none(device.approval_id.as_str()),
-        option_i64_text(device.current_certificate_expires_at_unix_ms),
+        device.current_certificate_expires_at_unix_ms.is_some(),
         option_text(device.revoked_reason.as_deref()),
         option_i64_text(device.revoked_at_unix_ms),
         option_i64_text(device.removed_at_unix_ms),

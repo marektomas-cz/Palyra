@@ -238,11 +238,11 @@ fn secrets_explain_accepts_vault_reference_from_list() -> Result<()> {
     );
     assert!(
         !explain_stdout.contains("value_bytes"),
-        "secrets explain must not disclose raw secret lengths: {explain_stdout}"
+        "secrets explain must not disclose raw secret lengths"
     );
     assert!(
         !explain_stdout.contains("minimax-secret-value"),
-        "secrets explain must not reveal raw secret values: {explain_stdout}"
+        "secrets explain must not reveal raw secret values"
     );
     Ok(())
 }
