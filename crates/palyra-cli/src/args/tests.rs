@@ -4678,7 +4678,14 @@ fn parse_patch_apply_from_stdin() {
     let parsed = Cli::parse_from(["palyra", "patch", "apply", "--stdin", "--dry-run", "--json"]);
     assert_eq!(
         parsed.command,
-        Command::Patch { command: PatchCommand::Apply { stdin: true, dry_run: true, json: true } }
+        Command::Patch {
+            command: PatchCommand::Apply {
+                workspace_root: None,
+                stdin: true,
+                dry_run: true,
+                json: true
+            }
+        }
     );
 }
 

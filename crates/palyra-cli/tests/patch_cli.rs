@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context, Result};
@@ -6,6 +7,15 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 fn run_cli_with_stdin(workdir: &TempDir, args: &[&str], stdin_payload: &[u8]) -> Result<Output> {
+    run_cli_with_stdin_and_env(workdir, args, stdin_payload, &[])
+}
+
+fn run_cli_with_stdin_and_env(
+    workdir: &TempDir,
+    args: &[&str],
+    stdin_payload: &[u8],
+    extra_env: &[(&str, &Path)],
+) -> Result<Output> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_palyra"));
     command
         .current_dir(workdir.path())
@@ -18,6 +28,9 @@ fn run_cli_with_stdin(workdir: &TempDir, args: &[&str], stdin_payload: &[u8]) ->
         .env("HOME", workdir.path().join("home"))
         .env("LOCALAPPDATA", workdir.path().join("localappdata"))
         .env("APPDATA", workdir.path().join("appdata"));
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     let mut child =
         command.spawn().with_context(|| format!("failed to spawn palyra {}", args.join(" ")))?;
     let stdin = child.stdin.as_mut().context("palyra command stdin was not available")?;
@@ -61,6 +74,61 @@ fn patch_apply_json_parse_error_emits_single_validation_payload() -> Result<()> 
             .and_then(Value::as_str)
             .is_some_and(|value| { value.contains("patch parse error") }),
         "payload should include the parser failure: {payload}"
+    );
+    Ok(())
+}
+
+#[test]
+fn patch_apply_uses_configured_workspace_root_not_shell_cwd() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary shell cwd")?;
+    let state_root = workdir.path().join("state");
+    let config_path = state_root.join("config").join("palyra.toml");
+    let workspace_root = state_root.join("workspace");
+    std::fs::create_dir_all(config_path.parent().context("config parent missing")?)?;
+    std::fs::create_dir_all(workspace_root.as_path())?;
+    std::fs::write(
+        config_path.as_path(),
+        r#"
+[tool_call.process_runner]
+workspace_root = "workspace"
+"#,
+    )?;
+
+    let output = run_cli_with_stdin_and_env(
+        &workdir,
+        &["patch", "apply", "--stdin", "--json"],
+        b"*** Begin Patch\n*** Add File: e2e-cli/patch-test.txt\n+Palyra E2E patch smoke\n*** End Patch\n",
+        &[("PALYRA_CONFIG", config_path.as_path()), ("PALYRA_STATE_ROOT", state_root.as_path())],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "patch apply should succeed; stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).context("patch success stdout was not JSON")?;
+    assert_eq!(
+        payload.pointer("/files_touched/0/path").and_then(Value::as_str),
+        Some("e2e-cli/patch-test.txt")
+    );
+    let workspace_root_text = workspace_root.to_string_lossy();
+    assert!(
+        payload.get("workspace_roots").and_then(Value::as_array).is_some_and(|roots| roots
+            .iter()
+            .any(|root| {
+                root.as_str().is_some_and(|root| root == workspace_root_text.as_ref())
+            })),
+        "payload should expose the configured workspace root: {payload}"
+    );
+    assert!(
+        workspace_root.join("e2e-cli").join("patch-test.txt").is_file(),
+        "patch output should be under configured workspace root"
+    );
+    assert!(
+        !workdir.path().join("e2e-cli").join("patch-test.txt").exists(),
+        "patch output must not be written under shell cwd"
     );
     Ok(())
 }
