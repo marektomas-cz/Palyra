@@ -11,6 +11,7 @@ Options:
       --profile-id <PROFILE_ID>
       --private-profile
       --timeout-ms <TIMEOUT_MS>
+      --json
   -h, --help                     Print help
 
 Global Options:

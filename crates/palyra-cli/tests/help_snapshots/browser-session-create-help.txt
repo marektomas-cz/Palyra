@@ -13,6 +13,7 @@ Options:
       --persistence-id <PERSISTENCE_ID>
       --profile-id <PROFILE_ID>
       --private-profile
+      --json
   -h, --help                                   Print help
 
 Global Options:

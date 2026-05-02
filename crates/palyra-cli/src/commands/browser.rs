@@ -163,6 +163,7 @@ struct BrowserOpenArgs {
     profile_id: Option<String>,
     private_profile: bool,
     timeout_ms: Option<u64>,
+    json: bool,
 }
 
 struct BrowserTypeArgs {
@@ -231,6 +232,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             profile_id,
             private_profile,
             timeout_ms,
+            json,
         } => {
             run_browser_open(BrowserOpenArgs {
                 url,
@@ -241,6 +243,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
                 profile_id,
                 private_profile,
                 timeout_ms,
+                json,
             })
             .await
         }
@@ -767,6 +770,7 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
         profile_id,
         private_profile,
         timeout_ms,
+        json,
     } = args;
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
@@ -809,7 +813,7 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
         "session": create,
         "navigate": navigate,
     });
-    emit_browser_value(
+    emit_browser_value_with_json(
         &payload,
         format!(
             "browser.open session_id={} success={} final_url={} status_code={}",
@@ -819,6 +823,7 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
             payload.pointer("/navigate/status_code").and_then(Value::as_u64).unwrap_or(0)
         ),
         "failed to encode browser open output",
+        json,
     )?;
     ensure_browser_command_success("browser.open", navigate_success, navigate_error.as_str())
 }
@@ -836,6 +841,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
             persistence_id,
             profile_id,
             private_profile,
+            json,
         } => {
             let context =
                 client::control_plane::connect_admin_console(app::ConnectionOverrides::default())
@@ -859,7 +865,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 .context("failed to create browser session")?;
             let value = serde_json::to_value(&envelope)
                 .context("failed to encode browser session create output")?;
-            emit_browser_value(
+            emit_browser_value_with_json(
                 &value,
                 format!(
                     "browser.session.create session_id={} principal={} downloads_enabled={} persistence_enabled={} profile_id={}",
@@ -870,6 +876,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                     redacted_browser_identifier_text(envelope.profile_id.as_deref(), "profile")
                 ),
                 "failed to encode browser session create output",
+                json,
             )
         }
         BrowserSessionCommand::List { principal, limit, json } => {
@@ -918,11 +925,17 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
             let value = session_detail_value(&detail);
             let text = format!(
                 "browser.session.show session_id={} tabs={} private_targets={} downloads={} profile_id={}",
-                value.pointer("/summary/session_id").and_then(Value::as_str).unwrap_or("-"),
+                redacted_browser_identifier_text(
+                    value.pointer("/summary/session_id").and_then(Value::as_str),
+                    "session"
+                ),
                 value.pointer("/summary/tab_count").and_then(Value::as_u64).unwrap_or(0),
                 value.pointer("/summary/allow_private_targets").and_then(Value::as_bool).unwrap_or(false),
                 value.pointer("/summary/downloads_enabled").and_then(Value::as_bool).unwrap_or(false),
-                value.pointer("/summary/profile_id").and_then(Value::as_str).unwrap_or("-"),
+                redacted_browser_identifier_text(
+                    value.pointer("/summary/profile_id").and_then(Value::as_str),
+                    "profile"
+                ),
             );
             emit_browser_value(&value, text, "failed to encode browser session show output")
         }
@@ -3397,8 +3410,8 @@ fn browser_identifier_json_value(value: Option<&str>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn browser_session_handle_text(value: Option<&str>) -> &str {
-    value.filter(|candidate| !candidate.trim().is_empty()).unwrap_or("-")
+fn browser_session_handle_text(value: Option<&str>) -> String {
+    redacted_browser_identifier_text(value, "session")
 }
 
 fn normalize_session_scoped_output(value: &mut Value, requested_session_id: &str) {
@@ -3424,7 +3437,7 @@ fn normalize_session_scoped_output(value: &mut Value, requested_session_id: &str
     map.insert("session_id".to_owned(), Value::String(requested.to_owned()));
 }
 
-fn browser_canonical_session_handle_text(value: Option<&common_v1::CanonicalId>) -> &str {
+fn browser_canonical_session_handle_text(value: Option<&common_v1::CanonicalId>) -> String {
     browser_session_handle_text(value.map(|entry| entry.ulid.as_str()))
 }
 
@@ -4001,7 +4014,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_session_list_text_includes_reusable_session_id() {
+    fn browser_session_list_text_redacts_session_id() {
         let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         let line = format_browser_session_summary_text(&browser_v1::BrowserSessionSummary {
             session_id: Some(common_v1::CanonicalId { ulid: session_id.to_owned() }),
@@ -4012,9 +4025,9 @@ mod tests {
         });
 
         assert!(
-            line.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV")
-                && !line.contains("session_id=session-"),
-            "session list should print the canonical reusable session handle: {line}"
+            line.contains("session_id=session-")
+                && !line.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            "session list text should redact the canonical reusable session handle: {line}"
         );
     }
 
@@ -4048,15 +4061,15 @@ mod tests {
     }
 
     #[test]
-    fn session_scoped_text_keeps_requested_session_id_copyable() {
+    fn session_scoped_text_redacts_requested_session_id() {
         let requested = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         let text = format!(
             "browser.screenshot session_id={}",
             browser_session_handle_text(Some(requested))
         );
 
-        assert!(text.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"), "{text}");
-        assert!(!text.contains(" session_id=session-"), "{text}");
+        assert!(text.contains("session_id=session-"), "{text}");
+        assert!(!text.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"), "{text}");
         assert!(!text.contains("runtime_session_id="), "{text}");
     }
 

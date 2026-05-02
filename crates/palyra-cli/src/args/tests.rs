@@ -3672,6 +3672,7 @@ fn parse_browser_session_create() {
                     persistence_id: Some("profile-cache".to_owned()),
                     profile_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
                     private_profile: true,
+                    json: false,
                 },
             }
         }

@@ -48,6 +48,8 @@ pub enum BrowserCommand {
         private_profile: bool,
         #[arg(long)]
         timeout_ms: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Manage browser sessions")]
     Session {
@@ -317,6 +319,8 @@ pub enum BrowserSessionCommand {
         profile_id: Option<String>,
         #[arg(long, default_value_t = false)]
         private_profile: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "List active browser sessions")]
     List {
