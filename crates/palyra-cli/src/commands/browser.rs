@@ -115,6 +115,8 @@ struct BrowserServiceMetadata {
     started_at_unix_ms: u64,
     #[serde(default)]
     auth_token_configured: bool,
+    #[serde(default)]
+    state_encryption_key_configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -520,12 +522,15 @@ fn browser_permissions_policy_action(command: &BrowserPermissionsCommand) -> &'s
 fn ensure_browser_cli_policy_enabled(action: &str) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
     ensure_browser_service_enabled(&resolved.policy, action, resolved.config_path.as_deref())?;
+    let metadata = read_browser_service_metadata()?;
+    let lifecycle_running = metadata.as_ref().is_some_and(|value| process_is_running(value.pid));
     ensure_browser_profile_prerequisites(
         &resolved.policy,
+        metadata.as_ref(),
+        lifecycle_running,
         action,
         resolved.config_path.as_deref(),
     )?;
-    let metadata = read_browser_service_metadata()?;
     ensure_browser_gateway_auth_token_alignment(
         &resolved.policy,
         metadata.as_ref(),
@@ -543,6 +548,11 @@ async fn run_browser_status(
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
     let metadata = read_browser_service_metadata()?;
     let lifecycle_running = metadata.as_ref().is_some_and(|value| process_is_running(value.pid));
+    let policy = browser_policy_with_lifecycle_profile_readiness(
+        resolved.policy,
+        metadata.as_ref(),
+        lifecycle_running,
+    );
     let health_response =
         fetch_browser_health(resolved.connection.health_base_url.as_str()).await.ok();
     let grpc_error =
@@ -550,14 +560,16 @@ async fn run_browser_status(
     let control_plane = probe_browser_control_plane_policy().await;
     let browserd_reachable = health_response.is_some() || grpc_error.is_none();
     let mut warnings = browser_status_warnings(
-        &resolved.policy,
+        &policy,
         &control_plane,
         browserd_reachable,
         metadata.as_ref(),
         resolved.config_path.as_deref(),
     );
     warnings.extend(browser_profile_prerequisite_warnings(
-        &resolved.policy,
+        &policy,
+        metadata.as_ref(),
+        lifecycle_running,
         resolved.config_path.as_deref(),
     ));
     let payload = BrowserStatusPayload {
@@ -571,7 +583,7 @@ async fn run_browser_status(
         lifecycle_running,
         lifecycle_metadata: metadata,
         config_path: resolved.config_path,
-        policy: resolved.policy,
+        policy,
         control_plane,
         warnings,
     };
@@ -596,8 +608,14 @@ async fn run_browser_start(
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
     ensure_browser_start_preflight(&resolved)?;
     let browserd_state_encryption_key = resolve_browserd_state_encryption_key_for_start(&resolved)?;
-    let mut lifecycle_warnings =
-        browser_profile_prerequisite_warnings(&resolved.policy, resolved.config_path.as_deref());
+    let state_encryption_key_configured = browserd_state_encryption_key.is_some()
+        || env_optional(BROWSERD_STATE_ENCRYPTION_KEY_ENV).is_some();
+    let mut lifecycle_warnings = browser_profile_prerequisite_warnings(
+        &resolved.policy,
+        None,
+        false,
+        resolved.config_path.as_deref(),
+    );
     lifecycle_warnings.extend(browser_start_auth_token_warnings(&resolved));
     if fetch_browser_health(resolved.connection.health_base_url.as_str()).await.is_ok() {
         let metadata = read_browser_service_metadata()?;
@@ -671,6 +689,7 @@ async fn run_browser_start(
         stderr_log_path: stderr_log_path.display().to_string(),
         started_at_unix_ms: now_unix_ms(),
         auth_token_configured: resolved.connection.auth_token.is_some(),
+        state_encryption_key_configured,
     };
     write_browser_service_metadata(&metadata)?;
 
@@ -2614,7 +2633,7 @@ fn ensure_browser_start_preflight(resolved: &BrowserResolvedConfig) -> Result<()
         ));
     }
 
-    if !browser_profile_state_key_configured(&resolved.policy) {
+    if !browser_profile_state_key_configured(&resolved.policy, None, false) {
         advisories.push(browser_profile_state_key_guidance(config_path));
     }
 
@@ -2759,9 +2778,13 @@ fn browser_status_warnings(
 
 fn browser_profile_prerequisite_warnings(
     policy: &BrowserPolicySnapshot,
+    metadata: Option<&BrowserServiceMetadata>,
+    lifecycle_running: bool,
     config_path: Option<&str>,
 ) -> Vec<String> {
-    if !policy.configured_enabled || browser_profile_state_key_configured(policy) {
+    if !policy.configured_enabled
+        || browser_profile_state_key_configured(policy, metadata, lifecycle_running)
+    {
         return Vec::new();
     }
     vec![browser_profile_state_key_guidance(config_path)]
@@ -2769,10 +2792,14 @@ fn browser_profile_prerequisite_warnings(
 
 fn ensure_browser_profile_prerequisites(
     policy: &BrowserPolicySnapshot,
+    metadata: Option<&BrowserServiceMetadata>,
+    lifecycle_running: bool,
     action: &str,
     config_path: Option<&str>,
 ) -> Result<()> {
-    if !action.starts_with("profiles ") || browser_profile_state_key_configured(policy) {
+    if !action.starts_with("profiles ")
+        || browser_profile_state_key_configured(policy, metadata, lifecycle_running)
+    {
         return Ok(());
     }
     anyhow::bail!(
@@ -2781,8 +2808,26 @@ fn ensure_browser_profile_prerequisites(
     );
 }
 
-fn browser_profile_state_key_configured(policy: &BrowserPolicySnapshot) -> bool {
-    policy.profiles_ready || policy.state_key_vault_ref_configured
+fn browser_profile_state_key_configured(
+    policy: &BrowserPolicySnapshot,
+    metadata: Option<&BrowserServiceMetadata>,
+    lifecycle_running: bool,
+) -> bool {
+    policy.profiles_ready
+        || policy.state_key_vault_ref_configured
+        || (lifecycle_running
+            && metadata.is_some_and(|entry| entry.state_encryption_key_configured))
+}
+
+fn browser_policy_with_lifecycle_profile_readiness(
+    mut policy: BrowserPolicySnapshot,
+    metadata: Option<&BrowserServiceMetadata>,
+    lifecycle_running: bool,
+) -> BrowserPolicySnapshot {
+    if browser_profile_state_key_configured(&policy, metadata, lifecycle_running) {
+        policy.profiles_ready = true;
+    }
+    policy
 }
 
 fn browser_profile_state_key_guidance(config_path: Option<&str>) -> String {
@@ -3867,6 +3912,7 @@ mod tests {
             stderr_log_path: "browserd.stderr.log".to_owned(),
             started_at_unix_ms: 1,
             auth_token_configured: true,
+            state_encryption_key_configured: false,
         }
     }
 
@@ -4189,8 +4235,12 @@ mod tests {
     fn browser_profile_prerequisite_warning_mentions_state_key() {
         let mut policy = disabled_policy();
         policy.configured_enabled = true;
-        let warnings =
-            super::browser_profile_prerequisite_warnings(&policy, Some(r"C:\Palyra\palyra.toml"));
+        let warnings = super::browser_profile_prerequisite_warnings(
+            &policy,
+            None,
+            false,
+            Some(r"C:\Palyra\palyra.toml"),
+        );
 
         assert!(
             warnings.iter().any(|warning| {
@@ -4209,6 +4259,8 @@ mod tests {
 
         let error = super::ensure_browser_profile_prerequisites(
             &policy,
+            None,
+            false,
             "profiles list",
             Some(r"C:\Palyra\palyra.toml"),
         )
@@ -4230,10 +4282,36 @@ mod tests {
 
         super::ensure_browser_profile_prerequisites(
             &policy,
+            None,
+            false,
             "profiles list",
             Some(r"C:\Palyra\palyra.toml"),
         )
         .expect("vault-backed state key config should satisfy profile preflight");
+    }
+
+    #[test]
+    fn browser_profile_prerequisites_accept_running_lifecycle_state_key() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        let mut metadata = browser_metadata_with_token();
+        metadata.state_encryption_key_configured = true;
+
+        super::ensure_browser_profile_prerequisites(
+            &policy,
+            Some(&metadata),
+            true,
+            "profiles list",
+            Some(r"C:\Palyra\palyra.toml"),
+        )
+        .expect("running CLI-managed browserd state key should satisfy profile preflight");
+
+        let hydrated =
+            super::browser_policy_with_lifecycle_profile_readiness(policy, Some(&metadata), true);
+        assert!(
+            hydrated.profiles_ready,
+            "status policy should expose profile readiness from lifecycle metadata"
+        );
     }
 
     #[test]
@@ -4243,7 +4321,7 @@ mod tests {
         policy.state_encryption_key_env_configured = true;
         policy.profiles_ready = true;
 
-        assert!(super::browser_profile_prerequisite_warnings(&policy, None).is_empty());
+        assert!(super::browser_profile_prerequisite_warnings(&policy, None, false, None).is_empty());
     }
 
     #[test]
