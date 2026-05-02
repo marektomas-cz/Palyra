@@ -17,9 +17,50 @@ pub(super) fn sanitize_schema_for_provider(
     dialect: ToolSchemaDialect,
 ) -> Result<Value, SchemaCompatibilityError> {
     let mut sanitized = schema.clone();
+    normalize_schema_for_provider(&mut sanitized, dialect, 0)?;
     validate_schema_subset(&sanitized, dialect, 0)?;
     sort_json_value(&mut sanitized);
     Ok(sanitized)
+}
+
+fn normalize_schema_for_provider(
+    schema: &mut Value,
+    dialect: ToolSchemaDialect,
+    depth: usize,
+) -> Result<(), SchemaCompatibilityError> {
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(schema_error(
+            "schema.depth_exceeded",
+            "tool schema nesting exceeds provider gate",
+        ));
+    }
+    let Some(object) = schema.as_object_mut() else {
+        return Ok(());
+    };
+
+    if dialect == ToolSchemaDialect::Anthropic
+        && object.get("additionalProperties").is_some_and(Value::is_object)
+    {
+        object.insert("additionalProperties".to_owned(), Value::Bool(true));
+    }
+
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for property_schema in properties.values_mut() {
+            normalize_schema_for_provider(property_schema, dialect, depth.saturating_add(1))?;
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        normalize_schema_for_provider(items, dialect, depth.saturating_add(1))?;
+    }
+    if dialect != ToolSchemaDialect::Anthropic {
+        if let Some(additional) =
+            object.get_mut("additionalProperties").filter(|value| value.is_object())
+        {
+            normalize_schema_for_provider(additional, dialect, depth.saturating_add(1))?;
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_schema_subset(

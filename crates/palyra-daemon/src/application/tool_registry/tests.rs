@@ -98,6 +98,47 @@ fn provider_payload_projects_native_openai_tools() {
 }
 
 #[test]
+fn anthropic_catalog_exposes_http_fetch_with_boolean_additional_properties() {
+    let config = config(&["palyra.http.fetch"]);
+    let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
+        config: &config,
+        browser_service_enabled: false,
+        request_context: &request_context(),
+        provider_kind: "anthropic",
+        provider_model_id: Some("minimax-m2.7"),
+        surface: ToolExposureSurface::RunStream,
+        remaining_tool_budget: 1,
+        created_at_unix_ms: 42,
+    });
+
+    let http_fetch = snapshot
+        .tools
+        .iter()
+        .find(|tool| tool.name == "palyra.http.fetch")
+        .expect("http fetch should stay visible for Anthropic-compatible providers");
+    assert!(
+        !snapshot.filtered_tools.iter().any(|tool| {
+            tool.name == "palyra.http.fetch"
+                && tool.reason_code.as_str() == "provider_schema_incompatible"
+        }),
+        "http fetch must not be filtered for schema dialect incompatibility"
+    );
+    assert_eq!(
+        http_fetch.provider_schema["properties"]["headers"]["additionalProperties"],
+        serde_json::Value::Bool(true)
+    );
+
+    let payload = snapshot_to_provider_request_value(&snapshot);
+    let tools = provider_tools_from_catalog_snapshot(&payload, ToolSchemaDialect::Anthropic);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "palyra.http.fetch");
+    assert_eq!(
+        tools[0]["input_schema"]["properties"]["headers"]["additionalProperties"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+#[test]
 fn intake_normalizes_safe_scalar_arguments() {
     let config = config(&["palyra.sleep"]);
     let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
