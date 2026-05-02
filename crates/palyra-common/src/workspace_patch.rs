@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cmp::Reverse,
     collections::{HashMap, HashSet},
     fs,
@@ -219,7 +220,9 @@ pub fn apply_workspace_patch(
     }
 
     let canonical_roots = canonicalize_workspace_roots(workspace_roots)?;
-    let operations = parse_patch_document(request.patch.as_str())?;
+    let normalized_patch = normalize_supported_patch_document(request.patch.as_str());
+    let patch_text = normalized_patch.as_ref();
+    let operations = parse_patch_document(patch_text)?;
     if operations.len() > limits.max_files_touched {
         return Err(WorkspacePatchError::TooManyFiles {
             limit: limits.max_files_touched,
@@ -227,12 +230,9 @@ pub fn apply_workspace_patch(
         });
     }
 
-    let patch_sha256 = compute_patch_sha256(request.patch.as_str());
-    let redacted_preview = redact_patch_preview(
-        request.patch.as_str(),
-        &request.redaction_policy,
-        limits.max_preview_bytes,
-    );
+    let patch_sha256 = compute_patch_sha256(patch_text);
+    let redacted_preview =
+        redact_patch_preview(patch_text, &request.redaction_policy, limits.max_preview_bytes);
 
     let plan = build_patch_plan(operations.as_slice(), canonical_roots.as_slice(), limits)?;
 
@@ -393,6 +393,194 @@ fn canonicalize_workspace_roots(
     }
     Ok(roots)
 }
+
+fn normalize_supported_patch_document(patch: &str) -> Cow<'_, str> {
+    if patch.starts_with("*** Begin Patch") {
+        return Cow::Borrowed(patch);
+    }
+    normalize_unified_diff_patch(patch).map_or(Cow::Borrowed(patch), Cow::Owned)
+}
+
+fn normalize_unified_diff_patch(patch: &str) -> Option<String> {
+    let normalized = patch.replace("\r\n", "\n").replace('\r', "\n");
+    let lines = normalized.split('\n').collect::<Vec<_>>();
+    let mut index = 0usize;
+    let mut operations = Vec::new();
+
+    while index < lines.len() {
+        if lines[index].trim().is_empty()
+            || lines[index].starts_with("diff --git ")
+            || lines[index].starts_with("index ")
+            || lines[index].starts_with("new file mode ")
+            || lines[index].starts_with("deleted file mode ")
+            || lines[index].starts_with("similarity index ")
+        {
+            index = index.saturating_add(1);
+            continue;
+        }
+
+        let old_raw = lines[index].strip_prefix("--- ")?;
+        index = index.saturating_add(1);
+        let new_raw = lines.get(index)?.strip_prefix("+++ ")?;
+        index = index.saturating_add(1);
+
+        let old_path = parse_unified_diff_path(old_raw)?;
+        let new_path = parse_unified_diff_path(new_raw)?;
+
+        match (old_path, new_path) {
+            (UnifiedDiffPath::DevNull, UnifiedDiffPath::Path(path)) => {
+                let (add_lines, next_index) =
+                    collect_unified_add_file_lines(lines.as_slice(), index)?;
+                operations.push(render_openclaw_add_file(path.as_str(), add_lines.as_slice()));
+                index = next_index;
+            }
+            (UnifiedDiffPath::Path(path), UnifiedDiffPath::DevNull) => {
+                let next_index = skip_unified_file_hunks(lines.as_slice(), index);
+                operations.push(format!("*** Delete File: {path}"));
+                index = next_index;
+            }
+            (UnifiedDiffPath::Path(_old_path), UnifiedDiffPath::Path(new_path)) => {
+                let (hunks, next_index) = collect_unified_update_hunks(lines.as_slice(), index)?;
+                operations.push(render_openclaw_update_file(new_path.as_str(), hunks.as_slice()));
+                index = next_index;
+            }
+            (UnifiedDiffPath::DevNull, UnifiedDiffPath::DevNull) => return None,
+        }
+    }
+
+    if operations.is_empty() {
+        return None;
+    }
+
+    let mut output = String::from("*** Begin Patch\n");
+    output.push_str(operations.join("\n").as_str());
+    output.push_str("\n*** End Patch\n");
+    Some(output)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UnifiedDiffPath {
+    DevNull,
+    Path(String),
+}
+
+fn parse_unified_diff_path(raw: &str) -> Option<UnifiedDiffPath> {
+    let path = raw.split('\t').next().unwrap_or(raw).trim();
+    if path == "/dev/null" {
+        return Some(UnifiedDiffPath::DevNull);
+    }
+    let path = path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")).unwrap_or(path).trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(UnifiedDiffPath::Path(path.to_owned()))
+    }
+}
+
+fn collect_unified_add_file_lines(
+    lines: &[&str],
+    mut index: usize,
+) -> Option<(Vec<String>, usize)> {
+    let mut add_lines = Vec::new();
+    while index < lines.len() && !is_unified_file_header(lines, index) {
+        let line = lines[index];
+        if line.starts_with("@@") || line.starts_with("\\ ") {
+            index = index.saturating_add(1);
+            continue;
+        }
+        if let Some(content) = line.strip_prefix('+') {
+            add_lines.push(content.to_owned());
+        } else if line.starts_with('-') || line.starts_with(' ') || line.trim().is_empty() {
+        } else {
+            return None;
+        }
+        index = index.saturating_add(1);
+    }
+    Some((add_lines, index))
+}
+
+fn collect_unified_update_hunks(
+    lines: &[&str],
+    mut index: usize,
+) -> Option<(Vec<Vec<String>>, usize)> {
+    let mut hunks = Vec::new();
+    while index < lines.len() && !is_unified_file_header(lines, index) {
+        let line = lines[index];
+        if !line.starts_with("@@") {
+            if line.trim().is_empty() {
+                index = index.saturating_add(1);
+                continue;
+            }
+            return None;
+        }
+        index = index.saturating_add(1);
+
+        let mut hunk_lines = Vec::new();
+        while index < lines.len()
+            && !lines[index].starts_with("@@")
+            && !is_unified_file_header(lines, index)
+        {
+            let candidate = lines[index];
+            if candidate.is_empty() && index.saturating_add(1) == lines.len() {
+                index = index.saturating_add(1);
+                break;
+            }
+            if candidate.starts_with("\\ ") {
+                index = index.saturating_add(1);
+                continue;
+            }
+            let Some(prefix) = candidate.chars().next() else {
+                return None;
+            };
+            if matches!(prefix, ' ' | '+' | '-') {
+                hunk_lines.push(candidate.to_owned());
+                index = index.saturating_add(1);
+                continue;
+            }
+            return None;
+        }
+        if hunk_lines.is_empty() {
+            return None;
+        }
+        hunks.push(hunk_lines);
+    }
+    Some((hunks, index))
+}
+
+fn skip_unified_file_hunks(lines: &[&str], mut index: usize) -> usize {
+    while index < lines.len() && !is_unified_file_header(lines, index) {
+        index = index.saturating_add(1);
+    }
+    index
+}
+
+fn is_unified_file_header(lines: &[&str], index: usize) -> bool {
+    lines.get(index).is_some_and(|line| line.starts_with("--- "))
+        && lines.get(index.saturating_add(1)).is_some_and(|line| line.starts_with("+++ "))
+}
+
+fn render_openclaw_add_file(path: &str, lines: &[String]) -> String {
+    let mut output = format!("*** Add File: {path}");
+    for line in lines {
+        output.push('\n');
+        output.push('+');
+        output.push_str(line);
+    }
+    output
+}
+
+fn render_openclaw_update_file(path: &str, hunks: &[Vec<String>]) -> String {
+    let mut output = format!("*** Update File: {path}");
+    for hunk in hunks {
+        output.push_str("\n@@");
+        for line in hunk {
+            output.push('\n');
+            output.push_str(line);
+        }
+    }
+    output
+}
+
 fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePatchError> {
     let normalized = patch.replace("\r\n", "\n").replace('\r', "\n");
     let lines = normalized.split('\n').collect::<Vec<_>>();
@@ -1212,6 +1400,52 @@ mod tests {
         assert!(outcome.dry_run);
         assert_eq!(outcome.files_touched.len(), 1);
         assert!(!workspace.join("dry-run.txt").exists(), "dry-run should not mutate filesystem");
+    }
+
+    #[test]
+    fn apply_workspace_patch_accepts_unified_diff_add_file() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        let patch =
+            "--- /dev/null\n+++ b/agent-patch-ok.txt\n@@ -0,0 +1 @@\n+PALYRA_AGENT_PATCH_OK\n";
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("unified add-file diff should apply");
+
+        assert_eq!(outcome.files_touched.len(), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.join("agent-patch-ok.txt"))
+                .expect("created file should read"),
+            "PALYRA_AGENT_PATCH_OK\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_accepts_unified_diff_update_file() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join("notes.txt"), "alpha\nbeta\n").expect("seed file should exist");
+
+        let patch =
+            "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+beta-updated\n";
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("unified update diff should apply");
+
+        assert_eq!(outcome.files_touched.len(), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.join("notes.txt")).expect("updated file should read"),
+            "alpha\nbeta-updated\n"
+        );
     }
 
     #[test]
