@@ -1081,6 +1081,15 @@ fn apply_hunks_to_bytes(
             .map(|line| line.text.clone())
             .collect::<Vec<_>>();
 
+        if old_lines.is_empty() && !lines.is_empty() {
+            return Err(WorkspacePatchError::HunkApplyFailed {
+                path: path_label.to_owned(),
+                message: format!(
+                    "hunk {index} has no context; include surrounding lines to choose insertion point"
+                ),
+            });
+        }
+
         let Some(start) = find_subsequence(lines.as_slice(), old_lines.as_slice(), search_cursor)
         else {
             return Err(WorkspacePatchError::HunkApplyFailed {
@@ -1624,6 +1633,34 @@ mod tests {
             created.after_sha256.as_deref(),
             Some(expected_after_created_hash.as_str()),
             "after hash should reflect created file content"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_context_free_insert_into_non_empty_file() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join("notes.txt"), "palyra patch e2e ok\n")
+            .expect("seed file should exist");
+
+        let patch =
+            "*** Begin Patch\n*** Update File: notes.txt\n@@\n+second patch line\n*** End Patch\n";
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("context-free insertion into a non-empty file must be rejected");
+
+        assert!(
+            error.to_string().contains("has no context"),
+            "error should explain how to disambiguate insertion point: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("notes.txt")).expect("seed file should read"),
+            "palyra patch e2e ok\n",
+            "failed ambiguous patch must leave file unchanged"
         );
     }
 
